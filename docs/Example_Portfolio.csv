@@ -1,0 +1,246 @@
+Id,Symbol,Name,Display Symbol,Exchange,Portfolio,Currency,Shares Owned,Cost Per Share,Commission,Transaction Date,Transaction Time,Purchase Exchange Rate,Type,Accounting,Accounting Execution Ids,Notes       
+
+"1","IXJ.AX","Isglhltca Etf Units [ixj]",,"ASX","Aus Super","AUD",,,,,,,,,,
+"2","IXJ.AX","Isglhltca Etf Units [ixj]",,"ASX","Aus Super","AUD","400","129.81","0","2025-07-16 GMT+1000","14:35:00",,"Buy",,,
+       
+"3","WHC.AX","Whitehaven Fpo [whc]",,"ASX","Aus Super","AUD",,,,,,,,,,
+"4","WHC.AX","Whitehaven Fpo [whc]",,"ASX","Aus Super","AUD","4200","6","0","2025-07-16 GMT+1000","10:00:00",,"Buy",,,
+       
+"5","CSL.AX","Csl Fpo [csl]",,"ASX","Aus Super","AUD",,,,,,,,,,
+"6","CSL.AX","Csl Fpo [csl]",,"ASX","Aus Super","AUD","220","227.5","0","2025-08-21 GMT+1000","02:52:00",,"Buy",,,
+       
+"7","DRO.AX","Drone Fpo [dro]",,"ASX","Aus Super","AUD",,,,,,,,,,
+"8","DRO.AX","Drone Fpo [dro]",,"ASX","Aus Super","AUD","5000","3.163","0","2025-09-15 GMT+1000","12:41:00",,"Buy",,,
+       
+"9","PWH.AX","Pwr Hlding Fpo [pwh]",,"ASX","Aus Super","AUD",,,,,,,,,,
+"10","PWH.AX","Pwr Hlding Fpo [pwh]",,"ASX","Aus Super","AUD","3200","8","0","2025-09-15 GMT+1000","16:43:00",,"Buy",,,
+       
+"11","AUD=CASH",,,,"Aus Super","AUD",,,,,,,,,,
+"12","AUD=CASH",,,,"Aus Super","AUD","150000","1","0","2025-08-01 GMT+1000","09:50:00",,"Buy",,,
+"13","AUD=CASH",,,,"Aus Super","AUD","10000","1","0","2025-08-01 GMT+1000","09:51:00",,"Buy",,,
+"14","AUD=CASH",,,,"Aus Super","AUD","5787","1","0","2025-10-23 GMT+1100","15:45:00",,"Buy",,,
+"15","AUD=CASH",,,,"Aus Super","AUD","47991","1","0","2025-10-23 GMT+1100","15:46:00",,"Sell",,,
+       
+"16","USDAUD=X","USD/AUD",,"CCY","Aus Super","AUD",,,,,,,,,,
+       
+"17","SHL.AX","Sonic Hlth Fpo [shl]",,"ASX","Aus Super","AUD",,,,,,,,,,
+"18","SHL.AX","Sonic Hlth Fpo [shl]",,"ASX","Aus Super","AUD","1000","21.95","0","2025-09-24 GMT+1000","11:13:00",,"Buy",,,
+       
+"19","IPH.AX","Iphlimited Fpo [iph]",,"ASX","Aus Super","AUD",,,,,,,,,,
+"20","IPH.AX","Iphlimited Fpo [iph]",,"ASX","Aus Super","AUD","7000","3.5","0","2025-10-20 GMT+1100","15:47:00",,"Buy",,,
+       
+"21","IJP.AX","Ishmsjap Etf Units [ijp]",,"ASX","Aus Super","AUD",,,,,,,,,,
+"22","IJP.AX","Ishmsjap Etf Units [ijp]",,"ASX","Aus Super","AUD","200","126","0","2025-10-23 GMT+1100","14:43:00",,"Buy",,,
+       
+"23","AUDUSD=X","AUD/USD",,"CCY","Aus Stocks","USD",,,,,,,,,,
+       
+"24","USDAUD=X","USD/AUD",,"CCY","Aus Stocks","AUD",,,,,,,,,,
+       
+"25","XAUUSD=X","XAU/USD",,"CCY","Aus Stocks","USD",,,,,,,,,,
+       
+"26","XAGUSD=X","XAG/USD",,"CCY","Aus Stocks","USD",,,,,,,,,,
+       
+"27","DRO.AX","Drone Fpo [dro]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+"28","DRO.AX","Drone Fpo [dro]",,"ASX","Aus Stocks","AUD","30000","0.69","0","2024-03-13 GMT+1100","11:23:00",,"Buy",,,
+"29","DRO.AX","Drone Fpo [dro]",,"ASX","Aus Stocks","AUD","20000","0.79","0","2024-04-29 GMT+1000","11:30:00",,"Buy",,,
+"30","DRO.AX","Drone Fpo [dro]",,"ASX","Aus Stocks","AUD","10000","1.1379","0","2024-08-02 GMT+1000","15:21:00",,"Buy",,,
+       
+"31","EVT.AX","Evtltd Fpo [evt]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"32","RMD.AX","Resmed Cdi 10:1 [rmd]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+"33","RMD.AX","Resmed Cdi 10:1 [rmd]",,"ASX","Aus Stocks","AUD","500","28.4","0","2024-01-25 GMT+1100","12:51:00",,"Buy",,,
+"34","RMD.AX","Resmed Cdi 10:1 [rmd]",,"ASX","Aus Stocks","AUD","1000","28.15","0","2024-02-12 GMT+1100","14:40:00",,"Buy",,,
+"35","RMD.AX","Resmed Cdi 10:1 [rmd]",,"ASX","Aus Stocks","AUD","500","27.9","0","2024-02-27 GMT+1100","14:16:00",,"Buy",,,
+"36","RMD.AX","Resmed Cdi 10:1 [rmd]",,"ASX","Aus Stocks","AUD","1000","27.38","0","2024-04-18 GMT+1000","12:10:00",,"Buy",,,
+       
+"37","LYC.AX","Lynas Fpo [lyc]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"38","APE.AX","Eagers Fpo [ape]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"39","NUC.AX","Nuchev Fpo [nuc]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"40","KSL.AX","Kina Fpo [ksl]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"41","ALD.AX","Ampol Fpo [ald]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"42","BKW.AX","Brickworks Fpo [bkw]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"43","JBH.AX","Jb Hi-fi Fpo [jbh]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"44","FMG.AX","Fortescue Fpo [fmg]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+"45","FMG.AX","Fortescue Fpo [fmg]",,"ASX","Aus Stocks","AUD","2000","10.9","0","2020-02-27 GMT+1100","00:00:00","0","Buy",,,
+"46","FMG.AX","Fortescue Fpo [fmg]",,"ASX","Aus Stocks","AUD","1000","8.6","0","2020-03-09 GMT+1100","00:00:00","0","Buy",,,
+"47","FMG.AX","Fortescue Fpo [fmg]",,"ASX","Aus Stocks","AUD","800","13.785","0","2020-06-28 GMT+1000","17:00:00","0","Buy",,,
+"48","FMG.AX","Fortescue Fpo [fmg]",,"ASX","Aus Stocks","AUD","200","15.4","0","2021-09-23 GMT+1000","12:39:00",,"Buy",,,
+"49","FMG.AX","Fortescue Fpo [fmg]",,"ASX","Aus Stocks","AUD","200","14.4","0","2021-10-15 GMT+1100","09:43:00",,"Buy",,,
+"50","FMG.AX","Fortescue Fpo [fmg]",,"ASX","Aus Stocks","AUD","500","22","0","2024-06-18 GMT+1000","22:02:00",,"Buy",,,
+       
+"51","RIO.AX","Rio Tinto Fpo [rio]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+"52","RIO.AX","Rio Tinto Fpo [rio]",,"ASX","Aus Stocks","AUD","120","80","0","2020-03-18 GMT+1100","18:00:00","0","Buy",,,
+"53","RIO.AX","Rio Tinto Fpo [rio]",,"ASX","Aus Stocks","AUD","240","76.6","0","2020-03-23 GMT+1100","18:00:00","0","Buy",,,
+"54","RIO.AX","Rio Tinto Fpo [rio]",,"ASX","Aus Stocks","AUD","100","97","0","2020-06-28 GMT+1000","17:00:00","0","Buy",,,
+"55","RIO.AX","Rio Tinto Fpo [rio]",,"ASX","Aus Stocks","AUD","140","111.11","0","2021-08-26 GMT+1000","08:58:00",,"Buy",,,
+"56","RIO.AX","Rio Tinto Fpo [rio]",,"ASX","Aus Stocks","AUD","100","112.65","0","2024-08-22 GMT+1000","14:08:00",,"Buy",,,
+"57","RIO.AX","Rio Tinto Fpo [rio]",,"ASX","Aus Stocks","AUD","100","105","0","2025-04-09 GMT+1000","10:47:00",,"Buy",,,
+       
+"58","IXJ.AX","Isglhltca Etf Units [ixj]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+"59","IXJ.AX","Isglhltca Etf Units [ixj]",,"ASX","Aus Stocks","AUD","100","92.5","0","2020-03-16 GMT+1100","18:00:00","0","Buy",,,
+"60","IXJ.AX","Isglhltca Etf Units [ixj]",,"ASX","Aus Stocks","AUD","200","93.3","0","2020-03-17 GMT+1100","18:00:00","0","Buy",,,
+"61","IXJ.AX","Isglhltca Etf Units [ixj]",,"ASX","Aus Stocks","AUD","100","96.7","0","2020-03-19 GMT+1100","18:00:00","0","Buy",,,
+"62","IXJ.AX","Isglhltca Etf Units [ixj]",,"ASX","Aus Stocks","AUD","100","89.87","0","2020-03-23 GMT+1100","18:00:00","0","Buy",,,
+"63","IXJ.AX","Isglhltca Etf Units [ixj]",,"ASX","Aus Stocks","AUD","100","99.9","0","2021-02-20 GMT+1100","13:17:00",,"Buy",,,
+"64","IXJ.AX","Isglhltca Etf Units [ixj]",,"ASX","Aus Stocks","AUD","50","113.15","0","2021-10-07 GMT+1100","08:42:00",,"Buy",,,
+"65","IXJ.AX","Isglhltca Etf Units [ixj]",,"ASX","Aus Stocks","AUD","50","112.2","0","2021-10-15 GMT+1100","09:40:00",,"Buy",,,
+"66","IXJ.AX","Isglhltca Etf Units [ixj]",,"ASX","Aus Stocks","AUD","50","112.2","0","2021-10-20 GMT+1100","09:00:00",,"Buy",,,
+"67","IXJ.AX","Isglhltca Etf Units [ixj]",,"ASX","Aus Stocks","AUD","50","114.7","0","2022-01-26 GMT+1100","04:28:00",,"Buy",,,
+"68","IXJ.AX","Isglhltca Etf Units [ixj]",,"ASX","Aus Stocks","AUD","50","136.7","0","2024-11-18 GMT+1100","14:19:00",,"Buy",,,
+"69","IXJ.AX","Isglhltca Etf Units [ixj]",,"ASX","Aus Stocks","AUD","400","131.45","0","2025-06-30 GMT+1000","13:43:00",,"Sell","FIFO",,
+       
+"70","STO.AX","Santos Fpo [sto]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+"71","STO.AX","Santos Fpo [sto]",,"ASX","Aus Stocks","AUD","2000","6.98","0","2023-03-01 GMT+1100","06:55:00",,"Buy",,,
+"72","STO.AX","Santos Fpo [sto]",,"ASX","Aus Stocks","AUD","2000","6.98","0","2023-03-15 GMT+1100","07:21:00",,"Buy",,,
+"73","STO.AX","Santos Fpo [sto]",,"ASX","Aus Stocks","AUD","2000","6.96","0","2023-03-17 GMT+1100","05:38:00",,"Buy",,,
+"74","STO.AX","Santos Fpo [sto]",,"ASX","Aus Stocks","AUD","2000","6.98","0","2023-05-04 GMT+1000","03:53:00",,"Buy",,,
+"75","STO.AX","Santos Fpo [sto]",,"ASX","Aus Stocks","AUD","2000","6.975","0","2023-11-18 GMT+1100","10:25:00",,"Buy",,,
+"76","STO.AX","Santos Fpo [sto]",,"ASX","Aus Stocks","AUD","2000","6.7","0","2025-02-21 GMT+1100","15:09:00",,"Buy",,,
+       
+"77","NHC.AX","New Hope Fpo [nhc]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+"78","NHC.AX","New Hope Fpo [nhc]",,"ASX","Aus Stocks","AUD","5000","3.62","0","2025-04-03 GMT+1100","15:53:00",,"Buy",,,
+"79","NHC.AX","New Hope Fpo [nhc]",,"ASX","Aus Stocks","AUD","20000","3.737","0","2025-06-27 GMT+1000","14:56:00",,"Buy",,,
+       
+"80","SHL.AX","Sonic Hlth Fpo [shl]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+"81","SHL.AX","Sonic Hlth Fpo [shl]",,"ASX","Aus Stocks","AUD","1000","25.75","0","2024-07-11 GMT+1000","14:40:00",,"Buy",,,
+"82","SHL.AX","Sonic Hlth Fpo [shl]",,"ASX","Aus Stocks","AUD","1000","27.75","0","2024-08-22 GMT+1000","15:08:00",,"Buy",,,
+"83","SHL.AX","Sonic Hlth Fpo [shl]",,"ASX","Aus Stocks","AUD","1000","27.3","0","2025-02-21 GMT+1100","15:10:00",,"Buy",,,
+"84","SHL.AX","Sonic Hlth Fpo [shl]",,"ASX","Aus Stocks","AUD","1000","25.5","0","2025-03-13 GMT+1100","15:25:00",,"Buy",,,
+"85","SHL.AX","Sonic Hlth Fpo [shl]",,"ASX","Aus Stocks","AUD","1000","25.5","0","2025-08-21 GMT+1000","14:41:00",,"Buy",,,
+       
+"86","GFL.AX","Gbl Master Fpo [gfl]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"87","FGX.AX","Future Aus Fpo [fgx]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"88","FGG.AX","Future Glb Fpo [fgg]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"89","NAB.AX","Nat. Bank Fpo [nab]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"90","QAN.AX","Qantas Fpo [qan]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"91","ANZ.AX","Anz Group Fpo [anz]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"92","CLW.AX","Chtr H Lwr Stapled [clw]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+"93","CLW.AX","Chtr H Lwr Stapled [clw]",,"ASX","Aus Stocks","AUD","20000","4.349","0","2020-06-28 GMT+1000","17:00:00","0","Buy",,,
+"94","CLW.AX","Chtr H Lwr Stapled [clw]",,"ASX","Aus Stocks","AUD","6252","4.798","0","2020-10-16 GMT+1100","15:39:00",,"Buy",,,
+"95","CLW.AX","Chtr H Lwr Stapled [clw]",,"ASX","Aus Stocks","AUD","3748","3.19","0","2023-10-11 GMT+1100","09:00:00",,"Buy",,,
+"96","CLW.AX","Chtr H Lwr Stapled [clw]",,"ASX","Aus Stocks","AUD","3000","3.3","0","2023-11-10 GMT+1100","10:04:00",,"Buy",,,
+       
+"97","GMG.AX","Good Group Stapled [gmg]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"98","NDQ.AX","Betanasdaq Etf Units [ndq]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"99","PLS.AX","Plsgroup Fpo [pls]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+"100","PLS.AX","Plsgroup Fpo [pls]",,"ASX","Aus Stocks","AUD","5000","2.5","0","2024-09-05 GMT+1000","20:53:00",,"Buy",,,
+"101","PLS.AX","Plsgroup Fpo [pls]",,"ASX","Aus Stocks","AUD","5000","2.5","0","2024-12-03 GMT+1100","15:22:00",,"Buy",,,
+"102","PLS.AX","Plsgroup Fpo [pls]",,"ASX","Aus Stocks","AUD","10000","1.43","0","2025-04-03 GMT+1100","15:52:00",,"Buy",,,
+       
+"103","CSL.AX","Csl Fpo [csl]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"104","MIN.AX","Mineralres Fpo [min]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+"105","MIN.AX","Mineralres Fpo [min]",,"ASX","Aus Stocks","AUD","500","56.75","0","2024-02-12 GMT+1100","14:38:00",,"Buy",,,
+"106","MIN.AX","Mineralres Fpo [min]",,"ASX","Aus Stocks","AUD","200","70","0","2024-06-05 GMT+1000","15:00:00",,"Buy",,,
+"107","MIN.AX","Mineralres Fpo [min]",,"ASX","Aus Stocks","AUD","3","54.76","0","2024-06-24 GMT+1000","12:14:00",,"Buy",,,
+"108","MIN.AX","Mineralres Fpo [min]",,"ASX","Aus Stocks","AUD","400","55","0","2024-06-28 GMT+1000","23:14:00",,"Buy",,,
+"109","MIN.AX","Mineralres Fpo [min]",,"ASX","Aus Stocks","AUD","97","54.76","0","2024-07-22 GMT+1000","11:56:00",,"Buy",,,
+"110","MIN.AX","Mineralres Fpo [min]",,"ASX","Aus Stocks","AUD","200","45.75","0","2024-08-15 GMT+1000","23:35:00",,"Buy",,,
+"111","MIN.AX","Mineralres Fpo [min]",,"ASX","Aus Stocks","AUD","300","39","0","2024-09-03 GMT+1000","10:18:00",,"Buy",,,
+"112","MIN.AX","Mineralres Fpo [min]",,"ASX","Aus Stocks","AUD","400","26.95","0","2025-02-21 GMT+1100","15:08:00",,"Buy",,,
+       
+"113","DDR.AX","Dickerdata Fpo [ddr]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"114","KAR.AX","Karoon Fpo [kar]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"115","MAQ.XA","Maq Tech Fpo [maq]",,"CXA","Aus Stocks","AUD",,,,,,,,,,
+       
+"116","PWH.AX","Pwr Hlding Fpo [pwh]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"117","KTG.AX","Ktg.ax,0p0000x4qq,0",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"118","IPH.AX","Iphlimited Fpo [iph]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"119","CAR.AX","Car Group Fpo [car]",,"ASX","Aus Stocks","AUD",,,,,,,,,,
+       
+"120","GDX.AX","Ve Gdx Etf Units [gdx]",,"ASX","Aus Sold","AUD",,,,,,,,,,
+"121","GDX.AX","Ve Gdx Etf Units [gdx]",,"ASX","Aus Sold","AUD","200","35.2","0","2020-03-19 GMT+1100","18:00:00","0","Buy",,,
+"122","GDX.AX","Ve Gdx Etf Units [gdx]",,"ASX","Aus Sold","AUD","200","37","0","2020-03-20 GMT+1100","18:00:00","0","Buy",,,
+"123","GDX.AX","Ve Gdx Etf Units [gdx]",,"ASX","Aus Sold","AUD","134","35.2","0","2020-03-23 GMT+1100","18:00:00","0","Buy",,,
+"124","GDX.AX","Ve Gdx Etf Units [gdx]",,"ASX","Aus Sold","AUD","200","39","0","2020-03-24 GMT+1100","18:00:00","0","Buy",,,
+"125","GDX.AX","Ve Gdx Etf Units [gdx]",,"ASX","Aus Sold","AUD","200","38.8","0","2020-03-31 GMT+1100","18:00:00","0","Buy",,,
+"126","GDX.AX","Ve Gdx Etf Units [gdx]",,"ASX","Aus Sold","AUD","200","51.5","0","2020-06-28 GMT+1000","17:00:00","0","Buy",,,
+"127","GDX.AX","Ve Gdx Etf Units [gdx]",,"ASX","Aus Sold","AUD","200","50.58","0","2020-11-13 GMT+1100","13:20:00",,"Buy",,,
+"128","GDX.AX","Ve Gdx Etf Units [gdx]",,"ASX","Aus Sold","AUD","1000","42.85","0","2024-01-25 GMT+1100","12:49:00",,"Buy",,,
+"129","GDX.AX","Ve Gdx Etf Units [gdx]",,"ASX","Aus Sold","AUD","734","80.7","0","2025-06-25 GMT+1000","15:11:00",,"Sell","FIFO",,
+"130","GDX.AX","Ve Gdx Etf Units [gdx]",,"ASX","Aus Sold","AUD","1600","80.3","0","2025-06-26 GMT+1000","13:15:00",,"Sell","FIFO",,
+       
+"131","CBA.AX","Cwlth Bank Fpo [cba]",,"ASX","Aus Sold","AUD",,,,,,,,,,
+"132","CBA.AX","Cwlth Bank Fpo [cba]",,"ASX","Aus Sold","AUD","460","83.77","0","2020-01-16 GMT+1100","00:00:00","0","Buy",,,
+"133","CBA.AX","Cwlth Bank Fpo [cba]",,"ASX","Aus Sold","AUD","150","70","0","2020-03-09 GMT+1100","00:00:00","0","Buy",,,
+"134","CBA.AX","Cwlth Bank Fpo [cba]",,"ASX","Aus Sold","AUD","230","61.32","0","2020-03-18 GMT+1100","18:00:00","0","Buy",,,
+"135","CBA.AX","Cwlth Bank Fpo [cba]",,"ASX","Aus Sold","AUD","160","99.936","0","2021-08-26 GMT+1000","08:50:00",,"Buy",,,
+"136","CBA.AX","Cwlth Bank Fpo [cba]",,"ASX","Aus Sold","AUD","200","120.35","0","2024-04-02 GMT+1100","11:51:00",,"Sell","FIFO",,
+"137","CBA.AX","Cwlth Bank Fpo [cba]",,"ASX","Aus Sold","AUD","300","119.15","0","2024-04-10 GMT+1000","11:52:00",,"Sell","FIFO",,
+"138","CBA.AX","Cwlth Bank Fpo [cba]",,"ASX","Aus Sold","AUD","200","121.3","0","2024-05-16 GMT+1000","10:51:00",,"Sell","FIFO",,
+"139","CBA.AX","Cwlth Bank Fpo [cba]",,"ASX","Aus Sold","AUD","300","130","0","2024-07-11 GMT+1000","11:16:00",,"Sell","FIFO",,
+       
+"140","NCK.AX","Nick Scali Fpo [nck]",,"ASX","Aus Sold","AUD",,,,,,,,,,
+"141","NCK.AX","Nick Scali Fpo [nck]",,"ASX","Aus Sold","AUD","1000","10.84","0","2023-10-11 GMT+1100","09:11:00",,"Buy",,,
+"142","NCK.AX","Nick Scali Fpo [nck]",,"ASX","Aus Sold","AUD","2000","10.85","0","2023-11-24 GMT+1100","10:44:00",,"Buy",,,
+"143","NCK.AX","Nick Scali Fpo [nck]",,"ASX","Aus Sold","AUD","223","13.25","0","2024-05-30 GMT+1000","15:10:00",,"Buy",,,"SPP shares"
+"144","NCK.AX","Nick Scali Fpo [nck]",,"ASX","Aus Sold","AUD","1000","18.45","0","2025-02-07 GMT+1100","10:51:00",,"Sell","FIFO",,
+"145","NCK.AX","Nick Scali Fpo [nck]",,"ASX","Aus Sold","AUD","2223","18.6","0","2025-02-07 GMT+1100","13:25:00",,"Sell","FIFO",,
+       
+"146","SLF.AX","Spdr Prp Etf Units [slf]",,"ASX","Aus Sold","AUD",,,,,,,,,,
+"147","SLF.AX","Spdr Prp Etf Units [slf]",,"ASX","Aus Sold","AUD","800","11.2","0","2020-03-16 GMT+1100","18:00:00","0","Buy",,,
+"148","SLF.AX","Spdr Prp Etf Units [slf]",,"ASX","Aus Sold","AUD","1200","8.37","0","2020-03-18 GMT+1100","18:00:00","0","Buy",,,
+"149","SLF.AX","Spdr Prp Etf Units [slf]",,"ASX","Aus Sold","AUD","1000","10.2","0","2020-06-28 GMT+1000","17:00:00","0","Buy",,,
+"150","SLF.AX","Spdr Prp Etf Units [slf]",,"ASX","Aus Sold","AUD","1000","11.75","0","2021-02-16 GMT+1100","13:59:00",,"Buy",,,
+"151","SLF.AX","Spdr Prp Etf Units [slf]",,"ASX","Aus Sold","AUD","400","11.4","0","2021-02-20 GMT+1100","13:16:00",,"Buy",,,
+"152","SLF.AX","Spdr Prp Etf Units [slf]",,"ASX","Aus Sold","AUD","400","12.99","0","2021-10-07 GMT+1100","07:54:00",,"Buy",,,
+"153","SLF.AX","Spdr Prp Etf Units [slf]",,"ASX","Aus Sold","AUD","200","12.99","0","2022-01-26 GMT+1100","10:23:00",,"Buy",,,
+"154","SLF.AX","Spdr Prp Etf Units [slf]",,"ASX","Aus Sold","AUD","1000","10.32","0","2023-11-11 GMT+1100","10:05:00",,"Sell","FIFO",,
+"155","SLF.AX","Spdr Prp Etf Units [slf]",,"ASX","Aus Sold","AUD","1000","10.62","0","2023-11-18 GMT+1100","10:52:00",,"Sell","FIFO",,
+"156","SLF.AX","Spdr Prp Etf Units [slf]",,"ASX","Aus Sold","AUD","2000","10.63","0","2023-12-05 GMT+1100","08:28:00",,"Sell","FIFO",,
+"157","SLF.AX","Spdr Prp Etf Units [slf]",,"ASX","Aus Sold","AUD","1000","11.6","0","2023-12-28 GMT+1100","05:58:00",,"Sell","FIFO",,
+       
+"158","USDAUD=X","USD/AUD",,"CCY","USA","AUD",,,,,,,,,,
+       
+"159","GOOG","Alphabet Inc.",,"NMS","USA","USD",,,,,,,,,,
+"160","GOOG","Alphabet Inc.",,"NMS","USA","USD","100","237","0","2025-10-13 GMT+1100","13:58:00",,"Buy",,,
+       
+"161","AAPL","Apple Inc.",,"NMS","USA","USD",,,,,,,,,,
+"162","AAPL","Apple Inc.",,"NMS","USA","USD","200","189","0","2019-03-27 GMT+1100","00:00:00","0","Buy",,,
+       
+"163","GREK","Global X MSCI Greece ETF",,"PCX","USA","USD",,,,,,,,,,
+"164","GREK","Global X MSCI Greece ETF",,"PCX","USA","USD","500","8.56","0","2019-04-30 GMT+1000","00:00:00","0","Buy",,,
+"165","GREK","Global X MSCI Greece ETF",,"PCX","USA","USD","500","9.45","0","2019-09-15 GMT+1000","00:00:00","0","Buy",,,
+       
+"166","INDY","iShares India 50 ETF",,"NGM","USA","USD",,,,,,,,,,
+"167","INDY","iShares India 50 ETF",,"NGM","USA","USD","200","38.585","0","2019-09-12 GMT+1000","00:00:00","0","Buy",,,
+       
+"168","BMY","Bristol-Myers Squibb Company",,"NYQ","USA","USD",,,,,,,,,,
+"169","BMY","Bristol-Myers Squibb Company",,"NYQ","USA","USD","100","51.94","0","2019-09-16 GMT+1000","00:00:00","0","Buy",,,
+       
+"170","RTN","Raytheon Company",,"NYQ","USA","USD",,,,,,,,,,
+"171","RTN","Raytheon Company",,"NYQ","USA","USD","100","186.5","0","2020-02-28 GMT+1100","00:00:00","0","Buy",,,
+       
+"172","TMO","Thermo Fisher Scientific Inc",,"NYQ","USA","USD",,,,,,,,,,
+"173","TMO","Thermo Fisher Scientific Inc",,"NYQ","USA","USD","30","295.35","0","2020-03-10 GMT+1100","00:00:00","0","Buy",,,
+       
+"174","IGF","iShares Global Infrastructure E",,"NGM","USA","USD",,,,,,,,,,
+"175","IGF","iShares Global Infrastructure E",,"NGM","USA","USD","200","33.8","0","2020-03-09 GMT+1100","18:00:00","0","Buy",,,
+       
+"176","VHT","Vanguard Health Care ETF",,"PCX","USA","USD",,,,,,,,,,
+"177","VHT","Vanguard Health Care ETF",,"PCX","USA","USD","50","157.32","0","2020-03-18 GMT+1100","18:00:00","0","Buy",,,
+       
+"178","UTG","53270",,"ASE","USA","USD",,,,,,,,,,
+"179","UTG","53270",,"ASE","USA","USD","300","24","0","2020-03-19 GMT+1100","18:00:00","0","Buy",,,
+       
+"180","EPR","EPR Properties","EPR Properties","NYQ","US watch","USD",,,,,,,,,,

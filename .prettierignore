@@ -1,0 +1,13 @@
+node_modules
+dist
+.next
+.vinext
+.wrangler
+.pnpm-store
+package-lock.json
+docs/01_SCREEN_INVENTORY_AND_NAVIGATION.md
+docs/02_DATA_MODEL_AND_CSV.md
+docs/03_CALCULATIONS_AND_INTERFACE.md
+docs/04_VIDEO_UNKNOWNS_AND_REBUILD_PLAN.md
+docs/YieldToMe_Visual_Style_Guide.md
+docs/Example_Portfolio.csv
