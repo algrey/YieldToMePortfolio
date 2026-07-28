@@ -6,7 +6,7 @@ Source evidence: the four numbered reverse-engineering documents, `YieldToMe_Vis
 
 ## 1. Product statement
 
-YieldToMe is a private, responsive web application for recording and understanding listed investments across currencies. It combines an auditable transaction ledger with cost basis, cash, pricing, foreign exchange, dividend, tax-lot, and historical reporting views.
+YieldToMe is a private, responsive web application for recording and understanding listed investments across currencies. Its core release combines an auditable transaction ledger with cost basis, cash, pricing, foreign exchange, tax-lot, and historical reporting views. Dividend reporting remains a documented later capability.
 
 The product is a faithful rebuild of the reference workflow, not a literal copy of undocumented internals. Where the video or CSV cannot establish behavior, this specification chooses a conservative rule, labels the uncertainty, and creates an explicit validation task.
 
@@ -20,8 +20,8 @@ The product is a faithful rebuild of the reference workflow, not a literal copy 
 - The supplied CSV contains portfolio/security definitions and transaction-level buys/sells, not merely a current-holdings snapshot.
 - The sample states FIFO accounting and contains enough buys/sells to support lot reconstruction for its included history.
 - The experience is compact and data-dense; visible metrics include value, cost, daily movement, unrealised/realised results, and income-related information.
-- Quotes, FX, history, dividends, CSV import, manual records, and correction workflows are required product capabilities.
-- The Quotes experience should prefer approximately 20-minute-delayed observations over end-of-day values and clearly distinguish delayed/EOD/manual states.
+- Quotes, FX, history, CSV import, manual records, and correction workflows are core release capabilities. The reference also establishes dividend reporting as a target capability, but its event, receipt, provider, and forecast work is deferred until source quality and the actual-cash workflow are scheduled.
+- The Quotes experience should prefer the freshest validated observation allowed by the configured source. Compact views generally suppress timestamps, source, delay, fallback, and quality; those facts remain available in an explanation, while only an action-required state is surfaced inline.
 - Users choose a home currency in settings and can toggle a foreign-currency holding’s displayed price/value between its native currency and home currency using that date’s attributable FX rate.
 - Broker synchronization is a desired later capability; v1 remains manual/import driven, but ledger/import boundaries must accept future broker adapters.
 
@@ -37,13 +37,13 @@ The product is a faithful rebuild of the reference workflow, not a literal copy 
 ### Reversible assumptions adopted for v1
 
 - FIFO is the only enabled cost-basis method.
-- A lawful, reliable 20-minute-delayed feed is preferred; end-of-day and manual values are explicit fallbacks when the preferred feed is unavailable or unlicensed.
+- A lawful, reliable delayed feed is preferred; best-effort, end-of-day, and manual values are selected under an explicit precedence rule and never described as real-time without evidence.
 - Cloudflare Access serves a small administrator-invited user set.
-- Headline price gain excludes estimated dividends; actual income is separate.
+- Headline price gain excludes estimated dividends. When the deferred income workflow exists, actual income remains separate.
 - Cash is a currency-specific ledger, not a synthetic security.
 - The service worker stores no private financial data.
 - Original CSV bytes are not retained; hashes, normalized source rows, mappings, issues, and audit evidence are retained in D1.
-- News is a disabled navigation destination pending a licensed source decision.
+- News is a disabled navigation destination pending an attributable source decision.
 
 ### Reference independence and genuine uncertainties
 
@@ -56,10 +56,9 @@ The product is a faithful rebuild of the reference workflow, not a literal copy 
 ### Missing information
 
 - Exact source FX direction in every export variant.
-- Contractual market-data permission for the proposed private multi-user display/storage model.
 - Whether future income needs Australian franking-credit projections or cash only.
 - Complete external cash-flow and dividend history needed for TWR/XIRR.
-- Whether News is a release requirement and, if so, its licensed source.
+- Whether News is a release requirement and, if so, its attributable source.
 - Account deletion cooling-off/retention policy and final Access invitation/session settings.
 
 ## 3. Problem
@@ -80,20 +79,20 @@ Personal investors frequently assemble portfolio truth from broker exports, spre
 
 A self-directed investor with one or more portfolios, holdings on Australian and international exchanges, base-currency reporting needs, and a preference for a dense desktop ledger plus a concise mobile overview.
 
-### Secondary
+### Initial deployment
 
-A small, administrator-invited group of independent users. They share the application deployment but must never share portfolio data. The first release is not a social, advisory, broker, or household-collaboration product.
+V1 supports a small, administrator-invited group of independent users in one deployment while keeping their portfolio, import, override, and audit data strictly isolated. Every real and synthetic user follows the same authentication and ownership rules. The configured Yahoo-compatible source has no product-enforced user-count or deployment-mode gate.
 
 ## 5. Goals
 
 1. Import the supplied YieldToMe CSV shape without losing source information.
-2. Maintain a canonical per-user ledger for portfolios, securities, trades, fees, cash movements, dividends, and manual corrections.
+2. Maintain a canonical per-user ledger for portfolios, securities, trades, fees, cash movements, and manual corrections, with an explicit later extension for dividends.
 3. Reproduce the core reference views: overview, holdings, quotes, details, and news navigation.
-4. Calculate explainable current value, cost basis, unrealised gain, realised gain, daily movement, income, and historical value in the portfolio base currency.
+4. Calculate explainable current value, cost basis, unrealised gain, realised gain, daily movement, and historical value in the portfolio base currency.
 5. Use provider-neutral market-data adapters with explicit provenance, timestamps, adjustment rules, and manual fallbacks.
 6. Provide responsive and installable web-app foundations, especially for iPhone use.
 7. Operate as a private Cloudflare-hosted application with server-enforced tenant isolation, recovery procedures, and auditability.
-8. Prefer licensed approximately 20-minute-delayed quotes for active price views, with honest EOD/manual fallback.
+8. Prefer the freshest validated, lawfully usable quote for active price views, with honest best-effort/EOD/manual fallback and no unsupported real-time claim.
 9. Preserve future broker synchronization as another staged, idempotent ledger source rather than a special holding overwrite.
 
 ## 6. Non-goals for the first release
@@ -107,7 +106,7 @@ A small, administrator-invited group of independent users. They share the applic
 - Options, futures, derivatives, crypto wallets, private assets, short selling, or margin.
 - Sub-minute or exchange-certified live pricing.
 - Offline viewing or editing of private portfolio records.
-- Automated corporate-action processing beyond explicit splits and cash dividends.
+- Provider corporate-action ingestion, dividend receipts/forecasting, withholding/franking analytics, and income/yield metrics. Explicit ledger splits remain supported.
 - Full performance attribution, benchmark comparison, TWR, or XIRR in the first calculation slice.
 - OCR or free-form spreadsheet import.
 
@@ -115,7 +114,9 @@ A small, administrator-invited group of independent users. They share the applic
 
 ### Trust before decoration
 
-Every material figure has a definition, currency, as-of time, and state. Estimated or incomplete values are visibly different from observed values.
+Every material figure has a stored definition, currency, as-of time, and state. Compact views do not add routine market-data metadata; `Price unavailable` is shown when no usable quote exists.
+
+User-facing summaries and lists generally suppress exact timestamps. Show a business-relevant date when it helps interpret a transaction, import, or calculation; keep the exact timestamp in the adjacent detail/audit explanation when provenance requires it.
 
 ### Dense, not cramped
 
@@ -127,7 +128,7 @@ Users can fix mappings, transactions, prices, and import decisions. Corrections 
 
 ### Useful under imperfect data
 
-One missing quote must not erase an entire portfolio. The application shows partial totals with coverage indicators, stale badges, and exact remediation.
+One missing quote must not erase an entire portfolio. The application excludes unavailable market value from known totals and shows `Price unavailable` for the affected holding without adding routine stale badges.
 
 ### Familiar reference vocabulary
 
@@ -142,7 +143,7 @@ Use Overview, Holdings, Quotes, Details, News, Quantity, Average Cost, Market Va
 - Add/import action.
 - User/session menu.
 - Primary tab row.
-- Data-freshness and partial-data status when relevant.
+- Actionable partial-data status when a displayed total is incomplete or an observation needs attention.
 
 ### Overview
 
@@ -151,7 +152,7 @@ Use Overview, Holdings, Quotes, Details, News, Quantity, Average Cost, Market Va
 - Today’s movement and percentage.
 - Total cost and unrealised gain/loss.
 - Cash and invested value.
-- Income summary when actual dividend receipts exist.
+- No income summary in the core release; add it with the deferred actual-receipt workflow.
 - Allocation/holdings summary.
 - Historical value chart with range controls.
 - Clear coverage and freshness state.
@@ -159,21 +160,21 @@ Use Overview, Holdings, Quotes, Details, News, Quantity, Average Cost, Market Va
 ### Holdings
 
 - One row per security position.
-- Symbol/name/exchange/currency, quantity, average cost, current/previous price, market value, daily movement, total gain/loss, and income/yield where supported.
+- Symbol/name/exchange/currency, quantity, average cost, current/previous price, market value, daily movement, and total gain/loss. Income/yield columns are deferred.
 - Sort, filter, expand, and mobile card presentation.
 - Cash represented separately, never disguised as a security.
 
 ### Quotes
 
 - Portfolio watch/quote table.
-- Prefer approximately 20-minute-delayed observations during market hours; otherwise use the selected EOD/manual fallback. Always show timestamp, source, currency, previous close, daily change, and delayed/stale state.
+- Prefer the freshest validated observation allowed by the configured source; otherwise use the selected EOD/manual fallback. Generally suppress timestamps, provider, delay, and fallback text in the compact row. A manual, stale, indicative, or fallback value remains discoverable through an adjacent explanation, and only an action-required state is surfaced inline. `Price unavailable` appears when there is no usable value.
 - Manual refresh subject to rate limits.
 - Manual price override workflow with reason and effective time.
 - Per-holding native/home-currency display toggle using the selected observation date’s FX rate; the toggle changes presentation only.
 
 ### Details
 
-- Settings: user home currency, portfolio title, timezone, accounting method, default withholding assumption, and display preferences. Portfolio reporting currency is initialized from the user’s home currency.
+- Settings: user home currency, portfolio title, timezone, accounting method, and display preferences. Portfolio reporting currency is initialized from the user’s home currency. Withholding assumptions are deferred with dividends.
 - Transaction ledger and entry/edit/reversal workflows.
 - Import history, mapping resolutions, warnings, and reversal.
 - Security and provider mapping details.
@@ -181,7 +182,7 @@ Use Overview, Holdings, Quotes, Details, News, Quantity, Average Cost, Market Va
 
 ### News
 
-A navigation placeholder only until a licensed, attributable news source and privacy behavior are chosen. News does not block the first release.
+A navigation placeholder only until an attributable news source and privacy behavior are chosen. News does not block the first release.
 
 ## 9. Core workflows
 
@@ -195,15 +196,15 @@ The user uploads a file, sees parser/header results, reviews inferred portfolios
 
 ### Record or correct a transaction
 
-The user enters a trade/cash/dividend event with currency, timestamps, fees, and source. An edit creates a superseding version or reversal plus replacement. Holdings, lots, cash, snapshots, and metrics rebuild deterministically.
+The user enters a trade or cash event with currency, timestamps, fees, and source. An edit creates a superseding version or reversal plus replacement. Holdings, lots, cash, snapshots, and metrics rebuild deterministically. Dividend receipts use the same immutable pattern only after that deferred workflow is promoted.
 
 ### View a foreign holding in home currency
 
-The user opens the holding/price menu and switches between native and home currency. The application selects the FX observation for the displayed market date, shows the rate/date/source, and converts price/value for presentation. The security price and transaction facts remain in native currency; canonical holding cost/value projections and portfolio totals are stored/rebuilt in home currency.
+The user opens the holding/price menu and switches between native and home currency. The application selects the FX observation for the displayed market date and converts price/value for presentation. The rate/date/source remain available in the adjacent explanation and are generally suppressed in the compact view. The security price and transaction facts remain in native currency; canonical holding cost/value projections and portfolio totals are stored/rebuilt in home currency.
 
 ### Future broker synchronization
 
-A later connection maps a broker account to an owned portfolio, stages broker transactions/positions through the same validation/reconciliation model as imports, and commits idempotently by broker record ID/version. Broker positions reconcile the ledger but never silently overwrite it. Broker quote access may be another market-data adapter when the user’s entitlement and broker terms allow it.
+A later connection maps a broker account to an owned portfolio, stages broker transactions/positions through the same validation/reconciliation model as imports, and commits idempotently by broker record ID/version. Broker positions reconcile the ledger but never silently overwrite it. Broker quote access may be another market-data adapter when exposed by the connected account.
 
 ### Inspect a number
 
@@ -211,7 +212,7 @@ The user can move from a portfolio total to the contributing holding, quote/FX o
 
 ### Resolve missing data
 
-A coverage banner identifies the missing security map, quote, FX rate, or cost basis. The user can fix the map, retry the provider, or enter a versioned manual override.
+An actionable coverage summary identifies a missing security map, quote, FX rate, or cost basis. The user can fix the map, retry the provider, or enter a versioned manual override. Routine healthy rows stay compact; anomalous or calculation-limiting states are never hidden.
 
 ## 10. Responsive behavior
 
@@ -241,13 +242,13 @@ Every route and workflow must specify these states, not just its populated “ha
 | State                     | Product behavior                                                                                                                               |
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | Initial loading           | Preserve shell/navigation dimensions; use restrained labelled progress and do not show fabricated zero values                                  |
-| Background refresh        | Keep last valid value visible with as-of timestamp and a non-blocking refresh indicator                                                        |
+| Background refresh        | Keep the last valid value visible; generally suppress timestamps and use a non-intrusive refresh state only while user action is relevant      |
 | Empty user                | Explain that no portfolio exists and offer create/import once those actions are implemented                                                    |
 | Empty portfolio           | Show base currency/settings plus manual-entry/import next steps; value metrics are unavailable, not `0` unless an explicit zero balance exists |
-| Missing quote             | Retain position/basis; exclude unavailable market value from known total; show mapping/retry/manual remediation                                |
+| Missing quote             | Retain position/basis; exclude unavailable market value from known total; show `Price unavailable`                                             |
 | Missing FX                | Show native values; base value and dependent gain are unavailable                                                                              |
 | Partial history           | Draw/label only supported range and explain missing ledger/market/FX coverage                                                                  |
-| Provider failure          | Keep last valid observation with stale/failure state; back off/retry server-side; never blank ledger facts                                     |
+| Provider failure          | Keep last valid observation where available and expose its stale/fallback state on demand; otherwise show `Price unavailable`; back off/retry  |
 | Validation error          | Associate stable message with row/field/control, preserve user input, and block only unsafe commit                                             |
 | Authorization failure     | Return a non-data-bearing denial and no cached private response                                                                                |
 | Import commit failure     | Preserve staged batch and resumable/idempotent state; never imply uncommitted rows changed totals                                              |
@@ -283,31 +284,24 @@ The normative formulas are in `CALCULATIONS.md`. Product-level meanings:
 
 The first release caches only versioned public shell assets and an offline information page. It does not cache authenticated HTML, API responses, CSVs, or portfolio data in the service worker. A network loss during an already loaded session may leave current in-memory content visible, but reload shows the offline page and mutations are disabled.
 
-Every market-derived view displays:
-
-- observed/as-of timestamp;
-- ingestion timestamp when useful;
-- source;
-- delayed, end-of-day, stale, manual, or estimated state;
-- quote and FX coverage counts.
+Market-derived provenance, timestamps, quality, and coverage remain stored and available to calculations/operations. Compact user views generally suppress timestamps, provider, delay, and fallback labels. Manual, stale, indicative, or fallback state remains available through an adjacent explanation, and only an action-required state is surfaced inline. `Price unavailable` appears when no usable price exists.
 
 Later offline private-data support would require a separate threat model, encrypted local storage decision, data-expiry rules, and conflict-safe mutation outbox.
 
 ## 15. Market-data product decision
 
-The product priority is approximately 20-minute-delayed pricing for active Quotes/Holdings views, with EOD and manual observations as explicit fallbacks. “Live prices” is interface shorthand only; the product label must say `Delayed 20 min`, `End of day`, `Manual`, or the actual licensed state.
+The product priority is the freshest validated observation available from the configured source for active Quotes/Holdings views, with EOD and manual observations as explicit fallbacks. Compact views make no “live” claim and generally suppress timestamps, provider, delay, and fallback labels. Material stale/manual/indicative/fallback state remains inspectable, with inline status reserved for action-required conditions.
 
-Yahoo Finance is not an approved provider because its commonly used quote endpoints are undocumented and do not provide a supported market-data API or clear hosted-display contract. Scraping or relying on community wrappers would create availability, provenance, and licensing risks.
+The owner has selected a free Yahoo Finance/yfinance-compatible source for v1. `yfinance` itself is a Python library and cannot run in the Worker; the implementation will be a small, server-only adapter to the corresponding public endpoints. This is an explicit best-effort decision: the source is unaffiliated, has no service-level guarantee, and can change without notice.
 
-EODHD is the preferred provider candidate because it advertises one API for ASX and 60+ international exchanges, FX, end-of-day history, and 15–20-minute-delayed ASX quotes. It also states that commercial plans can include end-user display and exchange redistribution rights. Production use still requires written confirmation of the exact plan, user scope, storage/cache rights, retention/deletion terms, covered exchanges, and total price.
+EODHD and other providers remain optional future upgrades based on measured coverage, reliability, capability, or cost needs. They are not prerequisites for adding users or changing deployment mode.
 
 Therefore:
 
-- treat low-cost international delayed data as a high-priority provider-validation constraint, not a confirmed free entitlement;
-- do not scrape ASX/Yahoo or depend on undocumented endpoints to manufacture a free feed;
-- implement the adapter and UI for delayed observations first using fixtures;
-- block production activation until `SPK-002` records a lawful provider, exact cost, display/storage rights, exchanges, and user scope;
-- use EODHD as the preferred adapter candidate and retain its EOD observations plus manual values as functional fallbacks;
+- treat Yahoo observations as best-effort, retaining source/timestamp/delay uncertainty internally;
+- apply no source-specific user-count, deployment-mode, public, paid, redistribution, or owner-binding gate;
+- implement provider-neutral contracts and deterministic fixtures before any network adapter;
+- keep Alpha Vantage as a separately gated candidate rather than adding a second v1 adapter before a measured need; manual values are the durable fallback;
 - evaluate a future broker quote adapter because a user’s broker entitlement may provide better current data.
 
 No implementation may depend directly on a provider-shaped symbol or response.
@@ -327,17 +321,16 @@ No implementation may depend directly on a provider-shaped symbol or response.
 
 ### Post-release health
 
-- Provider ingestion success and staleness are observable.
+- Provider ingestion success, staleness, and owner-scope denials are observable.
 - No unresolved reconciliation drift between ledger and projections.
 - Restore drills complete within the documented recovery objective.
 - Support incidents can be traced through structured logs and audit events without exposing financial payloads.
 
 ## 17. Open decisions and validation spikes
 
-1. Obtain written market-data rights confirmation for the exact private multi-user deployment model.
-2. Confirm whether the reference’s “all time” percentage excludes income, as assumed.
-3. Decide whether dividend forecasts include Australian franking-credit information or only cash.
-4. Decide if News remains out of scope or requires a licensed source.
-5. Validate Cloudflare Access session length, allowed identities, and account offboarding policy.
-6. Verify iOS install/offline behavior on physical devices before release.
-7. Obtain an EODHD commercial quote and written confirmation for the intended international multi-user display/storage model; if unsuitable, evaluate the next licensed global provider.
+1. Confirm whether the reference’s “all time” percentage excludes income, as assumed.
+2. Decide whether dividend forecasts include Australian franking-credit information or only cash.
+3. Decide if News remains out of scope or requires an attributable source.
+4. Validate Cloudflare Access session length, allowed identities, and account offboarding policy.
+5. Verify iOS install/offline behavior on physical devices before release.
+6. Evaluate another provider only when measured coverage, reliability, capability, or cost warrants it.

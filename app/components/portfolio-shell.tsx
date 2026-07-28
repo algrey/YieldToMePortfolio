@@ -1,4 +1,16 @@
+"use client";
+
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useMemo, useState } from "react";
+import {
+  historyBars,
+  overviewRows,
+  portfolioPrototypes,
+  type Holding,
+  type PortfolioPrototype,
+  type Tone,
+} from "../prototype-data";
 import { BrandMark } from "./brand-mark";
 import { ServiceWorkerRegistration } from "./service-worker-registration";
 
@@ -11,40 +23,790 @@ export const portfolioSections = [
 ] as const;
 
 export type PortfolioSection = (typeof portfolioSections)[number];
+type ViewState = "populated" | "empty" | "partial" | "provider-error";
+type HoldingSort = "ticker" | "value" | "daily" | "total";
+type QuoteSort = "ticker" | "price" | "change";
+type Direction = "ascending" | "descending";
+type OpenMenu = "portfolio" | "add" | "prototype" | null;
 
-const sectionDetails: Record<
-  PortfolioSection,
-  { title: string; description: string }
-> = {
-  overview: {
-    title: "Overview foundation",
-    description:
-      "The responsive portfolio summary will live here once the owned ledger and calculation engine are implemented.",
-  },
-  holdings: {
-    title: "Holdings foundation",
-    description:
-      "This route will present explainable positions, cost basis, value, and coverage without hiding missing market data.",
-  },
-  quotes: {
-    title: "Quotes foundation",
-    description:
-      "End-of-day prices, foreign exchange, source timestamps, and manual overrides will be added behind a provider-neutral boundary.",
-  },
-  details: {
-    title: "Details foundation",
-    description:
-      "Portfolio settings, the immutable ledger, import history, mappings, and correction workflows will live here.",
-  },
-  news: {
-    title: "News is intentionally deferred",
-    description:
-      "This navigation point is preserved from the reference, but no news source will be added without a licensing and privacy decision.",
-  },
+const prototypeStateLabels: Record<ViewState, string> = {
+  populated: "Populated portfolio",
+  empty: "Empty portfolio",
+  partial: "Partial pricing",
+  "provider-error": "Provider unavailable",
 };
 
 function sectionHref(section: PortfolioSection) {
   return section === "overview" ? "/" : `/portfolio/preview/${section}`;
+}
+
+function compareBigIntStrings(left: string, right: string) {
+  const leftValue = BigInt(left);
+  const rightValue = BigInt(right);
+  return leftValue === rightValue ? 0 : leftValue < rightValue ? -1 : 1;
+}
+
+function compactAmount(value: string) {
+  return value.replace("A$", "");
+}
+
+function sortByExactKey<T>(
+  rows: T[],
+  selectKey: (row: T) => string,
+  direction: Direction,
+) {
+  return [...rows].sort((left, right) => {
+    const compared = compareBigIntStrings(selectKey(left), selectKey(right));
+    return direction === "ascending" ? compared : -compared;
+  });
+}
+
+function ToneValue({
+  children,
+  tone,
+  className = "",
+}: {
+  children: React.ReactNode;
+  tone: Tone;
+  className?: string;
+}) {
+  return <span className={`tone-${tone} ${className}`}>{children}</span>;
+}
+
+function StatusBanner({
+  viewState,
+  onReset,
+}: {
+  viewState: ViewState;
+  onReset: () => void;
+}) {
+  if (viewState === "populated" || viewState === "empty") {
+    return null;
+  }
+
+  const isPartial = viewState === "partial";
+  return (
+    <div className={`status-banner ${isPartial ? "warning" : "error"}`}>
+      <span className="status-symbol" aria-hidden="true">
+        {isPartial ? "!" : "×"}
+      </span>
+      <p>
+        <strong>{isPartial ? "Known value only" : "Prices unavailable"}</strong>
+        <span>
+          {isPartial
+            ? "One holding is excluded because its current price is unavailable."
+            : "Last known values are retained. Refresh is temporarily unavailable."}
+        </span>
+      </p>
+      <button type="button" onClick={onReset}>
+        Dismiss
+      </button>
+    </div>
+  );
+}
+
+function EmptyState({
+  title = "No holdings yet",
+  message = "Add a quote or import transactions to start this portfolio.",
+}: {
+  title?: string;
+  message?: string;
+}) {
+  return (
+    <section className="empty-state" aria-labelledby="empty-title">
+      <span className="empty-mark" aria-hidden="true">
+        <BrandMark />
+      </span>
+      <p className="eyebrow">Empty state</p>
+      <h2 id="empty-title">{title}</h2>
+      <p>{message}</p>
+      <button type="button">Preview add menu</button>
+    </section>
+  );
+}
+
+function PortfolioSummary({
+  portfolio,
+  partial,
+}: {
+  portfolio: PortfolioPrototype;
+  partial: boolean;
+}) {
+  const [expanded, setExpanded] = useState(true);
+
+  return (
+    <aside
+      className={`portfolio-summary ${expanded ? "expanded" : "collapsed"}`}
+      aria-label="Portfolio totals"
+    >
+      <div className="summary-primary">
+        <span className="summary-label">
+          {partial ? "Known value" : "Unrealised"}
+        </span>
+        <strong>{partial ? "A$1,143,903.50" : portfolio.value}</strong>
+        <ToneValue tone="positive">
+          {compactAmount(partial ? "+A$2,934.99" : portfolio.dailyAmount)}
+        </ToneValue>
+        <ToneValue tone="positive">
+          {compactAmount(partial ? "+A$278,496.60" : portfolio.gainAmount)}
+        </ToneValue>
+      </div>
+      {expanded ? (
+        <div className="summary-detail">
+          <button type="button" onClick={() => setExpanded(false)}>
+            Hide details
+          </button>
+          <span>{partial ? "A$865,743.12" : portfolio.cost}</span>
+          <ToneValue tone="positive">
+            {partial ? "+0.26%" : portfolio.dailyPercent}
+          </ToneValue>
+          <ToneValue tone="positive">
+            {partial ? "+32.17%" : portfolio.gainPercent}
+          </ToneValue>
+          <p>
+            <span>Realised</span>
+            <ToneValue tone="positive">
+              {portfolio.realisedAmount} ({portfolio.realisedPercent})
+            </ToneValue>
+          </p>
+          <p className="summary-footnote">
+            {partial
+              ? "7 of 8 holdings priced · one value excluded"
+              : `${portfolio.holdings.length} holdings priced · AUD reporting`}
+          </p>
+        </div>
+      ) : (
+        <button
+          className="summary-expand"
+          type="button"
+          onClick={() => setExpanded(true)}
+        >
+          Show details
+        </button>
+      )}
+    </aside>
+  );
+}
+
+function SortButton<T extends string>({
+  label,
+  sortKey,
+  activeKey,
+  direction,
+  onSort,
+}: {
+  label: string;
+  sortKey: T;
+  activeKey: T;
+  direction: Direction;
+  onSort: (key: T) => void;
+}) {
+  const active = sortKey === activeKey;
+  return (
+    <button
+      type="button"
+      onClick={() => onSort(sortKey)}
+      aria-label={`${label}${active ? `, sorted ${direction}` : ", sort column"}`}
+      aria-pressed={active}
+    >
+      <span>{label}</span>
+      <span className={active ? "sort-arrow active" : "sort-arrow"}>
+        {active && direction === "ascending" ? "↑" : "↓"}
+      </span>
+    </button>
+  );
+}
+
+function OverviewScreen({
+  viewState,
+  onOpenPortfolio,
+}: {
+  viewState: ViewState;
+  onOpenPortfolio: (id: string) => void;
+}) {
+  if (viewState === "empty") {
+    return (
+      <EmptyState
+        title="No portfolios yet"
+        message="Create a portfolio or preview an import. No financial actions are connected."
+      />
+    );
+  }
+
+  return (
+    <div className="overview-screen">
+      <section className="overview-hero" aria-labelledby="overview-title">
+        <div>
+          <p className="eyebrow">All portfolios · AUD</p>
+          <h1 id="overview-title">A$1,695,575.90</h1>
+          <p className="overview-movement">
+            <ToneValue tone="positive">↑ A$5,359.64</ToneValue>
+            <span>today · +0.32%</span>
+          </p>
+        </div>
+        <dl className="overview-kpis">
+          <div>
+            <dt>Invested</dt>
+            <dd>A$1,592,846.40</dd>
+          </div>
+          <div>
+            <dt>Cash</dt>
+            <dd>A$103,379.45</dd>
+          </div>
+          <div>
+            <dt>Unrealised</dt>
+            <dd className="tone-positive">+A$339,465.78</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section className="history-panel" aria-labelledby="history-title">
+        <div className="section-heading compact">
+          <div>
+            <p className="eyebrow">Portfolio history</p>
+            <h2 id="history-title">Value over 12 months</h2>
+          </div>
+          <ToneValue tone="positive">+18.42%</ToneValue>
+        </div>
+        <div
+          className="history-bars"
+          role="img"
+          aria-label="Portfolio value rose from approximately A$1.37 million to A$1.70 million over twelve months, with several short declines."
+        >
+          {historyBars.map((height, index) => (
+            <span
+              key={`${height}-${index}`}
+              style={{ "--bar-height": height } as React.CSSProperties}
+            />
+          ))}
+        </div>
+        <div className="chart-axis" aria-hidden="true">
+          <span>Aug</span>
+          <span>Jan</span>
+          <span>Jul</span>
+        </div>
+      </section>
+
+      <section className="portfolio-list" aria-labelledby="portfolios-title">
+        <div className="section-heading compact">
+          <div>
+            <p className="eyebrow">Breakdown</p>
+            <h2 id="portfolios-title">Portfolios</h2>
+          </div>
+          <span className="muted-copy">2 invested · 1 watchlist</span>
+        </div>
+        <div className="overview-grid table-heading" aria-hidden="true">
+          <span>Name</span>
+          <span>Value / cost</span>
+          <span>Daily</span>
+          <span>Total</span>
+        </div>
+        {overviewRows.map((row) => (
+          <button
+            className="portfolio-row overview-grid"
+            type="button"
+            key={row.id}
+            onClick={() => onOpenPortfolio(row.id)}
+          >
+            <span className="row-primary">{row.name}</span>
+            <span className="row-primary numeric">{row.value}</span>
+            <ToneValue tone={row.tone} className="row-primary numeric">
+              {compactAmount(row.daily)}
+            </ToneValue>
+            <ToneValue tone={row.tone} className="row-primary numeric">
+              {compactAmount(row.total)}
+            </ToneValue>
+            <span className="row-secondary">{row.holdings}</span>
+            <span className="row-secondary numeric">{row.cost}</span>
+            <ToneValue tone={row.tone} className="row-secondary numeric">
+              {row.dailyPercent}
+            </ToneValue>
+            <ToneValue tone={row.tone} className="row-secondary numeric">
+              {row.totalPercent}
+            </ToneValue>
+          </button>
+        ))}
+      </section>
+    </div>
+  );
+}
+
+function HoldingsScreen({
+  portfolio,
+  viewState,
+  onSelectHolding,
+}: {
+  portfolio: PortfolioPrototype;
+  viewState: ViewState;
+  onSelectHolding: (holding: Holding) => void;
+}) {
+  const [sortKey, setSortKey] = useState<HoldingSort>("daily");
+  const [direction, setDirection] = useState<Direction>("descending");
+
+  const rows = useMemo(() => {
+    if (sortKey === "ticker") {
+      return [...portfolio.holdings].sort((left, right) => {
+        const compared = left.symbol.localeCompare(right.symbol);
+        return direction === "ascending" ? compared : -compared;
+      });
+    }
+    return sortByExactKey(
+      portfolio.holdings,
+      (holding) => holding.sort[sortKey],
+      direction,
+    );
+  }, [direction, portfolio.holdings, sortKey]);
+
+  function handleSort(nextKey: HoldingSort) {
+    if (nextKey === sortKey) {
+      setDirection((current) =>
+        current === "ascending" ? "descending" : "ascending",
+      );
+      return;
+    }
+    setSortKey(nextKey);
+    setDirection(nextKey === "ticker" ? "ascending" : "descending");
+  }
+
+  if (viewState === "empty" || rows.length === 0) {
+    return <EmptyState />;
+  }
+
+  return (
+    <div className="holdings-layout">
+      <section className="holdings-list" aria-label="Portfolio holdings">
+        <div className="holdings-grid table-heading sticky-heading">
+          <SortButton
+            label="Ticker"
+            sortKey="ticker"
+            activeKey={sortKey}
+            direction={direction}
+            onSort={handleSort}
+          />
+          <SortButton
+            label="Value / cost"
+            sortKey="value"
+            activeKey={sortKey}
+            direction={direction}
+            onSort={handleSort}
+          />
+          <SortButton
+            label="Daily"
+            sortKey="daily"
+            activeKey={sortKey}
+            direction={direction}
+            onSort={handleSort}
+          />
+          <SortButton
+            label="Total"
+            sortKey="total"
+            activeKey={sortKey}
+            direction={direction}
+            onSort={handleSort}
+          />
+        </div>
+        <div className="holding-rows">
+          {rows.map((holding, index) => {
+            const priceUnavailable =
+              viewState === "partial" && index === rows.length - 1;
+            return (
+              <button
+                className={`holding-row holdings-grid${priceUnavailable ? " unavailable-row" : ""}`}
+                type="button"
+                key={holding.symbol}
+                onClick={() => onSelectHolding(holding)}
+                aria-label={`${holding.symbol}, ${holding.name}, open details`}
+              >
+                <span className="row-primary symbol">{holding.symbol}</span>
+                <span className="row-primary numeric">
+                  {priceUnavailable ? "—" : holding.value}
+                </span>
+                {priceUnavailable ? (
+                  <span className="row-primary numeric unavailable">
+                    Price unavailable
+                  </span>
+                ) : (
+                  <ToneValue
+                    tone={holding.dailyTone}
+                    className="row-primary numeric"
+                  >
+                    {compactAmount(holding.dailyAmount)}
+                  </ToneValue>
+                )}
+                {priceUnavailable ? (
+                  <span className="row-primary numeric unavailable">—</span>
+                ) : (
+                  <ToneValue
+                    tone={holding.totalTone}
+                    className="row-primary numeric"
+                  >
+                    {compactAmount(holding.totalAmount)}
+                  </ToneValue>
+                )}
+                <span className="row-secondary">{holding.price}</span>
+                <span className="row-secondary numeric">{holding.cost}</span>
+                {priceUnavailable ? (
+                  <span className="row-secondary numeric unavailable">—</span>
+                ) : (
+                  <ToneValue
+                    tone={holding.dailyTone}
+                    className="row-secondary numeric"
+                  >
+                    {holding.dailyPercent}
+                  </ToneValue>
+                )}
+                {priceUnavailable ? (
+                  <span className="row-secondary numeric unavailable">—</span>
+                ) : (
+                  <ToneValue
+                    tone={holding.totalTone}
+                    className="row-secondary numeric"
+                  >
+                    {holding.totalPercent}
+                  </ToneValue>
+                )}
+                <span className="row-tertiary">{holding.quantityLine}</span>
+                <span className="desktop-only holding-name">
+                  {holding.name} · {holding.exchange} · {holding.currency}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+      <PortfolioSummary
+        portfolio={portfolio}
+        partial={viewState === "partial"}
+      />
+    </div>
+  );
+}
+
+function QuotesScreen({
+  portfolio,
+  viewState,
+}: {
+  portfolio: PortfolioPrototype;
+  viewState: ViewState;
+}) {
+  const [sortKey, setSortKey] = useState<QuoteSort>("change");
+  const [direction, setDirection] = useState<Direction>("descending");
+
+  const rows = useMemo(() => {
+    if (sortKey === "ticker") {
+      return [...portfolio.quotes].sort((left, right) => {
+        const compared = left.symbol.localeCompare(right.symbol);
+        return direction === "ascending" ? compared : -compared;
+      });
+    }
+    return sortByExactKey(
+      portfolio.quotes,
+      (quote) => quote.sort[sortKey],
+      direction,
+    );
+  }, [direction, portfolio.quotes, sortKey]);
+
+  function handleSort(nextKey: QuoteSort) {
+    if (nextKey === sortKey) {
+      setDirection((current) =>
+        current === "ascending" ? "descending" : "ascending",
+      );
+      return;
+    }
+    setSortKey(nextKey);
+    setDirection(nextKey === "ticker" ? "ascending" : "descending");
+  }
+
+  if (viewState === "empty") {
+    return (
+      <EmptyState
+        title="No quotes yet"
+        message="Add securities to watch without creating a holding."
+      />
+    );
+  }
+
+  return (
+    <section className="quotes-screen" aria-label="Portfolio quotes">
+      <div className="quotes-grid table-heading sticky-heading">
+        <SortButton
+          label="Ticker"
+          sortKey="ticker"
+          activeKey={sortKey}
+          direction={direction}
+          onSort={handleSort}
+        />
+        <SortButton
+          label="Last price"
+          sortKey="price"
+          activeKey={sortKey}
+          direction={direction}
+          onSort={handleSort}
+        />
+        <SortButton
+          label="Change"
+          sortKey="change"
+          activeKey={sortKey}
+          direction={direction}
+          onSort={handleSort}
+        />
+      </div>
+      {rows.map((quote, index) => {
+        const unavailable =
+          viewState === "partial" && index === rows.length - 1;
+        return (
+          <button
+            className="quote-row quotes-grid"
+            type="button"
+            key={quote.symbol}
+          >
+            <span className="row-primary symbol">{quote.symbol}</span>
+            <span className="row-primary numeric">
+              {unavailable ? "Price unavailable" : quote.price}
+            </span>
+            <ToneValue
+              tone={unavailable ? "neutral" : quote.tone}
+              className="row-primary numeric"
+            >
+              {unavailable ? "—" : quote.change}
+            </ToneValue>
+            <span className="row-secondary ellipsis">{quote.name}</span>
+            <span className="row-secondary numeric">{quote.marketDate}</span>
+            <ToneValue
+              tone={unavailable ? "neutral" : quote.tone}
+              className="row-secondary numeric"
+            >
+              {unavailable ? "—" : quote.percent}
+            </ToneValue>
+          </button>
+        );
+      })}
+      {viewState === "provider-error" ? (
+        <p className="data-explanation">
+          Last known observations remain visible. Exact source and observation
+          times are available in the row explanation, not repeated here.
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function DetailsScreen({
+  portfolio,
+  viewState,
+}: {
+  portfolio: PortfolioPrototype;
+  viewState: ViewState;
+}) {
+  const periods = ["1W", "1M", "3M", "6M", "YTD", "1Y", "Max"];
+  const [period, setPeriod] = useState("1Y");
+
+  if (viewState === "empty") {
+    return (
+      <EmptyState
+        title="History starts with a portfolio"
+        message="Value history is unavailable until transactions and market observations exist."
+      />
+    );
+  }
+
+  return (
+    <div className="details-screen">
+      <section className="details-history" aria-labelledby="details-title">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Portfolio value · {period}</p>
+            <h1 id="details-title">{portfolio.value}</h1>
+            <p className="overview-movement">
+              <ToneValue tone="positive">↑ A$197,846.30</ToneValue>
+              <span>+18.42%</span>
+            </p>
+          </div>
+          <button className="compact-select" type="button">
+            Portfolio value <span aria-hidden="true">⌄</span>
+          </button>
+        </div>
+        <div
+          className="detail-chart"
+          role="img"
+          aria-label="Portfolio value trend with a dip in October and stronger growth from March to July."
+        >
+          <div className="chart-area" />
+          <span className="chart-endpoint" aria-hidden="true" />
+        </div>
+        <div className="period-tabs" aria-label="Chart period">
+          {periods.map((item) => (
+            <button
+              type="button"
+              key={item}
+              aria-pressed={period === item}
+              onClick={() => setPeriod(item)}
+            >
+              {item}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="detail-metrics" aria-labelledby="analysis-title">
+        <div className="section-heading compact">
+          <div>
+            <p className="eyebrow">Open positions</p>
+            <h2 id="analysis-title">Analysis</h2>
+          </div>
+          <span className="muted-copy">
+            {viewState === "partial" ? "7 of 8 priced" : "Complete coverage"}
+          </span>
+        </div>
+        <dl className="metric-list">
+          <div>
+            <dt>Market value</dt>
+            <dd>
+              {viewState === "partial"
+                ? "A$1,143,903.50 known"
+                : portfolio.value}
+            </dd>
+          </div>
+          <div>
+            <dt>Open cost basis</dt>
+            <dd>{portfolio.cost}</dd>
+          </div>
+          <div>
+            <dt>Unrealised gain</dt>
+            <dd className="tone-positive">
+              {portfolio.gainAmount} · {portfolio.gainPercent}
+            </dd>
+          </div>
+          <div>
+            <dt>Realised gain</dt>
+            <dd className="tone-positive">
+              {portfolio.realisedAmount} · {portfolio.realisedPercent}
+            </dd>
+          </div>
+          <div>
+            <dt>Cash</dt>
+            <dd>{portfolio.cash}</dd>
+          </div>
+          <div>
+            <dt>Accounting</dt>
+            <dd>FIFO</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section className="allocation-panel" aria-labelledby="allocation-title">
+        <div className="section-heading compact">
+          <div>
+            <p className="eyebrow">Priced holdings</p>
+            <h2 id="allocation-title">Largest positions</h2>
+          </div>
+          <span className="muted-copy">of invested value</span>
+        </div>
+        <div className="allocation-list">
+          {[
+            ["RIO.AX", "10.3%", "100%"],
+            ["DRO.AX", "9.8%", "95%"],
+            ["CLW.AX", "9.7%", "94%"],
+            ["MIN.AX", "9.1%", "88%"],
+          ].map(([symbol, percentage, width]) => (
+            <div key={symbol}>
+              <span>{symbol}</span>
+              <span className="allocation-track">
+                <i style={{ "--allocation": width } as React.CSSProperties} />
+              </span>
+              <strong>{percentage}</strong>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function NewsScreen() {
+  return (
+    <section className="news-placeholder" aria-labelledby="news-title">
+      <p className="eyebrow">Route reserved</p>
+      <h1 id="news-title">Portfolio news is not connected</h1>
+      <p>
+        This prototype preserves the navigation pattern without inventing a
+        provider or showing unattributed market content.
+      </p>
+      <div className="news-skeleton" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </div>
+    </section>
+  );
+}
+
+function HoldingSheet({
+  holding,
+  onClose,
+}: {
+  holding: Holding;
+  onClose: () => void;
+}) {
+  return (
+    <div className="sheet-layer" role="presentation" onMouseDown={onClose}>
+      <section
+        className="holding-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="holding-sheet-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="sheet-handle" aria-hidden="true" />
+        <div className="sheet-heading">
+          <div>
+            <p className="eyebrow">
+              {holding.exchange} · {holding.currency}
+            </p>
+            <h2 id="holding-sheet-title">{holding.symbol}</h2>
+            <p>{holding.name}</p>
+          </div>
+          <button
+            type="button"
+            aria-label="Close holding details"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </div>
+        <div className="sheet-quote">
+          <strong>{holding.price}</strong>
+          <ToneValue tone={holding.dailyTone}>
+            {holding.dailyAmount} · {holding.dailyPercent}
+          </ToneValue>
+        </div>
+        <dl className="sheet-facts">
+          <div>
+            <dt>Market value</dt>
+            <dd>{holding.value}</dd>
+          </div>
+          <div>
+            <dt>Open cost</dt>
+            <dd>{holding.cost}</dd>
+          </div>
+          <div>
+            <dt>Total gain</dt>
+            <dd className={`tone-${holding.totalTone}`}>
+              {holding.totalAmount} · {holding.totalPercent}
+            </dd>
+          </div>
+          <div>
+            <dt>Quantity</dt>
+            <dd>{holding.quantityLine}</dd>
+          </div>
+        </dl>
+        <p className="sheet-note">
+          Prototype explanation: exact observation time, source, FX evidence,
+          and FIFO lots would remain available here without crowding the row.
+        </p>
+      </section>
+    </div>
+  );
 }
 
 export function PortfolioShell({
@@ -52,101 +814,278 @@ export function PortfolioShell({
 }: {
   activeSection: PortfolioSection;
 }) {
-  const detail = sectionDetails[activeSection];
+  const router = useRouter();
+  const [portfolioId, setPortfolioId] = useState("aus-stocks");
+  const [viewState, setViewState] = useState<ViewState>("populated");
+  const [openMenu, setOpenMenu] = useState<OpenMenu>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [selectedHolding, setSelectedHolding] = useState<Holding | null>(null);
+
+  const portfolio =
+    portfolioPrototypes.find((item) => item.id === portfolioId) ??
+    portfolioPrototypes[0];
+
+  function selectPortfolio(nextId: string) {
+    setPortfolioId(nextId);
+    setOpenMenu(null);
+    setDrawerOpen(false);
+  }
 
   return (
-    <div className="app-frame">
+    <div className="prototype-app">
       <ServiceWorkerRegistration />
-      <header className="topbar">
-        <Link className="brand" href="/" aria-label="YieldToMe home">
+      <header className="app-bar">
+        <button
+          className="icon-button"
+          type="button"
+          aria-label="Open navigation menu"
+          aria-expanded={drawerOpen}
+          onClick={() => setDrawerOpen(true)}
+        >
+          <span className="hamburger" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+        </button>
+
+        <Link className="topbar-brand" href="/" aria-label="YieldToMe overview">
           <BrandMark />
           <span className="wordmark">YieldToMe</span>
         </Link>
-        <span className="foundation-status">
-          <span className="status-dot" aria-hidden="true" />
-          Foundation ready
-        </span>
-      </header>
 
-      <main className="workspace">
-        <section
-          className="workspace-heading"
-          aria-labelledby="workspace-title"
-        >
-          <div>
-            <p className="eyebrow">Private portfolio workspace</p>
-            <h1 id="workspace-title">Portfolio scaffold</h1>
-          </div>
-          <button className="portfolio-selector" type="button" disabled>
-            No portfolio connected
+        <div className="menu-anchor portfolio-anchor">
+          <button
+            className="portfolio-button"
+            type="button"
+            aria-expanded={openMenu === "portfolio"}
+            onClick={() =>
+              setOpenMenu((current) =>
+                current === "portfolio" ? null : "portfolio",
+              )
+            }
+          >
+            <span>{portfolio.name}</span>
             <span aria-hidden="true">⌄</span>
           </button>
-        </section>
+          {openMenu === "portfolio" ? (
+            <div className="popover portfolio-popover">
+              <p>Portfolios</p>
+              {portfolioPrototypes.map((item) => (
+                <button
+                  type="button"
+                  key={item.id}
+                  aria-pressed={item.id === portfolioId}
+                  onClick={() => selectPortfolio(item.id)}
+                >
+                  <span>{item.name}</span>
+                  {item.id === portfolioId ? (
+                    <span aria-hidden="true">✓</span>
+                  ) : null}
+                </button>
+              ))}
+              <Link href="/" onClick={() => setOpenMenu(null)}>
+                <span>All portfolios</span>
+                <span aria-hidden="true">→</span>
+              </Link>
+            </div>
+          ) : null}
+        </div>
 
-        <nav className="section-tabs" aria-label="Portfolio sections">
-          {portfolioSections.map((section) => (
-            <Link
-              key={section}
-              href={sectionHref(section)}
-              aria-current={activeSection === section ? "page" : undefined}
-            >
-              {section}
-            </Link>
-          ))}
-        </nav>
+        <span className="prototype-chip desktop-only">
+          Prototype · mock data
+        </span>
 
-        <section className="foundation-panel" aria-labelledby="section-title">
-          <div className="foundation-copy">
-            <p className="eyebrow">Scaffold preview</p>
-            <h2 id="section-title">{detail.title}</h2>
-            <p>{detail.description}</p>
-          </div>
-          <div className="scope-note">
-            <span className="scope-icon" aria-hidden="true">
-              i
+        <div className="app-actions">
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="Refresh prices"
+          >
+            <span className="refresh-icon" aria-hidden="true">
+              ↻
             </span>
-            <p>
-              Authentication, portfolio data, imports, calculations, and market
-              feeds are deliberately not connected in this pass.
-            </p>
+          </button>
+          <div className="menu-anchor">
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="Open add menu"
+              aria-expanded={openMenu === "add"}
+              onClick={() =>
+                setOpenMenu((current) => (current === "add" ? null : "add"))
+              }
+            >
+              <span className="plus-icon" aria-hidden="true">
+                +
+              </span>
+            </button>
+            {openMenu === "add" ? (
+              <div className="popover action-popover">
+                <p>Prototype actions</p>
+                <button type="button">
+                  <span>Add holding</span>
+                  <small>UI only</small>
+                </button>
+                <button type="button">
+                  <span>Add transaction</span>
+                  <small>UI only</small>
+                </button>
+                <button type="button">
+                  <span>Import CSV</span>
+                  <small>Not connected</small>
+                </button>
+              </div>
+            ) : null}
           </div>
-        </section>
+          <div className="menu-anchor">
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="Open prototype state menu"
+              aria-expanded={openMenu === "prototype"}
+              onClick={() =>
+                setOpenMenu((current) =>
+                  current === "prototype" ? null : "prototype",
+                )
+              }
+            >
+              <span className="more-icon" aria-hidden="true">
+                •••
+              </span>
+            </button>
+            {openMenu === "prototype" ? (
+              <div className="popover prototype-popover">
+                <p>Preview a state</p>
+                {(Object.keys(prototypeStateLabels) as ViewState[]).map(
+                  (state) => (
+                    <button
+                      type="button"
+                      key={state}
+                      aria-pressed={viewState === state}
+                      onClick={() => {
+                        setViewState(state);
+                        setOpenMenu(null);
+                      }}
+                    >
+                      <span>{prototypeStateLabels[state]}</span>
+                      {viewState === state ? (
+                        <span aria-hidden="true">✓</span>
+                      ) : null}
+                    </button>
+                  ),
+                )}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </header>
 
-        <section className="foundation-grid" aria-label="Foundation boundaries">
-          <article>
-            <span className="panel-number">01</span>
-            <h3>Ledger first</h3>
-            <p>
-              Immutable transactions, cash, and FIFO lots will become the source
-              of truth.
-            </p>
-            <span className="pending-label">Not implemented</span>
-          </article>
-          <article>
-            <span className="panel-number">02</span>
-            <h3>Explicit provenance</h3>
-            <p>
-              Prices and FX will carry source, currency, as-of time, and
-              freshness.
-            </p>
-            <span className="pending-label">Not connected</span>
-          </article>
-          <article>
-            <span className="panel-number">03</span>
-            <h3>Private by design</h3>
-            <p>
-              Cloudflare Access identity will be paired with server-enforced
-              ownership.
-            </p>
-            <span className="pending-label">Specified only</span>
-          </article>
-        </section>
+      <nav className="primary-tabs" aria-label="Portfolio sections">
+        {portfolioSections.map((section) => (
+          <Link
+            key={section}
+            href={sectionHref(section)}
+            aria-current={activeSection === section ? "page" : undefined}
+          >
+            {section}
+          </Link>
+        ))}
+      </nav>
+
+      <StatusBanner
+        viewState={viewState}
+        onReset={() => setViewState("populated")}
+      />
+
+      <main className={`screen-content screen-${activeSection}`}>
+        {activeSection === "overview" ? (
+          <OverviewScreen
+            viewState={viewState}
+            onOpenPortfolio={(id) => {
+              selectPortfolio(id);
+              router.push("/portfolio/preview/holdings");
+            }}
+          />
+        ) : null}
+        {activeSection === "holdings" ? (
+          <HoldingsScreen
+            portfolio={portfolio}
+            viewState={viewState}
+            onSelectHolding={setSelectedHolding}
+          />
+        ) : null}
+        {activeSection === "quotes" ? (
+          <QuotesScreen portfolio={portfolio} viewState={viewState} />
+        ) : null}
+        {activeSection === "details" ? (
+          <DetailsScreen portfolio={portfolio} viewState={viewState} />
+        ) : null}
+        {activeSection === "news" ? <NewsScreen /> : null}
       </main>
 
-      <footer className="footer">
-        <BrandMark />
-        <p>Built for calm, explainable portfolio decisions.</p>
-      </footer>
+      {drawerOpen ? (
+        <div
+          className="drawer-layer"
+          role="presentation"
+          onMouseDown={() => setDrawerOpen(false)}
+        >
+          <aside
+            className="navigation-drawer"
+            aria-label="Navigation"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="drawer-heading">
+              <Link href="/" onClick={() => setDrawerOpen(false)}>
+                <BrandMark />
+                <span className="wordmark">YieldToMe</span>
+              </Link>
+              <button
+                type="button"
+                aria-label="Close navigation menu"
+                onClick={() => setDrawerOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <p className="drawer-label">Workspace</p>
+            <Link href="/" onClick={() => setDrawerOpen(false)}>
+              Overview
+            </Link>
+            <p className="drawer-label">Portfolios</p>
+            {portfolioPrototypes.map((item) => (
+              <button
+                type="button"
+                key={item.id}
+                aria-pressed={item.id === portfolioId}
+                onClick={() => selectPortfolio(item.id)}
+              >
+                <span>{item.name}</span>
+                {item.id === portfolioId ? <span>Selected</span> : null}
+              </button>
+            ))}
+            <p className="drawer-label">Manage</p>
+            <button type="button">
+              <span>Import / export</span>
+              <small>Prototype only</small>
+            </button>
+            <button type="button">
+              <span>Settings</span>
+              <small>Prototype only</small>
+            </button>
+            <p className="drawer-note">
+              Static review build · local mock data · no financial writes
+            </p>
+          </aside>
+        </div>
+      ) : null}
+
+      {selectedHolding ? (
+        <HoldingSheet
+          holding={selectedHolding}
+          onClose={() => setSelectedHolding(null)}
+        />
+      ) : null}
     </div>
   );
 }

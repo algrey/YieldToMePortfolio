@@ -53,9 +53,10 @@ Normalized transaction quantities are positive; transaction type supplies buy/se
 For security `s` and valuation instant/date `t`, select:
 
 1. active manual price override covering `t`;
-2. approved normalized provider observation matching the required adjustment state;
-3. previous valid trading-day observation within the configured EOD staleness window;
-4. unavailable.
+2. approved validated best-effort/delayed observation within its applicable staleness window and matching the required adjustment state;
+3. approved EOD observation matching the required adjustment state;
+4. previous valid trading-day observation within the configured EOD staleness window;
+5. unavailable.
 
 For v1 current value, use raw/unadjusted close or latest EOD observation because ledger quantities already reflect explicit split effects. Adjusted series is used for chart continuity/return research only and must never multiply against already split-adjusted quantities without reconciliation.
 
@@ -67,19 +68,21 @@ Use the immediately preceding valid market session’s comparable observation fr
 
 For a required market/accounting date:
 
-1. same-date approved observation at or before the valuation cutoff;
-2. prior available business-day observation within five calendar days;
-3. manual override;
+1. active manual FX override covering the requested instant/date;
+2. same-date approved observation at or before the valuation cutoff;
+3. prior available business-day observation within five calendar days;
 4. unavailable.
 
-The actual selected observation date remains visible. Do not look forward for transaction cost basis because that would use information unavailable at the transaction time. A deliberate manual correction can resolve the gap.
+The actual selected observation date remains in calculation evidence but is generally suppressed in compact views. Do not look forward for transaction cost basis because that would use information unavailable at the transaction time. A deliberate manual correction can resolve the gap.
+
+For an imported/manual transaction, a validated explicit transaction FX fact takes precedence over market observations. A missing or legacy-zero transaction FX remains unknown; the calculation engine does not silently substitute a later provider rate without a separate attributed correction.
 
 ### Staleness defaults
 
 - EOD: current through the end of the next expected trading session; stale after two missed expected sessions.
 - FX daily: stale after two relevant business days.
 - Delayed/intraday future capability: stale after delay plus a configured tolerance.
-- Manual: does not become fresh merely because it is manual; display its effective/as-of time.
+- Manual: does not become fresh merely because it is manual; retain its effective/as-of time in the explanation.
 
 Exchange calendars and holidays determine expected sessions.
 
@@ -91,7 +94,7 @@ For a holding price observed on market date `d`:
 
 `HoldingValue_home,d = Q_d × P_home,d`
 
-The holding menu can display `P_native,d`/native value or `P_home,d`/home value. Both views use the same quantity and price observation. The home view exposes the selected FX rate, date, and source.
+The holding menu can display `P_native,d`/native value or `P_home,d`/home value. Both views use the same quantity and price observation. The selected FX rate, date, and source remain available in the adjacent explanation and are generally suppressed in the compact view.
 
 Changing the toggle is presentation-only. It does not update transactions, lots, security currency, price observations, or holdings. If date-appropriate FX is unavailable, native price/value remains visible and the home view is unavailable—not zero. A change to the user’s home currency is different: it is an explicit settings/recalculation operation that rebuilds derived home-currency projections and snapshots without rewriting native facts.
 
@@ -131,7 +134,7 @@ Let:
 
 For ratio `a:b`, each open quantity is multiplied by `a / b` and per-unit basis is divided by that ratio; total basis is unchanged. Fractional cash-in-lieu requires an explicit sale/cash event. Split processing is idempotent by event and portfolio/security.
 
-### Transfer
+### Transfer (deferred)
 
 Transfers preserve original acquisition dates/basis only when the source provides them. Otherwise mark basis incomplete. Transfer-in is not treated as investment performance; transfer-out removes quantity/lots according to documented lot selection without recognizing a sale gain unless a taxable disposal record says so.
 
@@ -261,10 +264,10 @@ Portfolio totals:
 - `InvestedValue = Σ available security MV_base`
 - `CashValue = Σ available cash base values`
 - `PortfolioValue = InvestedValue + CashValue`
-- `OpenBasis = Σ available open lot base basis`
-- `UnrealisedGain = InvestedValue − OpenBasis` for covered positions only
+- `CoveredOpenBasis = Σ open basis for exactly the same priced-and-converted positions included in InvestedValue`
+- `UnrealisedGain = InvestedValue − CoveredOpenBasis`
 - `RealisedGain = Σ posted realised lot allocation gains`
-- `ActualIncome = Σ actual gross/net dividend receipt measure named by the UI`
+- once the deferred dividend workflow exists, `ActualIncome = Σ actual gross/net dividend receipt measure named by the UI`
 
 Coverage accompanies each total:
 
@@ -273,11 +276,13 @@ Coverage accompanies each total:
 - converted cash accounts / total cash accounts;
 - known and excluded values where knowable.
 
+If any non-zero holding or cash account is excluded, the UI calls the result `Known value` or another explicit partial-total label. It never presents the sum as the complete portfolio value, and it never invents a dollar value for an excluded component whose price/FX is unknown.
+
 ## 8. Historical values and snapshots
 
 ### Quantity series
 
-Build end-of-local-day quantities by replaying posted ledger events in effective order, including splits and transfers. Do not use today’s quantity for prior dates.
+Build end-of-local-day quantities by replaying posted ledger events in effective order, including explicit splits. Do not use today’s quantity for prior dates. Add transfer replay only when the deferred transfer contract is promoted.
 
 ### Daily holding value
 
@@ -307,7 +312,7 @@ Otherwise store partial status and exclusions.
 
 ### Chart gaps
 
-Carry a prior market close only across non-trading dates within the FX fallback window and label the observation date. Do not interpolate missing prices. Break or mark the series when a required value exceeds staleness policy.
+Carry a prior market close only across non-trading dates within the FX fallback window and retain the selected observation date in the point explanation. Do not interpolate missing prices. Break or mark the series when a required value exceeds staleness policy.
 
 ## 9. Realised, unrealised, and headline returns
 
@@ -315,7 +320,7 @@ The reference material does not conclusively define all-time return. The conserv
 
 - Unrealised gain: current covered market value minus remaining open basis.
 - Realised gain: net sale proceeds minus matched FIFO basis.
-- Actual income: posted dividend/other income receipts, separately.
+- Once supported, actual income: posted dividend/other income receipts, separately. The core release omits this result.
 - Total investment gain (when shown): realised gain + unrealised gain, excluding actual income unless the label explicitly says “including income”.
 - Estimated dividends never enter realised gain, cash, portfolio value, or headline return.
 
@@ -341,7 +346,9 @@ XIRR solves:
 
 Do not implement until transfer/deposit/withdrawal semantics are explicit and a robust solver/date convention is tested. It must be labelled money-weighted, not “gain %”.
 
-## 10. Dividends
+## 10. Dividends (deferred)
+
+This section preserves the future calculation contract. None of it is part of the core ledger/valuation release, and no estimate or receipt table should be added before `DB-005`, `MKT-005`, and `DIV-001` are promoted from deferred status.
 
 ### Actual receipt
 
@@ -360,7 +367,7 @@ The system must not infer an actual receipt solely because a provider event exis
 
 For future income:
 
-1. Sum known, non-cancelled declared future events using expected eligible quantity at ex-date.
+1. Sum known, non-cancelled declared future events using current eligible quantity as an explicit no-future-trades estimate unless the ex-date has already passed and ledger quantity is known.
 2. For uncovered periods, use a trailing-twelve-month gross-per-share rate only when at least two regular comparable payments exist.
 3. Infer frequency only when payment spacing supports a stable cadence (annual, semiannual, quarterly, monthly) within tolerance.
 4. If history is irregular or insufficient, show TTM income without extrapolating, or unavailable.
@@ -371,7 +378,7 @@ Forecast:
 
 `EstimatedGross_base = EstimatedGross_native × latest selected FX`
 
-Latest FX use is acceptable only for forecast display and is labelled with its as-of date. Actual accounting uses payment-date FX.
+Latest FX use is acceptable only for forecast display and retains its as-of date in the explanation. Actual accounting uses payment-date FX.
 
 Default withholding is a user assumption, not tax truth:
 

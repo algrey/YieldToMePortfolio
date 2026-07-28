@@ -1,9 +1,16 @@
 import { notFound } from "next/navigation";
 import {
   PortfolioShell,
-  portfolioSections,
   type PortfolioSection,
 } from "../../../components/portfolio-shell";
+
+const portfolioSections = [
+  "overview",
+  "holdings",
+  "quotes",
+  "details",
+  "news",
+] as const;
 
 type PortfolioSectionPageProps = {
   params: Promise<{ portfolioId: string; section: string }>;

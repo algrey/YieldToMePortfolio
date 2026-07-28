@@ -48,6 +48,7 @@ Acceptance:
 - Touch targets are at least 44×44 CSS pixels.
 - The tab row remains operable without hover.
 - Desktop holdings use a dense table and mobile holdings use labelled cards.
+- Lists and summaries generally suppress exact timestamps; financially relevant dates remain visible where useful, with exact provenance time available in detail/audit explanations.
 
 ### PRD-005 — Native/home-currency display
 
@@ -70,7 +71,7 @@ Production requests shall be protected by Cloudflare Access and the Worker shall
 Acceptance:
 
 - Signature uses the current remote JWKS.
-- `iss`, `aud`, `exp`, and `nbf` are validated.
+- `iss`, `aud`, `exp`, `nbf`, and application token type are validated against configured values; a browser principal also requires a non-empty `sub`.
 - Missing configuration fails closed.
 - Missing, expired, malformed, wrong-issuer, and wrong-audience tokens return a non-data-bearing 401/403.
 
@@ -119,7 +120,7 @@ Acceptance:
 
 ### LED-001 — Immutable transaction ledger
 
-The system shall store normalized trades and cash/income events as attributable ledger facts.
+The core release shall store normalized trades, explicit splits, and cash events as attributable ledger facts. Income and transfer extensions remain deferred.
 
 Acceptance:
 
@@ -186,7 +187,7 @@ Market data shall enter through provider-neutral interfaces and normalized recor
 
 Acceptance:
 
-- Adapters implement capabilities for reference lookup, daily price history, latest observation, FX, dividends, splits, and optional fundamentals.
+- The contract supports typed, independently implementable capabilities. The core release requires reference lookup, latest observation, daily raw-price history, and FX; dividends, provider splits/adjusted history, and fundamentals remain unavailable until their deferred tasks are promoted.
 - Provider payloads are not returned directly to the client.
 - Unsupported capabilities produce typed unavailable states.
 
@@ -196,7 +197,8 @@ Each price observation shall retain source, symbol mapping, currency, observatio
 
 Acceptance:
 
-- A displayed price exposes its as-of time and delayed/EOD/manual state.
+- A displayed price has stored provenance and state.
+- Compact views generally suppress timestamps, provider, delay, and fallback labels. Manual, stale, indicative, or fallback state is available through an adjacent accessible explanation, with inline status reserved for an action-required condition.
 - Adjusted and unadjusted prices cannot be mixed in one calculation without an explicit rule.
 - Duplicate provider observations are idempotent.
 
@@ -216,9 +218,10 @@ The product shall surface freshness and coverage rather than substituting zero.
 
 Acceptance:
 
-- Portfolio totals disclose included and excluded market value.
+- An incomplete total is labelled as a known/partial total and discloses priced/converted counts; it does not claim an unknowable excluded dollar value.
 - Staleness thresholds differ for EOD and delayed sources.
 - Missing quote and FX states identify remediation.
+- A last-known stale value may remain visible, but its stale/fallback state cannot be represented as a normal current observation.
 
 ### MKT-006 — Manual overrides
 
@@ -227,29 +230,29 @@ Authorized users shall create versioned price, FX, security-map, and selected ca
 Acceptance:
 
 - An override has scope, effective interval, actor, reason, and supersession history.
-- Manual values are visually identified.
+- Manual state is available in the adjacent explanation; routine compact rows generally do not add an inline label unless user action is required.
 - Removing an override restores the underlying provider/source result.
 
-### MKT-007 — Provider rights gate
+### MKT-007 — Provider use-policy gate (deprecated)
 
-Production market-data use shall be blocked until terms and display/storage rights for the deployment model are recorded.
+External provider-use decisions are outside the application requirements. The product shall not implement a provider use-policy gate.
 
 Acceptance:
 
-- The provider configuration has a documented approval owner/date/scope.
+- Provider enablement is ordinary server configuration and does not depend on user count, owner identity, deployment mode, monetization, redistribution, or an alternative-provider prerequisite.
 - No endpoint exposes bulk/raw provider data.
-- Retention and deletion obligations are operationalized.
+- Normal authentication, portfolio isolation, provenance, input validation, and rate controls apply equally to every configured provider.
+- No provider approval, use-scope, or provider-rights field is added to application schema or authorization logic.
 
 ### MKT-008 — Delayed quote priority
 
-Active Quotes and Holdings price views shall prefer a lawful approximately 20-minute-delayed observation over end-of-day data when the provider supports the security/exchange.
+Active Quotes and Holdings price views shall prefer the freshest validated observation available from the approved source without adding routine provenance or freshness text to compact views.
 
 Acceptance:
 
-- The UI labels the observation with its actual delay and timestamp; it does not call delayed data real-time.
-- EOD and manual values remain explicit fallbacks when delayed data is unavailable, unlicensed, stale, or over rate budget.
-- Production activation records whether the source is free or paid; “free” is never assumed from a public website or trial plan.
-- Display/redistribution rights and actual delay are confirmed for every enabled Australian and international exchange independently of API access.
+- The chosen observation and its actual/unknown delay, timestamp, source scope, quality, and fallback reason are retained in the domain explanation; it is never called real-time without evidence.
+- EOD and manual values remain explicit fallbacks when a fresh observation is unavailable, stale, malformed, or over rate budget.
+- Compact price views show `Price unavailable` when no usable value exists. They generally suppress timestamps, provider, delay, and fallback labels; anomalous manual/stale/indicative/fallback state remains accessible, with inline status reserved for an action-required condition.
 - Provider-unavailable behavior preserves the last valid observation with stale state and never substitutes zero.
 
 ## Calculations and history
@@ -322,6 +325,7 @@ Headline v1 “total gain” shall be price/realised gain based and shall not si
 Acceptance:
 
 - Actual income is shown separately.
+- Until the deferred dividend workflow exists, income is omitted or explicitly unavailable rather than inferred.
 - TWR/XIRR remain unavailable until explicit external cash-flow classification and complete history exist.
 - Any future return metric declares cash-flow and fee treatment.
 
@@ -343,7 +347,7 @@ Acceptance:
 
 - Known declared future events take precedence.
 - Otherwise use supported regular payment history/TTM rules.
-- Estimate timestamp, method, assumptions, and coverage are exposed.
+- Estimate timestamp, method, assumptions, and coverage are exposed in the explanation; the compact forecast view generally suppresses the timestamp.
 
 ## CSV import
 
@@ -356,6 +360,7 @@ Acceptance:
 - Header normalization tolerates BOM, CRLF/LF, and surrounding whitespace.
 - All 244 rows after the header in the supplied file are classified.
 - Blank transaction date/type/quantity plus populated `Id`, `Symbol`, `Portfolio`, and `Currency` identifies a portfolio-security definition row only when the remaining row rules pass.
+- The exact legacy `<ISO currency>=CASH` shape maps to cash-account events and never creates a security, lot, or quote request; malformed variants block.
 
 ### IMP-002 — Staged import
 
@@ -432,6 +437,9 @@ Acceptance:
 - Local, preview, and production configuration are distinct.
 - Production secrets are Worker secrets, never `NEXT_PUBLIC_*`.
 - Missing bindings fail at startup/request boundary with safe errors.
+- The generated Worker configuration and Vinext compatibility check are exercised in CI-equivalent verification; unsupported Next/Vinext behavior is not assumed from Next.js documentation alone.
+- Cloudflare runtime/binding types are generated with Wrangler and checked for drift; built Worker code references no binding absent from its environment configuration.
+- The production deployment profile is Workers Paid for the documented CSV limit and recovery objective. A Free-profile deployment fails closed on CSV upload unless a separately documented Worker-runtime benchmark approves a smaller limit.
 
 ### PLAT-002 — PWA foundation
 
@@ -440,6 +448,7 @@ The application shall provide manifest metadata, iPhone-safe viewport behavior, 
 Acceptance:
 
 - Manifest has name, short name, theme/background colors, start URL, and icon.
+- Release assets include installable raster icons appropriate for iOS and standard 192/512-pixel PWA use; SVG-only scaffold metadata is not release completion.
 - Service worker caches only an allowlisted public shell/offline asset set.
 - Authenticated HTML, APIs, imports, and financial data use network/no-store behavior.
 
@@ -470,7 +479,7 @@ D1 recovery and long-term export procedures shall be documented and tested.
 Acceptance:
 
 - Paid production uses D1 Time Travel’s current retention window and records pre-migration bookmarks.
-- Encrypted exports are stored outside the primary failure domain for the defined retention period.
+- Encrypted exports are stored outside the primary failure domain for the defined retention period through an explicitly approved manual or automated mechanism; this requirement alone does not authorize R2, Workflows, or another service.
 - Restore drill verifies schema, row counts, ownership checks, and representative calculations.
 
 ### OPS-004 — Data retention and deletion
@@ -480,7 +489,7 @@ Retention shall be explicit for user data, imports, logs, provider data, exports
 Acceptance:
 
 - Disabled, deletion-requested, and purged states are distinct.
-- Provider contractual deletion requirements override cache convenience.
+- Provider data follows the application retention and deletion policy.
 - Deletion is idempotent, audited, and verified.
 
 ### QUAL-001 — Accessibility
@@ -495,10 +504,11 @@ Acceptance:
 
 ### QUAL-002 — Automated quality gate
 
-Every implementation slice shall pass lint, production build, relevant unit/integration tests, and rendered-route smoke tests.
+Every implementation slice shall pass formatting, lint, strict TypeScript typecheck, production build, relevant unit/integration tests, and rendered-route smoke tests.
 
 Acceptance:
 
 - CI-equivalent commands are documented and deterministic.
+- The aggregate quality command includes `tsc --noEmit`; a Vite/Vinext transpile-only build is not treated as a typecheck.
 - Financial fixtures are independent of network providers.
 - A failed required check blocks task completion.

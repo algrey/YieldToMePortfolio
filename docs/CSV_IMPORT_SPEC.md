@@ -80,6 +80,18 @@ The actual `Notes` cell has trailing spaces. Matching trims BOM/outer whitespace
 
 The importer never silently supplies an exchange, security currency, date timezone, or FX direction from ticker alone.
 
+### Legacy cash pseudo-security
+
+The supplied file’s `AUD=CASH` rows are a versioned legacy encoding, not a listed security:
+
+- a definition row with symbol `<ISO currency>=CASH`, blank exchange, and the same `Currency` may create/map the owned portfolio’s cash account for that currency; it creates no canonical security or quote request;
+- a matching transaction requires unit price exactly `1`, zero/blank commission, quantity as the cash amount, and no conflicting security fields;
+- `Buy` normalizes to `cash_deposit`; `Sell` normalizes to `cash_withdrawal`;
+- the original symbol/type/price remain in import provenance;
+- any other `=CASH` shape blocks with `CASH_ENCODING_INVALID` rather than being guessed.
+
+This compatibility rule applies only to this parser version. Native YieldToMe ledger events use explicit cash transaction types.
+
 ## 4. Row grammar
 
 Parsing first preserves every physical row and all original field strings.
@@ -111,6 +123,8 @@ Required:
 - supported/blank `Accounting` under the transaction rule.
 
 Portfolio/security reference fields repeat definition data; batch conflicts are errors, not last-write-wins. A transaction appearing without a definition row can be staged with a warning, but no implicit cross-user mapping is allowed.
+
+The legacy cash shape above follows the same physical transaction grammar but maps to a cash account/event instead of a portfolio security, lot, or holding.
 
 ### Unsupported row
 
@@ -156,7 +170,8 @@ Source zero becomes missing with `FX_ZERO_TREATED_AS_UNKNOWN`. It does not block
 
 - Authenticated owner only.
 - `.csv` extension is advisory; validate content as bounded text.
-- Initial size limit: 10 MiB and 100,000 physical rows; make configurable.
+- Initial size limit: 10 MiB and 100,000 physical rows; make configurable. This release contract requires a Workers Paid production deployment because Workers Free cannot guarantee the parse/normalize/hash workload within its 10 ms CPU limit.
+- A deployment configured as Workers Free rejects CSV import before reading the body. Enabling a smaller Free limit requires a separate Worker-runtime benchmark and a documented configuration profile.
 - Stream/bounded parse; reject NUL/binary content and pathological field sizes.
 - Support UTF-8 with optional BOM. Non-UTF-8 requires explicit future encoding support.
 - Do not evaluate spreadsheet formulas, HTML, Markdown, URLs, or note content.
@@ -249,32 +264,33 @@ Show committed/skipped counts, warnings that remain, coverage impacts, and rever
 
 ## 9. Issue code baseline
 
-| Code                         | Severity | Meaning                                                 |
-| ---------------------------- | -------- | ------------------------------------------------------- |
-| `HEADER_MISMATCH`            | error    | logical header differs from supported 17-column version |
-| `COLUMN_COUNT`               | error    | row field count cannot be safely reconciled             |
-| `ROW_UNCLASSIFIED`           | error    | nonblank row matches no grammar                         |
-| `ROW_AMBIGUOUS`              | error    | row matches conflicting grammars                        |
-| `PORTFOLIO_MISSING`          | error    | transaction has no definition/mapping                   |
-| `PORTFOLIO_CONFLICT`         | error    | repeated name/currency/method conflict                  |
-| `CURRENCY_UNKNOWN`           | error    | unsupported currency                                    |
-| `EXCHANGE_UNRESOLVED`        | error    | exchange alias cannot map                               |
-| `SECURITY_UNRESOLVED`        | error    | no confirmed canonical security                         |
-| `SECURITY_AMBIGUOUS`         | error    | multiple candidates                                     |
-| `TRANSACTION_TYPE_UNKNOWN`   | error    | unsupported type                                        |
-| `DATE_INVALID`               | error    | not an enumerated date format                           |
-| `DATE_TIME_CONFLICT`         | error    | embedded/separate times disagree                        |
-| `QUANTITY_INVALID`           | error    | missing/nonpositive buy/sell quantity                   |
-| `PRICE_INVALID`              | error    | missing/invalid price                                   |
-| `FX_ZERO_TREATED_AS_UNKNOWN` | warning  | source zero normalized to missing                       |
-| `FX_DIRECTION_UNCONFIRMED`   | error    | base/native interpretation unresolved                   |
-| `FEE_INVALID`                | error    | negative/invalid cost                                   |
-| `ACCOUNTING_UNSUPPORTED`     | error    | method is not FIFO                                      |
-| `DUPLICATE_EXACT`            | info     | exact normalized row already committed                  |
-| `DUPLICATE_POSSIBLE`         | warning  | close semantic match needs decision                     |
-| `OVERSELL`                   | error    | sells exceed available mapped lots                      |
-| `HISTORY_INCOMPLETE`         | warning  | import lacks opening cash/basis/history                 |
-| `DISPLAY_SYMBOL_OVERRIDE`    | info     | display symbol differs from canonical map               |
+| Code                         | Severity | Meaning                                                  |
+| ---------------------------- | -------- | -------------------------------------------------------- |
+| `HEADER_MISMATCH`            | error    | logical header differs from supported 17-column version  |
+| `COLUMN_COUNT`               | error    | row field count cannot be safely reconciled              |
+| `ROW_UNCLASSIFIED`           | error    | nonblank row matches no grammar                          |
+| `ROW_AMBIGUOUS`              | error    | row matches conflicting grammars                         |
+| `PORTFOLIO_MISSING`          | error    | transaction has no definition/mapping                    |
+| `PORTFOLIO_CONFLICT`         | error    | repeated name/currency/method conflict                   |
+| `CURRENCY_UNKNOWN`           | error    | unsupported currency                                     |
+| `EXCHANGE_UNRESOLVED`        | error    | exchange alias cannot map                                |
+| `SECURITY_UNRESOLVED`        | error    | no confirmed canonical security                          |
+| `SECURITY_AMBIGUOUS`         | error    | multiple candidates                                      |
+| `TRANSACTION_TYPE_UNKNOWN`   | error    | unsupported type                                         |
+| `DATE_INVALID`               | error    | not an enumerated date format                            |
+| `DATE_TIME_CONFLICT`         | error    | embedded/separate times disagree                         |
+| `QUANTITY_INVALID`           | error    | missing/nonpositive buy/sell quantity                    |
+| `PRICE_INVALID`              | error    | missing/invalid price                                    |
+| `FX_ZERO_TREATED_AS_UNKNOWN` | warning  | source zero normalized to missing                        |
+| `FX_DIRECTION_UNCONFIRMED`   | error    | base/native interpretation unresolved                    |
+| `FEE_INVALID`                | error    | negative/invalid cost                                    |
+| `ACCOUNTING_UNSUPPORTED`     | error    | method is not FIFO                                       |
+| `DUPLICATE_EXACT`            | info     | exact normalized row already committed                   |
+| `DUPLICATE_POSSIBLE`         | warning  | close semantic match needs decision                      |
+| `OVERSELL`                   | error    | sells exceed available mapped lots                       |
+| `HISTORY_INCOMPLETE`         | warning  | import lacks opening cash/basis/history                  |
+| `DISPLAY_SYMBOL_OVERRIDE`    | info     | display symbol differs from canonical map                |
+| `CASH_ENCODING_INVALID`      | error    | legacy `=CASH` row violates the exact compatibility rule |
 
 ## 10. Idempotency and duplicate detection
 
@@ -343,6 +359,7 @@ Commit acceptance checks:
 - holding quantity equals ledger projection;
 - lot quantities reconcile;
 - every financial transaction has expected cash effect or an explicit `cash_history_incomplete` exception;
+- the four supplied `AUD=CASH` transactions produce cash events only and no security lots/market-data requests;
 - all committed rows link to a resulting fact or explicit skip reason;
 - portfolio home/reporting currency and accounting conflicts are resolved;
 - audit count and batch status are consistent.

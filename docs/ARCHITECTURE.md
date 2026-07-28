@@ -7,7 +7,7 @@ Date: 2026-07-28
 
 Build a single Cloudflare Worker application using Vinext’s Next-compatible App Router, React, and TypeScript. Use D1 as the system of record and initial normalized market-data cache. Put Cloudflare Access in front of the deployment, then validate its JWT again inside the Worker and map it to an internal user. Keep all portfolio operations server-side and owner-scoped.
 
-Do not add R2, KV, Queues, Durable Objects, or an independent auth vendor in the first implementation slice. Add each only when its documented trigger occurs.
+Do not add R2, KV, Queues, Durable Objects, Images transformations, or an independent auth vendor in the first implementation slice. Add each only when its documented trigger occurs.
 
 ## 2. Context
 
@@ -17,7 +17,7 @@ flowchart LR
     Access --> Worker["YieldToMe Worker\nVinext routes + server operations"]
     Worker --> D1["D1\nledger, identities, mappings,\nnormalized market cache, audit"]
     Worker --> Provider["Market-data provider adapter"]
-    Provider --> Delayed["Delayed quote source\n(provider decision gated)"]
+    Provider --> Delayed["Best-effort / delayed quote source"]
     Provider --> EOD["EOD / FX / history fallback"]
     Worker -. future .-> Broker["Broker adapter\naccounts + transactions + optional entitled quotes"]
     Worker --> Logs["Cloudflare structured logs / metrics"]
@@ -32,7 +32,7 @@ Trust boundaries:
 2. Cloudflare Access is the outer gateway, not the application authorization layer.
 3. The Worker is the policy and calculation boundary.
 4. D1 constraints protect relational integrity but do not provide tenant row-level security.
-5. Provider data is untrusted external input and may be stale, corrected, delayed, or contractually restricted.
+5. Provider data is untrusted external input and may be stale, corrected, delayed, incomplete, or malformed.
 
 ## 3. Application stack
 
@@ -46,6 +46,8 @@ Trust boundaries:
 - Progressive web app metadata plus a deliberately limited service worker.
 
 Version pins describe the scaffold date, not a perpetual latest-version promise. Dependency upgrades require build/test confirmation and a task.
+
+Vinext is under active development and does not promise full Next.js parity. Every routing, middleware/header, Server Action, binding, and cache behavior used by this product must pass `vinext check`, the production Worker build, and a runtime smoke test. Next.js documentation alone is not proof that a feature works in this stack.
 
 ### Persistence
 
@@ -105,7 +107,8 @@ Conclusion: Access is enough for a private, administrator-invited first version.
 
 - Validate `Cf-Access-Jwt-Assertion`, not merely the cookie or email header.
 - Fetch JWKS from the configured team domain and support signing-key rotation.
-- Validate the application audience, issuer, timestamps, and accepted token type.
+- Validate the application audience, configured issuer, timestamps, and `type = app`; an interactive principal also requires a non-empty subject.
+- Construct the JWKS URL only from the configured Access team domain/issuer. Never follow an unverified JWT `iss` value.
 - Map `(access_issuer, access_subject)` to an internal user. Email is contact/display metadata.
 - Treat subject reuse/change defensively. Cloudflare documents that a subject can change if a user is removed/re-added or authenticates through a different organization.
 - Reject service-token identities from interactive flows.
@@ -139,6 +142,7 @@ D1 has no application row-level-security policy. Isolation is enforced by query 
 - `users.id` is the internal tenant principal.
 - `portfolios` contains `user_id`.
 - High-risk child tables also denormalize `user_id` and use composite foreign keys such as `(portfolio_id, user_id) -> portfolios(id, user_id)`.
+- Any child-to-child relationship that can influence financial results—import row to transaction, reversal to transaction, transaction to portfolio security, cash entry to transaction, lot allocation to sale/lot, receipt to transaction/cash entry—carries enough owner/portfolio columns for a composite foreign key. A service check is not a substitute where D1 can enforce the relationship.
 - Owned repositories require `{ userId, resourceId }`.
 - Queries join/predicate by both values in one SQL statement, avoiding a check-then-use race.
 - Unique/index keys begin with `user_id` or `portfolio_id` where access patterns do.
@@ -159,7 +163,6 @@ domain/
   lots/                     FIFO projections and matches
   market-data/              provider interfaces + normalization
   calculations/             pure decimal calculations
-  dividends/                events, receipts, forecasts
   imports/                  versioned parsers and staged workflow
   snapshots/                deterministic daily projections
 db/
@@ -171,10 +174,11 @@ worker/
 ```
 
 This is the intended boundary, not a requirement to create empty directories now.
+Add a separate dividend module only when the deferred event, actual-receipt, and forecast tasks are promoted.
 
 ## 7. Market-data architecture
 
-The detailed, date-stamped provider comparison, first-provider decision, licensing gate, cost envelope, cache/refresh lifecycle, FX rules, and adapter contract are normative in `MARKET_DATA_STRATEGY.md`. This section records the architectural boundary.
+The technical provider comparison, first-provider decision, cache/refresh lifecycle, FX rules, and adapter contract are normative in `MARKET_DATA_STRATEGY.md`. External provider-use matters are handled separately by the operator and create no application gate or schema.
 
 ### Capability interface
 
@@ -195,50 +199,47 @@ interface MarketDataProvider {
 }
 ```
 
-Adapters return normalized values and provenance, never UI-ready totals. Capabilities declare supported exchanges, history depth, delay class, adjustment support, rate limits, and licensed-use scope.
+Adapters return normalized values and provenance, never UI-ready totals. Capabilities declare supported exchanges, history depth, delay class, adjustment support, and rate limits.
 
 ### Initial provider decision
 
-Implement delayed-quote capability first against deterministic fixtures, with EOD/history/FX/manual fallbacks. EODHD is the preferred first adapter, but production remains blocked until its commercial display/storage terms are approved.
+Implement normalized observation selection first against deterministic fixtures, with best-effort/EOD/manual states. The first network adapter is a server-only Yahoo Finance-compatible best-effort source. Another provider remains optional until measured coverage, reliability, capability, or cost justifies it.
 
-Do not scrape or depend on undocumented Yahoo Finance endpoints.
+`yfinance` is a Python library and does not run in the Worker. The Worker adapter calls corresponding Yahoo Finance endpoints only from server code, with bounded requests, circuit breaking, response validation, and explicit best-effort provenance. Provider enablement is ordinary server configuration with no user-count, owner-binding, deployment-mode, monetization, redistribution, or external-use gate.
 
-Provider comparison as of 2026-07-28:
+Technical alternatives as of 2026-07-28:
 
-| Provider      | Useful capability                                                                                        |                                                        Published entry point | Material constraint                                                                                                             | Decision                                                          |
-| ------------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------: | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| EODHD         | Advertises delayed ASX plus 60+ global exchanges, EOD/history, adjusted prices, splits/dividends, and FX |       Personal: US$19.99/month EOD; US$99.99 all-in-one; commercial by quote | Personal terms prohibit group display; commercial approval must cover display, exchanges, storage, derived values, and deletion | Preferred first adapter, conditional on written commercial rights |
-| Marketstack   | Global EOD, splits/dividends; ASX listed; generic commercial-use tier                                    |                                                          US$9.99/month Basic | FX is not a complete pricing feed; 10-year Basic history; ASX-specific rights still need confirmation                           | Low-cost fallback spike                                           |
-| Twelve Data   | Global series, dividends, FX; explicit 20-minute delayed ASX                                             | US$229/month individual Pro or US$499/month business Venture before ASX fees | Basic free does not provide general AU display; ASX add-on/display licensing can be much more expensive                         | Clearest documented delayed candidate                             |
-| FMP           | Global EOD/quotes, fundamentals, FX, dividends                                                           |                                             US$149/month Ultimate for global | Global coverage tier cost and separate display/redistribution agreement                                                         | Fundamentals-driven upgrade                                       |
-| Alpha Vantage | Daily global/FX and adjusted-history APIs                                                                |                                  Free 25 requests/day; paid per-minute plans | ASX depth unverified; commercial use requires sales agreement                                                                   | Development/fallback research only                                |
+| Provider                 | Useful capability                                                                         | Material technical constraint                     | Decision                    |
+| ------------------------ | ----------------------------------------------------------------------------------------- | ------------------------------------------------- | --------------------------- |
+| Yahoo Finance-compatible | Broad international latest/daily prices, FX, dividends, and splits when endpoints respond | No SLA; endpoint and response shapes can change   | Preferred v1 adapter        |
+| EODHD                    | Broad delayed/EOD/history, adjusted prices, splits/dividends, and FX                      | Requires separate adapter/fixture work            | Optional future alternative |
+| Marketstack              | Global EOD and corporate actions                                                          | FX is not a complete pricing feed                 | Not sufficient alone        |
+| Twelve Data              | Global series, dividends, FX, and documented ASX capability                               | Capability/rate behavior needs fixture validation | Optional future alternative |
+| FMP                      | Global prices, fundamentals, FX, and dividends                                            | Fundamentals exceed core-release need             | Deferred                    |
+| Alpha Vantage            | Low-volume daily global/FX and adjusted-history APIs                                      | Quota and ASX depth require measurement           | Deferred fallback candidate |
 
-Prices and terms change. Revalidate at contracting time. Primary research links:
+Technical behavior changes. Revalidate before implementation:
 
 - Cloudflare Access authorization cookie: <https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/>
 - Cloudflare Access JWT validation: <https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/>
-- EODHD pricing: <https://eodhd.com/pricing>
-- EODHD ASX/global commercial coverage: <https://eodhd.com/asx-data>
-- EODHD data sources: <https://eodhd.com/financial-apis/our-data-sources-and-data-partners>
-- EODHD commercial terms: <https://eodhd.com/financial-apis/commercial-vs-personal-license-use>
-- EODHD terms: <https://eodhd.com/financial-apis/terms-conditions>
+- yfinance project: <https://github.com/ranaroussi/yfinance>
 - EODHD ASX exchange coverage: <https://eodhd.com/financial-apis/exchanges-api-list-of-tickers-and-trading-hours>
-- Marketstack pricing: <https://marketstack.com/product>
-- Twelve Data pricing: <https://twelvedata.com/pricing>
+- Marketstack product documentation: <https://marketstack.com/product>
 - Twelve Data ASX support: <https://support.twelvedata.com/en/articles/13001919-australian-equities-market-data>
-- ASX delayed-data redistribution: <https://www.asx.com.au/connectivity-and-data/information-services/price-data/delayed-price-data>
-- FMP pricing: <https://site.financialmodelingprep.com/developer/docs/pricing>
-- Alpha Vantage support/pricing: <https://www.alphavantage.co/support/>
+- FMP developer documentation: <https://site.financialmodelingprep.com/developer/docs>
+- Alpha Vantage support: <https://www.alphavantage.co/support/>
 
 ### Ingestion and cache
 
 - Normalize and upsert by provider, mapping, interval, observation timestamp/date, and adjustment state.
-- Keep raw payload only transiently for parsing diagnostics; persist a payload hash and selected normalized provenance. Retain raw payloads only if contractually allowed and operationally necessary.
+- Keep raw payload only transiently for parsing diagnostics; persist a payload hash and selected normalized provenance. Retain raw payloads only under a bounded diagnostic policy.
 - Apply provider rate limiting and bounded exponential retry with jitter.
 - Cache negative lookups briefly to prevent storms.
 - Manual user refresh enqueues/request-coalesces a refresh operation; it does not fan out one request per row.
 - Scheduled backfill/refresh starts with Cron Triggers calling a bounded worker. Add Queues when a run cannot reliably finish within Worker execution/subrequest limits or needs durable fan-out.
 - Do not store provider results in browser/service-worker caches.
+
+The v1 adapter is one source plus manual override, not a multi-provider aggregator. Adding another provider requires measured technical need, deterministic adapter tests, and a backlog task.
 
 ### Durable job and concurrency pattern
 
@@ -249,18 +250,21 @@ Prices and terms change. Revalidate at contracting time. Primary research links:
 - `ctx.waitUntil` may finish short logging/cache work but is not the sole durability mechanism for financially material work.
 - Cron claims ready jobs and respects provider/Worker query budgets. Add Queues only after measurement shows that bounded Cron/request processing cannot meet reliability or latency.
 - Concurrent recalculations use calculation version + affected range and coalesce overlapping invalidations; a stale run cannot publish a high-water mark over newer ledger facts.
+- Use D1 prepared-statement batches for each bounded atomic unit. Do not assume an interactive transaction can span application round trips.
+- Bound every chunk for D1’s 100 parameters per query, 2 MB row/value limit, and the Worker’s 128 MB memory limit. Free D1 permits 50 queries per invocation and paid D1 permits more, but neither removes the need for resumable chunks.
+- The 10 MiB/100,000-row v1 upload contract is a Workers Paid production capability. Workers Free has a 10 ms CPU limit and cannot safely guarantee the bounded parser, normalization, hashing, and validation workload. V1 fails closed on CSV upload when configured for Free rather than silently timing out; a smaller Free import profile requires a separate measured benchmark and documented limit.
 
 ### Price selection
 
 Selection is deterministic:
 
 1. active user manual override for the requested instant/date;
-2. approved delayed observation within its advertised delay/staleness window;
+2. approved validated best-effort/delayed observation within its applicable staleness window;
 3. approved EOD observation matching adjustment mode and security mapping;
 4. prior valid trading-day observation within the permitted staleness window;
 5. unavailable.
 
-The chosen observation and fallback reason are included in the calculation explanation.
+The chosen observation and fallback reason are included in the calculation explanation. Compact views generally suppress timestamps and routine source/fallback labels; the explanation remains available on demand, and inline status is reserved for action-required conditions.
 
 ### Home-currency presentation
 
@@ -293,7 +297,7 @@ interface BrokerAdapter {
 - `external_record_mappings` keys each broker transaction/cash event by broker, account, external ID, and provider version. Corrections create ledger reversals/supersessions.
 - Broker transactions enter the same staging/validation/reconciliation path as CSV/manual sources with `source_type = broker_sync`.
 - Position snapshots are reconciliation evidence. They flag drift; they do not silently replace ledger-derived holdings.
-- Broker quotes, when the connected user’s entitlement and terms allow them, normalize through `MarketDataProvider` and remain scoped to that user/connection.
+- Broker quotes exposed by a connected account normalize through `MarketDataProvider` and remain scoped to that user/connection.
 - Revoking a connection stops sync and deletes/invalidates credentials without deleting already committed ledger facts.
 
 This boundary prevents a later broker integration from requiring a new ledger, holdings model, or UI calculation path.
@@ -334,6 +338,10 @@ Add for durable provider fan-out, long imports, snapshot backfills, or deletion 
 
 Only consider for strong coordination such as provider-wide rate-limit serialization or collaborative real-time state. D1 idempotency and job leases are sufficient initially.
 
+### Images transformations — defer
+
+The release uses public static raster/SVG assets and does not require the Cloudflare Images binding. Remove the scaffold’s custom `IMAGES` optimization path unless a later image-heavy feature, measured bandwidth need, and cost decision approve it. No generated Worker may reference an undeclared binding.
+
 ## 11. PWA and offline architecture
 
 - Web manifest identifies the app and standalone display mode.
@@ -352,9 +360,11 @@ This intentionally avoids leaving private financial data in a broadly accessible
 
 - Local: local D1, explicit development identity, provider fixtures by default.
 - Preview: separate Access application/policy, separate D1, sandbox provider keys, production auth validation.
-- Production: least-privilege Access policy, production D1, Worker secrets, rights-approved provider.
+- Production: least-privilege Access policy, production D1, Worker secrets, and the configured provider.
 
 Never bind preview to production data.
+
+The private v1 deployment may contain multiple administrator-invited users. Provider access follows normal authenticated application access and has no separate deployment mode or owner binding.
 
 ### Secrets
 
@@ -378,7 +388,7 @@ Do not log transaction amounts, quantities, CSV contents, tokens, emails, API ke
 
 - D1 production Time Travel is automatic; current documentation provides up to 30 days on Workers Paid and 7 days on Free.
 - Capture a Time Travel bookmark before and after production migrations.
-- Nightly/weekly encrypted D1 exports to a separate controlled store are required for retention beyond Time Travel; R2 plus Workflows is the likely Cloudflare-native option when operations are implemented.
+- Encrypted D1 exports to a separate controlled store are required for retention beyond Time Travel. A documented operator-run export is sufficient initially. Automating this with R2, Workflows, or another service requires its architecture trigger and a separate approval/task.
 - Quarterly restore drill: restore into a non-production database when supported by the workflow, apply/verify schema, check ownership counts and hashes, and run representative calculation fixtures.
 - Target initial RPO: 24 hours for long-term export plus Time Travel for recent changes. Target RTO: 4 hours for operator-led restore. Revisit after real usage.
 
@@ -387,6 +397,7 @@ Sources:
 - <https://developers.cloudflare.com/d1/reference/time-travel/>
 - <https://developers.cloudflare.com/d1/platform/limits/>
 - <https://developers.cloudflare.com/d1/sql-api/foreign-keys/>
+- <https://developers.cloudflare.com/workers/platform/limits/>
 
 ### Retention
 
@@ -420,6 +431,7 @@ Sources:
 - Add Queues when provider/import/snapshot work cannot complete reliably in bounded requests/Cron.
 - Add KV only for measured, non-authoritative read caching.
 - Add Durable Objects only for demonstrated strong coordination needs.
-- Change market provider when coverage, accuracy, cost, rights, or contractual retention fails the production gate.
+- Add Images transformations only for a measured dynamic-image requirement and approved binding/cost; static release assets do not qualify.
+- Change market provider when measured coverage, accuracy, reliability, capability, or cost warrants it.
 - Revisit D1 sharding/partitioning only as database size, write contention, or regional latency approaches measured limits.
 - Add broker adapters only through documented OAuth/API integrations with owner-scoped encrypted connections and staged ledger reconciliation; never by screen scraping or storing broker passwords.

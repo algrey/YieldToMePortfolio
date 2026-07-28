@@ -6,28 +6,30 @@ Executable backlog: `TASKS.md`
 
 ## 1. Delivery strategy
 
-Build in vertical, reversible slices. Establish identity and ownership before financial endpoints; establish immutable ledger truth before projections; establish deterministic calculations before rich UI; establish provider rights before production ingestion.
+Build in vertical, reversible slices. Establish identity and ownership before financial endpoints; establish immutable ledger truth before projections; establish deterministic calculations before rich UI; establish the explicit owner/source scope before production ingestion.
 
-The first working release is administrator-invited and delayed-quote-first where a lawful provider is available, with labelled end-of-day/manual fallback. It can deliver ledger value without genuine real-time quotes, news, public registration, broker sync, or advanced performance metrics.
+The private production deployment supports a small administrator-invited user set. Tenant isolation is proved with real request context plus synthetic preview/test users. Provider access has no source-specific user-count, owner-binding, deployment-mode, monetization, redistribution, or external-use gate. The release can deliver ledger value without genuine real-time quotes, dividend forecasts, news, public registration, broker sync, or advanced performance metrics.
 
 ## 2. Phase gates
 
 ### Phase 0 — Foundation and decisions
 
-Tasks: `FND-001`, `FND-002`, `SPK-001`, `SPK-002`
+Tasks: `FND-001`, `FND-002A`, `FND-002B`, `SPK-001`, `SPK-002`
 
 Gate:
 
 - scaffold builds and routes responsively;
 - config is fail-closed;
-- EODHD commercial rights, international coverage, and total cost decision recorded;
+- Wrangler-generated types and Worker configuration agree, with the unapproved `IMAGES` path removed and no undeclared binding reference;
+- the production profile declares Workers Paid for the 10 MiB/100,000-row import contract and Free profile rejects that upload path;
+- Yahoo best-effort technical behavior and free fallback policy recorded;
 - the exact supplied 17-column header is locked as the complete supported import contract.
 
-Parallelism: the market-rights and CSV-format spikes can run independently from code foundation. Do not begin a production provider adapter before `SPK-002`.
+Parallelism: the provider-technical and CSV-format spikes can run independently from code foundation. Do not begin a production provider adapter before `SPK-002`.
 
 ### Phase 1 — Identity and owned persistence
 
-Tasks: `AUTH-001`, `DB-001`, `AUTH-002`, `OPS-001`
+Tasks: `DB-001A`, `DB-001B`, `AUTH-001`, `AUTH-002`, `OPS-001`
 
 Gate:
 
@@ -40,7 +42,7 @@ Sequencing: schema can be designed alongside JWT verification, but owned reposit
 
 ### Phase 2 — Ledger and import truth
 
-Tasks: `DB-002`, `MKT-001`, `LED-001`, `IMP-001`, `IMP-002`, `IMP-003`, `LED-002`
+Tasks: `DB-002`, `MKT-001`, `LED-001A`, `LED-001B`, `IMP-001`, `IMP-002A`, `IMP-002B`, `LED-002A`, `LED-002B`, `IMP-003A`, `IMP-003B`
 
 Gate:
 
@@ -54,28 +56,28 @@ Parallelism: the security master/provider contract and pure parser fixtures can 
 
 ### Phase 3 — Market data and financial calculations
 
-Tasks: `DB-003`, `DB-004`, `MKT-002`, `MKT-003`, `CALC-001`, `CALC-002`, `DIV-001`
+Tasks: `DB-003`, `DB-004`, `MKT-002`, `MKT-003A`, `MKT-003B`, `MKT-004`, `CALC-001A`, `CALC-001B`, `CALC-002`
 
 Gate:
 
-- approved provider data normalizes with provenance;
-- delayed observations are preferred and explicitly labelled when supported;
+- owner-scoped provider data normalizes with provenance;
+- the freshest validated observation is preferred, while compact views generally suppress timestamps and routine provider/delay/fallback labels;
 - manual fallback works;
 - price/FX gaps produce partial coverage, not zero;
-- FIFO/current/daily/history/dividend fixtures pass;
+- FIFO/current/daily/history fixtures pass;
 - snapshots rebuild deterministically by calculation version.
 
-Parallelism: pure calculation work can use fixtures before live provider integration. Provider interface and schema can proceed together. Adapter implementation is blocked by the rights gate.
+Parallelism: pure calculation work can use fixtures before live provider integration. Provider interface and schema can proceed together.
 
 ### Phase 4 — Product surfaces
 
-Tasks: `UI-001`, `UI-002`, `UI-003`, `UI-004`, `UI-005`, `PWA-001`
+Tasks: `UI-001`, `UI-002`, `UI-003`, `UI-004`, `UI-005A`, `UI-005B`, `UI-005C`, `UI-005D`, `UI-005E`, `PWA-001`
 
 Gate:
 
 - reference navigation and workflows operate end to end;
 - mobile and desktop hierarchy is usable;
-- missing/stale/estimated states are clear;
+- missing/stale/partial states are clear;
 - service worker stores no private data;
 - News is honestly unavailable unless separately approved.
 
@@ -83,7 +85,7 @@ UI screens may proceed in parallel once shared response contracts and shell are 
 
 ### Phase 5 — Operations and release
 
-Tasks: `OPS-002`, `OPS-003`, `QA-001`, `QA-002`
+Tasks: `OPS-002`, `OPS-003A`, `OPS-003B`, `QA-001A`, `QA-001B`, `QA-002`
 
 Gate:
 
@@ -97,71 +99,71 @@ Gate:
 
 ```mermaid
 flowchart TD
-    FND["FND-001/002\nscaffold + gates"] --> AUTH["AUTH-001/002\nverified owned context"]
-    FND --> DB["DB-001/002\nD1 schema"]
-    AUTH --> LED["LED-001\nledger + cash"]
+    FND["FND-001/002A/002B\nscaffold + gates"] --> AUTH["AUTH-001/002\nverified owned context"]
+    FND --> DB["DB-001A/B + DB-002\nowned persistence + security master"]
+    AUTH --> LED["LED-001A/B\nledger + cash"]
     DB --> LED
-    LED --> IMP["IMP-001/002/003\nstaged import"]
-    LED --> LOT["LED-002\nFIFO lots"]
-    DB --> MKT["MKT-001/002/003\nprovider normalization"]
-    LOT --> CALC["CALC-001/002\nmetrics + history"]
+    LED --> IMP["IMP-001, 002A/B, 003A/B\nstaged import"]
+    LED --> LOT["LED-002A/B\nFIFO + projections"]
+    DB --> MKT["MKT-001, 002, 003A/B, 004\nscoped market data"]
+    LOT --> CALC["CALC-001A/B + 002\nmetrics + history"]
     MKT --> CALC
-    CALC --> UI["UI-001..005\nproduct surfaces"]
+    CALC --> UI["UI-001..005E\nproduct surfaces"]
     IMP --> UI
     UI --> QA["OPS + QA\nrelease gate"]
 ```
 
 ## 4. Traceability matrix
 
-| Requirement | Task(s)                                    |
-| ----------- | ------------------------------------------ |
-| PRD-001     | AUTH-002, DB-001, QA-001                   |
-| PRD-002     | AUTH-002, UI-001                           |
-| PRD-003     | FND-001, UI-001                            |
-| PRD-004     | FND-001, UI-001, UI-002, UI-003, QA-001    |
-| PRD-005     | DB-001, CALC-001, UI-001, UI-003           |
-| AUTH-001    | AUTH-001                                   |
-| AUTH-002    | AUTH-002                                   |
-| AUTH-003    | AUTH-002, DB-001, QA-001                   |
-| AUTH-004    | FND-002, AUTH-001, IMP-003, QA-001         |
-| AUTH-005    | AUTH-002, OPS-003                          |
-| LED-001     | LED-001, IMP-003                           |
-| LED-002     | LED-001, CALC-001                          |
-| LED-003     | LED-001, LED-002                           |
-| LED-004     | LED-002                                    |
-| LED-005     | LED-001, CALC-002                          |
-| MKT-001     | DB-002, MKT-001                            |
-| MKT-002     | MKT-001, MKT-002                           |
-| MKT-003     | DB-003, MKT-002, UI-004                    |
-| MKT-004     | DB-003, MKT-002, CALC-001                  |
-| MKT-005     | MKT-003, CALC-002, UI-002, UI-003, UI-004  |
-| MKT-006     | DB-003, MKT-003, UI-004, UI-005            |
-| MKT-007     | SPK-002, MKT-001, OPS-003                  |
-| MKT-008     | SPK-002, MKT-001, MKT-002, MKT-003, UI-004 |
-| CALC-001    | CALC-001                                   |
-| CALC-002    | CALC-001, UI-002, UI-003                   |
-| CALC-003    | LED-002, CALC-001                          |
-| CALC-004    | LED-002, CALC-001                          |
-| CALC-005    | CALC-001, CALC-002                         |
-| CALC-006    | CALC-002, UI-002                           |
-| CALC-007    | CALC-001, UI-002                           |
-| DIV-001     | DB-004, DIV-001, LED-001                   |
-| DIV-002     | DB-004, DIV-001, UI-002, UI-003            |
-| IMP-001     | IMP-001                                    |
-| IMP-002     | IMP-002                                    |
-| IMP-003     | IMP-002                                    |
-| IMP-004     | IMP-001, IMP-003                           |
-| IMP-005     | IMP-003                                    |
-| IMP-006     | SPK-001, IMP-001                           |
-| BRK-001     | SPK-003                                    |
-| PLAT-001    | FND-001, FND-002, DB-001                   |
-| PLAT-002    | FND-001, PWA-001                           |
-| OPS-001     | OPS-001, IMP-003, MKT-003                  |
-| OPS-002     | OPS-001, QA-002                            |
-| OPS-003     | OPS-002, QA-002                            |
-| OPS-004     | OPS-003                                    |
-| QUAL-001    | UI-001..005, QA-001                        |
-| QUAL-002    | FND-002, QA-002                            |
+| Requirement | Task(s)                                                                              |
+| ----------- | ------------------------------------------------------------------------------------ |
+| PRD-001     | AUTH-002, DB-001A, DB-001B, QA-001A                                                  |
+| PRD-002     | AUTH-002, UI-001                                                                     |
+| PRD-003     | FND-001, UI-001                                                                      |
+| PRD-004     | FND-001, UI-001, UI-002, UI-003, QA-001B                                             |
+| PRD-005     | DB-001A, DB-001B, CALC-001B, UI-001, UI-003                                          |
+| AUTH-001    | AUTH-001                                                                             |
+| AUTH-002    | AUTH-002                                                                             |
+| AUTH-003    | AUTH-002, DB-001B, QA-001A                                                           |
+| AUTH-004    | FND-002B, AUTH-001, IMP-003A, QA-001A                                                |
+| AUTH-005    | AUTH-002, OPS-003A                                                                   |
+| LED-001     | LED-001A, LED-001B, IMP-003A, UI-005E                                                |
+| LED-002     | LED-001A, LED-001B, CALC-001B, UI-005E                                               |
+| LED-003     | LED-001A, LED-001B, LED-002A, UI-005E                                                |
+| LED-004     | LED-002A, LED-002B                                                                   |
+| LED-005     | LED-001A, LED-001B, CALC-002, UI-005E                                                |
+| MKT-001     | DB-002, MKT-001                                                                      |
+| MKT-002     | MKT-001, MKT-002                                                                     |
+| MKT-003     | DB-003, MKT-002, MKT-003B, UI-004                                                    |
+| MKT-004     | DB-003, MKT-004, CALC-001B                                                           |
+| MKT-005     | MKT-003A, MKT-003B, CALC-002, UI-002, UI-003, UI-004                                 |
+| MKT-006     | DB-003, MKT-003A, UI-004                                                             |
+| MKT-007     | SPK-002, MKT-001                                                                     |
+| MKT-008     | SPK-002, MKT-001, MKT-002, MKT-003A, MKT-003B, UI-004                                |
+| CALC-001    | CALC-001A                                                                            |
+| CALC-002    | CALC-001A, CALC-001B, UI-002, UI-003                                                 |
+| CALC-003    | LED-002A, LED-002B, CALC-001A                                                        |
+| CALC-004    | LED-002A, LED-002B, CALC-001A                                                        |
+| CALC-005    | CALC-001B, CALC-002                                                                  |
+| CALC-006    | CALC-002, UI-002                                                                     |
+| CALC-007    | CALC-001A, UI-002                                                                    |
+| DIV-001     | DB-005, DIV-001                                                                      |
+| DIV-002     | DB-005, MKT-005, DIV-001                                                             |
+| IMP-001     | IMP-001                                                                              |
+| IMP-002     | IMP-002A, IMP-002B, UI-005B, UI-005C                                                 |
+| IMP-003     | IMP-002B, UI-005B                                                                    |
+| IMP-004     | IMP-001, IMP-002A, IMP-003A, UI-005C                                                 |
+| IMP-005     | IMP-003B, UI-005D                                                                    |
+| IMP-006     | SPK-001, IMP-001                                                                     |
+| BRK-001     | SPK-003                                                                              |
+| PLAT-001    | FND-001, FND-002A, DB-001A                                                           |
+| PLAT-002    | FND-001, PWA-001                                                                     |
+| OPS-001     | OPS-001, IMP-003A, IMP-003B, MKT-003A                                                |
+| OPS-002     | OPS-001, QA-002                                                                      |
+| OPS-003     | OPS-002, QA-002                                                                      |
+| OPS-004     | OPS-003A, OPS-003B                                                                   |
+| QUAL-001    | UI-001, UI-002, UI-003, UI-004, UI-005A, UI-005B, UI-005C, UI-005D, UI-005E, QA-001B |
+| QUAL-002    | FND-002A, FND-002B, QA-002                                                           |
 
 Every requirement has an implementation owner. `TASKS.md` gives acceptance and test details.
 
@@ -175,13 +177,13 @@ Verified identity, internal user, portfolio CRUD, audit, responsive shell, no fi
 
 Staged import of the supplied file, mapping, idempotent commit/reversal, cash incompleteness warning, FIFO projections. Market values remain unavailable until Slice C.
 
-### Slice C — Delayed/EOD valuation
+### Slice C — Best-effort/EOD valuation
 
-Rights-approved provider/fixtures, security mapping, preferred delayed observation with EOD/manual fallback, date-appropriate FX, native/home display, current value/cost/gain/daily movement, and coverage.
+Owner-scoped provider/fixtures, security mapping, preferred validated observation with EOD/manual fallback, date-appropriate FX, native/home display, current value/cost/gain/daily movement, and coverage. Compact views generally suppress timestamps and routine source/delay/fallback labels.
 
-### Slice D — History and income
+### Slice D — History
 
-Daily snapshots, historical chart, declared/actual/estimated dividends with distinct labels.
+Daily snapshots and historical value chart with explicit incomplete-history boundaries. Dividend events, receipts, and forecasts remain deferred.
 
 ### Slice E — Release hardening
 
@@ -189,16 +191,17 @@ Details/import history, PWA offline safety, recovery/deletion, accessibility/sec
 
 ## 6. Market-data rollout
 
-1. Record the EODHD commercial contract/rights/coverage decision (`SPK-002`).
+1. Record the Yahoo best-effort technical and free fallback decision (`SPK-002`).
 2. Implement provider-neutral contracts and fixtures (`MKT-001`).
-3. Implement only the approved delayed provider capabilities (`MKT-002`): delayed/latest quote, symbol reference, daily history, FX, dividends, and splits as contracted.
-4. Backfill only securities and date ranges owned by an active portfolio.
-5. Refresh delayed observations no faster than the advertised delay/rate budget; coalesce canonical securities, then collect the completed EOD window.
-6. Add Queues only if refresh/backfill cannot be reliably bounded.
-7. Expose `Delayed 20 min` (or actual delay), previous close, EOD/manual fallback, source, and as-of labels.
-8. Keep genuine real-time data as a separate entitlement; do not call delayed polling live.
+3. Implement latest/previous-close and raw daily price capabilities only (`MKT-002`).
+4. Implement required directional FX pairs only (`MKT-004`).
+5. Backfill only securities, FX pairs, and date ranges owned by an active portfolio.
+6. Refresh no faster than the source/rate budget permits; coalesce canonical requests and collect bounded daily correction windows.
+7. Add Queues only if measured refresh/backfill cannot be reliably bounded by D1 jobs and Cron.
+8. Keep normal quote/holding views compact: generally suppress timestamps and routine source/delay/fallback labels; keep explanation data on demand; show inline status only when action is required and `Price unavailable` when no usable value exists.
+9. Keep genuine real-time data as a separate entitlement; do not call best-effort polling live.
 
-Production stop condition: if lawful delayed storage/display rights are not obtained at an approved cost, keep provider fixtures and ship only explicitly approved EOD/manual data. Do not scrape a public delayed website to satisfy the free-data preference.
+External provider-use decisions are handled separately by the operator. The product implements no source-specific user-count, owner-binding, deployment-mode, monetization, redistribution, or external-use gate.
 
 ## 7. Security implementation checklist
 
@@ -223,7 +226,6 @@ Production stop condition: if lawful delayed storage/display rights are not obta
 - FIFO and fee allocation;
 - price/FX selection and staleness;
 - current/daily/history formulas;
-- dividends;
 - CSV header/row/date/fingerprint logic;
 - authorization policy functions.
 
@@ -258,27 +260,28 @@ Network data is never required for deterministic calculation/import tests.
 
 ## 9. Risks and mitigations
 
-| Risk                                              | Impact                            | Mitigation / owner task                                                                                           |
-| ------------------------------------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Low-cost global delayed rights are unavailable    | Preferred quote freshness blocked | EODHD commercial-rights/cost gate, delayed-first abstraction, explicit EOD/manual fallback (`SPK-002`, `MKT-001`) |
-| Incomplete cash/dividend/corporate-action history | Misleading returns/history        | Completeness boundary and partial metrics (`IMP-002`, `CALC-002`)                                                 |
-| Access treated as full user system                | Tenant/account flaws              | Internal identity/status and owned repos (`AUTH-001/002`)                                                         |
-| Ticker changes/delistings                         | Mispriced historical holdings     | Canonical security + validity mappings (`DB-002`)                                                                 |
-| D1 write/job limits                               | Refresh/import failures           | Bounded chunks, idempotency, measured Queue trigger (`IMP-003`, `MKT-003`)                                        |
-| Decimal/rounding drift                            | Financial mismatch                | Decimal domain + fixtures (`CALC-001`)                                                                            |
-| Service worker leaks private data                 | Shared-device exposure            | Public allowlist only (`PWA-001`, `QA-001`)                                                                       |
-| Destructive correction/deletion                   | Lost audit/history                | Reversals, Time Travel, exports (`IMP-003`, `OPS-002/003`)                                                        |
-| Mobile desktop-table copy                         | Poor iPhone usability             | Distinct card hierarchy and device UAT (`UI-003`, `QA-002`)                                                       |
+| Risk                                          | Impact                            | Mitigation / owner task                                                                                                              |
+| --------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Yahoo endpoints are unavailable or unsuitable | Best-effort valuation unavailable | Circuit breaker, `Price unavailable`, manual fallback; add a second source only through a measured-need task (`MKT-002`, `MKT-003B`) |
+| Incomplete cash/split history                 | Misleading returns/history        | Completeness boundary and partial metrics (`IMP-002B`, `CALC-002`)                                                                   |
+| Access treated as full user system            | Tenant/account flaws              | Internal identity/status and owned repos (`AUTH-001/002`)                                                                            |
+| Ticker changes/delistings                     | Mispriced historical holdings     | Canonical security + validity mappings (`DB-002`)                                                                                    |
+| D1 write/job limits                           | Refresh/import failures           | Bounded chunks, idempotency, measured Queue trigger (`IMP-003A`, `MKT-003B`)                                                         |
+| Decimal/rounding drift                        | Financial mismatch                | Decimal domain + fixtures (`CALC-001A`)                                                                                              |
+| Service worker leaks private data             | Shared-device exposure            | Public allowlist only (`PWA-001`, `QA-001A`)                                                                                         |
+| Destructive correction/deletion               | Lost audit/history                | Reversals, Time Travel, exports (`IMP-003B`, `OPS-002`, `OPS-003A/B`)                                                                |
+| Mobile desktop-table copy                     | Poor iPhone usability             | Distinct card hierarchy and device UAT (`UI-003`, `QA-002`)                                                                          |
 
 ## 10. Deferred backlog triggers
 
 These are not active tasks:
 
-- News: add only with licensed source, attribution, caching, and privacy decision.
+- News: add only with an attributable source, caching, and privacy decision.
+- Dividend forecasts/franking analytics: add only after DB-005/MKT-005 validate actual receipt workflow and provider event quality.
 - TWR/XIRR: add only after complete valuations and external-flow classification.
 - Self-service identity: add only if product leaves admin-invited private mode.
 - R2 originals: add only for a proven retention/download need and encrypted lifecycle.
-- Intraday quotes: add only with exchange/provider display rights and a cost decision.
+- Intraday quotes: add only when measured product need and provider capability justify them.
 - Broker synchronization: preserve the adapter/source boundary now; implement only after broker/API/security scope is selected (`SPK-003`).
 - Fundamentals: add only when a specified Details view justifies the provider tier.
 - Offline private data: add only after a separate encrypted-storage/conflict threat model.

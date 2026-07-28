@@ -11,11 +11,11 @@ Read these in order:
 2. `REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md` — stable requirement IDs and testable outcomes.
 3. `ARCHITECTURE.md` — Cloudflare/Vinext design, authentication, isolation, providers, history, offline, and operations.
 4. `DATA_MODEL.md` — proposed D1 entities, constraints, indexes, invariants, and migration rules.
-5. `MARKET_DATA_STRATEGY.md` — provider comparison, licensing/cost gate, chosen first integration, abstraction, caching, and lifecycle.
+5. `MARKET_DATA_STRATEGY.md` — technical provider comparison, chosen first integration, abstraction, caching, and lifecycle.
 6. `CALCULATIONS.md` — decimal, FX, FIFO, value, movement, history, returns, and dividends.
 7. `CSV_IMPORT_SPEC.md` — exact 17-column format, row grammar, mapping, validation, idempotency, and reversal.
 8. `IMPLEMENTATION_PLAN.md` — phase gates, dependencies, traceability, risks, and release strategy.
-9. Root `TASKS.md` — session-sized executable backlog.
+9. Root `TASKS.md` — session-sized executable backlog grouped by workstream, with dependency fields defining execution order.
 10. Root `AGENTS.md` — engineering rules and definition of done.
 
 When a source note and a normative document differ, the normative set governs implementation. Record any intentional decision change in the relevant normative document and `AGENTS.md` decision log.
@@ -30,6 +30,11 @@ When a source note and a normative document differ, the normative set governs im
 - `Example_Portfolio.csv`
 
 These files capture observations, inferences, and earlier proposals from the reference app. Preserve them for traceability. They are not themselves an implementation backlog.
+
+## Prototype review evidence
+
+- `UI_SPEC.md` — provisional typography, density, spacing, responsive, state, interaction, and mobile-information rules for owner review. It is not approved production UI guidance until its status is updated after feedback.
+- `ui-captures/` — 390 px principal-screen renders plus 320 px, 430 px, and desktop Holdings breakpoint evidence.
 
 ## Reference-content rule
 

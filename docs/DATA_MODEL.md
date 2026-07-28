@@ -15,6 +15,7 @@ Date: 2026-07-28
 - All mutable tables have `created_at`, `updated_at`, and usually `version`.
 - Corrections use status/supersession/reversal records. Hard deletes are reserved for verified account purge.
 - Shared reference data is separate from user-owned financial data.
+- Every relationship that can change a user’s financial result carries enough owner/portfolio columns for a composite foreign key. Application validation adds domain rules; it does not replace enforceable ownership constraints.
 
 Why decimal text: D1’s integers are signed 64-bit and one global scale cannot safely cover fractional quantities, FX precision, prices, and large portfolio values. SQLite `REAL` is binary floating point. Decimal text plus strict application parsing is the safest v1 representation; sortable/reporting values are derived through the domain layer, not ad hoc SQL arithmetic.
 
@@ -30,7 +31,7 @@ erDiagram
     CASH_ACCOUNTS ||--o{ CASH_LEDGER_ENTRIES : posts
     SECURITIES ||--o{ SECURITY_PROVIDER_MAPPINGS : maps
     PORTFOLIOS ||--o{ PORTFOLIO_SECURITIES : tracks
-    SECURITIES ||--o{ TRANSACTIONS : concerns
+    PORTFOLIO_SECURITIES ||--o{ TRANSACTIONS : concerns
     TRANSACTIONS ||--o{ TAX_LOTS : opens
     TRANSACTIONS ||--o{ LOT_ALLOCATIONS : closes
     TAX_LOTS ||--o{ LOT_ALLOCATIONS : matched
@@ -110,13 +111,13 @@ Unique: `(user_id, id)` for composite FKs; `(user_id, code)`. Index `(user_id, s
 One-to-one with portfolio, including `user_id` composite ownership:
 
 - display currency preferences;
-- default dividend withholding percentage as decimal text;
-- dividend forecast method (`declared_then_ttm`);
 - quote staleness policy;
 - mobile density preferences;
 - feature flags that are genuinely user settings, not security switches.
 
 Unique/FK: `(portfolio_id, user_id) -> portfolios(id, user_id)`.
+
+Dividend assumptions are not part of the core schema. Add them only with the deferred dividend workflow.
 
 ## 4. Reference and security master
 
@@ -140,18 +141,19 @@ Unique MIC when present.
 
 Shared canonical identity:
 
-| Column                                | Meaning                            |
-| ------------------------------------- | ---------------------------------- |
-| `id`                                  | durable internal security ID       |
-| `asset_type`                          | v1 `equity`, `etf`, `fund`         |
-| `exchange_id`                         | nullable only while unresolved     |
-| `primary_currency_code`               | trading currency                   |
-| `canonical_name`                      | issuer/fund name                   |
-| `isin`                                | nullable, unique where trusted     |
-| `status`                              | `active`, `delisted`, `unresolved` |
-| `first_trade_date`, `last_trade_date` | nullable                           |
+| Column                                | Meaning                                                                |
+| ------------------------------------- | ---------------------------------------------------------------------- |
+| `id`                                  | durable internal security ID                                           |
+| `asset_type`                          | v1 `equity`, `etf`, `fund`                                             |
+| `exchange_id`                         | verified primary exchange when known; null is not an unresolved marker |
+| `primary_currency_code`               | trading currency                                                       |
+| `canonical_name`                      | issuer/fund name                                                       |
+| `isin`                                | nullable, unique where trusted                                         |
+| `status`                              | `active`, `delisted`                                                   |
+| `first_trade_date`, `last_trade_date` | nullable                                                               |
 
 Ticker deliberately does not live here as an eternal identifier.
+Unresolved candidates remain private in `portfolio_securities`; they are not rows in this shared table.
 
 ### `security_identifiers`
 
@@ -173,11 +175,8 @@ Provider registry:
 - code/name;
 - active flag;
 - capability JSON limited to non-secret metadata;
-- terms URL and reviewed date;
-- authorized use scope;
-- retention days/termination purge requirement;
 - rate-limit configuration;
-- rights approval status, approver, date, and notes reference.
+- technical review date and operator notes reference.
 
 No API key in D1.
 
@@ -192,17 +191,20 @@ No API key in D1.
 
 Unique active mapping `(provider_id, provider_exchange, provider_symbol, valid_from)`. Index `(security_id, provider_id, valid_to)`.
 
+This shared table is writable only by a server/operator verification path. An end-user mapping choice writes an owned mapping decision and `portfolio_securities` relationship; it cannot directly publish a candidate or change another user’s canonical mapping.
+
 ### `portfolio_securities`
 
 Owner-specific relationship:
 
-- `id`, `user_id`, `portfolio_id`, `security_id`;
+- `id`, `user_id`, `portfolio_id`, nullable verified `security_id`;
+- owner-scoped imported symbol, exchange alias, currency, and name while unresolved;
 - display symbol/name override;
 - watch/hidden status;
 - user mapping status;
 - first/last relevant date.
 
-Composite FK to owned portfolio. Unique `(portfolio_id, security_id)`.
+Composite FK to owned portfolio. Resolved memberships are unique by `(portfolio_id, security_id)`. Unresolved imported candidates remain private in this table and do not create or mutate shared canonical securities until separately verified.
 
 ## 5. Ledger, lots, and cash
 
@@ -210,29 +212,29 @@ Composite FK to owned portfolio. Unique `(portfolio_id, security_id)`.
 
 Immutable/versioned normalized ledger event:
 
-| Column                                     | Meaning                                                                                                                               |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`, `user_id`, `portfolio_id`            | owned identity                                                                                                                        |
-| `security_id`                              | nullable for cash-only event                                                                                                          |
-| `type`                                     | `buy`, `sell`, `cash_deposit`, `cash_withdrawal`, `fee`, `tax`, `dividend`, `split`, `transfer_in`, `transfer_out`, `opening_balance` |
-| `status`                                   | `posted`, `reversed`, `superseded`, `void_pending`                                                                                    |
-| `trade_at`, `settlement_date`              | event timing                                                                                                                          |
-| `local_trade_date`                         | portfolio-timezone accounting day                                                                                                     |
-| `quantity_decimal`                         | signed-domain input; service enforces type semantics                                                                                  |
-| `unit_price_decimal`                       | native quote currency                                                                                                                 |
-| `currency_code`                            | transaction currency                                                                                                                  |
-| `gross_amount_decimal`                     | optional explicit source amount                                                                                                       |
-| `fee_amount_decimal`, `tax_amount_decimal` | non-negative native amounts                                                                                                           |
-| `fx_rate_to_base_decimal`                  | nullable; transaction currency per one base conversion convention documented below                                                    |
-| `fx_rate_source`, `fx_observed_at`         | provenance                                                                                                                            |
-| `source_type`                              | `manual`, `csv_import`, future `broker_sync`, `provider`, `system`                                                                    |
-| `source_reference`                         | nullable external/reference ID                                                                                                        |
-| `import_row_id`                            | nullable FK                                                                                                                           |
-| `reverses_transaction_id`                  | nullable self-FK                                                                                                                      |
-| `supersedes_transaction_id`                | nullable self-FK                                                                                                                      |
-| `created_by_user_id`                       | actor                                                                                                                                 |
-| `calculation_version`                      | normalization rule version                                                                                                            |
-| timestamps/version                         |                                                                                                                                       |
+| Column                                     | Meaning                                                                                                                          |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `id`, `user_id`, `portfolio_id`            | owned identity                                                                                                                   |
+| `portfolio_security_id`                    | required for security events; nullable for cash-only events; owner/portfolio-scoped composite FK                                 |
+| `type`                                     | `buy`, `sell`, `cash_deposit`, `cash_withdrawal`, `fee`, `tax`, `split`, `opening_balance`; transfers and dividends are deferred |
+| `status`                                   | `posted`, `reversed`, `superseded`, `void_pending`                                                                               |
+| `trade_at`, `settlement_date`              | event timing                                                                                                                     |
+| `local_trade_date`                         | portfolio-timezone accounting day                                                                                                |
+| `quantity_decimal`                         | signed-domain input; service enforces type semantics                                                                             |
+| `unit_price_decimal`                       | native quote currency                                                                                                            |
+| `currency_code`                            | transaction currency                                                                                                             |
+| `gross_amount_decimal`                     | optional explicit source amount                                                                                                  |
+| `fee_amount_decimal`, `tax_amount_decimal` | non-negative native amounts                                                                                                      |
+| `fx_rate_to_base_decimal`                  | nullable; transaction currency per one base conversion convention documented below                                               |
+| `fx_rate_source`, `fx_observed_at`         | provenance                                                                                                                       |
+| `source_type`                              | `manual`, `csv_import`, future `broker_sync`, `provider`, `system`                                                               |
+| `source_reference`                         | nullable external/reference ID                                                                                                   |
+| `import_row_id`                            | nullable FK                                                                                                                      |
+| `reverses_transaction_id`                  | nullable self-FK                                                                                                                 |
+| `supersedes_transaction_id`                | nullable self-FK                                                                                                                 |
+| `created_by_user_id`                       | actor                                                                                                                            |
+| `calculation_version`                      | normalization rule version                                                                                                       |
+| timestamps/version                         |                                                                                                                                  |
 
 Convention: `fx_rate_to_base × native amount = portfolio-base amount`.
 
@@ -245,7 +247,9 @@ Checks:
 - one reversal target at most once;
 - source reference unique within `(portfolio_id, source_type)` when present.
 
-Indexes: `(user_id, portfolio_id, local_trade_date, id)`, `(portfolio_id, security_id, trade_at)`, import row, reversal/supersession.
+Indexes: `(user_id, portfolio_id, local_trade_date, id)`, `(portfolio_id, portfolio_security_id, trade_at)`, import row, reversal/supersession.
+
+`import_row_id`, reversal/supersession targets, and any other private child reference use composite owner/portfolio foreign keys. A transaction cannot point to another portfolio’s membership, import row, or transaction even when both portfolios have the same owner.
 
 ### `transaction_versions`
 
@@ -262,7 +266,7 @@ Financial effect changes still use reversal/replacement transactions.
 
 Disposable but inspectable FIFO projection:
 
-- `id`, `user_id`, `portfolio_id`, `security_id`;
+- `id`, `user_id`, `portfolio_id`, `portfolio_security_id`;
 - opening transaction ID;
 - acquired timestamp/date;
 - original/open quantity decimal;
@@ -277,6 +281,7 @@ Unique opening lot identity. A buy can produce one lot in v1.
 
 - sell transaction ID;
 - tax lot ID;
+- owner, portfolio, and portfolio-security membership used in composite foreign keys to both sides;
 - matched quantity;
 - allocated native/base basis;
 - allocated sale fees/taxes;
@@ -301,7 +306,7 @@ Unique `(portfolio_id, currency_code)`.
 Append-only cash effect:
 
 - owned cash account and portfolio IDs;
-- linked transaction/dividend receipt/import row;
+- linked transaction/import row; a dividend-receipt link is deferred;
 - effective timestamp/date;
 - type;
 - signed native amount decimal;
@@ -314,7 +319,7 @@ Only one canonical posting per source effect. Cash balances are projected sums; 
 
 Current disposable projection:
 
-- portfolio/security;
+- owner, portfolio, and portfolio-security membership;
 - quantity, native open basis where meaningful, and canonical home-currency open basis;
 - selected native price/home FX evidence for the current projection;
 - average basis per unit;
@@ -322,7 +327,7 @@ Current disposable projection:
 - calculation version and rebuilt time;
 - completeness status.
 
-Unique `(portfolio_id, security_id)`. Must reconcile to lots and posted transactions.
+Unique `(portfolio_id, portfolio_security_id)`. Must reconcile to lots and posted transactions, including an owner-private unresolved membership.
 
 The projection’s home-currency values are stored/rebuilt for reporting. Native security prices, transaction amounts, and lot provenance remain available. Switching the UI between native and home currency never rewrites the projection or ledger.
 
@@ -331,7 +336,8 @@ The projection’s home-currency values are stored/rebuilt for reporting. Native
 ### `price_observations`
 
 - security/provider/mapping IDs;
-- `interval` (`eod`, `delayed`, `intraday`, `manual`);
+- observation scope (`deployment` or `user`) and nullable `scope_user_id`; the Yahoo-compatible source is deployment-scoped, while a future user-entitled source may be user-scoped;
+- `interval` (`eod`, `delayed`, `intraday`); manual values live only in owner-scoped `manual_overrides`;
 - `observation_at`, `market_date`, `market_timezone`;
 - currency;
 - open/high/low/close decimal text;
@@ -348,6 +354,7 @@ Unique `(provider_id, security_provider_mapping_id, interval, observation_at, ad
 ### `fx_rate_observations`
 
 - provider;
+- access scope and nullable `scope_user_id` under the same rule as prices;
 - base currency, quote currency;
 - `rate_decimal` meaning one base equals rate quote;
 - interval, observed timestamp/date/timezone;
@@ -355,7 +362,11 @@ Unique `(provider_id, security_provider_mapping_id, interval, observation_at, ad
 
 Unique provider/pair/interval/observed time. Application derives and records inversion choice in calculation evidence rather than inserting duplicate inverse rows.
 
+Provider selection uses deployment observations for the configured Yahoo-compatible source. A future user-entitled observation must match the authenticated internal user; this scope is for privacy/entitlement isolation only.
+
 ### `split_events`
+
+Deferred provider capability; this is not part of the core schema:
 
 - security/provider;
 - ex/effective date;
@@ -366,6 +377,8 @@ Unique provider/pair/interval/observed time. Application derives and records inv
 Splits affect quantities and raw/adjusted comparison. An explicit ledger corporate-action record links implementation effect.
 
 ### `dividend_events`
+
+Deferred capability; this is not part of the core schema:
 
 - security/provider;
 - kind (`cash`, `special`, `capital_return`, other future);
@@ -380,17 +393,17 @@ Declared/paid provider events and calculated estimates remain distinguishable.
 
 ### `dividend_receipts`
 
-Owned actual income:
+Deferred owner-scoped actual income:
 
-- portfolio/security/event and transaction IDs;
+- owner, portfolio, portfolio-security membership, event, and transaction IDs;
 - eligible quantity;
 - gross, withholding, other tax, net native amounts;
 - native currency;
 - payment-date FX and base values;
 - cash ledger entry;
-- actual/estimated status and source.
+- actual status and source.
 
-Only actual posted receipts affect cash and actual income. A provider event does not create an actual receipt without a user/imported/broker fact or explicit estimation policy.
+Only actual posted receipts affect cash and actual income. A provider event does not create an actual receipt without a user/imported/broker fact. Estimated income never creates a receipt row.
 
 ### `fundamental_snapshots`
 
@@ -402,7 +415,7 @@ Deferred capability:
 - normalized selected metrics;
 - source revision and payload hash.
 
-Do not create until a concrete Details screen requirement and provider rights exist.
+Do not create until a concrete Details screen requirement and provider capability exist.
 
 ## 7. Imports and mappings
 
@@ -429,7 +442,7 @@ Exact file duplicate is owner-scoped unique by hash and parser version as policy
 - normalized fields JSON;
 - normalized fingerprint;
 - validation status;
-- target portfolio/security IDs;
+- target portfolio and owner-scoped portfolio-security membership IDs;
 - commit status and resulting transaction ID;
 - error/warning counts.
 
@@ -506,7 +519,7 @@ Broker-provided prices use the existing price-observation/provider mapping shape
 
 - owned portfolio/date/base currency;
 - securities value, cash value, total value;
-- cost basis, unrealised gain, realised gain-to-date, actual income-to-date;
+- cost basis, unrealised gain, realised gain-to-date; actual-income fields are deferred;
 - daily movement with optional price/FX components;
 - quote/FX/holding coverage counts and excluded value where knowable;
 - completeness/status;
@@ -518,7 +531,7 @@ Unique `(portfolio_id, snapshot_date, calculation_version)`. Index latest dates.
 
 ### `holding_daily_snapshots`
 
-Per portfolio/security/date details supporting drill-down:
+Per portfolio/portfolio-security/date details supporting drill-down:
 
 - quantity, native/base value and basis;
 - selected price/FX observation IDs;
@@ -532,7 +545,7 @@ Can be retained for relevant history or regenerated; define pruning only after m
 Generic header:
 
 - `id`, `user_id`, optional portfolio/security;
-- type (`price`, `fx_rate`, `security_mapping`, `transaction_fx`, `dividend`);
+- type (`price`, `fx_rate`, `security_mapping`, `transaction_fx`); dividend overrides are deferred;
 - target key/reference;
 - effective from/to;
 - value JSON with type-specific validated schema;
@@ -590,7 +603,9 @@ One D1 transactional batch must cover:
 - committing each bounded import chunk plus idempotency marker;
 - reversing a transaction/import effect plus audit;
 - installing a mapping decision that changes committed facts plus recalculation job;
-- posting an actual dividend receipt and its cash entry.
+- later, posting an actual dividend receipt and its cash entry.
+
+D1 `batch()` is the bounded atomic primitive: its prepared statements execute sequentially and the sequence rolls back on failure. No design may depend on holding an interactive transaction open across requests or job chunks.
 
 Invariants checked after each material operation:
 
@@ -599,6 +614,7 @@ Invariants checked after each material operation:
 - transaction cash effects reconcile to cash entries;
 - lot allocations for a sell sum to its quantity;
 - owned composite IDs agree;
+- every private child link agrees on owner and portfolio, not merely on opaque ID;
 - only one active override for a target/interval;
 - snapshots never claim a ledger high-water mark beyond committed facts.
 
@@ -610,7 +626,7 @@ Expected access paths:
 
 - owner portfolio list: `(user_id, status, updated_at)`;
 - ledger screen/rebuild: `(portfolio_id, local_trade_date, id)`;
-- holding lots: `(portfolio_id, security_id, acquired_at)`;
+- holding lots: `(portfolio_id, portfolio_security_id, acquired_at)`;
 - latest daily price: `(security_id, adjustment_state, market_date DESC)`;
 - FX date lookup: `(base_currency_code, quote_currency_code, market_date DESC)`;
 - import review: `(batch_id, validation_status, physical_row_number)`;
@@ -694,8 +710,6 @@ CREATE INDEX idx_portfolios_owner_status
 CREATE TABLE portfolio_settings (
   portfolio_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
-  default_withholding_decimal TEXT,
-  forecast_method TEXT NOT NULL DEFAULT 'declared_then_ttm',
   quote_staleness_policy TEXT NOT NULL DEFAULT 'eod_standard',
   updated_at TEXT NOT NULL,
   PRIMARY KEY (portfolio_id),
@@ -722,7 +736,7 @@ CREATE TABLE securities (
   primary_currency_code TEXT NOT NULL REFERENCES currencies(code) ON DELETE RESTRICT,
   canonical_name TEXT NOT NULL,
   isin TEXT,
-  status TEXT NOT NULL CHECK (status IN ('active', 'delisted', 'unresolved')),
+  status TEXT NOT NULL CHECK (status IN ('active', 'delisted')),
   first_trade_date TEXT,
   last_trade_date TEXT,
   created_at TEXT NOT NULL,
@@ -748,14 +762,11 @@ CREATE TABLE market_data_providers (
   id TEXT PRIMARY KEY,
   code TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('disabled', 'approved', 'suspended')),
-  authorized_use_scope TEXT NOT NULL,
-  rights_reviewed_at TEXT,
-  rights_approved_by TEXT,
-  terms_url TEXT NOT NULL,
-  retention_days INTEGER,
-  purge_on_termination INTEGER NOT NULL DEFAULT 0
-    CHECK (purge_on_termination IN (0, 1))
+  status TEXT NOT NULL CHECK (status IN ('disabled', 'enabled', 'suspended')),
+  capabilities_json TEXT NOT NULL,
+  rate_limit_json TEXT NOT NULL,
+  technically_reviewed_at TEXT,
+  operator_notes_reference TEXT
 );
 
 CREATE TABLE security_provider_mappings (
@@ -773,7 +784,8 @@ CREATE TABLE security_provider_mappings (
   verified_at TEXT,
   CHECK (valid_to IS NULL OR valid_to >= valid_from),
   UNIQUE (provider_id, provider_exchange, provider_symbol, valid_from),
-  UNIQUE (id, provider_id)
+  UNIQUE (id, provider_id),
+  UNIQUE (id, provider_id, security_id)
 );
 CREATE INDEX idx_provider_mapping_security
   ON security_provider_mappings(security_id, provider_id, valid_to);
@@ -782,7 +794,11 @@ CREATE TABLE portfolio_securities (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
   portfolio_id TEXT NOT NULL,
-  security_id TEXT NOT NULL REFERENCES securities(id) ON DELETE RESTRICT,
+  security_id TEXT REFERENCES securities(id) ON DELETE RESTRICT,
+  source_symbol TEXT NOT NULL,
+  source_exchange_alias TEXT,
+  source_currency_code TEXT NOT NULL REFERENCES currencies(code) ON DELETE RESTRICT,
+  source_name TEXT,
   display_symbol TEXT,
   display_name TEXT,
   status TEXT NOT NULL CHECK (status IN ('held', 'watch', 'hidden', 'unresolved')),
@@ -792,8 +808,11 @@ CREATE TABLE portfolio_securities (
   updated_at TEXT NOT NULL,
   FOREIGN KEY (portfolio_id, user_id)
     REFERENCES portfolios(id, user_id) ON DELETE RESTRICT,
-  UNIQUE (portfolio_id, security_id)
+  UNIQUE (id, user_id, portfolio_id)
 );
+CREATE UNIQUE INDEX idx_portfolio_securities_resolved
+  ON portfolio_securities(portfolio_id, security_id)
+  WHERE security_id IS NOT NULL;
 
 CREATE TABLE import_batches (
   id TEXT PRIMARY KEY,
@@ -811,10 +830,12 @@ CREATE TABLE import_batches (
   ),
   commit_idempotency_key TEXT,
   reversal_idempotency_key TEXT,
-  supersedes_batch_id TEXT REFERENCES import_batches(id) ON DELETE RESTRICT,
+  supersedes_batch_id TEXT,
   created_at TEXT NOT NULL,
   committed_at TEXT,
   reversed_at TEXT,
+  FOREIGN KEY (supersedes_batch_id, user_id)
+    REFERENCES import_batches(id, user_id) ON DELETE RESTRICT,
   UNIQUE (user_id, file_sha256, parser_format, parser_version),
   UNIQUE (id, user_id)
 );
@@ -830,11 +851,20 @@ CREATE TABLE import_rows (
   normalized_fingerprint TEXT,
   validation_status TEXT NOT NULL,
   target_portfolio_id TEXT,
-  target_security_id TEXT REFERENCES securities(id) ON DELETE RESTRICT,
+  target_portfolio_security_id TEXT,
   commit_status TEXT NOT NULL DEFAULT 'staged',
   FOREIGN KEY (batch_id, user_id)
     REFERENCES import_batches(id, user_id) ON DELETE RESTRICT,
-  UNIQUE (batch_id, physical_row_number)
+  FOREIGN KEY (target_portfolio_id, user_id)
+    REFERENCES portfolios(id, user_id) ON DELETE RESTRICT,
+  FOREIGN KEY (
+    target_portfolio_security_id, user_id, target_portfolio_id
+  ) REFERENCES portfolio_securities(
+    id, user_id, portfolio_id
+  ) ON DELETE RESTRICT,
+  UNIQUE (batch_id, physical_row_number),
+  UNIQUE (id, user_id),
+  UNIQUE (id, user_id, target_portfolio_id)
 );
 CREATE INDEX idx_import_rows_review
   ON import_rows(batch_id, validation_status, physical_row_number);
@@ -845,8 +875,13 @@ CREATE TABLE transactions (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
   portfolio_id TEXT NOT NULL,
-  security_id TEXT REFERENCES securities(id) ON DELETE RESTRICT,
-  type TEXT NOT NULL,
+  portfolio_security_id TEXT,
+  type TEXT NOT NULL CHECK (
+    type IN (
+      'buy', 'sell', 'cash_deposit', 'cash_withdrawal', 'fee', 'tax', 'split',
+      'opening_balance'
+    )
+  ),
   status TEXT NOT NULL CHECK (
     status IN ('posted', 'reversed', 'superseded', 'void_pending')
   ),
@@ -862,24 +897,42 @@ CREATE TABLE transactions (
   fx_rate_to_base_decimal TEXT,
   fx_rate_source TEXT,
   fx_observed_at TEXT,
-  source_type TEXT NOT NULL,
+  source_type TEXT NOT NULL CHECK (
+    source_type IN ('manual', 'csv_import', 'broker_sync', 'provider', 'system')
+  ),
   source_reference TEXT,
-  import_row_id TEXT REFERENCES import_rows(id) ON DELETE RESTRICT,
-  reverses_transaction_id TEXT REFERENCES transactions(id) ON DELETE RESTRICT,
-  supersedes_transaction_id TEXT REFERENCES transactions(id) ON DELETE RESTRICT,
+  import_row_id TEXT,
+  reverses_transaction_id TEXT,
+  supersedes_transaction_id TEXT,
   created_by_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   calculation_version INTEGER NOT NULL,
   created_at TEXT NOT NULL,
   version INTEGER NOT NULL DEFAULT 1,
   FOREIGN KEY (portfolio_id, user_id)
     REFERENCES portfolios(id, user_id) ON DELETE RESTRICT,
+  FOREIGN KEY (portfolio_security_id, user_id, portfolio_id)
+    REFERENCES portfolio_securities(id, user_id, portfolio_id) ON DELETE RESTRICT,
+  FOREIGN KEY (import_row_id, user_id, portfolio_id)
+    REFERENCES import_rows(id, user_id, target_portfolio_id) ON DELETE RESTRICT,
+  FOREIGN KEY (reverses_transaction_id, user_id, portfolio_id)
+    REFERENCES transactions(id, user_id, portfolio_id) ON DELETE RESTRICT,
+  FOREIGN KEY (supersedes_transaction_id, user_id, portfolio_id)
+    REFERENCES transactions(id, user_id, portfolio_id) ON DELETE RESTRICT,
   UNIQUE (id, user_id),
+  UNIQUE (id, user_id, portfolio_id),
+  UNIQUE (id, user_id, portfolio_id, portfolio_security_id),
   UNIQUE (portfolio_id, source_type, source_reference)
 );
 CREATE INDEX idx_transactions_ledger
   ON transactions(user_id, portfolio_id, local_trade_date, id);
 CREATE INDEX idx_transactions_security
-  ON transactions(portfolio_id, security_id, trade_at);
+  ON transactions(portfolio_id, portfolio_security_id, trade_at);
+CREATE UNIQUE INDEX idx_transactions_one_reversal
+  ON transactions(reverses_transaction_id)
+  WHERE reverses_transaction_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_transactions_one_supersession
+  ON transactions(supersedes_transaction_id)
+  WHERE supersedes_transaction_id IS NOT NULL;
 
 CREATE TABLE cash_accounts (
   id TEXT PRIMARY KEY,
@@ -893,6 +946,7 @@ CREATE TABLE cash_accounts (
   FOREIGN KEY (portfolio_id, user_id)
     REFERENCES portfolios(id, user_id) ON DELETE RESTRICT,
   UNIQUE (id, user_id),
+  UNIQUE (id, user_id, portfolio_id),
   UNIQUE (portfolio_id, currency_code)
 );
 
@@ -901,18 +955,23 @@ CREATE TABLE cash_ledger_entries (
   user_id TEXT NOT NULL,
   portfolio_id TEXT NOT NULL,
   cash_account_id TEXT NOT NULL,
-  transaction_id TEXT REFERENCES transactions(id) ON DELETE RESTRICT,
+  transaction_id TEXT,
   effective_at TEXT NOT NULL,
   local_effective_date TEXT NOT NULL,
   type TEXT NOT NULL,
   signed_amount_decimal TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('posted', 'reversed')),
-  reverses_entry_id TEXT REFERENCES cash_ledger_entries(id) ON DELETE RESTRICT,
+  reverses_entry_id TEXT,
   created_at TEXT NOT NULL,
   FOREIGN KEY (portfolio_id, user_id)
     REFERENCES portfolios(id, user_id) ON DELETE RESTRICT,
-  FOREIGN KEY (cash_account_id, user_id)
-    REFERENCES cash_accounts(id, user_id) ON DELETE RESTRICT,
+  FOREIGN KEY (cash_account_id, user_id, portfolio_id)
+    REFERENCES cash_accounts(id, user_id, portfolio_id) ON DELETE RESTRICT,
+  FOREIGN KEY (transaction_id, user_id, portfolio_id)
+    REFERENCES transactions(id, user_id, portfolio_id) ON DELETE RESTRICT,
+  FOREIGN KEY (reverses_entry_id, user_id, portfolio_id)
+    REFERENCES cash_ledger_entries(id, user_id, portfolio_id) ON DELETE RESTRICT,
+  UNIQUE (id, user_id, portfolio_id),
   UNIQUE (transaction_id, type)
 );
 CREATE INDEX idx_cash_entries_balance
@@ -922,8 +981,8 @@ CREATE TABLE tax_lots (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
   portfolio_id TEXT NOT NULL,
-  security_id TEXT NOT NULL REFERENCES securities(id) ON DELETE RESTRICT,
-  opening_transaction_id TEXT NOT NULL REFERENCES transactions(id) ON DELETE RESTRICT,
+  portfolio_security_id TEXT NOT NULL,
+  opening_transaction_id TEXT NOT NULL,
   acquired_at TEXT NOT NULL,
   original_quantity_decimal TEXT NOT NULL,
   open_quantity_decimal TEXT NOT NULL,
@@ -934,15 +993,25 @@ CREATE TABLE tax_lots (
   rebuilt_at TEXT NOT NULL,
   FOREIGN KEY (portfolio_id, user_id)
     REFERENCES portfolios(id, user_id) ON DELETE RESTRICT,
+  FOREIGN KEY (portfolio_security_id, user_id, portfolio_id)
+    REFERENCES portfolio_securities(id, user_id, portfolio_id) ON DELETE RESTRICT,
+  FOREIGN KEY (
+    opening_transaction_id, user_id, portfolio_id, portfolio_security_id
+  ) REFERENCES transactions(
+    id, user_id, portfolio_id, portfolio_security_id
+  ) ON DELETE RESTRICT,
   UNIQUE (id, user_id),
+  UNIQUE (id, user_id, portfolio_id, portfolio_security_id),
   UNIQUE (opening_transaction_id)
 );
 CREATE INDEX idx_tax_lots_fifo
-  ON tax_lots(portfolio_id, security_id, acquired_at, id);
+  ON tax_lots(portfolio_id, portfolio_security_id, acquired_at, id);
 
 CREATE TABLE lot_allocations (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
+  portfolio_id TEXT NOT NULL,
+  portfolio_security_id TEXT NOT NULL,
   sell_transaction_id TEXT NOT NULL,
   tax_lot_id TEXT NOT NULL,
   allocation_sequence INTEGER NOT NULL,
@@ -951,19 +1020,28 @@ CREATE TABLE lot_allocations (
   base_net_proceeds_decimal TEXT,
   base_realised_gain_decimal TEXT,
   calculation_version INTEGER NOT NULL,
-  FOREIGN KEY (sell_transaction_id, user_id)
-    REFERENCES transactions(id, user_id) ON DELETE RESTRICT,
-  FOREIGN KEY (tax_lot_id, user_id)
-    REFERENCES tax_lots(id, user_id) ON DELETE RESTRICT,
+  FOREIGN KEY (
+    sell_transaction_id, user_id, portfolio_id, portfolio_security_id
+  ) REFERENCES transactions(
+    id, user_id, portfolio_id, portfolio_security_id
+  ) ON DELETE RESTRICT,
+  FOREIGN KEY (
+    tax_lot_id, user_id, portfolio_id, portfolio_security_id
+  ) REFERENCES tax_lots(
+    id, user_id, portfolio_id, portfolio_security_id
+  ) ON DELETE RESTRICT,
   UNIQUE (sell_transaction_id, tax_lot_id, allocation_sequence)
 );
 
 CREATE TABLE price_observations (
   id TEXT PRIMARY KEY,
   provider_id TEXT NOT NULL REFERENCES market_data_providers(id) ON DELETE RESTRICT,
+  access_scope TEXT NOT NULL CHECK (access_scope IN ('deployment', 'user')),
+  scope_user_id TEXT REFERENCES users(id) ON DELETE RESTRICT,
+  scope_key TEXT NOT NULL,
   mapping_id TEXT NOT NULL,
   security_id TEXT NOT NULL REFERENCES securities(id) ON DELETE RESTRICT,
-  interval TEXT NOT NULL CHECK (interval IN ('eod', 'delayed', 'intraday', 'manual')),
+  interval TEXT NOT NULL CHECK (interval IN ('eod', 'delayed', 'intraday')),
   observation_at TEXT NOT NULL,
   market_date TEXT NOT NULL,
   market_timezone TEXT NOT NULL,
@@ -977,9 +1055,24 @@ CREATE TABLE price_observations (
   delayed_minutes INTEGER,
   ingested_at TEXT NOT NULL,
   payload_sha256 TEXT,
-  FOREIGN KEY (mapping_id, provider_id)
-    REFERENCES security_provider_mappings(id, provider_id) ON DELETE RESTRICT,
-  UNIQUE (provider_id, mapping_id, interval, observation_at, adjustment_state)
+  FOREIGN KEY (mapping_id, provider_id, security_id)
+    REFERENCES security_provider_mappings(
+      id, provider_id, security_id
+    ) ON DELETE RESTRICT,
+  CHECK (
+    (
+      access_scope = 'deployment' AND scope_user_id IS NULL AND
+      scope_key = 'deployment'
+    ) OR
+    (
+      access_scope = 'user' AND scope_user_id IS NOT NULL AND
+      scope_key = scope_user_id
+    )
+  ),
+  UNIQUE (
+    provider_id, scope_key, mapping_id, interval, observation_at,
+    adjustment_state
+  )
 );
 CREATE INDEX idx_prices_security_date
   ON price_observations(security_id, adjustment_state, market_date DESC);
@@ -987,6 +1080,9 @@ CREATE INDEX idx_prices_security_date
 CREATE TABLE fx_rate_observations (
   id TEXT PRIMARY KEY,
   provider_id TEXT NOT NULL REFERENCES market_data_providers(id) ON DELETE RESTRICT,
+  access_scope TEXT NOT NULL CHECK (access_scope IN ('deployment', 'user')),
+  scope_user_id TEXT REFERENCES users(id) ON DELETE RESTRICT,
+  scope_key TEXT NOT NULL,
   base_currency_code TEXT NOT NULL REFERENCES currencies(code) ON DELETE RESTRICT,
   quote_currency_code TEXT NOT NULL REFERENCES currencies(code) ON DELETE RESTRICT,
   rate_decimal TEXT NOT NULL,
@@ -997,8 +1093,19 @@ CREATE TABLE fx_rate_observations (
   ingested_at TEXT NOT NULL,
   payload_sha256 TEXT,
   CHECK (base_currency_code <> quote_currency_code),
+  CHECK (
+    (
+      access_scope = 'deployment' AND scope_user_id IS NULL AND
+      scope_key = 'deployment'
+    ) OR
+    (
+      access_scope = 'user' AND scope_user_id IS NOT NULL AND
+      scope_key = scope_user_id
+    )
+  ),
   UNIQUE (
-    provider_id, base_currency_code, quote_currency_code, interval, observed_at
+    provider_id, scope_key, base_currency_code, quote_currency_code, interval,
+    observed_at
   )
 );
 CREATE INDEX idx_fx_pair_date
@@ -1006,53 +1113,13 @@ CREATE INDEX idx_fx_pair_date
     base_currency_code, quote_currency_code, market_date DESC
   );
 
-CREATE TABLE dividend_events (
-  id TEXT PRIMARY KEY,
-  security_id TEXT NOT NULL REFERENCES securities(id) ON DELETE RESTRICT,
-  provider_id TEXT REFERENCES market_data_providers(id) ON DELETE RESTRICT,
-  status TEXT NOT NULL CHECK (
-    status IN ('estimated', 'declared', 'paid', 'cancelled', 'corrected')
-  ),
-  kind TEXT NOT NULL,
-  ex_date TEXT,
-  record_date TEXT,
-  payment_date TEXT,
-  currency_code TEXT NOT NULL REFERENCES currencies(code) ON DELETE RESTRICT,
-  gross_per_share_decimal TEXT NOT NULL,
-  estimate_method TEXT,
-  estimate_as_of TEXT,
-  supersedes_event_id TEXT REFERENCES dividend_events(id) ON DELETE RESTRICT,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX idx_dividends_security_date
-  ON dividend_events(security_id, ex_date, payment_date);
-
-CREATE TABLE dividend_receipts (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  portfolio_id TEXT NOT NULL,
-  security_id TEXT NOT NULL REFERENCES securities(id) ON DELETE RESTRICT,
-  event_id TEXT REFERENCES dividend_events(id) ON DELETE RESTRICT,
-  transaction_id TEXT REFERENCES transactions(id) ON DELETE RESTRICT,
-  eligible_quantity_decimal TEXT NOT NULL,
-  gross_native_decimal TEXT NOT NULL,
-  withholding_native_decimal TEXT NOT NULL DEFAULT '0',
-  net_native_decimal TEXT NOT NULL,
-  currency_code TEXT NOT NULL REFERENCES currencies(code) ON DELETE RESTRICT,
-  fx_rate_to_base_decimal TEXT,
-  status TEXT NOT NULL CHECK (status IN ('actual', 'estimated')),
-  payment_date TEXT NOT NULL,
-  FOREIGN KEY (portfolio_id, user_id)
-    REFERENCES portfolios(id, user_id) ON DELETE RESTRICT
-);
-
 CREATE TABLE manual_overrides (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   portfolio_id TEXT,
   security_id TEXT REFERENCES securities(id) ON DELETE RESTRICT,
   type TEXT NOT NULL CHECK (
-    type IN ('price', 'fx_rate', 'security_mapping', 'transaction_fx', 'dividend')
+    type IN ('price', 'fx_rate', 'security_mapping', 'transaction_fx')
   ),
   target_key TEXT NOT NULL,
   effective_from TEXT NOT NULL,

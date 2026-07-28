@@ -28,7 +28,7 @@ The numbered files already in `docs/` and `YieldToMe_Visual_Style_Guide.md` are 
 - Node’s test runner for scaffold smoke tests; domain/integration tools may be added only by an approved task.
 - Prettier and ESLint as baseline formatting/lint gates.
 
-Cloudflare R2, KV, Queues, and Durable Objects are not approved by default. Use the architecture triggers before adding them.
+Cloudflare R2, KV, Queues, Durable Objects, and Images transformations are not approved by default. Use the architecture triggers before adding them.
 
 ## Repository structure
 
@@ -80,8 +80,9 @@ Before completing a task, run `npm run format:check`, `npm run lint`, and the re
 - Store monetary, price, quantity, and FX values as validated decimal strings. Do not use JavaScript binary floating point for financial arithmetic.
 - Record the currency, timezone, source, observation time, ingestion time, and adjustment status for market data.
 - Preserve immutable ledger facts. Corrections create a reversal/superseding record or a versioned override; they do not silently rewrite history.
-- Make missing or stale data visible. Never turn a missing quote, FX rate, cost basis, or dividend into zero.
-- Label estimates, delayed prices, stale data, partial history, and incomplete return metrics in the interface.
+- Show `Price unavailable` when no usable quote exists. Never turn a missing quote, FX rate, cost basis, or dividend into zero.
+- Keep market-data provenance and freshness internally. Compact portfolio/quote views generally suppress source, delay, timestamp, and fallback labels; retain them in an accessible explanation and surface inline status only when user action is required.
+- Generally suppress exact timestamps in user-facing lists and summaries. Show a business-relevant date when it helps interpretation, and keep the exact timestamp available in detail, audit, or operational evidence where provenance requires it.
 - A ticker is not a durable security identifier. Resolve holdings through `securities`, exchange/MIC, currency, and validity-dated provider mappings.
 - CSV imports must be staged, previewed, validated, idempotent, attributable to a batch, and reversible before they affect portfolio totals.
 - Service workers must not cache authenticated HTML, API responses, portfolio data, or uploaded files in v1.
@@ -92,8 +93,8 @@ Before completing a task, run `npm run format:check`, `npm run lint`, and the re
 - Implement only a task marked ready in `TASKS.md`, including its dependencies and acceptance criteria.
 - Keep changes session-sized. If a task reveals a larger decision, update the decision log and split the work rather than quietly expanding scope.
 - Do not add providers, frameworks, Cloudflare products, or persistence layers without an architecture decision.
-- Use D1 first. Add R2, KV, Queues, or Durable Objects only when the documented trigger is met.
-- Do not call a price “live” unless the contract and data timestamps prove it. Prefer “as of”, “delayed”, or “previous close”.
+- Use D1 first. Add R2, KV, Queues, Durable Objects, or Images transformations only when the documented trigger is met.
+- Do not call a price “live” unless the contract and data timestamps prove it. Otherwise omit a freshness claim from the compact UI.
 - Do not implement self-service registration while Cloudflare Access remains the only identity gateway.
 
 ## Definition of done
@@ -130,7 +131,7 @@ A task is done only when:
 
 - Do not modify the preserved source evidence: `docs/01_*`, `docs/02_*`, `docs/03_*`, `docs/04_*`, `docs/YieldToMe_Visual_Style_Guide.md`, or `docs/Example_Portfolio.csv`.
 - Do not hand-edit generated migration SQL after generation without documenting why and re-running migration tests.
-- Do not change `.openai/hosting.json`, Worker bindings, Access audience/issuer behavior, provider-rights flags, calculation rules, or retention/deletion behavior as incidental cleanup.
+- Do not change `.openai/hosting.json`, Worker bindings, Access audience/issuer behavior, provider configuration, calculation rules, or retention/deletion behavior as incidental cleanup.
 - Never commit `.env*` secrets, runtime state, exports, uploaded CSVs, D1 files, provider payload dumps, or access tokens.
 
 ## Decision log
@@ -138,9 +139,12 @@ A task is done only when:
 - `2026-07-28`: Vinext/Next-compatible App Router on Cloudflare Workers is the application foundation.
 - `2026-07-28`: D1 is the system of record and initial cache; no R2/KV/Queues at scaffold stage.
 - `2026-07-28`: Cloudflare Access is acceptable for a private, administrator-invited first release, but is not an in-app account-management system.
-- `2026-07-28`: active quote views prefer lawfully sourced approximately 20-minute-delayed international data, with clearly labelled EOD/manual fallback. Free hosted-display rights are not assumed and production remains rights/cost gated.
+- `2026-07-28`: active quote views prefer the freshest validated observation allowed by the configured source, with EOD/manual fallback. Compact views generally suppress timestamps and routine source/delay/fallback labels; provenance remains inspectable and no value is called live without evidence.
 - `2026-07-28`: the supplied 17-column CSV header is the complete supported import contract; fields visible only in other references are not inferred.
-- `2026-07-28`: EODHD is the preferred global delayed/EOD/FX provider candidate. Yahoo Finance and undocumented community endpoints are excluded; production EODHD activation remains conditional on written hosted-display, storage, exchange-coverage, retention, and pricing terms.
+- `2026-07-28`: v1 uses a server-only Yahoo Finance/yfinance-compatible best-effort source at zero cost. `yfinance` itself is not used in the Worker. Endpoint stability, coverage, delay, and response-shape changes remain explicit operational risks.
+- `2026-07-29`: all source-specific user-count, deployment-mode, public, paid, redistribution, owner-binding, and alternative-provider prerequisite gates are removed. External provider-use matters are handled separately by the operator. Provider enablement is ordinary server configuration; normal application authentication, privacy, provenance, and rate controls still apply.
+- `2026-07-28`: the documented 10 MiB/100,000-row CSV contract and recovery objective require a Workers Paid production profile. Workers Free fails closed on CSV import unless a smaller limit is separately benchmarked and approved.
+- `2026-07-28`: v1 uses public static image/PWA assets and does not approve a Cloudflare Images transformation binding. The scaffold’s undeclared `IMAGES` path is removed by FND-002A.
 - `2026-07-28`: FIFO is the first cost-basis method; the stored accounting method remains explicit for future alternatives.
 - `2026-07-28`: Offline v1 is a safe static shell only, not offline access to private portfolio data or offline mutations.
 - `2026-07-28`: sample screens/video and the sample CSV are independent layout/schema fixtures; differences in their portfolio contents are expected and must not be reconciled or carried as product uncertainty.

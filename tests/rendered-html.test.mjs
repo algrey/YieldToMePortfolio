@@ -23,18 +23,17 @@ async function render(path = "/") {
   );
 }
 
-test("server-renders the YieldToMe foundation shell", async () => {
+test("server-renders the YieldToMe static prototype", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
   assert.match(html, /<title>YieldToMe<\/title>/i);
-  assert.match(html, /Private portfolio workspace/);
-  assert.match(html, /Portfolio scaffold/);
-  assert.match(html, /Overview foundation/);
-  assert.match(html, /Foundation ready/);
-  assert.match(html, /Not implemented/);
+  assert.match(html, /All portfolios · AUD/);
+  assert.match(html, /A\$1,695,575\.90/);
+  assert.match(html, /Portfolio history/);
+  assert.match(html, /Aus Stocks/);
   assert.doesNotMatch(html, /Your site is taking shape|react-loading-skeleton/);
 });
 
@@ -43,11 +42,29 @@ test("server-renders a direct portfolio section route", async () => {
   assert.equal(response.status, 200);
 
   const html = await response.text();
-  assert.match(html, /Holdings foundation/);
+  assert.match(html, /PLS\.AX/);
+  assert.match(html, /Value \/ cost/);
+  assert.match(html, /A\$1\.965 × 20,000 shares/);
+  assert.match(html, /Unrealised/);
   assert.match(
     html,
     /href="\/portfolio\/preview\/holdings"[^>]*aria-current="page"|aria-current="page"[^>]*href="\/portfolio\/preview\/holdings"/,
   );
+});
+
+test("server-renders quote and detail prototype routes", async () => {
+  const quotesResponse = await render("/portfolio/preview/quotes");
+  assert.equal(quotesResponse.status, 200);
+  const quotesHtml = await quotesResponse.text();
+  assert.match(quotesHtml, /AUDUSD=X/);
+  assert.match(quotesHtml, /Last price/);
+
+  const detailsResponse = await render("/portfolio/preview/details");
+  assert.equal(detailsResponse.status, 200);
+  const detailsHtml = await detailsResponse.text();
+  assert.match(detailsHtml, /Portfolio value/);
+  assert.match(detailsHtml, /Largest positions/);
+  assert.match(detailsHtml, /FIFO/);
 });
 
 test("service worker only caches the public offline allowlist", async () => {

@@ -1,9 +1,9 @@
 # Market-data strategy
 
-Status: EODHD-preferred delayed-data target with unresolved commercial-rights gate  
+Status: free, best-effort Yahoo Finance source for the private deployment
 Research date: 2026-07-28
 
-Prices, plans, coverage, limits, and terms change. Revalidate this document before contracting or production activation.
+Coverage, response shapes, limits, and endpoint behavior change. Revalidate technical assumptions before production activation. External provider-use decisions are handled separately by the operator and create no product requirement, runtime gate, schema field, or task dependency.
 
 ## 1. Required capabilities
 
@@ -11,74 +11,66 @@ The first release needs:
 
 - listed equities, ETFs, and funds across Australia, the US, and other international markets represented in user portfolios;
 - canonical exchange/symbol reference data;
-- approximately 20-minute-delayed observations for active Quotes/Holdings views where lawfully available;
+- the freshest validated observation available from the configured source for active Quotes/Holdings views, with delay allowed to be unknown for a best-effort source;
 - end-of-day raw prices as fallback and enough adjusted history to reason about corrections/splits;
 - latest available delayed/EOD/manual observation and previous comparable close;
 - daily foreign-exchange history for portfolio conversion;
 - dividends/distributions and splits;
 - observation, ingestion, currency, source, delay, and adjustment provenance;
 - practical server-to-server use from Cloudflare Workers;
-- low cost for a small private invited-user deployment;
-- a legal right to store normalized data and display it to authorized users.
+- zero/low initial provider cost.
 
-Fundamentals and genuine exchange real-time prices are upgrades. Approximately 20-minute-delayed data is a v1 priority, but production must fall back honestly to EOD/manual data for any market where a lawful delayed source is unavailable or unaffordable.
+Fundamentals and genuine exchange real-time prices are upgrades. The freshest validated observation is a v1 priority, but production must fall back honestly to EOD/manual data for any market where the best-effort source is unavailable or unusable.
 
 ## 2. Data-state vocabulary
 
-| State      | Meaning                                                                                      |
-| ---------- | -------------------------------------------------------------------------------------------- |
-| Real-time  | Exchange/vendor contract permits a very low-latency observation to be displayed as real-time |
-| Delayed    | Vendor-defined delayed feed, with delay minutes and timestamp shown                          |
-| End of day | Completed or most recent daily market-session observation                                    |
-| Cached     | A previously ingested observation; it retains its original state and timestamp               |
-| Stale      | Observation exceeds the product’s exchange/calendar freshness rule                           |
-| Indicative | Not guaranteed to be an exchange last trade; label the vendor’s methodology                  |
-| Manual     | User-entered versioned value with reason and effective time                                  |
-| Estimated  | Derived rather than observed, primarily for dividend forecasts                               |
+| State      | Meaning                                                                                            |
+| ---------- | -------------------------------------------------------------------------------------------------- |
+| Real-time  | The source identifies a low-latency observation as real-time and its timestamp supports that state |
+| Delayed    | Vendor-defined delayed feed, with delay minutes and timestamp retained                             |
+| End of day | Completed or most recent daily market-session observation                                          |
+| Cached     | A previously ingested observation; it retains its original state and timestamp                     |
+| Stale      | Observation exceeds the product’s exchange/calendar freshness rule                                 |
+| Indicative | Not guaranteed to be an exchange last trade; retain the vendor methodology                         |
+| Manual     | User-entered versioned value with reason and effective time                                        |
+| Estimated  | Derived rather than observed, primarily for dividend forecasts                                     |
 
 Caching an EOD value does not make it current, and polling an indicative/delayed endpoint does not make it live.
 
-## 3. Provider comparison
+## 3. Technical provider comparison
 
-Published plan details observed on the research date:
+Only technical capability and operational fit are in scope here:
 
-| Provider                | ASX / global coverage                                                                                            | Prices and history                                                                                                                         | FX / dividends / adjustments / fundamentals                                                                                                 | Limits and indicative cost                                                                                                             | Licensing and operational concerns                                                                                                                                                                                                                               |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| EODHD                   | Advertises ASX plus 60+ global exchanges, 150,000+ tickers, ETFs, indices, and FX pairs                          | 30+ years advertised; EOD package; delayed data is generally 15 minutes unless stated; ASX delayed quotes are advertised at 15–20 minutes  | FX pairs, splits/dividends, adjusted close, fundamentals on higher/all-in-one capability; ASX corporate actions have evolving/beta coverage | Personal plans: free 20 calls/day; All World EOD US$19.99/month; All-in-One US$99.99/month; commercial price is by quote               | Best functional fit, but personal plans prohibit group display. A written commercial agreement must confirm display, exchange redistribution, storage, derived data, and deletion obligations; some observations are indicative rather than exchange last trades |
-| Marketstack             | Advertises Australian Stock Exchange and global EOD coverage                                                     | Free 1-year EOD; Basic 10-year EOD; higher tiers advertise 15+ years and real-time stock prices; intraday documentation is US/IEX-oriented | Splits/dividends available; currency metadata is not a complete FX history service; fundamentals are not the core low tier                  | Free 100 requests/month; Basic US$9.99/month / 10,000 requests; Professional US$49.99/month / 100,000 requests; Business higher        | Generic commercial-use claims do not replace ASX-specific display verification; would need a second FX source and careful adjusted-series validation                                                                                                             |
-| Twelve Data             | Broad global; explicitly documents ASX 20-minute delayed/EOD/historical support                                  | `time_series`; delay and exchange-specific plans; current ASX last trade is not uniformly supported                                        | FX, dividends (higher credits/tier), splits/fundamentals by capability                                                                      | Basic free 8 credits/min and 800/day with limited markets; Grow US$79/month; Pro US$229/month plus applicable ASX/data add-ons         | Explicit ASX support is clearer, but exchange licensing/display fees can greatly exceed API subscription; external display/redistribution and even plan category require confirmation                                                                            |
-| Financial Modeling Prep | Global support on upper tier; useful US/global reference                                                         | Daily/history and quote APIs with adjusted data                                                                                            | FX, dividends, splits, broad fundamentals                                                                                                   | Starter US$22/month is US-limited; Premium US$59/month covers more markets; Ultimate about US$149/month for global and 3,000 calls/min | Display/redistribution needs the appropriate agreement; global/fundamental tier cost is hard to justify before the Details product is specified                                                                                                                  |
-| Alpha Vantage           | Describes global ticker support, but ASX depth/quality was not explicit enough to accept without a fixture spike | Free daily series; premium daily adjusted with long history; quote freshness depends on market/tier                                        | FX daily/intraday APIs and dividends; fundamentals on supported symbols                                                                     | Free 25 requests/day; paid per-minute plans without the free daily cap                                                                 | Commercial use requires discussion; low free quota is useful only for development; ASX and production rights remain unverified                                                                                                                                   |
+| Provider                           | Coverage evidence                                                                                                         | Price/history capability                                                                                                            | Other capability                                                                                            | Operational fit                                                                                     |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Yahoo Finance via a Worker adapter | Broad international security, ETF, index, and FX coverage exposed by Yahoo Finance; exact coverage must be fixture-tested | Latest/previous-close and daily history are available on a best-effort basis; delay is exchange/symbol dependent and not guaranteed | Commonly exposes splits, dividends, FX pairs, and adjusted fields; semantics must be validated per response | Free, no API key or SLA; endpoint and response changes require strict validation and circuit breaks |
+| EODHD                              | Advertises ASX plus broad global exchange coverage                                                                        | Long daily history and delayed observations are advertised                                                                          | FX, splits/dividends, adjusted close, and fundamentals by capability                                        | Optional future alternative if measured Yahoo coverage or reliability is inadequate                 |
+| Marketstack                        | Advertises ASX and global EOD coverage                                                                                    | EOD/history; intraday documentation is more limited                                                                                 | Splits/dividends; not a complete FX-history source                                                          | Would require a second FX source                                                                    |
+| Twelve Data                        | Broad global coverage with explicit ASX documentation                                                                     | Time series with exchange-dependent delay and history                                                                               | FX, dividends, splits, and fundamentals by capability                                                       | Optional future alternative                                                                         |
+| Financial Modeling Prep            | Global coverage on higher capability tiers                                                                                | Daily/history and quote APIs with adjusted data                                                                                     | FX, dividends, splits, and broad fundamentals                                                               | Fundamentals exceed core-release need                                                               |
+| Alpha Vantage                      | Global ticker support advertised; ASX depth remains fixture-dependent                                                     | Low-volume daily series and quote freshness that varies by endpoint                                                                 | FX and dividends on supported symbols                                                                       | Deferred low-volume fallback candidate                                                              |
 
-Primary sources:
+Primary technical sources remain linked for later revalidation:
 
-- ASX delayed price data and redistribution requirement: <https://www.asx.com.au/connectivity-and-data/information-services/price-data/delayed-price-data>
-- ASX website terms (generally 20-minute-delayed, private/personal access terms): <https://www.asx.com.au/legals/terms-of-use>
-- EODHD pricing: <https://eodhd.com/pricing>
-- EODHD ASX and global commercial coverage: <https://eodhd.com/asx-data>
-- EODHD data sources: <https://eodhd.com/financial-apis/our-data-sources-and-data-partners>
-- EODHD commercial-use guidance: <https://eodhd.com/financial-apis/commercial-vs-personal-license-use>
-- EODHD terms: <https://eodhd.com/financial-apis/terms-conditions>
+- yfinance project and implementation context: <https://github.com/ranaroussi/yfinance>
 - EODHD exchange list/API: <https://eodhd.com/financial-apis/exchanges-api-list-of-tickers-and-trading-hours>
-- Marketstack product/pricing: <https://marketstack.com/product>
-- Twelve Data pricing: <https://twelvedata.com/pricing>
+- Marketstack product documentation: <https://marketstack.com/product>
 - Twelve Data ASX support: <https://support.twelvedata.com/en/articles/13001919-australian-equities-market-data>
-- FMP pricing: <https://site.financialmodelingprep.com/developer/docs/pricing>
+- FMP developer documentation: <https://site.financialmodelingprep.com/developer/docs>
 - Alpha Vantage support: <https://www.alphavantage.co/support/>
 
-Subscription cost alone is not a licensing decision. Free delayed viewing on a vendor website does not confer a free API or redistribution right.
+## 4. Free-source decision
 
-## 4. Yahoo and free-data finding
+The owner has selected a free Yahoo Finance/yfinance-compatible source for the private v1 deployment:
 
-Yahoo Finance is not suitable for the production adapter:
+- `yfinance` is Python-only and cannot run in the Cloudflare Worker. The Worker will instead use a small server-only Yahoo-compatible adapter; no Python runtime or new hosting service is introduced.
+- The application applies no source-specific user-count, owner-binding, deployment-mode, monetization, redistribution, or external-use gate. External provider-use decisions are handled separately by the operator and are not represented in product code or schema.
+- Provider, returned timestamp, and inferred/known state are retained internally. Compact views generally suppress timestamps and routine market-data metadata; the explanation remains available on demand, and inline status is reserved for an action-required state.
+- Provider failure, throttling, malformed data, missing symbols, and suspected anomalies preserve the previous valid observation where available; otherwise compact views show `Price unavailable`. They never produce zero.
 
-- Yahoo does not document or support the Finance quote endpoints commonly accessed by community wrappers as a public market-data API.
-- A wrapper does not create a data licence, service-level agreement, stable response contract, or redistribution right.
-- Scraping exposes portfolio prices to silent endpoint, cookie, throttling, and schema changes.
+Alpha Vantage is a deferred candidate for low-volume daily global history and FX. Do not add a second adapter until a measured Yahoo coverage or reliability failure justifies the operational complexity.
 
-As of the research date, no official source reviewed establishes a free, licensed, international delayed-price API for this hosted multi-user display model. Free tiers generally cover trials, personal/internal use, EOD data, limited symbols, or US-only intraday data.
-
-Consequently, low cost remains a goal, but lawful international coverage and supported APIs take priority over a nominally free source.
+The app remains provider-neutral so another provider or a user-entitled broker quote source can replace Yahoo without changing ledger, calculation, or UI contracts.
 
 ## 5. Chosen first implementation
 
@@ -86,55 +78,29 @@ Consequently, low cost remains a goal, but lawful international coverage and sup
 
 Implement the normalized provider contract and UI in this priority order:
 
-1. delayed quote capability (`delayedMinutes`, market timestamp, provider/entitlement);
-2. EOD/latest fallback;
-3. daily historical raw/adjusted prices;
-4. FX, dividends, and splits;
-5. versioned manual security, price, FX, and dividend corrections.
+1. best-effort/latest quote capability (`delayedMinutes` may be unknown; retain market timestamp and provider scope);
+2. EOD/daily raw-price history for valuation;
+3. FX observations needed by owned portfolios;
+4. versioned manual security, price, and FX corrections;
+5. adjusted history, dividends, and splits only through later capability-specific tasks.
 
-Use deterministic fixtures until the rights/cost spike approves production terms. Provider order:
+Use deterministic fixtures until the free-source adapter is implemented. Provider order:
 
-- **EODHD commercial plan** as the preferred single-provider delayed + EOD + international + FX/corporate-action candidate;
-- **Twelve Data business plan plus required exchange licensing** only if EODHD coverage, quality, or terms fail;
-- **EODHD All World EOD** or manual values as the lower-cost fallback, not the preferred active quote source;
+- **Yahoo Finance-compatible Worker adapter** as the free latest/daily/FX source;
+- **manual values** as the final, versioned fallback;
+- **Alpha Vantage** only through a later low-volume daily-history/FX task if measured need justifies it;
+- **EODHD or another provider** only if measured capability, reliability, or cost warrants it;
 - a later **broker quote adapter** where the connected user’s market-data entitlement allows display.
 
-The product remains provider-neutral even though EODHD is the preferred first adapter.
-
-### Mandatory condition
-
-Do not enable any provider in production, and do not add a second real user, until written permission covers:
-
-- private display to the intended number/type of authorized users;
-- server-side storage/cache of normalized observations and derived portfolio values;
-- every required Australian and international exchange;
-- historical retention and backups;
-- whether calculated/aggregated values are derivative data;
-- acceptable refresh patterns;
-- termination/deletion obligations.
-
-Store the approval scope/date/owner in provider configuration. `MARKET_DATA_RIGHTS_APPROVED=false` must fail closed in production.
-
-### Cost envelope
-
-Desired target: inexpensive delayed data for the small initial user base. Verified public personal-plan ranges are:
-
-- free only for narrow trial/internal/non-display coverage;
-- about US$100/month for EODHD All-in-One before any additional display rights;
-- US$229/month individual Twelve Data Pro or US$499/month business Venture before applicable ASX/data add-ons and exchange licensing;
-- about US$20/month for EODHD EOD as a lower-freshness fallback.
-
-EODHD commercial pricing is by quote. The owner must approve that quote or explicitly choose labelled EOD/manual fallback. The product remains functional as a ledger/cost-basis tool without a delayed provider.
+The product remains provider-neutral even though Yahoo-compatible best-effort data is the first adapter.
 
 ## 6. Rejected or deferred alternatives
 
-- Yahoo Finance/community wrappers: no supported Finance API contract, unclear display rights, no SLA, and endpoint changes can silently corrupt data.
-- Direct exchange real-time: cost, entitlement reporting, and display agreements are disproportionate to the first user base.
-- Twelve Data free ASX assumption: Basic does not provide general delayed AU display; paid plan and ASX rights are still required.
-- Marketstack-only: attractive price, but it does not satisfy the required FX lifecycle alone and its ASX/adjusted-data rights need validation.
-- FMP first: fundamentals are strong, but global tier cost funds a feature the first slice does not need.
-- Alpha Vantage primary: quotas and ASX/production-use uncertainty are poor foundations despite useful experiments.
-- Multi-provider aggregation in v1: more licensing, symbol reconciliation, correction conflicts, and observability before there is measured need.
+- Direct exchange real-time: operational and entitlement complexity is disproportionate to the first release.
+- Marketstack-only: it does not satisfy the required FX lifecycle alone.
+- FMP first: fundamentals exceed the first slice’s product need.
+- Alpha Vantage primary: quotas and unverified ASX depth are weak foundations.
+- Multi-provider aggregation in v1: adds symbol reconciliation, correction conflicts, and observability before measured need.
 
 ## 7. Provider abstraction
 
@@ -153,7 +119,6 @@ interface ProviderCapabilities {
   supportsFundamentals: boolean;
   historicalStart?: string;
   delayedMinutes?: number;
-  authorizedUseScope: string;
 }
 
 interface MarketDataProvider {
@@ -173,6 +138,8 @@ interface MarketDataProvider {
 ```
 
 A later `BrokerMarketDataAdapter` may implement the same interface, but only for the connected user/account entitlement. It must preserve broker/source/entitlement provenance and cannot make broker prices globally available to other users.
+
+`manual` is a selection quality/state, not a provider interval. Manual price/FX records live in the owner-scoped override model and are composed with provider results by the selector.
 
 Normalized results contain no provider-specific response objects. They include:
 
@@ -200,10 +167,10 @@ Provider errors are typed as authentication, entitlement, rate limit, unavailabl
 
 ### Initial mapping/backfill
 
-1. User/import creates an unresolved security candidate.
+1. User/import creates an owner-scoped unresolved portfolio-security candidate; it does not publish or mutate a shared canonical security.
 2. Server searches provider/reference data using exchange, symbol, currency, and name.
 3. User or high-confidence verified rule confirms a canonical mapping.
-4. Backfill raw/EOD and approved adjusted series from earliest relevant transaction date, bounded by provider rights/history.
+4. Backfill raw/EOD and validated adjusted series from the earliest relevant transaction date, bounded by available provider history.
 5. Backfill required FX pairs/dates and corporate actions.
 6. Normalize/upsert idempotently and invalidate affected portfolio snapshots.
 
@@ -228,13 +195,13 @@ Provider errors are typed as authentication, entitlement, rate limit, unavailabl
 
 D1 is the first normalized server cache:
 
-- Delayed/EOD price and FX observations: retain for owned relevant history within contract.
+- Delayed/EOD price and FX observations: retain for owned relevant history under the application retention policy.
 - Latest-result cache is derived by indexed query; no separate correctness-critical KV.
 - Symbol-search negative cache: short-lived, non-authoritative.
-- Provider raw body: parse transiently; store only selected normalized fields + payload hash unless contract and a diagnostic need authorize temporary raw retention.
+- Provider raw body: parse transiently; store only selected normalized fields + payload hash unless a bounded diagnostic policy authorizes temporary raw retention.
 - Client/API: `private, no-store` for portfolio-derived responses.
 - Service worker: never cache provider/portfolio/API responses.
-- On provider termination: purge provider-derived observations/payloads within contract timing, keep user-entered ledger/overrides and lawfully derived values only if the agreement permits.
+- On provider removal: purge transient provider payloads and retain normalized observations according to the application retention policy; user-entered ledger/overrides remain independent.
 
 R2 is unnecessary for routine market data. KV may later cache non-sensitive shared reference lookups, but never authorization, portfolio truth, or balances.
 
@@ -268,11 +235,11 @@ Calculation normalizes to native→portfolio-base with decimal arithmetic and re
 
 Never use a future date for transaction cost basis. Identity conversion is exact `1`. Forecast dividends may use the latest FX only when labelled estimated/as-of; actual receipts use payment-date FX.
 
-If EODHD FX rights/quality fail, evaluate an authoritative daily central-bank source for supported AUD crosses plus a licensed broader FX provider. Do not silently triangulate through inconsistent timestamps without storing both legs and the formula.
+If the selected source’s FX quality or coverage fails, evaluate an authoritative daily central-bank source for supported AUD crosses or another capability-specific source through a separate decision. Do not silently triangulate through inconsistent timestamps without storing both legs and the formula.
 
 ## 13. Rate limits, retries, and jobs
 
-- Central provider client uses a token-budget/rate-limit policy derived from the contracted tier.
+- Central provider client uses a configured token-budget/rate-limit policy derived from measured endpoint behavior.
 - Coalesce identical in-flight requests and batch symbols only where the API/credit model makes it cheaper.
 - Retry only transient network/5xx/429 failures with bounded exponential backoff, full jitter, and `Retry-After`.
 - Do not retry authentication, entitlement, malformed symbol, or validation failures automatically.
@@ -281,7 +248,7 @@ If EODHD FX rights/quality fail, evaluate an authoritative daily central-bank so
 - Keep one active logical refresh per provider/capability/key/window.
 - Use `ctx.waitUntil` only to finish short non-authoritative work; durable job state exists before returning.
 - Cron processes bounded batches. Add Cloudflare Queues when measured work cannot reliably stay within Worker/subrequest limits or needs durable fan-out.
-- Circuit-break an unhealthy provider and serve last valid stale observations with visible status.
+- Circuit-break an unhealthy provider and retain the last valid stale observation. Keep its state inspectable; surface inline status only when user action is required to avoid a misleading current value.
 
 ## 14. Data gaps and manual fallback
 
@@ -311,14 +278,14 @@ Alert on sustained provider failure, entitlement changes, high staleness, rate-b
 
 ## 16. Production readiness checklist
 
-- Written rights approval matches deployment/user/exchange/storage scope.
-- The provider spike has documented whether the delayed source is genuinely free for this exact use; if not, the owner has approved the recurring/exchange cost or EOD fallback.
+- The selected provider, enabled capabilities, technical review date, rate budget, and fallback behavior are recorded.
+- Provider activation has no source-specific user-count, owner-binding, deployment-mode, monetization, redistribution, or external-use gate.
 - Production key is a Worker secret and cannot appear in client chunks/logs.
 - Australian, US, European-or-UK, and FX symbol/date/adjustment fixtures reconcile with independent samples.
 - FX direction/inversion fixtures pass.
 - Rate budget covers expected securities, backfill, correction window, and retries.
 - Raw/adjusted series selection cannot double-count splits.
 - Ticker change, delisting, correction, 429, outage, and manual override tests pass.
-- Retention/termination purge is implemented.
-- UI says `Delayed 20 min`, EOD, manual, or the provider’s actual as-of state; never “live” without a real-time entitlement.
+- Application retention and provider-removal behavior are implemented.
+- Compact UI generally suppresses timestamps and routine freshness/source labels and never says “live” without a real-time entitlement. State remains inspectable; inline status is reserved for action-required conditions, and `Price unavailable` appears when no usable quote exists.
 - Provider replacement can pass the common contract suite.
