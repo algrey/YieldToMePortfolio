@@ -398,7 +398,7 @@ Status: DONE on 2026-07-29.
 
 ### IMP-002B — Import mapping, reconciliation, and preview contract
 
-Status: PENDING.
+Status: READY.
 
 - Objective: let an owner resolve every portfolio/security/FX ambiguity and inspect exact effects before commit.
 - Dependencies: IMP-002A, DB-001B, DB-002, LED-002A.
@@ -588,7 +588,7 @@ Status: PENDING.
 
 ### MKT-004 — Yahoo-compatible FX adapter
 
-Status: PENDING.
+Status: READY.
 
 - Objective: add only the directional daily FX capability required by owned foreign-currency holdings.
 - Dependencies: MKT-001, DB-003, MKT-002.
@@ -690,7 +690,7 @@ Status: DONE for owner review on 2026-07-29; production UI tasks remain unchange
 
 ### UI-001 — Authenticated shell, portfolio selection, and routes
 
-Status: DONE (2026-07-30).
+Status: IN PROGRESS; review finding on 2026-07-30.
 
 - Objective: replace the visual-only scaffold with the verified private session shell and real owned portfolio navigation.
 - Dependencies: AUTH-002, FND-001.
@@ -702,6 +702,7 @@ Status: DONE (2026-07-30).
 - Risks: selector leaking portfolio names in cached HTML; use no-store.
 - Parallel safe: base shell first, then downstream screens can parallelize.
 - Completion: Added Worker-verified principal transport, D1-backed owned workspace loading, no-store authenticated shell routes, portfolio-safe navigation, session menu, home-currency display, honest empty/unavailable/news states, and route/projection regression coverage. Preview fixture routes remain isolated under `/portfolio/preview/*`; portfolio mutations remain deferred to their dedicated authorization and UI tasks.
+- Review finding: the declared PRD-002 scope is not complete. Implement the authenticated create, rename, archive, and restore portfolio actions plus the home-currency setting/display toggle, with owner-scoped route/action tests and the required 320 px/desktop semantic and keyboard coverage. Keep mutation workflows server-authoritative and separate from downstream financial-entry tasks.
 
 ### UI-002 — Overview and historical value
 
@@ -817,7 +818,7 @@ Status: PENDING.
 
 ### PWA-001 — Offline-safe shell and connectivity states
 
-Status: PENDING.
+Status: READY.
 
 - Objective: make installation and offline failure graceful without persisting private financial responses on the device.
 - Dependencies: FND-001, UI-001.
