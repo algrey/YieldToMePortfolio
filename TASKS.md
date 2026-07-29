@@ -318,7 +318,7 @@ Status: PENDING.
 
 ### DB-002 — Security master and provider mapping schema
 
-Status: READY.
+Status: DONE on 2026-07-29.
 
 - Objective: represent durable securities and validity-dated exchange/provider identifiers without treating ticker as identity.
 - Dependencies: DB-001A.
@@ -329,6 +329,7 @@ Status: READY.
 - Tests: migration/foreign keys, private unresolved candidate, mapping overlap/conflict service rules, ticker change/delisting, provider configuration, owned portfolio-security access.
 - Risks: schema too provider-shaped or global master data being mutated by one user.
 - Parallel safe: yes with LED-001A after schema coordination.
+- Completion note: Added the shared exchange/security/provider schema, validity-dated identifier and provider mappings, and owner-constrained portfolio-security candidates. Unresolved imports remain private with no shared-master write path; generated migration and deterministic mapping-conflict tests cover ownership, ticker history, delisting, and ordinary provider configuration.
 
 ### DB-003 — Price, FX, and override schema
 

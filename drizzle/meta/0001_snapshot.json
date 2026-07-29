@@ -1,0 +1,1307 @@
+{
+  "version": "6",
+  "dialect": "sqlite",
+  "id": "81e8e0c8-b17f-4d07-91f0-9e762ad0dd67",
+  "prevId": "d813b659-3df0-4e2f-9df9-81f6c5c1d2fa",
+  "tables": {
+    "currencies": {
+      "name": "currencies",
+      "columns": {
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "numeric_code": {
+          "name": "numeric_code",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "minor_unit_digits": {
+          "name": "minor_unit_digits",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "currencies_minor_unit_digits_check": {
+          "name": "currencies_minor_unit_digits_check",
+          "value": "\"currencies\".\"minor_unit_digits\" BETWEEN 0 AND 8"
+        },
+        "currencies_is_active_check": {
+          "name": "currencies_is_active_check",
+          "value": "\"currencies\".\"is_active\" IN (0, 1)"
+        }
+      }
+    },
+    "exchanges": {
+      "name": "exchanges",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mic": {
+          "name": "mic",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "country_code": {
+          "name": "country_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "timezone": {
+          "name": "timezone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "default_currency_code": {
+          "name": "default_currency_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "calendar_code": {
+          "name": "calendar_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
+        }
+      },
+      "indexes": {
+        "exchanges_mic_unique": {
+          "name": "exchanges_mic_unique",
+          "columns": ["mic"],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "exchanges_default_currency_code_currencies_code_fk": {
+          "name": "exchanges_default_currency_code_currencies_code_fk",
+          "tableFrom": "exchanges",
+          "tableTo": "currencies",
+          "columnsFrom": ["default_currency_code"],
+          "columnsTo": ["code"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "exchanges_is_active_check": {
+          "name": "exchanges_is_active_check",
+          "value": "\"exchanges\".\"is_active\" IN (0, 1)"
+        }
+      }
+    },
+    "market_data_providers": {
+      "name": "market_data_providers",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'disabled'"
+        },
+        "capabilities_json": {
+          "name": "capabilities_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "rate_limit_json": {
+          "name": "rate_limit_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "technically_reviewed_at": {
+          "name": "technically_reviewed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "operator_notes_reference": {
+          "name": "operator_notes_reference",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "market_data_providers_code_unique": {
+          "name": "market_data_providers_code_unique",
+          "columns": ["code"],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "market_data_providers_status_check": {
+          "name": "market_data_providers_status_check",
+          "value": "\"market_data_providers\".\"status\" IN ('disabled', 'enabled', 'suspended')"
+        }
+      }
+    },
+    "portfolio_securities": {
+      "name": "portfolio_securities",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "portfolio_id": {
+          "name": "portfolio_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "security_id": {
+          "name": "security_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source_symbol": {
+          "name": "source_symbol",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_exchange_alias": {
+          "name": "source_exchange_alias",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source_currency_code": {
+          "name": "source_currency_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_name": {
+          "name": "source_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "display_symbol": {
+          "name": "display_symbol",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "display_name": {
+          "name": "display_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'unresolved'"
+        },
+        "first_relevant_date": {
+          "name": "first_relevant_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "last_relevant_date": {
+          "name": "last_relevant_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "portfolio_securities_id_user_portfolio_unique": {
+          "name": "portfolio_securities_id_user_portfolio_unique",
+          "columns": ["id", "user_id", "portfolio_id"],
+          "isUnique": true
+        },
+        "portfolio_securities_resolved_unique": {
+          "name": "portfolio_securities_resolved_unique",
+          "columns": ["portfolio_id", "security_id"],
+          "isUnique": true,
+          "where": "\"portfolio_securities\".\"security_id\" IS NOT NULL"
+        },
+        "portfolio_securities_owner_portfolio_status_idx": {
+          "name": "portfolio_securities_owner_portfolio_status_idx",
+          "columns": ["user_id", "portfolio_id", "status"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "portfolio_securities_portfolio_id_user_id_portfolios_id_user_id_fk": {
+          "name": "portfolio_securities_portfolio_id_user_id_portfolios_id_user_id_fk",
+          "tableFrom": "portfolio_securities",
+          "tableTo": "portfolios",
+          "columnsFrom": ["portfolio_id", "user_id"],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "portfolio_securities_security_id_securities_id_fk": {
+          "name": "portfolio_securities_security_id_securities_id_fk",
+          "tableFrom": "portfolio_securities",
+          "tableTo": "securities",
+          "columnsFrom": ["security_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "portfolio_securities_source_currency_code_currencies_code_fk": {
+          "name": "portfolio_securities_source_currency_code_currencies_code_fk",
+          "tableFrom": "portfolio_securities",
+          "tableTo": "currencies",
+          "columnsFrom": ["source_currency_code"],
+          "columnsTo": ["code"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "portfolio_securities_status_check": {
+          "name": "portfolio_securities_status_check",
+          "value": "\"portfolio_securities\".\"status\" IN ('held', 'watch', 'hidden', 'unresolved')"
+        },
+        "portfolio_securities_resolution_check": {
+          "name": "portfolio_securities_resolution_check",
+          "value": "(\"portfolio_securities\".\"status\" = 'unresolved' AND \"portfolio_securities\".\"security_id\" IS NULL) OR (\"portfolio_securities\".\"status\" <> 'unresolved' AND \"portfolio_securities\".\"security_id\" IS NOT NULL)"
+        },
+        "portfolio_securities_relevant_dates_check": {
+          "name": "portfolio_securities_relevant_dates_check",
+          "value": "\"portfolio_securities\".\"last_relevant_date\" IS NULL OR \"portfolio_securities\".\"first_relevant_date\" IS NULL OR \"portfolio_securities\".\"last_relevant_date\" >= \"portfolio_securities\".\"first_relevant_date\""
+        }
+      }
+    },
+    "portfolio_settings": {
+      "name": "portfolio_settings",
+      "columns": {
+        "portfolio_id": {
+          "name": "portfolio_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "quote_staleness_policy": {
+          "name": "quote_staleness_policy",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        }
+      },
+      "indexes": {
+        "portfolio_settings_portfolio_user_unique": {
+          "name": "portfolio_settings_portfolio_user_unique",
+          "columns": ["portfolio_id", "user_id"],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "portfolio_settings_portfolio_id_user_id_portfolios_id_user_id_fk": {
+          "name": "portfolio_settings_portfolio_id_user_id_portfolios_id_user_id_fk",
+          "tableFrom": "portfolio_settings",
+          "tableTo": "portfolios",
+          "columnsFrom": ["portfolio_id", "user_id"],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "portfolios": {
+      "name": "portfolios",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "base_currency_code": {
+          "name": "base_currency_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "timezone": {
+          "name": "timezone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "accounting_method": {
+          "name": "accounting_method",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'fifo'"
+        },
+        "history_complete_from": {
+          "name": "history_complete_from",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'active'"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        }
+      },
+      "indexes": {
+        "portfolios_id_user_id_unique": {
+          "name": "portfolios_id_user_id_unique",
+          "columns": ["id", "user_id"],
+          "isUnique": true
+        },
+        "portfolios_user_id_code_unique": {
+          "name": "portfolios_user_id_code_unique",
+          "columns": ["user_id", "code"],
+          "isUnique": true
+        },
+        "portfolios_owner_status_updated_at_idx": {
+          "name": "portfolios_owner_status_updated_at_idx",
+          "columns": ["user_id", "status", "updated_at"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "portfolios_user_id_users_id_fk": {
+          "name": "portfolios_user_id_users_id_fk",
+          "tableFrom": "portfolios",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "portfolios_base_currency_code_currencies_code_fk": {
+          "name": "portfolios_base_currency_code_currencies_code_fk",
+          "tableFrom": "portfolios",
+          "tableTo": "currencies",
+          "columnsFrom": ["base_currency_code"],
+          "columnsTo": ["code"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "portfolios_accounting_method_check": {
+          "name": "portfolios_accounting_method_check",
+          "value": "\"portfolios\".\"accounting_method\" = 'fifo'"
+        },
+        "portfolios_status_check": {
+          "name": "portfolios_status_check",
+          "value": "\"portfolios\".\"status\" IN ('active', 'archived')"
+        }
+      }
+    },
+    "securities": {
+      "name": "securities",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "asset_type": {
+          "name": "asset_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "exchange_id": {
+          "name": "exchange_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "primary_currency_code": {
+          "name": "primary_currency_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "canonical_name": {
+          "name": "canonical_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "isin": {
+          "name": "isin",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'active'"
+        },
+        "first_trade_date": {
+          "name": "first_trade_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "last_trade_date": {
+          "name": "last_trade_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "securities_isin_unique": {
+          "name": "securities_isin_unique",
+          "columns": ["isin"],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "securities_exchange_id_exchanges_id_fk": {
+          "name": "securities_exchange_id_exchanges_id_fk",
+          "tableFrom": "securities",
+          "tableTo": "exchanges",
+          "columnsFrom": ["exchange_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "securities_primary_currency_code_currencies_code_fk": {
+          "name": "securities_primary_currency_code_currencies_code_fk",
+          "tableFrom": "securities",
+          "tableTo": "currencies",
+          "columnsFrom": ["primary_currency_code"],
+          "columnsTo": ["code"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "securities_asset_type_check": {
+          "name": "securities_asset_type_check",
+          "value": "\"securities\".\"asset_type\" IN ('equity', 'etf', 'fund')"
+        },
+        "securities_status_check": {
+          "name": "securities_status_check",
+          "value": "\"securities\".\"status\" IN ('active', 'delisted')"
+        },
+        "securities_trade_dates_check": {
+          "name": "securities_trade_dates_check",
+          "value": "\"securities\".\"last_trade_date\" IS NULL OR \"securities\".\"first_trade_date\" IS NULL OR \"securities\".\"last_trade_date\" >= \"securities\".\"first_trade_date\""
+        }
+      }
+    },
+    "security_identifiers": {
+      "name": "security_identifiers",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "security_id": {
+          "name": "security_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "scheme": {
+          "name": "scheme",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "value": {
+          "name": "value",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "exchange_id": {
+          "name": "exchange_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "valid_from": {
+          "name": "valid_from",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "valid_to": {
+          "name": "valid_to",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "security_identifiers_lookup_idx": {
+          "name": "security_identifiers_lookup_idx",
+          "columns": [
+            "scheme",
+            "value",
+            "exchange_id",
+            "valid_from",
+            "valid_to"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "security_identifiers_security_id_securities_id_fk": {
+          "name": "security_identifiers_security_id_securities_id_fk",
+          "tableFrom": "security_identifiers",
+          "tableTo": "securities",
+          "columnsFrom": ["security_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "security_identifiers_exchange_id_exchanges_id_fk": {
+          "name": "security_identifiers_exchange_id_exchanges_id_fk",
+          "tableFrom": "security_identifiers",
+          "tableTo": "exchanges",
+          "columnsFrom": ["exchange_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "security_identifiers_validity_check": {
+          "name": "security_identifiers_validity_check",
+          "value": "\"security_identifiers\".\"valid_to\" IS NULL OR \"security_identifiers\".\"valid_to\" >= \"security_identifiers\".\"valid_from\""
+        }
+      }
+    },
+    "security_provider_mappings": {
+      "name": "security_provider_mappings",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "security_id": {
+          "name": "security_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider_id": {
+          "name": "provider_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider_exchange": {
+          "name": "provider_exchange",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider_symbol": {
+          "name": "provider_symbol",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "valid_from": {
+          "name": "valid_from",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "valid_to": {
+          "name": "valid_to",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'candidate'"
+        },
+        "verified_by_user_id": {
+          "name": "verified_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "verified_at": {
+          "name": "verified_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "security_provider_mappings_provider_symbol_from_unique": {
+          "name": "security_provider_mappings_provider_symbol_from_unique",
+          "columns": [
+            "provider_id",
+            "provider_exchange",
+            "provider_symbol",
+            "valid_from"
+          ],
+          "isUnique": true
+        },
+        "security_provider_mappings_id_provider_unique": {
+          "name": "security_provider_mappings_id_provider_unique",
+          "columns": ["id", "provider_id"],
+          "isUnique": true
+        },
+        "security_provider_mappings_id_provider_security_unique": {
+          "name": "security_provider_mappings_id_provider_security_unique",
+          "columns": ["id", "provider_id", "security_id"],
+          "isUnique": true
+        },
+        "security_provider_mappings_security_provider_valid_to_idx": {
+          "name": "security_provider_mappings_security_provider_valid_to_idx",
+          "columns": ["security_id", "provider_id", "valid_to"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "security_provider_mappings_security_id_securities_id_fk": {
+          "name": "security_provider_mappings_security_id_securities_id_fk",
+          "tableFrom": "security_provider_mappings",
+          "tableTo": "securities",
+          "columnsFrom": ["security_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "security_provider_mappings_provider_id_market_data_providers_id_fk": {
+          "name": "security_provider_mappings_provider_id_market_data_providers_id_fk",
+          "tableFrom": "security_provider_mappings",
+          "tableTo": "market_data_providers",
+          "columnsFrom": ["provider_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "security_provider_mappings_verified_by_user_id_users_id_fk": {
+          "name": "security_provider_mappings_verified_by_user_id_users_id_fk",
+          "tableFrom": "security_provider_mappings",
+          "tableTo": "users",
+          "columnsFrom": ["verified_by_user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "security_provider_mappings_status_check": {
+          "name": "security_provider_mappings_status_check",
+          "value": "\"security_provider_mappings\".\"status\" IN ('candidate', 'verified', 'rejected', 'expired')"
+        },
+        "security_provider_mappings_validity_check": {
+          "name": "security_provider_mappings_validity_check",
+          "value": "\"security_provider_mappings\".\"valid_to\" IS NULL OR \"security_provider_mappings\".\"valid_to\" >= \"security_provider_mappings\".\"valid_from\""
+        }
+      }
+    },
+    "user_identities": {
+      "name": "user_identities",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'cloudflare_access'"
+        },
+        "issuer": {
+          "name": "issuer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "subject": {
+          "name": "subject",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "email_at_link": {
+          "name": "email_at_link",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'active'"
+        },
+        "last_authenticated_at": {
+          "name": "last_authenticated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        }
+      },
+      "indexes": {
+        "user_identities_provider_issuer_subject_unique": {
+          "name": "user_identities_provider_issuer_subject_unique",
+          "columns": ["provider", "issuer", "subject"],
+          "isUnique": true
+        },
+        "user_identities_user_status_idx": {
+          "name": "user_identities_user_status_idx",
+          "columns": ["user_id", "status"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "user_identities_user_id_users_id_fk": {
+          "name": "user_identities_user_id_users_id_fk",
+          "tableFrom": "user_identities",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "user_identities_provider_check": {
+          "name": "user_identities_provider_check",
+          "value": "\"user_identities\".\"provider\" = 'cloudflare_access'"
+        },
+        "user_identities_status_check": {
+          "name": "user_identities_status_check",
+          "value": "\"user_identities\".\"status\" IN ('active', 'revoked')"
+        }
+      }
+    },
+    "user_settings": {
+      "name": "user_settings",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "home_currency_code": {
+          "name": "home_currency_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "timezone": {
+          "name": "timezone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "default_holding_currency_view": {
+          "name": "default_holding_currency_view",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'native'"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        }
+      },
+      "indexes": {
+        "user_settings_user_home_currency_unique": {
+          "name": "user_settings_user_home_currency_unique",
+          "columns": ["user_id", "home_currency_code"],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "user_settings_user_id_users_id_fk": {
+          "name": "user_settings_user_id_users_id_fk",
+          "tableFrom": "user_settings",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "user_settings_home_currency_code_currencies_code_fk": {
+          "name": "user_settings_home_currency_code_currencies_code_fk",
+          "tableFrom": "user_settings",
+          "tableTo": "currencies",
+          "columnsFrom": ["home_currency_code"],
+          "columnsTo": ["code"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "user_settings_default_holding_currency_view_check": {
+          "name": "user_settings_default_holding_currency_view_check",
+          "value": "\"user_settings\".\"default_holding_currency_view\" IN ('native', 'home')"
+        }
+      }
+    },
+    "users": {
+      "name": "users",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'pending'"
+        },
+        "display_name": {
+          "name": "display_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "primary_email": {
+          "name": "primary_email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "locale": {
+          "name": "locale",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'en-AU'"
+        },
+        "timezone": {
+          "name": "timezone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "terms_accepted_at": {
+          "name": "terms_accepted_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "last_seen_at": {
+          "name": "last_seen_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        }
+      },
+      "indexes": {
+        "users_status_idx": {
+          "name": "users_status_idx",
+          "columns": ["status"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "users_status_check": {
+          "name": "users_status_check",
+          "value": "\"users\".\"status\" IN ('pending', 'active', 'disabled', 'deletion_pending', 'purged')"
+        }
+      }
+    }
+  },
+  "views": {},
+  "enums": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "indexes": {}
+  }
+}

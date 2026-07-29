@@ -8,6 +8,13 @@
       "when": 1785293769868,
       "tag": "0000_happy_madelyne_pryor",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1785297805170,
+      "tag": "0001_special_winter_soldier",
+      "breakpoints": true
     }
   ]
 }
