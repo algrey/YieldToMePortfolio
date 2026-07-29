@@ -52,7 +52,7 @@ Status: DONE on 2026-07-29.
 
 ### VSL-002 — Deterministic preview valuation contract
 
-Status: READY.
+Status: DONE on 2026-07-29.
 
 - Objective: calculate the sample portfolio’s quantity, cost, current value, daily movement, and gain from decimal CSV facts plus deterministic price and FX fixtures.
 - Dependencies: `VSL-001`.
@@ -63,6 +63,7 @@ Status: READY.
 - Tests: same-currency and FX-valued holdings, direct/inverse/identity FX, buy/sell projection, gain/daily formula, rounding, missing price/FX, and fixture determinism.
 - Risks: silently substituting a simplified projection for the production FIFO ledger; name its rules in the preview explanation and keep `LED-002A`, `CALC-001A`, and `CALC-001B` pending.
 - Parallel safe: no; its result is the UI contract.
+- Completion note: Added a deterministic preview valuation engine with exact decimal arithmetic, fixture price/FX conversion, same-currency and FX scenarios, buy/sell projection coverage, and shared expected-result fixtures for the sample portfolio and edge cases.
 
 ### Demo checkpoint A — parsed and valued sample
 
