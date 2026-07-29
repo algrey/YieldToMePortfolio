@@ -150,6 +150,39 @@ test("normalizes daily raw history and provider symbol lookup", async () => {
   assert.equal(calls.length, 2);
 });
 
+test("preserves an explicit unknown delay as an EOD observation", async () => {
+  const provider = providerFor(async () =>
+    jsonResponse({
+      chart: {
+        result: [
+          {
+            meta: {
+              currency: "GBP",
+              exchangeTimezoneName: "Europe/London",
+              exchangeDataDelayedBy: null,
+              regularMarketPrice: 725.5,
+              regularMarketTime: Date.parse("2026-07-29T15:30:00Z") / 1000,
+            },
+            timestamp: [1_751_210_600],
+            indicators: { quote: [{ close: [725.5] }] },
+          },
+        ],
+      },
+    }),
+  );
+  const result = await provider.getLatestObservation({
+    ...australianRequest,
+    mappingId: "mapping-uk",
+    securityId: "security-shell",
+  });
+
+  assert.equal(result.ok, true);
+  if (result.ok && result.value) {
+    assert.equal(result.value.delayedMinutes, null);
+    assert.equal(result.value.interval, "eod");
+  }
+});
+
 test("retries throttle responses, bounds timeout attempts, and trips the circuit", async () => {
   const retryCalls: FetchCall[] = [];
   const retryProvider = providerFor(

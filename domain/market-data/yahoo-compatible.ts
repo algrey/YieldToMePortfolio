@@ -424,13 +424,15 @@ export function createYahooCompatibleProvider(
     const currency = requiredString(result.meta.currency);
     const timezone = requiredString(result.meta.exchangeTimezoneName);
     const delayedMinutes =
-      result.meta.exchangeDataDelayedBy === undefined
+      result.meta.exchangeDataDelayedBy === undefined ||
+      result.meta.exchangeDataDelayedBy === null
         ? null
         : nonNegativeInteger(result.meta.exchangeDataDelayedBy);
     if (
       !currency ||
       !timezone ||
       (result.meta.exchangeDataDelayedBy !== undefined &&
+        result.meta.exchangeDataDelayedBy !== null &&
         delayedMinutes === null)
     ) {
       return error(
