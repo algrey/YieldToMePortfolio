@@ -111,27 +111,52 @@ test("wrangler source and generated worker config stay aligned with the task pro
     new URL("../dist/server/index.js", import.meta.url),
     "utf8",
   );
+  const workerTypes = await readFile(
+    new URL("../worker-configuration.d.ts", import.meta.url),
+    "utf8",
+  );
 
   assert.equal(wranglerSource.compatibility_date, "2026-07-29");
   assert.deepEqual(wranglerSource.compatibility_flags, ["nodejs_compat"]);
-  assert.deepEqual(wranglerSource.d1_databases ?? [], []);
+  assert.deepEqual(wranglerSource.d1_databases, [
+    {
+      binding: "DB",
+      database_name: "yieldtome-portfolio",
+    },
+  ]);
   assert.deepEqual(wranglerSource.r2_buckets ?? [], []);
 
   const sourceVars = wranglerSource.vars as Record<string, string>;
   const sourceEnvs = wranglerSource.env as Record<
     string,
-    { vars: Record<string, string>; secrets: { required: string[] } }
+    {
+      vars: Record<string, string>;
+      secrets: { required: string[] };
+      d1_databases?: Array<{ binding: string; database_name: string }>;
+    }
   >;
   assert.equal(sourceVars.YIELDTOME_RUNTIME_ENV, "local");
   assert.equal(sourceVars.YIELDTOME_WORKERS_PLAN, "free");
   assert.equal(sourceVars.MARKET_DATA_PROVIDER, "disabled");
   assert.equal(sourceVars.CLOUDFLARE_ACCESS_ISSUER, undefined);
   assert.equal(sourceVars.CLOUDFLARE_ACCESS_AUDIENCE, undefined);
+  assert.deepEqual(sourceEnvs.preview.d1_databases, [
+    {
+      binding: "DB",
+      database_name: "yieldtome-portfolio-preview",
+    },
+  ]);
   assert.equal(sourceEnvs.preview.vars.YIELDTOME_RUNTIME_ENV, "preview");
   assert.equal(sourceEnvs.preview.vars.YIELDTOME_WORKERS_PLAN, "free");
   assert.deepEqual(sourceEnvs.preview.secrets.required, [
     "CLOUDFLARE_ACCESS_ISSUER",
     "CLOUDFLARE_ACCESS_AUDIENCE",
+  ]);
+  assert.deepEqual(sourceEnvs.production.d1_databases, [
+    {
+      binding: "DB",
+      database_name: "yieldtome-portfolio-production",
+    },
   ]);
   assert.equal(sourceEnvs.production.vars.YIELDTOME_RUNTIME_ENV, "production");
   assert.equal(sourceEnvs.production.vars.YIELDTOME_WORKERS_PLAN, "paid");
@@ -142,7 +167,13 @@ test("wrangler source and generated worker config stay aligned with the task pro
 
   const generatedAssets = generatedConfig.assets as { binding?: string };
   assert.equal(generatedAssets.binding, "ASSETS");
-  assert.deepEqual(generatedConfig.d1_databases, []);
+  assert.deepEqual(generatedConfig.d1_databases, [
+    {
+      binding: "DB",
+      database_name: "yieldtome-portfolio",
+    },
+  ]);
   assert.deepEqual(generatedConfig.r2_buckets, []);
+  assert.match(workerTypes.slice(0, 1200), /\bDB: D1Database;/);
   assert.doesNotMatch(builtWorker, /\bIMAGES\b/);
 });

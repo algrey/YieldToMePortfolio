@@ -8,6 +8,12 @@
     "directory": "./dist/client",
     "binding": "ASSETS"
   },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "yieldtome-portfolio"
+    }
+  ],
   "vars": {
     "YIELDTOME_RUNTIME_ENV": "local",
     "YIELDTOME_WORKERS_PLAN": "free",
@@ -15,6 +21,12 @@
   },
   "env": {
     "preview": {
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "yieldtome-portfolio-preview"
+        }
+      ],
       "vars": {
         "YIELDTOME_RUNTIME_ENV": "preview",
         "YIELDTOME_WORKERS_PLAN": "free",
@@ -25,6 +37,12 @@
       }
     },
     "production": {
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "yieldtome-portfolio-production"
+        }
+      ],
       "vars": {
         "YIELDTOME_RUNTIME_ENV": "production",
         "YIELDTOME_WORKERS_PLAN": "paid",

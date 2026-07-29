@@ -130,7 +130,7 @@ Status: DONE on 2026-07-29.
 
 ### DB-001A — Identity and portfolio schema migration
 
-Status: READY.
+Status: DONE on 2026-07-29.
 
 - Objective: establish the smallest reviewed D1 schema for identity, settings, currencies, and owned portfolios.
 - Dependencies: FND-002B.
@@ -141,6 +141,7 @@ Status: READY.
 - Tests: migration apply, schema/foreign-key/index assertions, invalid constraint fixtures.
 - Risks: migration incompatibility or a schema that cannot support owner-scoped queries.
 - Parallel safe: yes with AUTH-001 and IMP-001 after FND-002B.
+- Completion note: Added the reviewed D1 schema for currencies, users, user settings, user identities, portfolios, and portfolio settings; generated and validated the first migration; configured `DB` in Wrangler/hosting metadata and regenerated Worker types for the protected-boundary foundation.
 
 ### DB-001B — Owned portfolio repositories and services
 
