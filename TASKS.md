@@ -56,7 +56,7 @@ Status: DONE on 2026-07-29.
 
 ### FND-002B — Security headers and CI-equivalent quality gate
 
-Status: IN PROGRESS as of 2026-07-29 review.
+Status: DONE on 2026-07-29.
 
 - Objective: establish one reproducible security/quality gate that later implementation tasks can invoke without relying on transpile-only success.
 - Dependencies: FND-002A.
@@ -67,7 +67,7 @@ Status: IN PROGRESS as of 2026-07-29 review.
 - Tests: header route tests, package-script failure propagation, format/lint/typecheck/`vinext check`/build/test.
 - Risks: headers behaving differently in generated Worker output or a nominal check omitting strict type analysis.
 - Parallel safe: no; merge this shared baseline before implementation branches.
-- Review finding (2026-07-29): the rendered Vinext route emits inline bootstrap scripts, and the current CSP permits them with `script-src 'unsafe-inline'`. Replace this with a nonce- or hash-based policy compatible with Vinext's rendered output, remove `unsafe-inline` from `script-src`, and add generated-response coverage proving every required inline script is authorized while an untrusted inline script is blocked. Until then, the CSP is not restrictive enough to complete this task.
+- Completion note: Added Worker-wide CSP, frame, referrer, MIME, permissions, and private no-store response policy plus tested `typecheck`, `vinext:check`, and fail-fast aggregate `check` scripts. Follow-up review replaced `script-src 'unsafe-inline'` with a request-scoped nonce, authorizes all seven Vinext bootstrap scripts, and proves an arbitrary inline script is excluded.
 
 ### SPK-001 — Lock the supplied 17-column CSV contract
 

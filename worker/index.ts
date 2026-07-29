@@ -3,7 +3,10 @@ import {
   createRuntimeConfigErrorResponse,
   resolveRuntimeConfig,
 } from "./runtime-config";
-import { applyResponseSecurityHeaders } from "./response-security";
+import {
+  applyResponseSecurityHeaders,
+  createCspNonce,
+} from "./response-security";
 
 const worker: ExportedHandler<Env> = {
   async fetch(
@@ -11,17 +14,20 @@ const worker: ExportedHandler<Env> = {
     env: Env,
     ctx: ExecutionContext,
   ): Promise<Response> {
+    const nonce = createCspNonce();
     const runtimeConfig = resolveRuntimeConfig(env);
     if (!runtimeConfig.ok) {
-      return applyResponseSecurityHeaders(
+      return await applyResponseSecurityHeaders(
         request,
         createRuntimeConfigErrorResponse(runtimeConfig.errors),
+        nonce,
       );
     }
 
-    return applyResponseSecurityHeaders(
+    return await applyResponseSecurityHeaders(
       request,
       await handler.fetch(request, env, ctx),
+      nonce,
     );
   },
 };

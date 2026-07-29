@@ -1,5 +1,7 @@
-const SECURITY_HEADERS = {
-  "content-security-policy": [
+const PRIVATE_CACHE_CONTROL = "private, no-store";
+
+function createContentSecurityPolicy(nonce: string): string {
+  return [
     "default-src 'self'",
     "base-uri 'self'",
     "connect-src 'self'",
@@ -9,10 +11,13 @@ const SECURITY_HEADERS = {
     "img-src 'self' data:",
     "manifest-src 'self'",
     "object-src 'none'",
-    "script-src 'self' 'unsafe-inline'",
+    `script-src 'self' 'nonce-${nonce}'`,
     "style-src 'self' 'unsafe-inline'",
     "worker-src 'self'",
-  ].join("; "),
+  ].join("; ");
+}
+
+const SECURITY_HEADERS = {
   "permissions-policy":
     "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
   "referrer-policy": "no-referrer",
@@ -20,7 +25,30 @@ const SECURITY_HEADERS = {
   "x-frame-options": "DENY",
 } as const;
 
-const PRIVATE_CACHE_CONTROL = "private, no-store";
+export function createCspNonce(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+
+  return btoa(String.fromCharCode(...bytes));
+}
+
+function addNonceToInlineScripts(html: string, nonce: string): string {
+  return html.replace(/<script\b([^>]*)>/gi, (tag, attributes: string) => {
+    if (/(?:^|\s)(?:src|nonce)\s*=/i.test(attributes)) {
+      return tag;
+    }
+
+    return `<script nonce="${nonce}"${attributes}>`;
+  });
+}
+
+function isHtmlResponse(response: Response): boolean {
+  return (
+    response.headers
+      .get("content-type")
+      ?.toLowerCase()
+      .startsWith("text/html") ?? false
+  );
+}
 
 export function isPrivateRequest(request: Request): boolean {
   const { pathname } = new URL(request.url);
@@ -33,11 +61,13 @@ export function isPrivateRequest(request: Request): boolean {
   );
 }
 
-export function applyResponseSecurityHeaders(
+export async function applyResponseSecurityHeaders(
   request: Request,
   response: Response,
-): Response {
+  nonce: string,
+): Promise<Response> {
   const headers = new Headers(response.headers);
+  headers.set("content-security-policy", createContentSecurityPolicy(nonce));
 
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
     headers.set(name, value);
@@ -47,7 +77,18 @@ export function applyResponseSecurityHeaders(
     headers.set("cache-control", PRIVATE_CACHE_CONTROL);
   }
 
-  return new Response(response.body, {
+  const shouldRewriteHtml = isHtmlResponse(response);
+  if (shouldRewriteHtml) {
+    // The nonce rewrite changes the representation received by the client.
+    headers.delete("content-length");
+    headers.delete("etag");
+  }
+
+  const body = shouldRewriteHtml
+    ? addNonceToInlineScripts(await response.text(), nonce)
+    : response.body;
+
+  return new Response(body, {
     status: response.status,
     statusText: response.statusText,
     headers,

@@ -7,6 +7,21 @@ import {
   PRIVATE_CACHE_CONTROL,
 } from "../worker/response-security.ts";
 
+function scriptSourceDirective(policy: string): string {
+  return (
+    policy
+      .split(";")
+      .find((directive) => directive.trim().startsWith("script-src"))
+      ?.trim() ?? ""
+  );
+}
+
+function cspAuthorizesNonce(policy: string, nonce: string): boolean {
+  return scriptSourceDirective(policy)
+    .split(/\s+/)
+    .includes(`'nonce-${nonce}'`);
+}
+
 async function renderProtectedFixture() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
@@ -40,12 +55,13 @@ async function readFiles(directory: string): Promise<string[]> {
   return nestedFiles.flat();
 }
 
-test("security policy applies restrictive headers and private caching", () => {
-  const privateResponse = applyResponseSecurityHeaders(
+test("security policy applies restrictive headers and private caching", async () => {
+  const privateResponse = await applyResponseSecurityHeaders(
     new Request("https://yieldtome.example/portfolio/owned/overview"),
     new Response("private response", {
       headers: { "cache-control": "max-age=3600" },
     }),
+    "test-nonce",
   );
 
   assert.equal(
@@ -61,6 +77,13 @@ test("security policy applies restrictive headers and private caching", () => {
   assert.match(
     privateResponse.headers.get("content-security-policy") ?? "",
     /frame-ancestors 'none'/,
+  );
+  assert.equal(
+    cspAuthorizesNonce(
+      privateResponse.headers.get("content-security-policy") ?? "",
+      "test-nonce",
+    ),
+    true,
   );
   assert.match(
     privateResponse.headers.get("permissions-policy") ?? "",
@@ -84,6 +107,24 @@ test("rendered protected-route fixture returns no-store and security headers", a
     response.headers.get("permissions-policy") ?? "",
     /microphone=\(\)/,
   );
+
+  const policy = response.headers.get("content-security-policy") ?? "";
+  const html = await response.text();
+  const inlineScripts = [...html.matchAll(/<script\b([^>]*)>/gi)]
+    .filter(([, attributes]) => !/(?:^|\s)src\s*=/i.test(attributes))
+    .map(([, attributes]) => {
+      const nonce = /(?:^|\s)nonce="([^"]+)"/i.exec(attributes)?.[1];
+      assert.ok(nonce, "every inline script must receive a CSP nonce");
+      return nonce;
+    });
+
+  assert.equal(inlineScripts.length, 7);
+  assert.equal(
+    inlineScripts.every((nonce) => cspAuthorizesNonce(policy, nonce)),
+    true,
+  );
+  assert.doesNotMatch(scriptSourceDirective(policy), /'unsafe-inline'/);
+  assert.equal(cspAuthorizesNonce(policy, "untrusted-inline-script"), false);
 });
 
 test("client output contains no Cloudflare Access configuration", async () => {
