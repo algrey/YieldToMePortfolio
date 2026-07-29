@@ -126,7 +126,7 @@ Status: DONE.
 
 ### VSL-006 — Preview deployment and review evidence
 
-Status: PENDING.
+Status: READY.
 
 - Objective: publish the completed vertical slice to a Cloudflare preview and package the evidence required for owner review.
 - Dependencies: `VSL-005`.
