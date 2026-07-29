@@ -145,7 +145,7 @@ Status: DONE on 2026-07-29.
 
 ### DB-001B — Owned portfolio repositories and services
 
-Status: PENDING.
+Status: READY.
 
 - Objective: provide the only supported owner-scoped access path for user settings and portfolio lifecycle.
 - Dependencies: DB-001A.
@@ -232,7 +232,7 @@ Status: DONE on 2026-07-29.
 
 ### IMP-002A — Owned import staging state machine
 
-Status: PENDING.
+Status: READY.
 
 - Objective: persist bounded parser output and issues without creating portfolios, securities, or ledger facts.
 - Dependencies: DB-001A, IMP-001.
@@ -318,7 +318,7 @@ Status: PENDING.
 
 ### DB-002 — Security master and provider mapping schema
 
-Status: PENDING.
+Status: READY.
 
 - Objective: represent durable securities and validity-dated exchange/provider identifiers without treating ticker as identity.
 - Dependencies: DB-001A.
