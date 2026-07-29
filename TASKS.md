@@ -505,7 +505,7 @@ Status: DEFERRED; not required by the core ledger/valuation release.
 
 ### MKT-001 — Best-effort provider-neutral contracts and configuration
 
-Status: READY.
+Status: DONE on 2026-07-30.
 
 - Objective: freeze provider-independent capabilities, normalized types, errors, fixtures, and ordinary server-side activation rules.
 - Dependencies: DB-002; production activation additionally depends on SPK-002.
@@ -516,6 +516,7 @@ Status: READY.
 - Tests: adapter contract suite, enabled/disabled configuration, deployment/user observation scope, malformed/outlier normalization.
 - Risks: leaky provider symbol/payload assumptions.
 - Parallel safe: yes with CALC-001A fixture design.
+- Completion note: Added provider-neutral market-data contracts, typed errors/results, explicit deployment/user observation scope, owner-scoped manual override types, and unknown-input normalizers for price and FX observations. Wired runtime provider configuration through the fail-closed ordinary `disabled`/`yahoo-best-effort` parser and added deterministic malformed, outlier, scope, direction, and unavailable-capability fixtures without adding a network adapter.
 
 ### MKT-002 — Yahoo-compatible quote and daily-price adapter
 

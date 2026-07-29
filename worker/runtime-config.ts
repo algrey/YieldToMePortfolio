@@ -1,6 +1,11 @@
+import {
+  parseMarketDataProviderConfiguration,
+  type MarketDataProviderCode,
+} from "../domain/market-data/config.ts";
+
 export type RuntimeEnvironment = "local" | "preview" | "production";
 export type WorkersPlan = "free" | "paid";
-export type MarketDataProvider = "disabled" | "yahoo-best-effort";
+export type MarketDataProvider = MarketDataProviderCode;
 
 type AssetsBinding = {
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
@@ -99,22 +104,6 @@ function parseWorkersPlan(
   }
 }
 
-function parseMarketDataProvider(value: unknown): MarketDataProvider | null {
-  const normalized = normalizeString(value);
-
-  if (normalized === null) {
-    return "disabled";
-  }
-
-  switch (normalized) {
-    case "disabled":
-    case "yahoo-best-effort":
-      return normalized;
-    default:
-      return null;
-  }
-}
-
 export function resolveRuntimeConfig(
   env: RuntimeEnvInput,
 ): RuntimeConfigResult {
@@ -148,8 +137,10 @@ export function resolveRuntimeConfig(
     });
   }
 
-  const marketDataProvider = parseMarketDataProvider(env.MARKET_DATA_PROVIDER);
-  if (marketDataProvider === null) {
+  const providerConfiguration = parseMarketDataProviderConfiguration(
+    env.MARKET_DATA_PROVIDER ?? "disabled",
+  );
+  if (!providerConfiguration.ok) {
     errors.push({
       code: "invalid-market-data-provider",
       message: "MARKET_DATA_PROVIDER must be disabled or yahoo-best-effort.",
@@ -197,7 +188,9 @@ export function resolveRuntimeConfig(
     config: {
       environment: resolvedEnvironment,
       workersPlan: resolvedWorkersPlan,
-      marketDataProvider: marketDataProvider ?? "disabled",
+      marketDataProvider: providerConfiguration.ok
+        ? providerConfiguration.config.code
+        : "disabled",
       csvImport: {
         enabled: csvImportEnabled,
         maxBytes: CSV_IMPORT_MAX_BYTES,
