@@ -474,7 +474,11 @@ dd {
   color: var(--green);
 }
 
-.holdings-grid,
+.holdings-grid {
+  display: grid;
+  grid-template-columns: 21% 32% 23% 24%;
+}
+
 .overview-grid {
   display: grid;
   grid-template-columns: 23% 31% 22% 24%;
@@ -572,7 +576,7 @@ dd {
 
 .summary-primary {
   display: grid;
-  grid-template-columns: 23% 31% 22% 24%;
+  grid-template-columns: 21% 32% 23% 24%;
   min-height: 18px;
   align-items: center;
   gap: 0;
@@ -606,7 +610,7 @@ dd {
 
 .summary-secondary {
   display: grid;
-  grid-template-columns: 23% 31% 22% 24%;
+  grid-template-columns: 21% 32% 23% 24%;
   min-height: 17px;
   align-items: center;
   color: var(--muted);
@@ -1374,7 +1378,7 @@ dd {
 
   .summary-primary,
   .summary-secondary {
-    grid-template-columns: 23% 31% 22% 24%;
+    grid-template-columns: 21% 32% 23% 24%;
     font-size: 0.7rem;
   }
 

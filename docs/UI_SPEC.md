@@ -72,7 +72,7 @@ Input text is not part of this prototype. Production forms must retain a minimum
 ### 5.1 Mobile grid
 
 ```text
-23% Ticker | 31% Value/Cost | 22% Daily | 24% Total
+21% Ticker | 32% Value/Cost | 23% Daily | 24% Total
 ```
 
 Line 1 shows ticker, market value, daily amount, and total unrealised amount. Line 2 shows price, open cost, daily percentage, and total unrealised percentage. Line 3 shows average open cost × quantity.
