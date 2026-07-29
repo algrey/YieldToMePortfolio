@@ -1,9 +1,11 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { extname, join } from "node:path";
+import { dirname, extname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createAccessJwtFixture } from "../tests/fixtures/access-jwt.ts";
 
 const port = Number(process.env.PREVIEW_HARNESS_PORT ?? "8788");
+const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = createAccessJwtFixture();
 const originalFetch = globalThis.fetch;
 const contentTypes = {
@@ -33,7 +35,7 @@ async function fetchAsset(input) {
 
   try {
     const body = await readFile(
-      join(process.cwd(), "dist/client", relativePath),
+      join(repositoryRoot, "dist/client", relativePath),
     );
     return new Response(body, {
       headers: {
@@ -49,6 +51,16 @@ async function fetchAsset(input) {
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url ?? "/", `http://localhost:${port}`);
+    if (url.pathname.startsWith("/assets/")) {
+      const assetResponse = await fetchAsset(url);
+      response.statusCode = assetResponse.status;
+      assetResponse.headers.forEach((value, key) =>
+        response.setHeader(key, value),
+      );
+      response.end(Buffer.from(await assetResponse.arrayBuffer()));
+      return;
+    }
+
     const workerResponse = await worker.fetch(
       new Request(url, {
         headers: {

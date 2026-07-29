@@ -122,6 +122,7 @@ test("wrangler source and generated worker config stay aligned with the task pro
     {
       binding: "DB",
       database_name: "yieldtome-portfolio",
+      database_id: "17b674b8-034a-4e78-9916-dab14499bb9c",
     },
   ]);
   assert.deepEqual(wranglerSource.r2_buckets ?? [], []);
@@ -132,7 +133,11 @@ test("wrangler source and generated worker config stay aligned with the task pro
     {
       vars: Record<string, string>;
       secrets: { required: string[] };
-      d1_databases?: Array<{ binding: string; database_name: string }>;
+      d1_databases?: Array<{
+        binding: string;
+        database_name: string;
+        database_id?: string;
+      }>;
     }
   >;
   assert.equal(sourceVars.YIELDTOME_RUNTIME_ENV, "local");
@@ -144,6 +149,7 @@ test("wrangler source and generated worker config stay aligned with the task pro
     {
       binding: "DB",
       database_name: "yieldtome-portfolio-preview",
+      database_id: "c236e389-f41f-439e-8352-5b489c391428",
     },
   ]);
   assert.equal(sourceEnvs.preview.vars.YIELDTOME_RUNTIME_ENV, "preview");
@@ -171,6 +177,7 @@ test("wrangler source and generated worker config stay aligned with the task pro
     {
       binding: "DB",
       database_name: "yieldtome-portfolio",
+      database_id: "17b674b8-034a-4e78-9916-dab14499bb9c",
     },
   ]);
   assert.deepEqual(generatedConfig.r2_buckets, []);

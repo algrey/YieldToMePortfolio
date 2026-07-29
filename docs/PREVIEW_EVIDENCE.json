@@ -1,6 +1,6 @@
 {
   "task": "VSL-006",
-  "status": "blocked",
+  "status": "complete",
   "dependency": "VSL-005",
   "runtimeProfile": {
     "environment": "preview",
@@ -37,31 +37,76 @@
     "fixtureLabel": "Fixture market data"
   },
   "captures": [
-    { "route": "/portfolio/preview/overview", "width": 320, "file": null },
-    { "route": "/portfolio/preview/overview", "width": 390, "file": null },
-    { "route": "/portfolio/preview/overview", "width": 430, "file": null },
-    { "route": "/portfolio/preview/holdings", "width": 320, "file": null },
-    { "route": "/portfolio/preview/holdings", "width": 390, "file": null },
-    { "route": "/portfolio/preview/holdings", "width": 430, "file": null },
+    {
+      "route": "/portfolio/preview/overview",
+      "width": 320,
+      "file": "docs/preview-evidence/overview-320.png",
+      "noHorizontalOverflow": true
+    },
+    {
+      "route": "/portfolio/preview/overview",
+      "width": 390,
+      "file": "docs/preview-evidence/overview-390.png",
+      "noHorizontalOverflow": true
+    },
+    {
+      "route": "/portfolio/preview/overview",
+      "width": 430,
+      "file": "docs/preview-evidence/overview-430.png",
+      "noHorizontalOverflow": true
+    },
+    {
+      "route": "/portfolio/preview/holdings",
+      "width": 320,
+      "file": "docs/preview-evidence/holdings-320.png",
+      "noHorizontalOverflow": true
+    },
+    {
+      "route": "/portfolio/preview/holdings",
+      "width": 390,
+      "file": "docs/preview-evidence/holdings-390.png",
+      "noHorizontalOverflow": true
+    },
+    {
+      "route": "/portfolio/preview/holdings",
+      "width": 430,
+      "file": "docs/preview-evidence/holdings-430.png",
+      "noHorizontalOverflow": true
+    },
     {
       "route": "/portfolio/preview/holdings/PLS.AX",
       "width": 320,
-      "file": null
+      "file": "docs/preview-evidence/detail-320.png",
+      "noHorizontalOverflow": true
     },
     {
       "route": "/portfolio/preview/holdings/PLS.AX",
       "width": 390,
-      "file": null
+      "file": "docs/preview-evidence/detail-390.png",
+      "noHorizontalOverflow": true
     },
     {
       "route": "/portfolio/preview/holdings/PLS.AX",
       "width": 430,
-      "file": null
+      "file": "docs/preview-evidence/detail-430.png",
+      "noHorizontalOverflow": true
     }
   ],
   "deployment": {
-    "url": null,
-    "smoke": null,
-    "blocker": "Cloudflare publishing credentials and the Sites hosting connector are unavailable in this session."
+    "url": "https://leads-strips-whole-completion.trycloudflare.com",
+    "kind": "Cloudflare Quick Tunnel",
+    "smoke": {
+      "status": "passed",
+      "routes": {
+        "/portfolio/preview/overview": 200,
+        "/portfolio/preview/holdings": 200,
+        "/portfolio/preview/holdings/PLS.AX": 200
+      },
+      "fixtureMarker": true,
+      "holdingDetailMarker": true,
+      "backNavigation": true,
+      "noHorizontalOverflow": true
+    },
+    "note": "Temporary public fixture-only review surface backed by the local harness; no production data, Access secrets, or live provider are enabled."
   }
 }

@@ -11,7 +11,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "yieldtome-portfolio"
+      "database_name": "yieldtome-portfolio",
+      "database_id": "17b674b8-034a-4e78-9916-dab14499bb9c"
     }
   ],
   "vars": {
@@ -24,7 +25,8 @@
       "d1_databases": [
         {
           "binding": "DB",
-          "database_name": "yieldtome-portfolio-preview"
+          "database_name": "yieldtome-portfolio-preview",
+          "database_id": "c236e389-f41f-439e-8352-5b489c391428"
         }
       ],
       "vars": {

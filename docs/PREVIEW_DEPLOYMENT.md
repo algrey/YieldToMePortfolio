@@ -16,7 +16,14 @@ npm run preview:harness
 
 The harness serves the built Worker at `http://127.0.0.1:8788` with the signed
 test principal and deterministic fixture JWKS. It is for local review only and
-does not expose a public URL or use production credentials.
+does not use production credentials. To expose that fixture-only surface for a
+short review session, run `cloudflared tunnel --url http://localhost:8788`.
+The resulting `trycloudflare.com` URL is temporary and public; it is not a
+production or private Access deployment and must not be used with real data.
+
+The VSL-006 review URL captured for this task is:
+
+`https://leads-strips-whole-completion.trycloudflare.com`
 
 The capture manifest is [PREVIEW_EVIDENCE.json](PREVIEW_EVIDENCE.json). The
 fixture contract is exercised by `tests/preview-valuation.test.ts`, and the
@@ -29,3 +36,8 @@ the preview Access secrets out of source control. The public preview URL and
 deployed-route smoke results must be added to the manifest after publication.
 Never put Access tokens, D1 exports, or fixture response dumps in this
 repository.
+
+The dedicated preview Worker profile was deployed separately at
+`yieldtome-portfolio-preview.argreen.workers.dev`; Access issuer and audience
+secrets remain intentionally unset until the operator has the tenant-specific
+values. The Quick Tunnel review uses the local fixture principal instead.
