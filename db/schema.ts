@@ -1146,3 +1146,39 @@ export const manualOverrides = sqliteTable(
     uniqueIndex("manual_overrides_id_user_unique").on(table.id, table.userId),
   ],
 );
+
+export const auditEvents = sqliteTable(
+  "audit_events",
+  {
+    id: text("id").primaryKey(),
+    actorUserId: text("actor_user_id"),
+    targetOwnerUserId: text("target_owner_user_id"),
+    action: text("action").notNull(),
+    targetType: text("target_type").notNull(),
+    targetId: text("target_id"),
+    requestId: text("request_id").notNull(),
+    result: text("result").notNull(),
+    metadataJson: text("metadata_json").notNull().default("{}"),
+    occurredAt: text("occurred_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "audit_events_actor_user_id_users_id_fk",
+      columns: [table.actorUserId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "audit_events_target_owner_user_id_users_id_fk",
+      columns: [table.targetOwnerUserId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    check(
+      "audit_events_result_check",
+      sql`${table.result} IN ('success', 'failure', 'denied')`,
+    ),
+    index("audit_events_owner_time_idx").on(
+      table.targetOwnerUserId,
+      table.occurredAt,
+    ),
+  ],
+);

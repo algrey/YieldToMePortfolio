@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type SqlClient } from "./sql-client.ts";
+import { createAuditRepository } from "./audit.ts";
 
 export type PortfolioStatus = "active" | "archived";
 export type PortfolioAccountingMethod = "fifo";
@@ -81,6 +82,10 @@ export type HomeCurrencyChangeResult =
 
 export type PortfolioListOptions = {
   includeArchived?: boolean;
+};
+
+export type PortfolioRepositoryOptions = {
+  requestId?: string;
 };
 
 const PORTFOLIO_COLUMNS = `
@@ -193,7 +198,28 @@ async function runMutation<T extends Record<string, unknown>>(
 export function createOwnedPortfolioRepository(
   client: SqlClient,
   now?: () => string,
+  options: PortfolioRepositoryOptions = {},
 ) {
+  const requestId = options.requestId ?? randomUUID();
+  const audit = createAuditRepository(client, now);
+
+  async function recordMutation(
+    userId: string,
+    action: string,
+    targetId: string,
+  ): Promise<void> {
+    await audit.append({
+      actorUserId: userId,
+      targetOwnerUserId: userId,
+      action,
+      targetType: "portfolio",
+      targetId,
+      requestId,
+      result: "success",
+      occurredAt: nowIso(now),
+    });
+  }
+
   return {
     async list(
       userId: string,
@@ -270,7 +296,12 @@ export function createOwnedPortfolioRepository(
         ],
       );
 
-      return rows.length > 0 ? createPortfolioRecord(rows[0] ?? {}) : null;
+      const portfolio =
+        rows.length > 0 ? createPortfolioRecord(rows[0] ?? {}) : null;
+      if (portfolio) {
+        await recordMutation(userId, "portfolio.create", portfolio.id);
+      }
+      return portfolio;
     },
 
     async rename(
@@ -310,10 +341,12 @@ export function createOwnedPortfolioRepository(
         return result;
       }
 
-      return {
-        ok: true,
+      const portfolio = {
+        ok: true as const,
         portfolio: createPortfolioRecord(result),
       };
+      await recordMutation(userId, "portfolio.rename", portfolio.portfolio.id);
+      return portfolio;
     },
 
     async archive(
@@ -345,10 +378,12 @@ export function createOwnedPortfolioRepository(
         return result;
       }
 
-      return {
-        ok: true,
+      const portfolio = {
+        ok: true as const,
         portfolio: createPortfolioRecord(result),
       };
+      await recordMutation(userId, "portfolio.archive", portfolio.portfolio.id);
+      return portfolio;
     },
 
     async restore(
@@ -380,10 +415,12 @@ export function createOwnedPortfolioRepository(
         return result;
       }
 
-      return {
-        ok: true,
+      const portfolio = {
+        ok: true as const,
         portfolio: createPortfolioRecord(result),
       };
+      await recordMutation(userId, "portfolio.restore", portfolio.portfolio.id);
+      return portfolio;
     },
   };
 }
@@ -391,7 +428,11 @@ export function createOwnedPortfolioRepository(
 export function createOwnedUserSettingsRepository(
   client: SqlClient,
   now?: () => string,
+  options: PortfolioRepositoryOptions = {},
 ) {
+  const requestId = options.requestId ?? randomUUID();
+  const audit = createAuditRepository(client, now);
+
   return {
     async get(userId: string): Promise<OwnedUserSettingsRecord | null> {
       const row = await client.get<Record<string, unknown>>(
@@ -452,6 +493,17 @@ export function createOwnedUserSettingsRepository(
         `,
         [userId],
       );
+
+      await audit.append({
+        actorUserId: userId,
+        targetOwnerUserId: userId,
+        action: "settings.home_currency_change",
+        targetType: "user_settings",
+        targetId: userId,
+        requestId,
+        result: "success",
+        occurredAt: updatedAt,
+      });
 
       return {
         ok: true,

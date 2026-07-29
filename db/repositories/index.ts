@@ -33,6 +33,7 @@ export {
   type OwnedUserSettingsRecord,
   type PortfolioAccountingMethod,
   type PortfolioListOptions,
+  type PortfolioRepositoryOptions,
   type PortfolioMutationFailure,
   type PortfolioMutationResult,
   type PortfolioStatus,
@@ -43,3 +44,9 @@ export {
   type SqlClient,
   type SqlRunResult,
 } from "./sql-client.ts";
+export { createAuditRepository } from "./audit.ts";
+export type {
+  AppendAuditEventInput,
+  AuditEventRecord,
+  AuditResult,
+} from "./audit.ts";

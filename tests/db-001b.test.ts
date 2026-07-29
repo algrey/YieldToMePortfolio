@@ -15,11 +15,17 @@ async function loadMigrationSql(): Promise<string> {
 
   assert.ok(migrationFiles.length > 0, "expected a generated migration");
 
-  const migrationFile = migrationFiles.sort()[0];
-  return await readFile(
-    new URL(`../drizzle/${migrationFile}`, import.meta.url),
-    "utf8",
+  const migrations = await Promise.all(
+    migrationFiles
+      .sort()
+      .map((migrationFile) =>
+        readFile(
+          new URL(`../drizzle/${migrationFile}`, import.meta.url),
+          "utf8",
+        ),
+      ),
   );
+  return migrations.join("\n");
 }
 
 function createMigratedDatabase(sql: string): DatabaseSync {

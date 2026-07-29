@@ -8,6 +8,11 @@ import {
   createCspNonce,
 } from "./response-security";
 import { createAccessJwtVerifier } from "../domain/auth/access-jwt";
+import {
+  addRequestId,
+  createRequestId,
+  emitStructuredLog,
+} from "../domain/observability/index.ts";
 
 const accessJwtVerifier = createAccessJwtVerifier();
 
@@ -33,12 +38,26 @@ const worker: ExportedHandler<Env> = {
     ctx: ExecutionContext,
   ): Promise<Response> {
     const nonce = createCspNonce();
+    const requestId = createRequestId(request);
+    const respond = async (response: Response): Promise<Response> =>
+      addRequestId(
+        await applyResponseSecurityHeaders(request, response, nonce),
+        requestId,
+      );
     const runtimeConfig = resolveRuntimeConfig(env);
     if (!runtimeConfig.ok) {
-      return await applyResponseSecurityHeaders(
-        request,
+      emitStructuredLog({
+        level: "error",
+        event: "request.config",
+        action: "runtime.config",
+        result: "failure",
+        requestId,
+        metadata: {
+          errorCodes: runtimeConfig.errors.map((error) => error.code),
+        },
+      });
+      return await respond(
         createRuntimeConfigErrorResponse(runtimeConfig.errors),
-        nonce,
       );
     }
 
@@ -47,8 +66,13 @@ const worker: ExportedHandler<Env> = {
       runtimeConfig.config.environment === "production" &&
       pathname.startsWith("/portfolio/preview/")
     ) {
-      return await applyResponseSecurityHeaders(
-        request,
+      emitStructuredLog({
+        event: "request.route",
+        action: "route.preview_blocked",
+        result: "denied",
+        requestId,
+      });
+      return await respond(
         new Response("Not found", {
           status: 404,
           headers: {
@@ -56,7 +80,6 @@ const worker: ExportedHandler<Env> = {
             "content-type": "text/plain; charset=utf-8",
           },
         }),
-        nonce,
       );
     }
 
@@ -65,18 +88,24 @@ const worker: ExportedHandler<Env> = {
       runtimeConfig.config.access,
     );
     if (!accessResult.ok) {
-      return await applyResponseSecurityHeaders(
-        request,
-        createAccessDeniedResponse(accessResult.status),
-        nonce,
-      );
+      emitStructuredLog({
+        level: accessResult.status >= 500 ? "error" : "warn",
+        event: "request.auth",
+        action: "auth.verify",
+        result: "denied",
+        requestId,
+        metadata: { status: accessResult.status },
+      });
+      return await respond(createAccessDeniedResponse(accessResult.status));
     }
 
-    return await applyResponseSecurityHeaders(
-      request,
-      await handler.fetch(request, env, ctx),
-      nonce,
-    );
+    emitStructuredLog({
+      event: "request.auth",
+      action: "auth.verify",
+      result: "success",
+      requestId,
+    });
+    return await respond(await handler.fetch(request, env, ctx));
   },
 };
 

@@ -33,7 +33,9 @@ export async function resolveAuthenticatedRequestContext(
     return { ok: false, reason: "identity" };
   }
 
-  const portfolios = createOwnedPortfolioRepository(client);
+  const portfolios = createOwnedPortfolioRepository(client, undefined, {
+    requestId: options?.requestId,
+  });
   const activePortfolio = requestedPortfolioId
     ? await portfolios.get(identity.user.id, requestedPortfolioId)
     : ((await portfolios.list(identity.user.id))[0] ?? null);

@@ -321,7 +321,7 @@ Status: DONE on 2026-07-29.
 
 ### OPS-001 — Audit and redacted observability foundation
 
-Status: READY.
+Status: DONE on 2026-07-30.
 
 - Objective: make material mutations attributable and operational failures diagnosable without leaking financial data.
 - Dependencies: DB-001A, AUTH-002.
@@ -332,6 +332,7 @@ Status: READY.
 - Tests: audit insertion, append-only policy, redaction snapshots, correlation propagation.
 - Risks: audit failures and primary mutation atomicity; define fail behavior per action.
 - Parallel safe: yes with later domain design after request-context contracts stabilize.
+- Completion note: Added the append-only `audit_events` schema/repository with owner-scoped listing, SQLite update/delete guards, structured redacted logs, safe request-ID propagation, and initial auth, portfolio, and home-currency mutation instrumentation. Tests cover actor/target/result/correlation fields, token/email/CSV/amount redaction, append-only enforcement, and Worker response correlation; generated trigger SQL is retained because Drizzle does not model triggers.
 
 ## Ledger and import
 

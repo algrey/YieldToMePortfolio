@@ -86,6 +86,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
   };
   assert.equal(foreignKeysEnabled.foreign_keys, 1);
   assert.deepEqual(tableNames(database), [
+    "audit_events",
     "cash_accounts",
     "cash_ledger_entries",
     "currencies",
@@ -107,6 +108,9 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "user_identities",
     "user_settings",
     "users",
+  ]);
+  assert.deepEqual(indexNames(database, "audit_events"), [
+    "audit_events_owner_time_idx",
   ]);
   assert.deepEqual(indexNames(database, "portfolios"), [
     "portfolios_id_user_id_unique",

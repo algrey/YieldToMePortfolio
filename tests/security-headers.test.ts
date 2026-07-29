@@ -113,6 +113,10 @@ test("rendered protected-route fixture returns no-store and security headers", a
   const response = await renderProtectedFixture();
 
   assert.equal(response.status, 200);
+  assert.match(
+    response.headers.get("x-request-id") ?? "",
+    /^[A-Za-z0-9._:-]+$/,
+  );
   assert.equal(response.headers.get("cache-control"), PRIVATE_CACHE_CONTROL);
   assert.equal(response.headers.get("referrer-policy"), "no-referrer");
   assert.equal(response.headers.get("x-frame-options"), "DENY");

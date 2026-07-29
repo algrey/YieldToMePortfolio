@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { VerifiedAccessPrincipal } from "./access-jwt.ts";
 import {
   createIdentityRepository,
@@ -5,6 +6,7 @@ import {
   type InternalUserStatus,
 } from "../../db/repositories/identity.ts";
 import type { SqlClient } from "../../db/repositories/sql-client.ts";
+import { createAuditRepository } from "../../db/repositories/audit.ts";
 
 export type IdentityProvisioningPolicy = "active" | "pending" | "disabled";
 
@@ -40,6 +42,7 @@ export type IdentityLifecycleOptions = {
   defaultHomeCurrencyCode?: string;
   defaultTimezone?: string;
   now?: () => string;
+  requestId?: string;
 };
 
 function normalizeEmail(value: string | null): string | null {
@@ -81,6 +84,8 @@ export function createIdentityLifecycleService(
   const defaultHomeCurrencyCode = options.defaultHomeCurrencyCode ?? "AUD";
   const defaultTimezone = options.defaultTimezone ?? "Australia/Sydney";
   const now = options.now ?? (() => new Date().toISOString());
+  const requestId = options.requestId ?? randomUUID();
+  const audit = createAuditRepository(client, now);
 
   return {
     async resolve(
@@ -114,6 +119,17 @@ export function createIdentityLifecycleService(
         }
 
         const updated = await repository.touch(existing, email, now());
+        await audit.append({
+          actorUserId: updated.userId,
+          targetOwnerUserId: updated.userId,
+          action: "auth.login",
+          targetType: "user_identity",
+          targetId: updated.identityId,
+          requestId,
+          result: "success",
+          metadata: { provisioned: false },
+          occurredAt: now(),
+        });
         return { ok: true, user: toInternalUser(updated), provisioned: false };
       }
 
@@ -132,6 +148,18 @@ export function createIdentityLifecycleService(
       if (provisioned.userStatus !== "active") {
         return { ok: false, reason: "provisioning-pending" };
       }
+
+      await audit.append({
+        actorUserId: provisioned.userId,
+        targetOwnerUserId: provisioned.userId,
+        action: "auth.provision",
+        targetType: "user_identity",
+        targetId: provisioned.identityId,
+        requestId,
+        result: "success",
+        metadata: { provisioned: true },
+        occurredAt: now(),
+      });
 
       return {
         ok: true,

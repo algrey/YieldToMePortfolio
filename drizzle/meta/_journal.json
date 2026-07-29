@@ -71,6 +71,13 @@
       "when": 1785357601378,
       "tag": "0009_nappy_tarot",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1785358577427,
+      "tag": "0010_curly_living_mummy",
+      "breakpoints": true
     }
   ]
 }
