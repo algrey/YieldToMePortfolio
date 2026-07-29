@@ -1,7 +1,7 @@
 # YieldToMe executable backlog
 
 Status: dependency-explicit implementation tasks grouped by workstream
-Date: 2026-07-28
+Date: 2026-07-29
 
 Rules:
 
@@ -22,6 +22,123 @@ npm test
 Run `npm run build` separately when `npm test` is narrowed during iteration, and run the task-specific test files/commands named in the task’s `Tests` field. A documentation-only spike may use link/traceability checks instead of a second build, but it must still run formatting and lint.
 
 Status values: `DONE` foundation only, `IN PROGRESS`, `READY`, `BLOCKED`, `PENDING`, `DEFERRED` (not in the active release scope).
+
+## Milestone: demonstrable CSV portfolio preview
+
+Objective: deliver a reviewable, fixture-backed product slice before continuing the production dependency spine. It is deliberately a read-only preview: it parses the supplied CSV into an in-memory sample portfolio, uses deterministic local price/FX fixtures, and never creates D1 ledger facts or calls a market-data provider.
+
+Scope rules:
+
+- Reuse the completed parser (`IMP-001`) and dense mobile prototype (`UI-PROT-001`); do not reconcile the independent screenshot and CSV fixture contents.
+- The preview calculation contract is a narrow, explicit substitute for the broader ledger/FIFO, persisted pricing, and historical-performance tasks. It must use decimal strings and show unavailable values rather than fabricate zeroes.
+- Production authentication, D1 import staging/commit, live market-data ingestion, refresh/background jobs, advanced history/performance, deletion, and operational hardening remain after this milestone. Existing PENDING tasks stay PENDING and must not be promoted by preview work alone.
+- A fixture label is required in the preview shell and on the holding detail. Routine source/delay/timestamp labels remain absent; this is an intentional, visible exception because no live provider is involved.
+- “Cloudflare preview” means a non-production deployment using the repository’s preview configuration. The preview-only sample route must be unavailable in the production environment.
+
+### VSL-001 — Build a parsed sample-portfolio projection input
+
+Status: READY.
+
+- Objective: turn the supplied `docs/Example_Portfolio.csv` into a repeatable, non-persistent sample-portfolio input using the completed strict parser.
+- Dependencies: `IMP-001`, `UI-PROT-001`.
+- Requirements: `IMP-001`, `IMP-004`, `PRD-003`, `PRD-004`.
+- Files: preview-only CSV loader/adapter, fixture assertions, and focused parser-to-preview tests.
+- Deliver: a typed in-memory sample portfolio containing displayable securities, transactions, cash rows, currencies, and explicit exclusions/issues; no client-side raw CSV parsing and no D1 mutation.
+- Acceptance: the supplied CSV is parsed through the production parser rather than duplicated data; the known parser counts remain asserted; each included preview holding is traceable to parsed rows; unsupported/incomplete rows are explicit and do not become holdings or zero values.
+- Tests: supplied-file parse-to-projection fixture, deterministic ordering, malformed/unavailable projection state, and no-D1/no-network boundary test.
+- Risks: treating a CSV definition row as a trade or implying complete cash/history; retain the parser classification and preview limitations.
+- Parallel safe: no; this defines the shared preview data contract.
+
+### VSL-002 — Deterministic preview valuation contract
+
+Status: PENDING.
+
+- Objective: calculate the sample portfolio’s quantity, cost, current value, daily movement, and gain from decimal CSV facts plus deterministic price and FX fixtures.
+- Dependencies: `VSL-001`.
+- Requirements: `CALC-001`, `CALC-002`, `CALC-003`, `CALC-005`, `CALC-007`, `MKT-004`.
+- Files: preview calculation module, price/previous-close/FX fixtures, independently expected-result fixtures, and unit tests.
+- Deliver: a narrow chronological holding projection with explicit quantity/cost basis rules, selected current and previous fixture observations, and fixture FX conversion for every non-home-currency valuation; typed unavailable/partial outcomes.
+- Acceptance: expected holdings reconcile independently for quantity, cost, value, daily movement, and gain; price/FX direction is explicit; all financial inputs and outputs are decimal strings; a missing fixture price or FX renders the affected metric unavailable rather than zero; no historical chart, provider adapter, database, or background refresh is introduced.
+- Tests: same-currency and FX-valued holdings, direct/inverse/identity FX, buy/sell projection, gain/daily formula, rounding, missing price/FX, and fixture determinism.
+- Risks: silently substituting a simplified projection for the production FIFO ledger; name its rules in the preview explanation and keep `LED-002A`, `CALC-001A`, and `CALC-001B` pending.
+- Parallel safe: no; its result is the UI contract.
+
+### Demo checkpoint A — parsed and valued sample
+
+Gate: `VSL-001` and `VSL-002` are DONE.
+
+- Evidence: a developer can run the local preview data test and inspect a stable, human-readable sample result showing parsed-row counts plus at least one quantity/cost/value/daily/gain calculation and one fixture-FX case.
+- Review question: do the sample composition and calculated figures provide a credible basis for the product screens before UI integration?
+
+### VSL-003 — Preview-only route and fixture-data boundary
+
+Status: PENDING.
+
+- Objective: make the sample portfolio safely available to local development and Cloudflare preview routes without enabling a production data path.
+- Dependencies: `VSL-002`, `FND-002A`.
+- Requirements: `PRD-003`, `PRD-004`, `MKT-003`, `QUAL-002`.
+- Files: preview route/data boundary, environment guard, route tests, and configuration documentation.
+- Deliver: stable Overview, Holdings, and holding-detail route inputs sourced only from the sample projection; a concise `Fixture market data` indicator; local and preview configuration; production rejection/absence for the sample route.
+- Acceptance: no authenticated/session/D1/provider dependency is added; preview routes render from the same deterministic fixture result locally and in a Cloudflare preview; production does not expose the fixture portfolio; routine provenance labels are not added beyond the required fixture indicator.
+- Tests: local/preview allowed, production denied/absent, fixture indicator present, direct route rendering, and no provider-network request.
+- Risks: an accidentally public production demo or fixture data leaking into a future real-data route.
+- Parallel safe: no; establishes the review surface boundary.
+
+### VSL-004 — Connect the dense Overview and Holdings screens
+
+Status: PENDING.
+
+- Objective: replace the relevant prototype mock values with the parsed sample and deterministic valuation while preserving the approved dense mobile layout.
+- Dependencies: `VSL-003`.
+- Requirements: `PRD-003`, `PRD-004`, `CALC-002`, `CALC-003`, `CALC-005`, `CALC-007`, `QUAL-001`.
+- Files: Overview/Holdings preview components, visual/route tests, and approved capture evidence.
+- Deliver: Overview summary and Holdings list showing quantity, cost, current value, daily movement, and gain from `VSL-002`; native/home-currency presentation where fixture FX applies; compact four-column mobile rows and fixed summary consistent with `docs/UI_SPEC.md`.
+- Acceptance: Overview and Holdings are navigable at 320, 390, and 430 CSS pixels without document overflow; every shown total is derived from the shared projection; unavailable data reads `Price unavailable`; all populated preview screens visibly identify fixture market data without adding timestamp/source clutter.
+- Tests: calculated-value render assertions, Overview/Holdings navigation, unavailable-price state, 320/390/430 responsive screenshots, keyboard/touch navigation, format/lint/build.
+- Risks: fitting real calculated values into a layout designed around static examples; preserve the approved hierarchy rather than adding cards or horizontal scrolling.
+- Parallel safe: no; shared routes and layout.
+
+### Demo checkpoint B — interactive overview and holdings
+
+Gate: `VSL-003` and `VSL-004` are DONE.
+
+- Evidence: local iPhone-width walkthrough of Overview and Holdings using the supplied CSV, with the fixture-data indicator visible and calculated values matching the deterministic result.
+- Review question: does the dense mobile product now read as a credible portfolio app, and are the fixture labels clear without consuming meaningful screen space?
+
+### VSL-005 — Holding-detail drill-down
+
+Status: PENDING.
+
+- Objective: complete the review flow by linking a holding row to a compact detail view of its calculated facts and fixture-data explanation.
+- Dependencies: `VSL-004`.
+- Requirements: `PRD-003`, `PRD-004`, `PRD-005`, `CALC-002`, `CALC-003`, `CALC-005`.
+- Files: holding-detail route/component, navigation and render tests, screenshot evidence.
+- Deliver: direct holding route; row-level navigation from Holdings; security/currency/quantity/cost/current value/daily movement/gain facts; native/home display explanation where FX is used; concise fixture-data label.
+- Acceptance: direct navigation and back navigation work at iPhone widths; the detail facts exactly match Overview/Holdings values; there is no fabricated live status, chart, transaction editor, or production provenance UI.
+- Tests: direct/deep route render, row navigation, native/home fixture conversion, unavailable metric, 320/390 width captures, keyboard semantics.
+- Risks: detail expansion turning into the deferred ledger, provider, or advanced-performance surface.
+- Parallel safe: no; follows the final Overview/Holdings contract.
+
+### VSL-006 — Preview deployment and review evidence
+
+Status: PENDING.
+
+- Objective: publish the completed vertical slice to a Cloudflare preview and package the evidence required for owner review.
+- Dependencies: `VSL-005`.
+- Requirements: `PRD-003`, `PRD-004`, `QUAL-001`, `QUAL-002`.
+- Files: preview deployment configuration/evidence, capture manifest, and only fixes required by final verification.
+- Deliver: successful local run instructions; a non-production Cloudflare preview URL; 320/390/430 iPhone-width screenshots for Overview, Holdings, and holding detail; calculation/fixture evidence; deployed-route smoke evidence.
+- Acceptance: the deployed preview uses the supplied CSV and deterministic fixture values; Overview, Holdings, and holding detail work by direct URL; the fixture-data indicator is visible; screenshots show no horizontal overflow; `format:check`, lint, test, and production build pass; no production auth/live provider/background-job/deletion capability is enabled as part of deployment.
+- Tests: full repository quality gate, deployed preview smoke check, manual iPhone-width route walkthrough, and screenshot/capture manifest review.
+- Risks: preview credentials/configuration being mistaken for production configuration; retain explicit environment separation and do not commit secrets or preview data exports.
+- Parallel safe: no; serial release evidence task.
+
+### Demo checkpoint C — deployed vertical-slice review
+
+Gate: `VSL-005` and `VSL-006` are DONE.
+
+- Evidence: Cloudflare preview URL plus the required Overview, Holdings, and holding-detail iPhone-width screenshots and calculation fixture manifest.
+- Review question: approve the product direction before resuming production authentication, persistence, live market data, and operational work.
 
 ## Foundation
 

@@ -1,16 +1,34 @@
 # YieldToMe implementation plan
 
 Status: sequenced delivery plan  
-Date: 2026-07-28  
+Date: 2026-07-29
 Executable backlog: `TASKS.md`
 
 ## 1. Delivery strategy
 
-Build in vertical, reversible slices. Establish identity and ownership before financial endpoints; establish immutable ledger truth before projections; establish deterministic calculations before rich UI; establish the explicit owner/source scope before production ingestion.
+Build in vertical, reversible slices. The immediate milestone is a deliberately read-only, fixture-backed CSV portfolio preview that can be evaluated as a product before the production dependency spine resumes. It parses the supplied CSV, creates an in-memory sample portfolio, uses deterministic local price and FX fixtures, and exposes the Overview, Holdings, and holding-detail flow locally and in a Cloudflare preview deployment. It uses the approved dense mobile layout and clearly identifies fixture market data.
+
+This preview does not introduce production authentication, D1 import commit, live market-data ingestion, background jobs, advanced historical performance, deletion workflows, or operational hardening. Those remain the subsequent production phases below. The preview route is intentionally unavailable in production.
+
+After the preview milestone, establish identity and ownership before financial endpoints; establish immutable ledger truth before projections; establish deterministic calculations before rich UI; establish the explicit owner/source scope before production ingestion.
 
 The private production deployment supports a small administrator-invited user set. Tenant isolation is proved with real request context plus synthetic preview/test users. Provider access has no source-specific user-count, owner-binding, deployment-mode, monetization, redistribution, or external-use gate. The release can deliver ledger value without genuine real-time quotes, dividend forecasts, news, public registration, broker sync, or advanced performance metrics.
 
 ## 2. Phase gates
+
+### Immediate milestone — Demonstrable CSV portfolio preview
+
+Tasks: `VSL-001` through `VSL-006` in `TASKS.md`
+
+Gate:
+
+- the supplied CSV is parsed by the completed strict parser into a non-persistent sample portfolio;
+- deterministic decimal price, previous-close, and FX fixtures calculate quantity, cost, current value, daily movement, and gain;
+- the approved dense Overview and Holdings screens and holding detail use those shared results at iPhone widths;
+- mocked/fixture market data is visibly identified without routine provider/timestamp clutter;
+- a Cloudflare preview URL and 320/390/430 screenshots provide owner-review evidence.
+
+Checkpoint cadence: evaluate the parsed/valued sample after `VSL-002`, the local interactive screens after `VSL-004`, and the deployed preview after `VSL-006`. Do not promote later production tasks solely because preview dependencies are complete.
 
 ### Phase 0 — Foundation and decisions
 
