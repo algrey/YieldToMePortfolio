@@ -20,6 +20,10 @@ does not use production credentials. To expose that fixture-only surface for a
 short review session, run `cloudflared tunnel --url http://localhost:8788`.
 The resulting `trycloudflare.com` URL is temporary and public; it is not a
 production or private Access deployment and must not be used with real data.
+If the Worker is rebuilt while the harness remains running, its asset resolver
+uses the current CSS bundle for stale hashed stylesheet references so the page
+cannot silently render unstyled; unrelated missing assets return an explicit
+503 diagnostic.
 
 The VSL-006 review URL captured for this task is:
 

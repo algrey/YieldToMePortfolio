@@ -1,8 +1,8 @@
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAccessJwtFixture } from "../tests/fixtures/access-jwt.ts";
+import { readPreviewAsset } from "./preview-asset-resolver.mjs";
 
 const port = Number(process.env.PREVIEW_HARNESS_PORT ?? "8788");
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -33,19 +33,28 @@ async function fetchAsset(input) {
   );
   const relativePath = assetUrl.pathname.replace(/^\//, "");
 
-  try {
-    const body = await readFile(
-      join(repositoryRoot, "dist/client", relativePath),
-    );
-    return new Response(body, {
+  const asset = await readPreviewAsset(
+    join(repositoryRoot, "dist/client"),
+    relativePath,
+  );
+  if (asset) {
+    return new Response(asset.body, {
       headers: {
         "content-type":
           contentTypes[extname(relativePath)] ?? "application/octet-stream",
+        ...(asset.fallback
+          ? { "x-preview-asset-fallback": "current-css" }
+          : {}),
       },
     });
-  } catch {
-    return new Response("Not found", { status: 404 });
   }
+  return new Response(
+    "Preview asset unavailable; rebuild and restart the harness.",
+    {
+      status: 503,
+      headers: { "content-type": "text/plain" },
+    },
+  );
 }
 
 const server = createServer(async (request, response) => {
