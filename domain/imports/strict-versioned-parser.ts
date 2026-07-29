@@ -1075,6 +1075,22 @@ export async function parseStrictVersionedCsvImport(
     };
   }
 
+  if (decoded.includes("\u0000")) {
+    return {
+      ok: false,
+      parserVersion: SUPPORTED_IMPORT_PARSER_VERSION,
+      fileFingerprint,
+      code: "CSV_DECODE_FAILED",
+      message: "The supplied CSV contains NUL or binary content.",
+      issues: [
+        makeIssue(
+          "CSV_DECODE_FAILED",
+          "The supplied CSV contains NUL or binary content.",
+        ),
+      ],
+    };
+  }
+
   const rowsResult = parseCsvText(stripBom(decoded), limits);
   if (!rowsResult.ok) {
     return {

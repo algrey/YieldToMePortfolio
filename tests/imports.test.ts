@@ -102,6 +102,21 @@ test("handles quoted commas, embedded newlines, and formula-like text without ev
   );
 });
 
+test("rejects embedded NUL content as binary input", async () => {
+  const csv = new TextEncoder().encode(
+    makeCsv([`"1","ABC","Al\u0000pha",,"ASX","Main","AUD",,,,,,,,,,`]),
+  );
+
+  const result = await parseStrictVersionedCsvImport(csv);
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    return;
+  }
+
+  assert.equal(result.code, "CSV_DECODE_FAILED");
+  assert.match(result.message, /NUL or binary content/i);
+});
+
 test("classifies exact cash rows and blocks malformed cash encodings", async () => {
   const exactCash = makeCsv([
     `"1","AUD=CASH",,,"","Aus Super","AUD","150000","1","0","2025-08-01 GMT+1000","09:50:00",,"Buy",,,`,
