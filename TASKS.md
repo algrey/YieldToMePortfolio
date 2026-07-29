@@ -74,7 +74,7 @@ Gate: `VSL-001` and `VSL-002` are DONE.
 
 ### VSL-003 — Preview-only route and fixture-data boundary
 
-Status: READY.
+Status: DONE on 2026-07-29.
 
 - Objective: make the sample portfolio safely available to local development and Cloudflare preview routes without enabling a production data path.
 - Dependencies: `VSL-002`, `FND-002A`.
@@ -85,6 +85,7 @@ Status: READY.
 - Tests: local/preview allowed, production denied/absent, fixture indicator present, direct route rendering, and no provider-network request.
 - Risks: an accidentally public production demo or fixture data leaking into a future real-data route.
 - Parallel safe: no; establishes the review surface boundary.
+- Completion note: Added a preview-route boundary for `/portfolio/preview/*` with a visible `Fixture market data` indicator, preserved local/preview rendering, and returned 404 from production before the sample portfolio can leak into the public path.
 
 ### VSL-004 — Connect the dense Overview and Holdings screens
 

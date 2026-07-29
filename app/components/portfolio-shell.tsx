@@ -829,8 +829,12 @@ function HoldingSheet({
 
 export function PortfolioShell({
   activeSection,
+  reviewBadgeLabel = "Prototype · mock data",
+  reviewNote = "Static review build · local mock data · no financial writes",
 }: {
   activeSection: PortfolioSection;
+  reviewBadgeLabel?: string;
+  reviewNote?: string;
 }) {
   const router = useRouter();
   const [portfolioId, setPortfolioId] = useState("aus-stocks");
@@ -910,9 +914,7 @@ export function PortfolioShell({
           ) : null}
         </div>
 
-        <span className="prototype-chip desktop-only">
-          Prototype · mock data
-        </span>
+        <span className="prototype-chip desktop-only">{reviewBadgeLabel}</span>
 
         <div className="app-actions">
           <button
@@ -1091,9 +1093,7 @@ export function PortfolioShell({
               <span>Settings</span>
               <small>Prototype only</small>
             </button>
-            <p className="drawer-note">
-              Static review build · local mock data · no financial writes
-            </p>
+            <p className="drawer-note">{reviewNote}</p>
           </aside>
         </div>
       ) : null}

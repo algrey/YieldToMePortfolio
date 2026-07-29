@@ -42,6 +42,24 @@ const worker: ExportedHandler<Env> = {
       );
     }
 
+    const pathname = new URL(request.url).pathname;
+    if (
+      runtimeConfig.config.environment === "production" &&
+      pathname.startsWith("/portfolio/preview/")
+    ) {
+      return await applyResponseSecurityHeaders(
+        request,
+        new Response("Not found", {
+          status: 404,
+          headers: {
+            "cache-control": "private, no-store",
+            "content-type": "text/plain; charset=utf-8",
+          },
+        }),
+        nonce,
+      );
+    }
+
     const accessResult = await accessJwtVerifier.verify(
       request,
       runtimeConfig.config.access,

@@ -6,7 +6,7 @@ import { createAccessJwtFixture } from "./fixtures/access-jwt.ts";
 const accessFixture = createAccessJwtFixture();
 
 async function render(path = "/", options = {}) {
-  const { token = null, fetch = null } = options;
+  const { token = null, fetch = null, env = {} } = options;
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}-${path}`);
   const originalFetch = globalThis.fetch;
@@ -33,6 +33,7 @@ async function render(path = "/", options = {}) {
         MARKET_DATA_PROVIDER: "disabled",
         CLOUDFLARE_ACCESS_ISSUER: accessFixture.issuer,
         CLOUDFLARE_ACCESS_AUDIENCE: accessFixture.audience,
+        ...env,
       },
       {
         waitUntil() {},
@@ -72,31 +73,58 @@ test("server denies unauthenticated requests before rendering private content", 
 });
 
 test("server-renders a direct portfolio section route", async () => {
+  for (const environment of ["local", "preview"]) {
+    const response = await render("/portfolio/preview/holdings", {
+      token: accessFixture.signToken(),
+      fetch: async (input) => {
+        const requestUrl = new URL(
+          input instanceof Request ? input.url : input,
+        );
+        assert.match(requestUrl.hostname, /cloudflareaccess\.com$/i);
+        return accessFixture.createJwks().clone();
+      },
+      env: {
+        YIELDTOME_RUNTIME_ENV: environment,
+      },
+    });
+    assert.equal(response.status, 200);
+
+    const html = await response.text();
+    assert.match(html, /Fixture market data/);
+    assert.match(html, /PLS\.AX/);
+    assert.match(html, /Value \/ cost/);
+    assert.match(html, /A\$1\.965 × 20,000 shares/);
+    assert.match(html, /Unrealised/);
+    assert.match(html, /A\$1,266,664/);
+    assert.match(html, /Realised/);
+    assert.match(html, /\+A\$15,000/);
+    assert.match(html, /All-Time/);
+    assert.match(html, /\+A\$277,423/);
+    assert.doesNotMatch(html, /Hide details|Show details/);
+    assert.match(
+      html,
+      /overview[\s\S]*news[\s\S]*quotes[\s\S]*holdings[\s\S]*details/i,
+    );
+    assert.match(
+      html,
+      /href="\/portfolio\/preview\/holdings"[^>]*aria-current="page"|aria-current="page"[^>]*href="\/portfolio\/preview\/holdings"/,
+    );
+  }
+});
+
+test("production hides the preview sample route", async () => {
   const response = await render("/portfolio/preview/holdings", {
     token: accessFixture.signToken(),
     fetch: async () => accessFixture.createJwks().clone(),
+    env: {
+      YIELDTOME_RUNTIME_ENV: "production",
+      YIELDTOME_WORKERS_PLAN: "paid",
+    },
   });
-  assert.equal(response.status, 200);
 
+  assert.equal(response.status, 404);
   const html = await response.text();
-  assert.match(html, /PLS\.AX/);
-  assert.match(html, /Value \/ cost/);
-  assert.match(html, /A\$1\.965 × 20,000 shares/);
-  assert.match(html, /Unrealised/);
-  assert.match(html, /A\$1,266,664/);
-  assert.match(html, /Realised/);
-  assert.match(html, /\+A\$15,000/);
-  assert.match(html, /All-Time/);
-  assert.match(html, /\+A\$277,423/);
-  assert.doesNotMatch(html, /Hide details|Show details/);
-  assert.match(
-    html,
-    /overview[\s\S]*news[\s\S]*quotes[\s\S]*holdings[\s\S]*details/i,
-  );
-  assert.match(
-    html,
-    /href="\/portfolio\/preview\/holdings"[^>]*aria-current="page"|aria-current="page"[^>]*href="\/portfolio\/preview\/holdings"/,
-  );
+  assert.doesNotMatch(html, /Fixture market data|PLS\.AX|Value \/ cost/);
 });
 
 test("server-renders quote and detail prototype routes", async () => {

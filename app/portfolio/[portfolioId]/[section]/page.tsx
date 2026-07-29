@@ -19,11 +19,21 @@ type PortfolioSectionPageProps = {
 export default async function PortfolioSectionPage({
   params,
 }: PortfolioSectionPageProps) {
-  const { section } = await params;
+  const { portfolioId, section } = await params;
+
+  if (portfolioId !== "preview") {
+    notFound();
+  }
 
   if (!portfolioSections.includes(section as PortfolioSection)) {
     notFound();
   }
 
-  return <PortfolioShell activeSection={section as PortfolioSection} />;
+  return (
+    <PortfolioShell
+      activeSection={section as PortfolioSection}
+      reviewBadgeLabel="Fixture market data"
+      reviewNote="Static review build · fixture market data · no financial writes"
+    />
+  );
 }
