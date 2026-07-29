@@ -71,6 +71,8 @@ function validTransaction(
     tax_amount_decimal: "0",
     fx_rate_to_base_decimal: null,
     source_type: "manual",
+    reverses_transaction_id: null,
+    supersedes_transaction_id: null,
     created_by_user_id: "user-a",
     calculation_version: 1,
     created_at: "2026-07-29T00:00:00Z",
@@ -93,8 +95,8 @@ function insertTransaction(
           fx_rate_source, fx_observed_at, source_type, source_reference,
           import_row_id, reverses_transaction_id, supersedes_transaction_id,
           created_by_user_id, calculation_version, created_at, version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL,
-                  NULL, NULL, ?, NULL, NULL, NULL, NULL, ?, ?, ?, 1)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?, ?, ?)
       `,
     )
     .run(
@@ -106,16 +108,25 @@ function insertTransaction(
       values.status,
       values.trade_at,
       values.local_trade_date,
+      null,
       values.quantity_decimal,
       values.unit_price_decimal,
       values.currency_code,
       values.gross_amount_decimal,
       values.fee_amount_decimal,
       values.tax_amount_decimal,
+      null,
+      null,
+      null,
       values.source_type,
+      null,
+      null,
+      values.reverses_transaction_id,
+      values.supersedes_transaction_id,
       values.created_by_user_id,
       values.calculation_version,
       values.created_at,
+      1,
     );
 }
 
@@ -262,4 +273,38 @@ test("ledger tables enforce owner, portfolio, membership, import, and self-refer
       )
       .run();
   }, /FOREIGN KEY constraint failed/);
+
+  insertTransaction(
+    database,
+    validTransaction({
+      id: "transaction-reversal-1",
+      reverses_transaction_id: "transaction-a",
+    }),
+  );
+  assert.throws(() => {
+    insertTransaction(
+      database,
+      validTransaction({
+        id: "transaction-reversal-2",
+        reverses_transaction_id: "transaction-a",
+      }),
+    );
+  }, /UNIQUE constraint failed: transactions\.reverses_transaction_id/);
+
+  insertTransaction(
+    database,
+    validTransaction({
+      id: "transaction-supersession-1",
+      supersedes_transaction_id: "transaction-a",
+    }),
+  );
+  assert.throws(() => {
+    insertTransaction(
+      database,
+      validTransaction({
+        id: "transaction-supersession-2",
+        supersedes_transaction_id: "transaction-a",
+      }),
+    );
+  }, /UNIQUE constraint failed: transactions\.supersedes_transaction_id/);
 });

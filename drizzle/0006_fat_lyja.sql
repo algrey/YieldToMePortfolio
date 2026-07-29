@@ -1,0 +1,2 @@
+CREATE UNIQUE INDEX `transactions_one_reversal_unique` ON `transactions` (`reverses_transaction_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `transactions_one_supersession_unique` ON `transactions` (`supersedes_transaction_id`);

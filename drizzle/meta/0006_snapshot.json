@@ -1,0 +1,2616 @@
+{
+  "version": "6",
+  "dialect": "sqlite",
+  "id": "3a5af4b2-f1e7-4e0e-a467-2348a262cecc",
+  "prevId": "d6c777b4-2f3a-4a48-9308-40bc1ac814e7",
+  "tables": {
+    "cash_accounts": {
+      "name": "cash_accounts",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "portfolio_id": {
+          "name": "portfolio_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "currency_code": {
+          "name": "currency_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "completeness": {
+          "name": "completeness",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "cash_accounts_id_user_unique": {
+          "name": "cash_accounts_id_user_unique",
+          "columns": ["id", "user_id"],
+          "isUnique": true
+        },
+        "cash_accounts_id_user_portfolio_unique": {
+          "name": "cash_accounts_id_user_portfolio_unique",
+          "columns": ["id", "user_id", "portfolio_id"],
+          "isUnique": true
+        },
+        "cash_accounts_portfolio_currency_unique": {
+          "name": "cash_accounts_portfolio_currency_unique",
+          "columns": ["portfolio_id", "currency_code"],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "cash_accounts_portfolio_id_user_id_portfolios_id_user_id_fk": {
+          "name": "cash_accounts_portfolio_id_user_id_portfolios_id_user_id_fk",
+          "tableFrom": "cash_accounts",
+          "tableTo": "portfolios",
+          "columnsFrom": ["portfolio_id", "user_id"],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "cash_accounts_currency_code_currencies_code_fk": {
+          "name": "cash_accounts_currency_code_currencies_code_fk",
+          "tableFrom": "cash_accounts",
+          "tableTo": "currencies",
+          "columnsFrom": ["currency_code"],
+          "columnsTo": ["code"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "cash_accounts_completeness_check": {
+          "name": "cash_accounts_completeness_check",
+          "value": "\"cash_accounts\".\"completeness\" IN ('complete', 'opening_balance', 'incomplete')"
+        },
+        "cash_accounts_status_check": {
+          "name": "cash_accounts_status_check",
+          "value": "\"cash_accounts\".\"status\" IN ('active', 'closed')"
+        }
+      }
+    },
+    "cash_ledger_entries": {
+      "name": "cash_ledger_entries",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "portfolio_id": {
+          "name": "portfolio_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "cash_account_id": {
+          "name": "cash_account_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "transaction_id": {
+          "name": "transaction_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "effective_at": {
+          "name": "effective_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "local_effective_date": {
+          "name": "local_effective_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "type": {
+          "name": "type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "signed_amount_decimal": {
+          "name": "signed_amount_decimal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "reverses_entry_id": {
+          "name": "reverses_entry_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "cash_entries_id_user_portfolio_unique": {
+          "name": "cash_entries_id_user_portfolio_unique",
+          "columns": ["id", "user_id", "portfolio_id"],
+          "isUnique": true
+        },
+        "cash_entries_transaction_type_unique": {
+          "name": "cash_entries_transaction_type_unique",
+          "columns": ["transaction_id", "type"],
+          "isUnique": true
+        },
+        "cash_entries_balance_idx": {
+          "name": "cash_entries_balance_idx",
+          "columns": ["cash_account_id", "effective_at", "id"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "cash_entries_portfolio_id_user_id_portfolios_id_user_id_fk": {
+          "name": "cash_entries_portfolio_id_user_id_portfolios_id_user_id_fk",
+          "tableFrom": "cash_ledger_entries",
+          "tableTo": "portfolios",
+          "columnsFrom": ["portfolio_id", "user_id"],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "cash_entries_cash_account_id_user_id_portfolio_id_fk": {
+          "name": "cash_entries_cash_account_id_user_id_portfolio_id_fk",
+          "tableFrom": "cash_ledger_entries",
+          "tableTo": "cash_accounts",
+          "columnsFrom": ["cash_account_id", "user_id", "portfolio_id"],
+          "columnsTo": ["id", "user_id", "portfolio_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "cash_entries_transaction_id_user_id_portfolio_id_fk": {
+          "name": "cash_entries_transaction_id_user_id_portfolio_id_fk",
+          "tableFrom": "cash_ledger_entries",
+          "tableTo": "transactions",
+          "columnsFrom": ["transaction_id", "user_id", "portfolio_id"],
+          "columnsTo": ["id", "user_id", "portfolio_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "cash_entries_reverses_entry_id_user_id_portfolio_id_fk": {
+          "name": "cash_entries_reverses_entry_id_user_id_portfolio_id_fk",
+          "tableFrom": "cash_ledger_entries",
+          "tableTo": "cash_ledger_entries",
+          "columnsFrom": ["reverses_entry_id", "user_id", "portfolio_id"],
+          "columnsTo": ["id", "user_id", "portfolio_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "cash_entries_status_check": {
+          "name": "cash_entries_status_check",
+          "value": "\"cash_ledger_entries\".\"status\" IN ('posted', 'reversed')"
+        },
+        "cash_entries_type_check": {
+          "name": "cash_entries_type_check",
+          "value": "\"cash_ledger_entries\".\"type\" IN ('cash_deposit', 'cash_withdrawal', 'fee', 'tax', 'opening_balance', 'split')"
+        }
+      }
+    },
+    "currencies": {
+      "name": "currencies",
+      "columns": {
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "numeric_code": {
+          "name": "numeric_code",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "minor_unit_digits": {
+          "name": "minor_unit_digits",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "currencies_minor_unit_digits_check": {
+          "name": "currencies_minor_unit_digits_check",
+          "value": "\"currencies\".\"minor_unit_digits\" BETWEEN 0 AND 8"
+        },
+        "currencies_is_active_check": {
+          "name": "currencies_is_active_check",
+          "value": "\"currencies\".\"is_active\" IN (0, 1)"
+        }
+      }
+    },
+    "exchanges": {
+      "name": "exchanges",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mic": {
+          "name": "mic",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "country_code": {
+          "name": "country_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "timezone": {
+          "name": "timezone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "default_currency_code": {
+          "name": "default_currency_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "calendar_code": {
+          "name": "calendar_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
+        }
+      },
+      "indexes": {
+        "exchanges_mic_unique": {
+          "name": "exchanges_mic_unique",
+          "columns": ["mic"],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "exchanges_default_currency_code_currencies_code_fk": {
+          "name": "exchanges_default_currency_code_currencies_code_fk",
+          "tableFrom": "exchanges",
+          "tableTo": "currencies",
+          "columnsFrom": ["default_currency_code"],
+          "columnsTo": ["code"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "exchanges_is_active_check": {
+          "name": "exchanges_is_active_check",
+          "value": "\"exchanges\".\"is_active\" IN (0, 1)"
+        }
+      }
+    },
+    "import_batches": {
+      "name": "import_batches",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "target_portfolio_id": {
+          "name": "target_portfolio_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "parser_format": {
+          "name": "parser_format",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "parser_version": {
+          "name": "parser_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "filename": {
+          "name": "filename",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "byte_size": {
+          "name": "byte_size",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "file_sha256": {
+          "name": "file_sha256",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'uploaded'"
+        },
+        "total_rows": {
+          "name": "total_rows",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "blank_rows": {
+          "name": "blank_rows",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "definition_rows": {
+          "name": "definition_rows",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "transaction_rows": {
+          "name": "transaction_rows",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "unsupported_rows": {
+          "name": "unsupported_rows",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "duplicate_rows": {
+          "name": "duplicate_rows",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "error_count": {
+          "name": "error_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "warning_count": {
+          "name": "warning_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "info_count": {
+          "name": "info_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "commit_idempotency_key": {
+          "name": "commit_idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "reversal_idempotency_key": {
+          "name": "reversal_idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "supersedes_batch_id": {
+          "name": "supersedes_batch_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "failure_category": {
+          "name": "failure_category",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "failure_detail": {
+          "name": "failure_detail",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "parsed_at": {
+          "name": "parsed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "committed_at": {
+          "name": "committed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "reversed_at": {
+          "name": "reversed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        }
+      },
+      "indexes": {
+        "import_batches_user_file_parser_unique": {
+          "name": "import_batches_user_file_parser_unique",
+          "columns": [
+            "user_id",
+            "file_sha256",
+            "parser_format",
+            "parser_version"
+          ],
+          "isUnique": true
+        },
+        "import_batches_id_user_unique": {
+          "name": "import_batches_id_user_unique",
+          "columns": ["id", "user_id"],
+          "isUnique": true
+        },
+        "import_batches_owner_status_updated_at_idx": {
+          "name": "import_batches_owner_status_updated_at_idx",
+          "columns": ["user_id", "status", "updated_at"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "import_batches_user_id_users_id_fk": {
+          "name": "import_batches_user_id_users_id_fk",
+          "tableFrom": "import_batches",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "import_batches_target_portfolio_id_user_id_portfolios_id_user_id_fk": {
+          "name": "import_batches_target_portfolio_id_user_id_portfolios_id_user_id_fk",
+          "tableFrom": "import_batches",
+          "tableTo": "portfolios",
+          "columnsFrom": ["target_portfolio_id", "user_id"],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "import_batches_supersedes_batch_id_user_id_import_batches_id_user_id_fk": {
+          "name": "import_batches_supersedes_batch_id_user_id_import_batches_id_user_id_fk",
+          "tableFrom": "import_batches",
+          "tableTo": "import_batches",
+          "columnsFrom": ["supersedes_batch_id", "user_id"],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "import_batches_status_check": {
+          "name": "import_batches_status_check",
+          "value": "\"import_batches\".\"status\" IN ('uploaded', 'parsed', 'needs_mapping', 'invalid', 'ready', 'committing', 'committed', 'reversing', 'reversed', 'failed')"
+        },
+        "import_batches_byte_size_check": {
+          "name": "import_batches_byte_size_check",
+          "value": "\"import_batches\".\"byte_size\" >= 0"
+        },
+        "import_batches_total_rows_check": {
+          "name": "import_batches_total_rows_check",
+          "value": "\"import_batches\".\"total_rows\" >= 0"
+        },
+        "import_batches_blank_rows_check": {
+          "name": "import_batches_blank_rows_check",
+          "value": "\"import_batches\".\"blank_rows\" >= 0"
+        },
+        "import_batches_definition_rows_check": {
+          "name": "import_batches_definition_rows_check",
+          "value": "\"import_batches\".\"definition_rows\" >= 0"
+        },
+        "import_batches_transaction_rows_check": {
+          "name": "import_batches_transaction_rows_check",
+          "value": "\"import_batches\".\"transaction_rows\" >= 0"
+        },
+        "import_batches_unsupported_rows_check": {
+          "name": "import_batches_unsupported_rows_check",
+          "value": "\"import_batches\".\"unsupported_rows\" >= 0"
+        },
+        "import_batches_duplicate_rows_check": {
+          "name": "import_batches_duplicate_rows_check",
+          "value": "\"import_batches\".\"duplicate_rows\" >= 0"
+        },
+        "import_batches_error_count_check": {
+          "name": "import_batches_error_count_check",
+          "value": "\"import_batches\".\"error_count\" >= 0"
+        },
+        "import_batches_warning_count_check": {
+          "name": "import_batches_warning_count_check",
+          "value": "\"import_batches\".\"warning_count\" >= 0"
+        },
+        "import_batches_info_count_check": {
+          "name": "import_batches_info_count_check",
+          "value": "\"import_batches\".\"info_count\" >= 0"
+        }
+      }
+    },
+    "import_issues": {
+      "name": "import_issues",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "batch_id": {
+          "name": "batch_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "row_id": {
+          "name": "row_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "physical_row_number": {
+          "name": "physical_row_number",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "field": {
+          "name": "field",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "severity": {
+          "name": "severity",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "message": {
+          "name": "message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "suggested_resolution_type": {
+          "name": "suggested_resolution_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "resolved_value": {
+          "name": "resolved_value",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "resolved_by_user_id": {
+          "name": "resolved_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "resolved_at": {
+          "name": "resolved_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        }
+      },
+      "indexes": {
+        "import_issues_id_user_unique": {
+          "name": "import_issues_id_user_unique",
+          "columns": ["id", "user_id"],
+          "isUnique": true
+        },
+        "import_issues_batch_row_idx": {
+          "name": "import_issues_batch_row_idx",
+          "columns": ["batch_id", "row_id", "physical_row_number"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "import_issues_batch_id_user_id_import_batches_id_user_id_fk": {
+          "name": "import_issues_batch_id_user_id_import_batches_id_user_id_fk",
+          "tableFrom": "import_issues",
+          "tableTo": "import_batches",
+          "columnsFrom": ["batch_id", "user_id"],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "import_issues_row_id_user_id_import_rows_id_user_id_fk": {
+          "name": "import_issues_row_id_user_id_import_rows_id_user_id_fk",
+          "tableFrom": "import_issues",
+          "tableTo": "import_rows",
+          "columnsFrom": ["row_id", "user_id"],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "import_issues_resolved_by_user_id_users_id_fk": {
+          "name": "import_issues_resolved_by_user_id_users_id_fk",
+          "tableFrom": "import_issues",
+          "tableTo": "users",
+          "columnsFrom": ["resolved_by_user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "import_issues_severity_check": {
+          "name": "import_issues_severity_check",
+          "value": "\"import_issues\".\"severity\" IN ('error', 'warning', 'info')"
+        }
+      }
+    },
+    "import_rows": {
+      "name": "import_rows",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "batch_id": {
+          "name": "batch_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "physical_row_number": {
+          "name": "physical_row_number",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "row_class": {
+          "name": "row_class",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "original_fields_json": {
+          "name": "original_fields_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "normalized_fields_json": {
+          "name": "normalized_fields_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "normalized_fingerprint": {
+          "name": "normalized_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "validation_status": {
+          "name": "validation_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'staged'"
+        },
+        "target_portfolio_id": {
+          "name": "target_portfolio_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "target_portfolio_security_id": {
+          "name": "target_portfolio_security_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "commit_status": {
+          "name": "commit_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'staged'"
+        },
+        "commit_transaction_id": {
+          "name": "commit_transaction_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "error_count": {
+          "name": "error_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "warning_count": {
+          "name": "warning_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "info_count": {
+          "name": "info_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        }
+      },
+      "indexes": {
+        "import_rows_batch_physical_row_unique": {
+          "name": "import_rows_batch_physical_row_unique",
+          "columns": ["batch_id", "physical_row_number"],
+          "isUnique": true
+        },
+        "import_rows_id_user_unique": {
+          "name": "import_rows_id_user_unique",
+          "columns": ["id", "user_id"],
+          "isUnique": true
+        },
+        "import_rows_id_user_portfolio_unique": {
+          "name": "import_rows_id_user_portfolio_unique",
+          "columns": ["id", "user_id", "target_portfolio_id"],
+          "isUnique": true
+        },
+        "import_rows_review_idx": {
+          "name": "import_rows_review_idx",
+          "columns": ["batch_id", "validation_status", "physical_row_number"],
+          "isUnique": false
+        },
+        "import_rows_user_normalized_fingerprint_idx": {
+          "name": "import_rows_user_normalized_fingerprint_idx",
+          "columns": ["user_id", "normalized_fingerprint"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "import_rows_batch_id_user_id_import_batches_id_user_id_fk": {
+          "name": "import_rows_batch_id_user_id_import_batches_id_user_id_fk",
+          "tableFrom": "import_rows",
+          "tableTo": "import_batches",
+          "columnsFrom": ["batch_id", "user_id"],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "import_rows_target_portfolio_id_user_id_portfolios_id_user_id_fk": {
+          "name": "import_rows_target_portfolio_id_user_id_portfolios_id_user_id_fk",
+          "tableFrom": "import_rows",
+          "tableTo": "portfolios",
+          "columnsFrom": ["target_portfolio_id", "user_id"],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "import_rows_target_portfolio_security_id_user_id_portfolio_id_portfolio_securities_id_user_id_portfolio_id_fk": {
+          "name": "import_rows_target_portfolio_security_id_user_id_portfolio_id_portfolio_securities_id_user_id_portfolio_id_fk",
+          "tableFrom": "import_rows",
+          "tableTo": "portfolio_securities",
+          "columnsFrom": [
+            "target_portfolio_security_id",
+            "user_id",
+            "target_portfolio_id"
+          ],
+          "columnsTo": ["id", "user_id", "portfolio_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "import_rows_physical_row_number_check": {
+          "name": "import_rows_physical_row_number_check",
+          "value": "\"import_rows\".\"physical_row_number\" > 1"
+        },
+        "import_rows_row_class_check": {
+          "name": "import_rows_row_class_check",
+          "value": "\"import_rows\".\"row_class\" IN ('portfolio_security_definition', 'transaction', 'blank', 'unsupported')"
+        },
+        "import_rows_validation_status_check": {
+          "name": "import_rows_validation_status_check",
+          "value": "\"import_rows\".\"validation_status\" IN ('staged', 'valid', 'needs_mapping', 'invalid')"
+        },
+        "import_rows_commit_status_check": {
+          "name": "import_rows_commit_status_check",
+          "value": "\"import_rows\".\"commit_status\" IN ('staged', 'committed', 'skipped', 'reversed', 'failed')"
+        },
+        "import_rows_error_count_check": {
+          "name": "import_rows_error_count_check",
+          "value": "\"import_rows\".\"error_count\" >= 0"
+        },
+        "import_rows_warning_count_check": {
+          "name": "import_rows_warning_count_check",
+          "value": "\"import_rows\".\"warning_count\" >= 0"
+        },
+        "import_rows_info_count_check": {
+          "name": "import_rows_info_count_check",
+          "value": "\"import_rows\".\"info_count\" >= 0"
+        }
+      }
+    },
+    "market_data_providers": {
+      "name": "market_data_providers",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'disabled'"
+        },
+        "capabilities_json": {
+          "name": "capabilities_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "rate_limit_json": {
+          "name": "rate_limit_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "technically_reviewed_at": {
+          "name": "technically_reviewed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "operator_notes_reference": {
+          "name": "operator_notes_reference",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "market_data_providers_code_unique": {
+          "name": "market_data_providers_code_unique",
+          "columns": ["code"],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "market_data_providers_status_check": {
+          "name": "market_data_providers_status_check",
+          "value": "\"market_data_providers\".\"status\" IN ('disabled', 'enabled', 'suspended')"
+        }
+      }
+    },
+    "portfolio_securities": {
+      "name": "portfolio_securities",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "portfolio_id": {
+          "name": "portfolio_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "security_id": {
+          "name": "security_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source_symbol": {
+          "name": "source_symbol",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_exchange_alias": {
+          "name": "source_exchange_alias",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source_currency_code": {
+          "name": "source_currency_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_name": {
+          "name": "source_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "display_symbol": {
+          "name": "display_symbol",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "display_name": {
+          "name": "display_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'unresolved'"
+        },
+        "first_relevant_date": {
+          "name": "first_relevant_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "last_relevant_date": {
+          "name": "last_relevant_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "portfolio_securities_id_user_portfolio_unique": {
+          "name": "portfolio_securities_id_user_portfolio_unique",
+          "columns": ["id", "user_id", "portfolio_id"],
+          "isUnique": true
+        },
+        "portfolio_securities_resolved_unique": {
+          "name": "portfolio_securities_resolved_unique",
+          "columns": ["portfolio_id", "security_id"],
+          "isUnique": true,
+          "where": "\"portfolio_securities\".\"security_id\" IS NOT NULL"
+        },
+        "portfolio_securities_owner_portfolio_status_idx": {
+          "name": "portfolio_securities_owner_portfolio_status_idx",
+          "columns": ["user_id", "portfolio_id", "status"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "portfolio_securities_portfolio_id_user_id_portfolios_id_user_id_fk": {
+          "name": "portfolio_securities_portfolio_id_user_id_portfolios_id_user_id_fk",
+          "tableFrom": "portfolio_securities",
+          "tableTo": "portfolios",
+          "columnsFrom": ["portfolio_id", "user_id"],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "portfolio_securities_security_id_securities_id_fk": {
+          "name": "portfolio_securities_security_id_securities_id_fk",
+          "tableFrom": "portfolio_securities",
+          "tableTo": "securities",
+          "columnsFrom": ["security_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "portfolio_securities_source_currency_code_currencies_code_fk": {
+          "name": "portfolio_securities_source_currency_code_currencies_code_fk",
+          "tableFrom": "portfolio_securities",
+          "tableTo": "currencies",
+          "columnsFrom": ["source_currency_code"],
+          "columnsTo": ["code"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "portfolio_securities_status_check": {
+          "name": "portfolio_securities_status_check",
+          "value": "\"portfolio_securities\".\"status\" IN ('held', 'watch', 'hidden', 'unresolved')"
+        },
+        "portfolio_securities_resolution_check": {
+          "name": "portfolio_securities_resolution_check",
+          "value": "(\"portfolio_securities\".\"status\" = 'unresolved' AND \"portfolio_securities\".\"security_id\" IS NULL) OR (\"portfolio_securities\".\"status\" <> 'unresolved' AND \"portfolio_securities\".\"security_id\" IS NOT NULL)"
+        },
+        "portfolio_securities_relevant_dates_check": {
+          "name": "portfolio_securities_relevant_dates_check",
+          "value": "\"portfolio_securities\".\"last_relevant_date\" IS NULL OR \"portfolio_securities\".\"first_relevant_date\" IS NULL OR \"portfolio_securities\".\"last_relevant_date\" >= \"portfolio_securities\".\"first_relevant_date\""
+        }
+      }
+    },
+    "portfolio_settings": {
+      "name": "portfolio_settings",
+      "columns": {
+        "portfolio_id": {
+          "name": "portfolio_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "quote_staleness_policy": {
+          "name": "quote_staleness_policy",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        }
+      },
+      "indexes": {
+        "portfolio_settings_portfolio_user_unique": {
+          "name": "portfolio_settings_portfolio_user_unique",
+          "columns": ["portfolio_id", "user_id"],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "portfolio_settings_portfolio_id_user_id_portfolios_id_user_id_fk": {
+          "name": "portfolio_settings_portfolio_id_user_id_portfolios_id_user_id_fk",
+          "tableFrom": "portfolio_settings",
+          "tableTo": "portfolios",
+          "columnsFrom": ["portfolio_id", "user_id"],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "portfolios": {
+      "name": "portfolios",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "base_currency_code": {
+          "name": "base_currency_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "timezone": {
+          "name": "timezone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "accounting_method": {
+          "name": "accounting_method",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'fifo'"
+        },
+        "history_complete_from": {
+          "name": "history_complete_from",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'active'"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        }
+      },
+      "indexes": {
+        "portfolios_id_user_id_unique": {
+          "name": "portfolios_id_user_id_unique",
+          "columns": ["id", "user_id"],
+          "isUnique": true
+        },
+        "portfolios_user_id_code_unique": {
+          "name": "portfolios_user_id_code_unique",
+          "columns": ["user_id", "code"],
+          "isUnique": true
+        },
+        "portfolios_owner_status_updated_at_idx": {
+          "name": "portfolios_owner_status_updated_at_idx",
+          "columns": ["user_id", "status", "updated_at"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "portfolios_user_id_users_id_fk": {
+          "name": "portfolios_user_id_users_id_fk",
+          "tableFrom": "portfolios",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "portfolios_base_currency_code_currencies_code_fk": {
+          "name": "portfolios_base_currency_code_currencies_code_fk",
+          "tableFrom": "portfolios",
+          "tableTo": "currencies",
+          "columnsFrom": ["base_currency_code"],
+          "columnsTo": ["code"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "portfolios_accounting_method_check": {
+          "name": "portfolios_accounting_method_check",
+          "value": "\"portfolios\".\"accounting_method\" = 'fifo'"
+        },
+        "portfolios_status_check": {
+          "name": "portfolios_status_check",
+          "value": "\"portfolios\".\"status\" IN ('active', 'archived')"
+        }
+      }
+    },
+    "securities": {
+      "name": "securities",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "asset_type": {
+          "name": "asset_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "exchange_id": {
+          "name": "exchange_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "primary_currency_code": {
+          "name": "primary_currency_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "canonical_name": {
+          "name": "canonical_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "isin": {
+          "name": "isin",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'active'"
+        },
+        "first_trade_date": {
+          "name": "first_trade_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "last_trade_date": {
+          "name": "last_trade_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "securities_isin_unique": {
+          "name": "securities_isin_unique",
+          "columns": ["isin"],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "securities_exchange_id_exchanges_id_fk": {
+          "name": "securities_exchange_id_exchanges_id_fk",
+          "tableFrom": "securities",
+          "tableTo": "exchanges",
+          "columnsFrom": ["exchange_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "securities_primary_currency_code_currencies_code_fk": {
+          "name": "securities_primary_currency_code_currencies_code_fk",
+          "tableFrom": "securities",
+          "tableTo": "currencies",
+          "columnsFrom": ["primary_currency_code"],
+          "columnsTo": ["code"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "securities_asset_type_check": {
+          "name": "securities_asset_type_check",
+          "value": "\"securities\".\"asset_type\" IN ('equity', 'etf', 'fund')"
+        },
+        "securities_status_check": {
+          "name": "securities_status_check",
+          "value": "\"securities\".\"status\" IN ('active', 'delisted')"
+        },
+        "securities_trade_dates_check": {
+          "name": "securities_trade_dates_check",
+          "value": "\"securities\".\"last_trade_date\" IS NULL OR \"securities\".\"first_trade_date\" IS NULL OR \"securities\".\"last_trade_date\" >= \"securities\".\"first_trade_date\""
+        }
+      }
+    },
+    "security_identifiers": {
+      "name": "security_identifiers",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "security_id": {
+          "name": "security_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "scheme": {
+          "name": "scheme",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "value": {
+          "name": "value",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "exchange_id": {
+          "name": "exchange_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "valid_from": {
+          "name": "valid_from",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "valid_to": {
+          "name": "valid_to",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "security_identifiers_lookup_idx": {
+          "name": "security_identifiers_lookup_idx",
+          "columns": [
+            "scheme",
+            "value",
+            "exchange_id",
+            "valid_from",
+            "valid_to"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "security_identifiers_security_id_securities_id_fk": {
+          "name": "security_identifiers_security_id_securities_id_fk",
+          "tableFrom": "security_identifiers",
+          "tableTo": "securities",
+          "columnsFrom": ["security_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "security_identifiers_exchange_id_exchanges_id_fk": {
+          "name": "security_identifiers_exchange_id_exchanges_id_fk",
+          "tableFrom": "security_identifiers",
+          "tableTo": "exchanges",
+          "columnsFrom": ["exchange_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "security_identifiers_validity_check": {
+          "name": "security_identifiers_validity_check",
+          "value": "\"security_identifiers\".\"valid_to\" IS NULL OR \"security_identifiers\".\"valid_to\" >= \"security_identifiers\".\"valid_from\""
+        }
+      }
+    },
+    "security_provider_mappings": {
+      "name": "security_provider_mappings",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "security_id": {
+          "name": "security_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider_id": {
+          "name": "provider_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider_exchange": {
+          "name": "provider_exchange",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider_symbol": {
+          "name": "provider_symbol",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "valid_from": {
+          "name": "valid_from",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "valid_to": {
+          "name": "valid_to",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'candidate'"
+        },
+        "verified_by_user_id": {
+          "name": "verified_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "verified_at": {
+          "name": "verified_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "security_provider_mappings_provider_symbol_from_unique": {
+          "name": "security_provider_mappings_provider_symbol_from_unique",
+          "columns": [
+            "provider_id",
+            "provider_exchange",
+            "provider_symbol",
+            "valid_from"
+          ],
+          "isUnique": true
+        },
+        "security_provider_mappings_id_provider_unique": {
+          "name": "security_provider_mappings_id_provider_unique",
+          "columns": ["id", "provider_id"],
+          "isUnique": true
+        },
+        "security_provider_mappings_id_provider_security_unique": {
+          "name": "security_provider_mappings_id_provider_security_unique",
+          "columns": ["id", "provider_id", "security_id"],
+          "isUnique": true
+        },
+        "security_provider_mappings_security_provider_valid_to_idx": {
+          "name": "security_provider_mappings_security_provider_valid_to_idx",
+          "columns": ["security_id", "provider_id", "valid_to"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "security_provider_mappings_security_id_securities_id_fk": {
+          "name": "security_provider_mappings_security_id_securities_id_fk",
+          "tableFrom": "security_provider_mappings",
+          "tableTo": "securities",
+          "columnsFrom": ["security_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "security_provider_mappings_provider_id_market_data_providers_id_fk": {
+          "name": "security_provider_mappings_provider_id_market_data_providers_id_fk",
+          "tableFrom": "security_provider_mappings",
+          "tableTo": "market_data_providers",
+          "columnsFrom": ["provider_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "security_provider_mappings_verified_by_user_id_users_id_fk": {
+          "name": "security_provider_mappings_verified_by_user_id_users_id_fk",
+          "tableFrom": "security_provider_mappings",
+          "tableTo": "users",
+          "columnsFrom": ["verified_by_user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "security_provider_mappings_status_check": {
+          "name": "security_provider_mappings_status_check",
+          "value": "\"security_provider_mappings\".\"status\" IN ('candidate', 'verified', 'rejected', 'expired')"
+        },
+        "security_provider_mappings_validity_check": {
+          "name": "security_provider_mappings_validity_check",
+          "value": "\"security_provider_mappings\".\"valid_to\" IS NULL OR \"security_provider_mappings\".\"valid_to\" >= \"security_provider_mappings\".\"valid_from\""
+        }
+      }
+    },
+    "transactions": {
+      "name": "transactions",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "portfolio_id": {
+          "name": "portfolio_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "portfolio_security_id": {
+          "name": "portfolio_security_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "type": {
+          "name": "type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "trade_at": {
+          "name": "trade_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "local_trade_date": {
+          "name": "local_trade_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "settlement_date": {
+          "name": "settlement_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "quantity_decimal": {
+          "name": "quantity_decimal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "unit_price_decimal": {
+          "name": "unit_price_decimal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "currency_code": {
+          "name": "currency_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "gross_amount_decimal": {
+          "name": "gross_amount_decimal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "fee_amount_decimal": {
+          "name": "fee_amount_decimal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'0'"
+        },
+        "tax_amount_decimal": {
+          "name": "tax_amount_decimal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'0'"
+        },
+        "fx_rate_to_base_decimal": {
+          "name": "fx_rate_to_base_decimal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "fx_rate_source": {
+          "name": "fx_rate_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "fx_observed_at": {
+          "name": "fx_observed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source_type": {
+          "name": "source_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_reference": {
+          "name": "source_reference",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "import_row_id": {
+          "name": "import_row_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "reverses_transaction_id": {
+          "name": "reverses_transaction_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "supersedes_transaction_id": {
+          "name": "supersedes_transaction_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_by_user_id": {
+          "name": "created_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "calculation_version": {
+          "name": "calculation_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        }
+      },
+      "indexes": {
+        "transactions_id_user_unique": {
+          "name": "transactions_id_user_unique",
+          "columns": ["id", "user_id"],
+          "isUnique": true
+        },
+        "transactions_id_user_portfolio_unique": {
+          "name": "transactions_id_user_portfolio_unique",
+          "columns": ["id", "user_id", "portfolio_id"],
+          "isUnique": true
+        },
+        "transactions_id_user_portfolio_security_unique": {
+          "name": "transactions_id_user_portfolio_security_unique",
+          "columns": ["id", "user_id", "portfolio_id", "portfolio_security_id"],
+          "isUnique": true
+        },
+        "transactions_portfolio_source_reference_unique": {
+          "name": "transactions_portfolio_source_reference_unique",
+          "columns": ["portfolio_id", "source_type", "source_reference"],
+          "isUnique": true
+        },
+        "transactions_one_reversal_unique": {
+          "name": "transactions_one_reversal_unique",
+          "columns": ["reverses_transaction_id"],
+          "isUnique": true
+        },
+        "transactions_one_supersession_unique": {
+          "name": "transactions_one_supersession_unique",
+          "columns": ["supersedes_transaction_id"],
+          "isUnique": true
+        },
+        "transactions_owner_ledger_idx": {
+          "name": "transactions_owner_ledger_idx",
+          "columns": ["user_id", "portfolio_id", "local_trade_date", "id"],
+          "isUnique": false
+        },
+        "transactions_security_trade_idx": {
+          "name": "transactions_security_trade_idx",
+          "columns": ["portfolio_id", "portfolio_security_id", "trade_at"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "transactions_portfolio_id_user_id_portfolios_id_user_id_fk": {
+          "name": "transactions_portfolio_id_user_id_portfolios_id_user_id_fk",
+          "tableFrom": "transactions",
+          "tableTo": "portfolios",
+          "columnsFrom": ["portfolio_id", "user_id"],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "transactions_portfolio_security_id_user_id_portfolio_id_fk": {
+          "name": "transactions_portfolio_security_id_user_id_portfolio_id_fk",
+          "tableFrom": "transactions",
+          "tableTo": "portfolio_securities",
+          "columnsFrom": ["portfolio_security_id", "user_id", "portfolio_id"],
+          "columnsTo": ["id", "user_id", "portfolio_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "transactions_currency_code_currencies_code_fk": {
+          "name": "transactions_currency_code_currencies_code_fk",
+          "tableFrom": "transactions",
+          "tableTo": "currencies",
+          "columnsFrom": ["currency_code"],
+          "columnsTo": ["code"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "transactions_import_row_id_user_id_portfolio_id_fk": {
+          "name": "transactions_import_row_id_user_id_portfolio_id_fk",
+          "tableFrom": "transactions",
+          "tableTo": "import_rows",
+          "columnsFrom": ["import_row_id", "user_id", "portfolio_id"],
+          "columnsTo": ["id", "user_id", "target_portfolio_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "transactions_reverses_transaction_id_user_id_portfolio_id_fk": {
+          "name": "transactions_reverses_transaction_id_user_id_portfolio_id_fk",
+          "tableFrom": "transactions",
+          "tableTo": "transactions",
+          "columnsFrom": ["reverses_transaction_id", "user_id", "portfolio_id"],
+          "columnsTo": ["id", "user_id", "portfolio_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "transactions_supersedes_transaction_id_user_id_portfolio_id_fk": {
+          "name": "transactions_supersedes_transaction_id_user_id_portfolio_id_fk",
+          "tableFrom": "transactions",
+          "tableTo": "transactions",
+          "columnsFrom": [
+            "supersedes_transaction_id",
+            "user_id",
+            "portfolio_id"
+          ],
+          "columnsTo": ["id", "user_id", "portfolio_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "transactions_created_by_user_id_users_id_fk": {
+          "name": "transactions_created_by_user_id_users_id_fk",
+          "tableFrom": "transactions",
+          "tableTo": "users",
+          "columnsFrom": ["created_by_user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "transactions_type_check": {
+          "name": "transactions_type_check",
+          "value": "\"transactions\".\"type\" IN ('buy', 'sell', 'cash_deposit', 'cash_withdrawal', 'fee', 'tax', 'split', 'opening_balance')"
+        },
+        "transactions_status_check": {
+          "name": "transactions_status_check",
+          "value": "\"transactions\".\"status\" IN ('posted', 'reversed', 'superseded', 'void_pending')"
+        },
+        "transactions_source_type_check": {
+          "name": "transactions_source_type_check",
+          "value": "\"transactions\".\"source_type\" IN ('manual', 'csv_import', 'broker_sync', 'provider', 'system')"
+        },
+        "transactions_fee_amount_check": {
+          "name": "transactions_fee_amount_check",
+          "value": "\"transactions\".\"fee_amount_decimal\" IS NOT NULL"
+        },
+        "transactions_tax_amount_check": {
+          "name": "transactions_tax_amount_check",
+          "value": "\"transactions\".\"tax_amount_decimal\" IS NOT NULL"
+        },
+        "transactions_created_by_owner_check": {
+          "name": "transactions_created_by_owner_check",
+          "value": "\"transactions\".\"created_by_user_id\" = \"transactions\".\"user_id\""
+        }
+      }
+    },
+    "user_identities": {
+      "name": "user_identities",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'cloudflare_access'"
+        },
+        "issuer": {
+          "name": "issuer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "subject": {
+          "name": "subject",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "email_at_link": {
+          "name": "email_at_link",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'active'"
+        },
+        "last_authenticated_at": {
+          "name": "last_authenticated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        }
+      },
+      "indexes": {
+        "user_identities_provider_issuer_subject_unique": {
+          "name": "user_identities_provider_issuer_subject_unique",
+          "columns": ["provider", "issuer", "subject"],
+          "isUnique": true
+        },
+        "user_identities_user_status_idx": {
+          "name": "user_identities_user_status_idx",
+          "columns": ["user_id", "status"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "user_identities_user_id_users_id_fk": {
+          "name": "user_identities_user_id_users_id_fk",
+          "tableFrom": "user_identities",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "user_identities_provider_check": {
+          "name": "user_identities_provider_check",
+          "value": "\"user_identities\".\"provider\" = 'cloudflare_access'"
+        },
+        "user_identities_status_check": {
+          "name": "user_identities_status_check",
+          "value": "\"user_identities\".\"status\" IN ('active', 'revoked')"
+        }
+      }
+    },
+    "user_settings": {
+      "name": "user_settings",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "home_currency_code": {
+          "name": "home_currency_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "timezone": {
+          "name": "timezone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "default_holding_currency_view": {
+          "name": "default_holding_currency_view",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'native'"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        }
+      },
+      "indexes": {
+        "user_settings_user_home_currency_unique": {
+          "name": "user_settings_user_home_currency_unique",
+          "columns": ["user_id", "home_currency_code"],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "user_settings_user_id_users_id_fk": {
+          "name": "user_settings_user_id_users_id_fk",
+          "tableFrom": "user_settings",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "user_settings_home_currency_code_currencies_code_fk": {
+          "name": "user_settings_home_currency_code_currencies_code_fk",
+          "tableFrom": "user_settings",
+          "tableTo": "currencies",
+          "columnsFrom": ["home_currency_code"],
+          "columnsTo": ["code"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "user_settings_default_holding_currency_view_check": {
+          "name": "user_settings_default_holding_currency_view_check",
+          "value": "\"user_settings\".\"default_holding_currency_view\" IN ('native', 'home')"
+        }
+      }
+    },
+    "users": {
+      "name": "users",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'pending'"
+        },
+        "display_name": {
+          "name": "display_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "primary_email": {
+          "name": "primary_email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "locale": {
+          "name": "locale",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'en-AU'"
+        },
+        "timezone": {
+          "name": "timezone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "terms_accepted_at": {
+          "name": "terms_accepted_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "last_seen_at": {
+          "name": "last_seen_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        }
+      },
+      "indexes": {
+        "users_status_idx": {
+          "name": "users_status_idx",
+          "columns": ["status"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "users_status_check": {
+          "name": "users_status_check",
+          "value": "\"users\".\"status\" IN ('pending', 'active', 'disabled', 'deletion_pending', 'purged')"
+        }
+      }
+    }
+  },
+  "views": {},
+  "enums": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "indexes": {}
+  }
+}

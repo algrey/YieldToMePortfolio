@@ -43,6 +43,13 @@
       "when": 1785328172120,
       "tag": "0005_tearful_loners",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1785328411622,
+      "tag": "0006_fat_lyja",
+      "breakpoints": true
     }
   ]
 }

@@ -785,6 +785,12 @@ export const transactions = sqliteTable(
       table.sourceType,
       table.sourceReference,
     ),
+    uniqueIndex("transactions_one_reversal_unique").on(
+      table.reversesTransactionId,
+    ),
+    uniqueIndex("transactions_one_supersession_unique").on(
+      table.supersedesTransactionId,
+    ),
     index("transactions_owner_ledger_idx").on(
       table.userId,
       table.portfolioId,
