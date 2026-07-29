@@ -89,7 +89,7 @@ Status: DONE on 2026-07-29.
 
 ### VSL-004 — Connect the dense Overview and Holdings screens
 
-Status: PENDING.
+Status: READY.
 
 - Objective: replace the relevant prototype mock values with the parsed sample and deterministic valuation while preserving the approved dense mobile layout.
 - Dependencies: `VSL-003`.
