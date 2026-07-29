@@ -298,6 +298,60 @@ test("persists invalid batches and issue evidence without mutating owned facts",
   );
 });
 
+test("persists parser failure issues at batch scope", async () => {
+  const database = createMigratedDatabase(await loadMigrationSql());
+  seedReferenceData(database);
+  const client = createSqliteSqlClient(database);
+  const repository = createOwnedImportStagingRepository(
+    client,
+    () => "2026-07-29T13:30:00Z",
+  );
+
+  const parseResult = await parseStrictVersionedCsvImport(
+    [
+      "Id,Symbol,Name,Display Symbol,Exchange,Portfolio,Currency,Shares Owned,Cost Per Share,Commission,Transaction Date,Transaction Time,Purchase Exchange Rate,Type,Accounting,Accounting Execution Ids,Extra",
+      `"1","ABC","Alpha",,"ASX","Main","AUD",,,,,,,,,,`,
+    ].join("\n"),
+  );
+  assert.equal(parseResult.ok, false);
+  if (parseResult.ok) {
+    return;
+  }
+
+  const csv = [
+    "Id,Symbol,Name,Display Symbol,Exchange,Portfolio,Currency,Shares Owned,Cost Per Share,Commission,Transaction Date,Transaction Time,Purchase Exchange Rate,Type,Accounting,Accounting Execution Ids,Extra",
+    `"1","ABC","Alpha",,"ASX","Main","AUD",,,,,,,,,,`,
+  ].join("\n");
+
+  const upload = await repository.startUpload("user-a", {
+    parserFormat: IMPORT_FORMAT,
+    parserVersion: SUPPORTED_IMPORT_PARSER_VERSION,
+    filename: "header-mismatch.csv",
+    byteSize: Buffer.byteLength(csv),
+    fileSha256: parseResult.fileFingerprint,
+  });
+  assert.equal(upload.ok, true);
+
+  const staged = await repository.recordParseResult("user-a", upload.batch.id, {
+    expectedVersion: upload.batch.version,
+    parseResult,
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) {
+    return;
+  }
+
+  assert.equal(staged.batch.status, "invalid");
+  assert.equal(staged.rowsInserted, 0);
+  assert.equal(staged.issuesInserted, 1);
+
+  const issues = await repository.listIssues("user-a", upload.batch.id);
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0]?.rowId, null);
+  assert.equal(issues[0]?.physicalRowNumber, null);
+  assert.equal(issues[0]?.code, "HEADER_MISMATCH");
+});
+
 test("denies cross-user access and enforces row bounds with foreign keys enabled", async () => {
   const database = createMigratedDatabase(await loadMigrationSql());
   seedReferenceData(database);

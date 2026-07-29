@@ -473,6 +473,42 @@ export function createOwnedImportStagingRepository(
     return inserted;
   }
 
+  async function insertBatchIssues(
+    userId: string,
+    batchId: string,
+    issues: readonly ParsedImportIssue[],
+    createdAt: string,
+  ): Promise<number> {
+    let inserted = 0;
+    for (const issue of issues) {
+      await client.run(
+        `
+          INSERT INTO import_issues (
+            id, user_id, batch_id, row_id, physical_row_number, field, severity,
+            code, message, suggested_resolution_type, resolved_value,
+            resolved_by_user_id, resolved_at, created_at, updated_at, version
+          )
+          VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, 1)
+        `,
+        [
+          randomUUID(),
+          userId,
+          batchId,
+          issue.field ?? null,
+          issue.severity,
+          issue.code,
+          issue.message,
+          null,
+          createdAt,
+          createdAt,
+        ],
+      );
+      inserted += 1;
+    }
+
+    return inserted;
+  }
+
   async function insertParsedRows(
     userId: string,
     batchId: string,
@@ -596,6 +632,12 @@ export function createOwnedImportStagingRepository(
           headerSignature: parseFailure.header?.signature ?? null,
           issueCount: parseFailure.issues.length,
         });
+        const issuesInserted = await insertBatchIssues(
+          userId,
+          batchId,
+          parseFailure.issues,
+          updatedAt,
+        );
 
         const updatedRows = await client.all<Record<string, unknown>>(
           `
@@ -637,7 +679,7 @@ export function createOwnedImportStagingRepository(
           ok: true,
           batch: createBatchRecord(updatedRows[0] ?? {}),
           rowsInserted: 0,
-          issuesInserted: 0,
+          issuesInserted,
         };
       }
 
