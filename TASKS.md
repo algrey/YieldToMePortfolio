@@ -21,7 +21,7 @@ npm test
 
 Run `npm run build` separately when `npm test` is narrowed during iteration, and run the task-specific test files/commands named in the task’s `Tests` field. A documentation-only spike may use link/traceability checks instead of a second build, but it must still run formatting and lint.
 
-Status values: `DONE` foundation only, `READY`, `BLOCKED`, `PENDING`, `DEFERRED` (not in the active release scope).
+Status values: `DONE` foundation only, `IN PROGRESS`, `READY`, `BLOCKED`, `PENDING`, `DEFERRED` (not in the active release scope).
 
 ## Foundation
 
@@ -56,7 +56,7 @@ Status: DONE on 2026-07-29.
 
 ### FND-002B — Security headers and CI-equivalent quality gate
 
-Status: DONE on 2026-07-29.
+Status: IN PROGRESS as of 2026-07-29 review.
 
 - Objective: establish one reproducible security/quality gate that later implementation tasks can invoke without relying on transpile-only success.
 - Dependencies: FND-002A.
@@ -67,7 +67,7 @@ Status: DONE on 2026-07-29.
 - Tests: header route tests, package-script failure propagation, format/lint/typecheck/`vinext check`/build/test.
 - Risks: headers behaving differently in generated Worker output or a nominal check omitting strict type analysis.
 - Parallel safe: no; merge this shared baseline before implementation branches.
-- Completion note: Added Worker-wide CSP, frame, referrer, MIME, permissions, and private no-store response policy plus tested `typecheck`, `vinext:check`, and fail-fast aggregate `check` scripts.
+- Review finding (2026-07-29): the rendered Vinext route emits inline bootstrap scripts, and the current CSP permits them with `script-src 'unsafe-inline'`. Replace this with a nonce- or hash-based policy compatible with Vinext's rendered output, remove `unsafe-inline` from `script-src`, and add generated-response coverage proving every required inline script is authorized while an untrusted inline script is blocked. Until then, the CSP is not restrictive enough to complete this task.
 
 ### SPK-001 — Lock the supplied 17-column CSV contract
 
