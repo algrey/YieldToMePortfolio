@@ -87,7 +87,7 @@ const security = {
   sourceSymbol: "ABC",
   sourceExchangeAlias: "ASX",
   sourceCurrencyCode: "USD",
-  securityId: null,
+  securityId: "security-abc",
 };
 
 const decisions: ImportPreviewMappingDecision[] = [
@@ -174,17 +174,32 @@ test("cash sentinel previews without creating a security candidate", () => {
 });
 
 test("row decisions override batch decisions and unresolved candidates remain blocked", () => {
-  const preview = createImportReconciliationPreview({
+  const unresolved = createImportReconciliationPreview({
     portfolios: [portfolio],
     securityCandidates: [{ ...security, securityId: null }],
     decisions: [
-      ...decisions,
       {
         kind: "security",
         sourceKey: "buy-1",
         scope: "row",
         targetId: "membership-a",
       },
+      decisions[1]!,
+    ],
+    rows: [row("buy-1", 2)],
+  });
+  assert.equal(unresolved.ready, false);
+  assert.ok(
+    unresolved.issues.some(
+      (issue) => issue.code === "SECURITY_MAPPING_REQUIRED",
+    ),
+  );
+
+  const invalidFx = createImportReconciliationPreview({
+    portfolios: [portfolio],
+    securityCandidates: [security],
+    decisions: [
+      decisions[0]!,
       {
         kind: "fx",
         sourceKey: "USD->AUD",
@@ -195,12 +210,9 @@ test("row decisions override batch decisions and unresolved candidates remain bl
     rows: [row("buy-1", 2)],
   });
 
-  assert.equal(preview.ready, false);
+  assert.equal(invalidFx.ready, false);
   assert.ok(
-    preview.issues.some((issue) => issue.code === "FX_DIRECTION_REQUIRED"),
-  );
-  assert.ok(
-    preview.issues.some((issue) => issue.code === "SECURITY_MAPPING_REQUIRED"),
+    invalidFx.issues.some((issue) => issue.code === "FX_DIRECTION_REQUIRED"),
   );
 });
 

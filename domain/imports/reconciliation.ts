@@ -306,8 +306,14 @@ export function createImportReconciliationPreview(
             "More than one owned security candidate matches; ticker alone is not enough.",
         });
         continue;
-      } else if (candidates.length === 0 || candidates[0]?.securityId === null) {
-        if (candidates.length === 0 && !unresolvedCandidateIds.has(membershipId)) {
+      } else if (
+        candidates.length === 0 ||
+        candidates[0]?.securityId === null
+      ) {
+        if (
+          candidates.length === 0 &&
+          !unresolvedCandidateIds.has(membershipId)
+        ) {
           candidateCreates += 1;
         }
         unresolved += 1;
