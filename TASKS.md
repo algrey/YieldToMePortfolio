@@ -56,7 +56,7 @@ Status: DONE on 2026-07-29.
 
 ### FND-002B — Security headers and CI-equivalent quality gate
 
-Status: PENDING.
+Status: READY.
 
 - Objective: establish one reproducible security/quality gate that later implementation tasks can invoke without relying on transpile-only success.
 - Dependencies: FND-002A.
