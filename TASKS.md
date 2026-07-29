@@ -115,7 +115,7 @@ Status: DEFERRED; not in the v1 release scope.
 
 ### AUTH-001 — Verify Cloudflare Access JWT
 
-Status: READY.
+Status: DONE on 2026-07-29.
 
 - Objective: establish a cryptographically verified Cloudflare Access principal at the Worker boundary.
 - Dependencies: FND-002B.
@@ -126,6 +126,7 @@ Status: READY.
 - Tests: valid, missing, malformed, bad signature, wrong issuer/audience, expired, not-yet-valid, key rotation, service token.
 - Risks: trusting forwarded headers or a stale hard-coded key.
 - Parallel safe: yes with DB-001A after FND-002B.
+- Completion note: Added a Worker-bound Access JWT verifier with remote JWKS fetching, bounded key caching, issuer/audience/time/type checks, and fail-closed generic denials; updated route and security-header tests to exercise authenticated rendering and rejection cases under signed fixtures.
 
 ### DB-001A — Identity and portfolio schema migration
 

@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
+import { createAccessJwtFixture } from "./fixtures/access-jwt.ts";
 import {
   applyResponseSecurityHeaders,
   PRIVATE_CACHE_CONTROL,
 } from "../worker/response-security.ts";
+
+const accessFixture = createAccessJwtFixture();
 
 function scriptSourceDirective(policy: string): string {
   return (
@@ -25,22 +28,37 @@ function cspAuthorizesNonce(policy: string, nonce: string): boolean {
 async function renderProtectedFixture() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
-  const { default: worker } = await import(workerUrl.href);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => accessFixture.createJwks().clone();
 
-  return worker.fetch(
-    new Request("http://localhost/portfolio/preview/holdings", {
-      headers: { accept: "text/html" },
-    }),
-    {
-      ASSETS: {
-        fetch: async () => new Response("Not found", { status: 404 }),
+  try {
+    const { default: worker } = await import(workerUrl.href);
+
+    return worker.fetch(
+      new Request("http://localhost/portfolio/preview/holdings", {
+        headers: {
+          accept: "text/html",
+          "Cf-Access-Jwt-Assertion": accessFixture.signToken(),
+        },
+      }),
+      {
+        ASSETS: {
+          fetch: async () => new Response("Not found", { status: 404 }),
+        },
+        YIELDTOME_RUNTIME_ENV: "local",
+        YIELDTOME_WORKERS_PLAN: "free",
+        MARKET_DATA_PROVIDER: "disabled",
+        CLOUDFLARE_ACCESS_ISSUER: accessFixture.issuer,
+        CLOUDFLARE_ACCESS_AUDIENCE: accessFixture.audience,
       },
-    },
-    {
-      waitUntil() {},
-      passThroughOnException() {},
-    },
-  );
+      {
+        waitUntil() {},
+        passThroughOnException() {},
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 }
 
 async function readFiles(directory: string): Promise<string[]> {
