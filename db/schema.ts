@@ -668,3 +668,245 @@ export const importIssues = sqliteTable(
     ),
   ],
 );
+
+export const transactions = sqliteTable(
+  "transactions",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    portfolioSecurityId: text("portfolio_security_id"),
+    type: text("type").notNull(),
+    status: text("status").notNull(),
+    tradeAt: text("trade_at").notNull(),
+    localTradeDate: text("local_trade_date").notNull(),
+    settlementDate: text("settlement_date"),
+    quantityDecimal: text("quantity_decimal"),
+    unitPriceDecimal: text("unit_price_decimal"),
+    currencyCode: text("currency_code").notNull(),
+    grossAmountDecimal: text("gross_amount_decimal"),
+    feeAmountDecimal: text("fee_amount_decimal").notNull().default("0"),
+    taxAmountDecimal: text("tax_amount_decimal").notNull().default("0"),
+    fxRateToBaseDecimal: text("fx_rate_to_base_decimal"),
+    fxRateSource: text("fx_rate_source"),
+    fxObservedAt: text("fx_observed_at"),
+    sourceType: text("source_type").notNull(),
+    sourceReference: text("source_reference"),
+    importRowId: text("import_row_id"),
+    reversesTransactionId: text("reverses_transaction_id"),
+    supersedesTransactionId: text("supersedes_transaction_id"),
+    createdByUserId: text("created_by_user_id").notNull(),
+    calculationVersion: integer("calculation_version").notNull(),
+    createdAt: text("created_at").notNull(),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    foreignKey({
+      name: "transactions_portfolio_id_user_id_portfolios_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "transactions_portfolio_security_id_user_id_portfolio_id_fk",
+      columns: [table.portfolioSecurityId, table.userId, table.portfolioId],
+      foreignColumns: [
+        portfolioSecurities.id,
+        portfolioSecurities.userId,
+        portfolioSecurities.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "transactions_currency_code_currencies_code_fk",
+      columns: [table.currencyCode],
+      foreignColumns: [currencies.code],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "transactions_import_row_id_user_id_portfolio_id_fk",
+      columns: [table.importRowId, table.userId, table.portfolioId],
+      foreignColumns: [
+        importRows.id,
+        importRows.userId,
+        importRows.targetPortfolioId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "transactions_reverses_transaction_id_user_id_portfolio_id_fk",
+      columns: [table.reversesTransactionId, table.userId, table.portfolioId],
+      foreignColumns: [table.id, table.userId, table.portfolioId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "transactions_supersedes_transaction_id_user_id_portfolio_id_fk",
+      columns: [table.supersedesTransactionId, table.userId, table.portfolioId],
+      foreignColumns: [table.id, table.userId, table.portfolioId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "transactions_created_by_user_id_users_id_fk",
+      columns: [table.createdByUserId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    check(
+      "transactions_type_check",
+      sql`${table.type} IN ('buy', 'sell', 'cash_deposit', 'cash_withdrawal', 'fee', 'tax', 'split', 'opening_balance')`,
+    ),
+    check(
+      "transactions_status_check",
+      sql`${table.status} IN ('posted', 'reversed', 'superseded', 'void_pending')`,
+    ),
+    check(
+      "transactions_source_type_check",
+      sql`${table.sourceType} IN ('manual', 'csv_import', 'broker_sync', 'provider', 'system')`,
+    ),
+    check(
+      "transactions_fee_amount_check",
+      sql`${table.feeAmountDecimal} IS NOT NULL`,
+    ),
+    check(
+      "transactions_tax_amount_check",
+      sql`${table.taxAmountDecimal} IS NOT NULL`,
+    ),
+    check(
+      "transactions_created_by_owner_check",
+      sql`${table.createdByUserId} = ${table.userId}`,
+    ),
+    uniqueIndex("transactions_id_user_unique").on(table.id, table.userId),
+    uniqueIndex("transactions_id_user_portfolio_unique").on(
+      table.id,
+      table.userId,
+      table.portfolioId,
+    ),
+    uniqueIndex("transactions_id_user_portfolio_security_unique").on(
+      table.id,
+      table.userId,
+      table.portfolioId,
+      table.portfolioSecurityId,
+    ),
+    uniqueIndex("transactions_portfolio_source_reference_unique").on(
+      table.portfolioId,
+      table.sourceType,
+      table.sourceReference,
+    ),
+    index("transactions_owner_ledger_idx").on(
+      table.userId,
+      table.portfolioId,
+      table.localTradeDate,
+      table.id,
+    ),
+    index("transactions_security_trade_idx").on(
+      table.portfolioId,
+      table.portfolioSecurityId,
+      table.tradeAt,
+    ),
+  ],
+);
+
+export const cashAccounts = sqliteTable(
+  "cash_accounts",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    currencyCode: text("currency_code").notNull(),
+    completeness: text("completeness").notNull(),
+    status: text("status").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "cash_accounts_portfolio_id_user_id_portfolios_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "cash_accounts_currency_code_currencies_code_fk",
+      columns: [table.currencyCode],
+      foreignColumns: [currencies.code],
+    }).onDelete("restrict"),
+    check(
+      "cash_accounts_completeness_check",
+      sql`${table.completeness} IN ('complete', 'opening_balance', 'incomplete')`,
+    ),
+    check(
+      "cash_accounts_status_check",
+      sql`${table.status} IN ('active', 'closed')`,
+    ),
+    uniqueIndex("cash_accounts_id_user_unique").on(table.id, table.userId),
+    uniqueIndex("cash_accounts_id_user_portfolio_unique").on(
+      table.id,
+      table.userId,
+      table.portfolioId,
+    ),
+    uniqueIndex("cash_accounts_portfolio_currency_unique").on(
+      table.portfolioId,
+      table.currencyCode,
+    ),
+  ],
+);
+
+export const cashLedgerEntries = sqliteTable(
+  "cash_ledger_entries",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    cashAccountId: text("cash_account_id").notNull(),
+    transactionId: text("transaction_id"),
+    effectiveAt: text("effective_at").notNull(),
+    localEffectiveDate: text("local_effective_date").notNull(),
+    type: text("type").notNull(),
+    signedAmountDecimal: text("signed_amount_decimal").notNull(),
+    status: text("status").notNull(),
+    reversesEntryId: text("reverses_entry_id"),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "cash_entries_portfolio_id_user_id_portfolios_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "cash_entries_cash_account_id_user_id_portfolio_id_fk",
+      columns: [table.cashAccountId, table.userId, table.portfolioId],
+      foreignColumns: [
+        cashAccounts.id,
+        cashAccounts.userId,
+        cashAccounts.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "cash_entries_transaction_id_user_id_portfolio_id_fk",
+      columns: [table.transactionId, table.userId, table.portfolioId],
+      foreignColumns: [
+        transactions.id,
+        transactions.userId,
+        transactions.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "cash_entries_reverses_entry_id_user_id_portfolio_id_fk",
+      columns: [table.reversesEntryId, table.userId, table.portfolioId],
+      foreignColumns: [table.id, table.userId, table.portfolioId],
+    }).onDelete("restrict"),
+    check(
+      "cash_entries_status_check",
+      sql`${table.status} IN ('posted', 'reversed')`,
+    ),
+    check(
+      "cash_entries_type_check",
+      sql`${table.type} IN ('cash_deposit', 'cash_withdrawal', 'fee', 'tax', 'opening_balance', 'split')`,
+    ),
+    uniqueIndex("cash_entries_id_user_portfolio_unique").on(
+      table.id,
+      table.userId,
+      table.portfolioId,
+    ),
+    uniqueIndex("cash_entries_transaction_type_unique").on(
+      table.transactionId,
+      table.type,
+    ),
+    index("cash_entries_balance_idx").on(
+      table.cashAccountId,
+      table.effectiveAt,
+      table.id,
+    ),
+  ],
+);

@@ -316,7 +316,7 @@ Status: PENDING.
 
 ### LED-001A — Transaction and cash ledger schema
 
-Status: READY.
+Status: DONE on 2026-07-29.
 
 - Objective: establish enforceable owner/portfolio relationships and typed event rules before any financial posting service.
 - Dependencies: DB-001A, DB-002.
@@ -327,6 +327,7 @@ Status: READY.
 - Tests: migration/foreign keys, invalid event shapes, cross-portfolio references, reversal uniqueness, decimal syntax.
 - Risks: a direct opaque-ID foreign key that bypasses owner/portfolio agreement.
 - Parallel safe: yes with AUTH-002 after DB-002 schema coordination.
+- Completion note: Added generated transactions, cash accounts, and cash ledger entry migrations with composite owner/portfolio/membership/import/self-reference constraints, typed status/source checks, exact-decimal event validators, and migration/foreign-key fixtures; no posting service or mutation route was added.
 
 ### LED-001B — Owned ledger posting, reversal, and cash service
 

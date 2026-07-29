@@ -86,6 +86,8 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
   };
   assert.equal(foreignKeysEnabled.foreign_keys, 1);
   assert.deepEqual(tableNames(database), [
+    "cash_accounts",
+    "cash_ledger_entries",
     "currencies",
     "exchanges",
     "import_batches",
@@ -98,6 +100,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "securities",
     "security_identifiers",
     "security_provider_mappings",
+    "transactions",
     "user_identities",
     "user_settings",
     "users",
@@ -106,6 +109,16 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "portfolios_id_user_id_unique",
     "portfolios_owner_status_updated_at_idx",
     "portfolios_user_id_code_unique",
+  ]);
+  assert.deepEqual(indexNames(database, "cash_accounts"), [
+    "cash_accounts_id_user_portfolio_unique",
+    "cash_accounts_id_user_unique",
+    "cash_accounts_portfolio_currency_unique",
+  ]);
+  assert.deepEqual(indexNames(database, "cash_ledger_entries"), [
+    "cash_entries_balance_idx",
+    "cash_entries_id_user_portfolio_unique",
+    "cash_entries_transaction_type_unique",
   ]);
   assert.deepEqual(indexNames(database, "import_batches"), [
     "import_batches_id_user_unique",
@@ -126,6 +139,14 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
   assert.deepEqual(indexNames(database, "user_identities"), [
     "user_identities_provider_issuer_subject_unique",
     "user_identities_user_status_idx",
+  ]);
+  assert.deepEqual(indexNames(database, "transactions"), [
+    "transactions_id_user_portfolio_security_unique",
+    "transactions_id_user_portfolio_unique",
+    "transactions_id_user_unique",
+    "transactions_owner_ledger_idx",
+    "transactions_portfolio_source_reference_unique",
+    "transactions_security_trade_idx",
   ]);
 
   assert.deepEqual(foreignKeys(database, "user_settings"), [
