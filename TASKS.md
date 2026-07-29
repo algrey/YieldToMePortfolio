@@ -52,7 +52,7 @@ Status: DONE on 2026-07-29.
 
 ### VSL-002 — Deterministic preview valuation contract
 
-Status: PENDING.
+Status: READY.
 
 - Objective: calculate the sample portfolio’s quantity, cost, current value, daily movement, and gain from decimal CSV facts plus deterministic price and FX fixtures.
 - Dependencies: `VSL-001`.
