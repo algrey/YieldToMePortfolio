@@ -145,7 +145,7 @@ Status: DONE on 2026-07-29.
 
 ### DB-001B — Owned portfolio repositories and services
 
-Status: READY.
+Status: DONE on 2026-07-29.
 
 - Objective: provide the only supported owner-scoped access path for user settings and portfolio lifecycle.
 - Dependencies: DB-001A.
@@ -156,6 +156,7 @@ Status: READY.
 - Tests: same-user CRUD, cross-user read/write/ID-enumeration denials, archive/restore, optimistic version conflict, query-shape assertions.
 - Risks: check-then-use ownership race or a generic repository that permits unscoped access.
 - Parallel safe: yes with AUTH-001; merge before AUTH-002.
+- Completion note: Added owner-scoped portfolio and user-settings repositories on top of the reviewed D1 schema, including create/list/read/rename/archive/restore, inherited home-currency selection for new portfolios, and a home-currency rebase request contract that leaves native facts unchanged.
 
 ### AUTH-002 — Internal identity lifecycle and portfolio session
 
