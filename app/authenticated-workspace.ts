@@ -6,6 +6,7 @@ import {
 import { resolveAuthenticatedRequestContext } from "../domain/auth/request-context";
 import { VERIFIED_PRINCIPAL_HEADER } from "../domain/auth/verified-principal-header";
 import { createOwnedPortfolioRepository } from "../db/repositories/owned-portfolios";
+import { createOwnedUserSettingsRepository } from "../db/repositories/owned-portfolios";
 import { createOwnedWorkspace } from "./owned-workspace";
 import type { OwnedWorkspace } from "./components/portfolio-shell";
 
@@ -62,9 +63,23 @@ export async function loadAuthenticatedWorkspace(
     const portfolioRecords = result.ok
       ? await createOwnedPortfolioRepository(client).list(
           result.context.user.id,
+          {
+            includeArchived: true,
+          },
         )
       : [];
-    return createOwnedWorkspace(result, portfolioRecords);
+    const workspace = createOwnedWorkspace(result, portfolioRecords);
+    if (!result.ok) return workspace;
+    const settings = await createOwnedUserSettingsRepository(client).get(
+      result.context.user.id,
+    );
+    return settings
+      ? {
+          ...workspace,
+          holdingCurrencyView: settings.defaultHoldingCurrencyView,
+          settingsVersion: settings.version,
+        }
+      : workspace;
   } catch {
     return unavailableWorkspace("Portfolio data is temporarily unavailable.");
   }

@@ -244,6 +244,89 @@ dd {
   white-space: nowrap;
 }
 
+.menu-field {
+  display: grid;
+  gap: 6px;
+  padding: 9px 11px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.menu-field select,
+.portfolio-dialog input {
+  min-height: 44px;
+  width: 100%;
+  padding: 0 10px;
+  border: 1px solid var(--divider);
+  border-radius: 3px;
+  background: var(--ink);
+  color: var(--cream);
+}
+
+.action-feedback {
+  position: fixed;
+  z-index: 100;
+  right: 16px;
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  max-width: min(360px, calc(100vw - 32px));
+  padding: 12px 14px;
+  border: 1px solid var(--negative);
+  border-radius: 4px;
+  background: #241513;
+  color: var(--cream);
+  font-size: 0.82rem;
+}
+
+.portfolio-dialog {
+  width: min(420px, calc(100vw - 32px));
+  padding: 24px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: #11231e;
+  color: var(--cream);
+}
+
+.portfolio-dialog::backdrop {
+  background: rgb(0 0 0 / 62%);
+}
+
+.portfolio-dialog form,
+.portfolio-dialog label {
+  display: grid;
+  gap: 8px;
+}
+
+.portfolio-dialog form {
+  gap: 16px;
+}
+
+.portfolio-dialog label {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dialog-actions button {
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--divider);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--cream);
+  cursor: pointer;
+}
+
+.dialog-actions button:last-child {
+  border-color: var(--green);
+  background: var(--green);
+  color: var(--ink);
+}
+
 .portfolio-popover {
   left: 0;
 }

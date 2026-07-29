@@ -21,6 +21,7 @@ export function createOwnedWorkspace(
     name: portfolio.name,
     homeCurrencyCode: portfolio.homeCurrencyCode,
     status: portfolio.status,
+    version: portfolio.version,
   }));
   if (!activePortfolio) {
     return {
@@ -29,6 +30,8 @@ export function createOwnedWorkspace(
       homeCurrencyCode: null,
       activePortfolio: null,
       portfolios,
+      holdingCurrencyView: "native",
+      settingsVersion: 1,
     };
   }
 
@@ -44,7 +47,10 @@ export function createOwnedWorkspace(
       timezone: activePortfolio.timezone,
       accountingMethod: activePortfolio.accountingMethod,
       status: activePortfolio.status,
+      version: activePortfolio.version,
     },
     portfolios,
+    holdingCurrencyView: "native",
+    settingsVersion: 1,
   };
 }

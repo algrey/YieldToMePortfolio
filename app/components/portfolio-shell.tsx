@@ -27,6 +27,8 @@ export type OwnedWorkspace = {
   status: "ready" | "empty" | "unavailable";
   userDisplayName?: string | null;
   homeCurrencyCode?: string | null;
+  holdingCurrencyView?: "native" | "home";
+  settingsVersion?: number;
   message?: string;
   activePortfolio: {
     id: string;
@@ -36,12 +38,14 @@ export type OwnedWorkspace = {
     timezone: string;
     accountingMethod: string;
     status: string;
+    version: number;
   } | null;
   portfolios: Array<{
     id: string;
     name: string;
     homeCurrencyCode: string;
     status: string;
+    version: number;
   }>;
 };
 const primaryPortfolioSections: PortfolioSection[] = [
@@ -1028,6 +1032,19 @@ export function PortfolioShell({
   const router = useRouter();
   const portfolios = portfolioPrototypesOverride ?? portfolioPrototypes;
   const ownedMode = ownedWorkspace !== undefined;
+  const selectorItems: Array<{
+    id: string;
+    name: string;
+    status: string;
+    version: number;
+  }> = ownedMode
+    ? ownedWorkspace.portfolios
+    : portfolios.map((item) => ({
+        id: item.id,
+        name: item.name,
+        status: "active",
+        version: 0,
+      }));
   const [portfolioId, setPortfolioId] = useState(() => {
     const detailPortfolio = holdingSymbol
       ? portfolios.find((item) =>
@@ -1053,6 +1070,11 @@ export function PortfolioShell({
   );
   const [selectedHoldingUnavailable, setSelectedHoldingUnavailable] =
     useState(false);
+  const [portfolioDialog, setPortfolioDialog] = useState<
+    "create" | "rename" | null
+  >(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [actionPending, setActionPending] = useState(false);
 
   const portfolio =
     portfolios.find((item) => item.id === portfolioId) ?? portfolios[0];
@@ -1066,6 +1088,174 @@ export function PortfolioShell({
     setDrawerOpen(false);
     if (ownedMode) {
       router.push(`/portfolio/${nextId}/${activeSection}`);
+    }
+  }
+
+  async function submitPortfolioAction(
+    event: React.FormEvent<HTMLFormElement>,
+  ) {
+    event.preventDefault();
+    if (!ownedWorkspace) return;
+    const form = new FormData(event.currentTarget);
+    const isRename = portfolioDialog === "rename";
+    const endpoint = isRename
+      ? `/api/portfolios/${ownedWorkspace.activePortfolio?.id ?? ""}`
+      : "/api/portfolios";
+    setActionPending(true);
+    setActionMessage(null);
+    try {
+      const response = await fetch(endpoint, {
+        method: isRename ? "PATCH" : "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          code: String(form.get("code") ?? ""),
+          name: String(form.get("name") ?? ""),
+          timezone: String(form.get("timezone") ?? ""),
+          expectedVersion: ownedWorkspace.activePortfolio?.version,
+        }),
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+        portfolio?: { id: string };
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(result.message ?? "Portfolio action failed.");
+      setPortfolioDialog(null);
+      router.refresh();
+      if (!isRename && result.portfolio)
+        router.push(`/portfolio/${result.portfolio.id}/overview`);
+    } catch (error) {
+      setActionMessage(
+        error instanceof Error ? error.message : "Portfolio action failed.",
+      );
+    } finally {
+      setActionPending(false);
+    }
+  }
+
+  async function changeHomeCurrency(value: string) {
+    if (!ownedWorkspace?.settingsVersion) return;
+    setActionPending(true);
+    setActionMessage(null);
+    try {
+      const response = await fetch("/api/settings/home-currency", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          homeCurrencyCode: value,
+          expectedVersion: ownedWorkspace.settingsVersion,
+        }),
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(
+          result.message ?? "Home currency could not be changed.",
+        );
+      setOpenMenu(null);
+      router.refresh();
+    } catch (error) {
+      setActionMessage(
+        error instanceof Error
+          ? error.message
+          : "Home currency could not be changed.",
+      );
+    } finally {
+      setActionPending(false);
+    }
+  }
+
+  async function changeHoldingCurrencyView(value: "native" | "home") {
+    if (!ownedWorkspace?.settingsVersion) return;
+    setActionPending(true);
+    setActionMessage(null);
+    try {
+      const response = await fetch("/api/settings/holding-currency-view", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          view: value,
+          expectedVersion: ownedWorkspace.settingsVersion,
+        }),
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(result.message ?? "Display view could not be changed.");
+      setOpenMenu(null);
+      router.refresh();
+    } catch (error) {
+      setActionMessage(
+        error instanceof Error
+          ? error.message
+          : "Display view could not be changed.",
+      );
+    } finally {
+      setActionPending(false);
+    }
+  }
+
+  async function archiveActivePortfolio() {
+    const active = ownedWorkspace?.activePortfolio;
+    if (!active) return;
+    setActionPending(true);
+    setActionMessage(null);
+    try {
+      const response = await fetch(`/api/portfolios/${active.id}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expectedVersion: active.version }),
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(result.message ?? "Portfolio could not be archived.");
+      setOpenMenu(null);
+      router.push("/");
+      router.refresh();
+    } catch (error) {
+      setActionMessage(
+        error instanceof Error
+          ? error.message
+          : "Portfolio could not be archived.",
+      );
+    } finally {
+      setActionPending(false);
+    }
+  }
+
+  async function restorePortfolio(portfolioId: string, version: number) {
+    setActionPending(true);
+    setActionMessage(null);
+    try {
+      const response = await fetch(`/api/portfolios/${portfolioId}/restore`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expectedVersion: version }),
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(result.message ?? "Portfolio could not be restored.");
+      setOpenMenu(null);
+      router.refresh();
+    } catch (error) {
+      setActionMessage(
+        error instanceof Error
+          ? error.message
+          : "Portfolio could not be restored.",
+      );
+    } finally {
+      setActionPending(false);
     }
   }
 
@@ -1113,8 +1303,17 @@ export function PortfolioShell({
           {openMenu === "portfolio" ? (
             <div className="popover portfolio-popover">
               <p>Portfolios</p>
-              {(ownedMode ? ownedWorkspace.portfolios : portfolios).map(
-                (item) => (
+              {selectorItems.map((item) =>
+                ownedMode && item.status === "archived" ? (
+                  <button
+                    type="button"
+                    key={item.id}
+                    onClick={() => void restorePortfolio(item.id, item.version)}
+                    disabled={actionPending}
+                  >
+                    <span>Restore {item.name}</span>
+                  </button>
+                ) : (
                   <button
                     type="button"
                     key={item.id}
@@ -1131,6 +1330,34 @@ export function PortfolioShell({
                   </button>
                 ),
               )}
+              {ownedMode ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setPortfolioDialog("create")}
+                  >
+                    <span>Create portfolio</span>
+                    <span aria-hidden="true">+</span>
+                  </button>
+                  {ownedWorkspace.activePortfolio ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setPortfolioDialog("rename")}
+                      >
+                        <span>Rename portfolio</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={archiveActivePortfolio}
+                        disabled={actionPending}
+                      >
+                        <span>Archive portfolio</span>
+                      </button>
+                    </>
+                  ) : null}
+                </>
+              ) : null}
               <Link href="/" onClick={() => setOpenMenu(null)}>
                 <span>All portfolios</span>
                 <span aria-hidden="true">→</span>
@@ -1213,6 +1440,36 @@ export function PortfolioShell({
                     <span className="menu-note">
                       {ownedWorkspace.userDisplayName ?? "Private account"}
                     </span>
+                    <label className="menu-field">
+                      <span>Home currency</span>
+                      <select
+                        value={ownedWorkspace.homeCurrencyCode ?? "AUD"}
+                        onChange={(event) =>
+                          void changeHomeCurrency(event.target.value)
+                        }
+                        disabled={actionPending}
+                      >
+                        <option value="AUD">AUD</option>
+                        <option value="USD">USD</option>
+                        <option value="GBP">GBP</option>
+                        <option value="EUR">EUR</option>
+                      </select>
+                    </label>
+                    <label className="menu-field">
+                      <span>Display values</span>
+                      <select
+                        value={ownedWorkspace.holdingCurrencyView ?? "native"}
+                        onChange={(event) =>
+                          void changeHoldingCurrencyView(
+                            event.target.value as "native" | "home",
+                          )
+                        }
+                        disabled={actionPending}
+                      >
+                        <option value="native">Native currency</option>
+                        <option value="home">Home currency</option>
+                      </select>
+                    </label>
                   </>
                 ) : null}
                 {!ownedMode ? <p>Preview a state</p> : null}
@@ -1312,6 +1569,71 @@ export function PortfolioShell({
         ) : null}
         {!ownedMode && activeSection === "news" ? <NewsScreen /> : null}
       </main>
+
+      {actionMessage ? (
+        <p className="action-feedback" role="alert">
+          {actionMessage}
+        </p>
+      ) : null}
+
+      {ownedMode && portfolioDialog ? (
+        <dialog
+          open
+          className="portfolio-dialog"
+          aria-labelledby="portfolio-dialog-title"
+        >
+          <form method="dialog" onSubmit={submitPortfolioAction}>
+            <p className="eyebrow">Portfolio settings</p>
+            <h2 id="portfolio-dialog-title">
+              {portfolioDialog === "create"
+                ? "Create portfolio"
+                : "Rename portfolio"}
+            </h2>
+            {portfolioDialog === "create" ? (
+              <label>
+                Code
+                <input name="code" required maxLength={40} defaultValue="NEW" />
+              </label>
+            ) : null}
+            <label>
+              Name
+              <input
+                name="name"
+                required
+                maxLength={120}
+                defaultValue={
+                  portfolioDialog === "rename"
+                    ? ownedWorkspace.activePortfolio?.name
+                    : "My portfolio"
+                }
+              />
+            </label>
+            <label>
+              Timezone
+              <input
+                name="timezone"
+                required
+                maxLength={80}
+                defaultValue={
+                  ownedWorkspace.activePortfolio?.timezone ?? "Australia/Sydney"
+                }
+              />
+            </label>
+            <div className="dialog-actions">
+              <button
+                type="button"
+                onClick={() => setPortfolioDialog(null)}
+                disabled={actionPending}
+              >
+                Cancel
+              </button>
+              <button type="submit" disabled={actionPending}>
+                {actionPending ? "Working…" : "Save portfolio"}
+              </button>
+            </div>
+          </form>
+        </dialog>
+      ) : null}
 
       {drawerOpen ? (
         <div

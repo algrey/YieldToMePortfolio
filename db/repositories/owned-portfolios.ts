@@ -55,6 +55,11 @@ export type HomeCurrencyChangeInput = {
   homeCurrencyCode: string;
 };
 
+export type HoldingCurrencyViewChangeInput = {
+  expectedVersion: number;
+  view: "native" | "home";
+};
+
 export type PortfolioMutationFailure =
   | { ok: false; reason: "not_found" }
   | { ok: false; reason: "version_conflict" };
@@ -79,6 +84,9 @@ export type HomeCurrencyChangeResult =
       rebaseRequest: HomeCurrencyRebaseRequest;
     }
   | PortfolioMutationFailure;
+
+export type HoldingCurrencyViewChangeResult =
+  { ok: true; settings: OwnedUserSettingsRecord } | PortfolioMutationFailure;
 
 export type PortfolioListOptions = {
   includeArchived?: boolean;
@@ -556,6 +564,46 @@ export function createOwnedUserSettingsRepository(
             requestedAt: updatedAt,
           },
         };
+      });
+    },
+
+    async setHoldingCurrencyView(
+      userId: string,
+      input: HoldingCurrencyViewChangeInput,
+    ): Promise<HoldingCurrencyViewChangeResult> {
+      return await withTransaction(client, async () => {
+        const updatedAt = nowIso(now);
+        const mutation = await runMutation<Record<string, unknown>>(
+          client,
+          "user_settings",
+          `
+          UPDATE user_settings
+          SET default_holding_currency_view = ?,
+              updated_at = ?,
+              version = version + 1
+          WHERE user_id = ? AND version = ?
+          RETURNING user_id, home_currency_code, timezone,
+            default_holding_currency_view, created_at, updated_at, version
+        `,
+          [input.view, updatedAt, userId, input.expectedVersion],
+          userId,
+          userId,
+        );
+
+        if (isMutationFailure(mutation)) return mutation;
+
+        const settings = createUserSettingsRecord(mutation);
+        await audit.append({
+          actorUserId: userId,
+          targetOwnerUserId: userId,
+          action: "settings.holding_currency_view_change",
+          targetType: "user_settings",
+          targetId: userId,
+          requestId,
+          result: "success",
+          occurredAt: updatedAt,
+        });
+        return { ok: true, settings };
       });
     },
   };
