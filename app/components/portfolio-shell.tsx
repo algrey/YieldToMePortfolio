@@ -423,10 +423,12 @@ function HoldingsScreen({
   portfolio,
   viewState,
   onSelectHolding,
+  holdingDetailHref,
 }: {
   portfolio: PortfolioPrototype;
   viewState: ViewState;
-  onSelectHolding: (holding: Holding) => void;
+  onSelectHolding: (holding: Holding, unavailable: boolean) => void;
+  holdingDetailHref?: (symbol: string) => string;
 }) {
   const [sortKey, setSortKey] = useState<HoldingSort>("daily");
   const [direction, setDirection] = useState<Direction>("descending");
@@ -497,14 +499,8 @@ function HoldingsScreen({
           {rows.map((holding, index) => {
             const priceUnavailable =
               viewState === "partial" && index === rows.length - 1;
-            return (
-              <button
-                className={`holding-row holdings-grid${priceUnavailable ? " unavailable-row" : ""}`}
-                type="button"
-                key={holding.symbol}
-                onClick={() => onSelectHolding(holding)}
-                aria-label={`${holding.symbol}, ${holding.name}, open details`}
-              >
+            const rowContent = (
+              <>
                 <span className="row-primary symbol">{holding.symbol}</span>
                 <span className="row-primary numeric">
                   {priceUnavailable ? "—" : holding.value}
@@ -557,6 +553,27 @@ function HoldingsScreen({
                 <span className="desktop-only holding-name">
                   {holding.name} · {holding.exchange} · {holding.currency}
                 </span>
+              </>
+            );
+            const detailHref = holdingDetailHref?.(holding.symbol);
+            return detailHref ? (
+              <Link
+                className={`holding-row holdings-grid${priceUnavailable ? " unavailable-row" : ""}`}
+                href={detailHref}
+                key={holding.symbol}
+                aria-label={`${holding.symbol}, ${holding.name}, open details`}
+              >
+                {rowContent}
+              </Link>
+            ) : (
+              <button
+                className={`holding-row holdings-grid${priceUnavailable ? " unavailable-row" : ""}`}
+                type="button"
+                key={holding.symbol}
+                onClick={() => onSelectHolding(holding, priceUnavailable)}
+                aria-label={`${holding.symbol}, ${holding.name}, open details`}
+              >
+                {rowContent}
               </button>
             );
           })}
@@ -832,9 +849,13 @@ function NewsScreen() {
 function HoldingSheet({
   holding,
   onClose,
+  directRoute = false,
+  unavailable = false,
 }: {
   holding: Holding;
   onClose: () => void;
+  directRoute?: boolean;
+  unavailable?: boolean;
 }) {
   return (
     <div className="sheet-layer" role="presentation" onMouseDown={onClose}>
@@ -863,15 +884,19 @@ function HoldingSheet({
           </button>
         </div>
         <div className="sheet-quote">
-          <strong>{holding.price}</strong>
-          <ToneValue tone={holding.dailyTone}>
-            {holding.dailyAmount} · {holding.dailyPercent}
-          </ToneValue>
+          <strong>{unavailable ? "Price unavailable" : holding.price}</strong>
+          {unavailable ? (
+            <span className="unavailable">Daily movement unavailable</span>
+          ) : (
+            <ToneValue tone={holding.dailyTone}>
+              {holding.dailyAmount} · {holding.dailyPercent}
+            </ToneValue>
+          )}
         </div>
         <dl className="sheet-facts">
           <div>
             <dt>Market value</dt>
-            <dd>{holding.value}</dd>
+            <dd>{unavailable ? "Price unavailable" : holding.value}</dd>
           </div>
           <div>
             <dt>Open cost</dt>
@@ -879,8 +904,14 @@ function HoldingSheet({
           </div>
           <div>
             <dt>Total gain</dt>
-            <dd className={`tone-${holding.totalTone}`}>
-              {holding.totalAmount} · {holding.totalPercent}
+            <dd
+              className={
+                unavailable ? "unavailable" : `tone-${holding.totalTone}`
+              }
+            >
+              {unavailable
+                ? "Price unavailable"
+                : `${holding.totalAmount} · ${holding.totalPercent}`}
             </dd>
           </div>
           <div>
@@ -889,9 +920,14 @@ function HoldingSheet({
           </div>
         </dl>
         <p className="sheet-note">
-          Prototype explanation: exact observation time, source, FX evidence,
-          and FIFO lots would remain available here without crowding the row.
+          {holding.detailExplanation ??
+            "Prototype explanation: exact observation time, source, FX evidence, and FIFO lots remain available here without crowding the row."}
         </p>
+        {directRoute ? (
+          <Link className="sheet-back" href="/portfolio/preview/holdings">
+            Back to holdings
+          </Link>
+        ) : null}
       </section>
     </div>
   );
@@ -903,25 +939,42 @@ export function PortfolioShell({
   reviewNote = "Static review build · local mock data · no financial writes",
   portfolioPrototypesOverride = null,
   overviewHref = "/",
+  holdingSymbol = null,
 }: {
   activeSection: PortfolioSection;
   reviewBadgeLabel?: string;
   reviewNote?: string;
   portfolioPrototypesOverride?: readonly PortfolioPrototype[] | null;
   overviewHref?: string;
+  holdingSymbol?: string | null;
 }) {
   const router = useRouter();
   const portfolios = portfolioPrototypesOverride ?? portfolioPrototypes;
-  const [portfolioId, setPortfolioId] = useState(
-    () =>
+  const [portfolioId, setPortfolioId] = useState(() => {
+    const detailPortfolio = holdingSymbol
+      ? portfolios.find((item) =>
+          item.holdings.some((holding) => holding.symbol === holdingSymbol),
+        )
+      : null;
+    return (
+      detailPortfolio?.id ??
       portfolios.find((item) => item.id === "aus-stocks")?.id ??
       portfolios[0]?.id ??
-      "aus-stocks",
-  );
+      "aus-stocks"
+    );
+  });
   const [viewState, setViewState] = useState<ViewState>("populated");
   const [openMenu, setOpenMenu] = useState<OpenMenu>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [selectedHolding, setSelectedHolding] = useState<Holding | null>(null);
+  const [selectedHolding, setSelectedHolding] = useState<Holding | null>(() =>
+    holdingSymbol
+      ? (portfolios
+          .flatMap((item) => item.holdings)
+          .find((holding) => holding.symbol === holdingSymbol) ?? null)
+      : null,
+  );
+  const [selectedHoldingUnavailable, setSelectedHoldingUnavailable] =
+    useState(false);
 
   const portfolio =
     portfolios.find((item) => item.id === portfolioId) ?? portfolios[0];
@@ -1118,7 +1171,16 @@ export function PortfolioShell({
           <HoldingsScreen
             portfolio={portfolio}
             viewState={viewState}
-            onSelectHolding={setSelectedHolding}
+            onSelectHolding={(holding, unavailable) => {
+              setSelectedHolding(holding);
+              setSelectedHoldingUnavailable(unavailable);
+            }}
+            holdingDetailHref={
+              portfolioPrototypesOverride
+                ? (symbol) =>
+                    `/portfolio/preview/holdings/${encodeURIComponent(symbol)}`
+                : undefined
+            }
           />
         ) : null}
         {activeSection === "quotes" ? (
@@ -1188,6 +1250,8 @@ export function PortfolioShell({
         <HoldingSheet
           holding={selectedHolding}
           onClose={() => setSelectedHolding(null)}
+          directRoute={holdingSymbol !== null}
+          unavailable={selectedHoldingUnavailable}
         />
       ) : null}
     </div>

@@ -1326,6 +1326,18 @@ dd {
   line-height: 1.5;
 }
 
+.sheet-back {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  margin-top: 15px;
+  padding: 0 12px;
+  border: 1px solid var(--green);
+  border-radius: 3px;
+  color: var(--cream);
+  font-size: 0.75rem;
+}
+
 @media (max-width: 350px) {
   .primary-tabs a {
     min-width: 64px;

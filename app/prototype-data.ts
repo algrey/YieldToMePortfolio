@@ -15,6 +15,8 @@ export type Holding = {
   totalAmount: string;
   totalPercent: string;
   totalTone: Tone;
+  baseCurrency?: string;
+  detailExplanation?: string;
   sort: {
     ticker: string;
     value: string;

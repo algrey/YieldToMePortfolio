@@ -111,7 +111,7 @@ Gate: `VSL-003` and `VSL-004` are DONE.
 
 ### VSL-005 — Holding-detail drill-down
 
-Status: READY.
+Status: DONE.
 
 - Objective: complete the review flow by linking a holding row to a compact detail view of its calculated facts and fixture-data explanation.
 - Dependencies: `VSL-004`.
@@ -122,6 +122,7 @@ Status: READY.
 - Tests: direct/deep route render, row navigation, native/home fixture conversion, unavailable metric, 320/390 width captures, keyboard semantics.
 - Risks: detail expansion turning into the deferred ledger, provider, or advanced-performance surface.
 - Parallel safe: no; follows the final Overview/Holdings contract.
+- Completion note: Added preview holding deep routes and row links, promoted the shared valuation facts into a compact accessible detail sheet with back navigation, and verified fixture/currency and unavailable-price explanations without adding live or mutation behavior.
 
 ### VSL-006 — Preview deployment and review evidence
 

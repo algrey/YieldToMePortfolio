@@ -175,6 +175,11 @@ function holdingToDisplay(holding: PreviewHoldingValuation): Holding {
     totalAmount: formatSignedCurrency(holding.totalGain, baseCurrency),
     totalPercent: percentFromTotals(holding.totalGain, holding.openBasis),
     totalTone: toneFromAmount(holding.totalGain),
+    baseCurrency,
+    detailExplanation:
+      holding.currency === baseCurrency
+        ? `Fixture market data · ${holding.currency} native values are also the portfolio reporting values.`
+        : `Fixture market data · price is shown in ${holding.currency}; value and gains use ${baseCurrency} reporting currency.`,
     sort: {
       ticker: holding.symbol,
       value: sortKey(holding.currentValue),

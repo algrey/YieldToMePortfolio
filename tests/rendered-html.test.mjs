@@ -112,7 +112,29 @@ test("server-renders a direct portfolio section route", async () => {
       /href="\/portfolio\/preview\/holdings"[^>]*aria-current="page"|aria-current="page"[^>]*href="\/portfolio\/preview\/holdings"/,
     );
     assert.match(html, /href="\/portfolio\/preview\/overview"/);
+    assert.match(html, /href="\/portfolio\/preview\/holdings\/PLS\.AX"/);
   }
+});
+
+test("server-renders a direct holding detail route from the shared valuation", async () => {
+  const response = await render("/portfolio/preview/holdings/PLS.AX", {
+    token: accessFixture.signToken(),
+    fetch: async () => accessFixture.createJwks().clone(),
+  });
+  assert.equal(response.status, 200);
+
+  const html = await response.text();
+  assert.match(html, /PLS\.AX/);
+  assert.match(html, /Plsgroup Fpo \[pls\]/);
+  assert.match(html, /ASX[\s\S]*AUD/);
+  assert.match(html, /A\$2\.09/);
+  assert.match(html, /Market value[\s\S]*A\$41800\.00/);
+  assert.match(html, /Open cost[\s\S]*A\$39300\.00/);
+  assert.match(html, /\+A\$4200\.00/);
+  assert.match(html, /Total gain[\s\S]*\+A\$2500\.00/);
+  assert.match(html, /A\$1\.965 × 20,000 shares/);
+  assert.match(html, /Fixture market data/);
+  assert.match(html, /Back to holdings/);
 });
 
 test("server-renders the preview overview route", async () => {
