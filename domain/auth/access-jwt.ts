@@ -482,3 +482,9 @@ export function createAccessJwtVerifier(options: AccessVerifierOptions = {}) {
 export function encodeAccessJwtBase64Url(value: unknown): string {
   return encodeBase64UrlJson(value);
 }
+
+export function decodeAccessJwtBase64Url(value: string): unknown {
+  return JSON.parse(
+    Buffer.from(value, "base64url").toString("utf8"),
+  ) as unknown;
+}

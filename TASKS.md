@@ -690,7 +690,7 @@ Status: DONE for owner review on 2026-07-29; production UI tasks remain unchange
 
 ### UI-001 — Authenticated shell, portfolio selection, and routes
 
-Status: READY.
+Status: DONE (2026-07-30).
 
 - Objective: replace the visual-only scaffold with the verified private session shell and real owned portfolio navigation.
 - Dependencies: AUTH-002, FND-001.
@@ -701,6 +701,7 @@ Status: READY.
 - Tests: route render/action ownership, semantic/keyboard checks, 320 px and desktop visual QA.
 - Risks: selector leaking portfolio names in cached HTML; use no-store.
 - Parallel safe: base shell first, then downstream screens can parallelize.
+- Completion: Added Worker-verified principal transport, D1-backed owned workspace loading, no-store authenticated shell routes, portfolio-safe navigation, session menu, home-currency display, honest empty/unavailable/news states, and route/projection regression coverage. Preview fixture routes remain isolated under `/portfolio/preview/*`; portfolio mutations remain deferred to their dedicated authorization and UI tasks.
 
 ### UI-002 — Overview and historical value
 

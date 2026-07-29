@@ -5,6 +5,7 @@ import {
 } from "../../../components/portfolio-shell";
 import { createPreviewPortfolioPrototypes } from "../../../preview-route-data";
 import { loadPreviewValuationFixture } from "../../../preview-valuation";
+import { loadAuthenticatedWorkspace } from "../../../authenticated-workspace";
 
 const portfolioSections = [
   "overview",
@@ -25,12 +26,27 @@ export default async function PortfolioSectionPage({
 }: PortfolioSectionPageProps) {
   const { portfolioId, section } = await params;
 
-  if (portfolioId !== "preview") {
+  if (!portfolioSections.includes(section as PortfolioSection)) {
     notFound();
   }
 
-  if (!portfolioSections.includes(section as PortfolioSection)) {
-    notFound();
+  if (portfolioId !== "preview") {
+    const workspace = await loadAuthenticatedWorkspace(portfolioId);
+    if (workspace.status === "unavailable") {
+      return (
+        <PortfolioShell
+          activeSection={section as PortfolioSection}
+          ownedWorkspace={workspace}
+        />
+      );
+    }
+    if (workspace.activePortfolio === null) notFound();
+    return (
+      <PortfolioShell
+        activeSection={section as PortfolioSection}
+        ownedWorkspace={workspace}
+      />
+    );
   }
 
   const previewFixtureResult = await previewValuationFixturePromise;

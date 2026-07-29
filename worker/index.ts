@@ -7,7 +7,11 @@ import {
   applyResponseSecurityHeaders,
   createCspNonce,
 } from "./response-security";
-import { createAccessJwtVerifier } from "../domain/auth/access-jwt";
+import {
+  createAccessJwtVerifier,
+  encodeAccessJwtBase64Url,
+} from "../domain/auth/access-jwt";
+import { VERIFIED_PRINCIPAL_HEADER } from "../domain/auth/verified-principal-header";
 import {
   addRequestId,
   createRequestId,
@@ -105,7 +109,16 @@ const worker: ExportedHandler<Env> = {
       result: "success",
       requestId,
     });
-    return await respond(await handler.fetch(request, env, ctx));
+    const authenticatedHeaders = new Headers(request.headers);
+    authenticatedHeaders.delete(VERIFIED_PRINCIPAL_HEADER);
+    authenticatedHeaders.set(
+      VERIFIED_PRINCIPAL_HEADER,
+      encodeAccessJwtBase64Url(accessResult.principal),
+    );
+    const authenticatedRequest = new Request(request, {
+      headers: authenticatedHeaders,
+    });
+    return await respond(await handler.fetch(authenticatedRequest, env, ctx));
   },
 };
 

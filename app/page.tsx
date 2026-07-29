@@ -1,5 +1,7 @@
 import { PortfolioShell } from "./components/portfolio-shell";
+import { loadAuthenticatedWorkspace } from "./authenticated-workspace";
 
-export default function Home() {
-  return <PortfolioShell activeSection="overview" />;
+export default async function Home() {
+  const workspace = await loadAuthenticatedWorkspace();
+  return <PortfolioShell activeSection="overview" ownedWorkspace={workspace} />;
 }

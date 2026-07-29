@@ -5,6 +5,7 @@ import {
 } from "../../../../components/portfolio-shell";
 import { createPreviewPortfolioPrototypes } from "../../../../preview-route-data";
 import { loadPreviewValuationFixture } from "../../../../preview-valuation";
+import { loadAuthenticatedWorkspace } from "../../../../authenticated-workspace";
 
 const previewValuationFixturePromise = loadPreviewValuationFixture();
 
@@ -20,7 +21,17 @@ export default async function HoldingDetailPage({
   params,
 }: HoldingDetailPageProps) {
   const { portfolioId, section, holdingId } = await params;
-  if (portfolioId !== "preview" || section !== "holdings") {
+  if (section !== "holdings") {
+    notFound();
+  }
+
+  if (portfolioId !== "preview") {
+    const workspace = await loadAuthenticatedWorkspace(portfolioId);
+    if (workspace.status === "unavailable") {
+      return (
+        <PortfolioShell activeSection="holdings" ownedWorkspace={workspace} />
+      );
+    }
     notFound();
   }
 

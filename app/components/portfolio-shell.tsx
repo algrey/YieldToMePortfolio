@@ -23,6 +23,27 @@ export const portfolioSections = [
 ] as const;
 
 export type PortfolioSection = (typeof portfolioSections)[number];
+export type OwnedWorkspace = {
+  status: "ready" | "empty" | "unavailable";
+  userDisplayName?: string | null;
+  homeCurrencyCode?: string | null;
+  message?: string;
+  activePortfolio: {
+    id: string;
+    name: string;
+    homeCurrencyCode: string;
+    baseCurrencyCode: string;
+    timezone: string;
+    accountingMethod: string;
+    status: string;
+  } | null;
+  portfolios: Array<{
+    id: string;
+    name: string;
+    homeCurrencyCode: string;
+    status: string;
+  }>;
+};
 const primaryPortfolioSections: PortfolioSection[] = [
   "overview",
   "news",
@@ -162,9 +183,11 @@ function StatusBanner({
 function EmptyState({
   title = "No holdings yet",
   message = "Add a quote or import transactions to start this portfolio.",
+  showAction = true,
 }: {
   title?: string;
   message?: string;
+  showAction?: boolean;
 }) {
   return (
     <section className="empty-state" aria-labelledby="empty-title">
@@ -174,8 +197,60 @@ function EmptyState({
       <p className="eyebrow">Empty state</p>
       <h2 id="empty-title">{title}</h2>
       <p>{message}</p>
-      <button type="button">Preview add menu</button>
+      {showAction ? <button type="button">Preview add menu</button> : null}
     </section>
+  );
+}
+
+function OwnedWorkspaceScreen({
+  activeSection,
+  workspace,
+}: {
+  activeSection: PortfolioSection;
+  workspace: OwnedWorkspace;
+}) {
+  if (workspace.status === "unavailable") {
+    return (
+      <section className="empty-state" aria-labelledby="workspace-error-title">
+        <p className="eyebrow">Private workspace</p>
+        <h1 id="workspace-error-title">Portfolio data unavailable</h1>
+        <p>{workspace.message ?? "Try again shortly."}</p>
+      </section>
+    );
+  }
+
+  if (workspace.status === "empty" || workspace.activePortfolio === null) {
+    return (
+      <EmptyState
+        title="No portfolios yet"
+        message="Create a portfolio to begin tracking holdings and history."
+        showAction={false}
+      />
+    );
+  }
+
+  const titles: Record<PortfolioSection, string> = {
+    overview: "No holdings yet",
+    holdings: "No holdings yet",
+    quotes: "No quotes yet",
+    details: "No valuation history yet",
+    news: "News is not connected yet",
+  };
+  const messages: Record<PortfolioSection, string> = {
+    overview:
+      "This portfolio is ready. Holdings and valuations will appear after ledger data is added.",
+    holdings: "Import or add a holding when portfolio entry is available.",
+    quotes: "Validated market observations will appear here when available.",
+    details: "Historical valuation data will appear here when available.",
+    news: "YieldToMe does not provide investment news in this release.",
+  };
+
+  return (
+    <EmptyState
+      title={titles[activeSection]}
+      message={messages[activeSection]}
+      showAction={false}
+    />
   );
 }
 
@@ -940,6 +1015,7 @@ export function PortfolioShell({
   portfolioPrototypesOverride = null,
   overviewHref = "/",
   holdingSymbol = null,
+  ownedWorkspace,
 }: {
   activeSection: PortfolioSection;
   reviewBadgeLabel?: string;
@@ -947,9 +1023,11 @@ export function PortfolioShell({
   portfolioPrototypesOverride?: readonly PortfolioPrototype[] | null;
   overviewHref?: string;
   holdingSymbol?: string | null;
+  ownedWorkspace?: OwnedWorkspace;
 }) {
   const router = useRouter();
   const portfolios = portfolioPrototypesOverride ?? portfolioPrototypes;
+  const ownedMode = ownedWorkspace !== undefined;
   const [portfolioId, setPortfolioId] = useState(() => {
     const detailPortfolio = holdingSymbol
       ? portfolios.find((item) =>
@@ -986,6 +1064,9 @@ export function PortfolioShell({
     setPortfolioId(nextId);
     setOpenMenu(null);
     setDrawerOpen(false);
+    if (ownedMode) {
+      router.push(`/portfolio/${nextId}/${activeSection}`);
+    }
   }
 
   return (
@@ -1022,25 +1103,34 @@ export function PortfolioShell({
               )
             }
           >
-            <span>{portfolio.name}</span>
+            <span>
+              {ownedMode
+                ? (ownedWorkspace?.activePortfolio?.name ?? "No portfolios")
+                : (portfolio?.name ?? "No portfolios")}
+            </span>
             <span aria-hidden="true">⌄</span>
           </button>
           {openMenu === "portfolio" ? (
             <div className="popover portfolio-popover">
               <p>Portfolios</p>
-              {portfolios.map((item) => (
-                <button
-                  type="button"
-                  key={item.id}
-                  aria-pressed={item.id === portfolioId}
-                  onClick={() => selectPortfolio(item.id)}
-                >
-                  <span>{item.name}</span>
-                  {item.id === portfolioId ? (
-                    <span aria-hidden="true">✓</span>
-                  ) : null}
-                </button>
-              ))}
+              {(ownedMode ? ownedWorkspace.portfolios : portfolios).map(
+                (item) => (
+                  <button
+                    type="button"
+                    key={item.id}
+                    aria-pressed={
+                      item.id ===
+                      (ownedWorkspace?.activePortfolio?.id ?? portfolioId)
+                    }
+                    onClick={() => selectPortfolio(item.id)}
+                  >
+                    <span>{item.name}</span>
+                    {item.id === portfolioId ? (
+                      <span aria-hidden="true">✓</span>
+                    ) : null}
+                  </button>
+                ),
+              )}
               <Link href="/" onClick={() => setOpenMenu(null)}>
                 <span>All portfolios</span>
                 <span aria-hidden="true">→</span>
@@ -1049,7 +1139,11 @@ export function PortfolioShell({
           ) : null}
         </div>
 
-        <span className="prototype-chip desktop-only">{reviewBadgeLabel}</span>
+        <span className="prototype-chip desktop-only">
+          {ownedMode
+            ? `${ownedWorkspace.homeCurrencyCode ?? "AUD"} workspace`
+            : reviewBadgeLabel}
+        </span>
 
         <div className="app-actions">
           <button
@@ -1097,7 +1191,9 @@ export function PortfolioShell({
             <button
               className="icon-button"
               type="button"
-              aria-label="Open prototype state menu"
+              aria-label={
+                ownedMode ? "Open account menu" : "Open prototype state menu"
+              }
               aria-expanded={openMenu === "prototype"}
               onClick={() =>
                 setOpenMenu((current) =>
@@ -1111,38 +1207,57 @@ export function PortfolioShell({
             </button>
             {openMenu === "prototype" ? (
               <div className="popover prototype-popover">
-                <p>Preview a state</p>
-                {(Object.keys(prototypeStateLabels) as ViewState[]).map(
-                  (state) => (
-                    <button
-                      type="button"
-                      key={state}
-                      aria-pressed={viewState === state}
-                      onClick={() => {
-                        setViewState(state);
-                        setOpenMenu(null);
-                      }}
-                    >
-                      <span>{prototypeStateLabels[state]}</span>
-                      {viewState === state ? (
-                        <span aria-hidden="true">✓</span>
-                      ) : null}
-                    </button>
-                  ),
-                )}
+                {ownedMode ? (
+                  <>
+                    <p>Signed in</p>
+                    <span className="menu-note">
+                      {ownedWorkspace.userDisplayName ?? "Private account"}
+                    </span>
+                  </>
+                ) : null}
+                {!ownedMode ? <p>Preview a state</p> : null}
+                {!ownedMode &&
+                  (Object.keys(prototypeStateLabels) as ViewState[]).map(
+                    (state) => (
+                      <button
+                        type="button"
+                        key={state}
+                        aria-pressed={viewState === state}
+                        onClick={() => {
+                          setViewState(state);
+                          setOpenMenu(null);
+                        }}
+                      >
+                        <span>{prototypeStateLabels[state]}</span>
+                        {viewState === state ? (
+                          <span aria-hidden="true">✓</span>
+                        ) : null}
+                      </button>
+                    ),
+                  )}
               </div>
             ) : null}
           </div>
         </div>
       </header>
 
-      <p className="prototype-chip mobile-only">{reviewBadgeLabel}</p>
+      <p className="prototype-chip mobile-only">
+        {ownedMode
+          ? `${ownedWorkspace.homeCurrencyCode ?? "AUD"} workspace`
+          : reviewBadgeLabel}
+      </p>
 
       <nav className="primary-tabs" aria-label="Portfolio sections">
         {primaryPortfolioSections.map((section) => (
           <Link
             key={section}
-            href={sectionHref(section, overviewHref)}
+            href={
+              ownedMode
+                ? ownedWorkspace.activePortfolio
+                  ? `/portfolio/${ownedWorkspace.activePortfolio.id}/${section}`
+                  : "/"
+                : sectionHref(section, overviewHref)
+            }
             aria-current={activeSection === section ? "page" : undefined}
           >
             {section}
@@ -1156,7 +1271,13 @@ export function PortfolioShell({
       />
 
       <main className={`screen-content screen-${activeSection}`}>
-        {activeSection === "overview" ? (
+        {ownedMode ? (
+          <OwnedWorkspaceScreen
+            activeSection={activeSection}
+            workspace={ownedWorkspace}
+          />
+        ) : null}
+        {!ownedMode && activeSection === "overview" ? (
           <OverviewScreen
             portfolio={portfolioPrototypesOverride ? portfolio : undefined}
             rows={overviewPortfolioRows}
@@ -1167,7 +1288,7 @@ export function PortfolioShell({
             }}
           />
         ) : null}
-        {activeSection === "holdings" ? (
+        {!ownedMode && activeSection === "holdings" ? (
           <HoldingsScreen
             portfolio={portfolio}
             viewState={viewState}
@@ -1183,13 +1304,13 @@ export function PortfolioShell({
             }
           />
         ) : null}
-        {activeSection === "quotes" ? (
+        {!ownedMode && activeSection === "quotes" ? (
           <QuotesScreen portfolio={portfolio} viewState={viewState} />
         ) : null}
-        {activeSection === "details" ? (
+        {!ownedMode && activeSection === "details" ? (
           <DetailsScreen portfolio={portfolio} viewState={viewState} />
         ) : null}
-        {activeSection === "news" ? <NewsScreen /> : null}
+        {!ownedMode && activeSection === "news" ? <NewsScreen /> : null}
       </main>
 
       {drawerOpen ? (

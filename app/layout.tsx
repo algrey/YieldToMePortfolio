@@ -16,7 +16,7 @@ export async function generateMetadata(): Promise<Metadata> {
   const protocol = forwardedProtocol === "https" ? "https" : "http";
   const metadataBase = new URL(`${protocol}://${host}`);
   const description =
-    "A static, responsive YieldToMe portfolio interface prototype using local mock data.";
+    "A private portfolio ledger and reporting workspace for invited users.";
 
   return {
     metadataBase,
@@ -45,7 +45,7 @@ export async function generateMetadata(): Promise<Metadata> {
           url: new URL("/og.png", metadataBase).toString(),
           width: 1200,
           height: 630,
-          alt: "YieldToMe portfolio prototype",
+          alt: "YieldToMe portfolio workspace",
         },
       ],
     },

@@ -47,7 +47,7 @@ async function render(path = "/", options = {}) {
   }
 }
 
-test("server-renders the YieldToMe static prototype", async () => {
+test("server-renders the private shell without exposing mock portfolio values", async () => {
   const response = await render("/", {
     token: accessFixture.signToken(),
     fetch: async () => accessFixture.createJwks().clone(),
@@ -57,10 +57,8 @@ test("server-renders the YieldToMe static prototype", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>YieldToMe<\/title>/i);
-  assert.match(html, /All portfolios · AUD/);
-  assert.match(html, /A\$1,695,575\.90/);
-  assert.match(html, /Portfolio history/);
-  assert.match(html, /Aus Stocks/);
+  assert.match(html, /Portfolio data unavailable/);
+  assert.doesNotMatch(html, /A\$1,695,575\.90|Aus Stocks|All portfolios · AUD/);
   assert.doesNotMatch(html, /Your site is taking shape|react-loading-skeleton/);
 });
 
