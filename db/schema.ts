@@ -1121,8 +1121,8 @@ export const manualOverrides = sqliteTable(
     }).onDelete("restrict"),
     foreignKey({
       name: "manual_overrides_supersedes_override_id_fk",
-      columns: [table.supersedesOverrideId],
-      foreignColumns: [table.id],
+      columns: [table.supersedesOverrideId, table.userId],
+      foreignColumns: [table.id, table.userId],
     }).onDelete("restrict"),
     check(
       "manual_overrides_type_check",
@@ -1143,5 +1143,6 @@ export const manualOverrides = sqliteTable(
       table.status,
       table.effectiveFrom,
     ),
+    uniqueIndex("manual_overrides_id_user_unique").on(table.id, table.userId),
   ],
 );

@@ -133,6 +133,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
   ]);
   assert.deepEqual(indexNames(database, "manual_overrides"), [
     "manual_overrides_active_idx",
+    "manual_overrides_id_user_unique",
   ]);
   assert.deepEqual(indexNames(database, "import_batches"), [
     "import_batches_id_user_unique",
@@ -719,6 +720,19 @@ test("manual overrides are owner-scoped, versionable, and interval constrained",
         'override-cross-owner', 'user-b', 'portfolio-a', 'price',
         'security-bhp', '2026-07-29', '{}', 'Cross-owner attempt', 'active',
         '2026-07-29T09:00:00Z'
+      );
+    `);
+  }, /FOREIGN KEY constraint failed/);
+
+  assert.throws(() => {
+    database.exec(`
+      INSERT INTO manual_overrides (
+        id, user_id, portfolio_id, type, target_key, effective_from,
+        value_json, reason, status, supersedes_override_id, created_at
+      ) VALUES (
+        'override-cross-user-supersession', 'user-b', 'portfolio-a', 'price',
+        'security-bhp', '2026-07-29', '{}', 'Cross-user supersession', 'active',
+        'override-1', '2026-07-29T10:00:00Z'
       );
     `);
   }, /FOREIGN KEY constraint failed/);
