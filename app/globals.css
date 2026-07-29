@@ -80,6 +80,21 @@ dd {
   display: none !important;
 }
 
+.mobile-only {
+  display: block !important;
+}
+
+.prototype-chip.mobile-only {
+  margin: 8px 16px 0;
+  padding: 4px 8px;
+  border: 1px solid var(--divider);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  width: fit-content;
+}
+
 .prototype-app {
   min-height: 100dvh;
   background:
@@ -1381,6 +1396,10 @@ dd {
 @media (min-width: 700px) {
   .desktop-only {
     display: initial !important;
+  }
+
+  .mobile-only {
+    display: none !important;
   }
 
   .app-bar {

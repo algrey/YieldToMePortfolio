@@ -1001,6 +1001,8 @@ export function PortfolioShell({
         </div>
       </header>
 
+      <p className="prototype-chip mobile-only">{reviewBadgeLabel}</p>
+
       <nav className="primary-tabs" aria-label="Portfolio sections">
         {primaryPortfolioSections.map((section) => (
           <Link
