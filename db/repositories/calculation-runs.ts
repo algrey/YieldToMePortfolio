@@ -204,6 +204,9 @@ export function createCalculationRunRepository(sql: SqlClient) {
       if (existing.status !== "running") {
         return { ok: false, reason: "not-running" };
       }
+      if (existing.leaseExpiresAt === null || existing.leaseExpiresAt <= now) {
+        return { ok: false, reason: "not-owned" };
+      }
       if (existing.ledgerHighWaterStart !== currentLedgerHighWater) {
         return { ok: false, reason: "stale-ledger" };
       }
@@ -217,6 +220,7 @@ export function createCalculationRunRepository(sql: SqlClient) {
               updated_at = ?
           WHERE user_id = ? AND portfolio_id = ? AND id = ?
             AND status = 'running' AND lease_owner = ?
+            AND lease_expires_at > ?
             AND ledger_high_water_start = ?
         `,
         [
@@ -229,6 +233,7 @@ export function createCalculationRunRepository(sql: SqlClient) {
           portfolioId,
           runId,
           leaseOwner,
+          now,
           currentLedgerHighWater,
         ],
       );

@@ -266,4 +266,42 @@ test("calculation runs are idempotent, leased, and reject stale ledger completio
     ),
     { ok: false, reason: "not-claimable" },
   );
+
+  const expiringRequest = await runs.request("user-a", {
+    id: "run-a-expiring",
+    portfolioId: "portfolio-a",
+    rangeFrom: "2026-07-01",
+    rangeTo: "2026-07-29",
+    calculationVersion: 2,
+    reason: "scheduled_refresh",
+    ledgerHighWaterStart: "ledger-101",
+    idempotencyKey: "rebuild-expiring",
+    now: "2026-07-30T00:12:00Z",
+  });
+  assert.equal(
+    (
+      await runs.claim(
+        "user-a",
+        "portfolio-a",
+        expiringRequest.id,
+        "worker-expiring",
+        "2026-07-30T00:20:00Z",
+        "2026-07-30T00:13:00Z",
+      )
+    ).ok,
+    true,
+  );
+  assert.deepEqual(
+    await runs.complete(
+      "user-a",
+      "portfolio-a",
+      expiringRequest.id,
+      "worker-expiring",
+      "ledger-101",
+      "2026-07-30T00:20:00Z",
+      1,
+      1,
+    ),
+    { ok: false, reason: "not-owned" },
+  );
 });
