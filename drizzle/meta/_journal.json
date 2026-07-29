@@ -15,6 +15,13 @@
       "when": 1785297805170,
       "tag": "0001_special_winter_soldier",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785299289553,
+      "tag": "0002_clammy_amphibian",
+      "breakpoints": true
     }
   ]
 }

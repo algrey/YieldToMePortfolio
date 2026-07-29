@@ -438,3 +438,233 @@ export const portfolioSecurities = sqliteTable(
     ),
   ],
 );
+
+export const importBatches = sqliteTable(
+  "import_batches",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    targetPortfolioId: text("target_portfolio_id"),
+    parserFormat: text("parser_format").notNull(),
+    parserVersion: text("parser_version").notNull(),
+    filename: text("filename").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    fileSha256: text("file_sha256").notNull(),
+    status: text("status").notNull().default("uploaded"),
+    totalRows: integer("total_rows").notNull().default(0),
+    blankRows: integer("blank_rows").notNull().default(0),
+    definitionRows: integer("definition_rows").notNull().default(0),
+    transactionRows: integer("transaction_rows").notNull().default(0),
+    unsupportedRows: integer("unsupported_rows").notNull().default(0),
+    duplicateRows: integer("duplicate_rows").notNull().default(0),
+    errorCount: integer("error_count").notNull().default(0),
+    warningCount: integer("warning_count").notNull().default(0),
+    infoCount: integer("info_count").notNull().default(0),
+    commitIdempotencyKey: text("commit_idempotency_key"),
+    reversalIdempotencyKey: text("reversal_idempotency_key"),
+    supersedesBatchId: text("supersedes_batch_id"),
+    failureCategory: text("failure_category"),
+    failureDetail: text("failure_detail"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    parsedAt: text("parsed_at"),
+    committedAt: text("committed_at"),
+    reversedAt: text("reversed_at"),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    foreignKey({
+      name: "import_batches_user_id_users_id_fk",
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "import_batches_target_portfolio_id_user_id_portfolios_id_user_id_fk",
+      columns: [table.targetPortfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "import_batches_supersedes_batch_id_user_id_import_batches_id_user_id_fk",
+      columns: [table.supersedesBatchId, table.userId],
+      foreignColumns: [table.id, table.userId],
+    }).onDelete("restrict"),
+    check(
+      "import_batches_status_check",
+      sql`${table.status} IN ('uploaded', 'parsed', 'needs_mapping', 'invalid', 'ready', 'committing', 'committed', 'reversing', 'reversed', 'failed')`,
+    ),
+    check("import_batches_byte_size_check", sql`${table.byteSize} >= 0`),
+    check("import_batches_total_rows_check", sql`${table.totalRows} >= 0`),
+    check("import_batches_blank_rows_check", sql`${table.blankRows} >= 0`),
+    check(
+      "import_batches_definition_rows_check",
+      sql`${table.definitionRows} >= 0`,
+    ),
+    check(
+      "import_batches_transaction_rows_check",
+      sql`${table.transactionRows} >= 0`,
+    ),
+    check(
+      "import_batches_unsupported_rows_check",
+      sql`${table.unsupportedRows} >= 0`,
+    ),
+    check(
+      "import_batches_duplicate_rows_check",
+      sql`${table.duplicateRows} >= 0`,
+    ),
+    check("import_batches_error_count_check", sql`${table.errorCount} >= 0`),
+    check(
+      "import_batches_warning_count_check",
+      sql`${table.warningCount} >= 0`,
+    ),
+    check("import_batches_info_count_check", sql`${table.infoCount} >= 0`),
+    uniqueIndex("import_batches_user_file_parser_unique").on(
+      table.userId,
+      table.fileSha256,
+      table.parserFormat,
+      table.parserVersion,
+    ),
+    uniqueIndex("import_batches_id_user_unique").on(table.id, table.userId),
+    index("import_batches_owner_status_updated_at_idx").on(
+      table.userId,
+      table.status,
+      table.updatedAt,
+    ),
+  ],
+);
+
+export const importRows = sqliteTable(
+  "import_rows",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    batchId: text("batch_id").notNull(),
+    physicalRowNumber: integer("physical_row_number").notNull(),
+    rowClass: text("row_class").notNull(),
+    originalFieldsJson: text("original_fields_json").notNull(),
+    normalizedFieldsJson: text("normalized_fields_json"),
+    normalizedFingerprint: text("normalized_fingerprint"),
+    validationStatus: text("validation_status").notNull().default("staged"),
+    targetPortfolioId: text("target_portfolio_id"),
+    targetPortfolioSecurityId: text("target_portfolio_security_id"),
+    commitStatus: text("commit_status").notNull().default("staged"),
+    commitTransactionId: text("commit_transaction_id"),
+    errorCount: integer("error_count").notNull().default(0),
+    warningCount: integer("warning_count").notNull().default(0),
+    infoCount: integer("info_count").notNull().default(0),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    foreignKey({
+      name: "import_rows_batch_id_user_id_import_batches_id_user_id_fk",
+      columns: [table.batchId, table.userId],
+      foreignColumns: [importBatches.id, importBatches.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "import_rows_target_portfolio_id_user_id_portfolios_id_user_id_fk",
+      columns: [table.targetPortfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "import_rows_target_portfolio_security_id_user_id_portfolio_id_portfolio_securities_id_user_id_portfolio_id_fk",
+      columns: [
+        table.targetPortfolioSecurityId,
+        table.userId,
+        table.targetPortfolioId,
+      ],
+      foreignColumns: [
+        portfolioSecurities.id,
+        portfolioSecurities.userId,
+        portfolioSecurities.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    check(
+      "import_rows_physical_row_number_check",
+      sql`${table.physicalRowNumber} > 1`,
+    ),
+    check(
+      "import_rows_row_class_check",
+      sql`${table.rowClass} IN ('portfolio_security_definition', 'transaction', 'blank', 'unsupported')`,
+    ),
+    check(
+      "import_rows_validation_status_check",
+      sql`${table.validationStatus} IN ('staged', 'valid', 'needs_mapping', 'invalid')`,
+    ),
+    check(
+      "import_rows_commit_status_check",
+      sql`${table.commitStatus} IN ('staged', 'committed', 'skipped', 'reversed', 'failed')`,
+    ),
+    check("import_rows_error_count_check", sql`${table.errorCount} >= 0`),
+    check("import_rows_warning_count_check", sql`${table.warningCount} >= 0`),
+    check("import_rows_info_count_check", sql`${table.infoCount} >= 0`),
+    uniqueIndex("import_rows_batch_physical_row_unique").on(
+      table.batchId,
+      table.physicalRowNumber,
+    ),
+    uniqueIndex("import_rows_id_user_unique").on(table.id, table.userId),
+    uniqueIndex("import_rows_id_user_portfolio_unique").on(
+      table.id,
+      table.userId,
+      table.targetPortfolioId,
+    ),
+    index("import_rows_review_idx").on(
+      table.batchId,
+      table.validationStatus,
+      table.physicalRowNumber,
+    ),
+    index("import_rows_user_normalized_fingerprint_idx").on(
+      table.userId,
+      table.normalizedFingerprint,
+    ),
+  ],
+);
+
+export const importIssues = sqliteTable(
+  "import_issues",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    batchId: text("batch_id").notNull(),
+    rowId: text("row_id"),
+    physicalRowNumber: integer("physical_row_number"),
+    field: text("field"),
+    severity: text("severity").notNull(),
+    code: text("code").notNull(),
+    message: text("message").notNull(),
+    suggestedResolutionType: text("suggested_resolution_type"),
+    resolvedValue: text("resolved_value"),
+    resolvedByUserId: text("resolved_by_user_id"),
+    resolvedAt: text("resolved_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    foreignKey({
+      name: "import_issues_batch_id_user_id_import_batches_id_user_id_fk",
+      columns: [table.batchId, table.userId],
+      foreignColumns: [importBatches.id, importBatches.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "import_issues_row_id_user_id_import_rows_id_user_id_fk",
+      columns: [table.rowId, table.userId],
+      foreignColumns: [importRows.id, importRows.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "import_issues_resolved_by_user_id_users_id_fk",
+      columns: [table.resolvedByUserId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    check(
+      "import_issues_severity_check",
+      sql`${table.severity} IN ('error', 'warning', 'info')`,
+    ),
+    uniqueIndex("import_issues_id_user_unique").on(table.id, table.userId),
+    index("import_issues_batch_row_idx").on(
+      table.batchId,
+      table.rowId,
+      table.physicalRowNumber,
+    ),
+  ],
+);

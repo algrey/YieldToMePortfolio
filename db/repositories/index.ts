@@ -1,4 +1,20 @@
 export {
+  createOwnedImportStagingRepository,
+  type ImportBatchRecord,
+  type ImportBatchStatus,
+  type ImportCommitStatus,
+  type ImportIssueRecord,
+  type ImportMutationFailure,
+  type ImportRowRecord,
+  type ImportRowStatus,
+  type RecordParsedImportResult,
+  type RecordParsedImportResultInput,
+  type StartImportUploadInput,
+  type StartImportUploadResult,
+  type TransitionImportBatchInput,
+  type TransitionImportBatchResult,
+} from "./import-staging.ts";
+export {
   createOwnedPortfolioRepository,
   createOwnedUserSettingsRepository,
   type ArchiveRestorePortfolioInput,

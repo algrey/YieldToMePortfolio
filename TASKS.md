@@ -233,7 +233,7 @@ Status: DONE on 2026-07-29.
 
 ### IMP-002A — Owned import staging state machine
 
-Status: READY.
+Status: DONE on 2026-07-29.
 
 - Objective: persist bounded parser output and issues without creating portfolios, securities, or ledger facts.
 - Dependencies: DB-001A, IMP-001.
@@ -244,6 +244,7 @@ Status: READY.
 - Tests: migration/foreign keys, transitions, duplicate hash, row bounds, cross-user access, concurrent transition conflict.
 - Risks: staging rows becoming visible as financial truth.
 - Parallel safe: yes with LED-001A work.
+- Completion note: Added owner-scoped import batch, row, and issue persistence with optimistic status transitions, duplicate-file reuse, and parser-output staging backed by a reviewed SQLite migration and repository tests.
 
 ### IMP-002B — Import mapping, reconciliation, and preview contract
 
