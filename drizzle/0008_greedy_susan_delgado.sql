@@ -1,0 +1,1 @@
+ALTER TABLE `price_observations` ADD `provider_revision_id` text;

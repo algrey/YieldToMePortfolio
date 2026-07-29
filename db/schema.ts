@@ -916,3 +916,232 @@ export const cashLedgerEntries = sqliteTable(
     ),
   ],
 );
+
+export const priceObservations = sqliteTable(
+  "price_observations",
+  {
+    id: text("id").primaryKey(),
+    providerId: text("provider_id").notNull(),
+    accessScope: text("access_scope").notNull(),
+    scopeUserId: text("scope_user_id"),
+    scopeKey: text("scope_key").notNull(),
+    mappingId: text("mapping_id").notNull(),
+    securityId: text("security_id").notNull(),
+    interval: text("interval").notNull(),
+    observationAt: text("observation_at").notNull(),
+    marketDate: text("market_date").notNull(),
+    marketTimezone: text("market_timezone").notNull(),
+    currencyCode: text("currency_code").notNull(),
+    closeDecimal: text("close_decimal").notNull(),
+    previousCloseDecimal: text("previous_close_decimal"),
+    adjustmentState: text("adjustment_state").notNull(),
+    quality: text("quality").notNull(),
+    delayedMinutes: integer("delayed_minutes"),
+    ingestedAt: text("ingested_at").notNull(),
+    providerRevisionId: text("provider_revision_id"),
+    payloadSha256: text("payload_sha256"),
+  },
+  (table) => [
+    foreignKey({
+      name: "price_observations_provider_id_market_data_providers_id_fk",
+      columns: [table.providerId],
+      foreignColumns: [marketDataProviders.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "price_observations_scope_user_id_users_id_fk",
+      columns: [table.scopeUserId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "price_observations_mapping_provider_security_fk",
+      columns: [table.mappingId, table.providerId, table.securityId],
+      foreignColumns: [
+        securityProviderMappings.id,
+        securityProviderMappings.providerId,
+        securityProviderMappings.securityId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "price_observations_security_id_securities_id_fk",
+      columns: [table.securityId],
+      foreignColumns: [securities.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "price_observations_currency_code_currencies_code_fk",
+      columns: [table.currencyCode],
+      foreignColumns: [currencies.code],
+    }).onDelete("restrict"),
+    check(
+      "price_observations_access_scope_check",
+      sql`${table.accessScope} IN ('deployment', 'user')`,
+    ),
+    check(
+      "price_observations_scope_check",
+      sql`(${table.accessScope} = 'deployment' AND ${table.scopeUserId} IS NULL AND ${table.scopeKey} = 'deployment') OR (${table.accessScope} = 'user' AND ${table.scopeUserId} IS NOT NULL AND ${table.scopeKey} = ${table.scopeUserId})`,
+    ),
+    check(
+      "price_observations_interval_check",
+      sql`${table.interval} IN ('eod', 'delayed', 'intraday')`,
+    ),
+    check(
+      "price_observations_adjustment_state_check",
+      sql`${table.adjustmentState} IN ('raw', 'split_adjusted', 'total_return_adjusted')`,
+    ),
+    check(
+      "price_observations_quality_check",
+      sql`${table.quality} IN ('observed', 'corrected', 'indicative', 'stale_candidate')`,
+    ),
+    check(
+      "price_observations_delayed_minutes_check",
+      sql`${table.delayedMinutes} IS NULL OR ${table.delayedMinutes} >= 0`,
+    ),
+    uniqueIndex("price_observations_provider_scope_mapping_unique").on(
+      table.providerId,
+      table.scopeKey,
+      table.mappingId,
+      table.interval,
+      table.observationAt,
+      table.adjustmentState,
+    ),
+    index("price_observations_security_date_idx").on(
+      table.securityId,
+      table.adjustmentState,
+      table.marketDate,
+    ),
+  ],
+);
+
+export const fxRateObservations = sqliteTable(
+  "fx_rate_observations",
+  {
+    id: text("id").primaryKey(),
+    providerId: text("provider_id").notNull(),
+    accessScope: text("access_scope").notNull(),
+    scopeUserId: text("scope_user_id"),
+    scopeKey: text("scope_key").notNull(),
+    baseCurrencyCode: text("base_currency_code").notNull(),
+    quoteCurrencyCode: text("quote_currency_code").notNull(),
+    rateDecimal: text("rate_decimal").notNull(),
+    interval: text("interval").notNull(),
+    observedAt: text("observed_at").notNull(),
+    marketDate: text("market_date").notNull(),
+    quality: text("quality").notNull(),
+    ingestedAt: text("ingested_at").notNull(),
+    payloadSha256: text("payload_sha256"),
+  },
+  (table) => [
+    foreignKey({
+      name: "fx_rate_observations_provider_id_market_data_providers_id_fk",
+      columns: [table.providerId],
+      foreignColumns: [marketDataProviders.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "fx_rate_observations_scope_user_id_users_id_fk",
+      columns: [table.scopeUserId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "fx_rate_observations_base_currency_code_currencies_code_fk",
+      columns: [table.baseCurrencyCode],
+      foreignColumns: [currencies.code],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "fx_rate_observations_quote_currency_code_currencies_code_fk",
+      columns: [table.quoteCurrencyCode],
+      foreignColumns: [currencies.code],
+    }).onDelete("restrict"),
+    check(
+      "fx_rate_observations_access_scope_check",
+      sql`${table.accessScope} IN ('deployment', 'user')`,
+    ),
+    check(
+      "fx_rate_observations_scope_check",
+      sql`(${table.accessScope} = 'deployment' AND ${table.scopeUserId} IS NULL AND ${table.scopeKey} = 'deployment') OR (${table.accessScope} = 'user' AND ${table.scopeUserId} IS NOT NULL AND ${table.scopeKey} = ${table.scopeUserId})`,
+    ),
+    check(
+      "fx_rate_observations_pair_check",
+      sql`${table.baseCurrencyCode} <> ${table.quoteCurrencyCode}`,
+    ),
+    check(
+      "fx_rate_observations_interval_check",
+      sql`${table.interval} IN ('eod', 'delayed', 'intraday')`,
+    ),
+    check(
+      "fx_rate_observations_quality_check",
+      sql`${table.quality} IN ('observed', 'corrected', 'indicative', 'stale_candidate')`,
+    ),
+    uniqueIndex("fx_rate_observations_provider_scope_pair_unique").on(
+      table.providerId,
+      table.scopeKey,
+      table.baseCurrencyCode,
+      table.quoteCurrencyCode,
+      table.interval,
+      table.observedAt,
+    ),
+    index("fx_rate_observations_pair_date_idx").on(
+      table.baseCurrencyCode,
+      table.quoteCurrencyCode,
+      table.marketDate,
+    ),
+  ],
+);
+
+export const manualOverrides = sqliteTable(
+  "manual_overrides",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id"),
+    securityId: text("security_id"),
+    type: text("type").notNull(),
+    targetKey: text("target_key").notNull(),
+    effectiveFrom: text("effective_from").notNull(),
+    effectiveTo: text("effective_to"),
+    valueJson: text("value_json").notNull(),
+    reason: text("reason").notNull(),
+    status: text("status").notNull(),
+    supersedesOverrideId: text("supersedes_override_id"),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "manual_overrides_user_id_users_id_fk",
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "manual_overrides_portfolio_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "manual_overrides_security_id_securities_id_fk",
+      columns: [table.securityId],
+      foreignColumns: [securities.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "manual_overrides_supersedes_override_id_fk",
+      columns: [table.supersedesOverrideId],
+      foreignColumns: [table.id],
+    }).onDelete("restrict"),
+    check(
+      "manual_overrides_type_check",
+      sql`${table.type} IN ('price', 'fx_rate', 'security_mapping', 'transaction_fx')`,
+    ),
+    check(
+      "manual_overrides_status_check",
+      sql`${table.status} IN ('active', 'superseded', 'revoked')`,
+    ),
+    check(
+      "manual_overrides_effective_interval_check",
+      sql`${table.effectiveTo} IS NULL OR ${table.effectiveTo} >= ${table.effectiveFrom}`,
+    ),
+    index("manual_overrides_active_idx").on(
+      table.userId,
+      table.type,
+      table.targetKey,
+      table.status,
+      table.effectiveFrom,
+    ),
+  ],
+);

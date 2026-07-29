@@ -462,7 +462,7 @@ Status: DONE on 2026-07-29.
 
 ### DB-003 — Price, FX, and override schema
 
-Status: READY.
+Status: DONE on 2026-07-30.
 
 - Objective: persist normalized price/FX observations and auditable user corrections with unambiguous provenance.
 - Dependencies: DB-002.
@@ -473,6 +473,7 @@ Status: READY.
 - Tests: migrations/foreign keys, deployment/user observation scope, duplicate/corrected observation, adjustment state, rate direction, override conflict/ownership.
 - Risks: ambiguous revision/upsert semantics or an index that cannot serve latest-by-date selection.
 - Parallel safe: yes with pure calculation fixtures after normalized types freeze.
+- Completion note: Added normalized price and directional FX observation tables with deployment/user scope checks, provider mapping provenance, revision/quality fields, idempotency and latest-selection indexes. Added owner-scoped versioned manual overrides with effective-interval and supersession constraints, generated migrations, and deterministic foreign-key/scope/duplicate/conflict tests.
 
 ### DB-004 — Snapshot and calculation-run schema
 

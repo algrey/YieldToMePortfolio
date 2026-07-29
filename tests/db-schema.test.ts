@@ -90,13 +90,16 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "cash_ledger_entries",
     "currencies",
     "exchanges",
+    "fx_rate_observations",
     "import_batches",
     "import_issues",
     "import_rows",
+    "manual_overrides",
     "market_data_providers",
     "portfolio_securities",
     "portfolio_settings",
     "portfolios",
+    "price_observations",
     "securities",
     "security_identifiers",
     "security_provider_mappings",
@@ -119,6 +122,17 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "cash_entries_balance_idx",
     "cash_entries_id_user_portfolio_unique",
     "cash_entries_transaction_type_unique",
+  ]);
+  assert.deepEqual(indexNames(database, "price_observations"), [
+    "price_observations_provider_scope_mapping_unique",
+    "price_observations_security_date_idx",
+  ]);
+  assert.deepEqual(indexNames(database, "fx_rate_observations"), [
+    "fx_rate_observations_pair_date_idx",
+    "fx_rate_observations_provider_scope_pair_unique",
+  ]);
+  assert.deepEqual(indexNames(database, "manual_overrides"), [
+    "manual_overrides_active_idx",
   ]);
   assert.deepEqual(indexNames(database, "import_batches"), [
     "import_batches_id_user_unique",
@@ -538,6 +552,176 @@ test("provider registry has ordinary technical configuration only", async () => 
     "technically_reviewed_at",
     "operator_notes_reference",
   ]);
+});
+
+test("market observations preserve scope, provenance, direction, and idempotency", async () => {
+  const database = createMigratedDatabase(await loadMigrationSql());
+  seedSecurityMasterFixture(database);
+  database.exec(`
+    INSERT INTO security_provider_mappings (
+      id, security_id, provider_id, provider_exchange, provider_symbol,
+      valid_from, valid_to, status, verified_by_user_id, verified_at
+    ) VALUES (
+      'mapping-bhp', 'security-bhp', 'provider-yahoo', 'ASX', 'BHP.AX',
+      '2020-01-01', NULL, 'verified', 'user-a', '2026-07-29T00:00:00Z'
+    );
+
+    INSERT INTO price_observations (
+      id, provider_id, access_scope, scope_user_id, scope_key, mapping_id,
+      security_id, interval, observation_at, market_date, market_timezone,
+      currency_code, close_decimal, previous_close_decimal, adjustment_state,
+      quality, delayed_minutes, ingested_at, provider_revision_id, payload_sha256
+    ) VALUES (
+      'price-deployment', 'provider-yahoo', 'deployment', NULL, 'deployment',
+      'mapping-bhp', 'security-bhp', 'eod', '2026-07-29T06:00:00Z',
+      '2026-07-29', 'Australia/Sydney', 'AUD', '42.10', '41.90', 'raw',
+      'observed', NULL, '2026-07-29T06:01:00Z', 'revision-1', 'hash-1'
+    ), (
+      'price-user', 'provider-yahoo', 'user', 'user-a', 'user-a', 'mapping-bhp',
+      'security-bhp', 'delayed', '2026-07-29T06:05:00Z', '2026-07-29',
+      'Australia/Sydney', 'AUD', '42.11', '42.00', 'raw', 'corrected', 15,
+      '2026-07-29T06:06:00Z', 'revision-2', 'hash-2'
+    );
+
+    INSERT INTO fx_rate_observations (
+      id, provider_id, access_scope, scope_user_id, scope_key,
+      base_currency_code, quote_currency_code, rate_decimal, interval,
+      observed_at, market_date, quality, ingested_at, payload_sha256
+    ) VALUES (
+      'fx-aud-usd', 'provider-yahoo', 'deployment', NULL, 'deployment',
+      'AUD', 'USD', '0.6600', 'eod', '2026-07-29T06:00:00Z', '2026-07-29',
+      'observed', '2026-07-29T06:01:00Z', 'fx-hash-1'
+    ), (
+      'fx-usd-aud', 'provider-yahoo', 'deployment', NULL, 'deployment',
+      'USD', 'AUD', '1.5151', 'eod', '2026-07-29T06:00:00Z', '2026-07-29',
+      'observed', '2026-07-29T06:01:00Z', 'fx-hash-2'
+    );
+  `);
+
+  assert.equal(
+    (
+      database
+        .prepare("SELECT count(*) AS count FROM price_observations")
+        .get() as { count: number }
+    ).count,
+    2,
+  );
+  assert.equal(
+    (
+      database
+        .prepare(
+          "SELECT base_currency_code, quote_currency_code FROM fx_rate_observations WHERE id = 'fx-aud-usd'",
+        )
+        .get() as { base_currency_code: string; quote_currency_code: string }
+    ).base_currency_code,
+    "AUD",
+  );
+
+  assert.throws(() => {
+    database.exec(`
+      INSERT INTO price_observations (
+        id, provider_id, access_scope, scope_user_id, scope_key, mapping_id,
+        security_id, interval, observation_at, market_date, market_timezone,
+        currency_code, close_decimal, adjustment_state, quality, ingested_at
+      ) VALUES (
+        'price-duplicate', 'provider-yahoo', 'deployment', NULL, 'deployment',
+        'mapping-bhp', 'security-bhp', 'eod', '2026-07-29T06:00:00Z',
+        '2026-07-29', 'Australia/Sydney', 'AUD', '42.10', 'raw', 'observed',
+        '2026-07-29T06:02:00Z'
+      );
+    `);
+  }, /UNIQUE constraint failed/);
+
+  assert.throws(() => {
+    database.exec(`
+      INSERT INTO price_observations (
+        id, provider_id, access_scope, scope_user_id, scope_key, mapping_id,
+        security_id, interval, observation_at, market_date, market_timezone,
+        currency_code, close_decimal, adjustment_state, quality, ingested_at
+      ) VALUES (
+        'price-invalid-scope', 'provider-yahoo', 'deployment', 'user-a', 'user-a',
+        'mapping-bhp', 'security-bhp', 'eod', '2026-07-30T06:00:00Z',
+        '2026-07-30', 'Australia/Sydney', 'AUD', '42.20', 'raw', 'observed',
+        '2026-07-30T06:01:00Z'
+      );
+    `);
+  }, /CHECK constraint failed: price_observations_scope_check/);
+
+  assert.throws(() => {
+    database.exec(`
+      INSERT INTO fx_rate_observations (
+        id, provider_id, access_scope, scope_user_id, scope_key,
+        base_currency_code, quote_currency_code, rate_decimal, interval,
+        observed_at, market_date, quality, ingested_at
+      ) VALUES (
+        'fx-identity', 'provider-yahoo', 'deployment', NULL, 'deployment',
+        'AUD', 'AUD', '1', 'eod', '2026-07-29T06:00:00Z', '2026-07-29',
+        'observed', '2026-07-29T06:01:00Z'
+      );
+    `);
+  }, /CHECK constraint failed: fx_rate_observations_pair_check/);
+});
+
+test("manual overrides are owner-scoped, versionable, and interval constrained", async () => {
+  const database = createMigratedDatabase(await loadMigrationSql());
+  seedSecurityMasterFixture(database);
+
+  database.exec(`
+    INSERT INTO manual_overrides (
+      id, user_id, portfolio_id, security_id, type, target_key, effective_from,
+      effective_to, value_json, reason, status, created_at
+    ) VALUES (
+      'override-1', 'user-a', 'portfolio-a', 'security-bhp', 'price',
+      'security-bhp', '2026-07-29', NULL, '{"close":"42.10"}',
+      'Corrected exchange close', 'active', '2026-07-29T07:00:00Z'
+    );
+    INSERT INTO manual_overrides (
+      id, user_id, portfolio_id, security_id, type, target_key, effective_from,
+      effective_to, value_json, reason, status, supersedes_override_id, created_at
+    ) VALUES (
+      'override-2', 'user-a', 'portfolio-a', 'security-bhp', 'price',
+      'security-bhp', '2026-07-29', NULL, '{"close":"42.11"}',
+      'New corrected close', 'active', 'override-1', '2026-07-29T08:00:00Z'
+    );
+    UPDATE manual_overrides SET status = 'superseded' WHERE id = 'override-1';
+  `);
+
+  assert.equal(
+    (
+      database
+        .prepare(
+          "SELECT supersedes_override_id, status FROM manual_overrides WHERE id = 'override-2'",
+        )
+        .get() as { supersedes_override_id: string; status: string }
+    ).supersedes_override_id,
+    "override-1",
+  );
+
+  assert.throws(() => {
+    database.exec(`
+      INSERT INTO manual_overrides (
+        id, user_id, portfolio_id, type, target_key, effective_from,
+        effective_to, value_json, reason, status, created_at
+      ) VALUES (
+        'override-invalid-interval', 'user-a', 'portfolio-a', 'fx_rate',
+        'AUD/USD', '2026-07-30', '2026-07-29', '{}', 'Invalid interval',
+        'active', '2026-07-29T09:00:00Z'
+      );
+    `);
+  }, /CHECK constraint failed: manual_overrides_effective_interval_check/);
+
+  assert.throws(() => {
+    database.exec(`
+      INSERT INTO manual_overrides (
+        id, user_id, portfolio_id, type, target_key, effective_from,
+        value_json, reason, status, created_at
+      ) VALUES (
+        'override-cross-owner', 'user-b', 'portfolio-a', 'price',
+        'security-bhp', '2026-07-29', '{}', 'Cross-owner attempt', 'active',
+        '2026-07-29T09:00:00Z'
+      );
+    `);
+  }, /FOREIGN KEY constraint failed/);
 });
 
 test("schema rejects duplicate identities, invalid enums, and cross-owner composite references", async () => {
