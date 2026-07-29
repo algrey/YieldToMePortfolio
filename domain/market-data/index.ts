@@ -5,6 +5,8 @@ export {
   type MarketDataProviderConfiguration,
   type ProviderConfigurationResult,
 } from "./config.ts";
+export { createYahooCompatibleProvider } from "./yahoo-compatible.ts";
+export type { YahooCompatibleAdapterOptions } from "./yahoo-compatible.ts";
 export {
   normalizeFxObservation,
   normalizePriceObservation,

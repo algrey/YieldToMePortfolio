@@ -545,7 +545,7 @@ Status: DONE on 2026-07-30.
 
 ### MKT-002 — Yahoo-compatible quote and daily-price adapter
 
-Status: READY.
+Status: DONE on 2026-07-30.
 
 - Objective: connect only latest/previous-close and daily price capabilities without leaking Yahoo response assumptions.
 - Dependencies: MKT-001, DB-003, SPK-002.
@@ -556,6 +556,7 @@ Status: READY.
 - Tests: sanitized fixtures, rate/throttle response, timeout, malformed decimal/date, missing symbol, schema change, stale fallback, Australian/US/European-or-UK examples.
 - Risks: endpoint changes, throttling, unknown delay, and incomplete coverage.
 - Parallel safe: yes with CALC-001A after normalized contract freezes.
+- Completion note: Added a server-only Yahoo-compatible adapter for symbol search, latest/previous-close observations, and raw daily history with strict response/date/decimal validation, normalized provenance and deployment/user scope, bounded retry/timeout/circuit behavior, stale latest fallback, and typed unsupported capabilities. Sanitized Australian, US, and UK fixtures prove provider payloads do not escape the adapter.
 
 ### MKT-003A — Observation selection, coverage, and manual overrides
 

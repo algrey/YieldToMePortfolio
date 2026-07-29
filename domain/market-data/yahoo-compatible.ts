@@ -1,0 +1,722 @@
+import type {
+  DailyPriceRequest,
+  LatestRequest,
+  MarketDataError,
+  MarketDataProvider,
+  MarketDataResult,
+  NormalizationContext,
+  PriceObservation,
+  ProviderCapabilities,
+  SecurityCandidate,
+  SecurityQuery,
+} from "./contracts.ts";
+import { normalizePriceObservation } from "./normalize.ts";
+
+type Fetcher = (input: string | URL, init?: RequestInit) => Promise<Response>;
+
+export type YahooCompatibleAdapterOptions = {
+  baseUrl?: string;
+  providerId?: string;
+  fetcher?: Fetcher;
+  resolveSymbol: (mappingId: string) => Promise<string | null>;
+  now?: () => string;
+  sleep?: (milliseconds: number) => Promise<void>;
+  random?: () => number;
+  maxAttempts?: number;
+  circuitFailureThreshold?: number;
+  circuitCooldownMs?: number;
+  timeoutMs?: number;
+};
+
+type YahooChartMeta = {
+  currency: unknown;
+  exchangeTimezoneName: unknown;
+  regularMarketPrice?: unknown;
+  regularMarketPreviousClose?: unknown;
+  previousClose?: unknown;
+  regularMarketTime?: unknown;
+  exchangeDataDelayedBy?: unknown;
+  symbol?: unknown;
+  instrumentType?: unknown;
+};
+
+type YahooChartResult = {
+  meta: YahooChartMeta;
+  timestamp?: unknown;
+  indicators: {
+    quote: unknown[];
+  };
+};
+
+type YahooQuote = {
+  symbol?: unknown;
+  shortname?: unknown;
+  longname?: unknown;
+  exchange?: unknown;
+  exchangeDisplayName?: unknown;
+  quoteType?: unknown;
+  currency?: unknown;
+};
+
+type CachedLatest = {
+  key: string;
+  value: PriceObservation;
+};
+
+const CAPABILITIES: ProviderCapabilities = {
+  exchanges: [],
+  intervals: ["eod", "delayed"],
+  supportsRawPrices: true,
+  supportsAdjustedPrices: false,
+  supportsFx: false,
+  supportsDividends: false,
+  supportsSplits: false,
+  supportsFundamentals: false,
+};
+
+const DEFAULT_BASE_URL = "https://query1.finance.yahoo.com";
+const DEFAULT_MAX_ATTEMPTS = 3;
+const DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3;
+const DEFAULT_CIRCUIT_COOLDOWN_MS = 30_000;
+const DEFAULT_TIMEOUT_MS = 8_000;
+const DEFAULT_MAX_BACKOFF_MS = 2_000;
+
+class FetchTimeoutError extends Error {
+  constructor() {
+    super("Yahoo-compatible provider request timed out.");
+    this.name = "FetchTimeoutError";
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function requiredString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : null;
+}
+
+function positiveDecimal(value: unknown): string | null {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value <= 0) {
+      return null;
+    }
+    return String(value);
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim();
+  return /^(0|[1-9]\d*)(\.\d+)?$/.test(normalized) &&
+    /[1-9]/.test(normalized.replace(".", ""))
+    ? normalized
+    : null;
+}
+
+function nonNegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+function isoFromUnixSeconds(value: unknown): string | null {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    return null;
+  }
+  const date = new Date(value * 1000);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
+function isMarketDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = Date.parse(`${value}T00:00:00Z`);
+  return (
+    Number.isFinite(parsed) && new Date(parsed).toISOString().startsWith(value)
+  );
+}
+
+function marketDateFromInstant(
+  instant: string,
+  timezone: string,
+): string | null {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date(instant));
+    const values = new Map(
+      parts
+        .filter((part) => part.type !== "literal")
+        .map((part) => [part.type, part.value]),
+    );
+    const result = `${values.get("year")}-${values.get("month")}-${values.get("day")}`;
+    return /^\d{4}-\d{2}-\d{2}$/.test(result) ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeScopeKey(scope: LatestRequest["scope"]): string {
+  return scope.kind === "deployment" ? "deployment" : `user:${scope.userId}`;
+}
+
+function error(
+  kind: MarketDataError["kind"],
+  message: string,
+  retryable: boolean,
+): MarketDataResult<never> {
+  return { ok: false, error: { kind, message, retryable } };
+}
+
+function unavailable<T>(capability: string): MarketDataResult<T> {
+  return error(
+    "unavailable_capability",
+    `${capability} is unavailable for this provider.`,
+    false,
+  );
+}
+
+function chartResult(value: unknown): MarketDataResult<YahooChartResult> {
+  const root = asRecord(value);
+  const chart = root ? asRecord(root.chart) : null;
+  const result = chart && Array.isArray(chart.result) ? chart.result[0] : null;
+  const resultRecord = asRecord(result);
+  const meta = resultRecord ? asRecord(resultRecord.meta) : null;
+  const indicators = resultRecord ? asRecord(resultRecord.indicators) : null;
+  const quote = indicators ? indicators.quote : null;
+  if (!meta || !indicators || !Array.isArray(quote) || !quote[0]) {
+    return error(
+      "invalid_response",
+      "Provider chart response is malformed.",
+      false,
+    );
+  }
+  return {
+    ok: true,
+    value: {
+      meta: meta as YahooChartMeta,
+      timestamp: resultRecord?.timestamp,
+      indicators: { quote: quote as unknown[] },
+    },
+  };
+}
+
+function retryableStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function retryAfterMilliseconds(response: Response): number | null {
+  const value = response.headers.get("retry-after");
+  if (!value) {
+    return null;
+  }
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds >= 0
+    ? Math.min(seconds * 1000, DEFAULT_MAX_BACKOFF_MS)
+    : null;
+}
+
+function requestKey(
+  request: LatestRequest | DailyPriceRequest,
+  symbol: string,
+): string {
+  return [
+    request.mappingId,
+    request.securityId,
+    symbol,
+    normalizeScopeKey(request.scope),
+  ].join("|");
+}
+
+export function createYahooCompatibleProvider(
+  options: YahooCompatibleAdapterOptions,
+): MarketDataProvider {
+  const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
+  const providerId = options.providerId ?? "yahoo-compatible";
+  const fetcher = options.fetcher ?? fetch.bind(globalThis);
+  const now = options.now ?? (() => new Date().toISOString());
+  const sleep =
+    options.sleep ??
+    ((milliseconds) =>
+      new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  const random = options.random ?? Math.random;
+  const maxAttempts = Math.max(
+    1,
+    Math.min(options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS, 5),
+  );
+  const failureThreshold = Math.max(
+    1,
+    options.circuitFailureThreshold ?? DEFAULT_CIRCUIT_FAILURE_THRESHOLD,
+  );
+  const circuitCooldownMs =
+    options.circuitCooldownMs ?? DEFAULT_CIRCUIT_COOLDOWN_MS;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const cachedLatest = new Map<string, CachedLatest>();
+  let consecutiveFailures = 0;
+  let circuitOpenedAt = 0;
+
+  function circuitOpen(): boolean {
+    if (circuitOpenedAt === 0) {
+      return false;
+    }
+    if (Date.now() - circuitOpenedAt >= circuitCooldownMs) {
+      circuitOpenedAt = 0;
+      consecutiveFailures = 0;
+      return false;
+    }
+    return true;
+  }
+
+  function recordSuccess(): void {
+    consecutiveFailures = 0;
+    circuitOpenedAt = 0;
+  }
+
+  function recordFailure(): void {
+    consecutiveFailures += 1;
+    if (consecutiveFailures >= failureThreshold) {
+      circuitOpenedAt = Date.now();
+    }
+  }
+
+  async function fetchJson(url: URL): Promise<MarketDataResult<unknown>> {
+    if (circuitOpen()) {
+      return error(
+        "transient_upstream",
+        "Market-data provider circuit is open.",
+        true,
+      );
+    }
+
+    let lastError: MarketDataResult<never> = error(
+      "transient_upstream",
+      "Market-data provider request failed.",
+      true,
+    );
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const controller = new AbortController();
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<Response>((_, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          reject(new FetchTimeoutError());
+        }, timeoutMs);
+      });
+      let response: Response;
+      try {
+        response = await Promise.race([
+          fetcher(url, {
+            headers: { accept: "application/json" },
+            signal: controller.signal,
+          }),
+          timeoutPromise,
+        ]);
+      } catch (caught: unknown) {
+        const timedOut =
+          caught instanceof FetchTimeoutError || controller.signal.aborted;
+        lastError = error(
+          timedOut ? "timeout" : "transient_upstream",
+          timedOut
+            ? "Market-data provider request timed out."
+            : "Market-data provider request failed.",
+          true,
+        );
+        recordFailure();
+        if (timeout) clearTimeout(timeout);
+        if (attempt + 1 < maxAttempts) {
+          await sleep(
+            Math.min(
+              DEFAULT_MAX_BACKOFF_MS,
+              100 * 2 ** attempt + Math.floor(random() * 100),
+            ),
+          );
+          continue;
+        }
+        return lastError;
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+
+      if (!response.ok) {
+        const isRetryable = retryableStatus(response.status);
+        lastError = error(
+          response.status === 401
+            ? "authentication"
+            : response.status === 403
+              ? "entitlement"
+              : response.status === 404
+                ? "symbol_not_found"
+                : response.status === 429
+                  ? "rate_limit"
+                  : isRetryable
+                    ? "transient_upstream"
+                    : "invalid_response",
+          "Market-data provider request was not accepted.",
+          isRetryable,
+        );
+        if (!isRetryable) {
+          return lastError;
+        }
+        recordFailure();
+        if (attempt + 1 < maxAttempts) {
+          await sleep(
+            retryAfterMilliseconds(response) ??
+              Math.min(
+                DEFAULT_MAX_BACKOFF_MS,
+                100 * 2 ** attempt + Math.floor(random() * 100),
+              ),
+          );
+          continue;
+        }
+        return lastError;
+      }
+
+      try {
+        const body: unknown = await response.json();
+        recordSuccess();
+        return { ok: true, value: body };
+      } catch {
+        recordFailure();
+        return error(
+          "invalid_response",
+          "Provider response is not valid JSON.",
+          false,
+        );
+      }
+    }
+    return lastError;
+  }
+
+  async function symbolFor(
+    mappingId: string,
+  ): Promise<MarketDataResult<string>> {
+    const symbol = await options.resolveSymbol(mappingId);
+    return symbol && /^[A-Za-z0-9.^=_-]{1,32}$/.test(symbol)
+      ? { ok: true, value: symbol }
+      : error(
+          "symbol_not_found",
+          "No provider symbol is mapped for this security.",
+          false,
+        );
+  }
+
+  function chartUrl(symbol: string, params: Record<string, string>): URL {
+    const url = new URL(
+      `${baseUrl}/v8/finance/chart/${encodeURIComponent(symbol)}`,
+    );
+    for (const [key, value] of Object.entries(params)) {
+      url.searchParams.set(key, value);
+    }
+    return url;
+  }
+
+  function chartContext(result: YahooChartResult): MarketDataResult<{
+    currency: string;
+    timezone: string;
+    delayedMinutes: number | null;
+  }> {
+    const currency = requiredString(result.meta.currency);
+    const timezone = requiredString(result.meta.exchangeTimezoneName);
+    const delayedMinutes =
+      result.meta.exchangeDataDelayedBy === undefined
+        ? null
+        : nonNegativeInteger(result.meta.exchangeDataDelayedBy);
+    if (
+      !currency ||
+      !timezone ||
+      (result.meta.exchangeDataDelayedBy !== undefined &&
+        delayedMinutes === null)
+    ) {
+      return error(
+        "invalid_response",
+        "Provider chart metadata is malformed.",
+        false,
+      );
+    }
+    return {
+      ok: true,
+      value: { currency, timezone, delayedMinutes },
+    };
+  }
+
+  function normalizeChartPrice(
+    request: LatestRequest | DailyPriceRequest,
+    timestamp: unknown,
+    close: unknown,
+    previousClose: unknown,
+    interval: "eod" | "delayed",
+    metadata: {
+      currency: string;
+      timezone: string;
+      delayedMinutes: number | null;
+    },
+  ): MarketDataResult<PriceObservation> {
+    const observationAt = isoFromUnixSeconds(timestamp);
+    const closeDecimal = positiveDecimal(close);
+    const previousCloseDecimal =
+      previousClose === null || previousClose === undefined
+        ? null
+        : positiveDecimal(previousClose);
+    const marketDate = observationAt
+      ? marketDateFromInstant(observationAt, metadata.timezone)
+      : null;
+    if (
+      !observationAt ||
+      !closeDecimal ||
+      (previousClose !== null &&
+        previousClose !== undefined &&
+        !previousCloseDecimal) ||
+      !marketDate
+    ) {
+      return error(
+        "invalid_response",
+        "Provider price data is malformed.",
+        false,
+      );
+    }
+    const normalized = normalizePriceObservation(
+      {
+        interval,
+        observationAt,
+        marketDate,
+        marketTimezone: metadata.timezone,
+        currencyCode: metadata.currency,
+        closeDecimal,
+        previousCloseDecimal,
+        adjustmentState: "raw",
+        quality: "observed",
+        delayedMinutes: metadata.delayedMinutes,
+      },
+      {
+        providerId,
+        mappingId: request.mappingId,
+        securityId: request.securityId,
+        scope: request.scope,
+        ingestedAt: now(),
+      } satisfies NormalizationContext,
+    );
+    return normalized;
+  }
+
+  function staleFallback(
+    key: string,
+  ): MarketDataResult<PriceObservation> | null {
+    const cached = cachedLatest.get(key);
+    if (!cached) {
+      return null;
+    }
+    return {
+      ok: true,
+      value: { ...cached.value, quality: "stale_candidate" },
+    };
+  }
+
+  return {
+    capabilities: () => CAPABILITIES,
+
+    async searchSecurities(
+      query: SecurityQuery,
+    ): Promise<MarketDataResult<SecurityCandidate[]>> {
+      const url = new URL(`${baseUrl}/v1/finance/search`);
+      url.searchParams.set("q", query.text);
+      if (query.exchangeId) url.searchParams.set("quotesCount", "20");
+      const response = await fetchJson(url);
+      if (!response.ok) return response;
+      const root = asRecord(response.value);
+      const quotes = root?.quotes;
+      if (!Array.isArray(quotes))
+        return error(
+          "invalid_response",
+          "Provider search response is malformed.",
+          false,
+        );
+      const candidates: SecurityCandidate[] = [];
+      for (const quote of quotes) {
+        const record = asRecord(quote) as YahooQuote | null;
+        const symbol = record ? requiredString(record.symbol) : null;
+        const name = record
+          ? (requiredString(record.longname) ??
+            requiredString(record.shortname))
+          : null;
+        const quoteType = record ? requiredString(record.quoteType) : null;
+        const currencyCode = record ? requiredString(record.currency) : null;
+        if (
+          !symbol ||
+          !name ||
+          !quoteType ||
+          !currencyCode ||
+          !["EQUITY", "ETF", "MUTUALFUND"].includes(quoteType)
+        ) {
+          continue;
+        }
+        const exchangeId = record
+          ? (requiredString(record.exchange) ??
+            requiredString(record.exchangeDisplayName))
+          : null;
+        candidates.push({
+          securityId: null,
+          mappingId: null,
+          symbol,
+          exchangeId,
+          currencyCode,
+          name,
+          confidence: "medium",
+        });
+      }
+      return candidates.length > 0
+        ? { ok: true, value: candidates }
+        : error(
+            "symbol_not_found",
+            "Provider returned no supported security matches.",
+            false,
+          );
+    },
+
+    async getDailyPrices(
+      request: DailyPriceRequest,
+    ): Promise<MarketDataResult<PriceObservation[]>> {
+      const symbol = await symbolFor(request.mappingId);
+      if (!symbol.ok) return symbol;
+      const from = Date.parse(`${request.from}T00:00:00Z`);
+      const to = Date.parse(`${request.to}T00:00:00Z`);
+      if (
+        !isMarketDate(request.from) ||
+        !isMarketDate(request.to) ||
+        !Number.isFinite(from) ||
+        !Number.isFinite(to) ||
+        to < from
+      ) {
+        return error(
+          "invalid_response",
+          "Daily price date range is invalid.",
+          false,
+        );
+      }
+      const response = await fetchJson(
+        chartUrl(symbol.value, {
+          period1: String(Math.floor(from / 1000)),
+          period2: String(Math.floor(to / 1000) + 86_400),
+          interval: "1d",
+          events: "history",
+        }),
+      );
+      if (!response.ok) return response;
+      const chart = chartResult(response.value);
+      if (!chart.ok) return chart;
+      const metadata = chartContext(chart.value);
+      if (!metadata.ok) return metadata;
+      const timestamps = Array.isArray(chart.value.timestamp)
+        ? chart.value.timestamp
+        : null;
+      const quote = asRecord(chart.value.indicators.quote[0]);
+      const closes = quote?.close;
+      if (
+        !timestamps ||
+        !Array.isArray(closes) ||
+        timestamps.length !== closes.length
+      ) {
+        return error(
+          "invalid_response",
+          "Provider daily price arrays are malformed.",
+          false,
+        );
+      }
+      const observations: PriceObservation[] = [];
+      for (let index = 0; index < timestamps.length; index += 1) {
+        const timestamp = timestamps[index];
+        const close = closes[index];
+        if (close === null || close === undefined) continue;
+        const normalized = normalizeChartPrice(
+          request,
+          timestamp,
+          close,
+          null,
+          "eod",
+          metadata.value,
+        );
+        if (!normalized.ok) return normalized;
+        if (
+          normalized.value.marketDate >= request.from &&
+          normalized.value.marketDate <= request.to
+        ) {
+          observations.push(normalized.value);
+        }
+      }
+      return { ok: true, value: observations };
+    },
+
+    async getLatestObservation(
+      request: LatestRequest,
+    ): Promise<MarketDataResult<PriceObservation | null>> {
+      const symbol = await symbolFor(request.mappingId);
+      if (!symbol.ok) return symbol;
+      const key = requestKey(request, symbol.value);
+      const response = await fetchJson(
+        chartUrl(symbol.value, {
+          range: "1d",
+          interval: "1d",
+          events: "history",
+        }),
+      );
+      if (!response.ok) {
+        const fallbackAllowed = [
+          "invalid_response",
+          "rate_limit",
+          "timeout",
+          "transient_upstream",
+        ].includes(response.error.kind);
+        return fallbackAllowed ? (staleFallback(key) ?? response) : response;
+      }
+      const chart = chartResult(response.value);
+      if (!chart.ok) return staleFallback(key) ?? chart;
+      const metadata = chartContext(chart.value);
+      if (!metadata.ok) return staleFallback(key) ?? metadata;
+      const timestamp =
+        chart.value.meta.regularMarketTime ??
+        (Array.isArray(chart.value.timestamp)
+          ? chart.value.timestamp.at(-1)
+          : null);
+      const quote = asRecord(chart.value.indicators.quote[0]);
+      const close =
+        chart.value.meta.regularMarketPrice ??
+        (Array.isArray(quote?.close) ? quote.close.at(-1) : null);
+      const previousClose =
+        chart.value.meta.regularMarketPreviousClose ??
+        chart.value.meta.previousClose ??
+        null;
+      if (
+        close === null ||
+        close === undefined ||
+        timestamp === null ||
+        timestamp === undefined
+      ) {
+        return (
+          staleFallback(key) ??
+          error("invalid_response", "Provider latest price is missing.", false)
+        );
+      }
+      const normalized = normalizeChartPrice(
+        request,
+        timestamp,
+        close,
+        previousClose,
+        metadata.value.delayedMinutes === null ? "eod" : "delayed",
+        metadata.value,
+      );
+      if (!normalized.ok) return staleFallback(key) ?? normalized;
+      cachedLatest.set(key, { key, value: normalized.value });
+      return normalized;
+    },
+
+    getFxRates: async () => unavailable("FX rates"),
+    getDividendEvents: async () => unavailable("Dividend events"),
+    getSplitEvents: async () => unavailable("Split events"),
+    getFundamentals: async () => unavailable("Fundamentals"),
+  };
+}
