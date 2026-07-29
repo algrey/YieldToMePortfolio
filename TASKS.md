@@ -501,7 +501,7 @@ Status: DONE on 2026-07-30.
 
 ### DB-004 — Snapshot and calculation-run schema
 
-Status: READY.
+Status: DONE on 2026-07-30.
 
 - Objective: persist versioned disposable historical projections without mixing calculation versions.
 - Dependencies: DB-001A, DB-003.
@@ -512,6 +512,7 @@ Status: READY.
 - Tests: migration/foreign keys, snapshot uniqueness/version, run lease/idempotency, cross-portfolio link rejection.
 - Risks: schema coupling projections to one calculation version or over-retaining per-holding history.
 - Parallel safe: yes with MKT-001.
+- Completion note: Added owner-scoped portfolio and holding daily snapshots tied to an exact calculation version, completeness and ledger high-water metadata, generated migration constraints/indexes, and an idempotent leased calculation-run repository that rejects stale ledger completion. Added migration, version-isolation, ownership, lease, and stale-run fixtures.
 
 ### DB-005 — Corporate-action event and dividend-receipt schema
 

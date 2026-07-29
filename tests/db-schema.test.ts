@@ -87,16 +87,19 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
   assert.equal(foreignKeysEnabled.foreign_keys, 1);
   assert.deepEqual(tableNames(database), [
     "audit_events",
+    "calculation_runs",
     "cash_accounts",
     "cash_ledger_entries",
     "currencies",
     "exchanges",
     "fx_rate_observations",
+    "holding_daily_snapshots",
     "import_batches",
     "import_issues",
     "import_rows",
     "manual_overrides",
     "market_data_providers",
+    "portfolio_daily_snapshots",
     "portfolio_securities",
     "portfolio_settings",
     "portfolios",
@@ -111,6 +114,22 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
   ]);
   assert.deepEqual(indexNames(database, "audit_events"), [
     "audit_events_owner_time_idx",
+  ]);
+  assert.deepEqual(indexNames(database, "calculation_runs"), [
+    "calculation_runs_id_user_portfolio_unique",
+    "calculation_runs_idempotency_unique",
+    "calculation_runs_lease_idx",
+    "calculation_runs_portfolio_status_idx",
+  ]);
+  assert.deepEqual(indexNames(database, "portfolio_daily_snapshots"), [
+    "portfolio_snapshots_chart_idx",
+    "portfolio_snapshots_id_user_portfolio_date_version_unique",
+    "portfolio_snapshots_portfolio_date_version_unique",
+  ]);
+  assert.deepEqual(indexNames(database, "holding_daily_snapshots"), [
+    "holding_snapshots_chart_idx",
+    "holding_snapshots_id_user_portfolio_unique",
+    "holding_snapshots_security_date_version_unique",
   ]);
   assert.deepEqual(indexNames(database, "portfolios"), [
     "portfolios_id_user_id_unique",

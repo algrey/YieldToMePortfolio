@@ -50,3 +50,11 @@ export type {
   AuditEventRecord,
   AuditResult,
 } from "./audit.ts";
+export {
+  createCalculationRunRepository,
+  type CalculationRunRecord,
+  type CalculationRunStatus,
+  type ClaimCalculationRunResult,
+  type CompleteCalculationRunResult,
+  type RequestCalculationRunInput,
+} from "./calculation-runs.ts";

@@ -1147,6 +1147,220 @@ export const manualOverrides = sqliteTable(
   ],
 );
 
+export const portfolioDailySnapshots = sqliteTable(
+  "portfolio_daily_snapshots",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    snapshotDate: text("snapshot_date").notNull(),
+    baseCurrencyCode: text("base_currency_code").notNull(),
+    securitiesValueDecimal: text("securities_value_decimal"),
+    cashValueDecimal: text("cash_value_decimal"),
+    totalValueDecimal: text("total_value_decimal"),
+    costBasisDecimal: text("cost_basis_decimal"),
+    unrealisedGainDecimal: text("unrealised_gain_decimal"),
+    realisedGainToDateDecimal: text("realised_gain_to_date_decimal"),
+    dailyMovementDecimal: text("daily_movement_decimal"),
+    coverageJson: text("coverage_json").notNull(),
+    completeness: text("completeness").notNull(),
+    status: text("status").notNull().default("ready"),
+    ledgerHighWater: text("ledger_high_water").notNull(),
+    marketDataCutoff: text("market_data_cutoff"),
+    calculationVersion: integer("calculation_version").notNull(),
+    rebuiltAt: text("rebuilt_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "portfolio_snapshots_portfolio_id_user_id_portfolios_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "portfolio_snapshots_base_currency_code_currencies_code_fk",
+      columns: [table.baseCurrencyCode],
+      foreignColumns: [currencies.code],
+    }).onDelete("restrict"),
+    check(
+      "portfolio_snapshots_completeness_check",
+      sql`${table.completeness} IN ('complete', 'partial', 'incomplete')`,
+    ),
+    check(
+      "portfolio_snapshots_status_check",
+      sql`${table.status} IN ('ready', 'invalidated')`,
+    ),
+    uniqueIndex("portfolio_snapshots_id_user_portfolio_date_version_unique").on(
+      table.id,
+      table.userId,
+      table.portfolioId,
+      table.snapshotDate,
+      table.calculationVersion,
+    ),
+    uniqueIndex("portfolio_snapshots_portfolio_date_version_unique").on(
+      table.portfolioId,
+      table.snapshotDate,
+      table.calculationVersion,
+    ),
+    index("portfolio_snapshots_chart_idx").on(
+      table.portfolioId,
+      table.snapshotDate,
+    ),
+  ],
+);
+
+export const holdingDailySnapshots = sqliteTable(
+  "holding_daily_snapshots",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    portfolioSecurityId: text("portfolio_security_id").notNull(),
+    portfolioSnapshotId: text("portfolio_snapshot_id").notNull(),
+    snapshotDate: text("snapshot_date").notNull(),
+    quantityDecimal: text("quantity_decimal").notNull(),
+    nativeValueDecimal: text("native_value_decimal"),
+    baseValueDecimal: text("base_value_decimal"),
+    basisDecimal: text("basis_decimal"),
+    priceObservationId: text("price_observation_id"),
+    fxObservationId: text("fx_observation_id"),
+    dailyMovementDecimal: text("daily_movement_decimal"),
+    completeness: text("completeness").notNull(),
+    status: text("status").notNull().default("ready"),
+    calculationVersion: integer("calculation_version").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "holding_snapshots_portfolio_id_user_id_portfolios_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "holding_snapshots_security_id_user_id_portfolio_id_fk",
+      columns: [table.portfolioSecurityId, table.userId, table.portfolioId],
+      foreignColumns: [
+        portfolioSecurities.id,
+        portfolioSecurities.userId,
+        portfolioSecurities.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "holding_snapshots_snapshot_id_user_portfolio_date_version_fk",
+      columns: [
+        table.portfolioSnapshotId,
+        table.userId,
+        table.portfolioId,
+        table.snapshotDate,
+        table.calculationVersion,
+      ],
+      foreignColumns: [
+        portfolioDailySnapshots.id,
+        portfolioDailySnapshots.userId,
+        portfolioDailySnapshots.portfolioId,
+        portfolioDailySnapshots.snapshotDate,
+        portfolioDailySnapshots.calculationVersion,
+      ],
+    }).onDelete("restrict"),
+    check(
+      "holding_snapshots_completeness_check",
+      sql`${table.completeness} IN ('complete', 'partial', 'incomplete')`,
+    ),
+    check(
+      "holding_snapshots_status_check",
+      sql`${table.status} IN ('ready', 'invalidated')`,
+    ),
+    uniqueIndex("holding_snapshots_id_user_portfolio_unique").on(
+      table.id,
+      table.userId,
+      table.portfolioId,
+    ),
+    uniqueIndex("holding_snapshots_security_date_version_unique").on(
+      table.portfolioId,
+      table.portfolioSecurityId,
+      table.snapshotDate,
+      table.calculationVersion,
+    ),
+    index("holding_snapshots_chart_idx").on(
+      table.portfolioId,
+      table.portfolioSecurityId,
+      table.snapshotDate,
+    ),
+  ],
+);
+
+export const calculationRuns = sqliteTable(
+  "calculation_runs",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    rangeFrom: text("range_from").notNull(),
+    rangeTo: text("range_to").notNull(),
+    calculationVersion: integer("calculation_version").notNull(),
+    reason: text("reason").notNull(),
+    invalidationSource: text("invalidation_source"),
+    status: text("status").notNull().default("queued"),
+    attempt: integer("attempt").notNull().default(0),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: text("lease_expires_at"),
+    ledgerHighWaterStart: text("ledger_high_water_start").notNull(),
+    ledgerHighWaterEnd: text("ledger_high_water_end"),
+    processedSnapshotCount: integer("processed_snapshot_count")
+      .notNull()
+      .default(0),
+    processedHoldingCount: integer("processed_holding_count")
+      .notNull()
+      .default(0),
+    idempotencyKey: text("idempotency_key").notNull(),
+    startedAt: text("started_at"),
+    completedAt: text("completed_at"),
+    failureCategory: text("failure_category"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "calculation_runs_portfolio_id_user_id_portfolios_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    check(
+      "calculation_runs_status_check",
+      sql`${table.status} IN ('queued', 'running', 'completed', 'failed', 'abandoned')`,
+    ),
+    check(
+      "calculation_runs_range_check",
+      sql`${table.rangeTo} >= ${table.rangeFrom}`,
+    ),
+    check("calculation_runs_attempt_check", sql`${table.attempt} >= 0`),
+    check(
+      "calculation_runs_snapshot_count_check",
+      sql`${table.processedSnapshotCount} >= 0`,
+    ),
+    check(
+      "calculation_runs_holding_count_check",
+      sql`${table.processedHoldingCount} >= 0`,
+    ),
+    uniqueIndex("calculation_runs_id_user_portfolio_unique").on(
+      table.id,
+      table.userId,
+      table.portfolioId,
+    ),
+    uniqueIndex("calculation_runs_idempotency_unique").on(
+      table.userId,
+      table.portfolioId,
+      table.calculationVersion,
+      table.idempotencyKey,
+    ),
+    index("calculation_runs_lease_idx").on(table.status, table.leaseExpiresAt),
+    index("calculation_runs_portfolio_status_idx").on(
+      table.userId,
+      table.portfolioId,
+      table.status,
+      table.createdAt,
+    ),
+  ],
+);
+
 export const auditEvents = sqliteTable(
   "audit_events",
   {
