@@ -74,7 +74,7 @@ Gate: `VSL-001` and `VSL-002` are DONE.
 
 ### VSL-003 — Preview-only route and fixture-data boundary
 
-Status: PENDING.
+Status: READY.
 
 - Objective: make the sample portfolio safely available to local development and Cloudflare preview routes without enabling a production data path.
 - Dependencies: `VSL-002`, `FND-002A`.
