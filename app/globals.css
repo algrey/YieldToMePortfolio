@@ -255,7 +255,7 @@ dd {
 }
 
 .primary-tabs a {
-  min-width: 72px;
+  min-width: 76px;
   min-height: 42px;
   display: inline-flex;
   flex: 1 0 auto;
@@ -391,6 +391,16 @@ dd {
   white-space: nowrap;
 }
 
+.row-primary.tone-positive,
+.row-secondary.tone-positive {
+  color: var(--green-bright);
+}
+
+.row-primary.tone-negative,
+.row-secondary.tone-negative {
+  color: var(--negative);
+}
+
 .symbol {
   font-weight: 650;
 }
@@ -401,7 +411,7 @@ dd {
 }
 
 .table-heading {
-  min-height: 36px;
+  min-height: 31px;
   align-items: center;
   border-bottom: 1px solid var(--divider);
   background: var(--forest-raised);
@@ -415,7 +425,7 @@ dd {
 
 .table-heading button {
   min-width: 0;
-  min-height: 36px;
+  min-height: 31px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -456,7 +466,7 @@ dd {
 }
 
 .holding-rows {
-  padding-bottom: calc(146px + env(safe-area-inset-bottom));
+  padding-bottom: calc(122px + env(safe-area-inset-bottom));
 }
 
 .holding-row {
@@ -534,7 +544,7 @@ dd {
   bottom: calc(5px + env(safe-area-inset-bottom));
   left: 5px;
   min-height: 48px;
-  padding: 8px 10px;
+  padding: 7px 10px;
   border: 1px solid #30433d;
   border-radius: 5px;
   background: rgb(20 40 34 / 97%);
@@ -545,6 +555,7 @@ dd {
 .summary-primary {
   display: grid;
   grid-template-columns: 23% 31% 22% 24%;
+  min-height: 18px;
   align-items: center;
   gap: 0;
   font-size: 0.86rem;
@@ -553,11 +564,12 @@ dd {
 .summary-label {
   color: var(--cream);
   font-size: 0.76rem;
+  text-align: left !important;
 }
 
 .summary-primary strong {
   overflow: hidden;
-  font-size: 0.88rem;
+  font-size: 0.94rem;
   font-weight: 600;
   letter-spacing: -0.03em;
   text-align: right;
@@ -570,58 +582,43 @@ dd {
   white-space: nowrap;
 }
 
-.summary-detail {
+.summary-primary > span:not(.summary-label) {
+  font-size: 0.92rem;
+}
+
+.summary-secondary {
   display: grid;
   grid-template-columns: 23% 31% 22% 24%;
-  gap: 3px 0;
-  margin-top: 4px;
+  min-height: 17px;
+  align-items: center;
   color: var(--muted);
   font-size: 0.74rem;
 }
 
-.summary-detail > button {
-  min-height: 28px;
-  justify-self: start;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--green);
-  cursor: pointer;
-  font-size: 0.72rem;
-  text-align: left;
-}
-
-.summary-detail > span {
-  align-self: center;
+.summary-secondary > span {
   text-align: right;
   white-space: nowrap;
 }
 
-.summary-detail p {
-  grid-column: 1 / -1;
+.summary-gain-lines {
+  display: grid;
+  gap: 1px;
+  margin-top: 3px;
+  font-size: 0.74rem;
+}
+
+.summary-gain-lines p {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 19px;
-}
-
-.summary-detail .summary-footnote {
-  min-height: 16px;
   justify-content: flex-start;
-  color: var(--muted-dark);
-  font-size: 0.61rem;
+  gap: 7px;
+  min-height: 19px;
+  white-space: nowrap;
 }
 
-.summary-expand {
-  min-height: 30px;
-  margin-top: 2px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--green);
-  cursor: pointer;
-  font-size: 0.7rem;
+.summary-gain-lines p > span:first-child {
+  min-width: 54px;
+  color: var(--muted);
 }
 
 .quotes-grid {
@@ -1316,7 +1313,7 @@ dd {
 
 @media (max-width: 350px) {
   .primary-tabs a {
-    min-width: 66px;
+    min-width: 64px;
     font-size: 0.62rem;
   }
 
@@ -1346,7 +1343,7 @@ dd {
   }
 
   .summary-primary,
-  .summary-detail {
+  .summary-secondary {
     grid-template-columns: 23% 31% 22% 24%;
     font-size: 0.7rem;
   }
@@ -1356,10 +1353,15 @@ dd {
   }
 
   .summary-primary strong {
-    font-size: 0.75rem;
+    font-size: 0.79rem;
   }
 
-  .summary-detail {
+  .summary-primary > span:not(.summary-label) {
+    font-size: 0.76rem;
+  }
+
+  .summary-secondary,
+  .summary-gain-lines {
     font-size: 0.66rem;
   }
 
@@ -1532,7 +1534,7 @@ dd {
   }
 
   .summary-primary,
-  .summary-detail {
+  .summary-secondary {
     grid-template-columns: 1fr;
     gap: 8px;
   }
@@ -1558,22 +1560,23 @@ dd {
     text-align: left;
   }
 
-  .summary-detail {
+  .summary-secondary {
+    grid-template-columns: 1fr 1fr;
     margin-top: 12px;
     font-size: 0.78rem;
   }
 
-  .summary-detail > button {
-    grid-row: 5;
+  .summary-secondary > span:first-child {
+    display: none;
   }
 
-  .summary-detail > span {
+  .summary-secondary > span {
     text-align: left;
   }
 
-  .summary-detail p {
-    display: grid;
-    justify-content: initial;
+  .summary-gain-lines {
+    margin-top: 12px;
+    font-size: 0.78rem;
   }
 
   .quotes-screen {

@@ -50,6 +50,8 @@ export type PortfolioPrototype = {
   gainPercent: string;
   realisedAmount: string;
   realisedPercent: string;
+  allTimeAmount: string;
+  allTimePercent: string;
   cash: string;
   holdings: Holding[];
   quotes: Quote[];
@@ -307,6 +309,8 @@ export const portfolioPrototypes: PortfolioPrototype[] = [
     gainPercent: "+26.13%",
     realisedAmount: "+A$15,000.00",
     realisedPercent: "+39.91%",
+    allTimeAmount: "+A$277,423.38",
+    allTimePercent: "+26.63%",
     cash: "A$84,930.45",
     holdings: ausStockHoldings,
     quotes: ausStockQuotes,
@@ -323,6 +327,8 @@ export const portfolioPrototypes: PortfolioPrototype[] = [
     gainPercent: "+21.90%",
     realisedAmount: "+A$8,220.00",
     realisedPercent: "+14.32%",
+    allTimeAmount: "+A$85,262.40",
+    allTimePercent: "+23.24%",
     cash: "A$18,450.00",
     holdings: ausStockHoldings.slice(1, 6),
     quotes: ausStockQuotes.slice(1, 8),
@@ -339,6 +345,8 @@ export const portfolioPrototypes: PortfolioPrototype[] = [
     gainPercent: "—",
     realisedAmount: "A$0.00",
     realisedPercent: "—",
+    allTimeAmount: "A$0.00",
+    allTimePercent: "—",
     cash: "A$0.00",
     holdings: [],
     quotes: [

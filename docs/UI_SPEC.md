@@ -1,6 +1,6 @@
 # YieldToMe UI specification
 
-Status: review candidate; no prototype pattern is approved until owner feedback is recorded  
+Status: owner-directed revision 1; revised patterns await visual confirmation  
 Date: 2026-07-29  
 Task: `UI-PROT-001`  
 Requirements: `PRD-003`, `PRD-004`, `PRD-005`, `QUAL-001`
@@ -11,15 +11,15 @@ This document records the first static prototype for visual review before produc
 
 The patterns below are candidates, not final product decisions. After owner review, each accepted pattern should be marked approved and each rejected pattern should be revised or removed. Production tasks `UI-001` through `UI-005E` remain pending.
 
-| Pattern                                                                           | Review status           |
-| --------------------------------------------------------------------------------- | ----------------------- |
-| Dark edge-to-edge application shell                                               | Awaiting owner feedback |
-| Five-item Overview / Holdings / Quotes / Details / News tab strip                 | Awaiting owner feedback |
-| Four-column, three-line mobile holding row                                        | Awaiting owner feedback |
-| Fixed mobile / side-rail desktop portfolio summary                                | Awaiting owner feedback |
-| Compact two-line Quotes row                                                       | Awaiting owner feedback |
-| Integrated chart and list treatment without large cards                           | Awaiting owner feedback |
-| Prototype state selector for populated, empty, partial, and provider-error states | Awaiting owner feedback |
+| Pattern                                                                           | Review status               |
+| --------------------------------------------------------------------------------- | --------------------------- |
+| Dark edge-to-edge application shell                                               | Awaiting owner feedback     |
+| Five-item Overview / News / Quotes / Holdings / Details tab strip                 | Revised from owner feedback |
+| Four-column, three-line mobile holding row with gain/loss colour                  | Revised from owner markup   |
+| Fixed four-line mobile / side-rail desktop portfolio summary                      | Revised from owner markup   |
+| Compact two-line Quotes row                                                       | Awaiting owner feedback     |
+| Integrated chart and list treatment without large cards                           | Awaiting owner feedback     |
+| Prototype state selector for populated, empty, partial, and provider-error states | Awaiting owner feedback     |
 
 ## 2. Evidence applied
 
@@ -35,17 +35,16 @@ The screenshot and CSV fixtures are independent references. Prototype values rep
 
 Measured at the 390 × 844 CSS-pixel review viewport:
 
-| Region                   | Candidate rule                                                                    |
-| ------------------------ | --------------------------------------------------------------------------------- |
-| App bar                  | 52 px visual height; measured 53 px including border; safe-area inset added above |
-| Primary tabs             | 42 px                                                                             |
-| Sort/header strip        | 36 px visual height; measured 37 px including border                              |
-| Holding row              | 76 px, three lines                                                                |
-| Quote row                | 60 px, two lines                                                                  |
-| Expanded mobile summary  | approximately 112 px plus bottom safe-area offset                                 |
-| Collapsed mobile summary | minimum 48 px                                                                     |
-| Mobile page edge         | 10 px left / 5 px right inside holding rows; 12 px on overview/details            |
-| Desktop content maximum  | 1,440 px                                                                          |
+| Region                  | Candidate rule                                                                    |
+| ----------------------- | --------------------------------------------------------------------------------- |
+| App bar                 | 52 px visual height; measured 53 px including border; safe-area inset added above |
+| Primary tabs            | 42 px                                                                             |
+| Sort/header strip       | 31 px minimum height; measured 32 px including border                             |
+| Holding row             | 76 px, three lines                                                                |
+| Quote row               | 60 px, two lines                                                                  |
+| Mobile summary          | measured approximately 97 px at 390 px and 93 px at 320 px, plus safe-area offset |
+| Mobile page edge        | 10 px left / 5 px right inside holding rows; 12 px on overview/details            |
+| Desktop content maximum | 1,440 px                                                                          |
 
 The app bar, tab strip, and list header are sticky. The mobile portfolio summary is fixed 5 px from the viewport edges and above `safe-area-inset-bottom`. Holdings content receives bottom padding so the final row can scroll fully above the summary.
 
@@ -78,7 +77,7 @@ Input text is not part of this prototype. Production forms must retain a minimum
 
 Line 1 shows ticker, market value, daily amount, and total unrealised amount. Line 2 shows price, open cost, daily percentage, and total unrealised percentage. Line 3 shows average open cost × quantity.
 
-Market value and open cost retain their currency prefix. Daily and Total amounts omit the repeated `A$` prefix in the compact grid because the portfolio reporting currency is already established by context; signs remain explicit. No financial dimension is removed.
+Market value and open cost retain their currency prefix. Daily and Total amounts omit the repeated `A$` prefix in the compact grid because the portfolio reporting currency is already established by context; signs remain explicit. Positive amounts and percentages are green, and negative amounts and percentages are red. This gain/loss treatment applies consistently across the prototype. No financial dimension is removed.
 
 The initial sort is Daily percentage descending to match the strong reference inference. Tapping a different header selects that key; tapping the active header reverses direction. Active direction is expressed by text/ARIA state and a green arrow, not colour alone.
 
@@ -95,15 +94,15 @@ The row does not expose swipe or long-press actions.
 
 ### 5.3 Summary
 
-Mobile totals align to the four holding columns. The expanded state shows:
+Mobile totals align to the four holding columns. The fixed four-line state shows:
 
 - Unrealised or Known value;
 - portfolio value, daily movement, and unrealised gain;
 - cost, daily percentage, and unrealised percentage;
-- realised gain;
-- priced-holding coverage.
+- realised gain and percentage, left aligned;
+- all-time gain including realised gains and its percentage, left aligned.
 
-Desktop moves the same summary into a 318 px side rail rather than stretching it across the viewport.
+The Unrealised label is left aligned. At 390 px, the first-line portfolio value is 15.0 px and its gain figures are 14.7 px; lower summary lines remain 11.8 px. Summary monetary values are rounded to whole dollars using exact decimal-string parsing; percentages retain their supplied precision. The detail toggle and coverage footnote are removed. Desktop moves the same summary into a 318 px side rail rather than stretching it across the viewport.
 
 ## 6. Other principal screens
 
@@ -139,15 +138,15 @@ The route and tab are present, but the screen explicitly says that no provider i
 - No document-level horizontal overflow.
 - All four holding columns remain visible.
 - Holding line 1 steps down to 12.5 px; line 2 to 10.9 px; line 3 to 10.1 px.
-- Five tabs remain operable in a horizontally scrollable strip.
+- Five tabs fit without horizontal scrolling.
 - App actions stay icon-only with accessible names.
-- The expanded summary remains four-column and approximately 112 px high.
+- The four-line summary remains four-column and measures 93 px high.
 
 ### 390 px
 
 - Default iPhone review width.
 - Holding line 1 is 15.5 px and the row remains 76 px.
-- Approximately seven complete rows plus part of an eighth remain visible behind the expanded summary at 844 px height, matching the reference density.
+- All eight fixture rows remain visible above the summary at 844 px height.
 - Overview, Quotes, and Details have no horizontal overflow.
 
 ### 430 px
@@ -180,6 +179,7 @@ The following secondary information is relocated:
 | Desktop wordmark                           | Navigation drawer                                |
 | Desktop side summary                       | Fixed bottom summary                             |
 | Action text labels                         | Accessible icon-button names and action popovers |
+| Priced-holding/AUD summary footnote        | Removed from compact totals; retained in states  |
 
 Exact timestamps remain a detail/audit concern. Compact lists show a business date only when it helps interpretation.
 
@@ -221,9 +221,10 @@ Browser checks confirmed document width equals viewport width at 320, 390, 430, 
 
 ## 12. Feedback requested
 
-Before marking any pattern approved, review:
+Revision 1 applies the owner’s marked-up Holdings feedback: the header and summary are each approximately 13–14% shorter; gain/loss colours apply to both numeric lines; the summary uses whole dollars, left-aligned Unrealised/Realised/All-Time labels, and no detail toggle. Follow-up feedback restores Overview as the first tab, followed by News, Quotes, Holdings, and Details, and slightly enlarges the first-line summary figures.
+
+Before marking the revised pattern approved, review:
 
 1. Whether the 390 px Holdings row feels as readable and dense as the reference.
 2. Whether Daily and Total should continue omitting the repeated `A$` prefix in compact rows.
-3. Whether the fixed expanded summary is the right default or should start collapsed.
-4. Whether Overview belongs in the persistent five-item tab strip or should remain a drawer/portfolio-selector destination.
+3. Whether the revised four-line, approximately 97 px summary has the intended balance of density and readability.

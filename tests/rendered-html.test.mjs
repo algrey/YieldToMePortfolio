@@ -46,6 +46,16 @@ test("server-renders a direct portfolio section route", async () => {
   assert.match(html, /Value \/ cost/);
   assert.match(html, /A\$1\.965 × 20,000 shares/);
   assert.match(html, /Unrealised/);
+  assert.match(html, /A\$1,266,664/);
+  assert.match(html, /Realised/);
+  assert.match(html, /\+A\$15,000/);
+  assert.match(html, /All-Time/);
+  assert.match(html, /\+A\$277,423/);
+  assert.doesNotMatch(html, /Hide details|Show details/);
+  assert.match(
+    html,
+    /overview[\s\S]*news[\s\S]*quotes[\s\S]*holdings[\s\S]*details/i,
+  );
   assert.match(
     html,
     /href="\/portfolio\/preview\/holdings"[^>]*aria-current="page"|aria-current="page"[^>]*href="\/portfolio\/preview\/holdings"/,

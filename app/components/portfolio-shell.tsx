@@ -23,6 +23,13 @@ export const portfolioSections = [
 ] as const;
 
 export type PortfolioSection = (typeof portfolioSections)[number];
+const primaryPortfolioSections: PortfolioSection[] = [
+  "overview",
+  "news",
+  "quotes",
+  "holdings",
+  "details",
+];
 type ViewState = "populated" | "empty" | "partial" | "provider-error";
 type HoldingSort = "ticker" | "value" | "daily" | "total";
 type QuoteSort = "ticker" | "price" | "change";
@@ -48,6 +55,20 @@ function compareBigIntStrings(left: string, right: string) {
 
 function compactAmount(value: string) {
   return value.replace("A$", "");
+}
+
+function wholeDollarAmount(value: string) {
+  const amount = value.match(/^([+−-]?)([A-Z]{0,2}\$)([\d,]+)(?:\.(\d+))?$/);
+  if (!amount) {
+    return value;
+  }
+
+  const [, sign, currency, integerPart, fraction = ""] = amount;
+  const shouldRoundUp = (fraction + "00").slice(0, 2) >= "50";
+  const rounded =
+    BigInt(integerPart.replaceAll(",", "")) + (shouldRoundUp ? 1n : 0n);
+
+  return `${sign}${currency}${rounded.toLocaleString("en-AU")}`;
 }
 
 function sortByExactKey<T>(
@@ -132,58 +153,55 @@ function PortfolioSummary({
   portfolio: PortfolioPrototype;
   partial: boolean;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  const summary = partial
+    ? {
+        value: "A$1,143,903.50",
+        cost: "A$865,743.12",
+        dailyAmount: "+A$2,934.99",
+        dailyPercent: "+0.26%",
+        gainAmount: "+A$278,496.60",
+        gainPercent: "+32.17%",
+        allTimeAmount: "+A$293,496.60",
+        allTimePercent: "+33.90%",
+      }
+    : portfolio;
 
   return (
-    <aside
-      className={`portfolio-summary ${expanded ? "expanded" : "collapsed"}`}
-      aria-label="Portfolio totals"
-    >
+    <aside className="portfolio-summary" aria-label="Portfolio totals">
       <div className="summary-primary">
         <span className="summary-label">
           {partial ? "Known value" : "Unrealised"}
         </span>
-        <strong>{partial ? "A$1,143,903.50" : portfolio.value}</strong>
+        <strong>{wholeDollarAmount(summary.value)}</strong>
         <ToneValue tone="positive">
-          {compactAmount(partial ? "+A$2,934.99" : portfolio.dailyAmount)}
+          {compactAmount(wholeDollarAmount(summary.dailyAmount))}
         </ToneValue>
         <ToneValue tone="positive">
-          {compactAmount(partial ? "+A$278,496.60" : portfolio.gainAmount)}
+          {compactAmount(wholeDollarAmount(summary.gainAmount))}
         </ToneValue>
       </div>
-      {expanded ? (
-        <div className="summary-detail">
-          <button type="button" onClick={() => setExpanded(false)}>
-            Hide details
-          </button>
-          <span>{partial ? "A$865,743.12" : portfolio.cost}</span>
+      <div className="summary-secondary">
+        <span aria-hidden="true" />
+        <span>{wholeDollarAmount(summary.cost)}</span>
+        <ToneValue tone="positive">{summary.dailyPercent}</ToneValue>
+        <ToneValue tone="positive">{summary.gainPercent}</ToneValue>
+      </div>
+      <div className="summary-gain-lines">
+        <p>
+          <span>Realised</span>
           <ToneValue tone="positive">
-            {partial ? "+0.26%" : portfolio.dailyPercent}
+            {wholeDollarAmount(portfolio.realisedAmount)} (
+            {portfolio.realisedPercent})
           </ToneValue>
+        </p>
+        <p>
+          <span>All-Time</span>
           <ToneValue tone="positive">
-            {partial ? "+32.17%" : portfolio.gainPercent}
+            {wholeDollarAmount(summary.allTimeAmount)} ({summary.allTimePercent}
+            )
           </ToneValue>
-          <p>
-            <span>Realised</span>
-            <ToneValue tone="positive">
-              {portfolio.realisedAmount} ({portfolio.realisedPercent})
-            </ToneValue>
-          </p>
-          <p className="summary-footnote">
-            {partial
-              ? "7 of 8 holdings priced · one value excluded"
-              : `${portfolio.holdings.length} holdings priced · AUD reporting`}
-          </p>
-        </div>
-      ) : (
-        <button
-          className="summary-expand"
-          type="button"
-          onClick={() => setExpanded(true)}
-        >
-          Show details
-        </button>
-      )}
+        </p>
+      </div>
     </aside>
   );
 }
@@ -982,7 +1000,7 @@ export function PortfolioShell({
       </header>
 
       <nav className="primary-tabs" aria-label="Portfolio sections">
-        {portfolioSections.map((section) => (
+        {primaryPortfolioSections.map((section) => (
           <Link
             key={section}
             href={sectionHref(section)}
