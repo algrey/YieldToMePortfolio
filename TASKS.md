@@ -126,7 +126,7 @@ Status: DONE.
 
 ### VSL-006 — Preview deployment and review evidence
 
-Status: READY.
+Status: BLOCKED.
 
 - Objective: publish the completed vertical slice to a Cloudflare preview and package the evidence required for owner review.
 - Dependencies: `VSL-005`.
@@ -137,6 +137,7 @@ Status: READY.
 - Tests: full repository quality gate, deployed preview smoke check, manual iPhone-width route walkthrough, and screenshot/capture manifest review.
 - Risks: preview credentials/configuration being mistaken for production configuration; retain explicit environment separation and do not commit secrets or preview data exports.
 - Parallel safe: no; serial release evidence task.
+- Completion note: Added the reproducible local preview harness and review-evidence manifest, but publication and the required browser captures are blocked because Cloudflare publishing credentials/Sites hosting are unavailable and the approved browser cannot reach the local capture surface; no preview URL or fabricated screenshot evidence was recorded.
 
 ### Demo checkpoint C — deployed vertical-slice review
 

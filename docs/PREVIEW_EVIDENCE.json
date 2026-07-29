@@ -1,0 +1,67 @@
+{
+  "task": "VSL-006",
+  "status": "blocked",
+  "dependency": "VSL-005",
+  "runtimeProfile": {
+    "environment": "preview",
+    "workersPlan": "free",
+    "marketDataProvider": "disabled",
+    "fixtureRoute": "/portfolio/preview/*",
+    "productionFixtureRoute": "404"
+  },
+  "routes": [
+    "/portfolio/preview/overview",
+    "/portfolio/preview/holdings",
+    "/portfolio/preview/holdings/PLS.AX"
+  ],
+  "localSmoke": {
+    "status": 200,
+    "route": "/portfolio/preview/holdings/PLS.AX",
+    "securityHeaders": [
+      "cache-control: private, no-store",
+      "content-security-policy",
+      "x-content-type-options: nosniff",
+      "x-frame-options: DENY"
+    ],
+    "fixtureMarker": true,
+    "backNavigation": true
+  },
+  "fixtureAssertions": {
+    "portfolio": "Aus Stocks",
+    "portfolioValue": "A$921536.34",
+    "openBasis": "A$900780.12",
+    "holding": "PLS.AX",
+    "holdingValue": "A$41800.00",
+    "holdingDailyMovement": "+A$4200.00",
+    "holdingTotalGain": "+A$2500.00",
+    "fixtureLabel": "Fixture market data"
+  },
+  "captures": [
+    { "route": "/portfolio/preview/overview", "width": 320, "file": null },
+    { "route": "/portfolio/preview/overview", "width": 390, "file": null },
+    { "route": "/portfolio/preview/overview", "width": 430, "file": null },
+    { "route": "/portfolio/preview/holdings", "width": 320, "file": null },
+    { "route": "/portfolio/preview/holdings", "width": 390, "file": null },
+    { "route": "/portfolio/preview/holdings", "width": 430, "file": null },
+    {
+      "route": "/portfolio/preview/holdings/PLS.AX",
+      "width": 320,
+      "file": null
+    },
+    {
+      "route": "/portfolio/preview/holdings/PLS.AX",
+      "width": 390,
+      "file": null
+    },
+    {
+      "route": "/portfolio/preview/holdings/PLS.AX",
+      "width": 430,
+      "file": null
+    }
+  ],
+  "deployment": {
+    "url": null,
+    "smoke": null,
+    "blocker": "Cloudflare publishing credentials and the Sites hosting connector are unavailable in this session."
+  }
+}
