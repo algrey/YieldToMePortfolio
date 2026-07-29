@@ -56,8 +56,10 @@ const prototypeStateLabels: Record<ViewState, string> = {
   "provider-error": "Provider unavailable",
 };
 
-function sectionHref(section: PortfolioSection) {
-  return section === "overview" ? "/" : `/portfolio/preview/${section}`;
+function sectionHref(section: PortfolioSection, overviewHref: string) {
+  return section === "overview"
+    ? overviewHref
+    : `/portfolio/preview/${section}`;
 }
 
 function compareBigIntStrings(left: string, right: string) {
@@ -900,11 +902,13 @@ export function PortfolioShell({
   reviewBadgeLabel = "Prototype · mock data",
   reviewNote = "Static review build · local mock data · no financial writes",
   portfolioPrototypesOverride = null,
+  overviewHref = "/",
 }: {
   activeSection: PortfolioSection;
   reviewBadgeLabel?: string;
   reviewNote?: string;
   portfolioPrototypesOverride?: readonly PortfolioPrototype[] | null;
+  overviewHref?: string;
 }) {
   const router = useRouter();
   const portfolios = portfolioPrototypesOverride ?? portfolioPrototypes;
@@ -1085,7 +1089,7 @@ export function PortfolioShell({
         {primaryPortfolioSections.map((section) => (
           <Link
             key={section}
-            href={sectionHref(section)}
+            href={sectionHref(section, overviewHref)}
             aria-current={activeSection === section ? "page" : undefined}
           >
             {section}

@@ -111,7 +111,24 @@ test("server-renders a direct portfolio section route", async () => {
       html,
       /href="\/portfolio\/preview\/holdings"[^>]*aria-current="page"|aria-current="page"[^>]*href="\/portfolio\/preview\/holdings"/,
     );
+    assert.match(html, /href="\/portfolio\/preview\/overview"/);
   }
+});
+
+test("server-renders the preview overview route", async () => {
+  const response = await render("/portfolio/preview/overview", {
+    token: accessFixture.signToken(),
+    fetch: async () => accessFixture.createJwks().clone(),
+  });
+  assert.equal(response.status, 200);
+
+  const html = await response.text();
+  assert.match(html, /Fixture market data/);
+  assert.match(html, /Aus Stocks · AUD/);
+  assert.match(html, /A\$921536\.34/);
+  assert.match(html, /A\$900780\.12/);
+  assert.match(html, /Portfolio history/);
+  assert.match(html, /Aus Stocks/);
 });
 
 test("production hides the preview sample route", async () => {

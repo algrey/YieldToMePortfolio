@@ -44,6 +44,7 @@ export default async function PortfolioSectionPage({
       portfolioPrototypesOverride={createPreviewPortfolioPrototypes(
         previewFixtureResult.fixture,
       )}
+      overviewHref="/portfolio/preview/overview"
       reviewBadgeLabel="Fixture market data"
       reviewNote="Static review build · fixture market data · no financial writes"
     />
