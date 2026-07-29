@@ -1,0 +1,38 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "yieldtome-portfolio",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-07-29",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS"
+  },
+  "vars": {
+    "YIELDTOME_RUNTIME_ENV": "local",
+    "YIELDTOME_WORKERS_PLAN": "free",
+    "MARKET_DATA_PROVIDER": "disabled",
+    "CLOUDFLARE_ACCESS_ISSUER": "",
+    "CLOUDFLARE_ACCESS_AUDIENCE": ""
+  },
+  "env": {
+    "preview": {
+      "vars": {
+        "YIELDTOME_RUNTIME_ENV": "preview",
+        "YIELDTOME_WORKERS_PLAN": "free",
+        "MARKET_DATA_PROVIDER": "disabled",
+        "CLOUDFLARE_ACCESS_ISSUER": "",
+        "CLOUDFLARE_ACCESS_AUDIENCE": ""
+      }
+    },
+    "production": {
+      "vars": {
+        "YIELDTOME_RUNTIME_ENV": "production",
+        "YIELDTOME_WORKERS_PLAN": "paid",
+        "MARKET_DATA_PROVIDER": "disabled",
+        "CLOUDFLARE_ACCESS_ISSUER": "",
+        "CLOUDFLARE_ACCESS_AUDIENCE": ""
+      }
+    }
+  }
+}

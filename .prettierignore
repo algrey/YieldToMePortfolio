@@ -5,6 +5,8 @@ dist
 .wrangler
 .pnpm-store
 package-lock.json
+.env.example
+worker-configuration.d.ts
 docs/01_SCREEN_INVENTORY_AND_NAVIGATION.md
 docs/02_DATA_MODEL_AND_CSV.md
 docs/03_CALCULATIONS_AND_INTERFACE.md

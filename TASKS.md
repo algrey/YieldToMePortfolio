@@ -41,7 +41,7 @@ Status: DONE in this foundation pass.
 
 ### FND-002A — Worker configuration, binding types, and runtime profile
 
-Status: READY after FND-001.
+Status: DONE on 2026-07-29.
 
 - Objective: make the generated Worker configuration explicit, type-safe, and free of unapproved runtime bindings before domain work starts.
 - Dependencies: FND-001.
@@ -52,6 +52,7 @@ Status: READY after FND-001.
 - Tests: env/config unit tests, `wrangler types --check`, `tsc --noEmit`, `vinext check`, generated-Worker binding/config inspection, build.
 - Risks: Vinext/Vite local configuration diverging from generated Wrangler output; inspect both.
 - Parallel safe: yes with SPK tasks; coordinate shared config.
+- Completion note: Added explicit `wrangler.json` environment profiles, fail-closed runtime config validation, generated Worker typing, removed the undeclared `IMAGES` path plus premature provider-policy/second-provider config, and added config tests that inspect both source and generated Worker output.
 
 ### FND-002B — Security headers and CI-equivalent quality gate
 
