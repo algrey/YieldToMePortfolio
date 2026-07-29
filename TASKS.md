@@ -440,7 +440,7 @@ Status: PENDING.
 
 ### LED-002A — Pure FIFO allocation engine
 
-Status: READY.
+Status: DONE on 2026-07-30.
 
 - Objective: freeze deterministic exact-decimal FIFO behavior independently of D1 and UI.
 - Dependencies: LED-001A.
@@ -451,6 +451,7 @@ Status: READY.
 - Tests: partial/multi-lot sales, fees, FX, equal timestamps, split, reversal, residual rounding, incomplete basis.
 - Risks: mutation ordering, split semantics, and rounding residuals.
 - Parallel safe: yes with owned service work after event types freeze.
+- Completion note: Added a pure exact-decimal FIFO engine with stable acquisition ordering, acquisition-cost/fee/tax basis construction, partial and multi-lot allocations, sale proceeds/fee/tax residual reconciliation, explicit incomplete-basis/FX states, oversell results, split quantity updates, and reversal-aware deterministic rebuilds. Added independent fixtures with no database, Worker, or network dependency.
 
 ### LED-002B — Owned lot and holding projection rebuild
 

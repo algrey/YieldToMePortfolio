@@ -12,3 +12,22 @@ export {
   type LedgerValidationIssueCode,
   type LedgerValidationResult,
 } from "./event-validation.ts";
+export {
+  allocateFifoSale,
+  applyFifoSplit,
+  createFifoLot,
+  rebuildFifo,
+  type BasisStatus,
+  type FifoAllocation,
+  type FifoAllocationFailure,
+  type FifoAllocationResult,
+  type FifoAllocationSuccess,
+  type FifoEvent,
+  type FifoLot,
+  type FifoLotInput,
+  type FifoRebuildFailure,
+  type FifoRebuildResult,
+  type FifoRebuildSuccess,
+  type FifoSaleInput,
+  type FifoSplitInput,
+} from "./fifo.ts";
