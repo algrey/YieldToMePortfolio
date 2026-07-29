@@ -536,9 +536,12 @@ dd {
 
 .holding-row .row-tertiary {
   grid-row: 3;
-  grid-column: 1 / 4;
+  grid-column: 1 / -1;
   align-self: end;
+  min-width: 0;
+  overflow: hidden;
   padding-top: 1px;
+  text-overflow: ellipsis;
 }
 
 .holding-row .unavailable.row-primary {
@@ -1550,6 +1553,12 @@ dd {
     text-align: right;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* Desktop rows have a second third-line item at the right; keep the
+     quantity line flowing across the remaining columns beside it. */
+  .holding-row .row-tertiary {
+    grid-column: 1 / 4;
   }
 
   .portfolio-summary {

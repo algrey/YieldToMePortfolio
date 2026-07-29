@@ -77,6 +77,8 @@ Input text is not part of this prototype. Production forms must retain a minimum
 
 Line 1 shows ticker, market value, daily amount, and total unrealised amount. Line 2 shows price, open cost, daily percentage, and total unrealised percentage. Line 3 shows average open cost × quantity.
 
+When a row line contains a single item, that item spans the available holding-row columns rather than determining the width of one column. On mobile this applies to the average open cost × quantity line; it may truncate with an ellipsis when the viewport is too narrow. Desktop may reserve a separate right-hand metadata item on the same line.
+
 Market value and open cost retain their currency prefix. Daily and Total amounts omit the repeated `A$` prefix in the compact grid because the portfolio reporting currency is already established by context; signs remain explicit. Positive amounts and percentages are green, and negative amounts and percentages are red. This gain/loss treatment applies consistently across the prototype. No financial dimension is removed.
 
 The initial sort is Daily percentage descending to match the strong reference inference. Tapping a different header selects that key; tapping the active header reverses direction. Active direction is expressed by text/ARIA state and a green arrow, not colour alone.
