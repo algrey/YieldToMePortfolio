@@ -217,7 +217,7 @@ Status: PENDING.
 
 ### IMP-001 — Strict versioned 17-column parser
 
-Status: READY.
+Status: DONE on 2026-07-29.
 
 - Objective: parse the supplied export deterministically into non-mutating normalized rows and actionable issues.
 - Dependencies: FND-002B.
@@ -228,6 +228,7 @@ Status: READY.
 - Tests: BOM, LF/CRLF, quoted commas/newlines, padded header, blank rows, dates, decimals, zero FX, exact/malformed `=CASH`, duplicates, malicious/formula text, 10 MiB/100,000-row/field bounds under Worker memory limits, and Free-profile rejection before body parsing.
 - Risks: parser library/runtime compatibility; date semantics.
 - Parallel safe: yes with LED-001A; no shared financial writes.
+- Completion note: Added a strict versioned CSV parser for the supplied 17-column export, including header normalization, row classification, cash-row normalization, duplicate fingerprints, and upload gating for Free-plan rejection before body parsing.
 
 ### IMP-002A — Owned import staging state machine
 
