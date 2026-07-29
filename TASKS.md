@@ -25,13 +25,15 @@ Status values: `DONE` foundation only, `IN PROGRESS`, `READY`, `BLOCKED`, `PENDI
 
 ## Milestone: demonstrable CSV portfolio preview
 
+Status: COMPLETE on 2026-07-29; owner approved continuation into the production dependency spine.
+
 Objective: deliver a reviewable, fixture-backed product slice before continuing the production dependency spine. It is deliberately a read-only preview: it parses the supplied CSV into an in-memory sample portfolio, uses deterministic local price/FX fixtures, and never creates D1 ledger facts or calls a market-data provider.
 
 Scope rules:
 
 - Reuse the completed parser (`IMP-001`) and dense mobile prototype (`UI-PROT-001`); do not reconcile the independent screenshot and CSV fixture contents.
 - The preview calculation contract is a narrow, explicit substitute for the broader ledger/FIFO, persisted pricing, and historical-performance tasks. It must use decimal strings and show unavailable values rather than fabricate zeroes.
-- Production authentication, D1 import staging/commit, live market-data ingestion, refresh/background jobs, advanced history/performance, deletion, and operational hardening remain after this milestone. Existing PENDING tasks stay PENDING and must not be promoted by preview work alone.
+- Production authentication, D1 import staging/commit, live market-data ingestion, refresh/background jobs, advanced history/performance, deletion, and operational hardening remain after this milestone. They may now advance only when their own dependencies and decisions are satisfied.
 - A fixture label is required in the preview shell and on the holding detail. Routine source/delay/timestamp labels remain absent; this is an intentional, visible exception because no live provider is involved.
 - “Cloudflare preview” means a non-production deployment using the repository’s preview configuration. The preview-only sample route must be unavailable in the production environment.
 
@@ -283,7 +285,7 @@ Status: DONE on 2026-07-29.
 
 ### AUTH-002 — Internal identity lifecycle and portfolio session
 
-Status: PENDING.
+Status: READY.
 
 - Objective: turn a verified Access principal into a lifecycle-aware internal user and active owned-portfolio context.
 - Dependencies: AUTH-001, DB-001B.
@@ -313,7 +315,7 @@ Status: PENDING.
 
 ### LED-001A — Transaction and cash ledger schema
 
-Status: PENDING.
+Status: READY.
 
 - Objective: establish enforceable owner/portfolio relationships and typed event rules before any financial posting service.
 - Dependencies: DB-001A, DB-002.
@@ -458,7 +460,7 @@ Status: DONE on 2026-07-29.
 
 ### DB-003 — Price, FX, and override schema
 
-Status: PENDING.
+Status: READY.
 
 - Objective: persist normalized price/FX observations and auditable user corrections with unambiguous provenance.
 - Dependencies: DB-002.
@@ -500,7 +502,7 @@ Status: DEFERRED; not required by the core ledger/valuation release.
 
 ### MKT-001 — Best-effort provider-neutral contracts and configuration
 
-Status: PENDING.
+Status: READY.
 
 - Objective: freeze provider-independent capabilities, normalized types, errors, fixtures, and ordinary server-side activation rules.
 - Dependencies: DB-002; production activation additionally depends on SPK-002.
