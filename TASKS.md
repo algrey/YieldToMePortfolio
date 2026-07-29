@@ -37,7 +37,7 @@ Scope rules:
 
 ### VSL-001 — Build a parsed sample-portfolio projection input
 
-Status: READY.
+Status: DONE on 2026-07-29.
 
 - Objective: turn the supplied `docs/Example_Portfolio.csv` into a repeatable, non-persistent sample-portfolio input using the completed strict parser.
 - Dependencies: `IMP-001`, `UI-PROT-001`.
@@ -48,6 +48,7 @@ Status: READY.
 - Tests: supplied-file parse-to-projection fixture, deterministic ordering, malformed/unavailable projection state, and no-D1/no-network boundary test.
 - Risks: treating a CSV definition row as a trade or implying complete cash/history; retain the parser classification and preview limitations.
 - Parallel safe: no; this defines the shared preview data contract.
+- Completion note: Added a server-only preview fixture adapter that parses `docs/Example_Portfolio.csv` through the production parser, groups displayable holdings/closed/reference securities with row-level traceability, and records explicit blank-row exclusions plus malformed/unavailable projection states.
 
 ### VSL-002 — Deterministic preview valuation contract
 
