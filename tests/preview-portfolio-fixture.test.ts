@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
-  PREVIEW_SAMPLE_PORTFOLIO_CSV_URL,
+  PREVIEW_SAMPLE_PORTFOLIO_CSV_PATH,
   SUPPORTED_IMPORT_PARSER_VERSION,
   createPreviewPortfolioFixtureFromParseResult,
   loadPreviewPortfolioFixture,
@@ -14,7 +14,7 @@ import {
 } from "../domain/imports/index.ts";
 
 async function loadFixtureCsv(): Promise<string> {
-  return await readFile(PREVIEW_SAMPLE_PORTFOLIO_CSV_URL, "utf8");
+  return await readFile(PREVIEW_SAMPLE_PORTFOLIO_CSV_PATH, "utf8");
 }
 
 test("builds a deterministic sample portfolio projection from the supplied CSV", async () => {

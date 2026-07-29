@@ -89,7 +89,7 @@ Status: DONE on 2026-07-29.
 
 ### VSL-004 — Connect the dense Overview and Holdings screens
 
-Status: READY.
+Status: DONE.
 
 - Objective: replace the relevant prototype mock values with the parsed sample and deterministic valuation while preserving the approved dense mobile layout.
 - Dependencies: `VSL-003`.
@@ -100,6 +100,7 @@ Status: READY.
 - Tests: calculated-value render assertions, Overview/Holdings navigation, unavailable-price state, 320/390/430 responsive screenshots, keyboard/touch navigation, format/lint/build.
 - Risks: fitting real calculated values into a layout designed around static examples; preserve the approved hierarchy rather than adding cards or horizontal scrolling.
 - Parallel safe: no; shared routes and layout.
+- Completion note: Connected the preview Overview and Holdings screens to the deterministic valuation fixture, kept the dense mobile layout intact at 320/390/430 px, and verified fixture labels, price-unavailable handling, and build/test gates.
 
 ### Demo checkpoint B — interactive overview and holdings
 

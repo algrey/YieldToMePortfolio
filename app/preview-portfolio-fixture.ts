@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import {
   parseStrictVersionedCsvImport,
   SUPPORTED_IMPORT_PARSER_VERSION,
@@ -9,9 +10,9 @@ import {
   type ImportTransactionKind,
 } from "../domain/imports/index.ts";
 
-export const PREVIEW_SAMPLE_PORTFOLIO_CSV_URL = new URL(
-  "../docs/Example_Portfolio.csv",
-  import.meta.url,
+export const PREVIEW_SAMPLE_PORTFOLIO_CSV_PATH = resolve(
+  process.cwd(),
+  "docs/Example_Portfolio.csv",
 );
 
 export type PreviewSecurityTrace = Readonly<{
@@ -425,7 +426,7 @@ export async function loadPreviewPortfolioFixtureFromCsv(
 
 export async function loadPreviewPortfolioFixture(): Promise<PreviewPortfolioFixtureResult> {
   try {
-    const csv = await readFile(PREVIEW_SAMPLE_PORTFOLIO_CSV_URL, "utf8");
+    const csv = await readFile(PREVIEW_SAMPLE_PORTFOLIO_CSV_PATH, "utf8");
     return await loadPreviewPortfolioFixtureFromCsv(csv);
   } catch (error) {
     const message =

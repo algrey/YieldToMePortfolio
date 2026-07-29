@@ -3,6 +3,8 @@ import {
   PortfolioShell,
   type PortfolioSection,
 } from "../../../components/portfolio-shell";
+import { createPreviewPortfolioPrototypes } from "../../../preview-route-data";
+import { loadPreviewValuationFixture } from "../../../preview-valuation";
 
 const portfolioSections = [
   "overview",
@@ -15,6 +17,8 @@ const portfolioSections = [
 type PortfolioSectionPageProps = {
   params: Promise<{ portfolioId: string; section: string }>;
 };
+
+const previewValuationFixturePromise = loadPreviewValuationFixture();
 
 export default async function PortfolioSectionPage({
   params,
@@ -29,9 +33,17 @@ export default async function PortfolioSectionPage({
     notFound();
   }
 
+  const previewFixtureResult = await previewValuationFixturePromise;
+  if (!previewFixtureResult.ok) {
+    throw new Error(previewFixtureResult.message);
+  }
+
   return (
     <PortfolioShell
       activeSection={section as PortfolioSection}
+      portfolioPrototypesOverride={createPreviewPortfolioPrototypes(
+        previewFixtureResult.fixture,
+      )}
       reviewBadgeLabel="Fixture market data"
       reviewNote="Static review build · fixture market data · no financial writes"
     />

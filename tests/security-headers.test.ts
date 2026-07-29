@@ -136,7 +136,7 @@ test("rendered protected-route fixture returns no-store and security headers", a
       return nonce;
     });
 
-  assert.equal(inlineScripts.length, 7);
+  assert.equal(inlineScripts.length, 8);
   assert.equal(
     inlineScripts.every((nonce) => cspAuthorizesNonce(policy, nonce)),
     true,

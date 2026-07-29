@@ -51,6 +51,7 @@ export type PreviewHoldingScenario = Readonly<{
   name: string;
   currency: string;
   baseCurrency: string;
+  exchange: string | null;
   quantity: string | null;
   openBasis: string | null;
   realisedGain: string | null;
@@ -68,6 +69,7 @@ export type PreviewHoldingValuation = Readonly<{
   name: string;
   currency: string;
   baseCurrency: string;
+  exchange: string | null;
   quantity: string;
   openBasis: string | null;
   averageCostPerShare: string | null;
@@ -102,9 +104,15 @@ export type PreviewPortfolioValuation = Readonly<{
   convertedHoldings: number;
   investedValue: string | null;
   coveredOpenBasis: string | null;
+  previousValue: string | null;
+  dailyMovement: string | null;
+  dailyPercent: string | null;
   realisedGain: string | null;
+  realisedPercent: string | null;
   unrealisedGain: string | null;
+  unrealisedPercent: string | null;
   totalGain: string | null;
+  totalPercent: string | null;
   portfolioValue: string | null;
   coverageLabel: string;
 }>;
@@ -378,6 +386,7 @@ function projectScenario(
     name: scenario.name,
     currency: scenario.currency,
     baseCurrency: scenario.baseCurrency,
+    exchange: scenario.exchange,
     quantity: toIntegerString(quantity),
     openBasis: openBasis === null ? null : formatMoney(openBasis),
     averageCostPerShare,
@@ -448,6 +457,7 @@ function projectOpenHolding(
     name: holding.name,
     currency: holding.currency ?? baseCurrency,
     baseCurrency,
+    exchange: holding.exchange,
     quantity: holding.quantity,
     openBasis: formatMoney(ledger.openBasis),
     realisedGain: formatMoney(ledger.realisedGain),
@@ -490,6 +500,7 @@ function projectClosedSecurity(
     name: holding.name,
     currency: holding.currency ?? baseCurrency,
     baseCurrency,
+    exchange: holding.exchange,
     quantity: holding.quantity,
     openBasis: null,
     realisedGain: formatMoney(ledger.realisedGain),
@@ -513,6 +524,7 @@ function projectReferenceSecurity(
     name: holding.name,
     currency: holding.currency ?? baseCurrency,
     baseCurrency,
+    exchange: holding.exchange,
     quantity: null,
     openBasis: null,
     realisedGain: null,
@@ -572,6 +584,36 @@ function evaluatePortfolio(
     ZERO,
   );
   const totalGain = add(realisedGain, unrealisedGain);
+  const previousValue = openHoldings.reduce(
+    (total, holding) =>
+      holding.previousValue === null
+        ? total
+        : add(total, parseDecimal(holding.previousValue)),
+    ZERO,
+  );
+  const dailyMovement = openHoldings.reduce(
+    (total, holding) =>
+      holding.dailyMovement === null
+        ? total
+        : add(total, parseDecimal(holding.dailyMovement)),
+    ZERO,
+  );
+  const dailyPercent =
+    compare(previousValue, ZERO) === 0 || compare(dailyMovement, ZERO) === 0
+      ? null
+      : formatDecimalFixed(divide(dailyMovement, previousValue), 2);
+  const unrealisedPercent =
+    compare(coveredOpenBasis, ZERO) === 0 || compare(unrealisedGain, ZERO) === 0
+      ? null
+      : formatDecimalFixed(divide(unrealisedGain, coveredOpenBasis), 2);
+  const realisedPercent =
+    compare(coveredOpenBasis, ZERO) === 0 || compare(realisedGain, ZERO) === 0
+      ? null
+      : formatDecimalFixed(divide(realisedGain, coveredOpenBasis), 2);
+  const totalPercent =
+    compare(coveredOpenBasis, ZERO) === 0 || compare(totalGain, ZERO) === 0
+      ? null
+      : formatDecimalFixed(divide(totalGain, coveredOpenBasis), 2);
   const pricedHoldings = openHoldings.filter(
     (holding) => holding.priceAvailable,
   ).length;
@@ -591,9 +633,15 @@ function evaluatePortfolio(
     convertedHoldings,
     investedValue: formatMoney(investedValue),
     coveredOpenBasis: formatMoney(coveredOpenBasis),
+    previousValue: formatMoney(previousValue),
+    dailyMovement: formatMoney(dailyMovement),
+    dailyPercent,
     realisedGain: formatMoney(realisedGain),
+    realisedPercent,
     unrealisedGain: formatMoney(unrealisedGain),
+    unrealisedPercent,
     totalGain: formatMoney(totalGain),
+    totalPercent,
     portfolioValue: formatMoney(investedValue),
     coverageLabel: `${pricedHoldings} priced holdings`,
   };

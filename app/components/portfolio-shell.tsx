@@ -36,6 +36,19 @@ type QuoteSort = "ticker" | "price" | "change";
 type Direction = "ascending" | "descending";
 type OpenMenu = "portfolio" | "add" | "prototype" | null;
 
+type OverviewRow = Readonly<{
+  id: string;
+  name: string;
+  holdings: string;
+  value: string;
+  cost: string;
+  daily: string;
+  dailyPercent: string;
+  total: string;
+  totalPercent: string;
+  tone: Tone;
+}>;
+
 const prototypeStateLabels: Record<ViewState, string> = {
   populated: "Populated portfolio",
   empty: "Empty portfolio",
@@ -55,6 +68,24 @@ function compareBigIntStrings(left: string, right: string) {
 
 function compactAmount(value: string) {
   return value.replace("A$", "");
+}
+
+function overviewRowFromPortfolio(portfolio: PortfolioPrototype): OverviewRow {
+  return {
+    id: portfolio.id,
+    name: portfolio.name,
+    holdings:
+      portfolio.holdings.length === 0
+        ? "0 holdings"
+        : `${portfolio.holdings.length} holdings`,
+    value: portfolio.value,
+    cost: portfolio.cost,
+    daily: portfolio.dailyAmount,
+    dailyPercent: portfolio.dailyPercent,
+    total: portfolio.allTimeAmount,
+    totalPercent: portfolio.allTimePercent,
+    tone: portfolio.allTimeAmount.startsWith("−") ? "negative" : "positive",
+  };
 }
 
 function wholeDollarAmount(value: string) {
@@ -236,9 +267,13 @@ function SortButton<T extends string>({
 }
 
 function OverviewScreen({
+  portfolio,
+  rows,
   viewState,
   onOpenPortfolio,
 }: {
+  portfolio?: PortfolioPrototype;
+  rows: readonly OverviewRow[];
   viewState: ViewState;
   onOpenPortfolio: (id: string) => void;
 }) {
@@ -255,25 +290,58 @@ function OverviewScreen({
     <div className="overview-screen">
       <section className="overview-hero" aria-labelledby="overview-title">
         <div>
-          <p className="eyebrow">All portfolios · AUD</p>
-          <h1 id="overview-title">A$1,695,575.90</h1>
+          <p className="eyebrow">
+            {portfolio
+              ? `${portfolio.name} · ${portfolio.homeCurrency}`
+              : "All portfolios · AUD"}
+          </p>
+          <h1 id="overview-title">
+            {portfolio ? portfolio.value : "A$1,695,575.90"}
+          </h1>
           <p className="overview-movement">
-            <ToneValue tone="positive">↑ A$5,359.64</ToneValue>
-            <span>today · +0.32%</span>
+            {portfolio ? (
+              <>
+                <ToneValue
+                  tone={
+                    portfolio.dailyAmount.startsWith("−")
+                      ? "negative"
+                      : "positive"
+                  }
+                >
+                  {portfolio.dailyAmount.startsWith("−")
+                    ? `↓ ${portfolio.dailyAmount}`
+                    : `↑ ${portfolio.dailyAmount}`}
+                </ToneValue>
+                <span>today · {portfolio.dailyPercent}</span>
+              </>
+            ) : (
+              <>
+                <ToneValue tone="positive">↑ A$5,359.64</ToneValue>
+                <span>today · +0.32%</span>
+              </>
+            )}
           </p>
         </div>
         <dl className="overview-kpis">
           <div>
             <dt>Invested</dt>
-            <dd>A$1,592,846.40</dd>
+            <dd>{portfolio ? portfolio.cost : "A$1,592,846.40"}</dd>
           </div>
           <div>
             <dt>Cash</dt>
-            <dd>A$103,379.45</dd>
+            <dd>{portfolio ? portfolio.cash : "A$103,379.45"}</dd>
           </div>
           <div>
             <dt>Unrealised</dt>
-            <dd className="tone-positive">+A$339,465.78</dd>
+            <dd
+              className={
+                portfolio?.gainAmount.startsWith("−")
+                  ? "tone-negative"
+                  : "tone-positive"
+              }
+            >
+              {portfolio ? portfolio.gainAmount : "+A$339,465.78"}
+            </dd>
           </div>
         </dl>
       </section>
@@ -319,7 +387,7 @@ function OverviewScreen({
           <span>Daily</span>
           <span>Total</span>
         </div>
-        {overviewRows.map((row) => (
+        {rows.map((row) => (
           <button
             className="portfolio-row overview-grid"
             type="button"
@@ -831,21 +899,31 @@ export function PortfolioShell({
   activeSection,
   reviewBadgeLabel = "Prototype · mock data",
   reviewNote = "Static review build · local mock data · no financial writes",
+  portfolioPrototypesOverride = null,
 }: {
   activeSection: PortfolioSection;
   reviewBadgeLabel?: string;
   reviewNote?: string;
+  portfolioPrototypesOverride?: readonly PortfolioPrototype[] | null;
 }) {
   const router = useRouter();
-  const [portfolioId, setPortfolioId] = useState("aus-stocks");
+  const portfolios = portfolioPrototypesOverride ?? portfolioPrototypes;
+  const [portfolioId, setPortfolioId] = useState(
+    () =>
+      portfolios.find((item) => item.id === "aus-stocks")?.id ??
+      portfolios[0]?.id ??
+      "aus-stocks",
+  );
   const [viewState, setViewState] = useState<ViewState>("populated");
   const [openMenu, setOpenMenu] = useState<OpenMenu>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [selectedHolding, setSelectedHolding] = useState<Holding | null>(null);
 
   const portfolio =
-    portfolioPrototypes.find((item) => item.id === portfolioId) ??
-    portfolioPrototypes[0];
+    portfolios.find((item) => item.id === portfolioId) ?? portfolios[0];
+  const overviewPortfolioRows = portfolioPrototypesOverride
+    ? portfolios.map(overviewRowFromPortfolio)
+    : overviewRows;
 
   function selectPortfolio(nextId: string) {
     setPortfolioId(nextId);
@@ -893,7 +971,7 @@ export function PortfolioShell({
           {openMenu === "portfolio" ? (
             <div className="popover portfolio-popover">
               <p>Portfolios</p>
-              {portfolioPrototypes.map((item) => (
+              {portfolios.map((item) => (
                 <button
                   type="button"
                   key={item.id}
@@ -1023,6 +1101,8 @@ export function PortfolioShell({
       <main className={`screen-content screen-${activeSection}`}>
         {activeSection === "overview" ? (
           <OverviewScreen
+            portfolio={portfolioPrototypesOverride ? portfolio : undefined}
+            rows={overviewPortfolioRows}
             viewState={viewState}
             onOpenPortfolio={(id) => {
               selectPortfolio(id);
@@ -1075,7 +1155,7 @@ export function PortfolioShell({
               Overview
             </Link>
             <p className="drawer-label">Portfolios</p>
-            {portfolioPrototypes.map((item) => (
+            {portfolios.map((item) => (
               <button
                 type="button"
                 key={item.id}

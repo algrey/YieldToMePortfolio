@@ -95,11 +95,13 @@ test("server-renders a direct portfolio section route", async () => {
     assert.match(html, /Value \/ cost/);
     assert.match(html, /A\$1\.965 × 20,000 shares/);
     assert.match(html, /Unrealised/);
-    assert.match(html, /A\$1,266,664/);
+    assert.match(html, /A\$921,536/);
+    assert.match(html, /A\$900,780/);
+    assert.match(html, /\+34,871/);
     assert.match(html, /Realised/);
     assert.match(html, /\+A\$15,000/);
     assert.match(html, /All-Time/);
-    assert.match(html, /\+A\$277,423/);
+    assert.match(html, /\+A\$35,756/);
     assert.doesNotMatch(html, /Hide details|Show details/);
     assert.match(
       html,
@@ -134,7 +136,12 @@ test("server-renders quote and detail prototype routes", async () => {
   });
   assert.equal(quotesResponse.status, 200);
   const quotesHtml = await quotesResponse.text();
-  assert.match(quotesHtml, /AUDUSD=X/);
+  assert.match(quotesHtml, /Fixture market data/);
+  assert.match(quotesHtml, /PLS\.AX/);
+  assert.match(quotesHtml, /A\$2\.09/);
+  assert.match(quotesHtml, /\+A\$0\.21/);
+  assert.match(quotesHtml, /29 Jul/);
+  assert.match(quotesHtml, /\+11\.17%/);
   assert.match(quotesHtml, /Last price/);
 
   const detailsResponse = await render("/portfolio/preview/details", {
