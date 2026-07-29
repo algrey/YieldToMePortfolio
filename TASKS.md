@@ -111,7 +111,7 @@ Gate: `VSL-003` and `VSL-004` are DONE.
 
 ### VSL-005 — Holding-detail drill-down
 
-Status: PENDING.
+Status: READY.
 
 - Objective: complete the review flow by linking a holding row to a compact detail view of its calculated facts and fixture-data explanation.
 - Dependencies: `VSL-004`.
