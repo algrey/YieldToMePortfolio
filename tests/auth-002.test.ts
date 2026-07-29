@@ -222,6 +222,32 @@ test("request context resolves only an owned active portfolio", async () => {
       "2026-07-29T12:00:00.000Z",
     );
 
+  const otherIdentity = await service.resolve(
+    principal("subject-other", "other@example.com"),
+  );
+  assert.equal(otherIdentity.ok, true);
+  if (!otherIdentity.ok) {
+    return;
+  }
+
+  database
+    .prepare(
+      `
+        INSERT INTO portfolios (
+          id, user_id, code, name, base_currency_code, timezone,
+          accounting_method, history_complete_from, status, created_at,
+          updated_at, version
+        ) VALUES (?, ?, 'OTHER', 'Other portfolio', 'AUD', 'Australia/Sydney',
+                  'fifo', NULL, 'active', ?, ?, 1)
+      `,
+    )
+    .run(
+      "portfolio-other",
+      otherIdentity.user.id,
+      "2026-07-29T12:00:00.000Z",
+      "2026-07-29T12:00:00.000Z",
+    );
+
   const context = await resolveAuthenticatedRequestContext(
     client,
     principal("subject-context", "context@example.com"),
