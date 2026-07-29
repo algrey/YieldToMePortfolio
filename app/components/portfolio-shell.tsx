@@ -1249,7 +1249,13 @@ export function PortfolioShell({
       {selectedHolding ? (
         <HoldingSheet
           holding={selectedHolding}
-          onClose={() => setSelectedHolding(null)}
+          onClose={() => {
+            if (holdingSymbol !== null) {
+              router.push("/portfolio/preview/holdings");
+              return;
+            }
+            setSelectedHolding(null);
+          }}
           directRoute={holdingSymbol !== null}
           unavailable={selectedHoldingUnavailable}
         />
