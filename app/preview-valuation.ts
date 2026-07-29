@@ -4,7 +4,6 @@ import {
   divideDecimal,
   formatDecimalFixed,
   formatDecimalTrimmed,
-  isZero,
   multiplyDecimal,
   parseDecimal,
   subtractDecimal,
@@ -428,7 +427,7 @@ function projectOpenHolding(
   );
 
   const averageCostPerShare =
-    isPositive(ledger.openQuantity) && !isZero(ledger.openBasis)
+    isPositive(ledger.openQuantity) && ledger.openBasis !== null
       ? formatPrice(divide(ledger.openBasis, ledger.openQuantity))
       : null;
   const priceObservation =
@@ -573,6 +572,12 @@ function evaluatePortfolio(
     ZERO,
   );
   const totalGain = add(realisedGain, unrealisedGain);
+  const pricedHoldings = openHoldings.filter(
+    (holding) => holding.priceAvailable,
+  ).length;
+  const convertedHoldings = openHoldings.filter(
+    (holding) => holding.fxAvailable,
+  ).length;
 
   return {
     name: portfolio.name,
@@ -582,17 +587,15 @@ function evaluatePortfolio(
     referenceSecurities,
     holdings,
     totalHoldings: holdings.length,
-    pricedHoldings: openHoldings.filter((holding) => holding.priceAvailable)
-      .length,
-    convertedHoldings: openHoldings.filter((holding) => holding.fxAvailable)
-      .length,
+    pricedHoldings,
+    convertedHoldings,
     investedValue: formatMoney(investedValue),
     coveredOpenBasis: formatMoney(coveredOpenBasis),
     realisedGain: formatMoney(realisedGain),
     unrealisedGain: formatMoney(unrealisedGain),
     totalGain: formatMoney(totalGain),
     portfolioValue: formatMoney(investedValue),
-    coverageLabel: `${openHoldings.length} priced holdings`,
+    coverageLabel: `${pricedHoldings} priced holdings`,
   };
 }
 
