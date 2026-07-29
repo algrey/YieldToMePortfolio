@@ -3,6 +3,7 @@ import {
   createRuntimeConfigErrorResponse,
   resolveRuntimeConfig,
 } from "./runtime-config";
+import { applyResponseSecurityHeaders } from "./response-security";
 
 const worker: ExportedHandler<Env> = {
   async fetch(
@@ -12,10 +13,16 @@ const worker: ExportedHandler<Env> = {
   ): Promise<Response> {
     const runtimeConfig = resolveRuntimeConfig(env);
     if (!runtimeConfig.ok) {
-      return createRuntimeConfigErrorResponse(runtimeConfig.errors);
+      return applyResponseSecurityHeaders(
+        request,
+        createRuntimeConfigErrorResponse(runtimeConfig.errors),
+      );
     }
 
-    return handler.fetch(request, env, ctx);
+    return applyResponseSecurityHeaders(
+      request,
+      await handler.fetch(request, env, ctx),
+    );
   },
 };
 
