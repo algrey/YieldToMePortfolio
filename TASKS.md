@@ -23,6 +23,27 @@ Run `npm run build` separately when `npm test` is narrowed during iteration, and
 
 Status values: `DONE` foundation only, `IN PROGRESS`, `READY`, `BLOCKED`, `PENDING`, `DEFERRED` (not in the active release scope).
 
+## Next milestone: authenticated owned-workspace slice
+
+Status: PLANNED; next active vertical slice after the approved preview.
+
+Objective: make the product privately testable with a verified Access identity and an owner-scoped portfolio workspace before enabling financial writes or live market data. This slice is intentionally read-only and should end with an authenticated user able to select an owned portfolio and see honest empty/loading/error states at the existing dense mobile widths.
+
+Executable order:
+
+1. `UI-001` — authenticated shell, portfolio selection, and stable Overview/Holdings/Quotes/Details/News routes.
+2. `OPS-001` — audit and redacted observability foundation for the authenticated request context.
+
+Demo checkpoint A after `UI-001` and `OPS-001`:
+
+- sign in with the local/preview Access fixture;
+- verify a user can see only their own portfolio selector and direct routes;
+- verify an empty owned portfolio and unavailable/failed states are explicit;
+- verify audit events and logs contain no tokens, emails, CSV rows, or amounts;
+- verify the dense 320/390px layout remains usable and no production fixture route is exposed.
+
+Following domain layer (READY, but not part of checkpoint A): `LED-002A` pure FIFO allocation, `DB-004` snapshot/run schema, and `MKT-002` Yahoo-compatible adapter. These should feed the next financial read slice after checkpoint A; ledger posting, import mapping/commit, calculations, and live quote UI remain PENDING until their dependencies complete.
+
 ## Milestone: demonstrable CSV portfolio preview
 
 Status: COMPLETE on 2026-07-29; owner approved continuation into the production dependency spine.
@@ -300,7 +321,7 @@ Status: DONE on 2026-07-29.
 
 ### OPS-001 — Audit and redacted observability foundation
 
-Status: PENDING.
+Status: READY.
 
 - Objective: make material mutations attributable and operational failures diagnosable without leaking financial data.
 - Dependencies: DB-001A, AUTH-002.
@@ -417,7 +438,7 @@ Status: PENDING.
 
 ### LED-002A — Pure FIFO allocation engine
 
-Status: PENDING.
+Status: READY.
 
 - Objective: freeze deterministic exact-decimal FIFO behavior independently of D1 and UI.
 - Dependencies: LED-001A.
@@ -477,7 +498,7 @@ Status: DONE on 2026-07-30.
 
 ### DB-004 — Snapshot and calculation-run schema
 
-Status: PENDING.
+Status: READY.
 
 - Objective: persist versioned disposable historical projections without mixing calculation versions.
 - Dependencies: DB-001A, DB-003.
@@ -520,7 +541,7 @@ Status: DONE on 2026-07-30.
 
 ### MKT-002 — Yahoo-compatible quote and daily-price adapter
 
-Status: PENDING.
+Status: READY.
 
 - Objective: connect only latest/previous-close and daily price capabilities without leaking Yahoo response assumptions.
 - Dependencies: MKT-001, DB-003, SPK-002.
@@ -664,7 +685,7 @@ Status: DONE for owner review on 2026-07-29; production UI tasks remain unchange
 
 ### UI-001 — Authenticated shell, portfolio selection, and routes
 
-Status: PENDING.
+Status: READY.
 
 - Objective: replace the visual-only scaffold with the verified private session shell and real owned portfolio navigation.
 - Dependencies: AUTH-002, FND-001.
