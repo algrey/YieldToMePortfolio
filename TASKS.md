@@ -285,7 +285,7 @@ Status: DONE on 2026-07-29.
 
 ### AUTH-002 — Internal identity lifecycle and portfolio session
 
-Status: READY.
+Status: DONE on 2026-07-29.
 
 - Objective: turn a verified Access principal into a lifecycle-aware internal user and active owned-portfolio context.
 - Dependencies: AUTH-001, DB-001B.
@@ -296,6 +296,7 @@ Status: READY.
 - Tests: first login, repeat login, email change, subject change, disabled user, service identity, cross-user portfolio.
 - Risks: subject lifecycle when Access identity is removed/re-added; require explicit relink process.
 - Parallel safe: no; central request context.
+- Completion note: Added issuer/subject identity mapping with controlled active/pending/disabled JIT policy, preserved link-time email metadata, disabled/revoked/deletion checks, and an owner-scoped authenticated request context that resolves an active portfolio without accepting client user IDs; added lifecycle and cross-user tests.
 
 ### OPS-001 — Audit and redacted observability foundation
 

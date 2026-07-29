@@ -15,6 +15,13 @@ export {
   type TransitionImportBatchResult,
 } from "./import-staging.ts";
 export {
+  createIdentityRepository,
+  type InternalIdentityRecord,
+  type InternalIdentityStatus,
+  type InternalUserStatus,
+  type ProvisionInternalIdentityInput,
+} from "./identity.ts";
+export {
   createOwnedPortfolioRepository,
   createOwnedUserSettingsRepository,
   type ArchiveRestorePortfolioInput,
