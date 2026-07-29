@@ -47,8 +47,20 @@ function optionalString(record: RecordValue, field: string): string | null {
     : null;
 }
 
+function optionalStringIsValid(record: RecordValue, field: string): boolean {
+  const value = record[field];
+  return (
+    value === undefined ||
+    value === null ||
+    (typeof value === "string" && value.trim().length > 0)
+  );
+}
+
 function isIsoInstant(value: string): boolean {
-  return Number.isFinite(Date.parse(value)) && value.includes("T");
+  return (
+    Number.isFinite(Date.parse(value)) &&
+    /^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+  );
 }
 
 function isMarketDate(value: string): boolean {
@@ -147,6 +159,10 @@ export function normalizePriceObservation(
     !adjustmentState ||
     !ADJUSTMENT_STATES.has(adjustmentState) ||
     (adjustmentFactor !== null && !isPositiveDecimal(adjustmentFactor)) ||
+    !optionalStringIsValid(record, "previousCloseDecimal") ||
+    !optionalStringIsValid(record, "adjustmentFactor") ||
+    !optionalStringIsValid(record, "providerRevisionId") ||
+    !optionalStringIsValid(record, "payloadSha256") ||
     !isIsoInstant(context.ingestedAt)
   ) {
     return invalid(
@@ -213,6 +229,8 @@ export function normalizeFxObservation(
     !isIsoInstant(observedAt) ||
     !marketDate ||
     !isMarketDate(marketDate) ||
+    !optionalStringIsValid(record, "providerRevisionId") ||
+    !optionalStringIsValid(record, "payloadSha256") ||
     !isIsoInstant(context.ingestedAt)
   ) {
     return invalid(

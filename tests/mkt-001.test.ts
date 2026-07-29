@@ -91,6 +91,37 @@ test("normalization rejects malformed values, outliers, and provider manual stat
     assert.equal(malformed.error.retryable, false);
   }
 
+  const malformedOptional = normalizePriceObservation(
+    {
+      interval: "eod",
+      observationAt: "2026-07-30T00:00:00Z",
+      marketDate: "2026-07-30",
+      marketTimezone: "UTC",
+      currencyCode: "AUD",
+      closeDecimal: "1.25",
+      adjustmentState: "raw",
+      quality: "observed",
+      payloadSha256: 123,
+    },
+    deploymentContext,
+  );
+  assert.equal(malformedOptional.ok, false);
+
+  const localTimestamp = normalizePriceObservation(
+    {
+      interval: "eod",
+      observationAt: "2026-07-30T00:00:00",
+      marketDate: "2026-07-30",
+      marketTimezone: "Australia/Sydney",
+      currencyCode: "AUD",
+      closeDecimal: "1.25",
+      adjustmentState: "raw",
+      quality: "observed",
+    },
+    deploymentContext,
+  );
+  assert.equal(localTimestamp.ok, false);
+
   const invalidFx = normalizeFxObservation(
     {
       interval: "eod",
