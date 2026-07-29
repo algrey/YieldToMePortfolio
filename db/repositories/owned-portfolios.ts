@@ -108,6 +108,21 @@ function nowIso(now?: () => string): string {
   return now ? now() : new Date().toISOString();
 }
 
+async function withTransaction<T>(
+  client: SqlClient,
+  operation: () => Promise<T>,
+): Promise<T> {
+  await client.run("BEGIN IMMEDIATE TRANSACTION");
+  try {
+    const result = await operation();
+    await client.run("COMMIT");
+    return result;
+  } catch (error) {
+    await client.run("ROLLBACK").catch(() => undefined);
+    throw error;
+  }
+}
+
 function isMutationFailure(value: unknown): value is PortfolioMutationFailure {
   return (
     typeof value === "object" &&
@@ -265,10 +280,11 @@ export function createOwnedPortfolioRepository(
       userId: string,
       input: CreatePortfolioInput,
     ): Promise<OwnedPortfolioRecord | null> {
-      const createdAt = nowIso(now);
-      const portfolioId = input.id ?? randomUUID();
-      const rows = await client.all<Record<string, unknown>>(
-        `
+      return await withTransaction(client, async () => {
+        const createdAt = nowIso(now);
+        const portfolioId = input.id ?? randomUUID();
+        const rows = await client.all<Record<string, unknown>>(
+          `
           INSERT INTO portfolios (
             id, user_id, code, name, base_currency_code, timezone,
             accounting_method, history_complete_from, status,
@@ -283,25 +299,26 @@ export function createOwnedPortfolioRepository(
             accounting_method, history_complete_from, status, created_at,
             updated_at, version, base_currency_code AS home_currency_code
         `,
-        [
-          portfolioId,
-          input.code,
-          input.name,
-          input.timezone,
-          input.accountingMethod ?? "fifo",
-          input.historyCompleteFrom ?? null,
-          createdAt,
-          createdAt,
-          userId,
-        ],
-      );
+          [
+            portfolioId,
+            input.code,
+            input.name,
+            input.timezone,
+            input.accountingMethod ?? "fifo",
+            input.historyCompleteFrom ?? null,
+            createdAt,
+            createdAt,
+            userId,
+          ],
+        );
 
-      const portfolio =
-        rows.length > 0 ? createPortfolioRecord(rows[0] ?? {}) : null;
-      if (portfolio) {
-        await recordMutation(userId, "portfolio.create", portfolio.id);
-      }
-      return portfolio;
+        const portfolio =
+          rows.length > 0 ? createPortfolioRecord(rows[0] ?? {}) : null;
+        if (portfolio) {
+          await recordMutation(userId, "portfolio.create", portfolio.id);
+        }
+        return portfolio;
+      });
     },
 
     async rename(
@@ -309,11 +326,12 @@ export function createOwnedPortfolioRepository(
       portfolioId: string,
       input: UpdatePortfolioInput,
     ): Promise<PortfolioMutationResult> {
-      const updatedAt = nowIso(now);
-      const result = await runMutation<Record<string, unknown>>(
-        client,
-        "portfolios",
-        `
+      return await withTransaction(client, async () => {
+        const updatedAt = nowIso(now);
+        const result = await runMutation<Record<string, unknown>>(
+          client,
+          "portfolios",
+          `
           UPDATE portfolios
           SET name = COALESCE(?, name),
               timezone = COALESCE(?, timezone),
@@ -325,28 +343,33 @@ export function createOwnedPortfolioRepository(
             updated_at, version,
             base_currency_code AS home_currency_code
         `,
-        [
-          input.name ?? null,
-          input.timezone ?? null,
-          updatedAt,
-          portfolioId,
+          [
+            input.name ?? null,
+            input.timezone ?? null,
+            updatedAt,
+            portfolioId,
+            userId,
+            input.expectedVersion,
+          ],
           userId,
-          input.expectedVersion,
-        ],
-        userId,
-        portfolioId,
-      );
+          portfolioId,
+        );
 
-      if (isMutationFailure(result)) {
-        return result;
-      }
+        if (isMutationFailure(result)) {
+          return result;
+        }
 
-      const portfolio = {
-        ok: true as const,
-        portfolio: createPortfolioRecord(result),
-      };
-      await recordMutation(userId, "portfolio.rename", portfolio.portfolio.id);
-      return portfolio;
+        const portfolio = {
+          ok: true as const,
+          portfolio: createPortfolioRecord(result),
+        };
+        await recordMutation(
+          userId,
+          "portfolio.rename",
+          portfolio.portfolio.id,
+        );
+        return portfolio;
+      });
     },
 
     async archive(
@@ -354,11 +377,12 @@ export function createOwnedPortfolioRepository(
       portfolioId: string,
       input: ArchiveRestorePortfolioInput,
     ): Promise<PortfolioMutationResult> {
-      const updatedAt = nowIso(now);
-      const result = await runMutation<Record<string, unknown>>(
-        client,
-        "portfolios",
-        `
+      return await withTransaction(client, async () => {
+        const updatedAt = nowIso(now);
+        const result = await runMutation<Record<string, unknown>>(
+          client,
+          "portfolios",
+          `
           UPDATE portfolios
           SET status = 'archived',
               updated_at = ?,
@@ -369,21 +393,26 @@ export function createOwnedPortfolioRepository(
             updated_at, version,
             base_currency_code AS home_currency_code
         `,
-        [updatedAt, portfolioId, userId, input.expectedVersion],
-        userId,
-        portfolioId,
-      );
+          [updatedAt, portfolioId, userId, input.expectedVersion],
+          userId,
+          portfolioId,
+        );
 
-      if (isMutationFailure(result)) {
-        return result;
-      }
+        if (isMutationFailure(result)) {
+          return result;
+        }
 
-      const portfolio = {
-        ok: true as const,
-        portfolio: createPortfolioRecord(result),
-      };
-      await recordMutation(userId, "portfolio.archive", portfolio.portfolio.id);
-      return portfolio;
+        const portfolio = {
+          ok: true as const,
+          portfolio: createPortfolioRecord(result),
+        };
+        await recordMutation(
+          userId,
+          "portfolio.archive",
+          portfolio.portfolio.id,
+        );
+        return portfolio;
+      });
     },
 
     async restore(
@@ -391,11 +420,12 @@ export function createOwnedPortfolioRepository(
       portfolioId: string,
       input: ArchiveRestorePortfolioInput,
     ): Promise<PortfolioMutationResult> {
-      const updatedAt = nowIso(now);
-      const result = await runMutation<Record<string, unknown>>(
-        client,
-        "portfolios",
-        `
+      return await withTransaction(client, async () => {
+        const updatedAt = nowIso(now);
+        const result = await runMutation<Record<string, unknown>>(
+          client,
+          "portfolios",
+          `
           UPDATE portfolios
           SET status = 'active',
               updated_at = ?,
@@ -406,21 +436,26 @@ export function createOwnedPortfolioRepository(
             updated_at, version,
             base_currency_code AS home_currency_code
         `,
-        [updatedAt, portfolioId, userId, input.expectedVersion],
-        userId,
-        portfolioId,
-      );
+          [updatedAt, portfolioId, userId, input.expectedVersion],
+          userId,
+          portfolioId,
+        );
 
-      if (isMutationFailure(result)) {
-        return result;
-      }
+        if (isMutationFailure(result)) {
+          return result;
+        }
 
-      const portfolio = {
-        ok: true as const,
-        portfolio: createPortfolioRecord(result),
-      };
-      await recordMutation(userId, "portfolio.restore", portfolio.portfolio.id);
-      return portfolio;
+        const portfolio = {
+          ok: true as const,
+          portfolio: createPortfolioRecord(result),
+        };
+        await recordMutation(
+          userId,
+          "portfolio.restore",
+          portfolio.portfolio.id,
+        );
+        return portfolio;
+      });
     },
   };
 }
@@ -453,19 +488,22 @@ export function createOwnedUserSettingsRepository(
       userId: string,
       input: HomeCurrencyChangeInput,
     ): Promise<HomeCurrencyChangeResult> {
-      const updatedAt = nowIso(now);
-      const currentSettings = await client.get<{ home_currency_code: string }>(
-        "SELECT home_currency_code FROM user_settings WHERE user_id = ? LIMIT 1",
-        [userId],
-      );
-      if (!currentSettings) {
-        return { ok: false, reason: "not_found" };
-      }
+      return await withTransaction(client, async () => {
+        const updatedAt = nowIso(now);
+        const currentSettings = await client.get<{
+          home_currency_code: string;
+        }>(
+          "SELECT home_currency_code FROM user_settings WHERE user_id = ? LIMIT 1",
+          [userId],
+        );
+        if (!currentSettings) {
+          return { ok: false, reason: "not_found" };
+        }
 
-      const mutation = await runMutation<Record<string, unknown>>(
-        client,
-        "user_settings",
-        `
+        const mutation = await runMutation<Record<string, unknown>>(
+          client,
+          "user_settings",
+          `
           UPDATE user_settings
           SET home_currency_code = ?,
               updated_at = ?,
@@ -474,50 +512,51 @@ export function createOwnedUserSettingsRepository(
           RETURNING user_id, home_currency_code, timezone,
             default_holding_currency_view, created_at, updated_at, version
         `,
-        [input.homeCurrencyCode, updatedAt, userId, input.expectedVersion],
-        userId,
-        userId,
-      );
+          [input.homeCurrencyCode, updatedAt, userId, input.expectedVersion],
+          userId,
+          userId,
+        );
 
-      if (isMutationFailure(mutation)) {
-        return mutation;
-      }
+        if (isMutationFailure(mutation)) {
+          return mutation;
+        }
 
-      const settings = createUserSettingsRecord(mutation);
-      const affectedPortfolioRows = await client.all<{ id: string }>(
-        `
+        const settings = createUserSettingsRecord(mutation);
+        const affectedPortfolioRows = await client.all<{ id: string }>(
+          `
           SELECT id
           FROM portfolios
           WHERE user_id = ?
           ORDER BY updated_at DESC, id ASC
         `,
-        [userId],
-      );
+          [userId],
+        );
 
-      await audit.append({
-        actorUserId: userId,
-        targetOwnerUserId: userId,
-        action: "settings.home_currency_change",
-        targetType: "user_settings",
-        targetId: userId,
-        requestId,
-        result: "success",
-        occurredAt: updatedAt,
+        await audit.append({
+          actorUserId: userId,
+          targetOwnerUserId: userId,
+          action: "settings.home_currency_change",
+          targetType: "user_settings",
+          targetId: userId,
+          requestId,
+          result: "success",
+          occurredAt: updatedAt,
+        });
+
+        return {
+          ok: true,
+          settings,
+          rebaseRequest: {
+            requestId: randomUUID(),
+            userId,
+            previousHomeCurrencyCode: currentSettings.home_currency_code,
+            nextHomeCurrencyCode: input.homeCurrencyCode,
+            affectedPortfolioIds: affectedPortfolioRows.map((row) => row.id),
+            portfolioCount: affectedPortfolioRows.length,
+            requestedAt: updatedAt,
+          },
+        };
       });
-
-      return {
-        ok: true,
-        settings,
-        rebaseRequest: {
-          requestId: randomUUID(),
-          userId,
-          previousHomeCurrencyCode: currentSettings.home_currency_code,
-          nextHomeCurrencyCode: input.homeCurrencyCode,
-          affectedPortfolioIds: affectedPortfolioRows.map((row) => row.id),
-          portfolioCount: affectedPortfolioRows.length,
-          requestedAt: updatedAt,
-        },
-      };
     },
   };
 }

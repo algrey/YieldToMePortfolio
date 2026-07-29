@@ -75,6 +75,21 @@ function isActive(record: InternalIdentityRecord): boolean {
   return record.identityStatus === "active" && record.userStatus === "active";
 }
 
+async function withTransaction<T>(
+  client: SqlClient,
+  operation: () => Promise<T>,
+): Promise<T> {
+  await client.run("BEGIN IMMEDIATE TRANSACTION");
+  try {
+    const result = await operation();
+    await client.run("COMMIT");
+    return result;
+  } catch (error) {
+    await client.run("ROLLBACK").catch(() => undefined);
+    throw error;
+  }
+}
+
 export function createIdentityLifecycleService(
   client: SqlClient,
   options: IdentityLifecycleOptions = {},
@@ -103,69 +118,75 @@ export function createIdentityLifecycleService(
         return { ok: false, reason: "missing-email" };
       }
 
-      const existing = await repository.findAccessIdentity(
-        principal.issuer,
-        principal.subject,
-      );
-      if (existing !== null) {
-        if (existing.identityStatus === "revoked") {
-          return { ok: false, reason: "identity-revoked" };
+      return await withTransaction(client, async () => {
+        const existing = await repository.findAccessIdentity(
+          principal.issuer,
+          principal.subject,
+        );
+        if (existing !== null) {
+          if (existing.identityStatus === "revoked") {
+            return { ok: false, reason: "identity-revoked" };
+          }
+
+          if (!isActive(existing)) {
+            return existing.userStatus === "pending"
+              ? { ok: false, reason: "provisioning-pending" }
+              : { ok: false, reason: "user-not-active" };
+          }
+
+          const updated = await repository.touch(existing, email, now());
+          await audit.append({
+            actorUserId: updated.userId,
+            targetOwnerUserId: updated.userId,
+            action: "auth.login",
+            targetType: "user_identity",
+            targetId: updated.identityId,
+            requestId,
+            result: "success",
+            metadata: { provisioned: false },
+            occurredAt: now(),
+          });
+          return {
+            ok: true,
+            user: toInternalUser(updated),
+            provisioned: false,
+          };
         }
 
-        if (!isActive(existing)) {
-          return existing.userStatus === "pending"
-            ? { ok: false, reason: "provisioning-pending" }
-            : { ok: false, reason: "user-not-active" };
+        if (provisioning === "disabled") {
+          return { ok: false, reason: "jit-disabled" };
         }
 
-        const updated = await repository.touch(existing, email, now());
+        const provisioned = await repository.provision({
+          principal: { ...principal, email },
+          userStatus: provisioning,
+          defaultHomeCurrencyCode,
+          defaultTimezone,
+          now: now(),
+        });
+
+        if (provisioned.userStatus !== "active") {
+          return { ok: false, reason: "provisioning-pending" };
+        }
+
         await audit.append({
-          actorUserId: updated.userId,
-          targetOwnerUserId: updated.userId,
-          action: "auth.login",
+          actorUserId: provisioned.userId,
+          targetOwnerUserId: provisioned.userId,
+          action: "auth.provision",
           targetType: "user_identity",
-          targetId: updated.identityId,
+          targetId: provisioned.identityId,
           requestId,
           result: "success",
-          metadata: { provisioned: false },
+          metadata: { provisioned: true },
           occurredAt: now(),
         });
-        return { ok: true, user: toInternalUser(updated), provisioned: false };
-      }
 
-      if (provisioning === "disabled") {
-        return { ok: false, reason: "jit-disabled" };
-      }
-
-      const provisioned = await repository.provision({
-        principal: { ...principal, email },
-        userStatus: provisioning,
-        defaultHomeCurrencyCode,
-        defaultTimezone,
-        now: now(),
+        return {
+          ok: true,
+          user: toInternalUser(provisioned),
+          provisioned: true,
+        };
       });
-
-      if (provisioned.userStatus !== "active") {
-        return { ok: false, reason: "provisioning-pending" };
-      }
-
-      await audit.append({
-        actorUserId: provisioned.userId,
-        targetOwnerUserId: provisioned.userId,
-        action: "auth.provision",
-        targetType: "user_identity",
-        targetId: provisioned.identityId,
-        requestId,
-        result: "success",
-        metadata: { provisioned: true },
-        occurredAt: now(),
-      });
-
-      return {
-        ok: true,
-        user: toInternalUser(provisioned),
-        provisioned: true,
-      };
     },
   };
 }

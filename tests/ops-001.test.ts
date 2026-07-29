@@ -5,6 +5,10 @@ import test from "node:test";
 import { createAuditRepository } from "../db/repositories/audit.ts";
 import { createSqliteSqlClient } from "../db/repositories/sql-client.ts";
 import {
+  createOwnedPortfolioRepository,
+  createOwnedUserSettingsRepository,
+} from "../db/repositories/owned-portfolios.ts";
+import {
   addRequestId,
   createRequestId,
   createStructuredLogEvent,
@@ -43,6 +47,30 @@ async function createMigratedDatabase(): Promise<DatabaseSync> {
     );
   `);
   return database;
+}
+
+function createAuditFailingClient(database: DatabaseSync) {
+  const base = createSqliteSqlClient(database);
+  return {
+    async all<T extends Record<string, unknown>>(
+      sql: string,
+      params: readonly unknown[] = [],
+    ): Promise<T[]> {
+      return await base.all<T>(sql, params);
+    },
+    async get<T extends Record<string, unknown>>(
+      sql: string,
+      params: readonly unknown[] = [],
+    ): Promise<T | undefined> {
+      return await base.get<T>(sql, params);
+    },
+    async run(sql: string, params: readonly unknown[] = []) {
+      if (/INSERT INTO audit_events/i.test(sql)) {
+        throw new Error("injected audit failure");
+      }
+      return await base.run(sql, params);
+    },
+  };
 }
 
 test("audit events record actor, target, result, correlation, and redacted metadata", async () => {
@@ -172,4 +200,78 @@ test("structured log snapshots redact user and financial payloads", () => {
   assert.deepEqual(redactMetadata({ email: "a@example.com" }), {
     email: "[REDACTED]",
   });
+});
+
+test("portfolio mutation rolls back when its audit append fails", async () => {
+  const database = await createMigratedDatabase();
+  database.exec(`
+    INSERT INTO user_settings (
+      user_id, home_currency_code, timezone, default_holding_currency_view,
+      created_at, updated_at, version
+    ) VALUES (
+      'user-a', 'AUD', 'Australia/Sydney', 'native',
+      '2026-07-30T00:00:00Z', '2026-07-30T00:00:00Z', 1
+    );
+  `);
+  const repository = createOwnedPortfolioRepository(
+    createAuditFailingClient(database),
+    () => "2026-07-30T00:10:00Z",
+    { requestId: "request-fault" },
+  );
+
+  await assert.rejects(
+    repository.rename("user-a", "portfolio-a", {
+      expectedVersion: 1,
+      name: "Changed name",
+    }),
+    /injected audit failure/,
+  );
+  const row = database
+    .prepare("SELECT name, version FROM portfolios WHERE id = 'portfolio-a'")
+    .get() as { name: string; version: number };
+  assert.equal(row.name, "Alice");
+  assert.equal(row.version, 1);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM audit_events").get()?.count,
+    0,
+  );
+});
+
+test("home-currency mutation rolls back when its audit append fails", async () => {
+  const database = await createMigratedDatabase();
+  database.exec(`
+    INSERT INTO currencies (code, numeric_code, name, minor_unit_digits, is_active)
+    VALUES ('USD', 840, 'US dollar', 2, 1);
+    INSERT INTO user_settings (
+      user_id, home_currency_code, timezone, default_holding_currency_view,
+      created_at, updated_at, version
+    ) VALUES (
+      'user-a', 'AUD', 'Australia/Sydney', 'native',
+      '2026-07-30T00:00:00Z', '2026-07-30T00:00:00Z', 1
+    );
+  `);
+  const repository = createOwnedUserSettingsRepository(
+    createAuditFailingClient(database),
+    () => "2026-07-30T00:10:00Z",
+    { requestId: "request-fault" },
+  );
+
+  await assert.rejects(
+    repository.requestHomeCurrencyRebase("user-a", {
+      expectedVersion: 1,
+      homeCurrencyCode: "USD",
+    }),
+    /injected audit failure/,
+  );
+  const row = database
+    .prepare(
+      "SELECT home_currency_code, version FROM user_settings WHERE user_id = 'user-a'",
+    )
+    .get() as { home_currency_code: string; version: number };
+  assert.equal(row.home_currency_code, "AUD");
+  assert.equal(row.version, 1);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM audit_events").get()?.count,
+    0,
+  );
 });
