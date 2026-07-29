@@ -61,6 +61,16 @@ npm test
 
 Before completing a task, run `npm run format:check`, `npm run lint`, and the relevant tests. Run the production build for routing, Worker, configuration, dependency, or scaffold changes.
 
+## Git commit workflow
+
+- Treat every completed user prompt that changes this repository, and every completed ready `TASKS.md` item, as a commit boundary.
+- At the start of work, inspect `git status --short` and identify pre-existing changes. They belong to the user or another task unless this task explicitly owns them.
+- After the task's required verification passes, stage only the files that implement that task, including its required migration and documentation updates, then create one focused commit before reporting completion.
+- Use an imperative, task-scoped commit subject. Prefix a `TASKS.md` task commit with its stable ID (for example, `FND-002A: configure Worker bindings`).
+- Do not use `git add -A`, `git add .`, or an indiscriminate commit in a dirty worktree. Never commit secrets, generated runtime state, exports, uploads, or another task's changes.
+- If an existing uncommitted change overlaps the task and cannot be cleanly separated, stop before staging or committing and ask the user how to proceed.
+- If a prompt changes no repository files, no commit is required; say so explicitly in the completion note.
+
 ## Coding conventions
 
 - TypeScript strictness stays enabled. Avoid `any`; validate `unknown` at every external boundary.
