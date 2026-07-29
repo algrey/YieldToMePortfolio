@@ -1,5 +1,5 @@
 const SENSITIVE_KEY =
-  /(access.?token|api.?key|authorization|cookie|secret|password|email|amount|price|quantity|balance|cost|value|user.?id|portfolio.?id|security.?id|target.?id|csv.*(row|data|content|text)|raw.*payload|provider.*payload)/i;
+  /(token|api.?key|authorization|cookie|secret|password|email|amount|price|quantity|balance|cost|value|user.?id|portfolio.?id|security.?id|target.?id|csv.*(row|data|content|text)|raw.*payload|provider.*payload)/i;
 const SENSITIVE_STRING =
   /(?:bearer\s+ey[a-z0-9._-]+|[\w.+-]+@[\w.-]+\.[a-z]{2,}|-----BEGIN [^-]+-----)/i;
 

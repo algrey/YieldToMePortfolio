@@ -66,6 +66,7 @@ test("audit events record actor, target, result, correlation, and redacted metad
       email: "alice@example.com",
       amount: "123.45",
       accessToken: "Bearer eyJsecret",
+      token: "opaque-secret-token",
       csvRows: [{ amount: "999" }],
       rowCount: 12,
     },
@@ -82,6 +83,7 @@ test("audit events record actor, target, result, correlation, and redacted metad
     email: "[REDACTED]",
     amount: "[REDACTED]",
     accessToken: "[REDACTED]",
+    token: "[REDACTED]",
     csvRows: "[REDACTED]",
     rowCount: 12,
   });
