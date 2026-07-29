@@ -22,3 +22,14 @@ export {
   type NormalizedImportRow,
   type ParsedImportRow,
 } from "./strict-versioned-parser.ts";
+
+export {
+  createImportReconciliationPreview,
+  type ImportPreviewMappingDecision,
+  type ImportPreviewPortfolio,
+  type ImportPreviewSecurityCandidate,
+  type ImportReconciliationInput,
+  type ImportReconciliationIssue,
+  type ImportReconciliationPreview,
+  type ImportReconciliationRow,
+} from "./reconciliation.ts";

@@ -398,7 +398,7 @@ Status: DONE on 2026-07-29.
 
 ### IMP-002B — Import mapping, reconciliation, and preview contract
 
-Status: READY.
+Status: DONE (2026-07-30).
 
 - Objective: let an owner resolve every portfolio/security/FX ambiguity and inspect exact effects before commit.
 - Dependencies: IMP-002A, DB-001B, DB-002, LED-002A.
@@ -409,6 +409,7 @@ Status: READY.
 - Tests: ownership, conflicts, mapping scopes, cash sentinel, duplicate/oversell, multi-currency and incomplete-history previews.
 - Risks: accidental shared-master mutation or preview logic diverging from commit.
 - Parallel safe: yes after contracts freeze; no UI in this task.
+- Completion: Added owner-scoped, reusable import mapping decisions and a pure deterministic reconciliation/preview contract. Ambiguous portfolio/security/FX mappings, duplicate rows, oversells, and incomplete history are surfaced as explicit issues; cash sentinels remain cash-only, unresolved candidates remain private, projected quantities are exact-decimal, and no ledger or shared security master rows are mutated.
 
 ### IMP-003A — Idempotent import commit and resume
 

@@ -1,4 +1,12 @@
 export {
+  createOwnedImportMappingDecisionRepository,
+  type ImportMappingConfidence,
+  type ImportMappingDecision,
+  type ImportMappingKind,
+  type ImportMappingScope,
+  type SaveImportMappingDecisionInput,
+} from "./import-mapping-decisions.ts";
+export {
   createOwnedImportStagingRepository,
   type ImportBatchRecord,
   type ImportBatchStatus,

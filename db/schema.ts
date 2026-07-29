@@ -669,6 +669,65 @@ export const importIssues = sqliteTable(
   ],
 );
 
+export const importMappingDecisions = sqliteTable(
+  "import_mapping_decisions",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    batchId: text("batch_id").notNull(),
+    kind: text("kind").notNull(),
+    sourceKey: text("source_key").notNull(),
+    normalizedSourceValue: text("normalized_source_value").notNull(),
+    targetId: text("target_id"),
+    targetValue: text("target_value"),
+    scope: text("scope").notNull(),
+    confidence: text("confidence").notNull(),
+    source: text("source").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    foreignKey({
+      name: "import_mapping_decisions_batch_id_user_id_import_batches_id_user_id_fk",
+      columns: [table.batchId, table.userId],
+      foreignColumns: [importBatches.id, importBatches.userId],
+    }).onDelete("restrict"),
+    check(
+      "import_mapping_decisions_kind_check",
+      sql`${table.kind} IN ('portfolio', 'security', 'currency', 'transaction_type', 'fx')`,
+    ),
+    check(
+      "import_mapping_decisions_scope_check",
+      sql`${table.scope} IN ('row', 'batch', 'user_future')`,
+    ),
+    check(
+      "import_mapping_decisions_confidence_check",
+      sql`${table.confidence} IN ('user', 'exact_identifier', 'system_candidate')`,
+    ),
+    check(
+      "import_mapping_decisions_source_check",
+      sql`${table.source} IN ('user', 'exact_identifier', 'system_candidate')`,
+    ),
+    uniqueIndex("import_mapping_decisions_id_user_unique").on(
+      table.id,
+      table.userId,
+    ),
+    uniqueIndex("import_mapping_decisions_lookup_unique").on(
+      table.batchId,
+      table.userId,
+      table.kind,
+      table.sourceKey,
+      table.scope,
+    ),
+    index("import_mapping_decisions_owner_batch_idx").on(
+      table.userId,
+      table.batchId,
+      table.kind,
+    ),
+  ],
+);
+
 export const transactions = sqliteTable(
   "transactions",
   {

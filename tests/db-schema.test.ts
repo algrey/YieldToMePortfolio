@@ -96,6 +96,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "holding_daily_snapshots",
     "import_batches",
     "import_issues",
+    "import_mapping_decisions",
     "import_rows",
     "manual_overrides",
     "market_data_providers",
