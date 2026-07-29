@@ -115,7 +115,7 @@ Status: DEFERRED; not in the v1 release scope.
 
 ### AUTH-001 — Verify Cloudflare Access JWT
 
-Status: PENDING.
+Status: READY.
 
 - Objective: establish a cryptographically verified Cloudflare Access principal at the Worker boundary.
 - Dependencies: FND-002B.
@@ -129,7 +129,7 @@ Status: PENDING.
 
 ### DB-001A — Identity and portfolio schema migration
 
-Status: PENDING.
+Status: READY.
 
 - Objective: establish the smallest reviewed D1 schema for identity, settings, currencies, and owned portfolios.
 - Dependencies: FND-002B.
@@ -215,7 +215,7 @@ Status: PENDING.
 
 ### IMP-001 — Strict versioned 17-column parser
 
-Status: PENDING.
+Status: READY.
 
 - Objective: parse the supplied export deterministically into non-mutating normalized rows and actionable issues.
 - Dependencies: FND-002B.
