@@ -11,27 +11,27 @@
   "vars": {
     "YIELDTOME_RUNTIME_ENV": "local",
     "YIELDTOME_WORKERS_PLAN": "free",
-    "MARKET_DATA_PROVIDER": "disabled",
-    "CLOUDFLARE_ACCESS_ISSUER": "",
-    "CLOUDFLARE_ACCESS_AUDIENCE": ""
+    "MARKET_DATA_PROVIDER": "disabled"
   },
   "env": {
     "preview": {
       "vars": {
         "YIELDTOME_RUNTIME_ENV": "preview",
         "YIELDTOME_WORKERS_PLAN": "free",
-        "MARKET_DATA_PROVIDER": "disabled",
-        "CLOUDFLARE_ACCESS_ISSUER": "",
-        "CLOUDFLARE_ACCESS_AUDIENCE": ""
+        "MARKET_DATA_PROVIDER": "disabled"
+      },
+      "secrets": {
+        "required": ["CLOUDFLARE_ACCESS_ISSUER", "CLOUDFLARE_ACCESS_AUDIENCE"]
       }
     },
     "production": {
       "vars": {
         "YIELDTOME_RUNTIME_ENV": "production",
         "YIELDTOME_WORKERS_PLAN": "paid",
-        "MARKET_DATA_PROVIDER": "disabled",
-        "CLOUDFLARE_ACCESS_ISSUER": "",
-        "CLOUDFLARE_ACCESS_AUDIENCE": ""
+        "MARKET_DATA_PROVIDER": "disabled"
+      },
+      "secrets": {
+        "required": ["CLOUDFLARE_ACCESS_ISSUER", "CLOUDFLARE_ACCESS_AUDIENCE"]
       }
     }
   }

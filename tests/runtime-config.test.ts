@@ -29,27 +29,32 @@ test("local runtime defaults stay fail-closed on CSV import and provider is disa
 });
 
 test("preview and production fail closed when Access config is missing", () => {
-  const previewResult = resolveRuntimeConfig({
-    ASSETS: {
-      fetch: async () => new Response("ok"),
-    },
-    YIELDTOME_RUNTIME_ENV: "preview",
-    YIELDTOME_WORKERS_PLAN: "free",
-    MARKET_DATA_PROVIDER: "disabled",
-  });
+  for (const [environment, workersPlan] of [
+    ["preview", "free"],
+    ["production", "paid"],
+  ] as const) {
+    const result = resolveRuntimeConfig({
+      ASSETS: {
+        fetch: async () => new Response("ok"),
+      },
+      YIELDTOME_RUNTIME_ENV: environment,
+      YIELDTOME_WORKERS_PLAN: workersPlan,
+      MARKET_DATA_PROVIDER: "disabled",
+    });
 
-  assert.equal(previewResult.ok, false);
-  if (previewResult.ok) {
-    return;
+    assert.equal(result.ok, false);
+    if (result.ok) {
+      continue;
+    }
+
+    assert.deepEqual(result.errors.map((error) => error.code).sort(), [
+      "missing-access-audience",
+      "missing-access-issuer",
+    ]);
+
+    const response = createRuntimeConfigErrorResponse(result.errors);
+    assert.equal(response.status, 503);
   }
-
-  assert.deepEqual(previewResult.errors.map((error) => error.code).sort(), [
-    "missing-access-audience",
-    "missing-access-issuer",
-  ]);
-
-  const response = createRuntimeConfigErrorResponse(previewResult.errors);
-  assert.equal(response.status, 503);
 });
 
 test("production requires Workers Paid and accepts the approved provider set only", () => {
@@ -115,15 +120,25 @@ test("wrangler source and generated worker config stay aligned with the task pro
   const sourceVars = wranglerSource.vars as Record<string, string>;
   const sourceEnvs = wranglerSource.env as Record<
     string,
-    { vars: Record<string, string> }
+    { vars: Record<string, string>; secrets: { required: string[] } }
   >;
   assert.equal(sourceVars.YIELDTOME_RUNTIME_ENV, "local");
   assert.equal(sourceVars.YIELDTOME_WORKERS_PLAN, "free");
   assert.equal(sourceVars.MARKET_DATA_PROVIDER, "disabled");
+  assert.equal(sourceVars.CLOUDFLARE_ACCESS_ISSUER, undefined);
+  assert.equal(sourceVars.CLOUDFLARE_ACCESS_AUDIENCE, undefined);
   assert.equal(sourceEnvs.preview.vars.YIELDTOME_RUNTIME_ENV, "preview");
   assert.equal(sourceEnvs.preview.vars.YIELDTOME_WORKERS_PLAN, "free");
+  assert.deepEqual(sourceEnvs.preview.secrets.required, [
+    "CLOUDFLARE_ACCESS_ISSUER",
+    "CLOUDFLARE_ACCESS_AUDIENCE",
+  ]);
   assert.equal(sourceEnvs.production.vars.YIELDTOME_RUNTIME_ENV, "production");
   assert.equal(sourceEnvs.production.vars.YIELDTOME_WORKERS_PLAN, "paid");
+  assert.deepEqual(sourceEnvs.production.secrets.required, [
+    "CLOUDFLARE_ACCESS_ISSUER",
+    "CLOUDFLARE_ACCESS_AUDIENCE",
+  ]);
 
   const generatedAssets = generatedConfig.assets as { binding?: string };
   assert.equal(generatedAssets.binding, "ASSETS");
