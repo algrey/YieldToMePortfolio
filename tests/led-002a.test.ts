@@ -172,6 +172,24 @@ test("incomplete FX or basis remains explicit and never becomes zero", () => {
   }
 });
 
+test("missing sale proceeds remain explicitly incomplete without a supplied status", () => {
+  const result = allocateFifoSale(
+    [lot("lot-1", "2026-01-01", "buy-1", "2", "20")],
+    sale({
+      quantityDecimal: "1",
+      netProceedsBaseDecimal: null,
+      feeBaseDecimal: "0",
+      taxBaseDecimal: "0",
+    }),
+  );
+
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.allocations[0]?.basisStatus, "incomplete_basis");
+    assert.equal(result.allocations[0]?.baseRealisedGainDecimal, null);
+  }
+});
+
 test("oversell returns an explicit unmatched remainder", () => {
   const result = allocateFifoSale(
     [lot("lot-1", "2026-01-01", "buy-1", "2", "20")],

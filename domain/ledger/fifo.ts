@@ -249,6 +249,16 @@ function statusForLot(input: FifoLotInput): BasisStatus {
     : "complete";
 }
 
+function statusForSale(input: FifoSaleInput): BasisStatus {
+  if (input.proceedsStatus) {
+    return input.proceedsStatus;
+  }
+
+  return input.netProceedsBaseDecimal === null
+    ? "incomplete_basis"
+    : "complete";
+}
+
 export function createFifoLot(input: FifoLotInput): FifoLot | null {
   const quantity = positiveDecimal(input.quantityDecimal);
   if (!quantity) {
@@ -460,12 +470,11 @@ export function allocateFifoSale(
     );
     allocatedTaxes = taxAllocation.nextAllocated;
 
+    const saleStatus = statusForSale(sale);
     const status: BasisStatus =
-      lot.basisStatus === "complete" &&
-      (sale.proceedsStatus ?? "complete") === "complete"
+      lot.basisStatus === "complete" && saleStatus === "complete"
         ? "complete"
-        : lot.basisStatus === "incomplete_fx" ||
-            sale.proceedsStatus === "incomplete_fx"
+        : lot.basisStatus === "incomplete_fx" || saleStatus === "incomplete_fx"
           ? "incomplete_fx"
           : "incomplete_basis";
     let gain: string | null = null;
