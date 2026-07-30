@@ -823,7 +823,7 @@ Status: PENDING.
 
 ### PWA-001 — Offline-safe shell and connectivity states
 
-Status: DONE on 2026-07-30.
+Status: IN PROGRESS; review finding on 2026-07-30.
 
 - Objective: make installation and offline failure graceful without persisting private financial responses on the device.
 - Dependencies: FND-001, UI-001.
@@ -835,6 +835,7 @@ Status: DONE on 2026-07-30.
 - Risks: cached private response or stale worker; fail safe to network/offline page.
 - Parallel safe: yes after shell asset paths settle.
 - Completion note: Added a versioned public-only service-worker allowlist with network-first offline navigation fallback, update activation, connectivity status, offline-disabled mutations, standalone 180/192/512 raster install assets, and manifest/header regression coverage. Physical Safari/iPhone UAT remains an operator verification step.
+- Review finding: automated implementation and regression checks pass, but the required physical Safari/iPhone UAT has not been completed. Verify installation, offline reload fallback, update activation, safe-area rendering, and disabled mutations on a physical device before marking this task complete.
 
 ## Operations and release
 

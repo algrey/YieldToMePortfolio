@@ -5,6 +5,9 @@ import { useEffect, useState } from "react";
 export function ServiceWorkerRegistration() {
   const [online, setOnline] = useState(true);
   const [updateReady, setUpdateReady] = useState(false);
+  const [waitingWorker, setWaitingWorker] = useState<ServiceWorker | null>(
+    null,
+  );
 
   useEffect(() => {
     const updateConnectivity = () => setOnline(navigator.onLine);
@@ -28,7 +31,10 @@ export function ServiceWorkerRegistration() {
           scope: "/",
         });
 
-        if (registration.waiting) setUpdateReady(true);
+        if (registration.waiting) {
+          setWaitingWorker(registration.waiting);
+          setUpdateReady(true);
+        }
         registration.addEventListener("updatefound", () => {
           const worker = registration.installing;
           if (!worker) return;
@@ -37,6 +43,7 @@ export function ServiceWorkerRegistration() {
               worker.state === "installed" &&
               navigator.serviceWorker.controller
             ) {
+              setWaitingWorker(registration.waiting ?? worker);
               setUpdateReady(true);
             }
           });
@@ -68,10 +75,13 @@ export function ServiceWorkerRegistration() {
           <button
             type="button"
             onClick={() => {
-              navigator.serviceWorker.controller?.postMessage({
-                type: "SKIP_WAITING",
-              });
-              window.location.reload();
+              const reload = () => window.location.reload();
+              navigator.serviceWorker.addEventListener(
+                "controllerchange",
+                reload,
+                { once: true },
+              );
+              waitingWorker?.postMessage({ type: "SKIP_WAITING" });
             }}
           >
             Reload

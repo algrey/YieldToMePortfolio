@@ -203,6 +203,16 @@ test("service worker only caches the public offline allowlist", async () => {
   assert.match(serviceWorker, /"\/offline\.html"/);
   assert.match(serviceWorker, /"\/icons\/icon-192\.png"/);
   assert.match(serviceWorker, /SKIP_WAITING/);
+  assert.match(
+    await readFile(
+      new URL(
+        "../app/components/service-worker-registration.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    /waitingWorker\?\.postMessage/,
+  );
   assert.match(serviceWorker, /request\.mode === "navigate"/);
   assert.doesNotMatch(serviceWorker, /\/api\/|portfolio\/preview|caches\.put/);
 });
