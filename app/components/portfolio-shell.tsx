@@ -1664,17 +1664,28 @@ export function PortfolioShell({
               Overview
             </Link>
             <p className="drawer-label">Portfolios</p>
-            {portfolios.map((item) => (
-              <button
-                type="button"
-                key={item.id}
-                aria-pressed={item.id === portfolioId}
-                onClick={() => selectPortfolio(item.id)}
-              >
-                <span>{item.name}</span>
-                {item.id === portfolioId ? <span>Selected</span> : null}
-              </button>
-            ))}
+            {selectorItems.map((item) =>
+              ownedMode && item.status === "archived" ? (
+                <button
+                  type="button"
+                  key={item.id}
+                  onClick={() => void restorePortfolio(item.id, item.version)}
+                  disabled={actionPending}
+                >
+                  <span>Restore {item.name}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  key={item.id}
+                  aria-pressed={item.id === portfolioId}
+                  onClick={() => selectPortfolio(item.id)}
+                >
+                  <span>{item.name}</span>
+                  {item.id === portfolioId ? <span>Selected</span> : null}
+                </button>
+              ),
+            )}
             <p className="drawer-label">Manage</p>
             <button type="button">
               <span>Import / export</span>

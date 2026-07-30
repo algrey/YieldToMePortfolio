@@ -98,6 +98,8 @@ test("authenticated shell keeps action controls accessible on narrow screens", a
   assert.match(component, /role="alert"/);
   assert.match(component, /Display values/);
   assert.match(component, /aria-expanded=/);
+  assert.match(component, /selectorItems\.map/);
+  assert.doesNotMatch(component, /\{portfolios\.map\(\(item\) => \(/);
   assert.match(styles, /min-width:\s*44px/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
 });

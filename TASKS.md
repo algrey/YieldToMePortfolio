@@ -693,7 +693,7 @@ Status: DONE for owner review on 2026-07-29; production UI tasks remain unchange
 
 ### UI-001 — Authenticated shell, portfolio selection, and routes
 
-Status: IN PROGRESS; review finding on 2026-07-30.
+Status: DONE on 2026-07-30.
 
 - Objective: replace the visual-only scaffold with the verified private session shell and real owned portfolio navigation.
 - Dependencies: AUTH-002, FND-001.
@@ -707,6 +707,7 @@ Status: IN PROGRESS; review finding on 2026-07-30.
 - Completion: Added Worker-verified principal transport, D1-backed owned workspace loading, no-store authenticated shell routes, portfolio-safe navigation, session menu, home-currency display, honest empty/unavailable/news states, and route/projection regression coverage. Preview fixture routes remain isolated under `/portfolio/preview/*`.
 - Review finding: the declared PRD-002 scope is not complete. Implement the authenticated create, rename, archive, and restore portfolio actions plus the home-currency setting/display toggle, with owner-scoped route/action tests and the required 320 px/desktop semantic and keyboard coverage. Keep mutation workflows server-authoritative and separate from downstream financial-entry tasks.
 - Review completion: Added server-authoritative, owner/version-scoped create, rename, archive, restore, home-currency, and native/home display-view actions; archived portfolio restore controls; accessible form/menu controls; and semantic responsive regression coverage. Financial-entry mutations remain deferred to downstream tasks.
+- Review completion: Corrected the authenticated mobile drawer to use the owner-scoped portfolio selector, preventing prototype portfolio names and IDs from appearing in private navigation. Added a regression assertion for this isolation boundary.
 
 ### UI-002 — Overview and historical value
 
