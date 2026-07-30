@@ -1,5 +1,11 @@
-const CACHE_NAME = "yieldtome-public-shell-v1";
-const PUBLIC_ASSETS = ["/favicon.svg", "/offline.html"];
+const CACHE_NAME = "yieldtome-public-shell-v2";
+const PUBLIC_ASSETS = [
+  "/favicon.svg",
+  "/offline.html",
+  "/icons/apple-touch-icon-180.png",
+  "/icons/icon-192.png",
+  "/icons/icon-512.png",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -21,6 +27,10 @@ self.addEventListener("activate", (event) => {
       ),
   );
   self.clients.claim();
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
 });
 
 self.addEventListener("fetch", (event) => {

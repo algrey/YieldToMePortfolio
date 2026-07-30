@@ -277,6 +277,38 @@ dd {
   font-size: 0.82rem;
 }
 
+.connectivity-status,
+.update-status {
+  position: fixed;
+  z-index: 110;
+  right: 16px;
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(420px, calc(100vw - 32px));
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--divider);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.connectivity-status {
+  border-color: var(--negative);
+}
+
+.update-status button {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--accent);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+}
+
 .portfolio-dialog {
   width: min(420px, calc(100vw - 32px));
   padding: 24px;

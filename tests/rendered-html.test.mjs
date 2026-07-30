@@ -201,6 +201,38 @@ test("service worker only caches the public offline allowlist", async () => {
   assert.match(serviceWorker, /PUBLIC_ASSETS/);
   assert.match(serviceWorker, /"\/favicon\.svg"/);
   assert.match(serviceWorker, /"\/offline\.html"/);
+  assert.match(serviceWorker, /"\/icons\/icon-192\.png"/);
+  assert.match(serviceWorker, /SKIP_WAITING/);
   assert.match(serviceWorker, /request\.mode === "navigate"/);
   assert.doesNotMatch(serviceWorker, /\/api\/|portfolio\/preview|caches\.put/);
+});
+
+test("PWA metadata uses standalone raster install icons", async () => {
+  const manifest = await readFile(
+    new URL("../app/manifest.ts", import.meta.url),
+    "utf8",
+  );
+  const layout = await readFile(
+    new URL("../app/layout.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(manifest, /icon-192\.png/);
+  assert.match(manifest, /icon-512\.png/);
+  assert.match(layout, /apple-touch-icon-180\.png/);
+
+  for (const [file, width, height] of [
+    ["apple-touch-icon-180.png", 180, 180],
+    ["icon-192.png", 192, 192],
+    ["icon-512.png", 512, 512],
+  ]) {
+    const bytes = await readFile(
+      new URL(`../public/icons/${file}`, import.meta.url),
+    );
+    assert.deepEqual(
+      bytes.subarray(0, 8),
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    );
+    assert.equal(bytes.readUInt32BE(16), width);
+    assert.equal(bytes.readUInt32BE(20), height);
+  }
 });

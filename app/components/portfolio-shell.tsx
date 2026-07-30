@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   historyBars,
   overviewRows,
@@ -1075,6 +1075,18 @@ export function PortfolioShell({
   >(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
+
+  useEffect(() => {
+    const updateConnectivity = () => setIsOnline(navigator.onLine);
+    updateConnectivity();
+    window.addEventListener("online", updateConnectivity);
+    window.addEventListener("offline", updateConnectivity);
+    return () => {
+      window.removeEventListener("online", updateConnectivity);
+      window.removeEventListener("offline", updateConnectivity);
+    };
+  }, []);
 
   const portfolio =
     portfolios.find((item) => item.id === portfolioId) ?? portfolios[0];
@@ -1095,7 +1107,7 @@ export function PortfolioShell({
     event: React.FormEvent<HTMLFormElement>,
   ) {
     event.preventDefault();
-    if (!ownedWorkspace) return;
+    if (!ownedWorkspace || !isOnline) return;
     const form = new FormData(event.currentTarget);
     const isRename = portfolioDialog === "rename";
     const endpoint = isRename
@@ -1135,7 +1147,7 @@ export function PortfolioShell({
   }
 
   async function changeHomeCurrency(value: string) {
-    if (!ownedWorkspace?.settingsVersion) return;
+    if (!ownedWorkspace?.settingsVersion || !isOnline) return;
     setActionPending(true);
     setActionMessage(null);
     try {
@@ -1169,7 +1181,7 @@ export function PortfolioShell({
   }
 
   async function changeHoldingCurrencyView(value: "native" | "home") {
-    if (!ownedWorkspace?.settingsVersion) return;
+    if (!ownedWorkspace?.settingsVersion || !isOnline) return;
     setActionPending(true);
     setActionMessage(null);
     try {
@@ -1202,7 +1214,7 @@ export function PortfolioShell({
 
   async function archiveActivePortfolio() {
     const active = ownedWorkspace?.activePortfolio;
-    if (!active) return;
+    if (!active || !isOnline) return;
     setActionPending(true);
     setActionMessage(null);
     try {
@@ -1309,7 +1321,7 @@ export function PortfolioShell({
                     type="button"
                     key={item.id}
                     onClick={() => void restorePortfolio(item.id, item.version)}
-                    disabled={actionPending}
+                    disabled={actionPending || !isOnline}
                   >
                     <span>Restore {item.name}</span>
                   </button>
@@ -1335,6 +1347,7 @@ export function PortfolioShell({
                   <button
                     type="button"
                     onClick={() => setPortfolioDialog("create")}
+                    disabled={actionPending || !isOnline}
                   >
                     <span>Create portfolio</span>
                     <span aria-hidden="true">+</span>
@@ -1344,13 +1357,14 @@ export function PortfolioShell({
                       <button
                         type="button"
                         onClick={() => setPortfolioDialog("rename")}
+                        disabled={actionPending || !isOnline}
                       >
                         <span>Rename portfolio</span>
                       </button>
                       <button
                         type="button"
                         onClick={archiveActivePortfolio}
-                        disabled={actionPending}
+                        disabled={actionPending || !isOnline}
                       >
                         <span>Archive portfolio</span>
                       </button>
@@ -1447,7 +1461,7 @@ export function PortfolioShell({
                         onChange={(event) =>
                           void changeHomeCurrency(event.target.value)
                         }
-                        disabled={actionPending}
+                        disabled={actionPending || !isOnline}
                       >
                         <option value="AUD">AUD</option>
                         <option value="USD">USD</option>
@@ -1464,7 +1478,7 @@ export function PortfolioShell({
                             event.target.value as "native" | "home",
                           )
                         }
-                        disabled={actionPending}
+                        disabled={actionPending || !isOnline}
                       >
                         <option value="native">Native currency</option>
                         <option value="home">Home currency</option>
@@ -1623,11 +1637,11 @@ export function PortfolioShell({
               <button
                 type="button"
                 onClick={() => setPortfolioDialog(null)}
-                disabled={actionPending}
+                disabled={actionPending || !isOnline}
               >
                 Cancel
               </button>
-              <button type="submit" disabled={actionPending}>
+              <button type="submit" disabled={actionPending || !isOnline}>
                 {actionPending ? "Working…" : "Save portfolio"}
               </button>
             </div>
@@ -1670,7 +1684,7 @@ export function PortfolioShell({
                   type="button"
                   key={item.id}
                   onClick={() => void restorePortfolio(item.id, item.version)}
-                  disabled={actionPending}
+                  disabled={actionPending || !isOnline}
                 >
                   <span>Restore {item.name}</span>
                 </button>

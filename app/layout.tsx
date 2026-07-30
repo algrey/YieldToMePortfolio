@@ -29,7 +29,7 @@ export async function generateMetadata(): Promise<Metadata> {
     icons: {
       icon: "/favicon.svg",
       shortcut: "/favicon.svg",
-      apple: "/favicon.svg",
+      apple: "/icons/apple-touch-icon-180.png",
     },
     appleWebApp: {
       capable: true,
