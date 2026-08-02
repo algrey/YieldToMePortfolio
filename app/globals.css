@@ -1460,6 +1460,213 @@ dd {
   font-size: 0.75rem;
 }
 
+.import-review-page {
+  width: min(calc(100% - 32px), 960px);
+  margin: 0 auto;
+  padding: 34px 0 72px;
+}
+
+.import-review-page h1 {
+  max-width: 620px;
+  margin-top: 5px;
+  font-family: var(--serif);
+  font-size: clamp(2rem, 6vw, 3.3rem);
+  font-weight: 400;
+  letter-spacing: -0.045em;
+}
+
+.import-intro,
+.import-review-page > p:not(.eyebrow) {
+  max-width: 650px;
+  margin-top: 12px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.import-upload-form,
+.import-mapping-form {
+  display: grid;
+  gap: 16px;
+  margin-top: 28px;
+  padding: 20px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: var(--forest-soft);
+}
+
+.import-upload-form label,
+.import-mapping-form label {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.import-upload-form input,
+.import-upload-form select,
+.import-mapping-form input,
+.import-mapping-form select {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--divider);
+  border-radius: 3px;
+  background: var(--ink);
+  color: var(--cream);
+  font-size: 1rem;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.import-upload-form button,
+.import-mapping-form button {
+  min-height: 44px;
+  justify-self: start;
+  padding: 0 16px;
+  border: 1px solid var(--green);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--cream);
+  cursor: pointer;
+}
+
+.import-upload-form button:hover,
+.import-mapping-form button:hover {
+  background: rgb(99 200 120 / 10%);
+}
+
+.import-upload-form button:disabled,
+.import-mapping-form button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.import-review-result {
+  margin-top: 36px;
+  padding: 20px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: var(--forest-soft);
+}
+
+.import-preview-version {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.import-preview-version code {
+  color: var(--green-bright);
+}
+
+.status-ready,
+.status-blocked {
+  padding-top: 12px;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.status-ready {
+  color: var(--green-bright);
+}
+
+.status-blocked {
+  color: var(--warning);
+}
+
+.import-counts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin-top: 22px;
+  border: 1px solid var(--divider);
+  background: var(--divider);
+}
+
+.import-counts span {
+  min-height: 66px;
+  padding: 14px 12px;
+  background: var(--forest);
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.import-mapping-form {
+  margin-top: 24px;
+  background: var(--forest-raised);
+}
+
+.import-mapping-form h3,
+.import-issues h3 {
+  font-family: var(--serif);
+  font-size: 1.25rem;
+  font-weight: 400;
+}
+
+.import-issues {
+  margin-top: 28px;
+}
+
+.import-issues ul {
+  display: grid;
+  gap: 1px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--divider);
+  background: var(--divider);
+}
+
+.import-issues li {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  background: var(--forest);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.import-issues li strong {
+  color: var(--warning);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+}
+
+.import-no-commit {
+  margin-top: 24px;
+  padding: 14px 16px;
+  border-left: 2px solid var(--green);
+  background: var(--forest-raised);
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+@media (max-width: 600px) {
+  .import-review-page {
+    width: min(calc(100% - 24px), 960px);
+    padding-top: 24px;
+  }
+
+  .import-upload-form,
+  .import-mapping-form,
+  .import-review-result {
+    padding: 14px;
+  }
+
+  .import-counts {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .section-heading.compact {
+    display: grid;
+  }
+}
+
 @media (max-width: 350px) {
   .primary-tabs a {
     min-width: 64px;

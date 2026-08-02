@@ -1412,7 +1412,7 @@ export function PortfolioShell({
             </button>
             {openMenu === "add" ? (
               <div className="popover action-popover">
-                <p>Prototype actions</p>
+                <p>{ownedMode ? "Workspace actions" : "Prototype actions"}</p>
                 <button type="button">
                   <span>Add holding</span>
                   <small>UI only</small>
@@ -1421,10 +1421,17 @@ export function PortfolioShell({
                   <span>Add transaction</span>
                   <small>UI only</small>
                 </button>
-                <button type="button">
-                  <span>Import CSV</span>
-                  <small>Not connected</small>
-                </button>
+                {ownedMode ? (
+                  <Link href="/import" onClick={() => setOpenMenu(null)}>
+                    <span>Import CSV</span>
+                    <small>Review only</small>
+                  </Link>
+                ) : (
+                  <button type="button">
+                    <span>Import CSV</span>
+                    <small>Not connected</small>
+                  </button>
+                )}
               </div>
             ) : null}
           </div>

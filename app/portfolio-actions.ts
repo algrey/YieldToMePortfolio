@@ -63,7 +63,7 @@ async function readPrincipal(): Promise<PrincipalResult> {
   }
 }
 
-async function contextFor(portfolioId?: string) {
+export async function getAuthenticatedSqlContext(portfolioId?: string) {
   const principal = await readPrincipal();
   if (!principal.ok) return principal;
   try {
@@ -104,7 +104,7 @@ export async function createPortfolioAction(value: unknown) {
       status: 400 as const,
       message: validation.message,
     };
-  const context = await contextFor();
+  const context = await getAuthenticatedSqlContext();
   if (!context.ok) return context;
   try {
     const portfolio = await createOwnedPortfolioRepository(
@@ -149,7 +149,7 @@ export async function renamePortfolioAction(
       message: "A valid name and portfolio version are required.",
     };
   }
-  const context = await contextFor(portfolioId);
+  const context = await getAuthenticatedSqlContext(portfolioId);
   if (!context.ok) return context;
   try {
     const result = await createOwnedPortfolioRepository(
@@ -187,7 +187,7 @@ async function setPortfolioStatus(
       status: 400 as const,
       message: "A valid portfolio version is required.",
     };
-  const context = await contextFor(portfolioId);
+  const context = await getAuthenticatedSqlContext(portfolioId);
   if (!context.ok) return context;
   try {
     const repository = createOwnedPortfolioRepository(
@@ -237,7 +237,7 @@ export async function changeHomeCurrencyAction(value: unknown) {
       message: "A valid currency and settings version are required.",
     };
   }
-  const context = await contextFor();
+  const context = await getAuthenticatedSqlContext();
   if (!context.ok) return context;
   try {
     const result = await createOwnedUserSettingsRepository(
@@ -282,7 +282,7 @@ export async function changeHoldingCurrencyViewAction(value: unknown) {
       message: "A valid display view and settings version are required.",
     };
   }
-  const context = await contextFor();
+  const context = await getAuthenticatedSqlContext();
   if (!context.ok) return context;
   try {
     const result = await createOwnedUserSettingsRepository(
