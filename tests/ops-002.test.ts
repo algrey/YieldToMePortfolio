@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   verifyRestoredDatabase,
+  writeD1DataImport,
   type RestoreEvidence,
 } from "../scripts/ops-002-restore-drill.ts";
 
@@ -212,6 +213,66 @@ test("rejects a restore whose table schema differs from the migrations", async (
       ),
       true,
     );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("verifies a D1-style export whose child rows precede parent rows", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "yieldtome-ops-002-"));
+  try {
+    const sourcePath = await createSqlFixture(directory);
+    const sourceSql = await readFile(sourcePath, "utf8");
+    const userInsert = sourceSql.match(/INSERT INTO users \([\s\S]*?;\n/);
+    const portfolioInsert = sourceSql.match(
+      /INSERT INTO portfolios \([\s\S]*?;\n/,
+    );
+    assert.ok(userInsert);
+    assert.ok(portfolioInsert);
+
+    const d1StylePath = join(directory, "d1-style.sql");
+    await writeFile(
+      d1StylePath,
+      sourceSql
+        .replaceAll("PRAGMA foreign_keys=ON;", "PRAGMA foreign_keys=OFF;")
+        .replace(userInsert[0], "")
+        .replace(portfolioInsert[0], `${portfolioInsert[0]}${userInsert[0]}`),
+    );
+
+    const result = await verifyRestoredDatabase(d1StylePath, {
+      migrationDirectory: new URL("../drizzle", import.meta.url).pathname,
+      requiredTables: [
+        "portfolios",
+        "transactions",
+        "portfolio_daily_snapshots",
+        "calculation_runs",
+        "audit_events",
+      ],
+    });
+
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+
+    const dataImportPath = join(directory, "d1-data.sql");
+    await writeD1DataImport(d1StylePath, dataImportPath);
+    const restoredPath = join(directory, "d1-restored.sqlite");
+    const restored = new DatabaseSync(restoredPath);
+    restored.exec(await migrationSql());
+    restored.exec(await readFile(dataImportPath, "utf8"));
+    restored.close();
+
+    const restoredResult = await verifyRestoredDatabase(restoredPath, {
+      migrationDirectory: new URL("../drizzle", import.meta.url).pathname,
+      requiredTables: [
+        "portfolios",
+        "transactions",
+        "portfolio_daily_snapshots",
+        "calculation_runs",
+        "audit_events",
+      ],
+      expectedEvidence: result.evidence,
+    });
+    assert.equal(restoredResult.ok, true);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

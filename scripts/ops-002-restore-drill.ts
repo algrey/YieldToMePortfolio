@@ -70,6 +70,9 @@ function canonicalValue(value: unknown): unknown {
   if (value instanceof Uint8Array) {
     return { blob: Buffer.from(value).toString("hex") };
   }
+  if (typeof value === "bigint") {
+    return { bigint: value.toString() };
+  }
   return value;
 }
 
@@ -113,14 +116,159 @@ function tableColumns(database: DatabaseSync, tableName: string): string[] {
     .map((row) => String((row as { name: string }).name));
 }
 
+type ForeignKeyColumn = Readonly<{
+  id: number;
+  table: string;
+  from: string;
+  to: string;
+}>;
+
+function foreignKeys(
+  database: DatabaseSync,
+  tableName: string,
+): ForeignKeyColumn[] {
+  return database
+    .prepare(`PRAGMA foreign_key_list(${quoteIdentifier(tableName)})`)
+    .all()
+    .map((row) => {
+      const value = row as Record<string, unknown>;
+      return {
+        id: Number(value.id),
+        table: String(value.table),
+        from: String(value.from),
+        to: String(value.to),
+      };
+    });
+}
+
+function dependencyOrderedTables(database: DatabaseSync): string[] {
+  const tables = tableNames(database);
+  const tableSet = new Set(tables);
+  const pending = new Set(tables);
+  const ordered: string[] = [];
+
+  while (pending.size > 0) {
+    const ready = [...pending].filter((tableName) =>
+      foreignKeys(database, tableName).every(
+        (foreignKey) =>
+          foreignKey.table === tableName ||
+          !tableSet.has(foreignKey.table) ||
+          !pending.has(foreignKey.table),
+      ),
+    );
+    if (ready.length === 0) {
+      throw new Error(
+        "cross-table foreign-key cycle prevents ordered D1 import",
+      );
+    }
+    for (const tableName of ready.sort()) {
+      pending.delete(tableName);
+      ordered.push(tableName);
+    }
+  }
+  return ordered;
+}
+
+function sqlLiteral(value: unknown): string {
+  if (value === null || value === undefined) return "NULL";
+  if (typeof value === "number" || typeof value === "bigint") {
+    return String(value);
+  }
+  if (value instanceof Uint8Array) {
+    return `X'${Buffer.from(value).toString("hex")}'`;
+  }
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function dependencyOrderedRows(
+  database: DatabaseSync,
+  tableName: string,
+  columns: readonly string[],
+): Array<Record<string, unknown>> {
+  const statement = database.prepare(
+    `SELECT * FROM ${quoteIdentifier(tableName)}`,
+  );
+  statement.setReadBigInts(true);
+  const rows = (statement.all() as Array<Record<string, unknown>>).sort(
+    (left, right) =>
+      canonicalRow(columns, left).localeCompare(canonicalRow(columns, right)),
+  );
+  const selfForeignKeys = Object.values(
+    Object.groupBy(
+      foreignKeys(database, tableName).filter(
+        (foreignKey) => foreignKey.table === tableName,
+      ),
+      (foreignKey) => String(foreignKey.id),
+    ),
+  ).filter((group): group is ForeignKeyColumn[] => Boolean(group));
+  if (selfForeignKeys.length === 0) return rows;
+
+  const pending = [...rows];
+  const ordered: Array<Record<string, unknown>> = [];
+  while (pending.length > 0) {
+    const readyIndex = pending.findIndex((row) =>
+      selfForeignKeys.every((group) => {
+        const childValues = group.map((foreignKey) => row[foreignKey.from]);
+        if (
+          childValues.some((value) => value === null || value === undefined)
+        ) {
+          return true;
+        }
+        const parent = rows.find((candidate) =>
+          group.every(
+            (foreignKey, index) =>
+              candidate[foreignKey.to] === childValues[index],
+          ),
+        );
+        return !parent || parent === row || ordered.includes(parent);
+      }),
+    );
+    if (readyIndex < 0) {
+      throw new Error(
+        `self-referencing row cycle prevents ordered D1 import for ${tableName}`,
+      );
+    }
+    ordered.push(pending.splice(readyIndex, 1)[0]);
+  }
+  return ordered;
+}
+
+export async function writeD1DataImport(
+  inputPath: string,
+  outputPath: string,
+): Promise<void> {
+  const input = await openDatabaseInput(inputPath);
+  try {
+    const statements = dependencyOrderedTables(input.database).flatMap(
+      (tableName) => {
+        const columns = tableColumns(input.database, tableName);
+        return dependencyOrderedRows(input.database, tableName, columns).map(
+          (row) =>
+            `INSERT INTO ${quoteIdentifier(tableName)} (${columns
+              .map(quoteIdentifier)
+              .join(", ")}) VALUES (${columns
+              .map((column) => sqlLiteral(row[column]))
+              .join(", ")});`,
+        );
+      },
+    );
+    await writeFile(outputPath, `${statements.join("\n")}\n`, { mode: 0o600 });
+    await chmod(outputPath, 0o600);
+  } finally {
+    input.close();
+  }
+}
+
 function tableEvidence(
   database: DatabaseSync,
   tableName: string,
 ): TableEvidence {
   const columns = tableColumns(database, tableName);
-  const rows = database
-    .prepare(`SELECT * FROM ${quoteIdentifier(tableName)}`)
-    .all() as Array<Record<string, unknown>>;
+  const statement = database.prepare(
+    `SELECT * FROM ${quoteIdentifier(tableName)}`,
+  );
+  statement.setReadBigInts(true);
+  const rows = statement.all() as Array<Record<string, unknown>>;
   const serializedRows = rows
     .map((row) => canonicalRow(columns, row))
     .sort()
@@ -293,7 +441,12 @@ function openDatabaseInput(inputPath: string): Promise<DatabaseInput> {
   if (inputPath.toLowerCase().endsWith(".sql")) {
     return readFile(inputPath, "utf8").then((contents) => {
       const database = new DatabaseSync(":memory:");
+      // D1 exports interleave each table's data with its CREATE TABLE statement.
+      // Parent tables can therefore appear after child rows; import the dump with
+      // enforcement disabled, then verify all relationships after it is complete.
+      database.exec("PRAGMA foreign_keys = OFF;");
       database.exec(contents);
+      database.exec("PRAGMA foreign_keys = ON;");
       return { database, close: () => database.close() };
     });
   }
@@ -475,11 +628,13 @@ function parseArguments(argv: readonly string[]): {
   migrationDirectory: string;
   requiredTables: string[];
   expectedEvidencePath: string | null;
+  d1DataOutputPath: string | null;
 } {
   let inputPath: string | null = null;
   let outputPath: string | null = null;
   let migrationDirectory = DEFAULT_MIGRATION_DIRECTORY;
   let expectedEvidencePath: string | null = null;
+  let d1DataOutputPath: string | null = null;
   const requiredTables: string[] = [];
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -500,9 +655,12 @@ function parseArguments(argv: readonly string[]): {
     } else if (argument === "--expected-evidence" && value) {
       expectedEvidencePath = resolve(value);
       index += 1;
+    } else if (argument === "--d1-data-output" && value) {
+      d1DataOutputPath = resolve(value);
+      index += 1;
     } else if (argument === "--help") {
       console.log(
-        "Usage: node --experimental-strip-types scripts/ops-002-restore-drill.ts --input <sqlite-or-sql> [--output <evidence.json>] [--expected-evidence <evidence.json>] [--require-table <name>]...",
+        "Usage: node --experimental-strip-types scripts/ops-002-restore-drill.ts --input <sqlite-or-sql> [--output <evidence.json>] [--expected-evidence <evidence.json>] [--d1-data-output <data.sql>] [--require-table <name>]...",
       );
       process.exit(0);
     } else {
@@ -520,6 +678,7 @@ function parseArguments(argv: readonly string[]): {
     requiredTables:
       requiredTables.length > 0 ? requiredTables : [...DEFAULT_REQUIRED_TABLES],
     expectedEvidencePath,
+    d1DataOutputPath,
   };
 }
 
@@ -535,6 +694,10 @@ export async function main(argv: readonly string[] = process.argv.slice(2)) {
     requiredTables: args.requiredTables,
     expectedEvidence,
   });
+
+  if (result.ok && args.d1DataOutputPath) {
+    await writeD1DataImport(args.inputPath, args.d1DataOutputPath);
+  }
 
   if (args.outputPath) {
     await writeFile(

@@ -80,16 +80,39 @@ the operator workstation policy.
 
 1. Create or select an isolated non-production D1 database. Confirm it cannot
    receive production traffic.
-2. Download the encrypted export, verify its checksum, decrypt it locally, and
-   import it into the isolated database:
+2. Download the encrypted export, verify its checksum, and decrypt it locally.
+   Verify the source export and create a dependency-ordered data import. D1
+   exports can interleave child rows before their parent rows, so do not assume
+   that a raw export can be executed directly when foreign keys are enforced.
 
    ```sh
    openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
      -in "$ENCRYPTED_EXPORT" -out "$WORK_DIR/restore.sql"
-   npx wrangler d1 execute "$RESTORE_DB" --remote --file="$WORK_DIR/restore.sql"
+
+   node --experimental-strip-types scripts/ops-002-restore-drill.ts \
+     --input "$WORK_DIR/restore.sql" \
+     --output "$WORK_DIR/source-evidence.json" \
+     --d1-data-output "$WORK_DIR/restore-data.sql" \
+     --require-table portfolios \
+     --require-table transactions \
+     --require-table portfolio_daily_snapshots \
+     --require-table calculation_runs \
+     --require-table audit_events
    ```
 
-3. Export the isolated restored database to a temporary SQL file for local
+3. Apply every checked-in migration, in filename order, to the fresh isolated
+   restore database. Stop on any failure. Then import only the generated,
+   dependency-ordered row data:
+
+   ```sh
+   for migration in drizzle/*.sql; do
+     npx wrangler d1 execute "$RESTORE_DB" --remote --yes --file="$migration" || exit 1
+   done
+   npx wrangler d1 execute "$RESTORE_DB" --remote --yes \
+     --file="$WORK_DIR/restore-data.sql"
+   ```
+
+4. Export the isolated restored database to a temporary SQL file for local
    verification:
 
    ```sh
@@ -97,28 +120,16 @@ the operator workstation policy.
    npx wrangler d1 export "$RESTORE_DB" --remote --output="$RESTORED_EXPORT"
    ```
 
-4. Apply the checked-in migrations to a fresh local SQLite database and compare
-   the restored SQL schema against them. First create a redacted baseline from
-   the decrypted export, then require the restored export to match its schema,
-   row hashes, and ownership counts. The verifier also checks SQLite integrity,
+5. Require the restored export to match the source evidence's schema, row
+   hashes, and ownership counts. The verifier also checks SQLite integrity,
    foreign keys, required representative tables, and application-level
    portfolio/transaction/snapshot/calculation ownership.
 
    ```sh
-   SOURCE_EVIDENCE="$WORK_DIR/source-evidence.json"
-   node --experimental-strip-types scripts/ops-002-restore-drill.ts \
-     --input "$WORK_DIR/restore.sql" \
-     --output "$SOURCE_EVIDENCE" \
-     --require-table portfolios \
-     --require-table transactions \
-     --require-table portfolio_daily_snapshots \
-     --require-table calculation_runs \
-     --require-table audit_events
-
    node --experimental-strip-types scripts/ops-002-restore-drill.ts \
      --input "$RESTORED_EXPORT" \
      --output "$WORK_DIR/restore-evidence.json" \
-     --expected-evidence "$SOURCE_EVIDENCE" \
+     --expected-evidence "$WORK_DIR/source-evidence.json" \
      --require-table portfolios \
      --require-table transactions \
      --require-table portfolio_daily_snapshots \
@@ -126,10 +137,10 @@ the operator workstation policy.
      --require-table audit_events
    ```
 
-5. Review every failed check. A checksum mismatch, missing table, unexpected
+6. Review every failed check. A checksum mismatch, missing table, unexpected
    table, ownership violation, integrity failure, or empty required table is a
    failed drill. Do not waive it by editing the evidence.
-6. Run the repository smoke suite against the drilled application commit:
+7. Run the repository smoke suite against the drilled application commit:
 
    ```sh
    npm test
@@ -138,7 +149,7 @@ the operator workstation policy.
    The verifier's read-only smoke checks are the database-side part of this
    suite; they do not mutate or expose restored rows.
 
-7. Remove decrypted SQL and temporary evidence from the workstation after the
+8. Remove decrypted SQL, generated data SQL, and temporary evidence from the workstation after the
    controlled evidence record is stored. Keep only the encrypted export and
    evidence according to the approved retention and access policy.
 
