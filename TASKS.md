@@ -851,7 +851,7 @@ Status: DONE on 2026-08-02.
 
 ### OPS-002 — Backup, export, migration, and restore drill
 
-Status: READY.
+Status: DONE (2026-08-03).
 
 - Objective: prove that schema/data can be recovered beyond ordinary application rollback and within the stated RPO/RTO.
 - Dependencies: DB-001A, DB-002, DB-003, DB-004, OPS-001.
@@ -862,6 +862,7 @@ Status: READY.
 - Tests: scripted checksum/count verification and application smoke suite against restored DB.
 - Risks: restore-in-place destructive operation; never drill against production.
 - Parallel safe: yes late in Phase 3/4.
+- Completion note: Added the operator-led backup/export/restore runbook and a read-only restore verifier that compares checked-in migrations, validates integrity and foreign keys, records redacted checksum/count/ownership evidence, and runs portfolio, transaction, snapshot, and calculation ownership smoke checks. Tests cover SQL-export restore, SQLite restore parity, tamper rejection, representative data, and payload-free evidence; no automated export destination or destructive production restore was added.
 
 ### OPS-003A — Offboarding and owned-data export
 
