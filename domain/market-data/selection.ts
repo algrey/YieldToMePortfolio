@@ -167,7 +167,8 @@ function activeOverride(
         (override) =>
           override.type === type &&
           override.targetKey === targetKey &&
-          (!userId || override.userId === userId) &&
+          userId !== undefined &&
+          override.userId === userId &&
           override.status === "active" &&
           override.effectiveFrom <= asOf &&
           (override.effectiveTo === null || override.effectiveTo >= asOf),

@@ -174,16 +174,25 @@ test("manual price and FX overrides take priority and identity FX is exact", () 
   const selected = selectPriceObservation({
     asOf: "2026-08-03",
     targetKey: "security-a",
+    userId: "user-a",
     observations: [price()],
     overrides: [override],
   });
   assert.equal(selected.selected?.source, "manual");
   assert.equal(selected.selected?.closeDecimal, "43.25");
   assert.equal(selected.explanation.overrideId, "override-price");
+  const withoutOwner = selectPriceObservation({
+    asOf: "2026-08-03",
+    targetKey: "security-a",
+    observations: [price({ closeDecimal: "42" })],
+    overrides: [override],
+  });
+  assert.equal(withoutOwner.selected?.source, "provider");
 
   const manualFx = selectFxObservation({
     asOf: "2026-08-03",
     targetKey: "USD->AUD",
+    userId: "user-a",
     baseCurrencyCode: "USD",
     quoteCurrencyCode: "AUD",
     observations: [fx({ rateDecimal: "1.51" })],

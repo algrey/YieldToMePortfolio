@@ -580,6 +580,7 @@ Status: DONE (2026-08-03).
 - Risks: silently presenting stale/partial values as current/complete.
 - Parallel safe: yes with adapter work.
 - Completion note: Added deterministic price/FX selection with manual, delayed/best-effort, EOD, bounded prior-session, stale, and unavailable states; decimal-only aligned coverage totals; owner-scoped versioned override supersession/removal with audit and calculation invalidation; and deployment/user scope, fallback, conflict, ownership, and rollback tests.
+- Review completion: User-owned manual overrides are now ignored unless the authenticated user scope is explicitly supplied; regression coverage confirms an owner cannot receive another user’s override or an unscoped override.
 
 ### MKT-003B — Bounded ingestion and refresh jobs
 
