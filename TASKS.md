@@ -357,7 +357,7 @@ Status: DONE on 2026-07-29.
 
 ### LED-001B — Owned ledger posting, reversal, and cash service
 
-Status: PENDING.
+Status: READY.
 
 - Objective: implement the single owner-scoped financial write path over the approved ledger schema.
 - Dependencies: LED-001A, DB-001B, AUTH-002, OPS-001.
@@ -564,7 +564,7 @@ Status: DONE on 2026-07-30.
 
 ### MKT-003A — Observation selection, coverage, and manual overrides
 
-Status: PENDING.
+Status: READY.
 
 - Objective: select fixture/provider observations deterministically and compose reversible owner overrides without network/job concerns.
 - Dependencies: MKT-001, DB-003, OPS-001.
@@ -845,7 +845,7 @@ Status: DONE on 2026-08-02.
 
 ### OPS-002 — Backup, export, migration, and restore drill
 
-Status: PENDING.
+Status: READY.
 
 - Objective: prove that schema/data can be recovered beyond ordinary application rollback and within the stated RPO/RTO.
 - Dependencies: DB-001A, DB-002, DB-003, DB-004, OPS-001.
