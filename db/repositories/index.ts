@@ -59,6 +59,14 @@ export type {
   AuditResult,
 } from "./audit.ts";
 export {
+  createOwnedLedgerRepository,
+  type CashLedgerEntryRecord,
+  type LedgerMutationFailure,
+  type LedgerMutationResult,
+  type LedgerMutationSuccess,
+  type LedgerTransactionRecord,
+} from "./ledger.ts";
+export {
   createCalculationRunRepository,
   type CalculationRunRecord,
   type CalculationRunStatus,

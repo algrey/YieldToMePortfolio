@@ -31,3 +31,10 @@ export {
   type FifoSaleInput,
   type FifoSplitInput,
 } from "./fifo.ts";
+export {
+  prepareLedgerPosting,
+  type LedgerPostingInput,
+  type PostingPreparation,
+  type PostingValidationFailure,
+  type PreparedLedgerPosting,
+} from "./posting.ts";
