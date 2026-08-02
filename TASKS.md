@@ -823,7 +823,7 @@ Status: PENDING.
 
 ### PWA-001 — Offline-safe shell and connectivity states
 
-Status: IN PROGRESS; review finding on 2026-07-30.
+Status: DONE on 2026-08-02.
 
 - Objective: make installation and offline failure graceful without persisting private financial responses on the device.
 - Dependencies: FND-001, UI-001.
@@ -834,8 +834,9 @@ Status: IN PROGRESS; review finding on 2026-07-30.
 - Tests: cache allow/deny list, offline navigation, service-worker update, Safari/iPhone physical-device UAT.
 - Risks: cached private response or stale worker; fail safe to network/offline page.
 - Parallel safe: yes after shell asset paths settle.
-- Completion note: Added a versioned public-only service-worker allowlist with network-first offline navigation fallback, update activation, connectivity status, offline-disabled mutations, standalone 180/192/512 raster install assets, and manifest/header regression coverage. Physical Safari/iPhone UAT remains an operator verification step.
+- Completion note: Added a versioned public-only service-worker allowlist with network-first offline navigation fallback, update activation, connectivity status, offline-disabled mutations, standalone 180/192/512 raster install assets, and manifest/header regression coverage. Physical Safari/iPhone UAT was user-confirmed on 2026-08-02 for Add to Home Screen, standalone launch, app name/icon, safe-area rendering, loaded-session offline state with disabled mutations, safe offline reload, reconnection, and service-worker update activation; exact device and iOS version were not recorded.
 - Review finding: automated implementation and regression checks pass, but the required physical Safari/iPhone UAT has not been completed. Verify installation, offline reload fallback, update activation, safe-area rendering, and disabled mutations on a physical device before marking this task complete.
+- Review resolution: user-confirmed physical Safari/iPhone UAT completed on 2026-08-02; the finding is closed with device and iOS version explicitly unspecified.
 
 ## Operations and release
 
