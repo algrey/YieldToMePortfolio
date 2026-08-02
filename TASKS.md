@@ -767,7 +767,7 @@ Status: PENDING.
 
 ### UI-005B — Import upload, mapping, and preview
 
-Status: PENDING.
+Status: READY.
 
 - Objective: make the complete non-mutating import review workflow operable before exposing a financial commit action.
 - Dependencies: UI-001, IMP-002B.
