@@ -37,6 +37,7 @@ test("import review exposes an authenticated, non-mutating preview workflow", as
   assert.match(page, /force-dynamic/);
   assert.match(previewRoute, /private, no-store/);
   assert.match(mappingRoute, /private, no-store/);
+  assert.match(action, /mapping service is temporarily unavailable/);
 });
 
 test("import review controls keep mapping and issue content operable on mobile", async () => {

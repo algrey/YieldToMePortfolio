@@ -780,6 +780,7 @@ Status: DONE (2026-08-02).
 - Risks: a large issue table on mobile or UI preview diverging from server contract.
 - Parallel safe: yes after shared actions/contracts.
 - Completion note: Added the authenticated upload/parse, mapping, reconciliation, and ready/not-ready preview workflow with no commit action; mapping writes enforce the server-issued preview version and all responses are private/no-store.
+- Review completion: Added private no-store coverage for the authenticated `/import` document and a structured unavailable response for mapping-save failures; all automated checks pass.
 
 ### UI-005C — Import commit, progress, and history
 

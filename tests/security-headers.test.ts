@@ -107,6 +107,16 @@ test("security policy applies restrictive headers and private caching", async ()
     privateResponse.headers.get("permissions-policy") ?? "",
     /camera=\(\)/,
   );
+
+  const importResponse = await applyResponseSecurityHeaders(
+    new Request("https://yieldtome.example/import"),
+    new Response("private import review"),
+    "test-nonce",
+  );
+  assert.equal(
+    importResponse.headers.get("cache-control"),
+    PRIVATE_CACHE_CONTROL,
+  );
 });
 
 test("rendered protected-route fixture returns no-store and security headers", async () => {

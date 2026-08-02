@@ -246,21 +246,29 @@ export async function saveImportMappingAction(
       message: "This preview is stale. Reload it before mapping.",
     };
   }
-  await createOwnedImportMappingDecisionRepository(context.client).save(
-    context.userId,
-    {
-      batchId,
-      kind: kind as ImportMappingKind,
-      scope: scope as ImportMappingScope,
-      confidence: confidence as ImportMappingConfidence,
-      source: "user",
-      sourceKey,
-      normalizedSourceValue,
-      targetId: typeof input?.targetId === "string" ? input.targetId : null,
-      targetValue:
-        typeof input?.targetValue === "string" ? input.targetValue : null,
-    },
-  );
-  const review = await loadReview(context.client, context.userId, batchId);
-  return "ok" in review ? review : { ok: true, review };
+  try {
+    await createOwnedImportMappingDecisionRepository(context.client).save(
+      context.userId,
+      {
+        batchId,
+        kind: kind as ImportMappingKind,
+        scope: scope as ImportMappingScope,
+        confidence: confidence as ImportMappingConfidence,
+        source: "user",
+        sourceKey,
+        normalizedSourceValue,
+        targetId: typeof input?.targetId === "string" ? input.targetId : null,
+        targetValue:
+          typeof input?.targetValue === "string" ? input.targetValue : null,
+      },
+    );
+    const review = await loadReview(context.client, context.userId, batchId);
+    return "ok" in review ? review : { ok: true, review };
+  } catch {
+    return {
+      ok: false,
+      status: 503,
+      message: "The mapping service is temporarily unavailable.",
+    };
+  }
 }
