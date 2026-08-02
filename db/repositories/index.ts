@@ -67,6 +67,13 @@ export {
   type LedgerTransactionRecord,
 } from "./ledger.ts";
 export {
+  createOwnedManualOverrideRepository,
+  type ManualOverrideMutationFailure,
+  type ManualOverrideMutationResult,
+  type ManualOverrideRecord,
+  type SaveManualOverrideInput,
+} from "./market-data.ts";
+export {
   createCalculationRunRepository,
   type CalculationRunRecord,
   type CalculationRunStatus,

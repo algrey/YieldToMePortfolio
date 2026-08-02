@@ -568,7 +568,7 @@ Status: DONE on 2026-07-30.
 
 ### MKT-003A — Observation selection, coverage, and manual overrides
 
-Status: READY.
+Status: DONE (2026-08-03).
 
 - Objective: select fixture/provider observations deterministically and compose reversible owner overrides without network/job concerns.
 - Dependencies: MKT-001, DB-003, OPS-001.
@@ -579,6 +579,7 @@ Status: READY.
 - Tests: date/session fallback, staleness, partial totals, override intervals/supersession/removal, deployment/user observation scope.
 - Risks: silently presenting stale/partial values as current/complete.
 - Parallel safe: yes with adapter work.
+- Completion note: Added deterministic price/FX selection with manual, delayed/best-effort, EOD, bounded prior-session, stale, and unavailable states; decimal-only aligned coverage totals; owner-scoped versioned override supersession/removal with audit and calculation invalidation; and deployment/user scope, fallback, conflict, ownership, and rollback tests.
 
 ### MKT-003B — Bounded ingestion and refresh jobs
 

@@ -36,3 +36,21 @@ export type {
   SplitEventInput,
   SplitRequest,
 } from "./contracts.ts";
+export {
+  composeCoveredTotals,
+  selectFx,
+  selectFxObservation,
+  selectPrice,
+  selectPriceObservation,
+  type CoverageItem,
+  type CoverageResult,
+  type FxSelection,
+  type FxSelectionInput,
+  type PriceSelection,
+  type PriceSelectionInput,
+  type SelectedFx,
+  type SelectedPrice,
+  type SelectionExplanation,
+  type SelectionOptions,
+  type SelectionState,
+} from "./selection.ts";

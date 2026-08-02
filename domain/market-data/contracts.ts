@@ -60,6 +60,7 @@ export type FxObservation = {
 
 export type ManualOverride = {
   kind: "manual_override";
+  id?: string;
   userId: string;
   portfolioId: string | null;
   securityId: string | null;
