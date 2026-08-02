@@ -28,6 +28,7 @@ export type LedgerTransactionRecord = {
   fxObservedAt: string | null;
   sourceType: string;
   sourceReference: string | null;
+  idempotencyKey: string | null;
   importRowId: string | null;
   reversesTransactionId: string | null;
   supersedesTransactionId: string | null;
@@ -89,7 +90,7 @@ const TRANSACTION_COLUMNS = `
   local_trade_date, settlement_date, quantity_decimal, unit_price_decimal,
   currency_code, gross_amount_decimal, fee_amount_decimal, tax_amount_decimal,
   fx_rate_to_base_decimal, fx_rate_source, fx_observed_at, source_type,
-  source_reference, import_row_id, reverses_transaction_id,
+  source_reference, idempotency_key, import_row_id, reverses_transaction_id,
   supersedes_transaction_id, created_by_user_id, calculation_version,
   created_at, version
 `;
@@ -131,6 +132,8 @@ function mapTransaction(row: Record<string, unknown>): LedgerTransactionRecord {
     sourceType: String(row.source_type),
     sourceReference:
       row.source_reference === null ? null : String(row.source_reference),
+    idempotencyKey:
+      row.idempotency_key === null ? null : String(row.idempotency_key),
     importRowId: row.import_row_id === null ? null : String(row.import_row_id),
     reversesTransactionId:
       row.reverses_transaction_id === null
@@ -214,16 +217,62 @@ export function createOwnedLedgerRepository(
 
   async function getByIdempotency(
     userId: string,
-    input: LedgerPostingInput,
+    input: InternalLedgerInput,
   ): Promise<LedgerTransactionRecord | null> {
-    const sourceReference = input.sourceReference ?? input.idempotencyKey;
+    const row = await client.get<Record<string, unknown>>(
+      `SELECT ${TRANSACTION_COLUMNS} FROM transactions
+       WHERE user_id = ? AND portfolio_id = ? AND idempotency_key = ? LIMIT 1`,
+      [userId, input.portfolioId, input.idempotencyKey],
+    );
+    return row ? mapTransaction(row) : null;
+  }
+
+  async function getBySourceReference(
+    userId: string,
+    input: InternalLedgerInput,
+  ): Promise<LedgerTransactionRecord | null> {
+    if (input.sourceReference === null || input.sourceReference === undefined) {
+      return null;
+    }
     const row = await client.get<Record<string, unknown>>(
       `SELECT ${TRANSACTION_COLUMNS} FROM transactions
        WHERE user_id = ? AND portfolio_id = ? AND source_type = ?
          AND source_reference = ? LIMIT 1`,
-      [userId, input.portfolioId, input.sourceType, sourceReference],
+      [userId, input.portfolioId, input.sourceType, input.sourceReference],
     );
     return row ? mapTransaction(row) : null;
+  }
+
+  function matchesPostingIntent(
+    existing: LedgerTransactionRecord,
+    input: InternalLedgerInput,
+    prepared: PreparedLedgerPosting,
+  ): boolean {
+    return (
+      existing.portfolioId === input.portfolioId &&
+      existing.portfolioSecurityId === input.portfolioSecurityId &&
+      existing.type === input.type &&
+      existing.tradeAt === input.tradeAt &&
+      existing.localTradeDate === input.localTradeDate &&
+      existing.settlementDate === (input.settlementDate ?? null) &&
+      existing.quantityDecimal === input.quantityDecimal &&
+      existing.unitPriceDecimal === input.unitPriceDecimal &&
+      existing.currencyCode === input.currencyCode &&
+      existing.grossAmountDecimal === prepared.grossAmountDecimal &&
+      existing.feeAmountDecimal === input.feeAmountDecimal &&
+      existing.taxAmountDecimal === input.taxAmountDecimal &&
+      existing.fxRateToBaseDecimal === input.fxRateToBaseDecimal &&
+      existing.fxRateSource === (input.fxRateSource ?? null) &&
+      existing.fxObservedAt === (input.fxObservedAt ?? null) &&
+      existing.sourceType === input.sourceType &&
+      existing.sourceReference === (input.sourceReference ?? null) &&
+      existing.importRowId === (input.importRowId ?? null) &&
+      existing.reversesTransactionId ===
+        (input.reversesTransactionId ?? null) &&
+      existing.supersedesTransactionId ===
+        (input.supersedesTransactionId ?? null) &&
+      existing.calculationVersion === prepared.calculationVersion
+    );
   }
 
   async function getCashEntry(
@@ -265,6 +314,18 @@ export function createOwnedLedgerRepository(
     };
   }
 
+  async function existingResult(
+    userId: string,
+    input: InternalLedgerInput,
+    prepared: PreparedLedgerPosting,
+    existing: LedgerTransactionRecord,
+  ): Promise<LedgerMutationResult> {
+    if (!matchesPostingIntent(existing, input, prepared)) {
+      return { ok: false, reason: "conflict" };
+    }
+    return result(userId, input.portfolioId, existing, true);
+  }
+
   async function validateOwnership(
     userId: string,
     input: LedgerPostingInput,
@@ -299,6 +360,12 @@ export function createOwnedLedgerRepository(
     statusUpdate: SqlStatement | null = null,
     cashEffectOverride?: string | null,
   ): Promise<LedgerMutationResult> {
+    const sourceReferenceConflict = await getBySourceReference(userId, input);
+    if (sourceReferenceConflict) {
+      return sourceReferenceConflict.idempotencyKey === input.idempotencyKey
+        ? existingResult(userId, input, prepared, sourceReferenceConflict)
+        : { ok: false, reason: "conflict" };
+    }
     const createdAt = now();
     const calculationRunId = randomUUID();
     const cashEffect =
@@ -339,7 +406,7 @@ export function createOwnedLedgerRepository(
     statements.push({
       sql: `INSERT INTO transactions (
         ${TRANSACTION_COLUMNS}
-      ) VALUES (?, ?, ?, ?, ?, 'posted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      ) VALUES (?, ?, ?, ?, ?, 'posted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       params: [
         prepared.transactionId,
         userId,
@@ -360,6 +427,7 @@ export function createOwnedLedgerRepository(
         input.fxObservedAt ?? null,
         input.sourceType,
         prepared.sourceReference,
+        prepared.idempotencyKey,
         input.importRowId ?? null,
         input.reversesTransactionId ?? null,
         input.supersedesTransactionId ?? null,
@@ -405,7 +473,7 @@ export function createOwnedLedgerRepository(
         prepared.calculationVersion,
         prepared.transactionId,
         prepared.transactionId,
-        `ledger:${prepared.sourceReference}`,
+        `ledger:${prepared.idempotencyKey}`,
         createdAt,
         createdAt,
       ],
@@ -434,7 +502,10 @@ export function createOwnedLedgerRepository(
       await atomic(client, statements);
     } catch {
       const existing = await getByIdempotency(userId, input);
-      if (existing) return result(userId, input.portfolioId, existing, true);
+      if (existing) return existingResult(userId, input, prepared, existing);
+      if (await getBySourceReference(userId, input)) {
+        return { ok: false, reason: "conflict" };
+      }
       return { ok: false, reason: "atomic_failure" };
     }
     const transaction = await getTransaction(
@@ -450,10 +521,6 @@ export function createOwnedLedgerRepository(
     userId: string,
     input: LedgerPostingInput,
   ): Promise<LedgerMutationResult> {
-    const existing = await getByIdempotency(userId, input);
-    if (existing) return result(userId, input.portfolioId, existing, true);
-    const ownershipFailure = await validateOwnership(userId, input);
-    if (ownershipFailure) return ownershipFailure;
     const preparation = prepareLedgerPosting(input);
     if (!preparation.ok)
       return {
@@ -469,6 +536,12 @@ export function createOwnedLedgerRepository(
                   ? "cash_effect_invalid"
                   : "invalid_input",
       };
+    const existing = await getByIdempotency(userId, input);
+    if (existing) {
+      return existingResult(userId, input, preparation.posting, existing);
+    }
+    const ownershipFailure = await validateOwnership(userId, input);
+    if (ownershipFailure) return ownershipFailure;
     return persist(userId, input, preparation.posting, "ledger.post");
   }
 
@@ -502,10 +575,17 @@ export function createOwnedLedgerRepository(
       requestId,
     };
     const existing = await getByIdempotency(userId, originalInput);
-    if (existing) return result(userId, portfolioId, existing, true);
-    if (original.status !== "posted") return { ok: false, reason: "conflict" };
     const preparation = prepareLedgerPosting(originalInput);
     if (!preparation.ok) return { ok: false, reason: "invalid_input" };
+    if (existing) {
+      return existingResult(
+        userId,
+        { ...originalInput, reversesTransactionId: transactionId },
+        preparation.posting,
+        existing,
+      );
+    }
+    if (original.status !== "posted") return { ok: false, reason: "conflict" };
     const originalCash = await getCashEntry(userId, portfolioId, transactionId);
     const reversalEffect = originalCash
       ? negate(originalCash.signedAmountDecimal)
@@ -536,12 +616,26 @@ export function createOwnedLedgerRepository(
     input: LedgerPostingInput,
   ): Promise<LedgerMutationResult> {
     const original = await getTransaction(userId, portfolioId, transactionId);
-    if (!original || original.status !== "posted")
-      return { ok: false, reason: "not_found" };
-    const ownershipFailure = await validateOwnership(userId, input);
-    if (ownershipFailure) return ownershipFailure;
-    const preparation = prepareLedgerPosting({ ...input, portfolioId });
+    if (!original) return { ok: false, reason: "not_found" };
+    const supersedingInput: InternalLedgerInput = {
+      ...input,
+      portfolioId,
+      supersedesTransactionId: transactionId,
+    };
+    const preparation = prepareLedgerPosting(supersedingInput);
     if (!preparation.ok) return { ok: false, reason: "invalid_input" };
+    const existing = await getByIdempotency(userId, supersedingInput);
+    if (existing) {
+      return existingResult(
+        userId,
+        supersedingInput,
+        preparation.posting,
+        existing,
+      );
+    }
+    if (original.status !== "posted") return { ok: false, reason: "conflict" };
+    const ownershipFailure = await validateOwnership(userId, supersedingInput);
+    if (ownershipFailure) return ownershipFailure;
     const statusUpdate: SqlStatement = {
       sql: `UPDATE transactions SET status = 'superseded'
         WHERE id = ? AND user_id = ? AND portfolio_id = ? AND status = 'posted'`,
@@ -549,7 +643,7 @@ export function createOwnedLedgerRepository(
     };
     return persist(
       userId,
-      { ...input, portfolioId, supersedesTransactionId: transactionId },
+      supersedingInput,
       preparation.posting,
       "ledger.supersede",
       statusUpdate,

@@ -357,7 +357,7 @@ Status: DONE on 2026-07-29.
 
 ### LED-001B — Owned ledger posting, reversal, and cash service
 
-Status: IN PROGRESS; review finding on 2026-08-03.
+Status: DONE on 2026-08-03.
 
 - Objective: implement the single owner-scoped financial write path over the approved ledger schema.
 - Dependencies: LED-001A, DB-001B, AUTH-002, OPS-001.
@@ -371,6 +371,7 @@ Status: IN PROGRESS; review finding on 2026-08-03.
 - Completion note: Added owner-scoped exact-decimal ledger posting for trades, cash events, fees, taxes, and splits with native FX provenance, signed cash effects, idempotent retries, reversal/supersession, calculation invalidation, audit, atomic rollback, and cross-owner/portfolio denial coverage.
 - Review completion: Added calendar-date validation and made idempotent retries return the original result after portfolio archival; focused and repository checks pass.
 - Review finding: `LedgerPostingInput` accepts both `idempotencyKey` and optional `sourceReference`, but `transactions` persists only `source_reference` and retries look up the substituted source reference. Reusing an idempotency key with a different source reference can create a duplicate transaction. Add an owner/portfolio-scoped persisted idempotency key (or explicitly make source reference the immutable idempotency key), enforce conflict semantics, and add a regression test before marking this task complete.
+- Review completion: Persisted `idempotency_key` independently of `source_reference` with an owner/portfolio unique index, preserved exact retries after archival, rejected key reuse with changed source or financial intent, rejected source-reference reuse under a different key, and added owner-scope plus migration regression coverage. The additive migration backfills only unambiguous legacy source references because overwritten historical keys cannot be reconstructed safely.
 
 ### IMP-001 — Strict versioned 17-column parser
 

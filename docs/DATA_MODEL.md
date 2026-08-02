@@ -229,6 +229,7 @@ Immutable/versioned normalized ledger event:
 | `fx_rate_source`, `fx_observed_at`         | provenance                                                                                                                       |
 | `source_type`                              | `manual`, `csv_import`, future `broker_sync`, `provider`, `system`                                                               |
 | `source_reference`                         | nullable external/reference ID                                                                                                   |
+| `idempotency_key`                          | required for new writes; immutable retry identity independent of source provenance                                               |
 | `import_row_id`                            | nullable FK                                                                                                                      |
 | `reverses_transaction_id`                  | nullable self-FK                                                                                                                 |
 | `supersedes_transaction_id`                | nullable self-FK                                                                                                                 |
@@ -246,6 +247,7 @@ Checks:
 - FX strictly positive when present;
 - one reversal target at most once;
 - source reference unique within `(portfolio_id, source_type)` when present.
+- idempotency key unique within `(user_id, portfolio_id)` when present; identical retries return the original result and a different normalized posting intent conflicts.
 
 Indexes: `(user_id, portfolio_id, local_trade_date, id)`, `(portfolio_id, portfolio_security_id, trade_at)`, import row, reversal/supersession.
 
@@ -901,6 +903,7 @@ CREATE TABLE transactions (
     source_type IN ('manual', 'csv_import', 'broker_sync', 'provider', 'system')
   ),
   source_reference TEXT,
+  idempotency_key TEXT,
   import_row_id TEXT,
   reverses_transaction_id TEXT,
   supersedes_transaction_id TEXT,
@@ -921,6 +924,7 @@ CREATE TABLE transactions (
   UNIQUE (id, user_id),
   UNIQUE (id, user_id, portfolio_id),
   UNIQUE (id, user_id, portfolio_id, portfolio_security_id),
+  UNIQUE (user_id, portfolio_id, idempotency_key),
   UNIQUE (portfolio_id, source_type, source_reference)
 );
 CREATE INDEX idx_transactions_ledger
@@ -1188,3 +1192,5 @@ Application validation remains necessary for decimal syntax/scale, overlapping v
 5. Apply in preview and run ownership/calculation/import smoke tests.
 6. Apply production migration, capture post-migration bookmark, and monitor.
 7. Prefer additive expand/migrate/contract changes; never deploy code that requires a migration not yet applied.
+
+The LED-001B idempotency migration adds the key as nullable for compatibility, backfills only legacy rows whose stored source reference is unambiguous within the owner/portfolio scope, and requires every new service write to persist a non-empty key. Ambiguous legacy rows remain nullable because the original key was not retained and must not be guessed.

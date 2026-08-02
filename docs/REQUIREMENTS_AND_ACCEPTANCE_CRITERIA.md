@@ -125,6 +125,7 @@ The core release shall store normalized trades, explicit splits, and cash events
 Acceptance:
 
 - Transactions have portfolio, type, trade timestamp, currency, quantity/amount fields, source, and created actor.
+- Each write persists an owner/portfolio-scoped idempotency key independently of source provenance; an identical retry returns the original result, while reuse for different normalized posting intent conflicts.
 - A correction records reversal/supersession; it does not silently overwrite source values.
 - Rebuilding projections from ledger facts produces the same result.
 

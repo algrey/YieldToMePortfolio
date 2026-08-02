@@ -751,6 +751,7 @@ export const transactions = sqliteTable(
     fxObservedAt: text("fx_observed_at"),
     sourceType: text("source_type").notNull(),
     sourceReference: text("source_reference"),
+    idempotencyKey: text("idempotency_key"),
     importRowId: text("import_row_id"),
     reversesTransactionId: text("reverses_transaction_id"),
     supersedesTransactionId: text("supersedes_transaction_id"),
@@ -843,6 +844,11 @@ export const transactions = sqliteTable(
       table.portfolioId,
       table.sourceType,
       table.sourceReference,
+    ),
+    uniqueIndex("transactions_owner_portfolio_idempotency_unique").on(
+      table.userId,
+      table.portfolioId,
+      table.idempotencyKey,
     ),
     uniqueIndex("transactions_one_reversal_unique").on(
       table.reversesTransactionId,

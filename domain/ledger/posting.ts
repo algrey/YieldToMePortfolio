@@ -39,7 +39,8 @@ export type PreparedLedgerPosting = {
   cashAccountId: string | null;
   cashEffectDecimal: string | null;
   grossAmountDecimal: string | null;
-  sourceReference: string;
+  idempotencyKey: string;
+  sourceReference: string | null;
   calculationVersion: number;
 };
 
@@ -233,7 +234,8 @@ export function prepareLedgerPosting(
           : `cash:${input.portfolioId}:${input.currencyCode}`,
       cashEffectDecimal: effect,
       grossAmountDecimal,
-      sourceReference: input.sourceReference ?? input.idempotencyKey,
+      idempotencyKey: input.idempotencyKey,
+      sourceReference: input.sourceReference ?? null,
       calculationVersion: input.calculationVersion ?? 1,
     },
   };

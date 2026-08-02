@@ -186,6 +186,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "transactions_one_reversal_unique",
     "transactions_one_supersession_unique",
     "transactions_owner_ledger_idx",
+    "transactions_owner_portfolio_idempotency_unique",
     "transactions_portfolio_source_reference_unique",
     "transactions_security_trade_idx",
   ]);
