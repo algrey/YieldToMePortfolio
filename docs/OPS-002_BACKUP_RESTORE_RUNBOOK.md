@@ -98,14 +98,27 @@ the operator workstation policy.
    ```
 
 4. Apply the checked-in migrations to a fresh local SQLite database and compare
-   the restored SQL schema against them. The verifier also checks SQLite
-   integrity, foreign keys, owner aggregates, required representative tables,
-   and application-level portfolio/transaction/snapshot/calculation ownership.
+   the restored SQL schema against them. First create a redacted baseline from
+   the decrypted export, then require the restored export to match its schema,
+   row hashes, and ownership counts. The verifier also checks SQLite integrity,
+   foreign keys, required representative tables, and application-level
+   portfolio/transaction/snapshot/calculation ownership.
 
    ```sh
+   SOURCE_EVIDENCE="$WORK_DIR/source-evidence.json"
+   node --experimental-strip-types scripts/ops-002-restore-drill.ts \
+     --input "$WORK_DIR/restore.sql" \
+     --output "$SOURCE_EVIDENCE" \
+     --require-table portfolios \
+     --require-table transactions \
+     --require-table portfolio_daily_snapshots \
+     --require-table calculation_runs \
+     --require-table audit_events
+
    node --experimental-strip-types scripts/ops-002-restore-drill.ts \
      --input "$RESTORED_EXPORT" \
      --output "$WORK_DIR/restore-evidence.json" \
+     --expected-evidence "$SOURCE_EVIDENCE" \
      --require-table portfolios \
      --require-table transactions \
      --require-table portfolio_daily_snapshots \

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { access, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, chmod, readFile, readdir, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
@@ -119,10 +119,11 @@ function tableEvidence(
 ): TableEvidence {
   const columns = tableColumns(database, tableName);
   const rows = database
-    .prepare(`SELECT * FROM ${quoteIdentifier(tableName)} ORDER BY rowid`)
+    .prepare(`SELECT * FROM ${quoteIdentifier(tableName)}`)
     .all() as Array<Record<string, unknown>>;
   const serializedRows = rows
     .map((row) => canonicalRow(columns, row))
+    .sort()
     .join("\n");
   return {
     rowCount: rows.length,
@@ -365,6 +366,7 @@ export async function verifyRestoredDatabase(
   const actualTables = tableNames(database);
   const expectedTables = tableNames(expectedSchema);
   const errors: string[] = [];
+  const expectedSchemaSha256 = schemaSha256(expectedSchema);
 
   const missingTables = expectedTables.filter(
     (tableName) => !actualTables.includes(tableName),
@@ -396,6 +398,10 @@ export async function verifyRestoredDatabase(
   }
   if (integrity.length !== 1 || integrity[0] !== "ok") {
     errors.push("sqlite integrity_check did not return ok");
+  }
+  const actualSchemaSha256 = schemaSha256(database);
+  if (actualSchemaSha256 !== expectedSchemaSha256) {
+    errors.push("schema checksum differs from checked-in migrations");
   }
 
   const tables = Object.fromEntries(
@@ -445,7 +451,7 @@ export async function verifyRestoredDatabase(
     foreignKeysEnabled,
     integrityCheck:
       integrity.length === 1 && integrity[0] === "ok" ? "ok" : "failed",
-    schemaSha256: schemaSha256(database),
+    schemaSha256: actualSchemaSha256,
     tables,
     ownershipCounts: ownership,
     representativeTables,
@@ -536,6 +542,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)) {
       `${JSON.stringify(result.evidence, null, 2)}\n`,
       { mode: 0o600 },
     );
+    await chmod(args.outputPath, 0o600);
   }
 
   if (!result.ok) {

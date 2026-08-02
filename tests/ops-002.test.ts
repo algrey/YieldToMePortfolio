@@ -92,10 +92,8 @@ async function createSqliteCopy(
   const source = new DatabaseSync(":memory:");
   source.exec(await readFile(sqlPath, "utf8"));
   const sqlitePath = join(directory, "restored.sqlite");
-  const serialized = (
-    source as DatabaseSync & { serialize: () => Uint8Array }
-  ).serialize();
-  await writeFile(sqlitePath, serialized);
+  const escapedPath = sqlitePath.replaceAll("'", "''");
+  source.exec(`VACUUM INTO '${escapedPath}'`);
   source.close();
   return sqlitePath;
 }
@@ -170,10 +168,6 @@ test("matches restored SQLite evidence and rejects a tampered restore", async ()
     tampered.exec(
       "UPDATE transactions SET gross_amount_decimal = '999.00' WHERE id = 'transaction-a'",
     );
-    const serialized = (
-      tampered as DatabaseSync & { serialize: () => Uint8Array }
-    ).serialize();
-    await writeFile(restoredPath, serialized);
     tampered.close();
 
     const rejected = await verifyRestoredDatabase(restoredPath, {
@@ -190,6 +184,32 @@ test("matches restored SQLite evidence and rejects a tampered restore", async ()
     if (rejected.ok) return;
     assert.equal(
       rejected.errors.some((error) => error.includes("transactions")),
+      true,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects a restore whose table schema differs from the migrations", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "yieldtome-ops-002-"));
+  try {
+    const sourcePath = await createSqlFixture(directory);
+    const restoredPath = await createSqliteCopy(sourcePath, directory);
+    const tampered = new DatabaseSync(restoredPath);
+    tampered.exec("ALTER TABLE transactions ADD COLUMN unexpected TEXT");
+    tampered.close();
+
+    const result = await verifyRestoredDatabase(restoredPath, {
+      migrationDirectory: new URL("../drizzle", import.meta.url).pathname,
+      requiredTables: ["portfolios", "transactions"],
+    });
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(
+      result.errors.includes(
+        "schema checksum differs from checked-in migrations",
+      ),
       true,
     );
   } finally {
