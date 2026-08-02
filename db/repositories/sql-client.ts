@@ -5,6 +5,15 @@ export type SqlRunResult = {
   lastInsertRowId: number;
 };
 
+export type SqlStatement = {
+  sql: string;
+  params?: readonly unknown[];
+};
+
+export type SqlBatchResult = SqlRunResult & {
+  results: Array<Record<string, unknown>>;
+};
+
 export type SqlClient = {
   all<T extends Record<string, unknown>>(
     sql: string,
@@ -15,6 +24,7 @@ export type SqlClient = {
     params?: readonly unknown[],
   ): Promise<T | undefined>;
   run(sql: string, params?: readonly unknown[]): Promise<SqlRunResult>;
+  batch?(statements: readonly SqlStatement[]): Promise<SqlBatchResult[]>;
 };
 
 function executeAll<T extends Record<string, unknown>>(
@@ -68,6 +78,27 @@ export function createSqliteSqlClient(database: DatabaseSync): SqlClient {
       params: readonly unknown[] = [],
     ): Promise<SqlRunResult> {
       return executeRun(database, sql, params);
+    },
+    async batch(
+      statements: readonly SqlStatement[],
+    ): Promise<SqlBatchResult[]> {
+      database.exec("BEGIN IMMEDIATE TRANSACTION");
+      try {
+        const results = statements.map((statement) => ({
+          results: executeAll<Record<string, unknown>>(
+            database,
+            statement.sql,
+            statement.params ?? [],
+          ),
+          changes: 0,
+          lastInsertRowId: 0,
+        }));
+        database.exec("COMMIT");
+        return results;
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
     },
   };
 }

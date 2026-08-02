@@ -79,6 +79,7 @@ async function withTransaction<T>(
   client: SqlClient,
   operation: () => Promise<T>,
 ): Promise<T> {
+  if (client.batch) return await operation();
   await client.run("BEGIN IMMEDIATE TRANSACTION");
   try {
     const result = await operation();
@@ -134,18 +135,27 @@ export function createIdentityLifecycleService(
               : { ok: false, reason: "user-not-active" };
           }
 
-          const updated = await repository.touch(existing, email, now());
-          await audit.append({
-            actorUserId: updated.userId,
-            targetOwnerUserId: updated.userId,
+          const authenticatedAt = now();
+          const auditInput = {
+            actorUserId: existing.userId,
+            targetOwnerUserId: existing.userId,
             action: "auth.login",
             targetType: "user_identity",
-            targetId: updated.identityId,
+            targetId: existing.identityId,
             requestId,
-            result: "success",
+            result: "success" as const,
             metadata: { provisioned: false },
-            occurredAt: now(),
-          });
+            occurredAt: authenticatedAt,
+          };
+          const updated = client.batch
+            ? await repository.touchWithAudit(
+                existing,
+                email,
+                authenticatedAt,
+                auditInput,
+              )
+            : await repository.touch(existing, email, authenticatedAt);
+          if (!client.batch) await audit.append(auditInput);
           return {
             ok: true,
             user: toInternalUser(updated),
@@ -157,29 +167,48 @@ export function createIdentityLifecycleService(
           return { ok: false, reason: "jit-disabled" };
         }
 
-        const provisioned = await repository.provision({
+        const provisionInput = {
           principal: { ...principal, email },
           userStatus: provisioning,
           defaultHomeCurrencyCode,
           defaultTimezone,
           now: now(),
-        });
+        };
+        const provisionAuditInput = {
+          actorUserId: "",
+          targetOwnerUserId: "",
+          action: "auth.provision" as const,
+          targetType: "user_identity",
+          targetId: "",
+          requestId,
+          result: "success" as const,
+          metadata: { provisioned: true },
+          occurredAt: now(),
+        };
+        const provisioned = client.batch
+          ? await repository.provisionWithAudit(
+              provisionInput,
+              provisionAuditInput,
+            )
+          : await repository.provision(provisionInput);
 
         if (provisioned.userStatus !== "active") {
           return { ok: false, reason: "provisioning-pending" };
         }
 
-        await audit.append({
-          actorUserId: provisioned.userId,
-          targetOwnerUserId: provisioned.userId,
-          action: "auth.provision",
-          targetType: "user_identity",
-          targetId: provisioned.identityId,
-          requestId,
-          result: "success",
-          metadata: { provisioned: true },
-          occurredAt: now(),
-        });
+        if (!client.batch) {
+          await audit.append({
+            actorUserId: provisioned.userId,
+            targetOwnerUserId: provisioned.userId,
+            action: "auth.provision",
+            targetType: "user_identity",
+            targetId: provisioned.identityId,
+            requestId,
+            result: "success",
+            metadata: { provisioned: true },
+            occurredAt: now(),
+          });
+        }
 
         return {
           ok: true,

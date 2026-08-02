@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { redactMetadata } from "../../domain/observability/redaction.ts";
-import type { SqlClient } from "./sql-client.ts";
+import type { SqlClient, SqlStatement } from "./sql-client.ts";
 
 export type AuditResult = "success" | "failure" | "denied";
 
@@ -22,6 +22,51 @@ export type AuditEventRecord = AppendAuditEventInput & {
   metadataJson: string;
   occurredAt: string;
 };
+
+export function createAuditInsertStatement(
+  input: AppendAuditEventInput,
+  now: () => string = () => new Date().toISOString(),
+): SqlStatement {
+  const id = input.id ?? randomUUID();
+  const occurredAt = input.occurredAt ?? now();
+  const metadataJson = JSON.stringify(redactMetadata(input.metadata ?? {}));
+  return {
+    sql: `
+      INSERT INTO audit_events (
+        id, actor_user_id, target_owner_user_id, action, target_type,
+        target_id, request_id, result, metadata_json, occurred_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    params: [
+      id,
+      input.actorUserId,
+      input.targetOwnerUserId,
+      input.action,
+      input.targetType,
+      input.targetId,
+      input.requestId,
+      input.result,
+      metadataJson,
+      occurredAt,
+    ],
+  };
+}
+
+export function createConditionalAuditInsertStatement(
+  input: AppendAuditEventInput,
+  condition: string,
+  conditionParams: readonly unknown[],
+  now: () => string = () => new Date().toISOString(),
+): SqlStatement {
+  const statement = createAuditInsertStatement(input, now);
+  return {
+    sql: statement.sql.replace(
+      /VALUES \(\?, \?, \?, \?, \?, \?, \?, \?, \?, \?\)/,
+      "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE " + condition,
+    ),
+    params: [...(statement.params ?? []), ...conditionParams],
+  };
+}
 
 function createRecord(row: Record<string, unknown>): AuditEventRecord {
   return {
@@ -48,30 +93,11 @@ export function createAuditRepository(
 ) {
   return {
     async append(input: AppendAuditEventInput): Promise<AuditEventRecord> {
-      const id = input.id ?? randomUUID();
-      const occurredAt = input.occurredAt ?? now();
-      const metadataJson = JSON.stringify(redactMetadata(input.metadata ?? {}));
-
-      await client.run(
-        `
-          INSERT INTO audit_events (
-            id, actor_user_id, target_owner_user_id, action, target_type,
-            target_id, request_id, result, metadata_json, occurred_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-        [
-          id,
-          input.actorUserId,
-          input.targetOwnerUserId,
-          input.action,
-          input.targetType,
-          input.targetId,
-          input.requestId,
-          input.result,
-          metadataJson,
-          occurredAt,
-        ],
-      );
+      const statement = createAuditInsertStatement(input, now);
+      const id = String(statement.params?.[0]);
+      const occurredAt = String(statement.params?.[9]);
+      const metadataJson = String(statement.params?.[8]);
+      await client.run(statement.sql, statement.params);
 
       return {
         ...input,

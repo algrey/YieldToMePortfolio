@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { type SqlClient } from "./sql-client.ts";
+import { type SqlClient, type SqlStatement } from "./sql-client.ts";
 import { createAuditRepository } from "./audit.ts";
 
 export type PortfolioStatus = "active" | "archived";
@@ -218,6 +218,39 @@ async function runMutation<T extends Record<string, unknown>>(
   return await resolveMutationFailure(client, table, userId, resourceId);
 }
 
+function auditMutationStatement(input: {
+  actorUserId: string;
+  action: string;
+  targetType: string;
+  targetId: string;
+  requestId: string;
+  occurredAt: string;
+  condition: string;
+  conditionParams: readonly unknown[];
+}): SqlStatement {
+  return {
+    sql: `
+      INSERT INTO audit_events (
+        id, actor_user_id, target_owner_user_id, action, target_type,
+        target_id, request_id, result, metadata_json, occurred_at
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?, 'success', '{}', ?
+      WHERE ${input.condition}
+    `,
+    params: [
+      randomUUID(),
+      input.actorUserId,
+      input.actorUserId,
+      input.action,
+      input.targetType,
+      input.targetId,
+      input.requestId,
+      input.occurredAt,
+      ...input.conditionParams,
+    ],
+  };
+}
+
 export function createOwnedPortfolioRepository(
   client: SqlClient,
   now?: () => string,
@@ -288,9 +321,54 @@ export function createOwnedPortfolioRepository(
       userId: string,
       input: CreatePortfolioInput,
     ): Promise<OwnedPortfolioRecord | null> {
+      const createdAt = nowIso(now);
+      const portfolioId = input.id ?? randomUUID();
+      if (client.batch) {
+        const rows = await client.batch([
+          {
+            sql: `
+              INSERT INTO portfolios (
+                id, user_id, code, name, base_currency_code, timezone,
+                accounting_method, history_complete_from, status,
+                created_at, updated_at, version
+              )
+              SELECT
+                ?, us.user_id, ?, ?, us.home_currency_code, ?, ?, ?, 'active',
+                ?, ?, 1
+              FROM user_settings AS us
+              WHERE us.user_id = ?
+              RETURNING id, user_id, code, name, base_currency_code, timezone,
+                accounting_method, history_complete_from, status, created_at,
+                updated_at, version, base_currency_code AS home_currency_code
+            `,
+            params: [
+              portfolioId,
+              input.code,
+              input.name,
+              input.timezone,
+              input.accountingMethod ?? "fifo",
+              input.historyCompleteFrom ?? null,
+              createdAt,
+              createdAt,
+              userId,
+            ],
+          },
+          auditMutationStatement({
+            actorUserId: userId,
+            action: "portfolio.create",
+            targetType: "portfolio",
+            targetId: portfolioId,
+            requestId,
+            occurredAt: createdAt,
+            condition:
+              "EXISTS (SELECT 1 FROM portfolios WHERE id = ? AND user_id = ?)",
+            conditionParams: [portfolioId, userId],
+          }),
+        ]);
+        const row = rows[0]?.results[0];
+        return row ? createPortfolioRecord(row) : null;
+      }
       return await withTransaction(client, async () => {
-        const createdAt = nowIso(now);
-        const portfolioId = input.id ?? randomUUID();
         const rows = await client.all<Record<string, unknown>>(
           `
           INSERT INTO portfolios (
@@ -334,8 +412,54 @@ export function createOwnedPortfolioRepository(
       portfolioId: string,
       input: UpdatePortfolioInput,
     ): Promise<PortfolioMutationResult> {
+      const updatedAt = nowIso(now);
+      const updateStatement: SqlStatement = {
+        sql: `
+          UPDATE portfolios
+          SET name = COALESCE(?, name),
+              timezone = COALESCE(?, timezone),
+              updated_at = ?,
+              version = version + 1
+          WHERE id = ? AND user_id = ? AND version = ?
+          RETURNING id, user_id, code, name, base_currency_code, timezone,
+            accounting_method, history_complete_from, status, created_at,
+            updated_at, version,
+            base_currency_code AS home_currency_code
+        `,
+        params: [
+          input.name ?? null,
+          input.timezone ?? null,
+          updatedAt,
+          portfolioId,
+          userId,
+          input.expectedVersion,
+        ],
+      };
+      if (client.batch) {
+        const rows = await client.batch([
+          updateStatement,
+          auditMutationStatement({
+            actorUserId: userId,
+            action: "portfolio.rename",
+            targetType: "portfolio",
+            targetId: portfolioId,
+            requestId,
+            occurredAt: updatedAt,
+            condition:
+              "EXISTS (SELECT 1 FROM portfolios WHERE id = ? AND user_id = ? AND version = ?)",
+            conditionParams: [portfolioId, userId, input.expectedVersion + 1],
+          }),
+        ]);
+        const row = rows[0]?.results[0];
+        if (row) return { ok: true, portfolio: createPortfolioRecord(row) };
+        return await resolveMutationFailure(
+          client,
+          "portfolios",
+          userId,
+          portfolioId,
+        );
+      }
       return await withTransaction(client, async () => {
-        const updatedAt = nowIso(now);
         const result = await runMutation<Record<string, unknown>>(
           client,
           "portfolios",
@@ -385,8 +509,43 @@ export function createOwnedPortfolioRepository(
       portfolioId: string,
       input: ArchiveRestorePortfolioInput,
     ): Promise<PortfolioMutationResult> {
+      const updatedAt = nowIso(now);
+      const updateStatement: SqlStatement = {
+        sql: `
+          UPDATE portfolios
+          SET status = 'archived', updated_at = ?, version = version + 1
+          WHERE id = ? AND user_id = ? AND version = ?
+          RETURNING id, user_id, code, name, base_currency_code, timezone,
+            accounting_method, history_complete_from, status, created_at,
+            updated_at, version, base_currency_code AS home_currency_code
+        `,
+        params: [updatedAt, portfolioId, userId, input.expectedVersion],
+      };
+      if (client.batch) {
+        const rows = await client.batch([
+          updateStatement,
+          auditMutationStatement({
+            actorUserId: userId,
+            action: "portfolio.archive",
+            targetType: "portfolio",
+            targetId: portfolioId,
+            requestId,
+            occurredAt: updatedAt,
+            condition:
+              "EXISTS (SELECT 1 FROM portfolios WHERE id = ? AND user_id = ? AND version = ?)",
+            conditionParams: [portfolioId, userId, input.expectedVersion + 1],
+          }),
+        ]);
+        const row = rows[0]?.results[0];
+        if (row) return { ok: true, portfolio: createPortfolioRecord(row) };
+        return await resolveMutationFailure(
+          client,
+          "portfolios",
+          userId,
+          portfolioId,
+        );
+      }
       return await withTransaction(client, async () => {
-        const updatedAt = nowIso(now);
         const result = await runMutation<Record<string, unknown>>(
           client,
           "portfolios",
@@ -428,8 +587,43 @@ export function createOwnedPortfolioRepository(
       portfolioId: string,
       input: ArchiveRestorePortfolioInput,
     ): Promise<PortfolioMutationResult> {
+      const updatedAt = nowIso(now);
+      const updateStatement: SqlStatement = {
+        sql: `
+          UPDATE portfolios
+          SET status = 'active', updated_at = ?, version = version + 1
+          WHERE id = ? AND user_id = ? AND version = ?
+          RETURNING id, user_id, code, name, base_currency_code, timezone,
+            accounting_method, history_complete_from, status, created_at,
+            updated_at, version, base_currency_code AS home_currency_code
+        `,
+        params: [updatedAt, portfolioId, userId, input.expectedVersion],
+      };
+      if (client.batch) {
+        const rows = await client.batch([
+          updateStatement,
+          auditMutationStatement({
+            actorUserId: userId,
+            action: "portfolio.restore",
+            targetType: "portfolio",
+            targetId: portfolioId,
+            requestId,
+            occurredAt: updatedAt,
+            condition:
+              "EXISTS (SELECT 1 FROM portfolios WHERE id = ? AND user_id = ? AND version = ?)",
+            conditionParams: [portfolioId, userId, input.expectedVersion + 1],
+          }),
+        ]);
+        const row = rows[0]?.results[0];
+        if (row) return { ok: true, portfolio: createPortfolioRecord(row) };
+        return await resolveMutationFailure(
+          client,
+          "portfolios",
+          userId,
+          portfolioId,
+        );
+      }
       return await withTransaction(client, async () => {
-        const updatedAt = nowIso(now);
         const result = await runMutation<Record<string, unknown>>(
           client,
           "portfolios",
@@ -496,18 +690,74 @@ export function createOwnedUserSettingsRepository(
       userId: string,
       input: HomeCurrencyChangeInput,
     ): Promise<HomeCurrencyChangeResult> {
-      return await withTransaction(client, async () => {
-        const updatedAt = nowIso(now);
-        const currentSettings = await client.get<{
-          home_currency_code: string;
-        }>(
-          "SELECT home_currency_code FROM user_settings WHERE user_id = ? LIMIT 1",
+      const updatedAt = nowIso(now);
+      const currentSettings = await client.get<{
+        home_currency_code: string;
+      }>(
+        "SELECT home_currency_code FROM user_settings WHERE user_id = ? LIMIT 1",
+        [userId],
+      );
+      if (!currentSettings) return { ok: false, reason: "not_found" };
+
+      const updateStatement: SqlStatement = {
+        sql: `
+          UPDATE user_settings
+          SET home_currency_code = ?, updated_at = ?, version = version + 1
+          WHERE user_id = ? AND version = ?
+          RETURNING user_id, home_currency_code, timezone,
+            default_holding_currency_view, created_at, updated_at, version
+        `,
+        params: [
+          input.homeCurrencyCode,
+          updatedAt,
+          userId,
+          input.expectedVersion,
+        ],
+      };
+      if (client.batch) {
+        const rows = await client.batch([
+          updateStatement,
+          auditMutationStatement({
+            actorUserId: userId,
+            action: "settings.home_currency_change",
+            targetType: "user_settings",
+            targetId: userId,
+            requestId,
+            occurredAt: updatedAt,
+            condition:
+              "EXISTS (SELECT 1 FROM user_settings WHERE user_id = ? AND version = ?)",
+            conditionParams: [userId, input.expectedVersion + 1],
+          }),
+        ]);
+        const row = rows[0]?.results[0];
+        if (!row) {
+          return await resolveMutationFailure(
+            client,
+            "user_settings",
+            userId,
+            userId,
+          );
+        }
+        const settings = createUserSettingsRecord(row);
+        const affectedPortfolioRows = await client.all<{ id: string }>(
+          "SELECT id FROM portfolios WHERE user_id = ? ORDER BY updated_at DESC, id ASC",
           [userId],
         );
-        if (!currentSettings) {
-          return { ok: false, reason: "not_found" };
-        }
-
+        return {
+          ok: true,
+          settings,
+          rebaseRequest: {
+            requestId: randomUUID(),
+            userId,
+            previousHomeCurrencyCode: currentSettings.home_currency_code,
+            nextHomeCurrencyCode: input.homeCurrencyCode,
+            affectedPortfolioIds: affectedPortfolioRows.map((item) => item.id),
+            portfolioCount: affectedPortfolioRows.length,
+            requestedAt: updatedAt,
+          },
+        };
+      }
+      return await withTransaction(client, async () => {
         const mutation = await runMutation<Record<string, unknown>>(
           client,
           "user_settings",
@@ -571,8 +821,43 @@ export function createOwnedUserSettingsRepository(
       userId: string,
       input: HoldingCurrencyViewChangeInput,
     ): Promise<HoldingCurrencyViewChangeResult> {
+      const updatedAt = nowIso(now);
+      const updateStatement: SqlStatement = {
+        sql: `
+          UPDATE user_settings
+          SET default_holding_currency_view = ?, updated_at = ?, version = version + 1
+          WHERE user_id = ? AND version = ?
+          RETURNING user_id, home_currency_code, timezone,
+            default_holding_currency_view, created_at, updated_at, version
+        `,
+        params: [input.view, updatedAt, userId, input.expectedVersion],
+      };
+      if (client.batch) {
+        const rows = await client.batch([
+          updateStatement,
+          auditMutationStatement({
+            actorUserId: userId,
+            action: "settings.holding_currency_view_change",
+            targetType: "user_settings",
+            targetId: userId,
+            requestId,
+            occurredAt: updatedAt,
+            condition:
+              "EXISTS (SELECT 1 FROM user_settings WHERE user_id = ? AND version = ?)",
+            conditionParams: [userId, input.expectedVersion + 1],
+          }),
+        ]);
+        const row = rows[0]?.results[0];
+        return row
+          ? { ok: true, settings: createUserSettingsRecord(row) }
+          : await resolveMutationFailure(
+              client,
+              "user_settings",
+              userId,
+              userId,
+            );
+      }
       return await withTransaction(client, async () => {
-        const updatedAt = nowIso(now);
         const mutation = await runMutation<Record<string, unknown>>(
           client,
           "user_settings",

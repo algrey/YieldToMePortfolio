@@ -321,7 +321,7 @@ Status: DONE on 2026-07-29.
 
 ### OPS-001 — Audit and redacted observability foundation
 
-Status: IN PROGRESS; review finding on 2026-07-30.
+Status: DONE on 2026-08-02.
 
 - Objective: make material mutations attributable and operational failures diagnosable without leaking financial data.
 - Dependencies: DB-001A, AUTH-002.
@@ -336,6 +336,7 @@ Status: IN PROGRESS; review finding on 2026-07-30.
 - Review finding: portfolio and home-currency mutations currently commit their primary write before appending the audit event. Implement a D1-batched atomic write (or an explicitly documented durable failure policy) and fault-injection tests so an audit failure cannot produce an ambiguous mutation outcome.
 - Completion: Wrapped portfolio lifecycle, home-currency rebase, and identity touch/provision mutations with atomic primary-write-plus-audit transactions. Audit append failures now roll back the mutation; fault-injection tests cover portfolio rename and home-currency change while existing redaction, append-only, ownership, and request-correlation coverage remains green.
 - Review finding: the atomic helpers use SQLite `BEGIN IMMEDIATE`/`COMMIT`/`ROLLBACK` through the generic statement client, but production D1 requires `D1Database.batch()` for atomic units. Replace the transaction abstraction with a D1 batch-capable client (and SQLite test equivalent), then add production-shaped batch rollback/failure tests before marking this task complete.
+- Review completion: Added an optional typed `SqlClient.batch()` contract backed by `D1Database.batch()` in Workers and transaction-wrapped batches in SQLite tests. Portfolio lifecycle, home-currency, display-view, and identity provision/login audit units now use the batch path; a D1-shaped injected audit failure proves the primary portfolio write rolls back atomically.
 
 ## Ledger and import
 

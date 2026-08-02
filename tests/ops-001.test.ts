@@ -275,3 +275,50 @@ test("home-currency mutation rolls back when its audit append fails", async () =
     0,
   );
 });
+
+test("D1-shaped audit batches roll back the primary write on batch failure", async () => {
+  const database = await createMigratedDatabase();
+  database.exec(`
+    INSERT INTO user_settings (
+      user_id, home_currency_code, timezone, default_holding_currency_view,
+      created_at, updated_at, version
+    ) VALUES (
+      'user-a', 'AUD', 'Australia/Sydney', 'native',
+      '2026-07-30T00:00:00Z', '2026-07-30T00:00:00Z', 1
+    );
+  `);
+  const base = createSqliteSqlClient(database);
+  const batchFailingClient = {
+    ...base,
+    async batch(statements: Parameters<NonNullable<typeof base.batch>>[0]) {
+      return await base.batch!([
+        statements[0]!,
+        {
+          sql: "INSERT INTO audit_events (invalid_column) VALUES (?)",
+          params: ["x"],
+        },
+      ]);
+    },
+  };
+  const repository = createOwnedPortfolioRepository(
+    batchFailingClient,
+    () => "2026-07-30T00:10:00Z",
+    { requestId: "request-batch-fault" },
+  );
+
+  await assert.rejects(
+    repository.rename("user-a", "portfolio-a", {
+      expectedVersion: 1,
+      name: "Changed name",
+    }),
+  );
+  const row = database
+    .prepare("SELECT name, version FROM portfolios WHERE id = 'portfolio-a'")
+    .get() as { name: string; version: number };
+  assert.equal(row.name, "Alice");
+  assert.equal(row.version, 1);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM audit_events").get()?.count,
+    0,
+  );
+});

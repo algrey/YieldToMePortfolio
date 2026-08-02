@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { VerifiedAccessPrincipal } from "../../domain/auth/access-jwt.ts";
 import type { SqlClient } from "./sql-client.ts";
+import {
+  createConditionalAuditInsertStatement,
+  type AppendAuditEventInput,
+} from "./audit.ts";
 
 export type InternalUserStatus =
   "pending" | "active" | "disabled" | "deletion_pending" | "purged";
@@ -170,6 +174,90 @@ export function createIdentityRepository(client: SqlClient) {
       return record;
     },
 
+    async provisionWithAudit(
+      input: ProvisionInternalIdentityInput,
+      auditInput: AppendAuditEventInput,
+    ): Promise<InternalIdentityRecord> {
+      if (!client.batch) {
+        const record = await this.provision(input);
+        return record;
+      }
+      const userId = randomUUID();
+      const identityId = randomUUID();
+      const email = input.principal.email;
+      const resolvedAuditInput = {
+        ...auditInput,
+        actorUserId: userId,
+        targetOwnerUserId: userId,
+        targetId: identityId,
+      };
+      await client.batch([
+        {
+          sql: `
+            INSERT INTO users (
+              id, status, display_name, primary_email, locale, timezone,
+              terms_accepted_at, last_seen_at, created_at, updated_at, version
+            ) VALUES (?, ?, NULL, ?, 'en-AU', ?, NULL, ?, ?, ?, 1)
+          `,
+          params: [
+            userId,
+            input.userStatus,
+            email,
+            input.defaultTimezone,
+            input.now,
+            input.now,
+            input.now,
+          ],
+        },
+        {
+          sql: `
+            INSERT INTO user_settings (
+              user_id, home_currency_code, timezone,
+              default_holding_currency_view, created_at, updated_at, version
+            ) VALUES (?, ?, ?, 'native', ?, ?, 1)
+          `,
+          params: [
+            userId,
+            input.defaultHomeCurrencyCode,
+            input.defaultTimezone,
+            input.now,
+            input.now,
+          ],
+        },
+        {
+          sql: `
+            INSERT INTO user_identities (
+              id, user_id, provider, issuer, subject, email_at_link, status,
+              last_authenticated_at, created_at, updated_at, version
+            ) VALUES (?, ?, 'cloudflare_access', ?, ?, ?, 'active', ?, ?, ?, 1)
+          `,
+          params: [
+            identityId,
+            userId,
+            input.principal.issuer,
+            input.principal.subject,
+            email,
+            input.now,
+            input.now,
+            input.now,
+          ],
+        },
+        createConditionalAuditInsertStatement(
+          resolvedAuditInput,
+          "EXISTS (SELECT 1 FROM user_identities WHERE id = ? AND user_id = ?)",
+          [identityId, userId],
+        ),
+      ]);
+      const record = await this.findAccessIdentity(
+        input.principal.issuer,
+        input.principal.subject,
+      );
+      if (record === null) {
+        throw new Error("Provisioned Access identity could not be reloaded.");
+      }
+      return record;
+    },
+
     async touch(
       record: InternalIdentityRecord,
       email: string,
@@ -200,6 +288,52 @@ export function createIdentityRepository(client: SqlClient) {
         throw new Error("Authenticated Access identity could not be reloaded.");
       }
 
+      return updated;
+    },
+
+    async touchWithAudit(
+      record: InternalIdentityRecord,
+      email: string,
+      authenticatedAt: string,
+      auditInput: AppendAuditEventInput,
+    ): Promise<InternalIdentityRecord> {
+      if (!client.batch)
+        return await this.touch(record, email, authenticatedAt);
+      await client.batch([
+        {
+          sql: `
+            UPDATE users
+            SET primary_email = ?, last_seen_at = ?, updated_at = ?, version = version + 1
+            WHERE id = ? AND status = 'active'
+          `,
+          params: [email, authenticatedAt, authenticatedAt, record.userId],
+        },
+        {
+          sql: `
+            UPDATE user_identities
+            SET last_authenticated_at = ?, updated_at = ?, version = version + 1
+            WHERE id = ? AND user_id = ? AND status = 'active'
+          `,
+          params: [
+            authenticatedAt,
+            authenticatedAt,
+            record.identityId,
+            record.userId,
+          ],
+        },
+        createConditionalAuditInsertStatement(
+          auditInput,
+          "EXISTS (SELECT 1 FROM user_identities WHERE id = ? AND user_id = ? AND status = 'active')",
+          [record.identityId, record.userId],
+        ),
+      ]);
+      const updated = await this.findAccessIdentity(
+        record.issuer,
+        record.subject,
+      );
+      if (updated === null) {
+        throw new Error("Authenticated Access identity could not be reloaded.");
+      }
       return updated;
     },
   };
