@@ -92,6 +92,8 @@ Use deterministic fixtures until the free-source adapter is implemented. Provide
 - **EODHD or another provider** only if measured capability, reliability, or cost warrants it;
 - a later **broker quote adapter** where the connected user’s market-data entitlement allows display.
 
+The initial FX adapter is deliberately limited to `AUD/USD` and `USD/AUD` through Yahoo's `AUDUSD=X` pair. It preserves direct or decimal-inverted direction evidence, rejects zero/malformed/future observations, and returns typed unavailable results for unsupported pairs; identity conversion remains local and no broad FX universe is backfilled.
+
 The product remains provider-neutral even though Yahoo-compatible best-effort data is the first adapter.
 
 ## 6. Rejected or deferred alternatives

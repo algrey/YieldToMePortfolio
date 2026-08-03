@@ -89,3 +89,19 @@ export const searchFixture = {
     },
   ],
 };
+
+export const australianUsdFxFixture = {
+  chart: {
+    result: [
+      {
+        meta: {
+          currency: "USD",
+          exchangeTimezoneName: "UTC",
+        },
+        timestamp: [unix("2026-07-29T00:00:00Z"), unix("2026-07-30T00:00:00Z")],
+        indicators: { quote: [{ close: [0.66, 0.67] }] },
+      },
+    ],
+    error: null,
+  },
+};

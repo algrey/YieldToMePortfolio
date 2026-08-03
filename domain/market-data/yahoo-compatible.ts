@@ -1,5 +1,7 @@
 import type {
   DailyPriceRequest,
+  FxObservation,
+  FxRequest,
   LatestRequest,
   MarketDataError,
   MarketDataProvider,
@@ -10,7 +12,10 @@ import type {
   SecurityCandidate,
   SecurityQuery,
 } from "./contracts.ts";
-import { normalizePriceObservation } from "./normalize.ts";
+import {
+  normalizeFxObservation,
+  normalizePriceObservation,
+} from "./normalize.ts";
 
 type Fetcher = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -68,7 +73,7 @@ const CAPABILITIES: ProviderCapabilities = {
   intervals: ["eod", "delayed"],
   supportsRawPrices: true,
   supportsAdjustedPrices: false,
-  supportsFx: false,
+  supportsFx: true,
   supportsDividends: false,
   supportsSplits: false,
   supportsFundamentals: false,
@@ -80,6 +85,21 @@ const DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3;
 const DEFAULT_CIRCUIT_COOLDOWN_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 8_000;
 const DEFAULT_MAX_BACKOFF_MS = 2_000;
+
+const FX_PAIR_MAPPINGS = {
+  "AUD/USD": {
+    providerSymbol: "AUDUSD=X",
+    providerBaseCurrencyCode: "AUD",
+    providerQuoteCurrencyCode: "USD",
+    invert: false,
+  },
+  "USD/AUD": {
+    providerSymbol: "AUDUSD=X",
+    providerBaseCurrencyCode: "AUD",
+    providerQuoteCurrencyCode: "USD",
+    invert: true,
+  },
+} as const;
 
 class FetchTimeoutError extends Error {
   constructor() {
@@ -115,6 +135,54 @@ function positiveDecimal(value: unknown): string | null {
     /[1-9]/.test(normalized.replace(".", ""))
     ? normalized
     : null;
+}
+
+type Decimal = { coefficient: bigint; scale: number };
+
+function parseDecimal(value: string): Decimal | null {
+  const match = /^(0|[1-9]\d*)(\.\d+)?$/.exec(value);
+  if (!match) return null;
+  const fraction = match[2]?.slice(1) ?? "";
+  return {
+    coefficient: BigInt(`${match[1]}${fraction}`),
+    scale: fraction.length,
+  };
+}
+
+function powerOfTen(scale: number): bigint {
+  return 10n ** BigInt(scale);
+}
+
+function roundHalfEven(numerator: bigint, denominator: bigint): bigint {
+  const quotient = numerator / denominator;
+  const remainder = numerator % denominator;
+  const doubled = remainder * 2n;
+  return doubled > denominator ||
+    (doubled === denominator && quotient % 2n !== 0n)
+    ? quotient + 1n
+    : quotient;
+}
+
+function normalizeDecimal(value: Decimal): string {
+  let coefficient = value.coefficient;
+  let scale = value.scale;
+  while (scale > 0 && coefficient % 10n === 0n) {
+    coefficient /= 10n;
+    scale -= 1;
+  }
+  if (scale === 0) return coefficient.toString();
+  const digits = coefficient.toString().padStart(scale + 1, "0");
+  return `${digits.slice(0, -scale)}.${digits.slice(-scale)}`;
+}
+
+function invertDecimal(value: string, scale = 18): string | null {
+  const decimal = parseDecimal(value);
+  if (!decimal || decimal.coefficient <= 0n) return null;
+  const numerator = powerOfTen(scale + decimal.scale);
+  return normalizeDecimal({
+    coefficient: roundHalfEven(numerator, decimal.coefficient),
+    scale,
+  });
 }
 
 function nonNegativeInteger(value: unknown): number | null {
@@ -232,6 +300,10 @@ function requestKey(
     symbol,
     normalizeScopeKey(request.scope),
   ].join("|");
+}
+
+function fxPairKey(request: FxRequest): string {
+  return `${request.baseCurrencyCode.toUpperCase()}/${request.quoteCurrencyCode.toUpperCase()}`;
 }
 
 export function createYahooCompatibleProvider(
@@ -506,6 +578,66 @@ export function createYahooCompatibleProvider(
     return normalized;
   }
 
+  function normalizeChartFx(
+    request: FxRequest,
+    timestamp: unknown,
+    close: unknown,
+    metadata: {
+      currency: string;
+      timezone: string;
+      delayedMinutes: number | null;
+    },
+    mapping: (typeof FX_PAIR_MAPPINGS)[keyof typeof FX_PAIR_MAPPINGS],
+  ): MarketDataResult<FxObservation> {
+    const observedAt = isoFromUnixSeconds(timestamp);
+    const providerRateDecimal = positiveDecimal(close);
+    const marketDate = observedAt
+      ? marketDateFromInstant(observedAt, metadata.timezone)
+      : null;
+    if (
+      !observedAt ||
+      !providerRateDecimal ||
+      !marketDate ||
+      metadata.currency.toUpperCase() !== mapping.providerQuoteCurrencyCode
+    ) {
+      return error(
+        "invalid_response",
+        "Provider FX data has malformed direction, date, or rate.",
+        false,
+      );
+    }
+    const rateDecimal = mapping.invert
+      ? invertDecimal(providerRateDecimal)
+      : providerRateDecimal;
+    if (!rateDecimal) {
+      return error(
+        "invalid_response",
+        "Provider FX rate cannot be inverted.",
+        false,
+      );
+    }
+    return normalizeFxObservation(
+      {
+        interval: "eod",
+        observedAt,
+        marketDate,
+        baseCurrencyCode: request.baseCurrencyCode.toUpperCase(),
+        quoteCurrencyCode: request.quoteCurrencyCode.toUpperCase(),
+        rateDecimal,
+        quality: "observed",
+        delayedMinutes: metadata.delayedMinutes,
+        providerRevisionId: mapping.invert
+          ? `inverted:${mapping.providerBaseCurrencyCode}/${mapping.providerQuoteCurrencyCode}`
+          : `direct:${mapping.providerBaseCurrencyCode}/${mapping.providerQuoteCurrencyCode}`,
+      },
+      {
+        providerId,
+        scope: request.scope,
+        ingestedAt: now(),
+      } satisfies NormalizationContext,
+    );
+  }
+
   function staleFallback(
     key: string,
   ): MarketDataResult<PriceObservation> | null {
@@ -716,7 +848,99 @@ export function createYahooCompatibleProvider(
       return normalized;
     },
 
-    getFxRates: async () => unavailable("FX rates"),
+    async getFxRates(
+      request: FxRequest,
+    ): Promise<MarketDataResult<FxObservation[]>> {
+      const baseCurrencyCode = request.baseCurrencyCode.toUpperCase();
+      const quoteCurrencyCode = request.quoteCurrencyCode.toUpperCase();
+      if (baseCurrencyCode === quoteCurrencyCode) {
+        return { ok: true, value: [] };
+      }
+      const mapping =
+        FX_PAIR_MAPPINGS[fxPairKey(request) as keyof typeof FX_PAIR_MAPPINGS];
+      if (!mapping) {
+        return unavailable(`FX pair ${baseCurrencyCode}/${quoteCurrencyCode}`);
+      }
+      const from = Date.parse(`${request.from}T00:00:00Z`);
+      const to = Date.parse(`${request.to}T00:00:00Z`);
+      if (
+        !isMarketDate(request.from) ||
+        !isMarketDate(request.to) ||
+        !Number.isFinite(from) ||
+        !Number.isFinite(to) ||
+        to < from
+      ) {
+        return error("invalid_response", "FX date range is invalid.", false);
+      }
+      const response = await fetchJson(
+        chartUrl(mapping.providerSymbol, {
+          period1: String(Math.floor(from / 1000)),
+          period2: String(Math.floor(to / 1000) + 86_400),
+          interval: "1d",
+          events: "history",
+        }),
+      );
+      if (!response.ok) return response;
+      const chart = chartResult(response.value);
+      if (!chart.ok) return chart;
+      const metadata = chartContext(chart.value);
+      if (!metadata.ok) return metadata;
+      const timestamps = Array.isArray(chart.value.timestamp)
+        ? chart.value.timestamp
+        : null;
+      const quote = asRecord(chart.value.indicators.quote[0]);
+      const closes = quote?.close;
+      if (
+        !timestamps ||
+        !Array.isArray(closes) ||
+        timestamps.length !== closes.length
+      ) {
+        return error(
+          "invalid_response",
+          "Provider FX arrays are malformed.",
+          false,
+        );
+      }
+      const observations: FxObservation[] = [];
+      for (let index = 0; index < timestamps.length; index += 1) {
+        const timestamp = timestamps[index];
+        const close = closes[index];
+        if (close === null || close === undefined) continue;
+        const observedAt = isoFromUnixSeconds(timestamp);
+        const marketDate = observedAt
+          ? marketDateFromInstant(observedAt, metadata.value.timezone)
+          : null;
+        if (!observedAt || !marketDate) {
+          return error(
+            "invalid_response",
+            "Provider FX timestamp is malformed.",
+            false,
+          );
+        }
+        if (marketDate > request.to) {
+          return error(
+            "invalid_response",
+            "Provider FX response contains a future observation.",
+            false,
+          );
+        }
+        if (marketDate < request.from) continue;
+        const normalized = normalizeChartFx(
+          {
+            ...request,
+            baseCurrencyCode,
+            quoteCurrencyCode,
+          },
+          timestamp,
+          close,
+          metadata.value,
+          mapping,
+        );
+        if (!normalized.ok) return normalized;
+        observations.push(normalized.value);
+      }
+      return { ok: true, value: observations };
+    },
     getDividendEvents: async () => unavailable("Dividend events"),
     getSplitEvents: async () => unavailable("Split events"),
     getFundamentals: async () => unavailable("Fundamentals"),

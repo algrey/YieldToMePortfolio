@@ -600,7 +600,7 @@ Status: READY.
 
 ### MKT-004 — Yahoo-compatible FX adapter
 
-Status: READY.
+Status: DONE on 2026-08-03.
 
 - Objective: add only the directional daily FX capability required by owned foreign-currency holdings.
 - Dependencies: MKT-001, DB-003, MKT-002.
@@ -611,6 +611,7 @@ Status: READY.
 - Tests: direct/inverse/identity, weekend fallback inputs, malformed/zero, owner scope, throttle/schema change.
 - Risks: reversed rate direction or inconsistent pair timestamps.
 - Parallel safe: yes after shared HTTP client from MKT-002 stabilizes.
+- Completion note: Added the scoped Yahoo `AUDUSD=X` daily adapter for AUD/USD and USD/AUD, with exact decimal inversion evidence, identity/no-network handling, typed unsupported-pair results, strict malformed/zero/future rejection, and direct/inverse/owner-scope/throttle/schema/weekend-fallback coverage.
 
 ### MKT-005 — Corporate-action and dividend provider capability
 
