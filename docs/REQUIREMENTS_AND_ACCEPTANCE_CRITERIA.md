@@ -400,6 +400,7 @@ Acceptance:
 - Commit reconstructs the exact owner-scoped server preview and rejects changed parser, row, issue, mapping, portfolio, or security state before any ledger effect.
 - Each request processes at most one bounded atomic chunk; a retry resumes from the durable physical-row high-water without replaying a committed effect.
 - Validated row-scoped portfolio/security targets are persisted with their ledger effect, and finalization durably queues one rebuild per affected owned portfolio at its actual ledger high-water before the batch becomes committed.
+- Authenticated history reads expose rows, issues, mappings, and audit evidence through fixed-size owner-scoped pages. A reloaded `committing` batch shows its persisted high-water, committed/skipped/remaining counts, and original idempotency key so the owner can resume without presenting partial work as complete.
 
 ### IMP-005 — Correction and reversal
 

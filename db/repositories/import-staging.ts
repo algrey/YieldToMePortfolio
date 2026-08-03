@@ -62,7 +62,26 @@ export type ImportBatchRecord = {
 export const IMPORT_HISTORY_LIMITS = {
   defaultBatchLimit: 20,
   maxBatchLimit: 50,
+  detailPageSize: 50,
+  maxDetailPageSize: 100,
+  maxDetailOffset: 100_000,
 } as const;
+
+export type ImportHistoryPage<T> = {
+  items: T[];
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+  nextOffset: number | null;
+};
+
+export type ImportCommitProgressRecord = {
+  highWaterRow: number;
+  idempotencyKey: string | null;
+  committedRows: number;
+  skippedRows: number;
+  remainingRows: number;
+};
 
 export type ImportRowRecord = {
   id: string;
@@ -180,6 +199,34 @@ function parseJson<T>(value: string | null): T | null {
 
 function toJson(value: unknown): string {
   return JSON.stringify(value);
+}
+
+function validateHistoryPage(offset: number, limit: number): void {
+  if (
+    !Number.isInteger(offset) ||
+    offset < 0 ||
+    offset > IMPORT_HISTORY_LIMITS.maxDetailOffset ||
+    !Number.isInteger(limit) ||
+    limit < 1 ||
+    limit > IMPORT_HISTORY_LIMITS.maxDetailPageSize
+  ) {
+    throw new Error("invalid_import_history_page");
+  }
+}
+
+function historyPage<T>(
+  rows: T[],
+  offset: number,
+  limit: number,
+): ImportHistoryPage<T> {
+  const hasMore = rows.length > limit;
+  return {
+    items: rows.slice(0, limit),
+    offset,
+    limit,
+    hasMore,
+    nextOffset: hasMore ? offset + limit : null,
+  };
 }
 
 function createBatchRecord(row: Record<string, unknown>): ImportBatchRecord {
@@ -1038,6 +1085,35 @@ export function createOwnedImportStagingRepository(
       return rows.map((row) => createRowRecord(row));
     },
 
+    async listRowsPage(
+      userId: string,
+      batchId: string,
+      offset = 0,
+      limit = IMPORT_HISTORY_LIMITS.detailPageSize,
+    ): Promise<ImportHistoryPage<ImportRowRecord>> {
+      validateHistoryPage(offset, limit);
+      const rows = await client.all<Record<string, unknown>>(
+        `
+          SELECT
+            id, user_id, batch_id, physical_row_number, row_class,
+            original_fields_json, normalized_fields_json, normalized_fingerprint,
+            validation_status, target_portfolio_id, target_portfolio_security_id,
+            commit_status, commit_transaction_id, error_count, warning_count,
+            info_count, created_at, updated_at, version
+          FROM import_rows
+          WHERE user_id = ? AND batch_id = ?
+          ORDER BY physical_row_number ASC, id ASC
+          LIMIT ? OFFSET ?
+        `,
+        [userId, batchId, limit + 1, offset],
+      );
+      return historyPage(
+        rows.map((row) => createRowRecord(row)),
+        offset,
+        limit,
+      );
+    },
+
     async listIssues(
       userId: string,
       batchId: string,
@@ -1056,6 +1132,65 @@ export function createOwnedImportStagingRepository(
       );
 
       return rows.map((row) => createIssueRecord(row));
+    },
+
+    async listIssuesPage(
+      userId: string,
+      batchId: string,
+      offset = 0,
+      limit = IMPORT_HISTORY_LIMITS.detailPageSize,
+    ): Promise<ImportHistoryPage<ImportIssueRecord>> {
+      validateHistoryPage(offset, limit);
+      const rows = await client.all<Record<string, unknown>>(
+        `
+          SELECT
+            id, user_id, batch_id, row_id, physical_row_number, field, severity,
+            code, message, suggested_resolution_type, resolved_value,
+            resolved_by_user_id, resolved_at, created_at, updated_at, version
+          FROM import_issues
+          WHERE user_id = ? AND batch_id = ?
+          ORDER BY physical_row_number ASC, row_id ASC, id ASC
+          LIMIT ? OFFSET ?
+        `,
+        [userId, batchId, limit + 1, offset],
+      );
+      return historyPage(
+        rows.map((row) => createIssueRecord(row)),
+        offset,
+        limit,
+      );
+    },
+
+    async getCommitProgress(
+      userId: string,
+      batchId: string,
+    ): Promise<ImportCommitProgressRecord | null> {
+      const row = await client.get<Record<string, unknown>>(
+        `
+          SELECT b.commit_high_water_row, b.commit_idempotency_key,
+            COALESCE(SUM(CASE WHEN r.commit_status = 'committed' THEN 1 ELSE 0 END), 0) AS committed_rows,
+            COALESCE(SUM(CASE WHEN r.commit_status = 'skipped' THEN 1 ELSE 0 END), 0) AS skipped_rows,
+            COALESCE(SUM(CASE WHEN r.commit_status = 'staged' THEN 1 ELSE 0 END), 0) AS remaining_rows
+          FROM import_batches b
+          LEFT JOIN import_rows r
+            ON r.user_id = b.user_id AND r.batch_id = b.id
+          WHERE b.id = ? AND b.user_id = ?
+          GROUP BY b.id, b.commit_high_water_row, b.commit_idempotency_key
+        `,
+        [batchId, userId],
+      );
+      return row
+        ? {
+            highWaterRow: Number(row.commit_high_water_row),
+            idempotencyKey:
+              row.commit_idempotency_key === null
+                ? null
+                : String(row.commit_idempotency_key),
+            committedRows: Number(row.committed_rows),
+            skippedRows: Number(row.skipped_rows),
+            remainingRows: Number(row.remaining_rows),
+          }
+        : null;
     },
   };
 }

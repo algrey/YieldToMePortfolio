@@ -2005,7 +2005,9 @@ dd {
 }
 
 .import-commit-panel > button,
-.history-refresh {
+.history-refresh,
+.history-commit-progress button,
+.history-load-more {
   min-height: 44px;
   margin-top: 16px;
   padding: 0 16px;
@@ -2018,13 +2020,17 @@ dd {
 
 .import-commit-panel > button:hover,
 .history-refresh:hover,
+.history-commit-progress button:hover,
+.history-load-more:hover,
 .import-history-list button:hover,
 .import-history-list button[aria-pressed="true"] {
   background: rgb(99 200 120 / 10%);
 }
 
 .import-commit-panel > button:disabled,
-.history-refresh:disabled {
+.history-refresh:disabled,
+.history-commit-progress button:disabled,
+.history-load-more:disabled {
   cursor: wait;
   opacity: 0.6;
 }
@@ -2136,6 +2142,21 @@ dd {
 
 .import-history-detail section {
   margin-top: 28px;
+}
+
+.history-commit-progress {
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--warning) 42%, transparent);
+  background: var(--forest);
+}
+
+.history-commit-progress button,
+.history-load-more {
+  width: 100%;
+}
+
+.history-page-complete {
+  font-size: 0.78rem;
 }
 
 .import-history-detail h4 {

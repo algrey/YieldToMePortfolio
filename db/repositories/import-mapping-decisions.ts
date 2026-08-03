@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import {
+  IMPORT_HISTORY_LIMITS,
+  type ImportHistoryPage,
+} from "./import-staging.ts";
 import type { SqlClient } from "./sql-client.ts";
 
 export type ImportMappingKind =
@@ -125,6 +129,42 @@ export function createOwnedImportMappingDecisionRepository(
         [userId, batchId],
       );
       return rows.map(createRecord);
+    },
+
+    async listPage(
+      userId: string,
+      batchId: string,
+      offset = 0,
+      limit = IMPORT_HISTORY_LIMITS.detailPageSize,
+    ): Promise<ImportHistoryPage<ImportMappingDecision>> {
+      if (
+        !Number.isInteger(offset) ||
+        offset < 0 ||
+        offset > IMPORT_HISTORY_LIMITS.maxDetailOffset ||
+        !Number.isInteger(limit) ||
+        limit < 1 ||
+        limit > IMPORT_HISTORY_LIMITS.maxDetailPageSize
+      ) {
+        throw new Error("invalid_import_history_page");
+      }
+      const rows = await client.all<Record<string, unknown>>(
+        `
+          SELECT ${SELECT_COLUMNS}
+          FROM import_mapping_decisions
+          WHERE user_id = ? AND batch_id = ?
+          ORDER BY kind ASC, source_key ASC, scope ASC, id ASC
+          LIMIT ? OFFSET ?
+        `,
+        [userId, batchId, limit + 1, offset],
+      );
+      const hasMore = rows.length > limit;
+      return {
+        items: rows.slice(0, limit).map(createRecord),
+        offset,
+        limit,
+        hasMore,
+        nextOffset: hasMore ? offset + limit : null,
+      };
     },
   };
 }

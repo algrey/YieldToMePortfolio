@@ -264,6 +264,8 @@ For every affected owned portfolio, derive the imported effective-date range and
 
 Show committed/skipped counts, warnings that remain, coverage impacts, and reversal action.
 
+Import history is private, owner-scoped, and non-cacheable. Batch detail returns source rows, issues, mapping decisions, and audit events in fixed-size pages rather than loading the complete file into one Worker response. When status remains `committing`, detail also returns the durable physical-row high-water, committed/skipped/remaining counts, and the stored commit idempotency key; the resume action must reuse that key and must continue to label the batch incomplete until finalization is durable.
+
 ## 9. Issue code baseline
 
 | Code                         | Severity | Meaning                                                  |

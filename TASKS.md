@@ -812,7 +812,7 @@ Status: DONE (2026-08-02).
 
 ### UI-005C — Import commit, progress, and history
 
-Status: DONE on 2026-08-03.
+Status: DONE (2026-08-03).
 
 - Objective: expose explicit, idempotent commit over an immutable reviewed preview and make its outcome inspectable.
 - Dependencies: UI-005B, IMP-003A.
@@ -823,7 +823,8 @@ Status: DONE on 2026-08-03.
 - Tests: supplied-file commit, stale preview, double submit, resume after bounded chunk failure, cross-user, keyboard/mobile.
 - Risks: optimistic UI claiming completion before the durable commit marker.
 - Parallel safe: no; this is a financial mutation workflow.
-- Completion note: Added explicit reviewed-preview commit confirmation with stable idempotency and exact preview/version payloads, durable resumable-versus-committed progress states, and owner-scoped batch/row/mapping/audit history. History lists show business dates while detail evidence retains exact timestamps; private no-store routes and keyboard/mobile regressions are covered. `npm test` passes all 165 tests.
+- Completion note: Added explicit reviewed-preview commit confirmation with stable idempotency and exact preview/version payloads, durable resumable-versus-committed progress states, and owner-scoped batch/row/mapping/audit history. History lists show business dates while detail evidence retains exact timestamps; private no-store routes and keyboard/mobile regressions are covered.
+- Review resolution: Batch detail includes the exact reversal timestamp and now reads source rows, issues, mappings, and audit events through fixed 50-record owner-scoped pages with an explicit load-more contract. Reloaded `committing` batches show persisted physical-row high-water plus committed/skipped/remaining counts and resume with the stored idempotency key. Migrated-D1 service/endpoint tests cover bounded high-volume pages, cross-owner denial, invalid pages, and unavailable recovery; server-rendered component coverage verifies incomplete/resumable messaging and mobile-operable controls.
 
 ### UI-005D — Import reversal and corrected successor
 

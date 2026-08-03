@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import { useEffect } from "react";
+import type { ImportHistoryDetail } from "../import-history-service.ts";
+import { ImportHistoryDetailPanel } from "./import-history-detail.tsx";
 
 type PortfolioOption = { id: string; name: string; homeCurrencyCode: string };
 type Review = {
@@ -59,48 +61,6 @@ type HistoryBatch = {
   supersedesBatchId: string | null;
 };
 
-type HistoryDetail = {
-  batch: HistoryBatch;
-  rows: Array<{
-    id: string;
-    physicalRowNumber: number;
-    rowClass: string;
-    originalFields: string[];
-    normalizedFields: Record<string, unknown> | null;
-    validationStatus: string;
-    commitStatus: string;
-    commitTransactionId: string | null;
-    errorCount: number;
-    warningCount: number;
-    infoCount: number;
-  }>;
-  issues: Array<{
-    id: string;
-    physicalRowNumber: number | null;
-    field: string | null;
-    severity: string;
-    code: string;
-    message: string;
-  }>;
-  mappings: Array<{
-    id: string;
-    kind: string;
-    sourceKey: string;
-    normalizedSourceValue: string;
-    targetId: string | null;
-    targetValue: string | null;
-    scope: string;
-    confidence: string;
-  }>;
-  audit: Array<{
-    id: string;
-    action: string;
-    result: string;
-    requestId: string;
-    occurredAt: string;
-  }>;
-};
-
 type CommitResult = {
   batchId: string;
   status: "committing" | "committed";
@@ -114,16 +74,6 @@ type CommitResult = {
 
 function businessDate(value: string): string {
   return value.slice(0, 10);
-}
-
-function displayValue(value: unknown): string {
-  if (value === null || value === undefined) return "Not recorded";
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return "Recorded value";
-  }
 }
 
 function statusLabel(status: string): string {
@@ -146,9 +96,8 @@ export function ImportReview({
   const [commitConfirmed, setCommitConfirmed] = useState(false);
   const [commitKey, setCommitKey] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryBatch[]>([]);
-  const [historyDetail, setHistoryDetail] = useState<HistoryDetail | null>(
-    null,
-  );
+  const [historyDetail, setHistoryDetail] =
+    useState<ImportHistoryDetail | null>(null);
   const [historyPending, setHistoryPending] = useState(false);
 
   useEffect(() => {
@@ -182,15 +131,19 @@ export function ImportReview({
     }
   }
 
-  async function loadHistoryDetail(batchId: string) {
+  async function loadHistoryDetail(batchId: string, offset = 0) {
     setHistoryPending(true);
     setMessage(null);
     try {
-      const response = await fetch(`/api/import/history/${batchId}`, {
-        cache: "no-store",
-      });
+      const response = await fetch(
+        `/api/import/history/${batchId}?offset=${offset}`,
+        {
+          cache: "no-store",
+        },
+      );
       const result = (await response.json()) as
-        { ok: true; detail: HistoryDetail } | { ok: false; message: string };
+        | { ok: true; detail: ImportHistoryDetail }
+        | { ok: false; message: string };
       if (!response.ok || result.ok === false) {
         throw new Error(
           result.ok === false
@@ -198,7 +151,18 @@ export function ImportReview({
             : "Import batch history could not be loaded.",
         );
       }
-      setHistoryDetail(result.detail);
+      setHistoryDetail((current) => {
+        if (offset === 0 || current?.batch.id !== result.detail.batch.id) {
+          return result.detail;
+        }
+        return {
+          ...result.detail,
+          rows: [...current.rows, ...result.detail.rows],
+          issues: [...current.issues, ...result.detail.issues],
+          mappings: [...current.mappings, ...result.detail.mappings],
+          audit: [...current.audit, ...result.detail.audit],
+        };
+      });
     } catch (error) {
       setMessage(
         error instanceof Error
@@ -332,6 +296,54 @@ export function ImportReview({
         error instanceof Error
           ? error.message
           : "The import commit could not be completed.",
+      );
+    } finally {
+      setCommitPending(false);
+    }
+  }
+
+  async function resumeHistoryCommit() {
+    if (
+      historyDetail?.batch.status !== "committing" ||
+      !historyDetail.progress.idempotencyKey
+    ) {
+      return;
+    }
+    setCommitPending(true);
+    setMessage(null);
+    try {
+      const response = await fetch(
+        `/api/import/commit/${historyDetail.batch.id}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            expectedVersion: historyDetail.batch.version,
+            expectedPreviewVersion: "resume-existing-commit",
+            idempotencyKey: historyDetail.progress.idempotencyKey,
+            confirmation: true,
+          }),
+        },
+      );
+      const result = (await response.json()) as
+        { ok: true; commit: CommitResult } | { ok: false; message: string };
+      if (!response.ok || result.ok === false) {
+        throw new Error(
+          result.ok === false
+            ? result.message
+            : "The import commit could not be resumed.",
+        );
+      }
+      setCommit(result.commit);
+      await Promise.all([
+        loadHistory(),
+        loadHistoryDetail(historyDetail.batch.id),
+      ]);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "The import commit could not be resumed.",
       );
     } finally {
       setCommitPending(false);
@@ -589,127 +601,19 @@ export function ImportReview({
       </section>
 
       {historyDetail ? (
-        <section
-          className="import-history-detail"
-          aria-labelledby="history-detail-title"
-        >
-          <div className="section-heading compact">
-            <div>
-              <p className="eyebrow">Batch detail</p>
-              <h3 id="history-detail-title">{historyDetail.batch.filename}</h3>
-            </div>
-            <span className="history-status">
-              {statusLabel(historyDetail.batch.status)}
-            </span>
-          </div>
-          <p>
-            {historyDetail.batch.transactionRows} transaction rows ·{" "}
-            {historyDetail.rows.length} staged rows ·{" "}
-            {historyDetail.issues.length} issues
-          </p>
-          <details>
-            <summary>Batch timestamps and durable evidence</summary>
-            <dl className="import-evidence-list">
-              <div>
-                <dt>Created</dt>
-                <dd>{historyDetail.batch.createdAt}</dd>
-              </div>
-              <div>
-                <dt>Updated</dt>
-                <dd>{historyDetail.batch.updatedAt}</dd>
-              </div>
-              <div>
-                <dt>Parsed</dt>
-                <dd>{historyDetail.batch.parsedAt ?? "Not recorded"}</dd>
-              </div>
-              <div>
-                <dt>Committed</dt>
-                <dd>{historyDetail.batch.committedAt ?? "Not recorded"}</dd>
-              </div>
-              <div>
-                <dt>Predecessor</dt>
-                <dd>{historyDetail.batch.supersedesBatchId ?? "None"}</dd>
-              </div>
-            </dl>
-          </details>
-
-          <section aria-labelledby="history-rows-title">
-            <h4 id="history-rows-title">Original rows</h4>
-            <div className="import-history-table-wrap">
-              <table className="import-history-table">
-                <caption>
-                  Immutable source rows and their durable outcome
-                </caption>
-                <thead>
-                  <tr>
-                    <th scope="col">Row</th>
-                    <th scope="col">Class</th>
-                    <th scope="col">Validation</th>
-                    <th scope="col">Commit</th>
-                    <th scope="col">Transaction</th>
-                    <th scope="col">Normalized facts</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {historyDetail.rows.map((row) => (
-                    <tr key={row.id}>
-                      <td>{row.physicalRowNumber}</td>
-                      <td>{row.rowClass}</td>
-                      <td>{row.validationStatus}</td>
-                      <td>{row.commitStatus}</td>
-                      <td>{row.commitTransactionId ?? "None"}</td>
-                      <td>
-                        <details>
-                          <summary>View</summary>
-                          <code>{displayValue(row.normalizedFields)}</code>
-                        </details>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <section aria-labelledby="history-mappings-title">
-            <h4 id="history-mappings-title">Mapping decisions</h4>
-            {historyDetail.mappings.length === 0 ? (
-              <p>No mapping decisions were recorded.</p>
-            ) : (
-              <ul className="import-history-facts">
-                {historyDetail.mappings.map((mapping) => (
-                  <li key={mapping.id}>
-                    <strong>{mapping.kind}</strong>
-                    <span>
-                      {mapping.sourceKey} →{" "}
-                      {mapping.targetId ?? mapping.targetValue ?? "Unresolved"}{" "}
-                      ({mapping.scope})
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-
-          <section aria-labelledby="history-audit-title">
-            <h4 id="history-audit-title">Audit evidence</h4>
-            {historyDetail.audit.length === 0 ? (
-              <p>No batch audit events were recorded.</p>
-            ) : (
-              <ul className="import-history-facts">
-                {historyDetail.audit.map((event) => (
-                  <li key={event.id}>
-                    <strong>{event.action}</strong>
-                    <span>
-                      {event.result} · {event.occurredAt} · request{" "}
-                      {event.requestId}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        </section>
+        <ImportHistoryDetailPanel
+          detail={historyDetail}
+          pending={historyPending || commitPending}
+          onLoadMore={() => {
+            if (historyDetail.pagination.nextOffset !== null) {
+              void loadHistoryDetail(
+                historyDetail.batch.id,
+                historyDetail.pagination.nextOffset,
+              );
+            }
+          }}
+          onResume={() => void resumeHistoryCommit()}
+        />
       ) : null}
     </main>
   );

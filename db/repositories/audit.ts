@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { redactMetadata } from "../../domain/observability/redaction.ts";
+import {
+  IMPORT_HISTORY_LIMITS,
+  type ImportHistoryPage,
+} from "./import-staging.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 
 export type AuditResult = "success" | "failure" | "denied";
@@ -138,6 +142,44 @@ export function createAuditRepository(
         [userId, targetType, targetId],
       );
       return rows.map(createRecord);
+    },
+
+    async listForOwnerTargetPage(
+      userId: string,
+      targetType: string,
+      targetId: string,
+      offset = 0,
+      limit = IMPORT_HISTORY_LIMITS.detailPageSize,
+    ): Promise<ImportHistoryPage<AuditEventRecord>> {
+      if (
+        !Number.isInteger(offset) ||
+        offset < 0 ||
+        offset > IMPORT_HISTORY_LIMITS.maxDetailOffset ||
+        !Number.isInteger(limit) ||
+        limit < 1 ||
+        limit > IMPORT_HISTORY_LIMITS.maxDetailPageSize
+      ) {
+        throw new Error("invalid_import_history_page");
+      }
+      const rows = await client.all<Record<string, unknown>>(
+        `
+          SELECT id, actor_user_id, target_owner_user_id, action, target_type,
+            target_id, request_id, result, metadata_json, occurred_at
+          FROM audit_events
+          WHERE target_owner_user_id = ? AND target_type = ? AND target_id = ?
+          ORDER BY occurred_at ASC, id ASC
+          LIMIT ? OFFSET ?
+        `,
+        [userId, targetType, targetId, limit + 1, offset],
+      );
+      const hasMore = rows.length > limit;
+      return {
+        items: rows.slice(0, limit).map(createRecord),
+        offset,
+        limit,
+        hasMore,
+        nextOffset: hasMore ? offset + limit : null,
+      };
     },
   };
 }

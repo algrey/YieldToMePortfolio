@@ -210,6 +210,7 @@ The overflow state menu is a review aid and is not a proposed production control
 - Positive and negative figures retain explicit `+`, `−`, and directional language; colour is supplemental.
 - The history chart has a text alternative.
 - Reduced-motion preferences suppress nonessential animation.
+- Import history loads durable row, issue, mapping, and audit evidence in bounded pages. A reloaded partial commit names its persisted high-water and remaining work, retains a 44 px resume control at narrow widths, and never labels the batch complete before the server does.
 
 ## 11. Rendered review evidence
 
