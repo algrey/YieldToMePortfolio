@@ -219,6 +219,24 @@ test("rejects zero, malformed, future, and invalid FX observations", async () =>
         },
       },
     },
+    {
+      name: "wrong provider symbol",
+      body: {
+        ...australianUsdFxFixture,
+        chart: {
+          ...australianUsdFxFixture.chart,
+          result: [
+            {
+              ...australianUsdFxFixture.chart.result[0],
+              meta: {
+                ...australianUsdFxFixture.chart.result[0].meta,
+                symbol: "EURUSD=X",
+              },
+            },
+          ],
+        },
+      },
+    },
   ];
   for (const testCase of cases) {
     const result = await providerFor(() => jsonResponse(testCase.body), [], {

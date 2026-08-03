@@ -492,9 +492,11 @@ export function createYahooCompatibleProvider(
     currency: string;
     timezone: string;
     delayedMinutes: number | null;
+    symbol: string | null;
   }> {
     const currency = requiredString(result.meta.currency);
     const timezone = requiredString(result.meta.exchangeTimezoneName);
+    const symbol = requiredString(result.meta.symbol);
     const delayedMinutes =
       result.meta.exchangeDataDelayedBy === undefined ||
       result.meta.exchangeDataDelayedBy === null
@@ -515,7 +517,7 @@ export function createYahooCompatibleProvider(
     }
     return {
       ok: true,
-      value: { currency, timezone, delayedMinutes },
+      value: { currency, timezone, delayedMinutes, symbol },
     };
   }
 
@@ -586,6 +588,7 @@ export function createYahooCompatibleProvider(
       currency: string;
       timezone: string;
       delayedMinutes: number | null;
+      symbol: string | null;
     },
     mapping: (typeof FX_PAIR_MAPPINGS)[keyof typeof FX_PAIR_MAPPINGS],
   ): MarketDataResult<FxObservation> {
@@ -598,6 +601,8 @@ export function createYahooCompatibleProvider(
       !observedAt ||
       !providerRateDecimal ||
       !marketDate ||
+      (metadata.symbol !== null &&
+        metadata.symbol !== mapping.providerSymbol) ||
       metadata.currency.toUpperCase() !== mapping.providerQuoteCurrencyCode
     ) {
       return error(
