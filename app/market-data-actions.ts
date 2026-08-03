@@ -216,26 +216,33 @@ export async function saveManualOverrideAction(
   ) {
     return { ok: false, status: 400, message: "Override fields are invalid." };
   }
-  const result = await createOwnedManualOverrideRepository(context.client).save(
-    context.userId,
-    scope as SaveManualOverrideInput,
-  );
-  if (result.ok) return result;
-  return {
-    ok: false,
-    status:
-      result.reason === "not_found" || result.reason === "ownership"
-        ? 404
-        : result.reason === "invalid_input"
-          ? 400
-          : result.reason === "conflict"
-            ? 409
-            : 503,
-    message:
-      result.reason === "conflict"
-        ? "The override interval or supersession is no longer available."
-        : "The market-data override could not be saved.",
-  };
+  try {
+    const result = await createOwnedManualOverrideRepository(
+      context.client,
+    ).save(context.userId, scope as SaveManualOverrideInput);
+    if (result.ok) return result;
+    return {
+      ok: false,
+      status:
+        result.reason === "not_found" || result.reason === "ownership"
+          ? 404
+          : result.reason === "invalid_input"
+            ? 400
+            : result.reason === "conflict"
+              ? 409
+              : 503,
+      message:
+        result.reason === "conflict"
+          ? "The override interval or supersession is no longer available."
+          : "The market-data override could not be saved.",
+    };
+  } catch {
+    return {
+      ok: false,
+      status: 503,
+      message: "The market-data override could not be saved.",
+    };
+  }
 }
 
 export async function removeManualOverrideAction(
@@ -253,23 +260,31 @@ export async function removeManualOverrideAction(
       message: "Override identifier is invalid.",
     };
   }
-  const result = await createOwnedManualOverrideRepository(
-    context.client,
-  ).remove(context.userId, overrideId, context.requestId);
-  if (result.ok) return result;
-  return {
-    ok: false,
-    status:
-      result.reason === "not_found"
-        ? 404
-        : result.reason === "conflict"
-          ? 409
-          : 503,
-    message:
-      result.reason === "conflict"
-        ? "This override has already been removed."
-        : "The market-data override could not be removed.",
-  };
+  try {
+    const result = await createOwnedManualOverrideRepository(
+      context.client,
+    ).remove(context.userId, overrideId, context.requestId);
+    if (result.ok) return result;
+    return {
+      ok: false,
+      status:
+        result.reason === "not_found"
+          ? 404
+          : result.reason === "conflict"
+            ? 409
+            : 503,
+      message:
+        result.reason === "conflict"
+          ? "This override has already been removed."
+          : "The market-data override could not be removed.",
+    };
+  } catch {
+    return {
+      ok: false,
+      status: 503,
+      message: "The market-data override could not be removed.",
+    };
+  }
 }
 
 export async function listManualOverrideAction(
