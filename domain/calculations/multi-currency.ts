@@ -33,6 +33,19 @@ export type FxUnavailableReason =
 
 export type MultiCurrencyUnavailableReason = CalculationUnavailableReason;
 
+export type FxSelectionState = "current" | "fallback" | "stale";
+
+export type FxSelectionQuality =
+  | "observed"
+  | "corrected"
+  | "indicative"
+  | "stale_candidate"
+  | "manual"
+  | "transaction"
+  | "identity";
+
+export type FxActionability = "none" | "explanation" | "action_required";
+
 export type FxEvidence = Readonly<{
   rateDecimal: string;
   baseCurrencyCode: string;
@@ -41,6 +54,10 @@ export type FxEvidence = Readonly<{
   observedAt: string | null;
   source: "transaction" | "manual" | "provider" | "identity";
   sourceId: string | null;
+  selectionState: FxSelectionState;
+  quality: FxSelectionQuality;
+  fallback: boolean;
+  selectionReason: string;
 }>;
 
 export type FxResolutionInput =
@@ -70,6 +87,11 @@ export type FxExplanation = Readonly<{
   suppliedQuoteCurrencyCode: string | null;
   suppliedRateDecimal: string | null;
   inverted: boolean;
+  selectionState: FxSelectionState | "unavailable";
+  quality: FxSelectionQuality | null;
+  fallback: boolean;
+  selectionReason: string | null;
+  actionability: FxActionability;
 }>;
 
 export type ResolvedFx =
@@ -152,21 +174,27 @@ export type CashConversionResult = Readonly<{
 
 export type PortfolioHoldingTotalInput = Readonly<{
   id: string;
+  quantityDecimal: string;
   homeMarketValue: CalculationValue;
   homeOpenBasis: CalculationValue;
 }>;
 
 export type PortfolioCashTotalInput = Readonly<{
   id: string;
+  nativeBalanceDecimal: string;
   homeValue: CalculationValue;
 }>;
 
 export type PortfolioCoverage = Readonly<{
   totalHoldingCount: number;
+  nonZeroHoldingCount: number;
+  zeroHoldingCount: number;
   pricedAndConvertedHoldingCount: number;
   basisCoveredHoldingCount: number;
   alignedHoldingCount: number;
   totalCashAccountCount: number;
+  nonZeroCashAccountCount: number;
+  zeroCashAccountCount: number;
   convertedCashAccountCount: number;
   excludedHoldingIds: readonly string[];
   excludedCashAccountIds: readonly string[];
@@ -242,6 +270,11 @@ function emptyFxExplanation(
     suppliedQuoteCurrencyCode: null,
     suppliedRateDecimal: null,
     inverted: false,
+    selectionState: "unavailable",
+    quality: null,
+    fallback: false,
+    selectionReason: null,
+    actionability: "action_required",
   };
 }
 
@@ -249,6 +282,7 @@ function evidenceExplanation(
   purpose: FxResolutionInput["purpose"],
   evidence: FxEvidence,
   inverted: boolean,
+  actionability: FxActionability = fxActionability(evidence),
 ): FxExplanation {
   return {
     purpose,
@@ -260,7 +294,31 @@ function evidenceExplanation(
     suppliedQuoteCurrencyCode: evidence.quoteCurrencyCode,
     suppliedRateDecimal: evidence.rateDecimal,
     inverted,
+    selectionState: evidence.selectionState,
+    quality: evidence.quality,
+    fallback: evidence.fallback,
+    selectionReason: evidence.selectionReason,
+    actionability,
   };
+}
+
+function fxActionability(evidence: FxEvidence): FxActionability {
+  if (
+    evidence.selectionState === "stale" ||
+    evidence.quality === "stale_candidate"
+  ) {
+    return "action_required";
+  }
+  if (
+    evidence.selectionState === "fallback" ||
+    evidence.fallback ||
+    evidence.quality === "manual" ||
+    evidence.quality === "indicative" ||
+    evidence.quality === "corrected"
+  ) {
+    return "explanation";
+  }
+  return "none";
 }
 
 function resolvedUnavailable(
@@ -274,7 +332,7 @@ function resolvedUnavailable(
     nativeCurrencyCode: input.nativeCurrencyCode,
     homeCurrencyCode: input.homeCurrencyCode,
     explanation: evidence
-      ? evidenceExplanation(input.purpose, evidence, false)
+      ? evidenceExplanation(input.purpose, evidence, false, "action_required")
       : emptyFxExplanation(input.purpose),
   };
 }
@@ -302,6 +360,11 @@ export function resolveFxRate(input: FxResolutionInput): ResolvedFx {
         suppliedQuoteCurrencyCode: input.homeCurrencyCode,
         suppliedRateDecimal: "1",
         inverted: false,
+        selectionState: "current",
+        quality: "identity",
+        fallback: false,
+        selectionReason: "Exact identity conversion applies.",
+        actionability: "none",
       },
     };
   }
@@ -793,40 +856,85 @@ function sumAvailable(values: readonly CalculationValue[]): string {
   return formatDecimalExact(total);
 }
 
+function isExplicitZero(valueDecimal: string): boolean {
+  try {
+    return compareDecimal(parseDecimal(valueDecimal), ZERO) === 0;
+  } catch {
+    // Invalid projection inputs remain material so they cannot hide a gap.
+    return false;
+  }
+}
+
 export function composePortfolioTotals(
   input: Readonly<{
     holdings: readonly PortfolioHoldingTotalInput[];
     cashAccounts: readonly PortfolioCashTotalInput[];
   }>,
 ): PortfolioTotalsResult {
-  const alignedHoldings = input.holdings.filter(
+  const zeroHoldings = input.holdings.filter((holding) =>
+    isExplicitZero(holding.quantityDecimal),
+  );
+  const nonZeroHoldings = input.holdings.filter(
+    (holding) => !isExplicitZero(holding.quantityDecimal),
+  );
+  const zeroCashAccounts = input.cashAccounts.filter((account) =>
+    isExplicitZero(account.nativeBalanceDecimal),
+  );
+  const nonZeroCashAccounts = input.cashAccounts.filter(
+    (account) => !isExplicitZero(account.nativeBalanceDecimal),
+  );
+  const alignedHoldings = nonZeroHoldings.filter(
     (holding) =>
       holding.homeMarketValue.status === "available" &&
       holding.homeOpenBasis.status === "available",
   );
-  const convertedCash = input.cashAccounts.filter(
+  const convertedCash = nonZeroCashAccounts.filter(
     (account) => account.homeValue.status === "available",
   );
   const coverage: PortfolioCoverage = {
     totalHoldingCount: input.holdings.length,
-    pricedAndConvertedHoldingCount: input.holdings.filter(
+    nonZeroHoldingCount: nonZeroHoldings.length,
+    zeroHoldingCount: zeroHoldings.length,
+    pricedAndConvertedHoldingCount: nonZeroHoldings.filter(
       (holding) => holding.homeMarketValue.status === "available",
     ).length,
-    basisCoveredHoldingCount: input.holdings.filter(
+    basisCoveredHoldingCount: nonZeroHoldings.filter(
       (holding) => holding.homeOpenBasis.status === "available",
     ).length,
     alignedHoldingCount: alignedHoldings.length,
     totalCashAccountCount: input.cashAccounts.length,
+    nonZeroCashAccountCount: nonZeroCashAccounts.length,
+    zeroCashAccountCount: zeroCashAccounts.length,
     convertedCashAccountCount: convertedCash.length,
-    excludedHoldingIds: input.holdings
+    excludedHoldingIds: nonZeroHoldings
       .filter((holding) => !alignedHoldings.includes(holding))
       .map((holding) => holding.id),
-    excludedCashAccountIds: input.cashAccounts
+    excludedCashAccountIds: nonZeroCashAccounts
       .filter((account) => !convertedCash.includes(account))
       .map((account) => account.id),
   };
   const hasKnownAmount = alignedHoldings.length > 0 || convertedCash.length > 0;
+  const hasExplicitComponents =
+    input.holdings.length > 0 || input.cashAccounts.length > 0;
+  const allComponentsAreZero =
+    hasExplicitComponents &&
+    nonZeroHoldings.length === 0 &&
+    nonZeroCashAccounts.length === 0;
   if (!hasKnownAmount) {
+    if (allComponentsAreZero) {
+      return {
+        status: "complete",
+        label: "portfolio_value",
+        amounts: {
+          investedValueDecimal: "0",
+          coveredOpenBasisDecimal: "0",
+          unrealisedGainDecimal: "0",
+          cashValueDecimal: "0",
+          portfolioValueDecimal: "0",
+        },
+        coverage,
+      };
+    }
     return {
       status: "unavailable",
       label: "value_unavailable",
@@ -864,8 +972,8 @@ export function composePortfolioTotals(
     portfolioValueDecimal,
   };
   const complete =
-    coverage.alignedHoldingCount === coverage.totalHoldingCount &&
-    coverage.convertedCashAccountCount === coverage.totalCashAccountCount;
+    coverage.alignedHoldingCount === coverage.nonZeroHoldingCount &&
+    coverage.convertedCashAccountCount === coverage.nonZeroCashAccountCount;
   return complete
     ? { status: "complete", label: "portfolio_value", amounts, coverage }
     : { status: "partial", label: "known_value", amounts, coverage };

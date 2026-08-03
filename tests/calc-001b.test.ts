@@ -17,7 +17,9 @@ import {
   explicitTransactionFx,
   unavailable,
   usdAudCurrentFx,
+  usdAudFallbackFx,
   usdAudPreviousFx,
+  usdAudStaleFx,
 } from "./fixtures/calc-001b.ts";
 
 test("CALC-001B resolves direct, inverse, and identity FX with explicit transaction precedence", () => {
@@ -156,7 +158,61 @@ test("CALC-001B keeps native holding facts stable across the display toggle", ()
     "2026-08-02T06:00:00Z",
   );
   assert.equal(holding.explanation.fx.explanation.sourceId, "yahoo-compatible");
-  assert.doesNotMatch(JSON.stringify(home), /observedAt|sourceId|marketDate/);
+  assert.doesNotMatch(
+    JSON.stringify(home),
+    /observedAt|sourceId|marketDate|selectionState|quality|fallback/,
+  );
+});
+
+test("CALC-001B retains fallback and stale FX state outside compact fields", () => {
+  const fallback = calculateNativeHomeHolding({
+    quantityDecimal: "10",
+    nativePriceDecimal: "20",
+    nativeCurrencyCode: "USD",
+    homeCurrencyCode: "AUD",
+    valuationFx: usdAudFallbackFx,
+  });
+  assert.equal(fallback.explanation.fx.status, "available");
+  assert.deepEqual(fallback.explanation.fx.explanation, {
+    purpose: "valuation",
+    source: "provider",
+    sourceId: "yahoo-compatible",
+    marketDate: "2026-08-01",
+    observedAt: "2026-08-01T06:00:00Z",
+    suppliedBaseCurrencyCode: "USD",
+    suppliedQuoteCurrencyCode: "AUD",
+    suppliedRateDecimal: "1.58",
+    inverted: false,
+    selectionState: "fallback",
+    quality: "observed",
+    fallback: true,
+    selectionReason:
+      "The latest validated prior-session observation was selected.",
+    actionability: "explanation",
+  });
+  assert.doesNotMatch(
+    JSON.stringify(fallback.facts.homeMarketValue),
+    /fallback|quality|stale|observedAt/,
+  );
+
+  const stale = calculateCashConversion({
+    balanceDecimal: "100",
+    currencyCode: "USD",
+    homeCurrencyCode: "AUD",
+    valuationFx: usdAudStaleFx,
+  });
+  assert.equal(stale.explanation.fx.status, "available");
+  assert.equal(stale.explanation.fx.explanation.selectionState, "stale");
+  assert.equal(stale.explanation.fx.explanation.quality, "stale_candidate");
+  assert.equal(stale.explanation.fx.explanation.fallback, true);
+  assert.equal(
+    stale.explanation.fx.explanation.actionability,
+    "action_required",
+  );
+  assert.equal(
+    stale.explanation.fx.explanation.selectionReason,
+    "The last valid rate exceeds the freshness threshold.",
+  );
 });
 
 test("CALC-001B missing FX preserves native values and cannot fabricate a home view", () => {
@@ -359,23 +415,34 @@ test("CALC-001B partial totals align invested value and basis to the same holdin
     holdings: [
       {
         id: "aligned",
+        quantityDecimal: "10",
         homeMarketValue: available("300"),
         homeOpenBasis: available("200"),
       },
       {
         id: "missing-basis",
+        quantityDecimal: "5",
         homeMarketValue: available("100"),
         homeOpenBasis: unavailable("missing_basis"),
       },
       {
         id: "missing-value",
+        quantityDecimal: "2",
         homeMarketValue: unavailable("missing_fx"),
         homeOpenBasis: available("50"),
       },
     ],
     cashAccounts: [
-      { id: "aud-cash", homeValue: available("50") },
-      { id: "usd-cash", homeValue: unavailable("missing_fx") },
+      {
+        id: "aud-cash",
+        nativeBalanceDecimal: "50",
+        homeValue: available("50"),
+      },
+      {
+        id: "usd-cash",
+        nativeBalanceDecimal: "25",
+        homeValue: unavailable("missing_fx"),
+      },
     ],
   });
   assert.equal(totals.status, "partial");
@@ -398,11 +465,18 @@ test("CALC-001B partial totals align invested value and basis to the same holdin
     holdings: [
       {
         id: "only",
+        quantityDecimal: "10",
         homeMarketValue: available("300"),
         homeOpenBasis: available("200"),
       },
     ],
-    cashAccounts: [{ id: "cash", homeValue: available("50") }],
+    cashAccounts: [
+      {
+        id: "cash",
+        nativeBalanceDecimal: "50",
+        homeValue: available("50"),
+      },
+    ],
   });
   assert.equal(complete.status, "complete");
   assert.equal(complete.label, "portfolio_value");
@@ -411,6 +485,7 @@ test("CALC-001B partial totals align invested value and basis to the same holdin
     holdings: [
       {
         id: "unpriced",
+        quantityDecimal: "10",
         homeMarketValue: unavailable("missing_price"),
         homeOpenBasis: available("200"),
       },
@@ -419,6 +494,76 @@ test("CALC-001B partial totals align invested value and basis to the same holdin
   });
   assert.deepEqual(unavailableTotals.amounts, null);
   assert.equal(unavailableTotals.status, "unavailable");
+});
+
+test("CALC-001B coverage ignores explicit zero positions and cash balances", () => {
+  const zeroCashConversion = calculateCashConversion({
+    balanceDecimal: "0",
+    currencyCode: "USD",
+    homeCurrencyCode: "AUD",
+  });
+  assert.deepEqual(zeroCashConversion.compact.homeValue, {
+    status: "unavailable",
+    currencyCode: "AUD",
+    reason: "missing_fx",
+  });
+
+  const totals = composePortfolioTotals({
+    holdings: [
+      {
+        id: "invested",
+        quantityDecimal: "10",
+        homeMarketValue: available("300"),
+        homeOpenBasis: available("200"),
+      },
+      {
+        id: "closed-zero",
+        quantityDecimal: "0.000",
+        homeMarketValue: unavailable("missing_price"),
+        homeOpenBasis: unavailable("missing_basis"),
+      },
+    ],
+    cashAccounts: [
+      {
+        id: "foreign-zero",
+        nativeBalanceDecimal: "0.00",
+        homeValue: unavailable(zeroCashConversion.compact.homeValue.reason),
+      },
+    ],
+  });
+  assert.equal(totals.status, "complete");
+  assert.deepEqual(totals.amounts, {
+    investedValueDecimal: "300",
+    coveredOpenBasisDecimal: "200",
+    unrealisedGainDecimal: "100",
+    cashValueDecimal: "0",
+    portfolioValueDecimal: "300",
+  });
+  assert.equal(totals.coverage.totalHoldingCount, 2);
+  assert.equal(totals.coverage.nonZeroHoldingCount, 1);
+  assert.equal(totals.coverage.zeroHoldingCount, 1);
+  assert.equal(totals.coverage.totalCashAccountCount, 1);
+  assert.equal(totals.coverage.nonZeroCashAccountCount, 0);
+  assert.equal(totals.coverage.zeroCashAccountCount, 1);
+  assert.deepEqual(totals.coverage.excludedHoldingIds, []);
+  assert.deepEqual(totals.coverage.excludedCashAccountIds, []);
+
+  const zeroOnly = composePortfolioTotals({
+    holdings: [],
+    cashAccounts: [
+      {
+        id: "zero-only",
+        nativeBalanceDecimal: "0",
+        homeValue: unavailable("missing_fx"),
+      },
+    ],
+  });
+  assert.equal(zeroOnly.status, "complete");
+  assert.equal(zeroOnly.amounts?.portfolioValueDecimal, "0");
+
+  const empty = composePortfolioTotals({ holdings: [], cashAccounts: [] });
+  assert.equal(empty.status, "unavailable");
+  assert.equal(empty.amounts, null);
 });
 
 test("CALC-001B inversion and percentage rounding use half-even decimal boundaries", () => {

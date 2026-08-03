@@ -61,7 +61,7 @@ Acceptance:
 - The toggle changes presentation only; it does not rewrite native security prices, transaction amounts, quantities, or ledger facts.
 - Holding projections, cost basis, snapshots, and portfolio totals retain home-currency monetary values while their native inputs/provenance remain available.
 - Missing FX leaves native values visible and home-currency values unavailable rather than zero.
-- Compact native/home results omit routine FX provenance, while the adjacent explanation retains the selected rate direction, rate/date, source, exact observation time, and inversion evidence.
+- Compact native/home results omit routine FX provenance, while the adjacent explanation retains the selected rate direction, rate/date, source, exact observation time, inversion evidence, selector state, quality, fallback reason, and actionability.
 
 ## Authentication, privacy, and authorization
 
@@ -228,6 +228,7 @@ The product shall surface freshness and coverage rather than substituting zero.
 Acceptance:
 
 - An incomplete total is labelled as a known/partial total and discloses priced/converted counts; it does not claim an unknowable excluded dollar value.
+- Coverage applies to non-zero positions and cash balances. An exact zero component with missing price or FX is counted separately and does not make an otherwise complete total partial or unavailable.
 - Staleness thresholds differ for EOD and delayed sources.
 - Missing quote and FX states identify remediation.
 - A last-known stale value may remain visible, but its stale/fallback state cannot be represented as a normal current observation.
@@ -289,6 +290,7 @@ Acceptance:
 - Missing price or FX produces an unavailable component, not zero.
 - Cash and securities are subtotaled separately.
 - Portfolio invested value and covered basis use the same priced-and-converted holding set; value-only or basis-only positions are excluded from both aligned amounts and disclosed in coverage.
+- A portfolio containing explicit all-zero components has a complete zero total; a genuinely empty portfolio remains unavailable.
 
 ### CALC-003 — Cost basis and unrealised gain
 
