@@ -1955,6 +1955,252 @@ dd {
   line-height: 1.5;
 }
 
+.import-commit-panel,
+.import-history,
+.import-history-detail {
+  margin-top: 28px;
+  padding: 20px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: var(--forest-raised);
+}
+
+.import-commit-panel h3,
+.import-history-detail h3,
+.import-history-detail h4 {
+  margin-top: 6px;
+  font-family: var(--serif);
+  font-weight: 400;
+}
+
+.import-commit-panel > p:not(.eyebrow),
+.import-history-detail > p {
+  max-width: 720px;
+  margin-top: 10px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.import-commit-panel code {
+  color: var(--green-bright);
+  overflow-wrap: anywhere;
+}
+
+.import-confirmation {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 18px;
+  color: var(--cream);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.import-confirmation input {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--green);
+}
+
+.import-commit-panel > button,
+.history-refresh {
+  min-height: 44px;
+  margin-top: 16px;
+  padding: 0 16px;
+  border: 1px solid var(--green);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--cream);
+  cursor: pointer;
+}
+
+.import-commit-panel > button:hover,
+.history-refresh:hover,
+.import-history-list button:hover,
+.import-history-list button[aria-pressed="true"] {
+  background: rgb(99 200 120 / 10%);
+}
+
+.import-commit-panel > button:disabled,
+.history-refresh:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.import-commit-status {
+  padding: 13px 15px;
+  border-left: 2px solid var(--green);
+  background: var(--forest);
+  font-size: 0.8rem;
+}
+
+.import-commit-status.resumable {
+  border-left-color: var(--warning);
+  color: var(--warning);
+}
+
+.import-commit-status.complete {
+  color: var(--green-bright);
+}
+
+.import-history .section-heading {
+  align-items: center;
+}
+
+.import-history-list,
+.import-history-facts {
+  display: grid;
+  gap: 1px;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--divider);
+  background: var(--divider);
+}
+
+.import-history-list li,
+.import-history-facts li {
+  background: var(--forest);
+}
+
+.import-history-list button {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  min-height: 58px;
+  padding: 11px 13px;
+  border: 0;
+  background: transparent;
+  color: var(--cream);
+  cursor: pointer;
+  text-align: left;
+}
+
+.import-history-list button span,
+.import-history-facts li span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
+.history-status {
+  color: var(--green-bright);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.import-history-detail {
+  background: var(--forest-soft);
+}
+
+.import-history-detail details {
+  margin-top: 18px;
+  border-top: 1px solid var(--divider);
+}
+
+.import-history-detail summary {
+  min-height: 44px;
+  padding-top: 13px;
+  color: var(--cream);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.import-evidence-list {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.import-evidence-list div {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.import-evidence-list dt {
+  color: var(--cream);
+  font-weight: 700;
+}
+
+.import-evidence-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.import-history-detail section {
+  margin-top: 28px;
+}
+
+.import-history-detail h4 {
+  font-size: 1.18rem;
+}
+
+.import-history-table-wrap {
+  margin-top: 12px;
+  overflow-x: auto;
+  border: 1px solid var(--divider);
+}
+
+.import-history-table {
+  width: 100%;
+  min-width: 660px;
+  border-collapse: collapse;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.import-history-table caption {
+  padding: 11px;
+  color: var(--muted);
+  text-align: left;
+}
+
+.import-history-table th,
+.import-history-table td {
+  padding: 10px;
+  border-top: 1px solid var(--divider);
+  text-align: left;
+  vertical-align: top;
+}
+
+.import-history-table th {
+  color: var(--cream);
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.import-history-table code {
+  display: block;
+  max-width: 360px;
+  color: var(--green-bright);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.import-history-facts {
+  margin-top: 12px;
+}
+
+.import-history-facts li {
+  display: grid;
+  gap: 5px;
+  padding: 11px 13px;
+}
+
+.import-history-facts li strong {
+  color: var(--cream);
+  font-size: 0.76rem;
+  text-transform: capitalize;
+}
+
 @media (max-width: 600px) {
   .import-review-page {
     width: min(calc(100% - 24px), 960px);
@@ -1963,7 +2209,10 @@ dd {
 
   .import-upload-form,
   .import-mapping-form,
-  .import-review-result {
+  .import-review-result,
+  .import-commit-panel,
+  .import-history,
+  .import-history-detail {
     padding: 14px;
   }
 

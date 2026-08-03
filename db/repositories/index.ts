@@ -17,6 +17,7 @@ export {
 } from "./import-commit.ts";
 export {
   createOwnedImportStagingRepository,
+  IMPORT_HISTORY_LIMITS,
   type ImportBatchRecord,
   type ImportBatchStatus,
   type ImportCommitStatus,

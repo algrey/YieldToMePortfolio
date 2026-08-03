@@ -59,6 +59,11 @@ export type ImportBatchRecord = {
   version: number;
 };
 
+export const IMPORT_HISTORY_LIMITS = {
+  defaultBatchLimit: 20,
+  maxBatchLimit: 50,
+} as const;
+
 export type ImportRowRecord = {
   id: string;
   userId: string;
@@ -978,6 +983,37 @@ export function createOwnedImportStagingRepository(
       batchId: string,
     ): Promise<ImportBatchRecord | null> {
       return await loadBatch(userId, batchId);
+    },
+
+    async listBatches(
+      userId: string,
+      limit = IMPORT_HISTORY_LIMITS.defaultBatchLimit,
+    ): Promise<ImportBatchRecord[]> {
+      if (
+        !Number.isInteger(limit) ||
+        limit < 1 ||
+        limit > IMPORT_HISTORY_LIMITS.maxBatchLimit
+      ) {
+        throw new Error("invalid_import_history_limit");
+      }
+      const rows = await client.all<Record<string, unknown>>(
+        `
+          SELECT
+            id, user_id, target_portfolio_id, parser_format, parser_version,
+            filename, byte_size, file_sha256, status, total_rows, blank_rows,
+            definition_rows, transaction_rows, unsupported_rows, duplicate_rows,
+            error_count, warning_count, info_count, commit_idempotency_key,
+            reversal_idempotency_key, supersedes_batch_id, failure_category,
+            failure_detail, created_at, updated_at, parsed_at, committed_at,
+            reversed_at, version
+          FROM import_batches
+          WHERE user_id = ?
+          ORDER BY created_at DESC, id DESC
+          LIMIT ?
+        `,
+        [userId, limit],
+      );
+      return rows.map((row) => createBatchRecord(row));
     },
 
     async listRows(

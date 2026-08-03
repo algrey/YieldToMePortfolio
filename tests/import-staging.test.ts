@@ -379,6 +379,14 @@ test("denies cross-user access and enforces row bounds with foreign keys enabled
   const crossUserBatch = await repository.get("user-b", upload.batch.id);
   assert.equal(crossUserBatch, null);
 
+  const ownedHistory = await repository.listBatches("user-a");
+  assert.equal(
+    ownedHistory.some((batch) => batch.id === upload.batch.id),
+    true,
+  );
+  const crossUserHistory = await repository.listBatches("user-b");
+  assert.deepEqual(crossUserHistory, []);
+
   const crossUserRows = await repository.listRows("user-b", upload.batch.id);
   assert.deepEqual(crossUserRows, []);
 

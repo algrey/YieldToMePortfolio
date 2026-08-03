@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useEffect } from "react";
 
 type PortfolioOption = { id: string; name: string; homeCurrencyCode: string };
 type Review = {
@@ -40,6 +41,95 @@ type Review = {
   };
 };
 
+type HistoryBatch = {
+  id: string;
+  filename: string;
+  status: string;
+  version: number;
+  targetPortfolioId: string | null;
+  totalRows: number;
+  transactionRows: number;
+  errorCount: number;
+  warningCount: number;
+  createdAt: string;
+  updatedAt: string;
+  parsedAt: string | null;
+  committedAt: string | null;
+  reversedAt: string | null;
+  supersedesBatchId: string | null;
+};
+
+type HistoryDetail = {
+  batch: HistoryBatch;
+  rows: Array<{
+    id: string;
+    physicalRowNumber: number;
+    rowClass: string;
+    originalFields: string[];
+    normalizedFields: Record<string, unknown> | null;
+    validationStatus: string;
+    commitStatus: string;
+    commitTransactionId: string | null;
+    errorCount: number;
+    warningCount: number;
+    infoCount: number;
+  }>;
+  issues: Array<{
+    id: string;
+    physicalRowNumber: number | null;
+    field: string | null;
+    severity: string;
+    code: string;
+    message: string;
+  }>;
+  mappings: Array<{
+    id: string;
+    kind: string;
+    sourceKey: string;
+    normalizedSourceValue: string;
+    targetId: string | null;
+    targetValue: string | null;
+    scope: string;
+    confidence: string;
+  }>;
+  audit: Array<{
+    id: string;
+    action: string;
+    result: string;
+    requestId: string;
+    occurredAt: string;
+  }>;
+};
+
+type CommitResult = {
+  batchId: string;
+  status: "committing" | "committed";
+  resumed: boolean;
+  idempotent: boolean;
+  highWaterRow: number;
+  committedRows: number;
+  skippedRows: number;
+  rebuildJobId: string | null;
+};
+
+function businessDate(value: string): string {
+  return value.slice(0, 10);
+}
+
+function displayValue(value: unknown): string {
+  if (value === null || value === undefined) return "Not recorded";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "Recorded value";
+  }
+}
+
+function statusLabel(status: string): string {
+  return status.replaceAll("_", " ");
+}
+
 export function ImportReview({
   portfolios,
 }: {
@@ -51,6 +141,74 @@ export function ImportReview({
   const [review, setReview] = useState<Review | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [commitPending, setCommitPending] = useState(false);
+  const [commit, setCommit] = useState<CommitResult | null>(null);
+  const [commitConfirmed, setCommitConfirmed] = useState(false);
+  const [commitKey, setCommitKey] = useState<string | null>(null);
+  const [history, setHistory] = useState<HistoryBatch[]>([]);
+  const [historyDetail, setHistoryDetail] = useState<HistoryDetail | null>(
+    null,
+  );
+  const [historyPending, setHistoryPending] = useState(false);
+
+  useEffect(() => {
+    void loadHistory();
+  }, []);
+
+  async function loadHistory() {
+    setHistoryPending(true);
+    try {
+      const response = await fetch("/api/import/history", {
+        cache: "no-store",
+      });
+      const result = (await response.json()) as
+        { ok: true; history: HistoryBatch[] } | { ok: false; message: string };
+      if (!response.ok || result.ok === false) {
+        throw new Error(
+          result.ok === false
+            ? result.message
+            : "Import history could not be loaded.",
+        );
+      }
+      setHistory(result.history);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Import history could not be loaded.",
+      );
+    } finally {
+      setHistoryPending(false);
+    }
+  }
+
+  async function loadHistoryDetail(batchId: string) {
+    setHistoryPending(true);
+    setMessage(null);
+    try {
+      const response = await fetch(`/api/import/history/${batchId}`, {
+        cache: "no-store",
+      });
+      const result = (await response.json()) as
+        { ok: true; detail: HistoryDetail } | { ok: false; message: string };
+      if (!response.ok || result.ok === false) {
+        throw new Error(
+          result.ok === false
+            ? result.message
+            : "Import batch history could not be loaded.",
+        );
+      }
+      setHistoryDetail(result.detail);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Import batch history could not be loaded.",
+      );
+    } finally {
+      setHistoryPending(false);
+    }
+  }
 
   async function upload(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -77,6 +235,10 @@ export function ImportReview({
         );
       }
       setReview(result.review);
+      setCommit(null);
+      setCommitConfirmed(false);
+      setCommitKey(null);
+      await loadHistory();
     } catch (error) {
       setMessage(
         error instanceof Error
@@ -134,6 +296,48 @@ export function ImportReview({
     }
   }
 
+  async function commitImport() {
+    if (!review || !review.preview.ready || !commitConfirmed) return;
+    const idempotencyKey = commitKey ?? crypto.randomUUID();
+    setCommitKey(idempotencyKey);
+    setCommitPending(true);
+    setMessage(null);
+    try {
+      const response = await fetch(`/api/import/commit/${review.batch.id}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedVersion: review.batch.version,
+          expectedPreviewVersion: review.previewVersion,
+          idempotencyKey,
+          confirmation: true,
+        }),
+      });
+      const result = (await response.json()) as
+        { ok: true; commit: CommitResult } | { ok: false; message: string };
+      if (!response.ok || result.ok === false) {
+        throw new Error(
+          result.ok === false
+            ? result.message
+            : "The import commit could not be completed.",
+        );
+      }
+      setCommit(result.commit);
+      await loadHistory();
+      if (result.commit.status === "committed") {
+        await loadHistoryDetail(review.batch.id);
+      }
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "The import commit could not be completed.",
+      );
+    } finally {
+      setCommitPending(false);
+    }
+  }
+
   const firstMappingIssue = review?.preview.issues.find(
     (issue) =>
       issue.code === "SECURITY_MAPPING_REQUIRED" ||
@@ -149,8 +353,8 @@ export function ImportReview({
       <p className="eyebrow">Import review</p>
       <h1>Preview a CSV import</h1>
       <p className="import-intro">
-        Upload, inspect, and resolve issues before any financial facts can be
-        created. This screen has no commit action.
+        Upload, inspect, and resolve issues before an explicit financial commit
+        can create reviewed facts.
       </p>
       <form className="import-upload-form" onSubmit={upload}>
         <label>
@@ -263,6 +467,61 @@ export function ImportReview({
             </form>
           ) : null}
 
+          {review.preview.ready ? (
+            <section
+              className="import-commit-panel"
+              aria-labelledby="commit-title"
+            >
+              <p className="eyebrow">Financial commit</p>
+              <h3 id="commit-title">Commit this reviewed preview</h3>
+              <p>
+                This action creates the reviewed ledger effects. The server will
+                revalidate preview version <code>{review.previewVersion}</code>
+                before changing any financial facts.
+              </p>
+              <label className="import-confirmation">
+                <input
+                  type="checkbox"
+                  checked={commitConfirmed}
+                  onChange={(event) => setCommitConfirmed(event.target.checked)}
+                  disabled={commitPending || commit?.status === "committed"}
+                />
+                I confirm this exact reviewed preview and its mappings.
+              </label>
+              <button
+                type="button"
+                onClick={commitImport}
+                disabled={
+                  !commitConfirmed ||
+                  commitPending ||
+                  commit?.status === "committed"
+                }
+              >
+                {commitPending
+                  ? "Submitting commit…"
+                  : commit?.status === "committing"
+                    ? "Resume commit"
+                    : commit?.status === "committed"
+                      ? "Commit complete"
+                      : "Commit reviewed import"}
+              </button>
+              {commit ? (
+                <p
+                  className={
+                    commit.status === "committed"
+                      ? "import-commit-status complete"
+                      : "import-commit-status resumable"
+                  }
+                  role="status"
+                >
+                  {commit.status === "committed"
+                    ? `Committed ${commit.committedRows} row effects; ${commit.skippedRows} rows were skipped.`
+                    : `Commit is resumable after physical row ${commit.highWaterRow}. It is not complete.`}
+                </p>
+              ) : null}
+            </section>
+          ) : null}
+
           <section className="import-issues" aria-labelledby="issues-title">
             <h3 id="issues-title">Row and field issues</h3>
             {review.preview.issues.length === 0 ? (
@@ -284,9 +543,172 @@ export function ImportReview({
             )}
           </section>
           <p className="import-no-commit" role="note">
-            Review only. No ledger, cash, security, or portfolio totals are
-            changed here.
+            Review only until you confirm the commit above. Review evidence
+            remains available after commit, and the preview does not change
+            ledger, cash, security, or portfolio totals beforehand.
           </p>
+        </section>
+      ) : null}
+
+      <section className="import-history" aria-labelledby="history-title">
+        <div className="section-heading compact">
+          <div>
+            <p className="eyebrow">Private provenance</p>
+            <h2 id="history-title">Import history</h2>
+          </div>
+          <button
+            type="button"
+            className="history-refresh"
+            onClick={() => void loadHistory()}
+            disabled={historyPending}
+          >
+            {historyPending ? "Loading…" : "Refresh history"}
+          </button>
+        </div>
+        {history.length === 0 && !historyPending ? (
+          <p>No import batches are recorded for this account.</p>
+        ) : (
+          <ul className="import-history-list">
+            {history.map((batch) => (
+              <li key={batch.id}>
+                <button
+                  type="button"
+                  aria-pressed={historyDetail?.batch.id === batch.id}
+                  onClick={() => void loadHistoryDetail(batch.id)}
+                >
+                  <strong>{batch.filename}</strong>
+                  <span>
+                    {statusLabel(batch.status)} ·{" "}
+                    {businessDate(batch.createdAt)} · {batch.totalRows} rows
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      {historyDetail ? (
+        <section
+          className="import-history-detail"
+          aria-labelledby="history-detail-title"
+        >
+          <div className="section-heading compact">
+            <div>
+              <p className="eyebrow">Batch detail</p>
+              <h3 id="history-detail-title">{historyDetail.batch.filename}</h3>
+            </div>
+            <span className="history-status">
+              {statusLabel(historyDetail.batch.status)}
+            </span>
+          </div>
+          <p>
+            {historyDetail.batch.transactionRows} transaction rows ·{" "}
+            {historyDetail.rows.length} staged rows ·{" "}
+            {historyDetail.issues.length} issues
+          </p>
+          <details>
+            <summary>Batch timestamps and durable evidence</summary>
+            <dl className="import-evidence-list">
+              <div>
+                <dt>Created</dt>
+                <dd>{historyDetail.batch.createdAt}</dd>
+              </div>
+              <div>
+                <dt>Updated</dt>
+                <dd>{historyDetail.batch.updatedAt}</dd>
+              </div>
+              <div>
+                <dt>Parsed</dt>
+                <dd>{historyDetail.batch.parsedAt ?? "Not recorded"}</dd>
+              </div>
+              <div>
+                <dt>Committed</dt>
+                <dd>{historyDetail.batch.committedAt ?? "Not recorded"}</dd>
+              </div>
+              <div>
+                <dt>Predecessor</dt>
+                <dd>{historyDetail.batch.supersedesBatchId ?? "None"}</dd>
+              </div>
+            </dl>
+          </details>
+
+          <section aria-labelledby="history-rows-title">
+            <h4 id="history-rows-title">Original rows</h4>
+            <div className="import-history-table-wrap">
+              <table className="import-history-table">
+                <caption>
+                  Immutable source rows and their durable outcome
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Row</th>
+                    <th scope="col">Class</th>
+                    <th scope="col">Validation</th>
+                    <th scope="col">Commit</th>
+                    <th scope="col">Transaction</th>
+                    <th scope="col">Normalized facts</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {historyDetail.rows.map((row) => (
+                    <tr key={row.id}>
+                      <td>{row.physicalRowNumber}</td>
+                      <td>{row.rowClass}</td>
+                      <td>{row.validationStatus}</td>
+                      <td>{row.commitStatus}</td>
+                      <td>{row.commitTransactionId ?? "None"}</td>
+                      <td>
+                        <details>
+                          <summary>View</summary>
+                          <code>{displayValue(row.normalizedFields)}</code>
+                        </details>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section aria-labelledby="history-mappings-title">
+            <h4 id="history-mappings-title">Mapping decisions</h4>
+            {historyDetail.mappings.length === 0 ? (
+              <p>No mapping decisions were recorded.</p>
+            ) : (
+              <ul className="import-history-facts">
+                {historyDetail.mappings.map((mapping) => (
+                  <li key={mapping.id}>
+                    <strong>{mapping.kind}</strong>
+                    <span>
+                      {mapping.sourceKey} →{" "}
+                      {mapping.targetId ?? mapping.targetValue ?? "Unresolved"}{" "}
+                      ({mapping.scope})
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section aria-labelledby="history-audit-title">
+            <h4 id="history-audit-title">Audit evidence</h4>
+            {historyDetail.audit.length === 0 ? (
+              <p>No batch audit events were recorded.</p>
+            ) : (
+              <ul className="import-history-facts">
+                {historyDetail.audit.map((event) => (
+                  <li key={event.id}>
+                    <strong>{event.action}</strong>
+                    <span>
+                      {event.result} · {event.occurredAt} · request{" "}
+                      {event.requestId}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
         </section>
       ) : null}
     </main>

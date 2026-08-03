@@ -121,5 +121,23 @@ export function createAuditRepository(
 
       return rows.map(createRecord);
     },
+
+    async listForOwnerTarget(
+      userId: string,
+      targetType: string,
+      targetId: string,
+    ): Promise<AuditEventRecord[]> {
+      const rows = await client.all<Record<string, unknown>>(
+        `
+          SELECT id, actor_user_id, target_owner_user_id, action, target_type,
+            target_id, request_id, result, metadata_json, occurred_at
+          FROM audit_events
+          WHERE target_owner_user_id = ? AND target_type = ? AND target_id = ?
+          ORDER BY occurred_at ASC, id ASC
+        `,
+        [userId, targetType, targetId],
+      );
+      return rows.map(createRecord);
+    },
   };
 }
