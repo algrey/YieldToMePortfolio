@@ -205,10 +205,7 @@ test("CALC-001B retains fallback and stale FX state outside compact fields", () 
   assert.equal(stale.explanation.fx.explanation.selectionState, "stale");
   assert.equal(stale.explanation.fx.explanation.quality, "stale_candidate");
   assert.equal(stale.explanation.fx.explanation.fallback, true);
-  assert.equal(
-    stale.explanation.fx.explanation.actionability,
-    "action_required",
-  );
+  assert.equal(stale.explanation.fx.explanation.actionability, "explanation");
   assert.equal(
     stale.explanation.fx.explanation.selectionReason,
     "The last valid rate exceeds the freshness threshold.",
@@ -564,6 +561,55 @@ test("CALC-001B coverage ignores explicit zero positions and cash balances", () 
   const empty = composePortfolioTotals({ holdings: [], cashAccounts: [] });
   assert.equal(empty.status, "unavailable");
   assert.equal(empty.amounts, null);
+});
+
+test("CALC-001B malformed materiality and contradictory FX evidence fail closed", () => {
+  const totals = composePortfolioTotals({
+    holdings: [
+      {
+        id: "invalid-quantity",
+        quantityDecimal: "not-a-decimal",
+        homeMarketValue: available("100"),
+        homeOpenBasis: available("50"),
+      },
+      {
+        id: "negative-quantity",
+        quantityDecimal: "-2",
+        homeMarketValue: available("100"),
+        homeOpenBasis: available("50"),
+      },
+    ],
+    cashAccounts: [
+      {
+        id: "invalid-balance",
+        nativeBalanceDecimal: "1e3",
+        homeValue: available("1000"),
+      },
+    ],
+  });
+  assert.equal(totals.status, "unavailable");
+  assert.equal(totals.coverage.invalidHoldingCount, 2);
+  assert.equal(totals.coverage.invalidCashAccountCount, 1);
+  assert.deepEqual(totals.coverage.excludedHoldingIds, [
+    "invalid-quantity",
+    "negative-quantity",
+  ]);
+  assert.deepEqual(totals.coverage.excludedCashAccountIds, ["invalid-balance"]);
+
+  const contradictoryFx = resolveFxRate({
+    purpose: "valuation",
+    nativeCurrencyCode: "USD",
+    homeCurrencyCode: "AUD",
+    selectedFx: {
+      ...usdAudFallbackFx,
+      selectionState: "current",
+    },
+  });
+  assert.equal(contradictoryFx.status, "unavailable");
+  if (contradictoryFx.status === "unavailable") {
+    assert.equal(contradictoryFx.reason, "invalid_fx");
+    assert.equal(contradictoryFx.explanation.actionability, "action_required");
+  }
 });
 
 test("CALC-001B inversion and percentage rounding use half-even decimal boundaries", () => {

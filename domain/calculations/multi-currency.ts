@@ -189,12 +189,14 @@ export type PortfolioCoverage = Readonly<{
   totalHoldingCount: number;
   nonZeroHoldingCount: number;
   zeroHoldingCount: number;
+  invalidHoldingCount: number;
   pricedAndConvertedHoldingCount: number;
   basisCoveredHoldingCount: number;
   alignedHoldingCount: number;
   totalCashAccountCount: number;
   nonZeroCashAccountCount: number;
   zeroCashAccountCount: number;
+  invalidCashAccountCount: number;
   convertedCashAccountCount: number;
   excludedHoldingIds: readonly string[];
   excludedCashAccountIds: readonly string[];
@@ -305,13 +307,9 @@ function evidenceExplanation(
 function fxActionability(evidence: FxEvidence): FxActionability {
   if (
     evidence.selectionState === "stale" ||
-    evidence.quality === "stale_candidate"
-  ) {
-    return "action_required";
-  }
-  if (
     evidence.selectionState === "fallback" ||
     evidence.fallback ||
+    evidence.quality === "stale_candidate" ||
     evidence.quality === "manual" ||
     evidence.quality === "indicative" ||
     evidence.quality === "corrected"
@@ -319,6 +317,34 @@ function fxActionability(evidence: FxEvidence): FxActionability {
     return "explanation";
   }
   return "none";
+}
+
+function isConsistentFxEvidence(
+  evidence: FxEvidence,
+  explicitTransactionFact: boolean,
+): boolean {
+  const sourceMatchesQuality =
+    (evidence.source === "provider" &&
+      (evidence.quality === "observed" ||
+        evidence.quality === "corrected" ||
+        evidence.quality === "indicative" ||
+        evidence.quality === "stale_candidate")) ||
+    (evidence.source === "manual" && evidence.quality === "manual") ||
+    (evidence.source === "transaction" && evidence.quality === "transaction") ||
+    (evidence.source === "identity" && evidence.quality === "identity");
+  const stateMatchesFallback =
+    !(evidence.selectionState === "current" && evidence.fallback) &&
+    !(evidence.selectionState === "fallback" && !evidence.fallback) &&
+    !(
+      evidence.quality === "stale_candidate" &&
+      evidence.selectionState !== "stale"
+    );
+  return (
+    sourceMatchesQuality &&
+    stateMatchesFallback &&
+    evidence.selectionReason.trim().length > 0 &&
+    (!explicitTransactionFact || evidence.source === "transaction")
+  );
 }
 
 function resolvedUnavailable(
@@ -373,6 +399,13 @@ export function resolveFxRate(input: FxResolutionInput): ResolvedFx {
     input.purpose === "transaction" ? input.explicitTransactionFx : undefined;
   const evidence = explicit ?? input.selectedFx;
   if (!evidence) return resolvedUnavailable(input, "missing_fx");
+  if (!isConsistentFxEvidence(evidence, explicit !== undefined)) {
+    return resolvedUnavailable(
+      input,
+      explicit ? "invalid_transaction_fx" : "invalid_fx",
+      evidence,
+    );
+  }
 
   let rate: DecimalFraction;
   try {
@@ -856,12 +889,18 @@ function sumAvailable(values: readonly CalculationValue[]): string {
   return formatDecimalExact(total);
 }
 
-function isExplicitZero(valueDecimal: string): boolean {
+type ComponentMateriality = "zero" | "nonzero" | "invalid";
+
+function componentMateriality(
+  valueDecimal: string,
+  allowNegative: boolean,
+): ComponentMateriality {
   try {
-    return compareDecimal(parseDecimal(valueDecimal), ZERO) === 0;
+    const comparison = compareDecimal(parseDecimal(valueDecimal), ZERO);
+    if (comparison === 0) return "zero";
+    return comparison < 0 && !allowNegative ? "invalid" : "nonzero";
   } catch {
-    // Invalid projection inputs remain material so they cannot hide a gap.
-    return false;
+    return "invalid";
   }
 }
 
@@ -871,17 +910,35 @@ export function composePortfolioTotals(
     cashAccounts: readonly PortfolioCashTotalInput[];
   }>,
 ): PortfolioTotalsResult {
-  const zeroHoldings = input.holdings.filter((holding) =>
-    isExplicitZero(holding.quantityDecimal),
+  const holdingMateriality = new Map(
+    input.holdings.map((holding) => [
+      holding,
+      componentMateriality(holding.quantityDecimal, false),
+    ]),
+  );
+  const cashMateriality = new Map(
+    input.cashAccounts.map((account) => [
+      account,
+      componentMateriality(account.nativeBalanceDecimal, true),
+    ]),
+  );
+  const zeroHoldings = input.holdings.filter(
+    (holding) => holdingMateriality.get(holding) === "zero",
   );
   const nonZeroHoldings = input.holdings.filter(
-    (holding) => !isExplicitZero(holding.quantityDecimal),
+    (holding) => holdingMateriality.get(holding) === "nonzero",
   );
-  const zeroCashAccounts = input.cashAccounts.filter((account) =>
-    isExplicitZero(account.nativeBalanceDecimal),
+  const invalidHoldings = input.holdings.filter(
+    (holding) => holdingMateriality.get(holding) === "invalid",
+  );
+  const zeroCashAccounts = input.cashAccounts.filter(
+    (account) => cashMateriality.get(account) === "zero",
   );
   const nonZeroCashAccounts = input.cashAccounts.filter(
-    (account) => !isExplicitZero(account.nativeBalanceDecimal),
+    (account) => cashMateriality.get(account) === "nonzero",
+  );
+  const invalidCashAccounts = input.cashAccounts.filter(
+    (account) => cashMateriality.get(account) === "invalid",
   );
   const alignedHoldings = nonZeroHoldings.filter(
     (holding) =>
@@ -895,6 +952,7 @@ export function composePortfolioTotals(
     totalHoldingCount: input.holdings.length,
     nonZeroHoldingCount: nonZeroHoldings.length,
     zeroHoldingCount: zeroHoldings.length,
+    invalidHoldingCount: invalidHoldings.length,
     pricedAndConvertedHoldingCount: nonZeroHoldings.filter(
       (holding) => holding.homeMarketValue.status === "available",
     ).length,
@@ -905,12 +963,23 @@ export function composePortfolioTotals(
     totalCashAccountCount: input.cashAccounts.length,
     nonZeroCashAccountCount: nonZeroCashAccounts.length,
     zeroCashAccountCount: zeroCashAccounts.length,
+    invalidCashAccountCount: invalidCashAccounts.length,
     convertedCashAccountCount: convertedCash.length,
-    excludedHoldingIds: nonZeroHoldings
-      .filter((holding) => !alignedHoldings.includes(holding))
+    excludedHoldingIds: input.holdings
+      .filter(
+        (holding) =>
+          holdingMateriality.get(holding) === "invalid" ||
+          (holdingMateriality.get(holding) === "nonzero" &&
+            !alignedHoldings.includes(holding)),
+      )
       .map((holding) => holding.id),
-    excludedCashAccountIds: nonZeroCashAccounts
-      .filter((account) => !convertedCash.includes(account))
+    excludedCashAccountIds: input.cashAccounts
+      .filter(
+        (account) =>
+          cashMateriality.get(account) === "invalid" ||
+          (cashMateriality.get(account) === "nonzero" &&
+            !convertedCash.includes(account)),
+      )
       .map((account) => account.id),
   };
   const hasKnownAmount = alignedHoldings.length > 0 || convertedCash.length > 0;
@@ -919,7 +988,9 @@ export function composePortfolioTotals(
   const allComponentsAreZero =
     hasExplicitComponents &&
     nonZeroHoldings.length === 0 &&
-    nonZeroCashAccounts.length === 0;
+    nonZeroCashAccounts.length === 0 &&
+    invalidHoldings.length === 0 &&
+    invalidCashAccounts.length === 0;
   if (!hasKnownAmount) {
     if (allComponentsAreZero) {
       return {
@@ -972,6 +1043,8 @@ export function composePortfolioTotals(
     portfolioValueDecimal,
   };
   const complete =
+    coverage.invalidHoldingCount === 0 &&
+    coverage.invalidCashAccountCount === 0 &&
     coverage.alignedHoldingCount === coverage.nonZeroHoldingCount &&
     coverage.convertedCashAccountCount === coverage.nonZeroCashAccountCount;
   return complete
