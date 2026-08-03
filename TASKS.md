@@ -750,7 +750,7 @@ Status: PENDING.
 
 ### UI-004 — Compact quotes, refresh, and overrides
 
-Status: PENDING.
+Status: READY.
 
 - Objective: expose compact quote views and controlled refresh/correction workflows without calling EOD data live.
 - Dependencies: UI-001, MKT-003B.
