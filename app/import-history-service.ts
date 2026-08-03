@@ -59,6 +59,7 @@ export type ImportHistoryPagination = {
 
 export type ImportHistoryDetail = {
   batch: ImportHistoryBatch;
+  successorBatchId: string | null;
   rows: ImportHistoryRow[];
   issues: ImportIssueRecord[];
   mappings: ImportMappingDecision[];
@@ -117,6 +118,12 @@ export async function loadImportBatchHistoryWithContext(
   const staging = createOwnedImportStagingRepository(context.client);
   const batch = await staging.get(context.userId, batchId);
   if (!batch) return null;
+  const successor = await context.client.get<{ id: string }>(
+    `SELECT id FROM import_batches
+      WHERE user_id = ? AND supersedes_batch_id = ?
+      ORDER BY created_at ASC, id ASC LIMIT 1`,
+    [context.userId, batchId],
+  );
   const [rows, issues, mappings, audit, progress] = await Promise.all([
     staging.listRowsPage(context.userId, batchId, offset, limit),
     staging.listIssuesPage(context.userId, batchId, offset, limit),
@@ -140,6 +147,7 @@ export async function loadImportBatchHistoryWithContext(
     rows.hasMore || issues.hasMore || mappings.hasMore || audit.hasMore;
   return {
     batch: batchHistory(batch),
+    successorBatchId: successor?.id ?? null,
     rows: rows.items.map(rowHistory),
     issues: issues.items,
     mappings: mappings.items,

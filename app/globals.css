@@ -2297,6 +2297,101 @@ dd {
   margin-top: 28px;
 }
 
+.import-reversal-panel {
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--warning) 42%, transparent);
+  background: var(--forest);
+}
+
+.import-reversal-panel > p:not(.import-reversal-status),
+.import-reversal-status,
+.import-reversal-error,
+.import-successor-link {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.import-reversal-button,
+.import-successor-link button {
+  min-height: 44px;
+  margin-top: 14px;
+  padding: 0 14px;
+  border: 1px solid var(--warning);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--cream);
+  cursor: pointer;
+}
+
+.import-reversal-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.import-reversal-status {
+  border-left: 2px solid var(--green);
+  padding: 10px 12px;
+  background: var(--forest-raised);
+}
+
+.import-reversal-error {
+  color: var(--warning);
+}
+
+.import-reversal-blocked {
+  margin-top: 14px;
+  padding: 12px;
+  border-left: 2px solid var(--warning);
+  background: var(--forest-raised);
+}
+
+.import-reversal-blocked > p {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.import-reversal-blocked ul {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.import-reversal-blocked li {
+  display: grid;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid var(--divider);
+  color: var(--cream);
+  font-size: 0.76rem;
+}
+
+.import-reversal-blocked details {
+  margin-top: 0;
+  border-top: 0;
+}
+
+.import-reversal-blocked summary {
+  min-height: 44px;
+  padding-top: 9px;
+  font-size: 0.74rem;
+}
+
+.import-reversal-blocked details p {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.import-successor-link button {
+  margin-top: 0;
+  border-color: var(--green);
+  color: var(--green-bright);
+}
+
 .history-commit-progress {
   padding: 16px;
   border: 1px solid color-mix(in srgb, var(--warning) 42%, transparent);

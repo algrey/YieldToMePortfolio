@@ -837,7 +837,7 @@ Status: DONE (2026-08-03).
 
 ### UI-005D — Import reversal and corrected successor
 
-Status: READY.
+Status: DONE (2026-08-04).
 
 - Objective: make committed batch provenance and safe correction/reversal understandable.
 - Dependencies: UI-005C, IMP-003B.
@@ -848,6 +848,7 @@ Status: READY.
 - Tests: clean/dependency-blocked/repeated reversal, corrected successor, cross-user, keyboard/mobile.
 - Risks: destructive action ambiguity.
 - Parallel safe: no; correction UI follows stable service behavior.
+- Completion note: Added explicit owner-scoped reversal confirmation with resumable/idempotent progress, dependency-impact evidence, retained post-reversal source history, and corrected-successor navigation. Focused UI rendering/history coverage and existing IMP-003B ownership, CSRF, dependency-block, repeat, and resume tests pass.
 
 ### UI-005E — Manual ledger entry and correction
 

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useEffect } from "react";
 import type { ImportHistoryDetail } from "../import-history-service.ts";
+import type { ImportReversalActionResult } from "../import-reversal-service.ts";
 import { ImportHistoryDetailPanel } from "./import-history-detail.tsx";
 
 type PortfolioOption = { id: string; name: string; homeCurrencyCode: string };
@@ -80,6 +81,20 @@ function statusLabel(status: string): string {
   return status.replaceAll("_", " ");
 }
 
+function isImportReversalResult(
+  value: unknown,
+): value is ImportReversalActionResult {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.ok === true) {
+    if (typeof candidate.reversal !== "object" || candidate.reversal === null)
+      return false;
+    const reversal = candidate.reversal as Record<string, unknown>;
+    return reversal.status === "reversing" || reversal.status === "reversed";
+  }
+  return candidate.ok === false && typeof candidate.message === "string";
+}
+
 export function ImportReview({
   portfolios,
 }: {
@@ -99,6 +114,11 @@ export function ImportReview({
   const [historyDetail, setHistoryDetail] =
     useState<ImportHistoryDetail | null>(null);
   const [historyPending, setHistoryPending] = useState(false);
+  const [reversalPending, setReversalPending] = useState(false);
+  const [reversal, setReversal] = useState<ImportReversalActionResult | null>(
+    null,
+  );
+  const [reversalKey, setReversalKey] = useState<string | null>(null);
 
   useEffect(() => {
     void loadHistory();
@@ -132,6 +152,10 @@ export function ImportReview({
   }
 
   async function loadHistoryDetail(batchId: string, offset = 0) {
+    if (offset === 0) {
+      setReversal(null);
+      setReversalKey(null);
+    }
     setHistoryPending(true);
     setMessage(null);
     try {
@@ -171,6 +195,55 @@ export function ImportReview({
       );
     } finally {
       setHistoryPending(false);
+    }
+  }
+
+  async function reverseHistoryImport(expectedVersion: number) {
+    if (!historyDetail) return;
+    const idempotencyKey = reversalKey ?? crypto.randomUUID();
+    setReversalKey(idempotencyKey);
+    setReversalPending(true);
+    setMessage(null);
+    try {
+      const response = await fetch(
+        `/api/import/commit/${historyDetail.batch.id}/reverse`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            expectedVersion,
+            idempotencyKey,
+            confirmation: true,
+          }),
+        },
+      );
+      const payload: unknown = await response.json().catch(() => null);
+      const result: ImportReversalActionResult = isImportReversalResult(payload)
+        ? payload
+        : {
+            ok: false,
+            status: 503,
+            message: "The reversal response was invalid.",
+          };
+      if (!response.ok && result.ok) {
+        setMessage("The reversal response was invalid.");
+      }
+      if (result.ok) {
+        await Promise.all([
+          loadHistory(),
+          loadHistoryDetail(historyDetail.batch.id),
+        ]);
+      }
+      setReversal(result);
+      setReversalKey(idempotencyKey);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Import reversal could not be completed.",
+      );
+    } finally {
+      setReversalPending(false);
     }
   }
 
@@ -613,6 +686,13 @@ export function ImportReview({
             }
           }}
           onResume={() => void resumeHistoryCommit()}
+          reversal={reversal}
+          reversalPending={reversalPending}
+          reversalRetryAvailable={reversalKey !== null}
+          onReverse={(expectedVersion) =>
+            void reverseHistoryImport(expectedVersion)
+          }
+          onOpenSuccessor={(batchId) => void loadHistoryDetail(batchId)}
         />
       ) : null}
     </main>

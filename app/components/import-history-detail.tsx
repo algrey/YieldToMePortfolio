@@ -1,4 +1,6 @@
 import type { ImportHistoryDetail } from "../import-history-service.ts";
+import type { ImportReversalActionResult } from "../import-reversal-service.ts";
+import { useState } from "react";
 
 function displayValue(value: unknown): string {
   if (value === null || value === undefined) return "Not recorded";
@@ -19,12 +21,23 @@ export function ImportHistoryDetailPanel({
   pending,
   onLoadMore,
   onResume,
+  reversal,
+  reversalPending,
+  reversalRetryAvailable,
+  onReverse,
+  onOpenSuccessor,
 }: {
   detail: ImportHistoryDetail;
   pending: boolean;
   onLoadMore: () => void;
   onResume: () => void;
+  reversal: ImportReversalActionResult | null;
+  reversalPending: boolean;
+  reversalRetryAvailable: boolean;
+  onReverse: (expectedVersion: number) => void;
+  onOpenSuccessor: (batchId: string) => void;
 }) {
+  const [confirmation, setConfirmation] = useState(false);
   const resumable =
     detail.batch.status === "committing" &&
     detail.progress.idempotencyKey !== null;
@@ -47,6 +60,122 @@ export function ImportHistoryDetailPanel({
         {detail.rows.length} source rows and {detail.issues.length} issues in
         this bounded page
       </p>
+
+      {detail.batch.status === "committed" ||
+      detail.batch.status === "reversing" ||
+      detail.batch.status === "reversed" ||
+      reversal ? (
+        <section
+          className="import-reversal-panel"
+          aria-labelledby="import-reversal-title"
+        >
+          <h4 id="import-reversal-title">Import correction and reversal</h4>
+          {detail.batch.status === "reversed" ? (
+            <>
+              <p className="import-reversal-status" role="status">
+                This committed import is reversed. Its source rows and
+                normalized facts remain visible below as immutable evidence.
+              </p>
+              {reversalRetryAvailable ? (
+                <button
+                  className="import-reversal-button"
+                  type="button"
+                  onClick={() => onReverse(detail.batch.version)}
+                  disabled={reversalPending}
+                >
+                  {reversalPending
+                    ? "Checking reversal…"
+                    : "Retry reversal request"}
+                </button>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <p>
+                Reversal creates compensating ledger facts; it does not delete
+                this import or its source evidence. Later dependent facts can
+                block the operation.
+              </p>
+              <label className="import-confirmation">
+                <input
+                  type="checkbox"
+                  checked={confirmation}
+                  onChange={(event) => setConfirmation(event.target.checked)}
+                />
+                <span>
+                  I confirm this exact batch reversal and understand that it
+                  creates compensating facts while retaining source history.
+                </span>
+              </label>
+              <button
+                className="import-reversal-button"
+                type="button"
+                onClick={() => onReverse(detail.batch.version)}
+                disabled={!confirmation || reversalPending}
+              >
+                {reversalPending
+                  ? "Reversing…"
+                  : detail.batch.status === "reversing"
+                    ? "Resume reversal"
+                    : "Reverse this committed import"}
+              </button>
+            </>
+          )}
+          {reversal?.ok ? (
+            <p className="import-reversal-status" role="status">
+              {reversal.reversal.status === "reversed"
+                ? `Reversal complete. ${reversal.reversal.reversedTransactions} ledger facts were compensated.`
+                : `Reversal is in progress. ${reversal.reversal.remainingTransactions} ledger facts remain.`}
+              {reversal.reversal.idempotent
+                ? " The repeated request returned the existing result."
+                : ""}
+            </p>
+          ) : reversal &&
+            !reversal.ok &&
+            reversal.impacts &&
+            reversal.impacts.length > 0 ? (
+            <div className="import-reversal-blocked" role="alert">
+              <strong>Reversal blocked by dependent facts</strong>
+              <p>Resolve these later facts before reversing the import.</p>
+              <ul>
+                {reversal.impacts.map((impact) => (
+                  <li
+                    key={`${impact.sourceTransactionId}-${impact.dependentTransactionId}`}
+                  >
+                    <span>
+                      Dependent transaction · business date{" "}
+                      {impact.dependentTradeAt.slice(0, 10)} · quantity{" "}
+                      {impact.dependentQuantityDecimal ?? "unavailable"}
+                    </span>
+                    <details>
+                      <summary>Show exact impact evidence</summary>
+                      <p>
+                        Source transaction: {impact.sourceTransactionId}. Exact
+                        dependent trade time: {impact.dependentTradeAt}.
+                        Dependent transaction: {impact.dependentTransactionId}.
+                      </p>
+                    </details>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : reversal && !reversal.ok ? (
+            <p className="import-reversal-error" role="alert">
+              {reversal.message}
+            </p>
+          ) : null}
+          {detail.successorBatchId ? (
+            <p className="import-successor-link">
+              <button
+                type="button"
+                onClick={() => onOpenSuccessor(detail.successorBatchId!)}
+              >
+                Open corrected successor batch
+              </button>
+            </p>
+          ) : null}
+        </section>
+      ) : null}
 
       {detail.batch.status === "committing" ? (
         <section
