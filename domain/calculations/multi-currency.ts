@@ -1,6 +1,7 @@
 import {
   addDecimal,
   compareDecimal,
+  DECIMAL_LIMITS,
   divideDecimal,
   formatDecimalExact,
   formatDecimalTrimmed,
@@ -339,19 +340,32 @@ export function resolveFxRate(input: FxResolutionInput): ResolvedFx {
   }
 
   try {
+    const inversionScale = input.inversionScale ?? DEFAULT_INVERSION_SCALE;
+    if (
+      !Number.isSafeInteger(inversionScale) ||
+      inversionScale < 0 ||
+      inversionScale > DECIMAL_LIMITS.inputScale
+    ) {
+      return resolvedUnavailable(
+        input,
+        explicit ? "invalid_transaction_fx" : "invalid_fx",
+        evidence,
+      );
+    }
     const normalized = inverse
-      ? roundDecimal(
-          divideDecimal(ONE, rate),
-          input.inversionScale ?? DEFAULT_INVERSION_SCALE,
-        )
+      ? roundDecimal(divideDecimal(ONE, rate), inversionScale)
       : rate;
+    if (compareDecimal(normalized, ZERO) <= 0) {
+      return resolvedUnavailable(
+        input,
+        explicit ? "invalid_transaction_fx" : "invalid_fx",
+        evidence,
+      );
+    }
     return {
       status: "available",
       rateDecimal: inverse
-        ? formatDecimalTrimmed(
-            normalized,
-            input.inversionScale ?? DEFAULT_INVERSION_SCALE,
-          )
+        ? formatDecimalTrimmed(normalized, inversionScale)
         : formatDecimalExact(normalized),
       nativeCurrencyCode: input.nativeCurrencyCode,
       homeCurrencyCode: input.homeCurrencyCode,

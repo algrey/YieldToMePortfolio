@@ -659,7 +659,7 @@ Status: DONE (review fixes completed 2026-08-03).
 
 ### CALC-001B — FX conversion, daily movement, and partial totals
 
-Status: DONE (2026-08-03).
+Status: IN PROGRESS (reviewed 2026-08-03).
 
 - Objective: add date-attributable home-currency presentation and coverage-aligned portfolio totals.
 - Dependencies: CALC-001A, MKT-003A, MKT-004.
@@ -671,6 +671,7 @@ Status: DONE (2026-08-03).
 - Risks: rate inversion or subtracting uncovered basis from covered value.
 - Parallel safe: yes after MKT-003A contract freezes.
 - Completion note: Added bounded exact-decimal transaction/valuation FX resolution with explicit transaction precedence, native/home holding presentation and provenance explanations, reconciled price/FX daily movement, signed cash conversion, and discriminated complete/partial portfolio totals whose invested value and basis share one aligned coverage set. Deterministic fixtures cover foreign buy/sell/current rates, direct/inverse/identity conversion, missing components, compact provenance suppression, cash, decomposition, coverage, and rounding; the aggregate repository gate passes.
+- Review finding: The calculation result drops the market selector's current/stale/fallback/quality state, so a last-known stale or fallback FX value can be represented indistinguishably from a normal current observation. The portfolio-total inputs also omit holding quantity and cash balance (or an explicit inclusion flag), so zero positions/accounts with missing price or FX are counted as excluded even though the normative coverage rule applies to non-zero components; an explicit zero foreign-currency balance can consequently make an otherwise known total partial or unavailable. Extend the calculation contracts to carry selector state into explanation/actionability and to compute coverage over non-zero components, then add stale/fallback and zero-position/zero-cash regression fixtures before returning this task to `DONE`. This review also made inversion-scale handling fail closed instead of returning a rate that downstream bounded decimal parsing rejects. The task remains a pure domain slice, so mobile and owner-isolation behavior are not applicable here.
 
 ### CALC-002 — Historical snapshots and rebuild
 

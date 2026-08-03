@@ -432,4 +432,28 @@ test("CALC-001B inversion and percentage rounding use half-even decimal boundari
   if (inverse.status === "available") {
     assert.equal(inverse.rateDecimal, "0.333333333333333333");
   }
+
+  const unsupportedScale = resolveFxRate({
+    purpose: "valuation",
+    nativeCurrencyCode: "USD",
+    homeCurrencyCode: "AUD",
+    selectedFx: audUsdInverseFx,
+    inversionScale: 25,
+  });
+  assert.equal(unsupportedScale.status, "unavailable");
+  if (unsupportedScale.status === "unavailable") {
+    assert.equal(unsupportedScale.reason, "invalid_fx");
+  }
+
+  const roundedToZero = resolveFxRate({
+    purpose: "valuation",
+    nativeCurrencyCode: "USD",
+    homeCurrencyCode: "AUD",
+    selectedFx: { ...audUsdInverseFx, rateDecimal: "100" },
+    inversionScale: 0,
+  });
+  assert.equal(roundedToZero.status, "unavailable");
+  if (roundedToZero.status === "unavailable") {
+    assert.equal(roundedToZero.reason, "invalid_fx");
+  }
 });
