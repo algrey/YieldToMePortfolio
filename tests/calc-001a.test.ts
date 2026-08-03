@@ -165,9 +165,12 @@ test("missing values and zero denominators remain named unavailable results", ()
       nativeMarketValue: { status: "available", valueDecimal: "200" },
       previousNativeMarketValue: {
         status: "unavailable",
-        reason: "missing_price",
+        reason: "missing_previous_price",
       },
-      dailyMovement: { status: "unavailable", reason: "missing_price" },
+      dailyMovement: {
+        status: "unavailable",
+        reason: "missing_previous_price",
+      },
       openBasis: { status: "available", valueDecimal: "0" },
       unrealisedGain: { status: "available", valueDecimal: "200" },
       unrealisedPercent: { status: "unavailable", reason: "zero_basis" },

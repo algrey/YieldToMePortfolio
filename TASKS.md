@@ -634,7 +634,7 @@ Status: DEFERRED; not required by the core ledger/valuation release.
 
 ### CALC-001A — Decimal primitives, basis, gain, and current value
 
-Status: DONE on 2026-08-03.
+Status: IN PROGRESS (review 2026-08-03).
 
 - Objective: implement the exact-decimal calculation foundation and single-date holding results.
 - Dependencies: LED-002B, MKT-001 fixture contract.
@@ -646,6 +646,7 @@ Status: DONE on 2026-08-03.
 - Risks: denominator semantics and rate inversion.
 - Parallel safe: yes with market adapters using fixture contracts.
 - Completion note: Added the exact-decimal calculation foundation, proportional allocation with reconciled final residuals, native holding value/basis/gain results, stable unavailable reasons, and deterministic FIFO calculation fixtures. Existing preview decimal callers now use the shared domain implementation.
+- Review findings: The implementation is a bespoke bigint fraction rather than the documented reviewed arbitrary-precision decimal dependency, accepts unbounded decimal length/scale (including potentially unbounded `pow10` work), and rounds most available holding/basis/gain outputs to 18 places despite the calculation rules requiring source precision to be retained. The “FIFO” fixture supplies precomputed basis/realised gain instead of exercising the ledger FIFO result, and the required invariant/property coverage is absent for malformed inputs, denominator/scale boundaries, negative/zero cases, and allocation reconciliation. An explicit `null` previous price was also reported as `missing_price`; this review corrects it to the stable `missing_previous_price` reason. Complete bounded, source-precision-safe decimal semantics and ledger-integrated invariant coverage before marking this task done. This domain task has no mobile surface.
 
 ### CALC-001B — FX conversion, daily movement, and partial totals
 

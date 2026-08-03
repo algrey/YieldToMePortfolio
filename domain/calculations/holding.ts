@@ -191,7 +191,8 @@ export function calculateSingleDateHolding(
   );
   const nativeMarketValue = calculateNativeMarketValue(input);
   const previousNativeMarketValue =
-    input.previousPriceDecimal === undefined
+    input.previousPriceDecimal === undefined ||
+    input.previousPriceDecimal === null
       ? unavailable("missing_previous_price")
       : calculateNativeMarketValue({
           quantityDecimal: input.quantityDecimal,
