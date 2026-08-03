@@ -107,9 +107,23 @@ test("manual contract fails closed for invalid exact decimals, ratios, and dates
     "request-a",
     "manual-ledger:key",
   );
-  assert.equal(invalidDate.ok, true);
-  if (!invalidDate.ok) return;
-  assert.equal(prepareLedgerPosting(invalidDate.input).ok, false);
+  assert.equal(invalidDate.ok, false);
+
+  const invalidTradeTime = parseManualLedgerForm(
+    { ...base, tradeAt: "2026-02-30T10:00:00.000Z" },
+    "portfolio-a",
+    "request-a",
+    "manual-ledger:key",
+  );
+  assert.equal(invalidTradeTime.ok, false);
+
+  const invalidSettlementDate = parseManualLedgerForm(
+    { ...base, settlementDate: "2026-02-30" },
+    "portfolio-a",
+    "request-a",
+    "manual-ledger:key",
+  );
+  assert.equal(invalidSettlementDate.ok, false);
 
   const invalidDecimal = parseManualLedgerForm(
     { ...base, quantityDecimal: "1e2" },
@@ -198,6 +212,8 @@ test("manual entry boundary is authenticated, same-origin, immutable, and mobile
   assert.match(component, /Split numerator/);
   assert.match(component, /Server impact preview/);
   assert.match(component, /FX unavailable/);
+  assert.match(component, /could not be completed\. Retry safely/);
+  assert.match(component, /!transaction\.reversesTransactionId/);
   assert.match(component, /original transaction[\s\S]*remain unchanged/);
   assert.match(page, /loadOwnedManualLedgerOptions/);
   assert.match(postRoute, /rejectCrossSiteMutation/);

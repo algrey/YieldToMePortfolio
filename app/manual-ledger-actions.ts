@@ -268,6 +268,8 @@ export async function reverseManualLedgerAction(
     : `manual-ledger:${randomUUID()}`;
   const context = await getAuthenticatedSqlContext(portfolioId);
   if (!context.ok) return actionFailure(context.status, context.message, key);
+  const base = await baseCurrency(context.client, portfolioId, context.userId);
+  if (!base) return actionFailure(404, "Portfolio was not found.", key);
   const mutation = await createOwnedLedgerRepository(context.client).reverse(
     context.userId,
     portfolioId,
@@ -288,15 +290,12 @@ export async function reverseManualLedgerAction(
       key,
     );
   }
-  const base = await baseCurrency(context.client, portfolioId, context.userId);
-  const input = base
-    ? inputFromTransaction(
-        mutation.transaction,
-        portfolioId,
-        context.requestId,
-        key,
-      )
-    : null;
+  const input = inputFromTransaction(
+    mutation.transaction,
+    portfolioId,
+    context.requestId,
+    key,
+  );
   const prepared = input ? prepareLedgerPosting(input) : null;
   if (!base || !input || !prepared || !prepared.ok) {
     return actionFailure(

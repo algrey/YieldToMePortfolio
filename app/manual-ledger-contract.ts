@@ -64,8 +64,28 @@ function manualType(value: unknown): ManualLedgerType | null {
     : null;
 }
 
+function calendarDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+}
+
 function dateTime(value: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) {
+    return false;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.valueOf())) return false;
+  const canonical = parsed.toISOString();
+  return canonical === value || canonical.replace(".000Z", "Z") === value;
 }
 
 export function parseManualLedgerForm(
@@ -91,7 +111,12 @@ export function parseManualLedgerForm(
       message: "A three-letter transaction currency is required.",
     };
   }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(localTradeDate) || !dateTime(tradeAt)) {
+  const settlementDate = nullableText(value.settlementDate);
+  if (
+    !calendarDate(localTradeDate) ||
+    !dateTime(tradeAt) ||
+    (settlementDate !== null && !calendarDate(settlementDate))
+  ) {
     return {
       ok: false,
       message: "A business date and exact trade time are required.",
@@ -130,7 +155,7 @@ export function parseManualLedgerForm(
     idempotencyKey,
     tradeAt,
     localTradeDate,
-    settlementDate: nullableText(value.settlementDate),
+    settlementDate,
     currencyCode,
     fxRateSource: nullableText(value.fxRateSource),
     fxObservedAt: nullableText(value.fxObservedAt),

@@ -57,6 +57,17 @@ function isoTimestamp(value: FormDataEntryValue | undefined): string {
   return Number.isNaN(parsed.valueOf()) ? "" : parsed.toISOString();
 }
 
+function responseResult(value: unknown, fallback: string): Result {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    typeof (value as { ok?: unknown }).ok !== "boolean"
+  ) {
+    return { ok: false, message: fallback };
+  }
+  return value as Result;
+}
+
 function formValue(
   form: HTMLFormElement,
   idempotencyKey: string | null,
@@ -86,6 +97,8 @@ function ResultPanel({
     );
   }
   const transaction = result.mutation?.transaction;
+  const canCorrect =
+    transaction?.status === "posted" && !transaction.reversesTransactionId;
   return (
     <section
       className="manual-ledger-result"
@@ -116,12 +129,12 @@ function ResultPanel({
         ) : null}
       </details>
       <div className="manual-ledger-actions">
-        {transaction?.status === "posted" ? (
+        {canCorrect ? (
           <button type="button" onClick={onReverse}>
             Reverse this fact
           </button>
         ) : null}
-        {transaction?.status === "posted" ? (
+        {canCorrect ? (
           <button type="button" onClick={onReplace}>
             Prepare a replacement
           </button>
@@ -147,44 +160,60 @@ export function ManualLedgerEntry({
 
   async function submit(form: HTMLFormElement) {
     setPending(true);
-    const payload = formValue(form, retryKey);
-    const endpoint = correctionTarget
-      ? `/api/portfolios/${portfolioId}/ledger/${correctionTarget}/supersede`
-      : `/api/portfolios/${portfolioId}/ledger`;
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const next = (await response.json().catch(() => ({
-      ok: false,
-      message: "The ledger response was invalid.",
-    }))) as Result;
-    setResult(next);
-    setRetryKey(next.idempotencyKey ?? retryKey);
-    setPending(false);
-    if (next.ok) setCorrectionTarget(null);
+    try {
+      const payload = formValue(form, retryKey);
+      const endpoint = correctionTarget
+        ? `/api/portfolios/${portfolioId}/ledger/${correctionTarget}/supersede`
+        : `/api/portfolios/${portfolioId}/ledger`;
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const next = responseResult(
+        await response.json(),
+        "The ledger response was invalid.",
+      );
+      setResult(next);
+      setRetryKey(next.idempotencyKey ?? retryKey);
+      if (next.ok) setCorrectionTarget(null);
+    } catch {
+      setResult({
+        ok: false,
+        message: "The ledger request could not be completed. Retry safely.",
+      });
+    } finally {
+      setPending(false);
+    }
   }
 
   async function reverse() {
     const transactionId = result?.mutation?.transaction.id;
     if (!transactionId) return;
     setPending(true);
-    const response = await fetch(
-      `/api/portfolios/${portfolioId}/ledger/${transactionId}/reverse`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
-      },
-    );
-    const next = (await response.json().catch(() => ({
-      ok: false,
-      message: "The correction response was invalid.",
-    }))) as Result;
-    setResult(next);
-    setRetryKey(next.idempotencyKey ?? retryKey);
-    setPending(false);
+    try {
+      const response = await fetch(
+        `/api/portfolios/${portfolioId}/ledger/${transactionId}/reverse`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      );
+      const next = responseResult(
+        await response.json(),
+        "The correction response was invalid.",
+      );
+      setResult(next);
+      setRetryKey(next.idempotencyKey ?? retryKey);
+    } catch {
+      setResult({
+        ok: false,
+        message: "The correction request could not be completed. Retry safely.",
+      });
+    } finally {
+      setPending(false);
+    }
   }
 
   return (
