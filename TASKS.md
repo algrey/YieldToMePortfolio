@@ -842,7 +842,7 @@ Status: PENDING.
 
 ### UI-005E — Manual ledger entry and correction
 
-Status: READY.
+Status: DONE on 2026-08-03.
 
 - Objective: expose the core manual trade/cash/split write path without mixing it into import or read-only projection screens.
 - Dependencies: UI-005A, LED-001B, LED-002B.
@@ -853,6 +853,7 @@ Status: READY.
 - Tests: each supported type, invalid decimal/ratio/date, missing FX, double submit, reversal/replacement, oversell, cross-user and cross-portfolio denial, keyboard/mobile.
 - Risks: a convenient form bypassing the single ledger service or implying incomplete FX is zero.
 - Parallel safe: no; financial mutation UI follows the stable ledger service.
+- Completion note: Added an authenticated, owner-scoped manual ledger form and same-origin post/reverse/supersede routes for buy, sell, cash, fee, tax, and split facts. Server-side parsing, exact impact preview, FIFO oversell guard, server-issued idempotency keys, explicit missing-FX state, and immutable correction evidence are covered by UI-005E tests and the repository-wide gates.
 
 ### PWA-001 — Offline-safe shell and connectivity states
 

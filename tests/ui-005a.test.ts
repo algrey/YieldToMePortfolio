@@ -314,8 +314,9 @@ test("details UI is read-only, provenance-explicit, and linked to separate entry
   assert.match(page, /loadAuthenticatedPortfolioInspection/);
   assert.match(manualRoute, /loadAuthenticatedWorkspace\(portfolioId\)/);
   assert.match(manualRoute, /workspace\.activePortfolio === null/);
-  assert.match(manualRoute, /Manual entry is not available yet/);
-  assert.doesNotMatch(manualRoute, /<form\b|<input\b|action=/i);
+  assert.match(manualRoute, /ManualLedgerEntry/);
+  assert.match(manualRoute, /getAuthenticatedSqlContext/);
+  assert.doesNotMatch(manualRoute, /Manual entry is not available yet/);
   assert.match(repository, /t\.user_id = \? AND t\.portfolio_id = \?/);
   assert.match(repository, /l\.user_id = \? AND l\.portfolio_id = \?/);
   assert.match(repository, /e\.user_id = \? AND e\.portfolio_id = \?/);

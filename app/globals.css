@@ -1473,6 +1473,159 @@ dd {
   padding: 48px 0;
 }
 
+.manual-ledger-page {
+  width: min(calc(100% - 32px), 900px);
+  margin: 0 auto;
+  padding: 40px 0 72px;
+}
+
+.manual-ledger-heading {
+  max-width: 680px;
+}
+
+.manual-ledger-heading h1,
+.manual-ledger-result h2,
+.manual-ledger-preview h2 {
+  margin-top: 8px;
+  font-family: var(--serif);
+  font-size: clamp(2rem, 6vw, 3.6rem);
+  font-weight: 400;
+  letter-spacing: -0.045em;
+  line-height: 0.98;
+}
+
+.manual-ledger-heading > p:not(.eyebrow),
+.manual-ledger-result > p,
+.manual-ledger-preview > p,
+.manual-ledger-help,
+.manual-ledger-notice {
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.manual-ledger-heading a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  margin-top: 14px;
+  color: var(--cream);
+}
+
+.manual-ledger-form,
+.manual-ledger-result {
+  margin-top: 32px;
+  padding: 22px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.manual-ledger-form fieldset {
+  min-width: 0;
+  border: 0;
+  padding: 0;
+}
+
+.manual-ledger-form legend {
+  color: var(--cream);
+  font-family: var(--serif);
+  font-size: 1.6rem;
+}
+
+.manual-ledger-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.manual-ledger-grid label {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+}
+
+.manual-ledger-grid input,
+.manual-ledger-grid select {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--ink);
+  color: var(--cream);
+  font: inherit;
+}
+
+.manual-ledger-wide,
+.manual-ledger-preview,
+.manual-ledger-help,
+.manual-ledger-warning {
+  grid-column: 1 / -1;
+}
+
+.manual-ledger-preview {
+  margin-top: 4px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 75%, var(--green));
+}
+
+.manual-ledger-preview h2 {
+  font-size: 1.5rem;
+}
+
+.manual-ledger-warning,
+.manual-ledger-error {
+  color: var(--orange);
+}
+
+.manual-ledger-form button,
+.manual-ledger-actions button {
+  min-height: 44px;
+  margin-top: 20px;
+  padding: 0 15px;
+  border: 1px solid var(--green);
+  border-radius: 3px;
+  background: var(--green);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.manual-ledger-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.manual-ledger-actions button + button {
+  border-color: var(--line-strong);
+  background: transparent;
+  color: var(--cream);
+}
+
+.manual-ledger-evidence {
+  margin-top: 16px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.55;
+}
+
+.manual-ledger-evidence summary {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--cream);
+  cursor: pointer;
+}
+
+.manual-ledger-evidence p + p {
+  margin-top: 6px;
+}
+
 .inspection-evidence p,
 .inspection-evidence ul {
   margin-top: 7px;
@@ -2223,6 +2376,26 @@ dd {
 }
 
 @media (max-width: 600px) {
+  .manual-ledger-page {
+    padding-top: 24px;
+  }
+
+  .manual-ledger-form,
+  .manual-ledger-result {
+    padding: 16px;
+  }
+
+  .manual-ledger-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .manual-ledger-wide,
+  .manual-ledger-preview,
+  .manual-ledger-help,
+  .manual-ledger-warning {
+    grid-column: auto;
+  }
+
   .import-review-page {
     width: min(calc(100% - 24px), 960px);
     padding-top: 24px;

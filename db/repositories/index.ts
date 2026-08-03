@@ -92,6 +92,11 @@ export {
   type LedgerTransactionRecord,
 } from "./ledger.ts";
 export {
+  loadOwnedManualLedgerOptions,
+  type ManualLedgerOptions,
+  type ManualLedgerSecurityOption,
+} from "./manual-ledger-options.ts";
+export {
   createOwnedManualOverrideRepository,
   type ManualOverrideMutationFailure,
   type ManualOverrideMutationResult,
