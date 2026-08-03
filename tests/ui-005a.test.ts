@@ -1,9 +1,54 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFile, readdir } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { loadOwnedPortfolioInspection } from "../db/repositories/portfolio-inspection.ts";
-import { createSqliteSqlClient } from "../db/repositories/sql-client.ts";
+import {
+  loadOwnedPortfolioInspection,
+  loadPortfolioInspectionSafely,
+} from "../db/repositories/portfolio-inspection.ts";
+import {
+  createSqliteSqlClient,
+  type SqlClient,
+} from "../db/repositories/sql-client.ts";
+
+function renderInspectionStates(): {
+  empty: string;
+  unavailable: string;
+  populated: string;
+} {
+  const componentUrl = new URL(
+    "../app/components/portfolio-details.tsx",
+    import.meta.url,
+  ).href;
+  const fixtureUrl = new URL("./fixtures/ui-005a.ts", import.meta.url).href;
+  const script = `
+    import { createElement } from "react";
+    import { renderToStaticMarkup } from "react-dom/server";
+    import { OwnedPortfolioDetails } from ${JSON.stringify(componentUrl)};
+    import { UI_005A_INSPECTION_FIXTURE } from ${JSON.stringify(fixtureUrl)};
+    const render = (inspection) => renderToStaticMarkup(
+      createElement(OwnedPortfolioDetails, { inspection, onOpenSettings() {} }),
+    );
+    const emptyInspection = {
+      ...UI_005A_INSPECTION_FIXTURE,
+      transactions: [], lots: [], allocations: [], cashAccounts: [], cashEntries: [],
+      truncated: { transactions: false, lots: false, allocations: false, cashEntries: false },
+    };
+    process.stdout.write(JSON.stringify({
+      empty: render(emptyInspection),
+      unavailable: render(null),
+      populated: render(UI_005A_INSPECTION_FIXTURE),
+    }));
+  `;
+  return JSON.parse(
+    execFileSync(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "--eval", script],
+      { encoding: "utf8" },
+    ),
+  ) as { empty: string; unavailable: string; populated: string };
+}
 
 async function database(): Promise<DatabaseSync> {
   const database = new DatabaseSync(":memory:");
@@ -58,6 +103,15 @@ async function database(): Promise<DatabaseSync> {
     ) VALUES
       ('cash-entry-a', 'user-a', 'portfolio-a', 'cash-a', 'tx-buy', '2026-08-01T10:01:00Z', '2026-08-01', 'cash_withdrawal', '-15.500', 'posted', '2026-08-01'),
       ('cash-entry-b', 'user-a', 'portfolio-a', 'cash-a', 'tx-sell', '2026-08-02T10:01:00Z', '2026-08-02', 'cash_deposit', '5.50', 'posted', '2026-08-02');
+      INSERT INTO cash_ledger_entries (
+        id, user_id, portfolio_id, cash_account_id, effective_at,
+        local_effective_date, type, signed_amount_decimal, status,
+        reverses_entry_id, created_at
+      ) VALUES (
+        'cash-entry-reversed', 'user-a', 'portfolio-a', 'cash-a',
+        '2026-08-03T10:01:00Z', '2026-08-03', 'cash_withdrawal',
+        '15.500', 'reversed', 'cash-entry-a', '2026-08-03'
+      );
     INSERT INTO tax_lots (
       id, user_id, portfolio_id, portfolio_security_id, opening_transaction_id,
       acquired_at, original_quantity_decimal, open_quantity_decimal,
@@ -96,6 +150,12 @@ test("portfolio inspection stays owner-scoped and preserves exact source decimal
   assert.equal(inspection?.transactions[0]?.quantityDecimal, "0.500");
   assert.equal(inspection?.lots[0]?.openQuantityDecimal, "1.000");
   assert.equal(inspection?.cashAccounts[0]?.balanceDecimal, "-10");
+  assert.equal(inspection?.cashAccounts[0]?.balanceStatus, "complete");
+  assert.equal(
+    inspection?.cashEntries.find((entry) => entry.status === "reversed")
+      ?.signedAmountDecimal,
+    "15.500",
+  );
   assert.equal(inspection?.allocations[0]?.matchedQuantityDecimal, "0.500");
   assert.equal(
     inspection?.transactions.every(
@@ -110,8 +170,115 @@ test("portfolio inspection stays owner-scoped and preserves exact source decimal
   db.close();
 });
 
+test("portfolio inspection does not present a partial cash balance", async () => {
+  const db = await database();
+  const statement = db.prepare(`
+    INSERT INTO cash_ledger_entries (
+      id, user_id, portfolio_id, cash_account_id, effective_at,
+      local_effective_date, type, signed_amount_decimal, status, created_at
+    ) VALUES (?, 'user-a', 'portfolio-a', 'cash-a', ?, '2026-08-04',
+      'cash_deposit', '1', 'posted', '2026-08-04')
+  `);
+  for (let index = 0; index < 201; index += 1) {
+    const id = `cash-entry-extra-${index}`;
+    statement.run(id, `2026-08-04T00:${String(index).padStart(2, "0")}:00Z`);
+  }
+  const inspection = await loadOwnedPortfolioInspection(
+    createSqliteSqlClient(db),
+    "user-a",
+    "portfolio-a",
+  );
+  assert.equal(inspection?.truncated.cashEntries, true);
+  assert.equal(inspection?.cashEntries.length, 200);
+  assert.equal(inspection?.cashAccounts[0]?.balanceDecimal, null);
+  assert.equal(inspection?.cashAccounts[0]?.balanceStatus, "window_incomplete");
+  db.close();
+});
+
+test("inspection boundaries are exact and failures return the safe unavailable state", async () => {
+  const db = await database();
+  const statement = db.prepare(`
+    INSERT INTO cash_ledger_entries (
+      id, user_id, portfolio_id, cash_account_id, effective_at,
+      local_effective_date, type, signed_amount_decimal, status, created_at
+    ) VALUES (?, 'user-a', 'portfolio-a', 'cash-a', ?, '2026-08-04',
+      'cash_deposit', '1', 'posted', '2026-08-04')
+  `);
+  for (let index = 0; index < 197; index += 1) {
+    statement.run(
+      `cash-entry-boundary-${index}`,
+      `2026-08-04T00:${String(index).padStart(3, "0")}:00Z`,
+    );
+  }
+  const complete = await loadOwnedPortfolioInspection(
+    createSqliteSqlClient(db),
+    "user-a",
+    "portfolio-a",
+  );
+  assert.equal(complete?.cashEntries.length, 200);
+  assert.equal(complete?.truncated.cashEntries, false);
+  assert.equal(complete?.cashAccounts[0]?.balanceDecimal, "187");
+  statement.run("cash-entry-boundary-overflow", "2026-08-05T00:00:00Z");
+  const incomplete = await loadOwnedPortfolioInspection(
+    createSqliteSqlClient(db),
+    "user-a",
+    "portfolio-a",
+  );
+  assert.equal(incomplete?.cashEntries.length, 200);
+  assert.equal(incomplete?.truncated.cashEntries, true);
+  assert.equal(incomplete?.cashAccounts[0]?.balanceDecimal, null);
+
+  const failingClient: SqlClient = {
+    async all() {
+      throw new Error("injected read failure");
+    },
+    async get() {
+      throw new Error("injected read failure");
+    },
+    async run() {
+      throw new Error("unexpected mutation");
+    },
+  };
+  assert.equal(
+    await loadPortfolioInspectionSafely(failingClient, "user-a", "portfolio-a"),
+    null,
+  );
+  db.close();
+});
+
+test("empty and unavailable details render explicit read-only states", async () => {
+  const db = await database();
+  const client = createSqliteSqlClient(db);
+  const empty = await loadOwnedPortfolioInspection(
+    client,
+    "user-b",
+    "portfolio-b",
+  );
+  assert.ok(empty);
+  if (!empty) return;
+  assert.equal(empty.transactions.length, 0);
+  assert.equal(empty.cashAccounts.length, 0);
+  const markup = renderInspectionStates();
+  const emptyMarkup = markup.empty;
+  assert.match(emptyMarkup, /No transactions are recorded/);
+  assert.match(emptyMarkup, /No FIFO lots are available/);
+  assert.match(emptyMarkup, /No cash account is recorded/);
+  assert.doesNotMatch(emptyMarkup, /<input\b|contenteditable=/i);
+
+  const unavailableMarkup = markup.unavailable;
+  assert.match(unavailableMarkup, /Ledger details unavailable/);
+  assert.match(unavailableMarkup, /No other owner’s data is shown/);
+
+  const populatedMarkup = markup.populated;
+  assert.match(populatedMarkup, /balance unavailable/);
+  assert.match(populatedMarkup, /bounded inspection window/);
+  assert.match(populatedMarkup, /Showing first 200 lots or matches/);
+  assert.match(populatedMarkup, /Showing first 200 entries/);
+  db.close();
+});
+
 test("details UI is read-only, provenance-explicit, and linked to separate entry workflow", async () => {
-  const [component, page, repository] = await Promise.all([
+  const [component, page, manualRoute, repository, styles] = await Promise.all([
     readFile(
       new URL("../app/components/portfolio-details.tsx", import.meta.url),
       "utf8",
@@ -124,9 +291,17 @@ test("details UI is read-only, provenance-explicit, and linked to separate entry
       "utf8",
     ),
     readFile(
+      new URL(
+        "../app/portfolio/[portfolioId]/ledger/new/page.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    readFile(
       new URL("../db/repositories/portfolio-inspection.ts", import.meta.url),
       "utf8",
     ),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
   assert.match(component, /Portfolio settings/);
   assert.match(component, /Transactions/);
@@ -134,9 +309,22 @@ test("details UI is read-only, provenance-explicit, and linked to separate entry
   assert.match(component, /Cash entries/);
   assert.match(component, /Manual entry and corrections/);
   assert.match(component, /<details className="inspection-evidence">/);
+  assert.match(component, /bounded inspection window/);
   assert.doesNotMatch(component, /<input\b|contentEditable/);
   assert.match(page, /loadAuthenticatedPortfolioInspection/);
+  assert.match(manualRoute, /loadAuthenticatedWorkspace\(portfolioId\)/);
+  assert.match(manualRoute, /workspace\.activePortfolio === null/);
+  assert.match(manualRoute, /Manual entry is not available yet/);
+  assert.doesNotMatch(manualRoute, /<form\b|<input\b|action=/i);
   assert.match(repository, /t\.user_id = \? AND t\.portfolio_id = \?/);
   assert.match(repository, /l\.user_id = \? AND l\.portfolio_id = \?/);
   assert.match(repository, /e\.user_id = \? AND e\.portfolio_id = \?/);
+  assert.match(
+    styles,
+    /\.inspection-evidence summary\s*{[^}]*min-height: 44px/s,
+  );
+  assert.match(
+    styles,
+    /\.manual-workflow-placeholder\s*{[^}]*width: min\(calc\(100% - 32px\), 760px\)/s,
+  );
 });

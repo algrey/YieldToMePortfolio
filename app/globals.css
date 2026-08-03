@@ -1460,11 +1460,17 @@ dd {
 }
 
 .inspection-evidence summary {
-  min-height: 36px;
+  min-height: 44px;
   display: inline-flex;
   align-items: center;
   color: var(--cream);
   cursor: pointer;
+}
+
+.manual-workflow-placeholder {
+  width: min(calc(100% - 32px), 760px);
+  margin: 0 auto;
+  padding: 48px 0;
 }
 
 .inspection-evidence p,

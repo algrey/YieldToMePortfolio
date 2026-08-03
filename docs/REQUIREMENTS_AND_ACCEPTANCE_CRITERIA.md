@@ -169,6 +169,7 @@ Cash balances shall be represented by currency-specific cash accounts and ledger
 Acceptance:
 
 - The balance equals the ordered sum of posted cash entries.
+- A bounded inspection view never presents a partial cash-entry window as a complete balance; it shows the balance as unavailable with an explicit reason instead.
 - Imports can flag unbalanced cash when source history is incomplete.
 - Currency conversion does not rewrite the native cash balance.
 

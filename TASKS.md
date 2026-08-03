@@ -778,7 +778,7 @@ Status: DONE (2026-08-03).
 
 ### UI-005A — Portfolio settings and ledger inspection
 
-Status: IN PROGRESS after review on 2026-08-03.
+Status: DONE (2026-08-03).
 
 - Objective: expose owned portfolio settings and read-only ledger/lot/cash provenance without combining them with financial write workflows.
 - Dependencies: UI-001, LED-002B.
@@ -790,8 +790,7 @@ Status: IN PROGRESS after review on 2026-08-03.
 - Risks: turning projections into editable truth or exposing an unscoped direct detail route.
 - Parallel safe: yes with import UI after shared shell.
 - Completion note: Added an owner-scoped read-only portfolio inspection model and authenticated Details view for settings, transactions, FIFO lots/matches, cash accounts/entries, exact-decimal edge formatting, business-date lists, expandable timestamp/provenance evidence, and a separate manual-entry/correction link.
-- Review resolution: Cash balances now sum only posted entries, fail closed when the bounded inspection window is incomplete, and database read failures render the safe unavailable state; evidence summaries meet the 44px control target and bounded lot/match lists are labelled.
-- Review findings: The manual-entry/correction link points to the not-yet-implemented UI-005E route and currently lands on a 404. The inspection test suite still lacks empty/error-state, rendered keyboard, and responsive/mobile coverage, and bounded transaction/lot/allocation results need a deliberate pagination or incomplete-state design before this task can be marked done.
+- Review resolution: Cash balances now sum only posted entries, expose a stable unavailable reason when the exact bounded window is incomplete or invalid, and distinguish exactly-full from truncated windows with one-row lookahead. Database read failures render the safe unavailable state; transaction, lot, match, and cash reads remain owner-scoped and bounded; evidence summaries meet the 44px control target; bounded lists are labelled. Behavioral tests cover populated, empty, cross-owner, reversed-entry, exact-boundary, injected-read-failure, rendered read-only states, native disclosure semantics, and narrow-layout constraints. The separate manual-entry URL now authenticates and verifies portfolio ownership, then renders an explicit non-mutating unavailable state until UI-005E supplies the financial workflow, instead of returning a 404. The in-app browser rejected the generated local responsive fixture under its URL policy, so no browser screenshot claim is recorded; production CSS/layout and rendered semantic regression checks remain passing.
 
 ### UI-005B — Import upload, mapping, and preview
 

@@ -258,16 +258,33 @@ function CashAccountRecord({
       <div className="inspection-record-heading">
         <div>
           <strong>{account.currencyCode} cash</strong>
-          <span>{account.completeness.replaceAll("_", " ")}</span>
+          <span>
+            {account.completeness.replaceAll("_", " ")}
+            {account.balanceStatus === "complete"
+              ? ""
+              : " · balance unavailable"}
+          </span>
         </div>
         <strong>{money(account.balanceDecimal, account.currencyCode)}</strong>
       </div>
       <details className="inspection-evidence">
         <summary>Show cash account provenance</summary>
-        <p>
-          Account status: {account.status}. Balance is the exact sum of posted
-          cash entries.
-        </p>
+        {account.balanceStatus === "complete" ? (
+          <p>
+            Account status: {account.status}. Balance is the exact sum of posted
+            cash entries.
+          </p>
+        ) : account.balanceStatus === "window_incomplete" ? (
+          <p>
+            Account status: {account.status}. Balance is unavailable because the
+            bounded inspection window does not contain every cash entry.
+          </p>
+        ) : (
+          <p>
+            Account status: {account.status}. Balance is unavailable because a
+            stored cash amount could not be validated as an exact decimal.
+          </p>
+        )}
       </details>
     </article>
   );
@@ -384,8 +401,10 @@ export function OwnedPortfolioDetails({
             <p className="eyebrow">FIFO projection</p>
             <h2 id="lots-title">Tax lots</h2>
           </div>
-          {inspection.truncated.lots ? (
-            <span className="muted-copy">Showing first 200</span>
+          {inspection.truncated.lots || inspection.truncated.allocations ? (
+            <span className="muted-copy">
+              Showing first 200 lots or matches
+            </span>
           ) : null}
         </div>
         {inspection.lots.length === 0 ? (

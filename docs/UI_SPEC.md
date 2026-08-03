@@ -130,6 +130,8 @@ The Unrealised label is left aligned. At 390 px, the first-line portfolio value 
 - Analysis uses a divider list rather than metric cards.
 - Largest-position allocation uses thin bars and a percentage.
 - Desktop reflows chart and analysis into two columns.
+- Authenticated portfolio Details replaces prototype analysis with an owner-scoped, read-only inspection of settings, immutable transactions, FIFO lots/matches, and currency cash ledgers. Business dates stay compact; exact timestamps, source references, calculation versions, and reversal links remain in keyboard-operable provenance disclosures.
+- Inspection lists are bounded and labelled. Posted cash entries alone contribute to the displayed balance; if the cash-entry window is incomplete or a stored decimal is invalid, the balance is unavailable with an explicit reason rather than a partial or zero value.
 
 ### News
 

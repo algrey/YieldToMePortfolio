@@ -69,6 +69,7 @@ export type PortfolioInspectionCashAccount = Readonly<{
   completeness: string;
   status: string;
   balanceDecimal: string | null;
+  balanceStatus: "complete" | "window_incomplete" | "invalid_decimal";
 }>;
 
 export type PortfolioInspectionCashEntry = Readonly<{
@@ -202,10 +203,15 @@ export async function loadOwnedPortfolioInspection(
   );
   if (!portfolio) return null;
 
-  const [transactionRows, lotRows, allocationRows, accountRows, cashRows] =
-    await Promise.all([
-      client.all<Record<string, unknown>>(
-        `SELECT t.id, t.type, t.status, t.local_trade_date, t.trade_at,
+  const [
+    rawTransactionRows,
+    rawLotRows,
+    rawAllocationRows,
+    accountRows,
+    rawCashRows,
+  ] = await Promise.all([
+    client.all<Record<string, unknown>>(
+      `SELECT t.id, t.type, t.status, t.local_trade_date, t.trade_at,
                 t.settlement_date, t.portfolio_security_id,
                 COALESCE(ps.display_symbol, ps.source_symbol, s.canonical_name)
                   AS security_label,
@@ -224,10 +230,10 @@ export async function loadOwnedPortfolioInspection(
           WHERE t.user_id = ? AND t.portfolio_id = ?
           ORDER BY t.local_trade_date DESC, t.trade_at DESC, t.id DESC
           LIMIT ?`,
-        [userId, portfolioId, MAX_INSPECTION_ROWS],
-      ),
-      client.all<Record<string, unknown>>(
-        `SELECT l.id, l.portfolio_security_id, l.opening_transaction_id,
+      [userId, portfolioId, MAX_INSPECTION_ROWS + 1],
+    ),
+    client.all<Record<string, unknown>>(
+      `SELECT l.id, l.portfolio_security_id, l.opening_transaction_id,
                 l.acquired_at, l.original_quantity_decimal,
                 l.open_quantity_decimal, l.native_basis_decimal,
                 l.base_basis_decimal, l.basis_status, l.status,
@@ -243,10 +249,10 @@ export async function loadOwnedPortfolioInspection(
           WHERE l.user_id = ? AND l.portfolio_id = ?
           ORDER BY l.acquired_at DESC, l.id DESC
           LIMIT ?`,
-        [userId, portfolioId, MAX_INSPECTION_ROWS],
-      ),
-      client.all<Record<string, unknown>>(
-        `SELECT id, sell_transaction_id, tax_lot_id, allocation_sequence,
+      [userId, portfolioId, MAX_INSPECTION_ROWS + 1],
+    ),
+    client.all<Record<string, unknown>>(
+      `SELECT id, sell_transaction_id, tax_lot_id, allocation_sequence,
                 matched_quantity_decimal, allocated_base_basis_decimal,
                 base_net_proceeds_decimal, base_realised_gain_decimal,
                 basis_status, calculation_version
@@ -254,18 +260,18 @@ export async function loadOwnedPortfolioInspection(
           WHERE user_id = ? AND portfolio_id = ?
           ORDER BY sell_transaction_id DESC, allocation_sequence ASC
           LIMIT ?`,
-        [userId, portfolioId, MAX_INSPECTION_ROWS],
-      ),
-      client.all<Record<string, unknown>>(
-        `SELECT id, currency_code, completeness, status
+      [userId, portfolioId, MAX_INSPECTION_ROWS + 1],
+    ),
+    client.all<Record<string, unknown>>(
+      `SELECT id, currency_code, completeness, status
            FROM cash_accounts
           WHERE user_id = ? AND portfolio_id = ?
           ORDER BY currency_code, id
           LIMIT ?`,
-        [userId, portfolioId, MAX_INSPECTION_ROWS],
-      ),
-      client.all<Record<string, unknown>>(
-        `SELECT e.id, e.cash_account_id, ca.currency_code, e.transaction_id,
+      [userId, portfolioId, MAX_INSPECTION_ROWS],
+    ),
+    client.all<Record<string, unknown>>(
+      `SELECT e.id, e.cash_account_id, ca.currency_code, e.transaction_id,
                 e.effective_at, e.local_effective_date, e.type,
                 e.signed_amount_decimal, e.status, e.reverses_entry_id
            FROM cash_ledger_entries e
@@ -276,10 +282,20 @@ export async function loadOwnedPortfolioInspection(
           WHERE e.user_id = ? AND e.portfolio_id = ?
           ORDER BY e.local_effective_date DESC, e.effective_at DESC, e.id DESC
           LIMIT ?`,
-        [userId, portfolioId, MAX_INSPECTION_ROWS],
-      ),
-    ]);
+      [userId, portfolioId, MAX_INSPECTION_ROWS + 1],
+    ),
+  ]);
 
+  const transactionRowsTruncated =
+    rawTransactionRows.length > MAX_INSPECTION_ROWS;
+  const lotRowsTruncated = rawLotRows.length > MAX_INSPECTION_ROWS;
+  const allocationRowsTruncated =
+    rawAllocationRows.length > MAX_INSPECTION_ROWS;
+  const cashRowsTruncated = rawCashRows.length > MAX_INSPECTION_ROWS;
+  const transactionRows = rawTransactionRows.slice(0, MAX_INSPECTION_ROWS);
+  const lotRows = rawLotRows.slice(0, MAX_INSPECTION_ROWS);
+  const allocationRows = rawAllocationRows.slice(0, MAX_INSPECTION_ROWS);
+  const cashRows = rawCashRows.slice(0, MAX_INSPECTION_ROWS);
   const cashEntries = cashRows.map((row) => ({
     id: String(row.id),
     cashAccountId: String(row.cash_account_id),
@@ -297,6 +313,7 @@ export async function loadOwnedPortfolioInspection(
 
   const balances = new Map<string, string[]>();
   for (const entry of cashEntries) {
+    if (entry.status !== "posted") continue;
     const values = balances.get(entry.cashAccountId) ?? [];
     values.push(entry.signedAmountDecimal);
     balances.set(entry.cashAccountId, values);
@@ -307,7 +324,10 @@ export async function loadOwnedPortfolioInspection(
       id: String(portfolio.id),
       code: String(portfolio.code),
       name: String(portfolio.name),
-      homeCurrencyCode: String(portfolio.home_currency_code),
+      homeCurrencyCode:
+        portfolio.home_currency_code === null
+          ? String(portfolio.base_currency_code)
+          : String(portfolio.home_currency_code),
       baseCurrencyCode: String(portfolio.base_currency_code),
       timezone: String(portfolio.timezone),
       accountingMethod: String(portfolio.accounting_method),
@@ -367,19 +387,41 @@ export async function loadOwnedPortfolioInspection(
       basisStatus: String(row.basis_status),
       calculationVersion: Number(row.calculation_version),
     })),
-    cashAccounts: accountRows.map((row) => ({
-      id: String(row.id),
-      currencyCode: String(row.currency_code),
-      completeness: String(row.completeness),
-      status: String(row.status),
-      balanceDecimal: exactSum(balances.get(String(row.id)) ?? []),
-    })),
+    cashAccounts: accountRows.map((row) => {
+      const balanceDecimal = cashRowsTruncated
+        ? null
+        : exactSum(balances.get(String(row.id)) ?? []);
+      return {
+        id: String(row.id),
+        currencyCode: String(row.currency_code),
+        completeness: String(row.completeness),
+        status: String(row.status),
+        balanceDecimal,
+        balanceStatus: cashRowsTruncated
+          ? ("window_incomplete" as const)
+          : balanceDecimal === null
+            ? ("invalid_decimal" as const)
+            : ("complete" as const),
+      };
+    }),
     cashEntries,
     truncated: {
-      transactions: transactionRows.length === MAX_INSPECTION_ROWS,
-      lots: lotRows.length === MAX_INSPECTION_ROWS,
-      allocations: allocationRows.length === MAX_INSPECTION_ROWS,
-      cashEntries: cashRows.length === MAX_INSPECTION_ROWS,
+      transactions: transactionRowsTruncated,
+      lots: lotRowsTruncated,
+      allocations: allocationRowsTruncated,
+      cashEntries: cashRowsTruncated,
     },
   };
+}
+
+export async function loadPortfolioInspectionSafely(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+): Promise<PortfolioInspection | null> {
+  try {
+    return await loadOwnedPortfolioInspection(client, userId, portfolioId);
+  } catch {
+    return null;
+  }
 }
