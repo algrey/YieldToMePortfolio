@@ -6,8 +6,11 @@ import {
   calculateDailyMovement,
   calculateNativeHomeHolding,
   composePortfolioTotals,
+  DECIMAL_LIMITS,
   formatDecimalExact,
+  multiplyDecimal,
   parseDecimal,
+  parseDecimalResult,
   resolveFxRate,
   selectHoldingCurrencyPresentation,
 } from "../domain/calculations/index.ts";
@@ -162,6 +165,90 @@ test("CALC-001B keeps native holding facts stable across the display toggle", ()
     JSON.stringify(home),
     /observedAt|sourceId|marketDate|selectionState|quality|fallback/,
   );
+});
+
+test("CALC-001B transports high-digit and high-scale calculated results", () => {
+  const quantityDecimal = "1234567890123456.123456789012345678901234";
+  const priceDecimal = "9876543210987654.987654321098765432109876";
+  const highPrecisionFx = {
+    ...usdAudCurrentFx,
+    rateDecimal: "1.123456789012345678901234",
+  };
+  const expectedNative = formatDecimalExact(
+    multiplyDecimal(parseDecimal(quantityDecimal), parseDecimal(priceDecimal)),
+  );
+  const expectedHome = formatDecimalExact(
+    multiplyDecimal(
+      parseDecimalResult(expectedNative),
+      parseDecimalResult(highPrecisionFx.rateDecimal),
+    ),
+  );
+
+  const holding = calculateNativeHomeHolding({
+    quantityDecimal,
+    nativePriceDecimal: priceDecimal,
+    nativeCurrencyCode: "USD",
+    homeCurrencyCode: "AUD",
+    valuationFx: highPrecisionFx,
+  });
+  assert.equal(holding.facts.nativeMarketValue.status, "available");
+  assert.equal(holding.facts.homeMarketValue.status, "available");
+  if (
+    holding.facts.nativeMarketValue.status === "available" &&
+    holding.facts.homeMarketValue.status === "available"
+  ) {
+    assert.equal(holding.facts.nativeMarketValue.valueDecimal, expectedNative);
+    assert.equal(holding.facts.homeMarketValue.valueDecimal, expectedHome);
+  }
+  assert.ok(
+    expectedNative.replace(".", "").length > DECIMAL_LIMITS.inputDigits,
+  );
+  assert.ok(expectedNative.split(".")[1]?.length > DECIMAL_LIMITS.inputScale);
+
+  const totals = composePortfolioTotals({
+    holdings: [
+      {
+        id: "high-precision",
+        quantityDecimal: "1",
+        homeMarketValue: available(expectedHome),
+        homeOpenBasis: available(expectedHome),
+      },
+    ],
+    cashAccounts: [],
+  });
+  assert.equal(totals.status, "complete");
+  assert.equal(totals.amounts?.portfolioValueDecimal, expectedHome);
+  assert.equal(totals.amounts?.unrealisedGainDecimal, "0");
+});
+
+test("CALC-001B rejects oversized calculated-result transport without throwing", () => {
+  const oversizedDigits = "9".repeat(DECIMAL_LIMITS.exactResultDigits + 1);
+  const oversizedScale = `0.${"1".repeat(DECIMAL_LIMITS.resultScale + 1)}`;
+  assert.throws(
+    () => parseDecimalResult(oversizedDigits),
+    /Invalid decimal result/,
+  );
+  assert.throws(
+    () => parseDecimalResult(oversizedScale),
+    /Invalid decimal result/,
+  );
+
+  let totals: ReturnType<typeof composePortfolioTotals>;
+  assert.doesNotThrow(() => {
+    totals = composePortfolioTotals({
+      holdings: [
+        {
+          id: "oversized-result",
+          quantityDecimal: "1",
+          homeMarketValue: available(oversizedDigits),
+          homeOpenBasis: available(oversizedScale),
+        },
+      ],
+      cashAccounts: [],
+    });
+  });
+  assert.equal(totals!.status, "unavailable");
+  assert.deepEqual(totals!.coverage.excludedHoldingIds, ["oversized-result"]);
 });
 
 test("CALC-001B retains fallback and stale FX state outside compact fields", () => {

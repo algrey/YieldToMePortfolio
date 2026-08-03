@@ -14,7 +14,7 @@ This document defines financial behavior. Interface labels and implementations m
 - Preserve source precision in normalized observations and transactions.
 - Use canonical decimal strings for persistence and API transport.
 - Reject NaN, infinity, exponent notation, locale separators after parsing, and zero/negative rates where prohibited.
-- A source decimal is bounded to 64 digits and 24 fractional places before construction. Exact operation chains are bounded to 256 significant digits and 96 fractional places with 320 working digits; work outside those limits fails closed instead of allocating an unbounded power or silently rounding.
+- A source decimal is bounded to 64 digits and 24 fractional places before construction. Exact operation chains are bounded to 256 significant digits and 96 fractional places with 320 working digits; work outside those limits fails closed instead of allocating an unbounded power or silently rounding. A calculated decimal transported between domain stages uses a dedicated parser at the wider 256-digit/96-scale result boundary; it must not be reparsed as a source fact.
 - Addition, subtraction, and multiplication retain their exact finite result scale. Division is marked as requiring an explicit rounding scale and cannot be serialized as an exact stored result without that boundary.
 - FIFO matching, lot allocation, split adjustment, and ledger projection calculations use this same wrapper; they must not introduce a parallel `bigint`, `number`, or power-of-ten arithmetic implementation that bypasses these limits.
 

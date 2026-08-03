@@ -11,6 +11,7 @@ export {
   multiplyDecimal,
   negateDecimal,
   parseDecimal,
+  parseDecimalResult,
   roundDecimal,
   subtractDecimal,
   toDecimal,

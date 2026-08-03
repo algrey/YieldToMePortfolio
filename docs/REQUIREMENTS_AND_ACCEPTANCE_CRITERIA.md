@@ -277,6 +277,7 @@ Acceptance:
 - Intermediate calculations retain provider/import precision.
 - Rounding occurs only at defined output or allocation boundaries.
 - Decimal length, source scale, exact-result precision, and allocation scale are bounded and fail closed with deterministic reasons when exceeded.
+- Calculated values transported between calculation stages use the wider documented 256-digit/96-scale result boundary rather than the narrower source-input parser; CALC-001B consumers return typed unavailable results for malformed or oversized calculated-result transport instead of throwing.
 - Production FIFO and ledger projection arithmetic use the same reviewed decimal wrapper and reject malformed or oversized lot, sale, and split values before projection output.
 
 ### CALC-002 — Current market value

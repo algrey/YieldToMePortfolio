@@ -9,6 +9,7 @@ import {
   multiplyDecimal,
   negateDecimal,
   parseDecimal,
+  parseDecimalResult,
   roundDecimal,
   subtractDecimal,
   type DecimalFraction,
@@ -532,6 +533,31 @@ function calculationToCompact(
     : compactUnavailable(currencyCode, value.reason);
 }
 
+function parseCalculatedResult(
+  valueDecimal: string,
+): DecimalFraction | UnavailableCalculation {
+  try {
+    return parseDecimalResult(valueDecimal);
+  } catch {
+    return unavailableCalculation("invalid_input");
+  }
+}
+
+function convertCalculatedValueToCompact(
+  value: DecimalFraction,
+  rate: DecimalFraction,
+  currencyCode: string,
+): CompactMoneyValue {
+  try {
+    return compactAvailable(
+      currencyCode,
+      formatDecimalExact(multiplyDecimal(value, rate)),
+    );
+  } catch {
+    return compactUnavailable(currencyCode, "invalid_input");
+  }
+}
+
 export function calculateNativeHomeHolding(
   input: Readonly<{
     quantityDecimal: string | null;
@@ -542,10 +568,15 @@ export function calculateNativeHomeHolding(
     inversionScale?: number;
   }>,
 ): NativeHomeHoldingResult {
-  const nativeMarketValue = calculateNativeMarketValue({
-    quantityDecimal: input.quantityDecimal,
-    priceDecimal: input.nativePriceDecimal,
-  });
+  let nativeMarketValue: CalculationValue;
+  try {
+    nativeMarketValue = calculateNativeMarketValue({
+      quantityDecimal: input.quantityDecimal,
+      priceDecimal: input.nativePriceDecimal,
+    });
+  } catch {
+    nativeMarketValue = unavailableCalculation("invalid_input");
+  }
   const nativePrice = positiveDecimal(
     input.nativePriceDecimal,
     "missing_price",
@@ -570,33 +601,40 @@ export function calculateNativeHomeHolding(
       nativeMarketValue,
       input.homeCurrencyCode,
     );
-  } else if (nativeMarketValue.status === "unavailable") {
-    homePrice = compactAvailable(
-      input.homeCurrencyCode,
-      formatDecimalExact(
-        multiplyDecimal(nativePrice, parseDecimal(fx.rateDecimal)),
-      ),
-    );
-    homeMarketValue = calculationToCompact(
-      nativeMarketValue,
-      input.homeCurrencyCode,
-    );
   } else {
-    homePrice = compactAvailable(
-      input.homeCurrencyCode,
-      formatDecimalExact(
-        multiplyDecimal(nativePrice, parseDecimal(fx.rateDecimal)),
-      ),
-    );
-    homeMarketValue = compactAvailable(
-      input.homeCurrencyCode,
-      formatDecimalExact(
-        multiplyDecimal(
-          parseDecimal(nativeMarketValue.valueDecimal),
-          parseDecimal(fx.rateDecimal),
-        ),
-      ),
-    );
+    let rate: DecimalFraction | null = null;
+    try {
+      rate = parseDecimalResult(fx.rateDecimal);
+    } catch {
+      // The selector result is already typed, but a malformed transport value
+      // must still become a deterministic unavailable calculation.
+    }
+    homePrice =
+      rate === null
+        ? compactUnavailable(input.homeCurrencyCode, "invalid_input")
+        : convertCalculatedValueToCompact(
+            nativePrice,
+            rate,
+            input.homeCurrencyCode,
+          );
+    if (nativeMarketValue.status === "unavailable") {
+      homeMarketValue = calculationToCompact(
+        nativeMarketValue,
+        input.homeCurrencyCode,
+      );
+    } else {
+      const nativeMarketValueDecimal = parseCalculatedResult(
+        nativeMarketValue.valueDecimal,
+      );
+      homeMarketValue =
+        rate === null || isCalculationValue(nativeMarketValueDecimal)
+          ? compactUnavailable(input.homeCurrencyCode, "invalid_input")
+          : convertCalculatedValueToCompact(
+              nativeMarketValueDecimal,
+              rate,
+              input.homeCurrencyCode,
+            );
+    }
   }
 
   return {
@@ -723,24 +761,43 @@ export function calculateDailyMovement(
       : isCalculationValue(previousPrice)
         ? previousPrice.reason
         : null;
-  const nativeMovement =
-    priceReason === null
-      ? compactAvailable(
-          input.nativeCurrencyCode,
-          formatDecimalExact(
-            multiplyDecimal(
-              quantity as DecimalFraction,
-              subtractDecimal(
-                currentPrice as DecimalFraction,
-                previousPrice as DecimalFraction,
-              ),
+  let nativeMovement: CompactMoneyValue;
+  if (priceReason !== null) {
+    nativeMovement = compactUnavailable(input.nativeCurrencyCode, priceReason);
+  } else {
+    try {
+      nativeMovement = compactAvailable(
+        input.nativeCurrencyCode,
+        formatDecimalExact(
+          multiplyDecimal(
+            quantity as DecimalFraction,
+            subtractDecimal(
+              currentPrice as DecimalFraction,
+              previousPrice as DecimalFraction,
             ),
           ),
-        )
-      : compactUnavailable(input.nativeCurrencyCode, priceReason);
+        ),
+      );
+    } catch {
+      nativeMovement = compactUnavailable(
+        input.nativeCurrencyCode,
+        "invalid_input",
+      );
+    }
+  }
   if (priceReason !== null) {
     return dailyUnavailable(
       priceReason,
+      currentFx,
+      previousFx,
+      input.quantityTiming,
+      nativeMovement,
+      input.homeCurrencyCode,
+    );
+  }
+  if (nativeMovement.status === "unavailable") {
+    return dailyUnavailable(
+      nativeMovement.reason,
       currentFx,
       previousFx,
       input.quantityTiming,
@@ -781,65 +838,80 @@ export function calculateDailyMovement(
     );
   }
 
-  const q = quantity as DecimalFraction;
-  const current = currentPrice as DecimalFraction;
-  const previous = previousPrice as DecimalFraction;
-  const currentRate = parseDecimal(currentFx.rateDecimal);
-  const previousRate = parseDecimal(previousFx.rateDecimal);
-  const priceChange = subtractDecimal(current, previous);
-  const fxChange = subtractDecimal(currentRate, previousRate);
-  const currentHomePrice = multiplyDecimal(current, currentRate);
-  const previousHomePrice = multiplyDecimal(previous, previousRate);
-  const homeMovement = multiplyDecimal(
-    q,
-    subtractDecimal(currentHomePrice, previousHomePrice),
-  );
-  const localContribution = multiplyDecimal(
-    multiplyDecimal(q, priceChange),
-    previousRate,
-  );
-  const pureFxContribution = multiplyDecimal(
-    multiplyDecimal(q, previous),
-    fxChange,
-  );
-  const crossTerm = multiplyDecimal(multiplyDecimal(q, priceChange), fxChange);
-  const fxIncludingCross = addDecimal(pureFxContribution, crossTerm);
-  const previousValue = multiplyDecimal(q, previousHomePrice);
-  const homePercent =
-    compareDecimal(previousValue, ZERO) === 0
-      ? unavailableCalculation("zero_previous_value")
-      : {
-          status: "available" as const,
-          valueDecimal: formatDecimalTrimmed(
-            multiplyDecimal(
-              divideDecimal(homeMovement, absoluteDecimal(previousValue)),
-              fromInteger(100n),
+  try {
+    const q = quantity as DecimalFraction;
+    const current = currentPrice as DecimalFraction;
+    const previous = previousPrice as DecimalFraction;
+    const currentRate = parseDecimalResult(currentFx.rateDecimal);
+    const previousRate = parseDecimalResult(previousFx.rateDecimal);
+    const priceChange = subtractDecimal(current, previous);
+    const fxChange = subtractDecimal(currentRate, previousRate);
+    const currentHomePrice = multiplyDecimal(current, currentRate);
+    const previousHomePrice = multiplyDecimal(previous, previousRate);
+    const homeMovement = multiplyDecimal(
+      q,
+      subtractDecimal(currentHomePrice, previousHomePrice),
+    );
+    const localContribution = multiplyDecimal(
+      multiplyDecimal(q, priceChange),
+      previousRate,
+    );
+    const pureFxContribution = multiplyDecimal(
+      multiplyDecimal(q, previous),
+      fxChange,
+    );
+    const crossTerm = multiplyDecimal(
+      multiplyDecimal(q, priceChange),
+      fxChange,
+    );
+    const fxIncludingCross = addDecimal(pureFxContribution, crossTerm);
+    const previousValue = multiplyDecimal(q, previousHomePrice);
+    const homePercent =
+      compareDecimal(previousValue, ZERO) === 0
+        ? unavailableCalculation("zero_previous_value")
+        : {
+            status: "available" as const,
+            valueDecimal: formatDecimalTrimmed(
+              multiplyDecimal(
+                divideDecimal(homeMovement, absoluteDecimal(previousValue)),
+                fromInteger(100n),
+              ),
+              2,
             ),
-            2,
-          ),
-        };
+          };
 
-  return {
-    compact: {
-      nativeMovement,
-      homeMovement: compactAvailable(
-        input.homeCurrencyCode,
-        formatDecimalExact(homeMovement),
-      ),
-      homePercent,
-    },
-    decomposition: {
-      localPriceContribution: availableCalculation(localContribution),
-      pureFxContribution: availableCalculation(pureFxContribution),
-      crossTerm: availableCalculation(crossTerm),
-      fxContributionIncludingCrossTerm: availableCalculation(fxIncludingCross),
-    },
-    explanation: {
+    return {
+      compact: {
+        nativeMovement,
+        homeMovement: compactAvailable(
+          input.homeCurrencyCode,
+          formatDecimalExact(homeMovement),
+        ),
+        homePercent,
+      },
+      decomposition: {
+        localPriceContribution: availableCalculation(localContribution),
+        pureFxContribution: availableCalculation(pureFxContribution),
+        crossTerm: availableCalculation(crossTerm),
+        fxContributionIncludingCrossTerm:
+          availableCalculation(fxIncludingCross),
+      },
+      explanation: {
+        currentFx,
+        previousFx,
+        quantityTiming: input.quantityTiming,
+      },
+    };
+  } catch {
+    return dailyUnavailable(
+      "invalid_input",
       currentFx,
       previousFx,
-      quantityTiming: input.quantityTiming,
-    },
-  };
+      input.quantityTiming,
+      nativeMovement,
+      input.homeCurrencyCode,
+    );
+  }
 }
 
 export function calculateCashConversion(
@@ -866,16 +938,23 @@ export function calculateCashConversion(
   const nativeBalance = isCalculationValue(balance)
     ? calculationToCompact(balance, input.currencyCode)
     : compactAvailable(input.currencyCode, formatDecimalExact(balance));
-  const homeValue = isCalculationValue(balance)
-    ? compactUnavailable(input.homeCurrencyCode, balance.reason)
-    : fx.status === "unavailable"
-      ? compactUnavailable(input.homeCurrencyCode, fx.reason)
-      : compactAvailable(
-          input.homeCurrencyCode,
-          formatDecimalExact(
-            multiplyDecimal(balance, parseDecimal(fx.rateDecimal)),
-          ),
-        );
+  let homeValue: CompactMoneyValue;
+  if (isCalculationValue(balance)) {
+    homeValue = compactUnavailable(input.homeCurrencyCode, balance.reason);
+  } else if (fx.status === "unavailable") {
+    homeValue = compactUnavailable(input.homeCurrencyCode, fx.reason);
+  } else {
+    try {
+      homeValue = compactAvailable(
+        input.homeCurrencyCode,
+        formatDecimalExact(
+          multiplyDecimal(balance, parseDecimalResult(fx.rateDecimal)),
+        ),
+      );
+    } catch {
+      homeValue = compactUnavailable(input.homeCurrencyCode, "invalid_input");
+    }
+  }
   return { compact: { nativeBalance, homeValue }, explanation: { fx } };
 }
 
@@ -883,10 +962,17 @@ function sumAvailable(values: readonly CalculationValue[]): string {
   let total = ZERO;
   for (const value of values) {
     if (value.status === "available") {
-      total = addDecimal(total, parseDecimal(value.valueDecimal));
+      total = addDecimal(total, parseDecimalResult(value.valueDecimal));
     }
   }
   return formatDecimalExact(total);
+}
+
+function hasUsableCalculatedValue(value: CalculationValue): boolean {
+  return (
+    value.status === "available" &&
+    !isCalculationValue(parseCalculatedResult(value.valueDecimal))
+  );
 }
 
 type ComponentMateriality = "zero" | "nonzero" | "invalid";
@@ -942,22 +1028,22 @@ export function composePortfolioTotals(
   );
   const alignedHoldings = nonZeroHoldings.filter(
     (holding) =>
-      holding.homeMarketValue.status === "available" &&
-      holding.homeOpenBasis.status === "available",
+      hasUsableCalculatedValue(holding.homeMarketValue) &&
+      hasUsableCalculatedValue(holding.homeOpenBasis),
   );
-  const convertedCash = nonZeroCashAccounts.filter(
-    (account) => account.homeValue.status === "available",
+  const convertedCash = nonZeroCashAccounts.filter((account) =>
+    hasUsableCalculatedValue(account.homeValue),
   );
   const coverage: PortfolioCoverage = {
     totalHoldingCount: input.holdings.length,
     nonZeroHoldingCount: nonZeroHoldings.length,
     zeroHoldingCount: zeroHoldings.length,
     invalidHoldingCount: invalidHoldings.length,
-    pricedAndConvertedHoldingCount: nonZeroHoldings.filter(
-      (holding) => holding.homeMarketValue.status === "available",
+    pricedAndConvertedHoldingCount: nonZeroHoldings.filter((holding) =>
+      hasUsableCalculatedValue(holding.homeMarketValue),
     ).length,
-    basisCoveredHoldingCount: nonZeroHoldings.filter(
-      (holding) => holding.homeOpenBasis.status === "available",
+    basisCoveredHoldingCount: nonZeroHoldings.filter((holding) =>
+      hasUsableCalculatedValue(holding.homeOpenBasis),
     ).length,
     alignedHoldingCount: alignedHoldings.length,
     totalCashAccountCount: input.cashAccounts.length,
@@ -1014,27 +1100,41 @@ export function composePortfolioTotals(
     };
   }
 
-  const investedValueDecimal = sumAvailable(
-    alignedHoldings.map((holding) => holding.homeMarketValue),
-  );
-  const coveredOpenBasisDecimal = sumAvailable(
-    alignedHoldings.map((holding) => holding.homeOpenBasis),
-  );
-  const cashValueDecimal = sumAvailable(
-    convertedCash.map((account) => account.homeValue),
-  );
-  const unrealisedGainDecimal = formatDecimalExact(
-    subtractDecimal(
-      parseDecimal(investedValueDecimal),
-      parseDecimal(coveredOpenBasisDecimal),
-    ),
-  );
-  const portfolioValueDecimal = formatDecimalExact(
-    addDecimal(
-      parseDecimal(investedValueDecimal),
-      parseDecimal(cashValueDecimal),
-    ),
-  );
+  let investedValueDecimal: string;
+  let coveredOpenBasisDecimal: string;
+  let cashValueDecimal: string;
+  let unrealisedGainDecimal: string;
+  let portfolioValueDecimal: string;
+  try {
+    investedValueDecimal = sumAvailable(
+      alignedHoldings.map((holding) => holding.homeMarketValue),
+    );
+    coveredOpenBasisDecimal = sumAvailable(
+      alignedHoldings.map((holding) => holding.homeOpenBasis),
+    );
+    cashValueDecimal = sumAvailable(
+      convertedCash.map((account) => account.homeValue),
+    );
+    unrealisedGainDecimal = formatDecimalExact(
+      subtractDecimal(
+        parseDecimalResult(investedValueDecimal),
+        parseDecimalResult(coveredOpenBasisDecimal),
+      ),
+    );
+    portfolioValueDecimal = formatDecimalExact(
+      addDecimal(
+        parseDecimalResult(investedValueDecimal),
+        parseDecimalResult(cashValueDecimal),
+      ),
+    );
+  } catch {
+    return {
+      status: "unavailable",
+      label: "value_unavailable",
+      amounts: null,
+      coverage,
+    };
+  }
   const amounts = {
     investedValueDecimal,
     coveredOpenBasisDecimal,

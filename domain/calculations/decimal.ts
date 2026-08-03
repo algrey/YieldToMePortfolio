@@ -111,7 +111,12 @@ function trimFixed(value: string): string {
   return trimmed === "-0" ? "0" : trimmed;
 }
 
-export function parseDecimal(value: string): DecimalFraction {
+function parseBoundedDecimal(
+  value: string,
+  digitLimit: number,
+  scaleLimit: number,
+  kind: "input" | "result",
+): DecimalFraction {
   const match = DECIMAL_PATTERN.exec(value);
   if (match === null) throw new Error("Invalid decimal string.");
   if (/^-0(?:\.0+)?$/.test(value)) {
@@ -119,14 +124,34 @@ export function parseDecimal(value: string): DecimalFraction {
   }
   const fraction = match[2] ?? "";
   const digitCount = value.replace("-", "").replace(".", "").length;
-  if (
-    digitCount > DECIMAL_LIMITS.inputDigits ||
-    fraction.length > DECIMAL_LIMITS.inputScale
-  ) {
-    throw new Error("Invalid decimal string: supported boundary exceeded.");
+  if (digitCount > digitLimit || fraction.length > scaleLimit) {
+    throw new Error(`Invalid decimal ${kind}: supported boundary exceeded.`);
   }
   const decimal = new FinancialDecimal(value);
   return wrap(decimal, fraction.length, decimal.sd());
+}
+
+export function parseDecimal(value: string): DecimalFraction {
+  return parseBoundedDecimal(
+    value,
+    DECIMAL_LIMITS.inputDigits,
+    DECIMAL_LIMITS.inputScale,
+    "input",
+  );
+}
+
+/**
+ * Parse a canonical decimal transported between calculation stages. This
+ * deliberately accepts the wider exact-result boundary, while source facts
+ * continue to use parseDecimal's narrower validation.
+ */
+export function parseDecimalResult(value: string): DecimalFraction {
+  return parseBoundedDecimal(
+    value,
+    DECIMAL_LIMITS.exactResultDigits,
+    DECIMAL_LIMITS.resultScale,
+    "result",
+  );
 }
 
 export function fromInteger(value: bigint): DecimalFraction {
