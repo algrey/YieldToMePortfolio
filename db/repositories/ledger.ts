@@ -85,6 +85,19 @@ type InternalLedgerInput = LedgerPostingInput & {
   reversalEntryId?: string | null;
 };
 
+export type LedgerPostingPersistenceInput = LedgerPostingInput & {
+  importRowId?: string | null;
+  reversesTransactionId?: string | null;
+  supersedesTransactionId?: string | null;
+  reversalEntryId?: string | null;
+};
+
+export type LedgerPostingStatements = {
+  statements: SqlStatement[];
+  transactionId: string;
+  calculationRunId: string;
+};
+
 const TRANSACTION_COLUMNS = `
   id, user_id, portfolio_id, portfolio_security_id, type, status, trade_at,
   local_trade_date, settlement_date, quantity_decimal, unit_price_decimal,
@@ -196,6 +209,149 @@ async function atomic(
     await client.run("ROLLBACK").catch(() => undefined);
     throw error;
   }
+}
+
+/** Build one posting's statements so import chunks can share one D1 batch. */
+export async function buildLedgerPostingStatements(
+  client: SqlClient,
+  userId: string,
+  input: LedgerPostingPersistenceInput,
+  prepared: PreparedLedgerPosting,
+  action: string,
+  now: () => string = () => new Date().toISOString(),
+): Promise<LedgerPostingStatements> {
+  const createdAt = now();
+  const calculationRunId = randomUUID();
+  const cashEffect = prepared.cashEffectDecimal;
+  const cashEntryId = cashEffect === null ? null : prepared.cashEntryId;
+  const existingAccount =
+    cashEffect === null
+      ? null
+      : await client.get<{ id: string }>(
+          `SELECT id FROM cash_accounts
+           WHERE user_id = ? AND portfolio_id = ? AND currency_code = ?
+           LIMIT 1`,
+          [userId, input.portfolioId, input.currencyCode],
+        );
+  const accountId =
+    cashEffect === null
+      ? null
+      : (existingAccount?.id ?? prepared.cashAccountId);
+  const statements: SqlStatement[] = [];
+  if (accountId) {
+    statements.push({
+      sql: `INSERT INTO cash_accounts
+        (id, user_id, portfolio_id, currency_code, completeness, status)
+        VALUES (?, ?, ?, ?, ?, 'active')
+        ON CONFLICT (portfolio_id, currency_code) DO NOTHING`,
+      params: [
+        accountId,
+        userId,
+        input.portfolioId,
+        input.currencyCode,
+        input.type === "opening_balance" ? "opening_balance" : "incomplete",
+      ],
+    });
+  }
+  statements.push({
+    sql: `INSERT INTO transactions (${TRANSACTION_COLUMNS})
+      VALUES (?, ?, ?, ?, ?, 'posted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+    params: [
+      prepared.transactionId,
+      userId,
+      input.portfolioId,
+      input.portfolioSecurityId,
+      input.type,
+      input.tradeAt,
+      input.localTradeDate,
+      input.settlementDate ?? null,
+      input.quantityDecimal,
+      input.unitPriceDecimal,
+      input.currencyCode,
+      prepared.grossAmountDecimal,
+      input.feeAmountDecimal,
+      input.taxAmountDecimal,
+      input.fxRateToBaseDecimal,
+      input.fxRateSource ?? null,
+      input.fxObservedAt ?? null,
+      input.sourceType,
+      prepared.sourceReference,
+      prepared.idempotencyKey,
+      input.importRowId ?? null,
+      input.reversesTransactionId ?? null,
+      input.supersedesTransactionId ?? null,
+      userId,
+      prepared.calculationVersion,
+      createdAt,
+    ],
+  });
+  if (cashEffect !== null && cashEntryId && accountId) {
+    statements.push({
+      sql: `INSERT INTO cash_ledger_entries (
+        id, user_id, portfolio_id, cash_account_id, transaction_id,
+        effective_at, local_effective_date, type, signed_amount_decimal,
+        status, reverses_entry_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'posted', ?, ?)`,
+      params: [
+        cashEntryId,
+        userId,
+        input.portfolioId,
+        accountId,
+        prepared.transactionId,
+        input.tradeAt,
+        input.localTradeDate,
+        cashTypeForEffect(input.type, cashEffect),
+        cashEffect,
+        input.reversalEntryId ?? null,
+        createdAt,
+      ],
+    });
+  }
+  statements.push({
+    sql: `INSERT INTO calculation_runs (
+      id, user_id, portfolio_id, range_from, range_to, calculation_version,
+      reason, invalidation_source, status, attempt, ledger_high_water_start,
+      idempotency_key, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'ledger_mutation', ?, 'queued', 0, ?, ?, ?, ?)`,
+    params: [
+      calculationRunId,
+      userId,
+      input.portfolioId,
+      input.localTradeDate,
+      input.localTradeDate,
+      prepared.calculationVersion,
+      prepared.transactionId,
+      prepared.transactionId,
+      `ledger:${prepared.idempotencyKey}`,
+      createdAt,
+      createdAt,
+    ],
+  });
+  statements.push(
+    createAuditInsertStatement(
+      {
+        actorUserId: userId,
+        targetOwnerUserId: userId,
+        action,
+        targetType: "transaction",
+        targetId: prepared.transactionId,
+        requestId: input.requestId,
+        result: "success",
+        metadata: {
+          type: input.type,
+          sourceType: input.sourceType,
+          currencyCode: input.currencyCode,
+        },
+        occurredAt: createdAt,
+      },
+      now,
+    ),
+  );
+  return {
+    statements,
+    transactionId: prepared.transactionId,
+    calculationRunId,
+  };
 }
 
 export function createOwnedLedgerRepository(

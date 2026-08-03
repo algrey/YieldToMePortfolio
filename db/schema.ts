@@ -470,6 +470,7 @@ export const importBatches = sqliteTable(
     parsedAt: text("parsed_at"),
     committedAt: text("committed_at"),
     reversedAt: text("reversed_at"),
+    commitHighWaterRow: integer("commit_high_water_row").notNull().default(1),
     version: integer("version").notNull().default(1),
   },
   (table) => [
@@ -524,10 +525,58 @@ export const importBatches = sqliteTable(
       table.parserVersion,
     ),
     uniqueIndex("import_batches_id_user_unique").on(table.id, table.userId),
+    uniqueIndex("import_batches_commit_idempotency_unique")
+      .on(table.userId, table.commitIdempotencyKey)
+      .where(sql`${table.commitIdempotencyKey} IS NOT NULL`),
     index("import_batches_owner_status_updated_at_idx").on(
       table.userId,
       table.status,
       table.updatedAt,
+    ),
+  ],
+);
+
+export const importCommitChunks = sqliteTable(
+  "import_commit_chunks",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    batchId: text("batch_id").notNull(),
+    commitIdempotencyKey: text("commit_idempotency_key").notNull(),
+    chunkIndex: integer("chunk_index").notNull(),
+    firstPhysicalRow: integer("first_physical_row").notNull(),
+    lastPhysicalRow: integer("last_physical_row").notNull(),
+    committedRowCount: integer("committed_row_count").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "import_commit_chunks_batch_id_user_id_import_batches_id_user_id_fk",
+      columns: [table.batchId, table.userId],
+      foreignColumns: [importBatches.id, importBatches.userId],
+    }).onDelete("restrict"),
+    check(
+      "import_commit_chunks_chunk_index_check",
+      sql`${table.chunkIndex} >= 0`,
+    ),
+    check(
+      "import_commit_chunks_row_range_check",
+      sql`${table.lastPhysicalRow} >= ${table.firstPhysicalRow}`,
+    ),
+    check(
+      "import_commit_chunks_committed_row_count_check",
+      sql`${table.committedRowCount} >= 0`,
+    ),
+    uniqueIndex("import_commit_chunks_batch_key_index_unique").on(
+      table.batchId,
+      table.userId,
+      table.commitIdempotencyKey,
+      table.chunkIndex,
+    ),
+    index("import_commit_chunks_owner_batch_idx").on(
+      table.userId,
+      table.batchId,
+      table.chunkIndex,
     ),
   ],
 );

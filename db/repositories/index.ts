@@ -7,6 +7,15 @@ export {
   type SaveImportMappingDecisionInput,
 } from "./import-mapping-decisions.ts";
 export {
+  createOwnedImportCommitRepository,
+  IMPORT_COMMIT_LIMITS,
+  type ImportCommitFailure,
+  type ImportCommitInput,
+  type ImportCommitOptions,
+  type ImportCommitResult,
+  type ImportCommitSuccess,
+} from "./import-commit.ts";
+export {
   createOwnedImportStagingRepository,
   type ImportBatchRecord,
   type ImportBatchStatus,
@@ -59,7 +68,10 @@ export type {
   AuditResult,
 } from "./audit.ts";
 export {
+  buildLedgerPostingStatements,
   createOwnedLedgerRepository,
+  type LedgerPostingPersistenceInput,
+  type LedgerPostingStatements,
   type CashLedgerEntryRecord,
   type LedgerMutationFailure,
   type LedgerMutationResult,

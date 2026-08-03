@@ -96,6 +96,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "holding_daily_snapshots",
     "holding_projections",
     "import_batches",
+    "import_commit_chunks",
     "import_issues",
     "import_mapping_decisions",
     "import_rows",
@@ -183,9 +184,14 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "market_data_refresh_jobs_target_idx",
   ]);
   assert.deepEqual(indexNames(database, "import_batches"), [
+    "import_batches_commit_idempotency_unique",
     "import_batches_id_user_unique",
     "import_batches_owner_status_updated_at_idx",
     "import_batches_user_file_parser_unique",
+  ]);
+  assert.deepEqual(indexNames(database, "import_commit_chunks"), [
+    "import_commit_chunks_batch_key_index_unique",
+    "import_commit_chunks_owner_batch_idx",
   ]);
   assert.deepEqual(indexNames(database, "import_rows"), [
     "import_rows_batch_physical_row_unique",
@@ -763,12 +769,15 @@ test("active refresh-job migration coalesces legacy duplicate targets", async ()
   const migrationFiles = (await readdir(new URL("../drizzle", import.meta.url)))
     .filter((file) => file.endsWith(".sql"))
     .sort();
-  const latest = migrationFiles.at(-1);
-  assert.equal(latest, "0018_groovy_dragon_lord.sql");
+  const refreshMigration = migrationFiles.find((file) =>
+    file.startsWith("0018_"),
+  );
+  assert.equal(refreshMigration, "0018_groovy_dragon_lord.sql");
+  const refreshMigrationIndex = migrationFiles.indexOf(refreshMigration ?? "");
   const priorSql = (
     await Promise.all(
       migrationFiles
-        .slice(0, -1)
+        .slice(0, refreshMigrationIndex)
         .map((file) =>
           readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8"),
         ),
@@ -800,8 +809,12 @@ test("active refresh-job migration coalesces legacy duplicate targets", async ()
        '2026-08-03T00:00:00Z', 'legacy-b',
        '2026-08-03T00:01:00Z', '2026-08-03T00:01:00Z');
   `);
+
   database.exec(
-    await readFile(new URL(`../drizzle/${latest}`, import.meta.url), "utf8"),
+    await readFile(
+      new URL(`../drizzle/${refreshMigration}`, import.meta.url),
+      "utf8",
+    ),
   );
   assert.deepEqual(
     database

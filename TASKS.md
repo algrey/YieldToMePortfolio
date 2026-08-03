@@ -420,7 +420,7 @@ Status: DONE (2026-07-30).
 
 ### IMP-003A — Idempotent import commit and resume
 
-Status: READY.
+Status: DONE on 2026-08-03.
 
 - Objective: turn an approved staged batch into bounded, resumable ledger effects with no duplicate visibility.
 - Dependencies: LED-001B, LED-002B, IMP-002B, OPS-001.
@@ -431,6 +431,7 @@ Status: READY.
 - Tests: retry at each chunk boundary, duplicate rows/files, free-plan 50-query/100-parameter chunk bounds, partial failure/resume, cross-user, CSRF/idempotency denial, atomic rollback.
 - Risks: D1 limits or exposing partially committed rows before final status.
 - Parallel safe: no; integrates ledger/import/audit.
+- Completion note: Added owner-scoped explicit commit with bounded D1 chunks, durable high-water/chunk markers, idempotent duplicate handling, atomic ledger effects, and queued rebuild finalization; failure-injection tests verify resumable behavior.
 
 ### IMP-003B — Import reversal and corrected re-import
 
