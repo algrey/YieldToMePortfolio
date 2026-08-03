@@ -70,7 +70,13 @@ export function createOwnedImportMappingDecisionRepository(
             id, user_id, batch_id, kind, source_key, normalized_source_value,
             target_id, target_value, scope, confidence, source,
             created_at, updated_at, version
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+          )
+          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1
+          WHERE EXISTS (
+            SELECT 1 FROM import_batches
+            WHERE id = ? AND user_id = ?
+              AND status IN ('parsed', 'needs_mapping', 'ready')
+          )
           ON CONFLICT (batch_id, user_id, kind, source_key, scope)
           DO UPDATE SET
             normalized_source_value = excluded.normalized_source_value,
@@ -96,9 +102,13 @@ export function createOwnedImportMappingDecisionRepository(
           input.source,
           timestamp,
           timestamp,
+          input.batchId,
+          userId,
         ],
       );
-      return createRecord(rows[0] ?? {});
+      const saved = rows[0];
+      if (!saved) throw new Error("import_mapping_batch_not_mutable");
+      return createRecord(saved);
     },
 
     async list(

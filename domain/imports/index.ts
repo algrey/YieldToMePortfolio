@@ -33,3 +33,13 @@ export {
   type ImportReconciliationPreview,
   type ImportReconciliationRow,
 } from "./reconciliation.ts";
+
+export {
+  buildImportReview,
+  type BuiltImportReview,
+  type ImportReviewBatch,
+  type ImportReviewEvidence,
+  type ImportReviewIssue,
+  type ImportReviewMapping,
+  type ImportReviewRow,
+} from "./review.ts";

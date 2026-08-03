@@ -396,6 +396,9 @@ Acceptance:
 - File hash identifies exact duplicate uploads.
 - Normalized row fingerprints identify duplicates across reordered/reformatted files.
 - Import commit has a unique idempotency key.
+- Commit reconstructs the exact owner-scoped server preview and rejects changed parser, row, issue, mapping, portfolio, or security state before any ledger effect.
+- Each request processes at most one bounded atomic chunk; a retry resumes from the durable physical-row high-water without replaying a committed effect.
+- Validated row-scoped portfolio/security targets are persisted with their ledger effect, and finalization durably queues one rebuild per affected owned portfolio at its actual ledger high-water before the batch becomes committed.
 
 ### IMP-005 — Correction and reversal
 

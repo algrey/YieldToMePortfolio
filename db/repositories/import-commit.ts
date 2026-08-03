@@ -6,16 +6,27 @@ import {
 import { createAuditInsertStatement } from "./audit.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 import { prepareLedgerPosting } from "../../domain/ledger/posting.ts";
-import type { NormalizedImportRow } from "../../domain/imports/index.ts";
+import {
+  SUPPORTED_IMPORT_PARSER_VERSION,
+  buildImportReview,
+  type ImportPreviewSecurityCandidate,
+  type NormalizedImportRow,
+} from "../../domain/imports/index.ts";
+import { createOwnedImportStagingRepository } from "./import-staging.ts";
+import { createOwnedImportMappingDecisionRepository } from "./import-mapping-decisions.ts";
+import { createOwnedPortfolioRepository } from "./owned-portfolios.ts";
 
-const DEFAULT_CHUNK_SIZE = 5;
-const MAX_CHUNK_SIZE = 5;
+const DEFAULT_CHUNK_SIZE = 2;
+const MAX_CHUNK_SIZE = 2;
 const DECIMAL = /^(0|[1-9]\d*)(\.\d+)?$/;
 
 export const IMPORT_COMMIT_LIMITS = {
   maxChunkSize: MAX_CHUNK_SIZE,
   maxStatementsPerChunk: 50,
   maxParametersPerStatement: 100,
+  maxQueriesPerInvocation: 50,
+  maxChunksPerInvocation: 1,
+  maxAffectedPortfolios: 25,
 } as const;
 
 export type ImportCommitInput = {
@@ -42,6 +53,7 @@ export type ImportCommitSuccess = {
   committedRows: number;
   skippedRows: number;
   rebuildJobId: string | null;
+  rebuildJobIds: string[];
 };
 
 export type ImportCommitFailure = {
@@ -51,6 +63,7 @@ export type ImportCommitFailure = {
     | "confirmation_required"
     | "invalid_idempotency_key"
     | "stale_preview"
+    | "revalidation_failed"
     | "not_ready"
     | "conflict"
     | "mapping_incomplete"
@@ -175,8 +188,15 @@ function isValidCommitKey(value: string): boolean {
   return value.length > 0 && value.length <= 120 && !/[\u0000\r\n]/.test(value);
 }
 
-function isPreviewVersion(value: string, batch: BatchState): boolean {
-  return new RegExp(`^${batch.version}\\.\\d+$`).test(value);
+function isBoundedAtomicUnit(statements: readonly SqlStatement[]): boolean {
+  return (
+    statements.length <= IMPORT_COMMIT_LIMITS.maxStatementsPerChunk &&
+    statements.every(
+      (statement) =>
+        (statement.params?.length ?? 0) <=
+        IMPORT_COMMIT_LIMITS.maxParametersPerStatement,
+    )
+  );
 }
 
 export function createOwnedImportCommitRepository(
@@ -206,6 +226,127 @@ export function createOwnedImportCommitRepository(
     return row ? batchFromRow(row) : null;
   }
 
+  async function revalidate(
+    userId: string,
+    batchId: string,
+  ): Promise<
+    | {
+        ok: true;
+        previewVersion: string;
+        targets: Readonly<
+          Record<
+            string,
+            {
+              portfolioId: string;
+              portfolioSecurityId: string | null;
+              fxDirection: "native_to_home" | "home_to_native" | null;
+            }
+          >
+        >;
+        skippedRowIds: ReadonlySet<string>;
+        state: {
+          rowCount: number;
+          rowVersionTotal: number;
+          issueCount: number;
+          issueVersionTotal: number;
+          mappingCount: number;
+          mappingVersionTotal: number;
+        };
+      }
+    | { ok: false; reason: "not_found" | "revalidation_failed" }
+  > {
+    const staging = createOwnedImportStagingRepository(client);
+    const ownedBatch = await staging.get(userId, batchId);
+    if (!ownedBatch) return { ok: false, reason: "not_found" };
+    const [rows, issues, mappings, portfolios, candidateRows] =
+      await Promise.all([
+        staging.listRows(userId, batchId),
+        staging.listIssues(userId, batchId),
+        createOwnedImportMappingDecisionRepository(client).list(
+          userId,
+          batchId,
+        ),
+        createOwnedPortfolioRepository(client).list(userId),
+        client.all<Record<string, unknown>>(
+          `SELECT id, portfolio_id, source_symbol, source_exchange_alias,
+                  source_currency_code, security_id
+           FROM portfolio_securities
+           WHERE user_id = ?
+           ORDER BY source_symbol ASC, id ASC`,
+          [userId],
+        ),
+      ]);
+    const securityCandidates: ImportPreviewSecurityCandidate[] =
+      candidateRows.map((row) => ({
+        id: String(row.id),
+        portfolioId: String(row.portfolio_id),
+        sourceSymbol: String(row.source_symbol),
+        sourceExchangeAlias:
+          row.source_exchange_alias === null
+            ? null
+            : String(row.source_exchange_alias),
+        sourceCurrencyCode: String(row.source_currency_code),
+        securityId: row.security_id === null ? null : String(row.security_id),
+      }));
+    const built = buildImportReview({
+      batch: ownedBatch,
+      rows,
+      issues,
+      mappings,
+      portfolios: portfolios.map((portfolio) => ({
+        id: portfolio.id,
+        name: portfolio.name,
+        homeCurrencyCode: portfolio.homeCurrencyCode,
+        historyCompleteFrom: portfolio.historyCompleteFrom,
+      })),
+      securityCandidates,
+    });
+    const hasBlockingPersistedState =
+      ownedBatch.parserFormat !== "strict-versioned-csv" ||
+      ownedBatch.parserVersion !== SUPPORTED_IMPORT_PARSER_VERSION ||
+      issues.some(
+        (issue) => issue.severity === "error" && issue.resolvedAt === null,
+      ) ||
+      rows.some(
+        (row) =>
+          row.validationStatus === "invalid" ||
+          row.errorCount > 0 ||
+          (row.rowClass === "transaction" &&
+            built.preview.resolvedTargets[row.id] === undefined &&
+            !built.preview.issues.some(
+              (issue) =>
+                issue.rowId === row.id && issue.code === "DUPLICATE_ROW",
+            )),
+      );
+    if (!built.preview.ready || hasBlockingPersistedState) {
+      return { ok: false, reason: "revalidation_failed" };
+    }
+    return {
+      ok: true,
+      previewVersion: built.previewVersion,
+      targets: built.preview.resolvedTargets,
+      skippedRowIds: new Set(
+        built.preview.issues
+          .filter((issue) => issue.code === "DUPLICATE_ROW")
+          .flatMap((issue) => (issue.rowId ? [issue.rowId] : [])),
+      ),
+      state: {
+        rowCount: rows.length,
+        rowVersionTotal: rows.reduce((total, row) => total + row.version, 0),
+        issueCount: issues.length,
+        issueVersionTotal: issues.reduce(
+          (total, issue) => total + issue.version,
+          0,
+        ),
+        mappingCount: mappings.length,
+        mappingVersionTotal: mappings.reduce(
+          (total, mapping) => total + mapping.version,
+          0,
+        ),
+      },
+    };
+  }
+
   async function summary(
     userId: string,
     batchId: string,
@@ -220,15 +361,13 @@ export function createOwnedImportCommitRepository(
        FROM import_rows WHERE user_id = ? AND batch_id = ?`,
       [userId, batchId],
     );
-    const job = await client.get<{ id: string }>(
+    const jobs = await client.all<{ id: string }>(
       `SELECT id FROM calculation_runs
-       WHERE user_id = ? AND portfolio_id = ? AND idempotency_key = ? LIMIT 1`,
-      [
-        userId,
-        batch.targetPortfolioId,
-        `import-rebuild:${batchId}:${batch.commitIdempotencyKey ?? ""}`,
-      ],
+       WHERE user_id = ? AND reason = 'import_commit' AND invalidation_source = ?
+       ORDER BY portfolio_id ASC, id ASC`,
+      [userId, batchId],
     );
+    const rebuildJobIds = jobs.map((job) => String(job.id));
     return {
       ok: true,
       batchId,
@@ -238,7 +377,8 @@ export function createOwnedImportCommitRepository(
       highWaterRow: batch.commitHighWaterRow,
       committedRows: Number(counts?.committed_rows ?? 0),
       skippedRows: Number(counts?.skipped_rows ?? 0),
-      rebuildJobId: job?.id ?? null,
+      rebuildJobId: rebuildJobIds[0] ?? null,
+      rebuildJobIds,
     };
   }
 
@@ -248,6 +388,11 @@ export function createOwnedImportCommitRepository(
     row: StagedRow,
     commitKey: string,
     requestId: string,
+    target: {
+      portfolioId: string;
+      portfolioSecurityId: string | null;
+      fxDirection: "native_to_home" | "home_to_native" | null;
+    },
   ): Promise<
     | {
         ok: true;
@@ -260,7 +405,7 @@ export function createOwnedImportCommitRepository(
     if (!normalized || !normalized.tradeAtUtc || !normalized.localTradeDate) {
       return { ok: false, reason: "mapping_incomplete" };
     }
-    const portfolioId = row.targetPortfolioId ?? batch.targetPortfolioId;
+    const portfolioId = target.portfolioId;
     if (!portfolioId || !normalized.currency) {
       return { ok: false, reason: "mapping_incomplete" };
     }
@@ -271,7 +416,7 @@ export function createOwnedImportCommitRepository(
     );
     if (!portfolio) return { ok: false, reason: "mapping_incomplete" };
     const isCash = normalized.cashEvent !== null;
-    if (!isCash && !row.targetPortfolioSecurityId) {
+    if (!isCash && !target.portfolioSecurityId) {
       return { ok: false, reason: "mapping_incomplete" };
     }
     if (!isCash) {
@@ -279,7 +424,7 @@ export function createOwnedImportCommitRepository(
         `SELECT id FROM portfolio_securities
          WHERE id = ? AND user_id = ? AND portfolio_id = ?
            AND status <> 'unresolved' AND security_id IS NOT NULL LIMIT 1`,
-        [row.targetPortfolioSecurityId, userId, portfolioId],
+        [target.portfolioSecurityId, userId, portfolioId],
       );
       if (!membership) return { ok: false, reason: "mapping_incomplete" };
     }
@@ -289,24 +434,14 @@ export function createOwnedImportCommitRepository(
       normalized.purchaseExchangeRate !== null &&
       normalized.currency !== portfolio.base_currency_code
     ) {
-      const decision = await client.get<{ target_value: string | null }>(
-        `SELECT target_value FROM import_mapping_decisions
-         WHERE user_id = ? AND batch_id = ? AND kind = 'fx'
-           AND source_key = ? ORDER BY scope = 'row' DESC, version DESC LIMIT 1`,
-        [
-          userId,
-          batch.id,
-          `${normalized.currency}->${portfolio.base_currency_code}`,
-        ],
-      );
       if (
-        decision?.target_value !== "native_to_home" &&
-        decision?.target_value !== "home_to_native"
+        target.fxDirection !== "native_to_home" &&
+        target.fxDirection !== "home_to_native"
       ) {
         return { ok: false, reason: "mapping_incomplete" };
       }
       fxRate =
-        decision.target_value === "native_to_home"
+        target.fxDirection === "native_to_home"
           ? normalized.purchaseExchangeRate
           : invertDecimal(normalized.purchaseExchangeRate);
       if (!fxRate) return { ok: false, reason: "mapping_incomplete" };
@@ -333,7 +468,7 @@ export function createOwnedImportCommitRepository(
       input: {
         portfolioId,
         type,
-        portfolioSecurityId: isCash ? null : row.targetPortfolioSecurityId,
+        portfolioSecurityId: isCash ? null : target.portfolioSecurityId,
         quantityDecimal: isCash ? null : normalized.sharesOwned,
         unitPriceDecimal: isCash ? null : normalized.costPerShare,
         grossAmountDecimal: gross,
@@ -362,28 +497,39 @@ export function createOwnedImportCommitRepository(
     nowAt: string,
     requestId: string,
   ): Promise<ImportCommitResult> {
-    const transactionRows = await client.all<Record<string, unknown>>(
-      `SELECT physical_row_number, normalized_fields_json
-       FROM import_rows WHERE user_id = ? AND batch_id = ? AND row_class = 'transaction'
-       ORDER BY physical_row_number ASC`,
-      [userId, batch.id],
+    const affected = await client.all<Record<string, unknown>>(
+      `SELECT t.portfolio_id, MIN(t.local_trade_date) AS range_from,
+              MAX(t.local_trade_date) AS range_to, COUNT(*) AS committed_count,
+              (SELECT latest.id FROM transactions latest
+               WHERE latest.user_id = ? AND latest.portfolio_id = t.portfolio_id
+                 AND latest.status IN ('posted', 'reversed')
+               ORDER BY latest.trade_at DESC, latest.id DESC LIMIT 1) AS ledger_high_water
+       FROM import_rows r
+       JOIN transactions t ON t.id = r.commit_transaction_id
+         AND t.user_id = r.user_id
+       WHERE r.user_id = ? AND r.batch_id = ? AND r.commit_status = 'committed'
+       GROUP BY t.portfolio_id
+       ORDER BY t.portfolio_id ASC
+       LIMIT ?`,
+      [
+        userId,
+        userId,
+        batch.id,
+        IMPORT_COMMIT_LIMITS.maxAffectedPortfolios + 1,
+      ],
     );
-    const dates = transactionRows
-      .map(
-        (row) =>
-          parseNormalized(
-            row.normalized_fields_json === null
-              ? null
-              : String(row.normalized_fields_json),
-          )?.localTradeDate,
-      )
-      .filter((date): date is string => typeof date === "string")
-      .sort();
-    const rangeFrom = dates[0] ?? nowAt.slice(0, 10);
-    const rangeTo = dates.at(-1) ?? rangeFrom;
-    const rebuildJobId = `import-rebuild:${batch.id}:${commitKey}`;
-    const statements: SqlStatement[] = [
-      {
+    if (affected.length > IMPORT_COMMIT_LIMITS.maxAffectedPortfolios) {
+      return { ok: false, reason: "revalidation_failed" };
+    }
+    const committedRowCount = affected.reduce(
+      (total, row) => total + Number(row.committed_count),
+      0,
+    );
+    const statements: SqlStatement[] = affected.map((row) => {
+      const portfolioId = String(row.portfolio_id);
+      const ledgerHighWater = String(row.ledger_high_water);
+      const rebuildJobId = `import-rebuild:${batch.id}:${portfolioId}:${commitKey}`;
+      return {
         sql: `INSERT INTO calculation_runs (
           id, user_id, portfolio_id, range_from, range_to, calculation_version,
           reason, invalidation_source, status, attempt, ledger_high_water_start,
@@ -393,16 +539,18 @@ export function createOwnedImportCommitRepository(
         params: [
           rebuildJobId,
           userId,
-          batch.targetPortfolioId,
-          rangeFrom,
-          rangeTo,
+          portfolioId,
+          String(row.range_from),
+          String(row.range_to),
           batch.id,
-          `import:${batch.id}:${batch.commitHighWaterRow}`,
+          ledgerHighWater,
           rebuildJobId,
           nowAt,
           nowAt,
         ],
-      },
+      };
+    });
+    statements.push(
       createAuditInsertStatement(
         {
           actorUserId: userId,
@@ -412,7 +560,10 @@ export function createOwnedImportCommitRepository(
           targetId: batch.id,
           requestId,
           result: "success",
-          metadata: { committedRowCount: transactionRows.length },
+          metadata: {
+            committedRowCount,
+            affectedPortfolioCount: affected.length,
+          },
           occurredAt: nowAt,
         },
         () => nowAt,
@@ -429,7 +580,10 @@ export function createOwnedImportCommitRepository(
             )`,
         params: [nowAt, nowAt, batch.id, userId, commitKey, batch.id, userId],
       },
-    ];
+    );
+    if (!isBoundedAtomicUnit(statements)) {
+      return { ok: false, reason: "atomic_failure", resumable: true };
+    }
     try {
       if (client.batch) await client.batch(statements);
       else {
@@ -454,6 +608,18 @@ export function createOwnedImportCommitRepository(
   }
 
   return {
+    async validate(
+      userId: string,
+      batchId: string,
+    ): Promise<
+      | { ok: true; previewVersion: string }
+      | { ok: false; reason: "not_found" | "revalidation_failed" }
+    > {
+      const validation = await revalidate(userId, batchId);
+      return validation.ok
+        ? { ok: true, previewVersion: validation.previewVersion }
+        : validation;
+    },
     async commit(
       userId: string,
       batchId: string,
@@ -474,10 +640,12 @@ export function createOwnedImportCommitRepository(
       if (batch.status !== "ready" && batch.status !== "committing") {
         return { ok: false, reason: "not_ready" };
       }
+      const validation = await revalidate(userId, batch.id);
+      if (!validation.ok) return validation;
       if (batch.status === "ready") {
         if (
           batch.version !== input.expectedVersion ||
-          !isPreviewVersion(input.expectedPreviewVersion, batch)
+          input.expectedPreviewVersion !== validation.previewVersion
         ) {
           return { ok: false, reason: "stale_preview" };
         }
@@ -485,35 +653,62 @@ export function createOwnedImportCommitRepository(
           `UPDATE import_batches SET status = 'committing', commit_idempotency_key = ?,
              updated_at = ?, version = version + 1
            WHERE id = ? AND user_id = ? AND status = 'ready' AND version = ?
-             AND commit_idempotency_key IS NULL`,
+             AND commit_idempotency_key IS NULL
+             AND (SELECT COUNT(*) FROM import_rows
+                  WHERE batch_id = ? AND user_id = ?) = ?
+             AND (SELECT COALESCE(SUM(version), 0) FROM import_rows
+                  WHERE batch_id = ? AND user_id = ?) = ?
+             AND (SELECT COUNT(*) FROM import_issues
+                  WHERE batch_id = ? AND user_id = ?) = ?
+             AND (SELECT COALESCE(SUM(version), 0) FROM import_issues
+                  WHERE batch_id = ? AND user_id = ?) = ?
+             AND (SELECT COUNT(*) FROM import_mapping_decisions
+                  WHERE batch_id = ? AND user_id = ?) = ?
+             AND (SELECT COALESCE(SUM(version), 0) FROM import_mapping_decisions
+                  WHERE batch_id = ? AND user_id = ?) = ?`,
           [
             input.idempotencyKey,
             nowIso(now),
             batch.id,
             userId,
             input.expectedVersion,
+            batch.id,
+            userId,
+            validation.state.rowCount,
+            batch.id,
+            userId,
+            validation.state.rowVersionTotal,
+            batch.id,
+            userId,
+            validation.state.issueCount,
+            batch.id,
+            userId,
+            validation.state.issueVersionTotal,
+            batch.id,
+            userId,
+            validation.state.mappingCount,
+            batch.id,
+            userId,
+            validation.state.mappingVersionTotal,
           ],
         );
-        if (changed.changes !== 1) return { ok: false, reason: "conflict" };
+        if (changed.changes !== 1)
+          return { ok: false, reason: "stale_preview" };
         batch = (await loadBatch(userId, batchId)) as BatchState;
       } else if (batch.commitIdempotencyKey !== input.idempotencyKey) {
         return { ok: false, reason: "conflict" };
       }
 
-      const allRows = mapRows(
+      const pending = mapRows(
         await client.all<Record<string, unknown>>(
           `SELECT id, batch_id, physical_row_number, row_class, normalized_fields_json,
                   normalized_fingerprint, validation_status, target_portfolio_id,
                   target_portfolio_security_id, commit_status
            FROM import_rows WHERE user_id = ? AND batch_id = ?
-           ORDER BY physical_row_number ASC, id ASC`,
-          [userId, batch.id],
+             AND physical_row_number > ? AND commit_status = 'staged'
+           ORDER BY physical_row_number ASC, id ASC LIMIT ?`,
+          [userId, batch.id, batch.commitHighWaterRow, chunkSize],
         ),
-      );
-      const pending = allRows.filter(
-        (row) =>
-          row.physicalRowNumber > batch.commitHighWaterRow &&
-          row.commitStatus === "staged",
       );
       let chunkIndex = Number(
         (
@@ -539,12 +734,36 @@ export function createOwnedImportCommitRepository(
             });
             continue;
           }
+          if (validation.skippedRowIds.has(row.id)) {
+            statements.push({
+              sql: `UPDATE import_rows SET commit_status = 'skipped', updated_at = ?, version = version + 1
+                WHERE id = ? AND user_id = ? AND batch_id = ? AND commit_status = 'staged'`,
+              params: [nowIso(now), row.id, userId, batch.id],
+            });
+            continue;
+          }
+          const target = validation.targets[row.id];
+          if (!target) return { ok: false, reason: "revalidation_failed" };
+          statements.push({
+            sql: `UPDATE import_rows SET target_portfolio_id = ?,
+                    target_portfolio_security_id = ?, updated_at = ?, version = version + 1
+                  WHERE id = ? AND user_id = ? AND batch_id = ? AND commit_status = 'staged'`,
+            params: [
+              target.portfolioId,
+              target.portfolioSecurityId,
+              nowIso(now),
+              row.id,
+              userId,
+              batch.id,
+            ],
+          });
           const resolved = await resolveInput(
             userId,
             batch,
             row,
             input.idempotencyKey,
             input.requestId,
+            target,
           );
           if (!resolved.ok) return resolved;
           if (seenSourceReferences.has(resolved.sourceReference)) {
@@ -651,6 +870,9 @@ export function createOwnedImportCommitRepository(
             batch.commitHighWaterRow,
           ],
         });
+        if (!isBoundedAtomicUnit(statements)) {
+          return { ok: false, reason: "atomic_failure", resumable: true };
+        }
         try {
           if (client.batch) await client.batch(statements);
           else {
@@ -669,6 +891,17 @@ export function createOwnedImportCommitRepository(
         }
         batch = (await loadBatch(userId, batch.id)) as BatchState;
         chunkIndex += 1;
+      }
+      if (pending.length === chunkSize) {
+        const remaining = await client.get<{ id: string }>(
+          `SELECT id FROM import_rows
+           WHERE user_id = ? AND batch_id = ? AND physical_row_number > ?
+             AND commit_status = 'staged' LIMIT 1`,
+          [userId, batch.id, batch.commitHighWaterRow],
+        );
+        if (remaining) {
+          return summary(userId, batch.id, batch, true, false);
+        }
       }
       return finalize(
         userId,

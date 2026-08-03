@@ -23,6 +23,8 @@ function messageFor(reason: string): string {
       return "A valid idempotency key is required.";
     case "stale_preview":
       return "This preview is stale. Reload it before committing.";
+    case "revalidation_failed":
+      return "This import no longer matches a commit-ready server preview. Review its issues and mappings again.";
     case "not_ready":
       return "This import is not ready to commit.";
     case "mapping_incomplete":

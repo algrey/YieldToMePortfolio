@@ -493,6 +493,10 @@ Sensitive notes are financial user data and follow account retention.
 
 No ambiguous security mapping auto-commits.
 
+The commit-ready preview version is a SHA-256 digest over the owner-scoped parser/batch state, staged row versions and targets, issue versions/resolution state, mapping versions, owned portfolio/security candidates, and deterministic reconciliation result. The `ready` → `committing` update also guards row, issue, and mapping counts/version totals; mapping inserts and updates are rejected after that transition. Each resumable chunk persists only its validated row targets, immutable ledger effects, chunk marker, audit, and physical-row high-water in one bounded D1 batch.
+
+Final import invalidation is portfolio-specific. For each affected portfolio, `calculation_runs.ledger_high_water_start` stores the actual latest committed transaction ID under the ledger ordering, while `invalidation_source` retains the import batch ID. The batch reaches `committed` only in the same bounded finalization batch that durably inserts every required portfolio rebuild request.
+
 ## 8. Future broker-sync extension
 
 These tables are deferred, but the current ownership/source keys reserve the boundary.
@@ -635,6 +639,7 @@ One D1 transactional batch must cover:
 
 - posting a transaction, cash effect, audit event, and projection invalidation;
 - committing each bounded import chunk plus idempotency marker;
+- finalizing an import plus every affected portfolio's real-ledger-high-water rebuild request;
 - reversing a transaction/import effect plus audit;
 - installing a mapping decision that changes committed facts plus recalculation job;
 - later, posting an actual dividend receipt and its cash entry.

@@ -431,10 +431,11 @@ Status: DONE (2026-08-03).
 - Tests: retry at each chunk boundary, duplicate rows/files, free-plan 50-query/100-parameter chunk bounds, partial failure/resume, cross-user, CSRF/idempotency denial, atomic rollback.
 - Risks: D1 limits or exposing partially committed rows before final status.
 - Parallel safe: no; integrates ledger/import/audit.
-- Completion note: Added owner-scoped explicit commit with bounded D1 chunks, durable high-water/chunk markers, idempotent duplicate handling, atomic ledger effects, and queued rebuild finalization; failure-injection tests verify resumable behavior.
+- Completion note: Added owner-scoped explicit commit with an exact server-revalidated preview digest, a guarded review-state freeze, validated row mapping consumption, one bounded D1 chunk per invocation, durable high-water/chunk markers, idempotent duplicate handling, atomic ledger effects, and per-portfolio rebuild finalization at real ledger high-water values.
 - Review finding: Commit does not re-run the server-issued reconciliation or verify current blocking issues, parser/mapping state, and exact preview version before moving a batch to `committing`; it also never consumes portfolio/security mapping decisions from IMP-002B, so an approved mapped batch cannot reliably resolve its staged targets. Add an owner-scoped server revalidation step and persist/apply only its validated mapping result before commit.
 - Review finding: Finalization creates a rebuild request with `ledger_high_water_start = import:<batch>:<row>` rather than the portfolio's actual ledger high-water identifier, and assumes one non-null batch portfolio. Derive durable rebuild requests from the affected owned portfolio(s) and their real committed ledger high-water values, with tests for per-row portfolio mappings and rebuild claim/completion.
 - Review finding: Tests cover one injected failure boundary and a manually prepared staged fixture, but do not cover every chunk boundary, duplicate-file commit through the staging path, D1 query/parameter budgets, blocked issue-state commits, stale exact preview versions, mapping consumption, or rebuild high-water correctness.
+- Review resolution: Commit now reconstructs the current owner-scoped reconciliation and requires its exact digest before a conditional transition that guards row, issue, and mapping versions. Mapping writes freeze at `committing`; each chunk persists only its validated durable targets with the ledger effects and advances one bounded unit per invocation. Finalization groups committed effects by affected owned portfolio and atomically queues each rebuild at the portfolio's actual latest ledger transaction. Integration tests cover every injected chunk boundary, concurrent/stale/blocked/parser states, row-scoped mapping consumption, duplicate rows and staging-path duplicate files, 50-query/50-statement/100-parameter budgets, atomic rollback, ownership/CSRF/idempotency denial, and rebuild claim/completion. No mobile surface applies to this backend commit job.
 
 ### IMP-003B — Import reversal and corrected re-import
 
@@ -777,7 +778,7 @@ Status: DONE (2026-08-03).
 
 ### UI-005A — Portfolio settings and ledger inspection
 
-Status: DONE on 2026-08-03.
+Status: IN PROGRESS after review on 2026-08-03.
 
 - Objective: expose owned portfolio settings and read-only ledger/lot/cash provenance without combining them with financial write workflows.
 - Dependencies: UI-001, LED-002B.
@@ -789,6 +790,8 @@ Status: DONE on 2026-08-03.
 - Risks: turning projections into editable truth or exposing an unscoped direct detail route.
 - Parallel safe: yes with import UI after shared shell.
 - Completion note: Added an owner-scoped read-only portfolio inspection model and authenticated Details view for settings, transactions, FIFO lots/matches, cash accounts/entries, exact-decimal edge formatting, business-date lists, expandable timestamp/provenance evidence, and a separate manual-entry/correction link.
+- Review resolution: Cash balances now sum only posted entries, fail closed when the bounded inspection window is incomplete, and database read failures render the safe unavailable state; evidence summaries meet the 44px control target and bounded lot/match lists are labelled.
+- Review findings: The manual-entry/correction link points to the not-yet-implemented UI-005E route and currently lands on a 404. The inspection test suite still lacks empty/error-state, rendered keyboard, and responsive/mobile coverage, and bounded transaction/lot/allocation results need a deliberate pagination or incomplete-state design before this task can be marked done.
 
 ### UI-005B — Import upload, mapping, and preview
 

@@ -65,6 +65,7 @@ export type ImportReconciliationRow = Readonly<{
   normalized: NormalizedImportRow;
   fingerprint: string;
   targetPortfolioId?: string | null;
+  targetPortfolioSecurityId?: string | null;
 }>;
 
 export type ImportPreviewPortfolio = Readonly<{
@@ -120,6 +121,16 @@ export type ImportReconciliationPreview = Readonly<{
   }>;
   projectedQuantities: Readonly<Record<string, string>>;
   unresolvedCandidates: readonly ImportPreviewSecurityCandidate[];
+  resolvedTargets: Readonly<
+    Record<
+      string,
+      Readonly<{
+        portfolioId: string;
+        portfolioSecurityId: string | null;
+        fxDirection: "native_to_home" | "home_to_native" | null;
+      }>
+    >
+  >;
   issues: readonly ImportReconciliationIssue[];
 }>;
 
@@ -157,16 +168,16 @@ function portfolioFor(
   decisions: readonly ImportPreviewMappingDecision[],
 ): ImportPreviewPortfolio | null {
   const source = row.normalized.portfolio ?? "";
-  if (row.targetPortfolioId !== undefined && row.targetPortfolioId !== null) {
-    return (
-      portfolios.find((portfolio) => portfolio.id === row.targetPortfolioId) ??
-      null
-    );
-  }
   const decision = decisionFor(decisions, "portfolio", source, row.id);
   if (decision?.targetId) {
     return (
       portfolios.find((portfolio) => portfolio.id === decision.targetId) ?? null
+    );
+  }
+  if (row.targetPortfolioId !== undefined && row.targetPortfolioId !== null) {
+    return (
+      portfolios.find((portfolio) => portfolio.id === row.targetPortfolioId) ??
+      null
     );
   }
   const matches = portfolios.filter(
@@ -197,6 +208,14 @@ export function createImportReconciliationPreview(
   const unresolvedCandidates: ImportPreviewSecurityCandidate[] = [];
   const unresolvedCandidateIds = new Set<string>();
   const projectedQuantities: Record<string, string> = {};
+  const resolvedTargets: Record<
+    string,
+    {
+      portfolioId: string;
+      portfolioSecurityId: string | null;
+      fxDirection: "native_to_home" | "home_to_native" | null;
+    }
+  > = {};
   const holdings = new Map<string, string>();
   const seen = new Set(existingFingerprints);
   const resolvedRows: Array<{
@@ -261,7 +280,7 @@ export function createImportReconciliationPreview(
     }
 
     const isCash = row.normalized.cashEvent !== null;
-    let membershipId = `cash:${portfolio.id}:${row.normalized.currency ?? ""}`;
+    let membershipId: string | null = null;
     if (!isCash) {
       const key = securityKey(portfolio.id, row);
       const decision = decisionFor(decisions, "security", key, row.id);
@@ -275,11 +294,15 @@ export function createImportReconciliationPreview(
           normalized(candidate.sourceCurrencyCode) ===
             normalized(row.normalized.currency ?? ""),
       );
+      const selectedTargetId =
+        decision?.targetId ?? row.targetPortfolioSecurityId ?? null;
       membershipId =
-        decision?.targetId ?? candidates[0]?.id ?? `candidate:${key}`;
-      if (decision?.targetId) {
-        const selectedCandidate = candidates.find(
-          (candidate) => candidate.id === decision.targetId,
+        selectedTargetId ?? candidates[0]?.id ?? `candidate:${key}`;
+      if (selectedTargetId) {
+        const selectedCandidate = input.securityCandidates.find(
+          (candidate) =>
+            candidate.id === selectedTargetId &&
+            candidate.portfolioId === portfolio.id,
         );
         if (!selectedCandidate || selectedCandidate.securityId === null) {
           unresolved += 1;
@@ -341,6 +364,7 @@ export function createImportReconciliationPreview(
       }
     }
 
+    let fxDirection: "native_to_home" | "home_to_native" | null = null;
     if (
       row.normalized.purchaseExchangeRate !== null &&
       row.normalized.currency !== portfolio.homeCurrencyCode
@@ -361,6 +385,8 @@ export function createImportReconciliationPreview(
           message:
             "Confirm whether the supplied exchange rate converts native currency to home currency or is inverse.",
         });
+      } else {
+        fxDirection = fxDecision.targetValue;
       }
     } else if (
       row.normalized.type !== null &&
@@ -377,7 +403,24 @@ export function createImportReconciliationPreview(
       });
     }
 
-    resolvedRows.push({ row, portfolio, membershipId });
+    if (
+      !issues.some(
+        (issue) => issue.rowId === row.id && issue.severity === "error",
+      )
+    ) {
+      resolvedTargets[row.id] = {
+        portfolioId: portfolio.id,
+        portfolioSecurityId: membershipId,
+        fxDirection,
+      };
+    }
+
+    resolvedRows.push({
+      row,
+      portfolio,
+      membershipId:
+        membershipId ?? `cash:${portfolio.id}:${row.normalized.currency ?? ""}`,
+    });
     if (row.rowClass === "transaction") transactionCreates += 1;
   }
 
@@ -439,6 +482,7 @@ export function createImportReconciliationPreview(
     counts: { transactionCreates, candidateCreates, skips, unresolved },
     projectedQuantities,
     unresolvedCandidates,
+    resolvedTargets,
     issues,
   };
 }

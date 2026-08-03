@@ -248,6 +248,7 @@ The v1 adapter is one source plus manual override, not a multi-provider aggregat
 - Give each logical operation a deterministic idempotency key and at most one active job row for that key/window.
 - Workers acquire a bounded lease with a conditional D1 update over status/version/lease expiry; expired leases may be reclaimed.
 - Process bounded chunks, commit a high-water mark, and make every retry safe from that mark.
+- Import commit reconstructs and digests the complete owner-scoped review state before a guarded `ready` → `committing` transition. It freezes mapping writes, persists only validated durable row targets with each ledger chunk, processes one chunk per invocation, and finalizes portfolio-specific rebuild jobs using actual ledger high-water transaction IDs.
 - `ctx.waitUntil` may finish short logging/cache work but is not the sole durability mechanism for financially material work.
 - Cron claims ready jobs and respects provider/Worker query budgets. Add Queues only after measurement shows that bounded Cron/request processing cannot meet reliability or latency.
 - Concurrent recalculations use calculation version + affected range and coalesce overlapping invalidations; a stale run cannot publish a high-water mark over newer ledger facts.

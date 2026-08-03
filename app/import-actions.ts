@@ -16,7 +16,6 @@ import {
   parseStrictVersionedCsvImport,
 } from "../domain/imports";
 import type {
-  ImportPreviewMappingDecision,
   ImportPreviewPortfolio,
   ImportPreviewSecurityCandidate,
 } from "../domain/imports/reconciliation";
@@ -48,7 +47,7 @@ async function loadReview(
         `SELECT id, portfolio_id, source_symbol, source_exchange_alias,
         source_currency_code, security_id
        FROM portfolio_securities
-       WHERE user_id = ? AND status = 'unresolved'
+       WHERE user_id = ?
        ORDER BY source_symbol ASC, id ASC`,
         [userId],
       ),
@@ -78,7 +77,7 @@ async function loadReview(
     batch,
     rows,
     issues,
-    mappings: mappings as ImportPreviewMappingDecision[],
+    mappings,
     portfolios: previewPortfolios,
     securityCandidates,
   });

@@ -240,7 +240,7 @@ The user must be able to download/copy an issue report without source formulas e
 
 ### Stage 6 — Commit
 
-Require explicit confirmation and unique idempotency key. Recheck ownership, issue state, mappings, parser version, and batch status on server.
+Require explicit confirmation and unique idempotency key. Reconstruct the owner-scoped reconciliation on the server and require an exact digest of its parser, rows, issues, mapping versions, owned portfolios, security memberships, and preview result. A version-shaped token is insufficient. The conditional transition to `committing` guards the row/issue/mapping counts and version totals so a concurrent review change leaves the batch `ready` and forces a new preview. Mapping writes fail once the transition wins.
 
 ### Stage 7 — Post
 
@@ -252,11 +252,13 @@ For each bounded chunk:
 - link each result to import row/batch;
 - store commit high-water mark and audit event.
 
+The validated row-level portfolio/security target and FX direction are the only mapping result consumed by posting. Persist durable target IDs in the same bounded unit as their ledger effect; never resolve them again from display symbols during posting. Process at most one chunk per Worker invocation so the 50-query invocation budget, 50-statement atomic-unit budget, and 100-parameter-per-query bound remain enforceable.
+
 If the entire batch cannot be one D1 transaction, status and chunk idempotency must allow resume without duplicate effects. Batch becomes `committed` only after every intended row and rebuild job is durably recorded.
 
 ### Stage 8 — Rebuild
 
-Rebuild FIFO lots, holdings, cash reconciliation, and affected snapshots from earliest imported effective date.
+For every affected owned portfolio, derive the imported effective-date range and the current real ledger high-water transaction ID. Durably create one idempotent rebuild request per portfolio before marking the batch committed. Rebuild FIFO lots, holdings, cash reconciliation, and affected snapshots from the earliest imported effective date; a synthetic import row marker is not a ledger high-water value.
 
 ### Stage 9 — Summary
 
