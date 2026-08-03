@@ -340,11 +340,17 @@ function isConsistentFxEvidence(
       evidence.quality === "stale_candidate" &&
       evidence.selectionState !== "stale"
     );
+  const sourceMatchesPurpose = explicitTransactionFact
+    ? evidence.source === "transaction" &&
+      evidence.selectionState === "current" &&
+      !evidence.fallback
+    : evidence.source !== "transaction" && evidence.source !== "identity";
   return (
     sourceMatchesQuality &&
     stateMatchesFallback &&
+    sourceMatchesPurpose &&
     evidence.selectionReason.trim().length > 0 &&
-    (!explicitTransactionFact || evidence.source === "transaction")
+    evidence.quality !== "identity"
   );
 }
 

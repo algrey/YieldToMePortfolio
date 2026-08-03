@@ -697,6 +697,37 @@ test("CALC-001B malformed materiality and contradictory FX evidence fail closed"
     assert.equal(contradictoryFx.reason, "invalid_fx");
     assert.equal(contradictoryFx.explanation.actionability, "action_required");
   }
+
+  const crossCurrencyIdentity = resolveFxRate({
+    purpose: "valuation",
+    nativeCurrencyCode: "USD",
+    homeCurrencyCode: "AUD",
+    selectedFx: {
+      ...usdAudCurrentFx,
+      source: "identity",
+      quality: "identity",
+      rateDecimal: "1",
+    },
+  });
+  assert.equal(crossCurrencyIdentity.status, "unavailable");
+  if (crossCurrencyIdentity.status === "unavailable") {
+    assert.equal(crossCurrencyIdentity.reason, "invalid_fx");
+  }
+
+  const staleExplicitTransaction = resolveFxRate({
+    purpose: "transaction",
+    nativeCurrencyCode: "USD",
+    homeCurrencyCode: "AUD",
+    explicitTransactionFx: {
+      ...explicitTransactionFx,
+      selectionState: "stale",
+      fallback: true,
+    },
+  });
+  assert.equal(staleExplicitTransaction.status, "unavailable");
+  if (staleExplicitTransaction.status === "unavailable") {
+    assert.equal(staleExplicitTransaction.reason, "invalid_transaction_fx");
+  }
 });
 
 test("CALC-001B inversion and percentage rounding use half-even decimal boundaries", () => {
