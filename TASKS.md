@@ -463,7 +463,7 @@ Status: DONE on 2026-07-30.
 
 ### LED-002B — Owned lot and holding projection rebuild
 
-Status: PENDING.
+Status: READY.
 
 - Objective: persist and deterministically rebuild owner-scoped lots, allocations, and current holding projections.
 - Dependencies: LED-002A, LED-001B.
@@ -584,7 +584,7 @@ Status: DONE (2026-08-03).
 
 ### MKT-003B — Bounded ingestion and refresh jobs
 
-Status: PENDING.
+Status: READY.
 
 - Objective: ingest current/daily price and FX observations reliably within Cloudflare/D1 limits.
 - Dependencies: MKT-003A, MKT-002, MKT-004, OPS-001.
