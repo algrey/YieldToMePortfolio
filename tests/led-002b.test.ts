@@ -139,6 +139,21 @@ async function startRun(
   return { client, runId: requested.id };
 }
 
+async function rebuildToCompletion(
+  repository: ReturnType<typeof createOwnedProjectionRepository>,
+  userId: string,
+  input: Parameters<
+    ReturnType<typeof createOwnedProjectionRepository>["rebuild"]
+  >[1],
+  maxChunks = 10_000,
+) {
+  for (let chunk = 0; chunk < maxChunks; chunk += 1) {
+    const result = await repository.rebuild(userId, input);
+    if (!result.ok || result.completed) return result;
+  }
+  throw new Error("projection_rebuild_did_not_complete");
+}
+
 test("owned projection rebuild publishes FIFO lots atomically and rejects stale work", async () => {
   const database = await createMigratedDatabase();
   seedLedger(database);
@@ -201,7 +216,7 @@ test("owned projection rebuild publishes FIFO lots atomically and rejects stale 
     }),
     { ok: false, reason: "not_found" },
   );
-  const published = await projections.rebuild("user-a", {
+  const published = await rebuildToCompletion(projections, "user-a", {
     portfolioId: "portfolio-a",
     calculationRunId: first.runId,
     leaseOwner: "worker-1",
@@ -230,9 +245,9 @@ test("owned projection rebuild publishes FIFO lots atomically and rejects stale 
   assert.deepEqual(
     database
       .prepare(
-        `SELECT id, open_quantity_decimal, native_basis_decimal,
+        `SELECT opening_transaction_id AS id, open_quantity_decimal, native_basis_decimal,
                 base_basis_decimal, status
-         FROM tax_lots ORDER BY id`,
+         FROM tax_lots ORDER BY opening_transaction_id`,
       )
       .all()
       .map((row) => Object.assign({}, row)),
@@ -256,9 +271,13 @@ test("owned projection rebuild publishes FIFO lots atomically and rejects stale 
   assert.deepEqual(
     database
       .prepare(
-        `SELECT sell_transaction_id, tax_lot_id, allocation_sequence,
+        `SELECT allocation.sell_transaction_id,
+                lot.opening_transaction_id AS tax_lot_id,
+                allocation.allocation_sequence,
                 matched_quantity_decimal
-         FROM lot_allocations ORDER BY allocation_sequence`,
+         FROM lot_allocations allocation
+         JOIN tax_lots lot ON lot.id = allocation.tax_lot_id
+         ORDER BY allocation_sequence`,
       )
       .all()
       .map((row) => Object.assign({}, row)),
@@ -360,23 +379,29 @@ test("owned projection rebuild publishes FIFO lots atomically and rejects stale 
     worker: "worker-incomplete",
     now: "2026-08-03T03:00:00Z",
   });
-  const incompleteResult = await createOwnedProjectionRepository(
-    incomplete.client,
-  ).rebuild("user-a", {
-    portfolioId: "portfolio-a",
-    calculationRunId: incomplete.runId,
-    leaseOwner: "worker-incomplete",
-    currentLedgerHighWater: "buy-incomplete",
-    now: "2026-08-03T03:05:00Z",
-  });
+  const incompleteResult = await rebuildToCompletion(
+    createOwnedProjectionRepository(incomplete.client),
+    "user-a",
+    {
+      portfolioId: "portfolio-a",
+      calculationRunId: incomplete.runId,
+      leaseOwner: "worker-incomplete",
+      currentLedgerHighWater: "buy-incomplete",
+      now: "2026-08-03T03:05:00Z",
+    },
+  );
   assert.equal(incompleteResult.ok, true);
   assert.deepEqual(
     Object.assign(
       {},
       database
         .prepare(
-          `SELECT quantity_decimal, base_open_basis_decimal, completeness
-           FROM holding_projections`,
+          `SELECT projection.quantity_decimal,
+                  projection.base_open_basis_decimal, projection.completeness
+           FROM holding_projections projection
+           JOIN projection_publications publication
+             ON publication.calculation_run_id = projection.calculation_run_id
+            AND publication.portfolio_id = projection.portfolio_id`,
         )
         .get(),
     ),
@@ -407,20 +432,28 @@ test("owned projection rebuild publishes FIFO lots atomically and rejects stale 
     worker: "worker-reversed",
     now: "2026-08-03T04:00:00Z",
   });
-  const reversedResult = await createOwnedProjectionRepository(
-    reversed.client,
-  ).rebuild("user-a", {
-    portfolioId: "portfolio-a",
-    calculationRunId: reversed.runId,
-    leaseOwner: "worker-reversed",
-    currentLedgerHighWater: "reverse-sell-1",
-    now: "2026-08-03T04:05:00Z",
-  });
+  const reversedResult = await rebuildToCompletion(
+    createOwnedProjectionRepository(reversed.client),
+    "user-a",
+    {
+      portfolioId: "portfolio-a",
+      calculationRunId: reversed.runId,
+      leaseOwner: "worker-reversed",
+      currentLedgerHighWater: "reverse-sell-1",
+      now: "2026-08-03T04:05:00Z",
+    },
+  );
   assert.equal(reversedResult.ok, true);
   assert.equal(
     (
       database
-        .prepare("SELECT count(*) AS count FROM lot_allocations")
+        .prepare(
+          `SELECT count(*) AS count
+           FROM lot_allocations allocation
+           JOIN projection_publications publication
+             ON publication.calculation_run_id = allocation.calculation_run_id
+            AND publication.portfolio_id = allocation.portfolio_id`,
+        )
         .get() as { count: number }
     ).count,
     0,
@@ -428,7 +461,13 @@ test("owned projection rebuild publishes FIFO lots atomically and rejects stale 
   assert.equal(
     (
       database
-        .prepare("SELECT quantity_decimal FROM holding_projections")
+        .prepare(
+          `SELECT projection.quantity_decimal
+           FROM holding_projections projection
+           JOIN projection_publications publication
+             ON publication.calculation_run_id = projection.calculation_run_id
+            AND publication.portfolio_id = projection.portfolio_id`,
+        )
         .get() as { quantity_decimal: string }
     ).quantity_decimal,
     "16",
@@ -446,4 +485,215 @@ test("owned projection rebuild publishes FIFO lots atomically and rejects stale 
       )
       .run();
   }, /FOREIGN KEY constraint failed/);
+});
+
+test("high-volume rebuild keeps ledger reads and D1 batches bounded", async () => {
+  const database = await createMigratedDatabase();
+  seedLedger(database);
+  const membershipInsert = database.prepare(
+    `INSERT INTO portfolio_securities (
+       id, user_id, portfolio_id, source_symbol, source_currency_code,
+       status, created_at, updated_at
+     ) VALUES (?, 'user-a', 'portfolio-a', ?, 'AUD', 'unresolved',
+               '2026-08-03', '2026-08-03')`,
+  );
+  for (let index = 0; index < 150; index += 1) {
+    const suffix = index.toString().padStart(3, "0");
+    const membershipId = `membership-${suffix}`;
+    membershipInsert.run(membershipId, `S${suffix}`);
+    insertTransaction(database, {
+      id: `buy-volume-${suffix}`,
+      portfolioSecurityId: membershipId,
+      type: "buy",
+      tradeAt: `2026-01-01T00:${Math.floor(index / 60)
+        .toString()
+        .padStart(2, "0")}:${(index % 60).toString().padStart(2, "0")}Z`,
+      quantityDecimal: "1",
+      unitPriceDecimal: "10",
+      grossAmountDecimal: "10",
+      fxRateToBaseDecimal: "1",
+    });
+  }
+
+  const run = await startRun(database, {
+    id: "run-volume",
+    version: 10,
+    highWater: "buy-volume-149",
+    worker: "worker-volume",
+    now: "2026-08-03T05:00:00Z",
+  });
+  let maximumBatchStatements = 0;
+  let maximumBatchParameters = 0;
+  let maximumLedgerRows = 0;
+  const instrumentedClient = {
+    ...run.client,
+    async all<T extends Record<string, unknown>>(
+      sql: string,
+      params: readonly unknown[] = [],
+    ): Promise<T[]> {
+      const rows = await run.client.all<T>(sql, params);
+      if (sql.includes("FROM transactions t")) {
+        maximumLedgerRows = Math.max(maximumLedgerRows, rows.length);
+      }
+      return rows;
+    },
+    async batch(
+      statements: Parameters<NonNullable<typeof run.client.batch>>[0],
+    ) {
+      maximumBatchStatements = Math.max(
+        maximumBatchStatements,
+        statements.length,
+      );
+      for (const statement of statements) {
+        maximumBatchParameters = Math.max(
+          maximumBatchParameters,
+          statement.params?.length ?? 0,
+        );
+      }
+      return run.client.batch!(statements);
+    },
+  };
+  const result = await rebuildToCompletion(
+    createOwnedProjectionRepository(instrumentedClient, {
+      maxLedgerEventsPerSecurity: 2,
+      maxOutputStatementsPerChunk: 3,
+    }),
+    "user-a",
+    {
+      portfolioId: "portfolio-a",
+      calculationRunId: run.runId,
+      leaseOwner: "worker-volume",
+      currentLedgerHighWater: "buy-volume-149",
+      now: "2026-08-03T05:05:00Z",
+    },
+  );
+  assert.equal(result.ok && result.completed, true);
+  assert.equal(maximumLedgerRows, 1);
+  assert.ok(maximumBatchStatements <= 4);
+  assert.ok(maximumBatchParameters <= 100);
+  assert.equal(
+    (
+      database
+        .prepare(
+          `SELECT count(*) AS count
+           FROM holding_projections projection
+           JOIN projection_publications publication
+             ON publication.calculation_run_id = projection.calculation_run_id
+            AND publication.portfolio_id = projection.portfolio_id`,
+        )
+        .get() as { count: number }
+    ).count,
+    150,
+  );
+});
+
+test("an injected chunk failure leaves its checkpoint unchanged and resumes", async () => {
+  const database = await createMigratedDatabase();
+  seedLedger(database);
+  for (let index = 0; index < 30; index += 1) {
+    const suffix = index.toString().padStart(2, "0");
+    insertTransaction(database, {
+      id: `buy-resume-${suffix}`,
+      type: "buy",
+      tradeAt: `2026-02-01T00:00:${suffix}Z`,
+      quantityDecimal: "1",
+      unitPriceDecimal: "10",
+      grossAmountDecimal: "10",
+      fxRateToBaseDecimal: "1",
+    });
+  }
+  const run = await startRun(database, {
+    id: "run-resume",
+    version: 11,
+    highWater: "buy-resume-29",
+    worker: "worker-resume",
+    now: "2026-08-03T06:00:00Z",
+  });
+  let batchCall = 0;
+  let failureInjected = false;
+  const failingClient = {
+    ...run.client,
+    async batch(
+      statements: Parameters<NonNullable<typeof run.client.batch>>[0],
+    ) {
+      batchCall += 1;
+      if (batchCall === 3 && !failureInjected) {
+        failureInjected = true;
+        throw new Error("injected_chunk_failure");
+      }
+      return run.client.batch!(statements);
+    },
+  };
+  const repository = createOwnedProjectionRepository(failingClient, {
+    maxLedgerEventsPerSecurity: 40,
+    maxOutputStatementsPerChunk: 4,
+  });
+  const input = {
+    portfolioId: "portfolio-a",
+    calculationRunId: run.runId,
+    leaseOwner: "worker-resume",
+    currentLedgerHighWater: "buy-resume-29",
+    now: "2026-08-03T06:05:00Z",
+  };
+  assert.equal((await repository.rebuild("user-a", input)).ok, true);
+  assert.equal((await repository.rebuild("user-a", input)).ok, true);
+  const beforeFailure = Object.assign(
+    {},
+    database
+      .prepare(
+        `SELECT projection_active_security_id, projection_output_offset
+         FROM calculation_runs WHERE id = 'run-resume'`,
+      )
+      .get(),
+  );
+  const lotCountBeforeFailure = (
+    database
+      .prepare(
+        `SELECT count(*) AS count FROM tax_lots
+         WHERE calculation_run_id = 'run-resume'`,
+      )
+      .get() as { count: number }
+  ).count;
+  assert.deepEqual(await repository.rebuild("user-a", input), {
+    ok: false,
+    reason: "atomic_failure",
+  });
+  assert.deepEqual(
+    Object.assign(
+      {},
+      database
+        .prepare(
+          `SELECT projection_active_security_id, projection_output_offset
+           FROM calculation_runs WHERE id = 'run-resume'`,
+        )
+        .get(),
+    ),
+    beforeFailure,
+  );
+  assert.equal(
+    (
+      database
+        .prepare(
+          `SELECT count(*) AS count FROM tax_lots
+           WHERE calculation_run_id = 'run-resume'`,
+        )
+        .get() as { count: number }
+    ).count,
+    lotCountBeforeFailure,
+  );
+
+  const resumed = await rebuildToCompletion(repository, "user-a", input);
+  assert.equal(resumed.ok && resumed.completed, true);
+  assert.equal(resumed.ok ? resumed.lotCount : -1, 30);
+  assert.equal(
+    (
+      database
+        .prepare(
+          `SELECT quantity_decimal FROM holding_projections
+           WHERE calculation_run_id = 'run-resume'`,
+        )
+        .get() as { quantity_decimal: string }
+    ).quantity_decimal,
+    "30",
+  );
 });

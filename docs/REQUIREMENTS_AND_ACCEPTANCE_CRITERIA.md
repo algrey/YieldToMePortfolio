@@ -159,6 +159,7 @@ Acceptance:
 - Buys create open quantities and sells consume oldest eligible quantities.
 - Oversells fail unless a future short-selling feature is explicitly enabled.
 - Reversing a trade rebuilds affected lots and snapshots.
+- Projection rebuilds persist bounded owner-scoped checkpoints; a failed chunk resumes without replaying committed output, and only a completed ledger high-water run becomes current.
 
 ### LED-005 — Cash balances
 

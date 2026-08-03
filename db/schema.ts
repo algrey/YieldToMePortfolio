@@ -1507,6 +1507,14 @@ export const calculationRuns = sqliteTable(
     processedHoldingCount: integer("processed_holding_count")
       .notNull()
       .default(0),
+    processedLedgerCount: integer("processed_ledger_count")
+      .notNull()
+      .default(0),
+    projectionCursorSecurityId: text("projection_cursor_security_id"),
+    projectionActiveSecurityId: text("projection_active_security_id"),
+    projectionOutputOffset: integer("projection_output_offset")
+      .notNull()
+      .default(0),
     idempotencyKey: text("idempotency_key").notNull(),
     startedAt: text("started_at"),
     completedAt: text("completed_at"),
@@ -1537,6 +1545,14 @@ export const calculationRuns = sqliteTable(
       "calculation_runs_holding_count_check",
       sql`${table.processedHoldingCount} >= 0`,
     ),
+    check(
+      "calculation_runs_ledger_count_check",
+      sql`${table.processedLedgerCount} >= 0`,
+    ),
+    check(
+      "calculation_runs_projection_output_offset_check",
+      sql`${table.projectionOutputOffset} >= 0`,
+    ),
     uniqueIndex("calculation_runs_id_user_portfolio_unique").on(
       table.id,
       table.userId,
@@ -1554,6 +1570,38 @@ export const calculationRuns = sqliteTable(
       table.portfolioId,
       table.status,
       table.createdAt,
+    ),
+  ],
+);
+
+export const projectionPublications = sqliteTable(
+  "projection_publications",
+  {
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").primaryKey(),
+    calculationRunId: text("calculation_run_id").notNull(),
+    calculationVersion: integer("calculation_version").notNull(),
+    ledgerHighWater: text("ledger_high_water").notNull(),
+    publishedAt: text("published_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "projection_publications_portfolio_owner_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "projection_publications_run_owner_portfolio_fk",
+      columns: [table.calculationRunId, table.userId, table.portfolioId],
+      foreignColumns: [
+        calculationRuns.id,
+        calculationRuns.userId,
+        calculationRuns.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    uniqueIndex("projection_publications_owner_portfolio_unique").on(
+      table.userId,
+      table.portfolioId,
     ),
   ],
 );
@@ -1667,8 +1715,9 @@ export const taxLots = sqliteTable(
       table.portfolioId,
       table.portfolioSecurityId,
     ),
-    uniqueIndex("tax_lots_opening_transaction_unique").on(
+    uniqueIndex("tax_lots_opening_transaction_run_unique").on(
       table.openingTransactionId,
+      table.calculationRunId,
     ),
     index("tax_lots_fifo_idx").on(
       table.portfolioId,
@@ -1747,6 +1796,7 @@ export const lotAllocations = sqliteTable(
       table.sellTransactionId,
       table.taxLotId,
       table.allocationSequence,
+      table.calculationRunId,
     ),
     index("lot_allocations_owner_sell_idx").on(
       table.userId,
@@ -1814,6 +1864,7 @@ export const holdingProjections = sqliteTable(
     uniqueIndex("holding_projections_portfolio_security_unique").on(
       table.portfolioId,
       table.portfolioSecurityId,
+      table.calculationRunId,
     ),
     index("holding_projections_owner_portfolio_idx").on(
       table.userId,

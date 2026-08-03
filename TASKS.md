@@ -463,7 +463,7 @@ Status: DONE on 2026-07-30.
 
 ### LED-002B — Owned lot and holding projection rebuild
 
-Status: IN PROGRESS (review 2026-08-03).
+Status: DONE on 2026-08-03.
 
 - Objective: persist and deterministically rebuild owner-scoped lots, allocations, and current holding projections.
 - Dependencies: LED-002A, LED-001B.
@@ -476,6 +476,7 @@ Status: IN PROGRESS (review 2026-08-03).
 - Parallel safe: no; central projection path.
 - Completion note: Added owner-scoped tax-lot, allocation, and holding-projection schema with composite membership constraints; exact-decimal, security-grouped FIFO projection assembly; and a lease/high-water-guarded atomic rebuild repository. Added integration coverage for FIFO reconciliation, idempotency, stale publication rejection, incomplete basis, reversal replay, and cross-portfolio links. Updated the generated migrations and schema contract checks.
 - Review finding: The rebuild currently loads the entire owner ledger into memory and emits one unbounded D1 batch containing every delete and projection insert. This conflicts with the architecture’s bounded-chunk, D1-parameter, and Worker-memory limits and cannot resume from a committed projection high-water mark after a partial failure. Add bounded/resumable rebuild chunks, enforce the batch/query limits, and add high-volume and injected-failure resume tests before marking this task DONE.
+- Review resolution: Replaced whole-ledger replacement with run-versioned projection rows, bounded per-security ledger reads, bounded output batches, and an atomic security/output checkpoint. A completed run becomes current only through the owner-scoped publication pointer, so partial and stale runs remain invisible. Added a 150-security volume test that instruments row, statement, and parameter bounds plus an injected-failure test proving the failed chunk leaves no rows/checkpoint advance and resumes to identical output.
 
 ## Market data and calculations
 

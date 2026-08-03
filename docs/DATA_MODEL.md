@@ -278,7 +278,7 @@ Disposable but inspectable FIFO projection:
 - status;
 - calculation run, version, and rebuilt time.
 
-Unique opening lot identity. A buy can produce one lot in v1. LED-002B
+Unique opening lot identity within a calculation run. A buy can produce one lot in v1. LED-002B
 rebuilds lots from the owner-scoped ledger high-water mark and retains closed
 lots in the disposable projection so allocations remain inspectable.
 
@@ -294,7 +294,7 @@ lots in the disposable projection so allocations remain inspectable.
 - native/base realised gain;
 - calculation version.
 
-Unique `(sell_transaction_id, tax_lot_id, allocation_sequence)`. Sum constraints are validated transactionally by the service.
+Unique `(sell_transaction_id, tax_lot_id, allocation_sequence, calculation_run_id)`. Sum constraints are validated transactionally by the service.
 
 ### `cash_accounts`
 
@@ -332,13 +332,16 @@ Current disposable projection:
 - calculation version and rebuilt time;
 - completeness status.
 
-Unique `(portfolio_id, portfolio_security_id)`. Must reconcile to lots and posted transactions, including an owner-private unresolved membership.
+Unique `(portfolio_id, portfolio_security_id, calculation_run_id)`. Must reconcile to lots and posted transactions, including an owner-private unresolved membership.
 
-Publication is guarded by the claimed calculation run, lease owner, and
-ledger high-water mark. A stale or lost-lease run cannot delete or insert
-projection rows. Rebuilds replace the run's lots, allocations, and holdings
-atomically; repeated publication at the same completed high-water mark is
-idempotent.
+Run-versioned rows remain non-current while bounded chunks are assembled.
+Each chunk atomically writes at most the configured output limit and advances
+the run's security/output high-water checkpoint. Publication is a single
+guarded update to `projection_publications`, keyed by owned portfolio, after
+the run completes at the unchanged ledger high-water mark. A stale or
+lost-lease run cannot advance its checkpoint or become current; a failed
+chunk can be retried without duplicating its output. Prior run rows are
+disposable and may be removed later in separately bounded cleanup work.
 
 The projection’s home-currency values are stored/rebuilt for reporting. Native security prices, transaction amounts, and lot provenance remain available. Switching the UI between native and home currency never rewrites the projection or ledger.
 
@@ -578,11 +581,23 @@ Type-specific values may move to separate tables if query complexity justifies i
 - portfolio, range, calculation version;
 - reason/invalidation source;
 - status, attempt, lease;
-- high-water marks and counts;
+- ledger high-water, completed-security/output-offset checkpoints, and counts;
 - started/completed timestamps;
 - redacted error category.
 
 Provides idempotent bounded rebuilds and future Queue compatibility.
+
+### `projection_publications`
+
+One owner-scoped current projection pointer per portfolio:
+
+- `user_id`, `portfolio_id`, and completed `calculation_run_id`;
+- calculation version and ledger high-water;
+- publication timestamp.
+
+The pointer changes in the same bounded D1 batch that completes its guarded
+run. Readers join through this table so partially assembled and stale run rows
+are never presented as current projections.
 
 ### `audit_events`
 
@@ -1027,7 +1042,7 @@ CREATE TABLE tax_lots (
     REFERENCES calculation_runs(id, user_id, portfolio_id) ON DELETE RESTRICT,
   UNIQUE (id, user_id),
   UNIQUE (id, user_id, portfolio_id, portfolio_security_id),
-  UNIQUE (opening_transaction_id)
+  UNIQUE (opening_transaction_id, calculation_run_id)
 );
 CREATE INDEX idx_tax_lots_fifo
   ON tax_lots(portfolio_id, portfolio_security_id, acquired_at, id);
@@ -1063,7 +1078,9 @@ CREATE TABLE lot_allocations (
   ) ON DELETE RESTRICT,
   FOREIGN KEY (calculation_run_id, user_id, portfolio_id)
     REFERENCES calculation_runs(id, user_id, portfolio_id) ON DELETE RESTRICT,
-  UNIQUE (sell_transaction_id, tax_lot_id, allocation_sequence)
+  UNIQUE (
+    sell_transaction_id, tax_lot_id, allocation_sequence, calculation_run_id
+  )
 );
 
 CREATE TABLE holding_projections (
@@ -1090,7 +1107,21 @@ CREATE TABLE holding_projections (
   FOREIGN KEY (calculation_run_id, user_id, portfolio_id)
     REFERENCES calculation_runs(id, user_id, portfolio_id) ON DELETE RESTRICT,
   UNIQUE (id, user_id, portfolio_id),
-  UNIQUE (portfolio_id, portfolio_security_id)
+  UNIQUE (portfolio_id, portfolio_security_id, calculation_run_id)
+);
+
+CREATE TABLE projection_publications (
+  user_id TEXT NOT NULL,
+  portfolio_id TEXT PRIMARY KEY,
+  calculation_run_id TEXT NOT NULL,
+  calculation_version INTEGER NOT NULL,
+  ledger_high_water TEXT NOT NULL,
+  published_at TEXT NOT NULL,
+  FOREIGN KEY (portfolio_id, user_id)
+    REFERENCES portfolios(id, user_id) ON DELETE RESTRICT,
+  FOREIGN KEY (calculation_run_id, user_id, portfolio_id)
+    REFERENCES calculation_runs(id, user_id, portfolio_id) ON DELETE RESTRICT,
+  UNIQUE (user_id, portfolio_id)
 );
 
 CREATE TABLE price_observations (

@@ -20,6 +20,10 @@ export type CalculationRunRecord = {
   ledgerHighWaterEnd: string | null;
   processedSnapshotCount: number;
   processedHoldingCount: number;
+  processedLedgerCount: number;
+  projectionCursorSecurityId: string | null;
+  projectionActiveSecurityId: string | null;
+  projectionOutputOffset: number;
   idempotencyKey: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -72,6 +76,16 @@ function mapRun(row: Record<string, unknown>): CalculationRunRecord {
         : String(row.ledger_high_water_end),
     processedSnapshotCount: Number(row.processed_snapshot_count),
     processedHoldingCount: Number(row.processed_holding_count),
+    processedLedgerCount: Number(row.processed_ledger_count),
+    projectionCursorSecurityId:
+      row.projection_cursor_security_id === null
+        ? null
+        : String(row.projection_cursor_security_id),
+    projectionActiveSecurityId:
+      row.projection_active_security_id === null
+        ? null
+        : String(row.projection_active_security_id),
+    projectionOutputOffset: Number(row.projection_output_offset),
     idempotencyKey: String(row.idempotency_key),
     startedAt: row.started_at === null ? null : String(row.started_at),
     completedAt: row.completed_at === null ? null : String(row.completed_at),

@@ -108,6 +108,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "portfolio_settings",
     "portfolios",
     "price_observations",
+    "projection_publications",
     "securities",
     "security_identifiers",
     "security_provider_mappings",
@@ -140,6 +141,9 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "holding_projections_id_user_portfolio_unique",
     "holding_projections_owner_portfolio_idx",
     "holding_projections_portfolio_security_unique",
+  ]);
+  assert.deepEqual(indexNames(database, "projection_publications"), [
+    "projection_publications_owner_portfolio_unique",
   ]);
   assert.deepEqual(indexNames(database, "lot_allocations"), [
     "lot_allocations_owner_sell_idx",
@@ -207,7 +211,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "tax_lots_fifo_idx",
     "tax_lots_id_user_portfolio_security_unique",
     "tax_lots_id_user_unique",
-    "tax_lots_opening_transaction_unique",
+    "tax_lots_opening_transaction_run_unique",
   ]);
 
   assert.deepEqual(foreignKeys(database, "user_settings"), [

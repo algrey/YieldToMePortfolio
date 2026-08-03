@@ -87,6 +87,7 @@ export {
   type ProjectionRebuildInput,
   type ProjectionRebuildResult,
   type ProjectionRebuildSuccess,
+  type ProjectionRepositoryOptions,
 } from "./projections.ts";
 export {
   createMarketDataRefreshRepository,
