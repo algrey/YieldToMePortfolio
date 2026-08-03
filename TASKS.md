@@ -633,7 +633,7 @@ Status: DEFERRED; not required by the core ledger/valuation release.
 
 ### CALC-001A — Decimal primitives, basis, gain, and current value
 
-Status: READY.
+Status: DONE on 2026-08-03.
 
 - Objective: implement the exact-decimal calculation foundation and single-date holding results.
 - Dependencies: LED-002B, MKT-001 fixture contract.
@@ -644,6 +644,7 @@ Status: READY.
 - Tests: same-currency/FIFO fixture families, property/invariant tests, zero/missing denominators, allocation/display rounding.
 - Risks: denominator semantics and rate inversion.
 - Parallel safe: yes with market adapters using fixture contracts.
+- Completion note: Added the exact-decimal calculation foundation, proportional allocation with reconciled final residuals, native holding value/basis/gain results, stable unavailable reasons, and deterministic FIFO calculation fixtures. Existing preview decimal callers now use the shared domain implementation.
 
 ### CALC-001B — FX conversion, daily movement, and partial totals
 
