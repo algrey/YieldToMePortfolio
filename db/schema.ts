@@ -919,6 +919,88 @@ export const transactions = sqliteTable(
   ],
 );
 
+export const ledgerMutationGuards = sqliteTable(
+  "ledger_mutation_guards",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    portfolioSecurityId: text("portfolio_security_id").notNull(),
+    valid: integer("valid").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "ledger_mutation_guards_security_owner_fk",
+      columns: [table.portfolioSecurityId, table.userId, table.portfolioId],
+      foreignColumns: [
+        portfolioSecurities.id,
+        portfolioSecurities.userId,
+        portfolioSecurities.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    check("ledger_mutation_guards_valid_check", sql`${table.valid} = 1`),
+  ],
+);
+
+export const manualLedgerMutationKeys = sqliteTable(
+  "manual_ledger_mutation_keys",
+  {
+    key: text("key").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    purpose: text("purpose").notNull(),
+    targetTransactionId: text("target_transaction_id"),
+    resultTransactionId: text("result_transaction_id"),
+    status: text("status").notNull().default("issued"),
+    issuedAt: text("issued_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    usedAt: text("used_at"),
+  },
+  (table) => [
+    foreignKey({
+      name: "manual_ledger_mutation_keys_portfolio_owner_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "manual_ledger_mutation_keys_target_owner_fk",
+      columns: [table.targetTransactionId, table.userId, table.portfolioId],
+      foreignColumns: [
+        transactions.id,
+        transactions.userId,
+        transactions.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "manual_ledger_mutation_keys_result_owner_fk",
+      columns: [table.resultTransactionId, table.userId, table.portfolioId],
+      foreignColumns: [
+        transactions.id,
+        transactions.userId,
+        transactions.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    check(
+      "manual_ledger_mutation_keys_purpose_check",
+      sql`${table.purpose} IN ('create', 'reverse', 'supersede')`,
+    ),
+    check(
+      "manual_ledger_mutation_keys_status_check",
+      sql`${table.status} IN ('issued', 'used')`,
+    ),
+    check(
+      "manual_ledger_mutation_keys_target_check",
+      sql`(${table.purpose} = 'create' AND ${table.targetTransactionId} IS NULL) OR (${table.purpose} IN ('reverse', 'supersede') AND ${table.targetTransactionId} IS NOT NULL)`,
+    ),
+    index("manual_ledger_mutation_keys_owner_portfolio_idx").on(
+      table.userId,
+      table.portfolioId,
+      table.status,
+      table.expiresAt,
+    ),
+  ],
+);
+
 export const cashAccounts = sqliteTable(
   "cash_accounts",
   {

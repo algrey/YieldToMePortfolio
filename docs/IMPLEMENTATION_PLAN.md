@@ -148,7 +148,7 @@ flowchart TD
 | LED-001     | LED-001A, LED-001B, IMP-003A, UI-005E                                                |
 | LED-002     | LED-001A, LED-001B, CALC-001B, UI-005E                                               |
 | LED-003     | LED-001A, LED-001B, LED-002A, UI-005E                                                |
-| LED-004     | LED-002A, LED-002B                                                                   |
+| LED-004     | LED-002A, LED-002B, UI-005E                                                          |
 | LED-005     | LED-001A, LED-001B, CALC-002, UI-005E                                                |
 | MKT-001     | DB-002, MKT-001                                                                      |
 | MKT-002     | MKT-001, MKT-002                                                                     |

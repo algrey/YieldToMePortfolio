@@ -1,5 +1,19 @@
 import { randomUUID } from "node:crypto";
+import {
+  addDecimal,
+  compareDecimal,
+  divideDecimal,
+  multiplyDecimal,
+  parseDecimal,
+  roundDecimal,
+  subtractDecimal,
+  type DecimalFraction,
+} from "../../domain/calculations/decimal.ts";
 import { createAuditInsertStatement } from "./audit.ts";
+import {
+  consumeManualLedgerMutationKeyStatement,
+  type LedgerMutationAuthorization,
+} from "./manual-ledger-keys.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 import {
   prepareLedgerPosting,
@@ -63,6 +77,9 @@ export type LedgerMutationFailure = {
     | "invalid_date"
     | "invalid_source"
     | "cash_effect_invalid"
+    | "oversell"
+    | "inventory_limit"
+    | "concurrent_change"
     | "atomic_failure";
 };
 
@@ -97,6 +114,88 @@ export type LedgerPostingStatements = {
   transactionId: string;
   calculationRunId: string;
 };
+
+export const LEDGER_INVENTORY_LIMITS = {
+  pageSize: 500,
+  maxPages: 12,
+  maxEvents: 6_000,
+  retryAttempts: 2,
+} as const;
+
+type InventorySnapshot = Readonly<{
+  portfolioSecurityId: string;
+  transactionCount: number;
+  versionTotal: number;
+}>;
+
+type InventoryEvent = Readonly<{
+  id: string;
+  type: "buy" | "sell" | "split";
+  tradeAt: string;
+  quantityDecimal: string;
+  unitPriceDecimal: string | null;
+}>;
+
+type InventoryPlan = Readonly<{
+  snapshot: InventorySnapshot;
+}>;
+
+function inventoryEventFromInput(
+  id: string,
+  input: InternalLedgerInput,
+): InventoryEvent | null {
+  if (
+    input.portfolioSecurityId === null ||
+    (input.type !== "buy" && input.type !== "sell" && input.type !== "split") ||
+    input.quantityDecimal === null
+  ) {
+    return null;
+  }
+  return {
+    id,
+    type: input.type,
+    tradeAt: input.tradeAt,
+    quantityDecimal: input.quantityDecimal,
+    unitPriceDecimal: input.unitPriceDecimal,
+  };
+}
+
+function applyInventoryEvent(
+  quantity: DecimalFraction,
+  event: InventoryEvent,
+): { ok: true; quantity: DecimalFraction } | LedgerMutationFailure {
+  try {
+    const eventQuantity = parseDecimal(event.quantityDecimal);
+    if (event.type === "buy") {
+      return { ok: true, quantity: addDecimal(quantity, eventQuantity) };
+    }
+    if (event.type === "sell") {
+      const remaining = subtractDecimal(quantity, eventQuantity);
+      return compareDecimal(remaining, parseDecimal("0")) < 0
+        ? { ok: false, reason: "oversell" }
+        : { ok: true, quantity: remaining };
+    }
+    if (event.unitPriceDecimal === null) {
+      return { ok: false, reason: "invalid_input" };
+    }
+    const denominator = parseDecimal(event.unitPriceDecimal);
+    if (
+      compareDecimal(eventQuantity, parseDecimal("0")) <= 0 ||
+      compareDecimal(denominator, parseDecimal("0")) <= 0
+    ) {
+      return { ok: false, reason: "invalid_input" };
+    }
+    return {
+      ok: true,
+      quantity: roundDecimal(
+        divideDecimal(multiplyDecimal(quantity, eventQuantity), denominator),
+        18,
+      ),
+    };
+  } catch {
+    return { ok: false, reason: "invalid_input" };
+  }
+}
 
 const TRANSACTION_COLUMNS = `
   id, user_id, portfolio_id, portfolio_security_id, type, status, trade_at,
@@ -399,6 +498,169 @@ export function createOwnedLedgerRepository(
     return row ? mapTransaction(row) : null;
   }
 
+  async function inventorySnapshot(
+    userId: string,
+    portfolioId: string,
+    portfolioSecurityId: string,
+  ): Promise<InventorySnapshot> {
+    const row = await client.get<Record<string, unknown>>(
+      `SELECT COUNT(*) AS transaction_count,
+              COALESCE(SUM(version), 0) AS version_total
+       FROM transactions
+       WHERE user_id = ? AND portfolio_id = ? AND portfolio_security_id = ?`,
+      [userId, portfolioId, portfolioSecurityId],
+    );
+    return {
+      portfolioSecurityId,
+      transactionCount: Number(row?.transaction_count ?? 0),
+      versionTotal: Number(row?.version_total ?? 0),
+    };
+  }
+
+  async function validateInventory(
+    userId: string,
+    portfolioId: string,
+    portfolioSecurityId: string,
+    candidate: InventoryEvent | null,
+    excludedTransactionId: string | null,
+  ): Promise<{ ok: true; plan: InventoryPlan } | LedgerMutationFailure> {
+    const snapshot = await inventorySnapshot(
+      userId,
+      portfolioId,
+      portfolioSecurityId,
+    );
+    let cursorTradeAt = "";
+    let cursorId = "";
+    let quantity = parseDecimal("0");
+    let candidateApplied = candidate === null;
+    for (let page = 0; page < LEDGER_INVENTORY_LIMITS.maxPages; page += 1) {
+      const rows = await client.all<Record<string, unknown>>(
+        `SELECT id, type, trade_at, quantity_decimal, unit_price_decimal
+         FROM transactions
+         WHERE user_id = ? AND portfolio_id = ? AND portfolio_security_id = ?
+           AND status = 'posted' AND reverses_transaction_id IS NULL
+           AND type IN ('buy', 'sell', 'split')
+           AND (? IS NULL OR id <> ?)
+           AND (trade_at > ? OR (trade_at = ? AND id > ?))
+         ORDER BY trade_at ASC, id ASC
+         LIMIT ?`,
+        [
+          userId,
+          portfolioId,
+          portfolioSecurityId,
+          excludedTransactionId,
+          excludedTransactionId,
+          cursorTradeAt,
+          cursorTradeAt,
+          cursorId,
+          LEDGER_INVENTORY_LIMITS.pageSize + 1,
+        ],
+      );
+      const pageRows = rows.slice(0, LEDGER_INVENTORY_LIMITS.pageSize);
+      for (const row of pageRows) {
+        const event: InventoryEvent = {
+          id: String(row.id),
+          type: String(row.type) as InventoryEvent["type"],
+          tradeAt: String(row.trade_at),
+          quantityDecimal: String(row.quantity_decimal),
+          unitPriceDecimal:
+            row.unit_price_decimal === null
+              ? null
+              : String(row.unit_price_decimal),
+        };
+        if (
+          !candidateApplied &&
+          candidate &&
+          (candidate.tradeAt.localeCompare(event.tradeAt) < 0 ||
+            (candidate.tradeAt === event.tradeAt &&
+              candidate.id.localeCompare(event.id) < 0))
+        ) {
+          const applied = applyInventoryEvent(quantity, candidate);
+          if (!applied.ok) return applied;
+          quantity = applied.quantity;
+          candidateApplied = true;
+        }
+        const applied = applyInventoryEvent(quantity, event);
+        if (!applied.ok) return applied;
+        quantity = applied.quantity;
+      }
+      if (rows.length <= LEDGER_INVENTORY_LIMITS.pageSize) {
+        if (!candidateApplied && candidate) {
+          const applied = applyInventoryEvent(quantity, candidate);
+          if (!applied.ok) return applied;
+        }
+        return { ok: true, plan: { snapshot } };
+      }
+      const finalRow = pageRows.at(-1);
+      cursorTradeAt = String(finalRow?.trade_at ?? "");
+      cursorId = String(finalRow?.id ?? "");
+    }
+    return { ok: false, reason: "inventory_limit" };
+  }
+
+  function inventoryGuardStatements(
+    userId: string,
+    portfolioId: string,
+    plans: readonly InventoryPlan[],
+  ): SqlStatement[] {
+    return plans.flatMap(({ snapshot }) => {
+      const id = randomUUID();
+      return [
+        {
+          sql: `INSERT INTO ledger_mutation_guards (
+                  id, user_id, portfolio_id, portfolio_security_id, valid
+                )
+                SELECT ?, ?, ?, ?, CASE WHEN (
+                  SELECT COUNT(*) FROM transactions
+                  WHERE user_id = ? AND portfolio_id = ? AND portfolio_security_id = ?
+                ) = ? AND (
+                  SELECT COALESCE(SUM(version), 0) FROM transactions
+                  WHERE user_id = ? AND portfolio_id = ? AND portfolio_security_id = ?
+                ) = ? THEN 1 ELSE 0 END`,
+          params: [
+            id,
+            userId,
+            portfolioId,
+            snapshot.portfolioSecurityId,
+            userId,
+            portfolioId,
+            snapshot.portfolioSecurityId,
+            snapshot.transactionCount,
+            userId,
+            portfolioId,
+            snapshot.portfolioSecurityId,
+            snapshot.versionTotal,
+          ],
+        },
+        {
+          sql: "DELETE FROM ledger_mutation_guards WHERE id = ? AND user_id = ?",
+          params: [id, userId],
+        },
+      ];
+    });
+  }
+
+  async function inventoryChanged(
+    userId: string,
+    portfolioId: string,
+    plans: readonly InventoryPlan[],
+  ): Promise<boolean> {
+    for (const { snapshot } of plans) {
+      const current = await inventorySnapshot(
+        userId,
+        portfolioId,
+        snapshot.portfolioSecurityId,
+      );
+      if (
+        current.transactionCount !== snapshot.transactionCount ||
+        current.versionTotal !== snapshot.versionTotal
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function matchesPostingIntent(
     existing: LedgerTransactionRecord,
     input: InternalLedgerInput,
@@ -515,6 +777,8 @@ export function createOwnedLedgerRepository(
     action: string,
     statusUpdate: SqlStatement | null = null,
     cashEffectOverride?: string | null,
+    inventoryPlans: readonly InventoryPlan[] = [],
+    authorization?: LedgerMutationAuthorization,
   ): Promise<LedgerMutationResult> {
     const sourceReferenceConflict = await getBySourceReference(userId, input);
     if (sourceReferenceConflict) {
@@ -542,7 +806,11 @@ export function createOwnedLedgerRepository(
       cashEffect === null
         ? null
         : (existingAccount?.id ?? prepared.cashAccountId);
-    const statements: SqlStatement[] = [];
+    const statements: SqlStatement[] = inventoryGuardStatements(
+      userId,
+      input.portfolioId,
+      inventoryPlans,
+    );
     if (statusUpdate) statements.push(statusUpdate);
     if (accountId) {
       statements.push({
@@ -592,6 +860,17 @@ export function createOwnedLedgerRepository(
         createdAt,
       ],
     });
+    if (authorization) {
+      statements.push(
+        consumeManualLedgerMutationKeyStatement(
+          authorization,
+          userId,
+          input.portfolioId,
+          prepared.transactionId,
+          createdAt,
+        ),
+      );
+    }
     if (cashEffect !== null && cashEntryId && accountId) {
       statements.push({
         sql: `INSERT INTO cash_ledger_entries (
@@ -662,6 +941,12 @@ export function createOwnedLedgerRepository(
       if (await getBySourceReference(userId, input)) {
         return { ok: false, reason: "conflict" };
       }
+      if (
+        inventoryPlans.length > 0 &&
+        (await inventoryChanged(userId, input.portfolioId, inventoryPlans))
+      ) {
+        return { ok: false, reason: "concurrent_change" };
+      }
       return { ok: false, reason: "atomic_failure" };
     }
     const transaction = await getTransaction(
@@ -676,6 +961,7 @@ export function createOwnedLedgerRepository(
   async function post(
     userId: string,
     input: LedgerPostingInput,
+    authorization?: LedgerMutationAuthorization,
   ): Promise<LedgerMutationResult> {
     const preparation = prepareLedgerPosting(input);
     if (!preparation.ok)
@@ -698,7 +984,45 @@ export function createOwnedLedgerRepository(
     }
     const ownershipFailure = await validateOwnership(userId, input);
     if (ownershipFailure) return ownershipFailure;
-    return persist(userId, input, preparation.posting, "ledger.post");
+    if (authorization && authorization.key !== input.idempotencyKey) {
+      return { ok: false, reason: "conflict" };
+    }
+    for (
+      let attempt = 0;
+      attempt < LEDGER_INVENTORY_LIMITS.retryAttempts;
+      attempt += 1
+    ) {
+      const event = inventoryEventFromInput(
+        preparation.posting.transactionId,
+        input,
+      );
+      const plans: InventoryPlan[] = [];
+      if (event && input.portfolioSecurityId) {
+        const validation = await validateInventory(
+          userId,
+          input.portfolioId,
+          input.portfolioSecurityId,
+          event,
+          null,
+        );
+        if (!validation.ok) return validation;
+        plans.push(validation.plan);
+      }
+      const mutation = await persist(
+        userId,
+        input,
+        preparation.posting,
+        "ledger.post",
+        null,
+        undefined,
+        plans,
+        authorization,
+      );
+      if (mutation.ok || mutation.reason !== "concurrent_change") {
+        return mutation;
+      }
+    }
+    return { ok: false, reason: "atomic_failure" };
   }
 
   async function reverse(
@@ -707,6 +1031,7 @@ export function createOwnedLedgerRepository(
     transactionId: string,
     idempotencyKey: string,
     requestId: string,
+    authorization?: LedgerMutationAuthorization,
   ): Promise<LedgerMutationResult> {
     const original = await getTransaction(userId, portfolioId, transactionId);
     if (!original) return { ok: false, reason: "not_found" };
@@ -741,28 +1066,60 @@ export function createOwnedLedgerRepository(
         existing,
       );
     }
+    if (authorization && authorization.key !== idempotencyKey) {
+      return { ok: false, reason: "conflict" };
+    }
     if (original.status !== "posted") return { ok: false, reason: "conflict" };
     const originalCash = await getCashEntry(userId, portfolioId, transactionId);
     const reversalEffect = originalCash
       ? negate(originalCash.signedAmountDecimal)
       : null;
     const statusUpdate: SqlStatement = {
-      sql: `UPDATE transactions SET status = 'reversed'
+      sql: `UPDATE transactions SET status = 'reversed', version = version + 1
         WHERE id = ? AND user_id = ? AND portfolio_id = ? AND status = 'posted'`,
       params: [transactionId, userId, portfolioId],
     };
-    return persist(
-      userId,
-      {
-        ...originalInput,
-        reversesTransactionId: transactionId,
-        reversalEntryId: originalCash?.id ?? null,
-      },
-      preparation.posting,
-      "ledger.reverse",
-      statusUpdate,
-      reversalEffect,
-    );
+    for (
+      let attempt = 0;
+      attempt < LEDGER_INVENTORY_LIMITS.retryAttempts;
+      attempt += 1
+    ) {
+      const plans: InventoryPlan[] = [];
+      if (
+        original.portfolioSecurityId &&
+        (original.type === "buy" ||
+          original.type === "sell" ||
+          original.type === "split")
+      ) {
+        const validation = await validateInventory(
+          userId,
+          portfolioId,
+          original.portfolioSecurityId,
+          null,
+          transactionId,
+        );
+        if (!validation.ok) return validation;
+        plans.push(validation.plan);
+      }
+      const mutation = await persist(
+        userId,
+        {
+          ...originalInput,
+          reversesTransactionId: transactionId,
+          reversalEntryId: originalCash?.id ?? null,
+        },
+        preparation.posting,
+        "ledger.reverse",
+        statusUpdate,
+        reversalEffect,
+        plans,
+        authorization,
+      );
+      if (mutation.ok || mutation.reason !== "concurrent_change") {
+        return mutation;
+      }
+    }
+    return { ok: false, reason: "atomic_failure" };
   }
 
   async function supersede(
@@ -770,6 +1127,7 @@ export function createOwnedLedgerRepository(
     portfolioId: string,
     transactionId: string,
     input: LedgerPostingInput,
+    authorization?: LedgerMutationAuthorization,
   ): Promise<LedgerMutationResult> {
     const original = await getTransaction(userId, portfolioId, transactionId);
     if (!original) return { ok: false, reason: "not_found" };
@@ -789,21 +1147,58 @@ export function createOwnedLedgerRepository(
         existing,
       );
     }
+    if (authorization && authorization.key !== input.idempotencyKey) {
+      return { ok: false, reason: "conflict" };
+    }
     if (original.status !== "posted") return { ok: false, reason: "conflict" };
     const ownershipFailure = await validateOwnership(userId, supersedingInput);
     if (ownershipFailure) return ownershipFailure;
     const statusUpdate: SqlStatement = {
-      sql: `UPDATE transactions SET status = 'superseded'
+      sql: `UPDATE transactions SET status = 'superseded', version = version + 1
         WHERE id = ? AND user_id = ? AND portfolio_id = ? AND status = 'posted'`,
       params: [transactionId, userId, portfolioId],
     };
-    return persist(
-      userId,
-      supersedingInput,
-      preparation.posting,
-      "ledger.supersede",
-      statusUpdate,
+    const securityIds = new Set(
+      [original.portfolioSecurityId, input.portfolioSecurityId].filter(
+        (id): id is string => id !== null,
+      ),
     );
+    const retryAttempts = securityIds.size === 1 ? 2 : 1;
+    for (let attempt = 0; attempt < retryAttempts; attempt += 1) {
+      const plans: InventoryPlan[] = [];
+      for (const securityId of securityIds) {
+        const candidate =
+          input.portfolioSecurityId === securityId
+            ? inventoryEventFromInput(
+                preparation.posting.transactionId,
+                supersedingInput,
+              )
+            : null;
+        const validation = await validateInventory(
+          userId,
+          portfolioId,
+          securityId,
+          candidate,
+          original.portfolioSecurityId === securityId ? transactionId : null,
+        );
+        if (!validation.ok) return validation;
+        plans.push(validation.plan);
+      }
+      const mutation = await persist(
+        userId,
+        supersedingInput,
+        preparation.posting,
+        "ledger.supersede",
+        statusUpdate,
+        undefined,
+        plans,
+        authorization,
+      );
+      if (mutation.ok || mutation.reason !== "concurrent_change") {
+        return mutation;
+      }
+    }
+    return { ok: false, reason: "atomic_failure" };
   }
 
   return { post, reverse, supersede };

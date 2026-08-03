@@ -83,6 +83,7 @@ export type {
 export {
   buildLedgerPostingStatements,
   createOwnedLedgerRepository,
+  LEDGER_INVENTORY_LIMITS,
   type LedgerPostingPersistenceInput,
   type LedgerPostingStatements,
   type CashLedgerEntryRecord,
@@ -96,6 +97,13 @@ export {
   type ManualLedgerOptions,
   type ManualLedgerSecurityOption,
 } from "./manual-ledger-options.ts";
+export {
+  consumeManualLedgerMutationKeyStatement,
+  createManualLedgerMutationKeyRepository,
+  type LedgerMutationAuthorization,
+  type ManualLedgerMutationKey,
+  type ManualLedgerMutationPurpose,
+} from "./manual-ledger-keys.ts";
 export {
   createOwnedManualOverrideRepository,
   type ManualOverrideMutationFailure,

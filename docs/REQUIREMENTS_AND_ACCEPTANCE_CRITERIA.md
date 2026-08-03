@@ -127,6 +127,7 @@ Acceptance:
 
 - Transactions have portfolio, type, trade timestamp, currency, quantity/amount fields, source, and created actor.
 - Each write persists an owner/portfolio-scoped idempotency key independently of source provenance; an identical retry returns the original result, while reuse for different normalized posting intent conflicts.
+- Manual writes require a persisted server-issued key bound to the authenticated owner, portfolio, operation purpose, and correction target. Missing, forged, expired-unused, or cross-target keys reject before posting; an acknowledged or unacknowledged committed retry keeps returning the original result.
 - A correction records reversal/supersession; it does not silently overwrite source values.
 - Rebuilding projections from ledger facts produces the same result.
 
@@ -159,6 +160,7 @@ Acceptance:
 
 - Buys create open quantities and sells consume oldest eligible quantities.
 - Oversells fail unless a future short-selling feature is explicitly enabled.
+- Security quantity mutations stream the complete supported ledger window in bounded pages and commit behind an owner-scoped transaction-count/version guard. Concurrent sells cannot both consume the same quantity; work beyond the declared event/query ceiling fails closed.
 - Reversing a trade rebuilds affected lots and snapshots.
 - Projection rebuilds persist bounded owner-scoped checkpoints; a failed chunk resumes without replaying committed output, and only a completed ledger high-water run becomes current.
 

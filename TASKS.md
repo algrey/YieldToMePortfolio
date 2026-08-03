@@ -842,21 +842,19 @@ Status: PENDING.
 
 ### UI-005E — Manual ledger entry and correction
 
-Status: IN PROGRESS after review on 2026-08-03.
+Status: DONE (2026-08-03).
 
 - Objective: expose the core manual trade/cash/split write path without mixing it into import or read-only projection screens.
 - Dependencies: UI-005A, LED-001B, LED-002B.
-- Requirements: LED-001, LED-002, LED-003, LED-005, QUAL-001.
+- Requirements: LED-001, LED-002, LED-003, LED-004, LED-005, QUAL-001.
 - Files: manual transaction/reversal routes, components, actions, and tests.
 - Deliver: labelled forms for buy, sell, cash deposit/withdrawal, fee/tax, and explicit split; immutable submit result; impact preview; reversal/superseding replacement; missing-FX state. Transfers and dividends remain unavailable.
 - Acceptance: every action uses the authenticated portfolio context and a server-issued idempotency key; exact decimals are revalidated server-side; split ratio is positive; business dates remain visible while exact timestamps are generally confined to detail/audit evidence; a correction never updates the original fact; unsupported transfer/dividend types reject.
 - Tests: each supported type, invalid decimal/ratio/date, missing FX, double submit, reversal/replacement, oversell, cross-user and cross-portfolio denial, keyboard/mobile.
 - Risks: a convenient form bypassing the single ledger service or implying incomplete FX is zero.
 - Parallel safe: no; financial mutation UI follows the stable ledger service.
-- Completion note: Added an authenticated, owner-scoped manual ledger form and same-origin post/reverse/supersede routes for buy, sell, cash, fee, tax, and split facts. Server-side parsing, exact impact preview, explicit missing-FX state, and immutable correction evidence are implemented; focused contract/source checks and repository-wide gates pass, but the review findings below keep the task in progress.
-- Review finding: the sell oversell check sums a bounded (200-row) inspection outside the posting transaction, while the shared ledger repository does not enforce FIFO allocation/oversell atomically. Portfolios with more than 200 lots can be rejected incorrectly, and concurrent sells can pass the check and create an oversell. Move the check into the single posting/rebuild path with an owner-scoped atomic guard, then add deterministic large-lot and concurrent-sale coverage.
-- Review finding: mutation actions accept any client-controlled value beginning with `manual-ledger:` and the reverse UI sends no stable key, so a retry after a committed-but-unacknowledged reversal cannot safely replay the same operation. Require/return a server-issued key that the client persists for retries and reject forged or missing correction keys.
-- Review finding: UI-005E tests are contract/source-boundary checks only; they do not exercise authenticated route mutations, ownership denial, CSRF, double submit, reversal/supersession persistence, oversell behavior, or network failure recovery. Add route/repository integration fixtures and a rendered keyboard/mobile interaction check before marking this task complete.
+- Completion note: Added authenticated, owner-scoped manual ledger forms and same-origin post/reverse/supersede routes for buy, sell, cash, fee, tax, and split facts. Server-side parsing, exact impact preview, explicit missing-FX state, and immutable correction evidence are implemented.
+- Review resolution: Removed the 200-lot projection precheck. The shared ledger repository now streams up to 6,000 chronological security events in fixed 500-row pages within the D1 invocation query budget, evaluates exact buy/sell/split quantity, and places an owner/portfolio/security count-and-version assertion in the same D1 batch as every security post, reversal, or supersession. Concurrent mutations retry from fresh evidence and oversells leave no partial write. Manual create/reverse/supersede routes now require persisted server-issued keys bound to owner, portfolio, purpose, and exact target; the client retains each operation key across network failures, and forged/missing/cross-target keys reject. Migrated-D1 integration tests cover more than 200 lots, simultaneous sells, authenticated route results, ownership hiding, CSRF, identical retry, durable reversal/replacement evidence, key rejection, and rendered keyboard/mobile semantics.
 
 ### PWA-001 — Offline-safe shell and connectivity states
 

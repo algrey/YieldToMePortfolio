@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { loadAuthenticatedWorkspace } from "../../../../authenticated-workspace";
 import { ManualLedgerEntry } from "../../../../components/manual-ledger-entry";
+import { createManualLedgerMutationKeyRepository } from "../../../../../db/repositories/manual-ledger-keys";
 import {
   loadOwnedManualLedgerOptions,
   type ManualLedgerOptions,
@@ -57,12 +58,18 @@ export default async function ManualLedgerEntryPage({
     );
   }
   let options: ManualLedgerOptions;
+  let initialIdempotencyKey: string;
   try {
     options = await loadOwnedManualLedgerOptions(
       context.client,
       context.userId,
       portfolioId,
     );
+    const issued = await createManualLedgerMutationKeyRepository(
+      context.client,
+    ).issue(context.userId, portfolioId, "create", null);
+    if (!issued) throw new Error("manual_ledger_key_unavailable");
+    initialIdempotencyKey = issued.key;
   } catch {
     return (
       <main className="manual-workflow-placeholder">
@@ -88,6 +95,7 @@ export default async function ManualLedgerEntryPage({
       portfolioId={portfolioId}
       baseCurrencyCode={workspace.activePortfolio.baseCurrencyCode}
       options={options}
+      initialIdempotencyKey={initialIdempotencyKey}
     />
   );
 }

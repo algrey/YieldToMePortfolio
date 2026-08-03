@@ -187,6 +187,7 @@ test("supports cash events, fees, taxes, and explicit split without fabricating 
   const repository = createOwnedLedgerRepository(
     createSqliteSqlClient(database),
   );
+  success(await repository.post("user-a", input()));
   const deposit = success(
     await repository.post(
       "user-a",
@@ -230,6 +231,7 @@ test("supports cash events, fees, taxes, and explicit split without fabricating 
         feeAmountDecimal: "0.50",
         taxAmountDecimal: "0.25",
         idempotencyKey: "sell-1",
+        tradeAt: "2026-08-01T11:00:00Z",
       }),
     ),
   );
@@ -276,6 +278,7 @@ test("supports cash events, fees, taxes, and explicit split without fabricating 
         feeAmountDecimal: "0",
         taxAmountDecimal: "0",
         idempotencyKey: "split-1",
+        tradeAt: "2026-08-01T12:00:00Z",
       }),
     ),
   );
@@ -294,7 +297,7 @@ test("supports cash events, fees, taxes, and explicit split without fabricating 
       )
       .get() as { balance: number } | undefined,
   ).balance;
-  assert.equal(balance, 905.5);
+  assert.equal(balance, 883.25);
 });
 
 test("retries only identical posting intent for an owner and portfolio", async () => {

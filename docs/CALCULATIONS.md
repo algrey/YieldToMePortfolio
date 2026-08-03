@@ -154,6 +154,8 @@ For a posted sell:
 5. Record each match.
 6. Reject an unmatched remainder as an oversell in v1.
 
+Manual posting, reversal, and supersession evaluate the same chronological buy/sell/split quantity invariant before mutation. Reads use fixed pages up to the declared ledger-event ceiling, and the D1 posting batch asserts that the security ledger count/version snapshot has not changed. A failed concurrency assertion is retried from fresh rows; if another sell consumed the quantity, the retry returns `oversell` and writes no transaction, cash entry, rebuild request, or audit success.
+
 ### Remaining cost basis
 
 `remaining basis = Σ open lot remaining base basis`

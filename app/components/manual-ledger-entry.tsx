@@ -12,6 +12,7 @@ type ManualLedgerEntryProps = Readonly<{
   portfolioId: string;
   baseCurrencyCode: string;
   options: ManualLedgerOptions;
+  initialIdempotencyKey: string;
 }>;
 
 type Result = Readonly<{
@@ -84,10 +85,12 @@ function ResultPanel({
   result,
   onReverse,
   onReplace,
+  pending,
 }: {
   result: Result;
   onReverse: () => void;
   onReplace: () => void;
+  pending: boolean;
 }) {
   if (!result.ok) {
     return (
@@ -130,12 +133,12 @@ function ResultPanel({
       </details>
       <div className="manual-ledger-actions">
         {canCorrect ? (
-          <button type="button" onClick={onReverse}>
+          <button type="button" onClick={onReverse} disabled={pending}>
             Reverse this fact
           </button>
         ) : null}
         {canCorrect ? (
-          <button type="button" onClick={onReplace}>
+          <button type="button" onClick={onReplace} disabled={pending}>
             Prepare a replacement
           </button>
         ) : null}
@@ -148,17 +151,62 @@ export function ManualLedgerEntry({
   portfolioId,
   baseCurrencyCode,
   options,
+  initialIdempotencyKey,
 }: ManualLedgerEntryProps) {
   const [type, setType] = useState<(typeof MANUAL_LEDGER_TYPES)[number]>("buy");
   const [currency, setCurrency] = useState(baseCurrencyCode);
   const [pending, setPending] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
-  const [retryKey, setRetryKey] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState<string | null>(
+    initialIdempotencyKey,
+  );
+  const [correctionKey, setCorrectionKey] = useState<{
+    targetTransactionId: string;
+    key: string;
+  } | null>(null);
   const [correctionTarget, setCorrectionTarget] = useState<string | null>(null);
   const securityEvent = type === "buy" || type === "sell" || type === "split";
   const missingFx = currency !== baseCurrencyCode;
 
+  async function issueKey(
+    purpose: "create" | "reverse" | "supersede",
+    targetTransactionId: string | null,
+  ): Promise<string | null> {
+    try {
+      const response = await fetch(
+        `/api/portfolios/${portfolioId}/ledger/key`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ purpose, targetTransactionId }),
+        },
+      );
+      const issued = responseResult(
+        await response.json(),
+        "A secure ledger retry key could not be issued.",
+      );
+      if (!response.ok || !issued.ok || !issued.idempotencyKey) {
+        setResult(issued);
+        return null;
+      }
+      return issued.idempotencyKey;
+    } catch {
+      setResult({
+        ok: false,
+        message: "A secure ledger retry key could not be issued.",
+      });
+      return null;
+    }
+  }
+
   async function submit(form: HTMLFormElement) {
+    if (!retryKey) {
+      setResult({
+        ok: false,
+        message: "Wait for a secure ledger retry key before submitting.",
+      });
+      return;
+    }
     setPending(true);
     try {
       const payload = formValue(form, retryKey);
@@ -175,8 +223,12 @@ export function ManualLedgerEntry({
         "The ledger response was invalid.",
       );
       setResult(next);
-      setRetryKey(next.idempotencyKey ?? retryKey);
-      if (next.ok) setCorrectionTarget(null);
+      if (next.ok) {
+        setCorrectionTarget(null);
+        setRetryKey(null);
+        const key = await issueKey("create", null);
+        setRetryKey(key);
+      }
     } catch {
       setResult({
         ok: false,
@@ -192,12 +244,18 @@ export function ManualLedgerEntry({
     if (!transactionId) return;
     setPending(true);
     try {
+      const key =
+        correctionKey?.targetTransactionId === transactionId
+          ? correctionKey.key
+          : await issueKey("reverse", transactionId);
+      if (!key) return;
+      setCorrectionKey({ targetTransactionId: transactionId, key });
       const response = await fetch(
         `/api/portfolios/${portfolioId}/ledger/${transactionId}/reverse`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({}),
+          body: JSON.stringify({ idempotencyKey: key }),
         },
       );
       const next = responseResult(
@@ -205,7 +263,9 @@ export function ManualLedgerEntry({
         "The correction response was invalid.",
       );
       setResult(next);
-      setRetryKey(next.idempotencyKey ?? retryKey);
+      if (next.ok) {
+        setCorrectionKey(null);
+      }
     } catch {
       setResult({
         ok: false,
@@ -214,6 +274,18 @@ export function ManualLedgerEntry({
     } finally {
       setPending(false);
     }
+  }
+
+  async function prepareReplacement() {
+    const transactionId = result?.mutation?.transaction.id;
+    if (!transactionId) return;
+    setPending(true);
+    const key = await issueKey("supersede", transactionId);
+    if (key) {
+      setRetryKey(key);
+      setCorrectionTarget(transactionId);
+    }
+    setPending(false);
   }
 
   return (
@@ -234,10 +306,8 @@ export function ManualLedgerEntry({
         <ResultPanel
           result={result}
           onReverse={reverse}
-          onReplace={() => {
-            setRetryKey(null);
-            setCorrectionTarget(result.mutation?.transaction.id ?? null);
-          }}
+          onReplace={() => void prepareReplacement()}
+          pending={pending}
         />
       ) : null}
       <form
@@ -247,7 +317,7 @@ export function ManualLedgerEntry({
           void submit(event.currentTarget);
         }}
       >
-        <fieldset disabled={pending}>
+        <fieldset disabled={pending || !retryKey}>
           <legend>
             {correctionTarget ? "Replacement fact" : "New ledger fact"}
           </legend>
@@ -446,9 +516,11 @@ export function ManualLedgerEntry({
           <button type="submit">
             {pending
               ? "Saving…"
-              : correctionTarget
-                ? "Post superseding replacement"
-                : "Post immutable ledger fact"}
+              : !retryKey
+                ? "Preparing secure retry…"
+                : correctionTarget
+                  ? "Post superseding replacement"
+                  : "Post immutable ledger fact"}
           </button>
         </fieldset>
       </form>

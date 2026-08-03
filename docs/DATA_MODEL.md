@@ -253,6 +253,16 @@ Indexes: `(user_id, portfolio_id, local_trade_date, id)`, `(portfolio_id, portfo
 
 `import_row_id`, reversal/supersession targets, and any other private child reference use composite owner/portfolio foreign keys. A transaction cannot point to another portfolio’s membership, import row, or transaction even when both portfolios have the same owner.
 
+### `manual_ledger_mutation_keys`
+
+Short-lived server-issued mutation grants bind a random key to `user_id`, `portfolio_id`, one purpose (`create`, `reverse`, or `supersede`), and the exact correction target when applicable. A successful ledger batch marks the grant used and links its immutable result transaction. Unused expired grants reject, while used grants remain valid only for an identical idempotent retry. The key is retry identity, not authentication; every issue and consume path still requires the authenticated owner and same-origin mutation checks.
+
+Used grants follow ledger retention because their result FK is retry evidence. Expired unused grants contain no financial payload and may be removed by a future bounded housekeeping job; they are never accepted after expiry.
+
+### `ledger_mutation_guards`
+
+Ephemeral rows provide a D1 atomic assertion for security quantity changes. Before posting, the repository streams active buy/sell/split events in bounded chronological pages and calculates exact quantity. The posting batch inserts a guard whose `valid = 1` check compares the observed owner/portfolio/security transaction count and version total with current ledger state, writes the immutable fact/status transition, then removes the guard. A concurrent ledger change makes the complete batch fail and retry from fresh evidence; guard rows do not survive successful batches.
+
 ### `transaction_versions`
 
 Optional immutable source-version payload for editable descriptive fields:
