@@ -5,11 +5,22 @@ import {
   type FifoLotInput,
   type FifoRebuildResult,
 } from "./fifo.ts";
+import {
+  DECIMAL_LIMITS,
+  addDecimal,
+  compareDecimal,
+  divideDecimal,
+  formatDecimalExact,
+  fromInteger,
+  multiplyDecimal,
+  parseDecimal,
+  roundDecimal,
+  subtractDecimal,
+  type DecimalFraction,
+} from "../calculations/decimal.ts";
 
-const DECIMAL_PATTERN = /^(0|[1-9]\d*)(\.\d+)?$/;
-const PROJECTION_SCALE = 18;
-
-type Decimal = { coefficient: bigint; scale: number };
+const PROJECTION_SCALE = DECIMAL_LIMITS.allocationScale;
+const ZERO = fromInteger(0n);
 
 export type ProjectionLedgerTransaction = {
   id: string;
@@ -97,103 +108,58 @@ type NativeLot = {
   nativeBasisDecimal: string | null;
 };
 
-function parseDecimal(value: string): Decimal | null {
-  if (!DECIMAL_PATTERN.test(value)) return null;
-  const [whole, fraction = ""] = value.split(".");
-  return {
-    coefficient: BigInt(`${whole}${fraction}`),
-    scale: fraction.length,
-  };
+function normalize(value: DecimalFraction): string {
+  return formatDecimalExact(value);
 }
 
-function powerOfTen(scale: number): bigint {
-  return 10n ** BigInt(scale);
-}
-
-function normalize(value: Decimal): string {
-  let coefficient = value.coefficient;
-  let scale = value.scale;
-  while (scale > 0 && coefficient % 10n === 0n) {
-    coefficient /= 10n;
-    scale -= 1;
+function positive(value: string | null): DecimalFraction | null {
+  if (value === null) return null;
+  try {
+    const parsed = parseDecimal(value);
+    return compareDecimal(parsed, ZERO) > 0 ? parsed : null;
+  } catch {
+    return null;
   }
-  if (scale === 0) return coefficient.toString();
-  const digits = coefficient.toString().padStart(scale + 1, "0");
-  return `${digits.slice(0, -scale)}.${digits.slice(-scale)}`;
 }
 
-function add(left: Decimal, right: Decimal): Decimal {
-  const scale = Math.max(left.scale, right.scale);
-  return {
-    coefficient:
-      left.coefficient * powerOfTen(scale - left.scale) +
-      right.coefficient * powerOfTen(scale - right.scale),
-    scale,
-  };
-}
-
-function subtract(left: Decimal, right: Decimal): Decimal | null {
-  const scale = Math.max(left.scale, right.scale);
-  const leftCoefficient = left.coefficient * powerOfTen(scale - left.scale);
-  const rightCoefficient = right.coefficient * powerOfTen(scale - right.scale);
-  if (leftCoefficient < rightCoefficient) return null;
-  return { coefficient: leftCoefficient - rightCoefficient, scale };
-}
-
-function multiply(left: Decimal, right: Decimal): Decimal {
-  return {
-    coefficient: left.coefficient * right.coefficient,
-    scale: left.scale + right.scale,
-  };
-}
-
-function roundHalfEven(numerator: bigint, denominator: bigint): bigint {
-  const quotient = numerator / denominator;
-  const remainder = numerator % denominator;
-  const doubled = remainder * 2n;
-  if (
-    doubled > denominator ||
-    (doubled === denominator && quotient % 2n !== 0n)
-  ) {
-    return quotient + 1n;
+function nonNegative(value: string): DecimalFraction | null {
+  try {
+    const parsed = parseDecimal(value);
+    return compareDecimal(parsed, ZERO) >= 0 ? parsed : null;
+  } catch {
+    return null;
   }
-  return quotient;
+}
+
+function subtractNonNegative(
+  left: DecimalFraction,
+  right: DecimalFraction,
+): DecimalFraction | null {
+  return compareDecimal(left, right) < 0 ? null : subtractDecimal(left, right);
 }
 
 function divideRounded(
-  numerator: Decimal,
-  denominator: Decimal,
-  scale = PROJECTION_SCALE,
-): Decimal | null {
-  if (denominator.coefficient === 0n) return null;
-  const exponent = scale + denominator.scale - numerator.scale;
-  const scaledNumerator =
-    exponent >= 0
-      ? numerator.coefficient * powerOfTen(exponent)
-      : numerator.coefficient / powerOfTen(-exponent);
-  return {
-    coefficient: roundHalfEven(scaledNumerator, denominator.coefficient),
-    scale,
-  };
-}
-
-function positive(value: string | null): Decimal | null {
-  const parsed = value === null ? null : parseDecimal(value);
-  return parsed && parsed.coefficient > 0n ? parsed : null;
-}
-
-function nonNegative(value: string): Decimal | null {
-  const parsed = parseDecimal(value);
-  return parsed && parsed.coefficient >= 0n ? parsed : null;
+  numerator: DecimalFraction,
+  denominator: DecimalFraction,
+): DecimalFraction | null {
+  if (compareDecimal(denominator, ZERO) === 0) return null;
+  try {
+    return roundDecimal(
+      divideDecimal(numerator, denominator),
+      PROJECTION_SCALE,
+    );
+  } catch {
+    return null;
+  }
 }
 
 function sum(values: Array<string | null>): string | null {
-  let total: Decimal = { coefficient: 0n, scale: 0 };
+  let total = ZERO;
   for (const value of values) {
     if (value === null) return null;
     const parsed = nonNegative(value);
     if (!parsed) return null;
-    total = add(total, parsed);
+    total = addDecimal(total, parsed);
   }
   return normalize(total);
 }
@@ -202,7 +168,7 @@ function multiplyStrings(left: string, right: string): string | null {
   const parsedLeft = nonNegative(left);
   const parsedRight = nonNegative(right);
   return parsedLeft && parsedRight
-    ? normalize(multiply(parsedLeft, parsedRight))
+    ? normalize(multiplyDecimal(parsedLeft, parsedRight))
     : null;
 }
 
@@ -430,7 +396,7 @@ function updateNativeLots(
       for (const lot of nativeLots.values()) {
         const quantity = positive(lot.openQuantityDecimal);
         const adjusted = quantity
-          ? divideRounded(multiply(quantity, numerator), denominator)
+          ? divideRounded(multiplyDecimal(quantity, numerator), denominator)
           : null;
         if (adjusted) lot.openQuantityDecimal = normalize(adjusted);
       }
@@ -449,16 +415,19 @@ function updateNativeLots(
       if (lot.nativeBasisDecimal !== null) {
         const basis = nonNegative(lot.nativeBasisDecimal);
         const allocated = basis
-          ? divideRounded(multiply(basis, matchedQuantity), openQuantity)
+          ? divideRounded(multiplyDecimal(basis, matchedQuantity), openQuantity)
           : null;
         if (basis && allocated) {
-          const remaining = subtract(basis, allocated);
+          const remaining = subtractNonNegative(basis, allocated);
           lot.nativeBasisDecimal = remaining ? normalize(remaining) : null;
         } else {
           lot.nativeBasisDecimal = null;
         }
       }
-      const remainingQuantity = subtract(openQuantity, matchedQuantity);
+      const remainingQuantity = subtractNonNegative(
+        openQuantity,
+        matchedQuantity,
+      );
       if (remainingQuantity)
         lot.openQuantityDecimal = normalize(remainingQuantity);
     }

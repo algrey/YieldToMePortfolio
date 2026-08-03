@@ -18,7 +18,12 @@ import {
   roundDecimal,
   subtractDecimal,
 } from "../domain/calculations/index.ts";
-import { allocateFifoSale, createFifoLot } from "../domain/ledger/index.ts";
+import {
+  allocateFifoSale,
+  applyFifoSplit,
+  buildLedgerProjections,
+  createFifoLot,
+} from "../domain/ledger/index.ts";
 import {
   expectedFifoHoldingResult,
   fifoHoldingFixture,
@@ -280,6 +285,107 @@ test("ledger FIFO outputs drive the single-date holding calculation", () => {
       realisedGainDecimal: formatDecimalExact(realisedGain),
     }),
     expectedFifoHoldingResult,
+  );
+});
+
+test("production FIFO uses the bounded decimal contract and retains allocation precision", () => {
+  const lot = createFifoLot({
+    id: "precision-lot",
+    acquiredAt: "2026-01-01T00:00:00Z",
+    openingTransactionId: "precision-buy",
+    quantityDecimal: "3",
+    costBasisBaseDecimal: "1.123456789012345678901234",
+    acquisitionFeeBaseDecimal: "0",
+    acquisitionTaxBaseDecimal: "0",
+  });
+  assert.ok(lot);
+
+  const allocation = allocateFifoSale([lot], {
+    transactionId: "precision-sale",
+    quantityDecimal: "1",
+    netProceedsBaseDecimal: "1.000000000000000000000001",
+    feeBaseDecimal: "0",
+    taxBaseDecimal: "0",
+  });
+  assert.equal(allocation.ok, true);
+  if (allocation.ok) {
+    assert.equal(
+      allocation.allocations[0]?.baseBasisDecimal,
+      "0.374485596337448559633745",
+    );
+    assert.equal(
+      allocation.allocations[0]?.baseRealisedGainDecimal,
+      "0.625514403662551440366256",
+    );
+    assert.equal(
+      allocation.remainingLots[0]?.remainingBasisBaseDecimal,
+      "0.748971192674897119267489",
+    );
+  }
+
+  const oversized = "9".repeat(DECIMAL_LIMITS.inputDigits + 1);
+  assert.equal(
+    createFifoLot({
+      id: "oversized-lot",
+      acquiredAt: "2026-01-01T00:00:00Z",
+      openingTransactionId: "oversized-buy",
+      quantityDecimal: oversized,
+      costBasisBaseDecimal: "1",
+      acquisitionFeeBaseDecimal: "0",
+      acquisitionTaxBaseDecimal: "0",
+    }),
+    null,
+  );
+  assert.deepEqual(
+    allocateFifoSale(
+      [lot],
+      {
+        transactionId: "oversized-sale",
+        quantityDecimal: "1",
+        netProceedsBaseDecimal: oversized,
+        feeBaseDecimal: "0",
+        taxBaseDecimal: "0",
+      },
+      DECIMAL_LIMITS.allocationScale,
+    ),
+    {
+      ok: false,
+      reason: "invalid_decimal",
+      allocations: [],
+      remainingLots: [lot],
+      matchedQuantityDecimal: "0",
+      unmatchedQuantityDecimal: "1",
+    },
+  );
+  assert.equal(
+    applyFifoSplit([lot], {
+      numeratorDecimal: "1",
+      denominatorDecimal: `0.${"1".repeat(DECIMAL_LIMITS.inputScale + 1)}`,
+    }),
+    null,
+  );
+  assert.deepEqual(
+    buildLedgerProjections([
+      {
+        id: "oversized-projection-buy",
+        portfolioSecurityId: "security-a",
+        type: "buy",
+        status: "posted",
+        tradeAt: "2026-01-01T00:00:00Z",
+        quantityDecimal: oversized,
+        unitPriceDecimal: "1",
+        grossAmountDecimal: null,
+        feeAmountDecimal: "0",
+        taxAmountDecimal: "0",
+        fxRateToBaseDecimal: "1",
+        reversesTransactionId: null,
+      },
+    ]),
+    {
+      ok: false,
+      reason: "invalid_decimal",
+      eventId: "oversized-projection-buy",
+    },
   );
 });
 

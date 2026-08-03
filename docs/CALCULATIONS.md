@@ -16,6 +16,7 @@ This document defines financial behavior. Interface labels and implementations m
 - Reject NaN, infinity, exponent notation, locale separators after parsing, and zero/negative rates where prohibited.
 - A source decimal is bounded to 64 digits and 24 fractional places before construction. Exact operation chains are bounded to 256 significant digits and 96 fractional places with 320 working digits; work outside those limits fails closed instead of allocating an unbounded power or silently rounding.
 - Addition, subtraction, and multiplication retain their exact finite result scale. Division is marked as requiring an explicit rounding scale and cannot be serialized as an exact stored result without that boundary.
+- FIFO matching, lot allocation, split adjustment, and ledger projection calculations use this same wrapper; they must not introduce a parallel `bigint`, `number`, or power-of-ten arithmetic implementation that bypasses these limits.
 
 ### Currency direction
 
@@ -37,7 +38,7 @@ Native price/transaction observations remain stored in `N`. Holding projections,
 - Display quantity up to the security/source scale, trimming insignificant trailing zeroes.
 - Display percentage to two decimal places by default.
 - Use decimal half-even for report/display rounding.
-- Allocation uses proportional unrounded values, rounds each except the final allocation, and assigns the exact remainder to the final item so totals reconcile.
+- Allocation uses proportional unrounded values, rounds each except the final allocation, and assigns the exact remainder to the final item so totals reconcile. FIFO defaults to the bounded 24-place allocation scale so accepted source precision is not silently reduced.
 - Allocation scale is explicitly bounded to 24 places; negative totals, non-positive denominators, invalid parts, and allocated amounts outside zero-to-total fail with stable reasons.
 
 ### Signs

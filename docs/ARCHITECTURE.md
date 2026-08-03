@@ -54,7 +54,7 @@ Vinext is under active development and does not promise full Next.js parity. Eve
 - Cloudflare D1 / SQLite-compatible SQL.
 - Drizzle schema and migrations for type-safe application access.
 - Decimal financial values stored as canonical decimal text and parsed by a decimal library when calculation work begins.
-- Pure financial arithmetic uses the exact-pinned, dependency-free `decimal.js` `10.6.0` ESM package behind a string-only bounded domain wrapper. Its broad runtime compatibility, TypeScript declarations, half-even rounding support, and absence of native/Node-only dependencies make it suitable for the Cloudflare Worker build; direct `number` construction is not exposed.
+- Pure financial arithmetic, including FIFO and ledger projections, uses the exact-pinned, zero-transitive-dependency `decimal.js` `10.6.0` ESM package behind a string-only bounded domain wrapper. Its broad runtime compatibility, TypeScript declarations, half-even rounding support, and absence of native/Node-only dependencies make it suitable for the Cloudflare Worker build; direct `number` construction and parallel arithmetic engines are not exposed.
 - UTC ISO-8601 instants for events; separate `local_date` and IANA timezone where market/accounting dates matter.
 - Public opaque IDs (UUIDv7/ULID-style text) rather than sequential row IDs in URLs.
 - User settings define a home currency. Native transaction/security facts remain native; home-currency cost/value projections and snapshots are the canonical reporting amounts.

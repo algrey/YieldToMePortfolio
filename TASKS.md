@@ -640,7 +640,7 @@ Status: DEFERRED; not required by the core ledger/valuation release.
 
 ### CALC-001A — Decimal primitives, basis, gain, and current value
 
-Status: IN PROGRESS (review 2026-08-03).
+Status: DONE (review fixes completed 2026-08-03).
 
 - Objective: implement the exact-decimal calculation foundation and single-date holding results.
 - Dependencies: LED-002B, MKT-001 fixture contract.
@@ -654,6 +654,8 @@ Status: IN PROGRESS (review 2026-08-03).
 - Completion note: Added the exact-decimal calculation foundation, proportional allocation with reconciled final residuals, native holding value/basis/gain results, stable unavailable reasons, and deterministic FIFO calculation fixtures. Existing preview decimal callers now use the shared domain implementation.
 - Review findings: The implementation is a bespoke bigint fraction rather than the documented reviewed arbitrary-precision decimal dependency, accepts unbounded decimal length/scale (including potentially unbounded `pow10` work), and rounds most available holding/basis/gain outputs to 18 places despite the calculation rules requiring source precision to be retained. The “FIFO” fixture supplies precomputed basis/realised gain instead of exercising the ledger FIFO result, and the required invariant/property coverage is absent for malformed inputs, denominator/scale boundaries, negative/zero cases, and allocation reconciliation. An explicit `null` previous price was also reported as `missing_price`; this review corrects it to the stable `missing_previous_price` reason. Complete bounded, source-precision-safe decimal semantics and ledger-integrated invariant coverage before marking this task done. This domain task has no mobile surface.
 - Review resolution: Replaced the bespoke fraction with exact-pinned `decimal.js` `10.6.0` behind canonical string-only input and bounded input/result/allocation limits; exact finite holding, basis, and gain outputs now retain their calculated source scale while division and display/allocation rounding remain explicit. The CALC fixture derives remaining quantity/basis and realised gain from the production FIFO allocator, and deterministic invariant coverage now exercises malformed and boundary inputs, algebraic identities, zero/negative states, named unavailable reasons, and final-residual reconciliation. The Worker production build verifies the dependency’s runtime compatibility; no mobile validation applies to this pure domain task.
+- Follow-up review finding: The holding primitives used the shared decimal wrapper, but the production FIFO allocator and ledger projection builder still contained independent, unbounded `bigint`/power-of-ten implementations. Consequently, the purported production FIFO fixture could still accept oversized scale/digit inputs and bypass the reviewed calculation boundary.
+- Follow-up review resolution: Production FIFO matching, fee/proceeds/basis allocation, split adjustment, and ledger projection arithmetic now use the same bounded `decimal.js` wrapper. Default FIFO allocation retains the documented 24-place source boundary, exact final residuals still reconcile, malformed or oversized lot/sale/split inputs fail closed, and regression fixtures exercise high-scale production allocations plus digit/scale limits. All focused and repository checks pass; no mobile surface applies to this domain task.
 
 ### CALC-001B — FX conversion, daily movement, and partial totals
 
