@@ -753,7 +753,7 @@ Status: PENDING.
 
 ### UI-004 — Compact quotes, refresh, and overrides
 
-Status: READY.
+Status: DONE on 2026-08-03.
 
 - Objective: expose compact quote views and controlled refresh/correction workflows without calling EOD data live.
 - Dependencies: UI-001, MKT-003B.
@@ -764,6 +764,7 @@ Status: READY.
 - Tests: fresh/stale/missing/partial, override ownership/validation, refresh retries, accessibility.
 - Risks: refresh abuse/provider cost; optimistic UI lying about data time.
 - Parallel safe: yes.
+- Completion: Added compact quote state explanations, honest missing/stale/partial handling, owner-scoped no-store refresh and correction endpoints, durable coalesced refresh requests, reversible price/FX correction UI, and accessibility/regression coverage.
 
 ### UI-005A — Portfolio settings and ledger inspection
 

@@ -121,6 +121,8 @@ The Unrealised label is left aligned. At 390 px, the first-line portfolio value 
 - Two-line 60 px rows.
 - Company names ellipsize; prices and changes never wrap.
 - Routine source, provider, delay, and exact timestamp are absent from the compact row. A business-relevant date is retained.
+- Each row has an adjacent accessible explanation for current, fallback, stale, partial, or unavailable state; `Price unavailable` is used only when no usable price exists.
+- Refresh queues a durable, coalesced server job and leaves displayed values unchanged until validated observations complete. Corrections use an owner-scoped, reasoned, reversible workflow outside the compact row.
 
 ### Details
 

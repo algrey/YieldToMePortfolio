@@ -11,6 +11,7 @@ import {
   type PortfolioPrototype,
   type Tone,
 } from "../prototype-data";
+import { quoteDisplayState, quoteExplanation } from "../quote-contract";
 import { BrandMark } from "./brand-mark";
 import { ServiceWorkerRegistration } from "./service-worker-registration";
 
@@ -221,6 +222,10 @@ function OwnedWorkspaceScreen({
         <p>{workspace.message ?? "Try again shortly."}</p>
       </section>
     );
+  }
+
+  if (workspace.activePortfolio && activeSection === "quotes") {
+    return null;
   }
 
   if (workspace.status === "empty" || workspace.activePortfolio === null) {
@@ -669,26 +674,48 @@ function HoldingsScreen({
 function QuotesScreen({
   portfolio,
   viewState,
+  portfolioId,
+  readOnly,
 }: {
-  portfolio: PortfolioPrototype;
+  portfolio: PortfolioPrototype | null;
   viewState: ViewState;
+  portfolioId: string;
+  readOnly: boolean;
 }) {
   const [sortKey, setSortKey] = useState<QuoteSort>("change");
   const [direction, setDirection] = useState<Direction>("descending");
+  const [refreshState, setRefreshState] = useState<
+    "idle" | "pending" | "queued" | "failed"
+  >("idle");
+  const [correctionOpen, setCorrectionOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyPending, setHistoryPending] = useState(false);
+  const [history, setHistory] = useState<
+    Array<{
+      id: string;
+      type: "price" | "fx_rate" | "security_mapping" | "transaction_fx";
+      targetKey: string;
+      effectiveFrom: string;
+      effectiveTo: string | null;
+      reason: string;
+      status: "active" | "superseded" | "revoked";
+    }>
+  >([]);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   const rows = useMemo(() => {
     if (sortKey === "ticker") {
-      return [...portfolio.quotes].sort((left, right) => {
+      return [...(portfolio?.quotes ?? [])].sort((left, right) => {
         const compared = left.symbol.localeCompare(right.symbol);
         return direction === "ascending" ? compared : -compared;
       });
     }
     return sortByExactKey(
-      portfolio.quotes,
+      portfolio?.quotes ?? [],
       (quote) => quote.sort[sortKey],
       direction,
     );
-  }, [direction, portfolio.quotes, sortKey]);
+  }, [direction, portfolio?.quotes, sortKey]);
 
   function handleSort(nextKey: QuoteSort) {
     if (nextKey === sortKey) {
@@ -701,77 +728,438 @@ function QuotesScreen({
     setDirection(nextKey === "ticker" ? "ascending" : "descending");
   }
 
-  if (viewState === "empty") {
-    return (
-      <EmptyState
-        title="No quotes yet"
-        message="Add securities to watch without creating a holding."
-      />
-    );
+  async function requestRefresh() {
+    setActionMessage(null);
+    if (readOnly) {
+      setActionMessage(
+        "Preview quotes are read-only; no refresh was requested.",
+      );
+      return;
+    }
+    setRefreshState("pending");
+    try {
+      const response = await fetch("/api/market-data/refresh", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ portfolioId }),
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        jobs?: Array<{ id: string }>;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(result.message ?? "Refresh could not be queued.");
+      if (!result.jobs?.length) {
+        setRefreshState("idle");
+        setActionMessage(
+          "No verified quote targets are available; no refresh was queued.",
+        );
+        return;
+      }
+      setRefreshState("queued");
+      setActionMessage(
+        "Refresh queued. Existing values remain displayed until validated observations are written.",
+      );
+    } catch (error) {
+      setRefreshState("failed");
+      setActionMessage(
+        error instanceof Error ? error.message : "Refresh could not be queued.",
+      );
+    }
+  }
+
+  async function loadHistory() {
+    setHistoryOpen(true);
+    if (readOnly) {
+      setActionMessage("Preview data has no correction history to display.");
+      return;
+    }
+    setHistoryPending(true);
+    try {
+      const query = new URLSearchParams({ portfolioId });
+      const response = await fetch(`/api/market-data/overrides?${query}`);
+      const result = (await response.json()) as {
+        ok: boolean;
+        overrides?: typeof history;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(result.message ?? "Correction history is unavailable.");
+      setHistory(result.overrides ?? []);
+    } catch (error) {
+      setActionMessage(
+        error instanceof Error
+          ? error.message
+          : "Correction history is unavailable.",
+      );
+    } finally {
+      setHistoryPending(false);
+    }
+  }
+
+  async function revokeCorrection(id: string) {
+    setHistoryPending(true);
+    try {
+      const response = await fetch("/api/market-data/overrides", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ overrideId: id }),
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(
+          result.message ?? "The correction could not be removed.",
+        );
+      setActionMessage(
+        "Correction revoked; the underlying provider value can be selected again.",
+      );
+      await loadHistory();
+    } catch (error) {
+      setActionMessage(
+        error instanceof Error
+          ? error.message
+          : "The correction could not be removed.",
+      );
+    } finally {
+      setHistoryPending(false);
+    }
   }
 
   return (
     <section className="quotes-screen" aria-label="Portfolio quotes">
-      <div className="quotes-grid table-heading sticky-heading">
-        <SortButton
-          label="Ticker"
-          sortKey="ticker"
-          activeKey={sortKey}
-          direction={direction}
-          onSort={handleSort}
-        />
-        <SortButton
-          label="Last price"
-          sortKey="price"
-          activeKey={sortKey}
-          direction={direction}
-          onSort={handleSort}
-        />
-        <SortButton
-          label="Change"
-          sortKey="change"
-          activeKey={sortKey}
-          direction={direction}
-          onSort={handleSort}
-        />
-      </div>
-      {rows.map((quote, index) => {
-        const unavailable =
-          viewState === "partial" && index === rows.length - 1;
-        return (
-          <button
-            className="quote-row quotes-grid"
-            type="button"
-            key={quote.symbol}
-          >
-            <span className="row-primary symbol">{quote.symbol}</span>
-            <span className="row-primary numeric">
-              {unavailable ? "Price unavailable" : quote.price}
-            </span>
-            <ToneValue
-              tone={unavailable ? "neutral" : quote.tone}
-              className="row-primary numeric"
-            >
-              {unavailable ? "—" : quote.change}
-            </ToneValue>
-            <span className="row-secondary ellipsis">{quote.name}</span>
-            <span className="row-secondary numeric">{quote.marketDate}</span>
-            <ToneValue
-              tone={unavailable ? "neutral" : quote.tone}
-              className="row-secondary numeric"
-            >
-              {unavailable ? "—" : quote.percent}
-            </ToneValue>
-          </button>
-        );
-      })}
-      {viewState === "provider-error" ? (
+      <div className="quote-actions" aria-label="Quote actions">
         <p className="data-explanation">
-          Last known observations remain visible. Exact source and observation
-          times are available in the row explanation, not repeated here.
+          Validated observations are preferred. EOD and manual values remain
+          explicit fallbacks; no quote is presented as live.
         </p>
+        <div className="quote-action-buttons">
+          <button
+            type="button"
+            onClick={() => void requestRefresh()}
+            disabled={refreshState === "pending"}
+          >
+            {refreshState === "pending" ? "Queueing…" : "Refresh quotes"}
+          </button>
+          <button type="button" onClick={() => setCorrectionOpen(true)}>
+            Correct a quote
+          </button>
+          <button type="button" onClick={() => void loadHistory()}>
+            Correction history
+          </button>
+        </div>
+        {refreshState === "queued" ? (
+          <p className="quote-action-status" role="status" aria-live="polite">
+            Refresh queued; current values are unchanged until the job
+            completes.
+          </p>
+        ) : null}
+        {actionMessage ? (
+          <p className="quote-action-status" role="alert">
+            {actionMessage}
+          </p>
+        ) : null}
+      </div>
+      {historyOpen ? (
+        <section
+          className="quote-history"
+          aria-labelledby="quote-history-title"
+        >
+          <div className="quote-history-heading">
+            <h2 id="quote-history-title">Correction history</h2>
+            <button
+              type="button"
+              onClick={() => setHistoryOpen(false)}
+              aria-label="Close correction history"
+            >
+              Close
+            </button>
+          </div>
+          {historyPending ? (
+            <p role="status">Loading correction history…</p>
+          ) : null}
+          {!historyPending && history.length === 0 ? (
+            <p className="muted-copy">
+              No owner-entered corrections are recorded.
+            </p>
+          ) : null}
+          <ul>
+            {history.map((item) => (
+              <li key={item.id}>
+                <span>
+                  <strong>
+                    {item.type === "fx_rate" ? "FX rate" : "Price"}
+                  </strong>
+                  <span>
+                    {item.targetKey} · effective {item.effectiveFrom}
+                  </span>
+                  <span>
+                    {item.reason} · {item.status}
+                  </span>
+                </span>
+                {item.status === "active" && !readOnly ? (
+                  <button
+                    type="button"
+                    onClick={() => void revokeCorrection(item.id)}
+                    disabled={historyPending}
+                  >
+                    Revoke
+                  </button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+      {viewState === "empty" ? (
+        <EmptyState
+          title="No quotes yet"
+          message="Add securities to watch without creating a holding."
+        />
+      ) : (
+        <>
+          <div className="quotes-grid table-heading sticky-heading">
+            <SortButton
+              label="Ticker"
+              sortKey="ticker"
+              activeKey={sortKey}
+              direction={direction}
+              onSort={handleSort}
+            />
+            <SortButton
+              label="Last price"
+              sortKey="price"
+              activeKey={sortKey}
+              direction={direction}
+              onSort={handleSort}
+            />
+            <SortButton
+              label="Change"
+              sortKey="change"
+              activeKey={sortKey}
+              direction={direction}
+              onSort={handleSort}
+            />
+          </div>
+          {rows.map((quote, index) => {
+            const state = quoteDisplayState(
+              viewState,
+              index === rows.length - 1,
+            );
+            const unavailable = state === "unavailable";
+            const explanationId = `quote-explanation-${quote.symbol.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+            return (
+              <button
+                className="quote-row quotes-grid"
+                type="button"
+                key={quote.symbol}
+                aria-describedby={explanationId}
+              >
+                <span className="row-primary symbol">{quote.symbol}</span>
+                <span className="row-primary numeric">
+                  {unavailable ? "Price unavailable" : quote.price}
+                </span>
+                <ToneValue
+                  tone={unavailable ? "neutral" : quote.tone}
+                  className="row-primary numeric"
+                >
+                  {unavailable ? "—" : quote.change}
+                </ToneValue>
+                <span className="row-secondary ellipsis">{quote.name}</span>
+                <span className="row-secondary numeric">
+                  {quote.marketDate}
+                </span>
+                <ToneValue
+                  tone={
+                    unavailable || state === "stale" ? "neutral" : quote.tone
+                  }
+                  className="row-secondary numeric"
+                >
+                  {unavailable ? "—" : quote.percent}
+                </ToneValue>
+                <span id={explanationId} className="visually-hidden">
+                  {quoteExplanation(state, quote.marketDate)}
+                </span>
+              </button>
+            );
+          })}
+          {viewState === "provider-error" ? (
+            <p className="data-explanation">
+              Last known observations remain visible. Exact source and
+              observation times are available in the row explanation, not
+              repeated here.
+            </p>
+          ) : null}
+        </>
+      )}
+      {correctionOpen ? (
+        <QuoteCorrectionDialog
+          portfolioId={portfolioId}
+          defaultTargetKey={rows[0]?.symbol ?? ""}
+          readOnly={readOnly}
+          onClose={() => setCorrectionOpen(false)}
+          onMessage={setActionMessage}
+        />
       ) : null}
     </section>
+  );
+}
+
+function QuoteCorrectionDialog({
+  portfolioId,
+  defaultTargetKey,
+  readOnly,
+  onClose,
+  onMessage,
+}: {
+  portfolioId: string;
+  defaultTargetKey: string;
+  readOnly: boolean;
+  onClose: () => void;
+  onMessage: (message: string | null) => void;
+}) {
+  const [type, setType] = useState<"price" | "fx_rate">("price");
+  const [pending, setPending] = useState(false);
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    if (readOnly) {
+      onMessage("Preview data is read-only; no financial write was attempted.");
+      return;
+    }
+    const targetKey = String(form.get("targetKey") ?? "").trim();
+    const effectiveFrom = String(form.get("effectiveFrom") ?? "").trim();
+    const reason = String(form.get("reason") ?? "").trim();
+    const valueJson =
+      type === "price"
+        ? JSON.stringify({
+            closeDecimal: String(form.get("value") ?? "").trim(),
+            currencyCode: String(form.get("currencyCode") ?? "").trim(),
+          })
+        : JSON.stringify({
+            rateDecimal: String(form.get("value") ?? "").trim(),
+            baseCurrencyCode: String(form.get("baseCurrencyCode") ?? "").trim(),
+            quoteCurrencyCode: String(
+              form.get("quoteCurrencyCode") ?? "",
+            ).trim(),
+          });
+    setPending(true);
+    onMessage(null);
+    try {
+      const response = await fetch("/api/market-data/overrides", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          portfolioId,
+          type,
+          targetKey,
+          effectiveFrom,
+          valueJson,
+          reason,
+        }),
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(result.message ?? "The correction could not be saved.");
+      onMessage("Correction saved with a reason and effective date.");
+      onClose();
+    } catch (error) {
+      onMessage(
+        error instanceof Error
+          ? error.message
+          : "The correction could not be saved.",
+      );
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <dialog className="quote-dialog" open aria-labelledby="quote-dialog-title">
+      <form onSubmit={submit}>
+        <p className="eyebrow">Manual correction</p>
+        <h2 id="quote-dialog-title">Correct a market value</h2>
+        <p className="dialog-note">
+          Corrections are versioned, owner-scoped, and reversible. A reason is
+          required; provider observations are never overwritten.
+        </p>
+        <label>
+          Correction type
+          <select
+            value={type}
+            onChange={(event) =>
+              setType(event.target.value === "fx_rate" ? "fx_rate" : "price")
+            }
+          >
+            <option value="price">Price</option>
+            <option value="fx_rate">FX rate</option>
+          </select>
+        </label>
+        <label>
+          Target key
+          <input name="targetKey" required defaultValue={defaultTargetKey} />
+        </label>
+        <label>
+          Effective date
+          <input name="effectiveFrom" type="date" required />
+        </label>
+        <label>
+          {type === "price" ? "Price" : "Rate"}
+          <input name="value" inputMode="decimal" required />
+        </label>
+        {type === "price" ? (
+          <label>
+            Currency
+            <input
+              name="currencyCode"
+              defaultValue="AUD"
+              maxLength={3}
+              required
+            />
+          </label>
+        ) : (
+          <div className="quote-dialog-grid">
+            <label>
+              Base currency
+              <input
+                name="baseCurrencyCode"
+                defaultValue="USD"
+                maxLength={3}
+                required
+              />
+            </label>
+            <label>
+              Quote currency
+              <input
+                name="quoteCurrencyCode"
+                defaultValue="AUD"
+                maxLength={3}
+                required
+              />
+            </label>
+          </div>
+        )}
+        <label>
+          Reason
+          <textarea name="reason" required maxLength={500} />
+        </label>
+        <div className="dialog-actions">
+          <button type="button" onClick={onClose} disabled={pending}>
+            Cancel
+          </button>
+          <button type="submit" disabled={pending}>
+            {pending ? "Saving…" : "Save correction"}
+          </button>
+        </div>
+      </form>
+    </dialog>
   );
 }
 
@@ -1583,7 +1971,22 @@ export function PortfolioShell({
           />
         ) : null}
         {!ownedMode && activeSection === "quotes" ? (
-          <QuotesScreen portfolio={portfolio} viewState={viewState} />
+          <QuotesScreen
+            portfolio={portfolio}
+            portfolioId={portfolio.id}
+            readOnly={!ownedMode}
+            viewState={viewState}
+          />
+        ) : null}
+        {ownedMode &&
+        activeSection === "quotes" &&
+        ownedWorkspace.activePortfolio ? (
+          <QuotesScreen
+            portfolio={null}
+            portfolioId={ownedWorkspace.activePortfolio.id}
+            readOnly={false}
+            viewState="empty"
+          />
         ) : null}
         {!ownedMode && activeSection === "details" ? (
           <DetailsScreen portfolio={portfolio} viewState={viewState} />

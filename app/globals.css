@@ -806,6 +806,114 @@ dd {
   line-height: 1.5;
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.quote-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px;
+  border-bottom: 1px solid var(--divider);
+}
+
+.quote-actions .data-explanation {
+  margin: 0;
+  border-left: 0;
+  padding: 0;
+}
+
+.quote-action-buttons {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.quote-action-buttons button,
+.quote-dialog button,
+.quote-dialog input,
+.quote-dialog select,
+.quote-dialog textarea {
+  font: inherit;
+}
+
+.quote-action-buttons button,
+.quote-dialog button {
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--divider);
+  border-radius: 2px;
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+.quote-action-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.quote-dialog {
+  width: min(440px, calc(100% - 24px));
+  border: 1px solid var(--divider);
+  padding: 24px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.quote-dialog::backdrop {
+  background: rgb(12 21 18 / 65%);
+}
+
+.quote-dialog form,
+.quote-dialog-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.quote-dialog label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.quote-dialog input,
+.quote-dialog select,
+.quote-dialog textarea {
+  min-height: 44px;
+  border: 1px solid var(--divider);
+  border-radius: 2px;
+  padding: 9px 10px;
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+.quote-dialog textarea {
+  min-height: 84px;
+  resize: vertical;
+}
+
+.quote-dialog-grid {
+  grid-template-columns: 1fr 1fr;
+}
+
+.dialog-note {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
 .overview-screen,
 .details-screen {
   padding: 16px 12px calc(32px + env(safe-area-inset-bottom));
@@ -1664,6 +1772,23 @@ dd {
 
   .section-heading.compact {
     display: grid;
+  }
+
+  .quote-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .quote-action-buttons {
+    flex-wrap: wrap;
+  }
+
+  .quote-action-buttons button {
+    flex: 1 1 150px;
+  }
+
+  .quote-action-status {
+    min-height: 18px;
   }
 }
 
