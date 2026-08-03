@@ -410,6 +410,7 @@ Acceptance:
 - Reversal creates compensating/superseding ledger state attributable to the batch.
 - A corrected batch can be staged against the reversal.
 - Audit and original normalized rows remain readable to the owner/admin process.
+- The authenticated reversal endpoint rejects cross-site requests and other owners, requires explicit confirmation plus an idempotency key and current batch version, and processes a bounded D1 unit per invocation.
 
 ### IMP-006 — Alternative CSV variants (deprecated)
 

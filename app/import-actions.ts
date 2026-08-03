@@ -112,6 +112,9 @@ export async function createImportPreviewAction(
     const targetPortfolioId = String(
       form.get("targetPortfolioId") ?? "",
     ).trim();
+    const supersedesBatchId = String(
+      form.get("supersedesBatchId") ?? "",
+    ).trim();
     if (!(file instanceof File) || !targetPortfolioId) {
       return {
         ok: false,
@@ -145,6 +148,7 @@ export async function createImportPreviewAction(
       context.client,
     ).startUpload(context.userId, {
       targetPortfolioId,
+      supersedesBatchId: supersedesBatchId || null,
       parserFormat: "strict-versioned-csv",
       parserVersion,
       filename: file.name,

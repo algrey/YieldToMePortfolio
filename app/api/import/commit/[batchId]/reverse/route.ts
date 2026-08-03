@@ -1,23 +1,4 @@
 import { reverseImportAction } from "../../../../../import-reversal-actions.ts";
-import { rejectCrossSiteMutation } from "../../../../../mutation-request.ts";
+import { createImportReversalPost } from "../../../../../import-reversal-route.ts";
 
-export async function POST(
-  request: Request,
-  context: { params: Promise<{ batchId: string }> },
-): Promise<Response> {
-  const rejected = rejectCrossSiteMutation(request);
-  if (rejected) return rejected;
-  const { batchId } = await context.params;
-  const result = await reverseImportAction(
-    batchId,
-    await request.json().catch(() => null),
-  );
-  return Response.json(result, {
-    status: result.ok
-      ? result.reversal.status === "reversed"
-        ? 200
-        : 202
-      : result.status,
-    headers: { "cache-control": "private, no-store" },
-  });
-}
+export const POST = createImportReversalPost(reverseImportAction);

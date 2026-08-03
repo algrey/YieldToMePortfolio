@@ -340,7 +340,7 @@ Never update a canonical global security because one user corrects a display lab
 Reversal is an explicit, idempotent operation:
 
 1. Confirm owner, batch status, and impact.
-2. Block or require a plan if later manual/other imported facts depend on lots created by this batch.
+2. Block or require a plan if later manual/other imported facts depend on lots created by this batch. Dependency ordering uses the stable ledger key `(trade_at, transaction_id)`, including when two facts share a timestamp.
 3. Mark original transactions reversed through compensating/superseding ledger records.
 4. Reverse linked cash entries and receipts.
 5. Expire portfolio-specific relationships created only by the batch when unused.
@@ -349,6 +349,7 @@ Reversal is an explicit, idempotent operation:
 8. Mark batch `reversed`.
 
 A corrected file creates a new batch with `supersedes_batch_id`; it never mutates the original batch.
+Each authenticated reversal request passes same-origin mutation checks and processes at most one configured transaction chunk. The chunk-size ceiling keeps its query count, total and per-atomic-unit statement counts, and bound parameters within the declared D1 limits; retries resume through the stored batch state and idempotency key.
 
 ## 13. Reconciliation
 

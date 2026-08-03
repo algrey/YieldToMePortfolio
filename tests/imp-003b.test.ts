@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { createImportReversalPost } from "../app/import-reversal-route.ts";
+import { reverseImportWithContext } from "../app/import-reversal-service.ts";
 import {
   createOwnedImportCommitRepository,
   createOwnedImportReversalRepository,
   createOwnedImportStagingRepository,
   createOwnedLedgerRepository,
   createSqliteSqlClient,
+  IMPORT_REVERSAL_LIMITS,
   type ImportCommitInput,
+  type SqlClient,
 } from "../db/repositories/index.ts";
 import { SUPPORTED_IMPORT_PARSER_VERSION } from "../domain/imports/index.ts";
 
@@ -276,6 +280,204 @@ test("later dependent sales block reversal with exact impact evidence", async ()
   );
 });
 
+test("equal-timestamp sales respect the stable ledger ordering", async () => {
+  const { database, version } = await commitBatch(await migratedDatabase(), 1);
+  const client = createSqliteSqlClient(database);
+  database
+    .prepare(
+      `INSERT INTO transactions (
+         id, user_id, portfolio_id, portfolio_security_id, type, status,
+         trade_at, local_trade_date, quantity_decimal, unit_price_decimal,
+         currency_code, gross_amount_decimal, source_type, source_reference,
+         created_by_user_id, calculation_version, created_at
+       ) VALUES ('zz-sale-equal-time', 'user-a', 'portfolio-a', 'membership-a',
+         'sell', 'posted', '2026-08-01T00:00:02.000Z', '2026-08-01',
+         '1', '12', 'AUD', '12', 'manual', 'manual-sale-equal-time',
+         'user-a', 1, '2026-08-01')`,
+    )
+    .run();
+  const result = await createOwnedImportReversalRepository(client).reverse(
+    "user-a",
+    "batch-a",
+    reversalInput(version),
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "dependent_facts");
+});
+
+test("direct reversal denies another owner without changing the batch", async () => {
+  const { database, version } = await commitBatch(await migratedDatabase(), 1);
+  const result = await createOwnedImportReversalRepository(
+    createSqliteSqlClient(database),
+  ).reverse("user-b", "batch-a", reversalInput(version, "wrong-owner"));
+  assert.deepEqual(result, { ok: false, reason: "not_found" });
+  assert.equal(
+    (
+      database
+        .prepare("SELECT status FROM import_batches WHERE id = 'batch-a'")
+        .get() as { status: string }
+    ).status,
+    "committed",
+  );
+});
+
+test("authenticated reversal action rejects malformed, unconfirmed, and stale requests", async () => {
+  const { database, version } = await commitBatch(await migratedDatabase(), 1);
+  const context = {
+    client: createSqliteSqlClient(database),
+    userId: "user-a",
+    requestId: "authenticated-request",
+  };
+  assert.deepEqual(await reverseImportWithContext(context, "batch-a", null), {
+    ok: false,
+    status: 400,
+    message:
+      "The batch version, confirmation, and idempotency key are required.",
+  });
+  assert.deepEqual(
+    await reverseImportWithContext(context, "batch-a", {
+      ...reversalInput(version),
+      confirmation: false,
+    }),
+    {
+      ok: false,
+      status: 400,
+      message: "Confirm the import reversal before continuing.",
+      impacts: undefined,
+    },
+  );
+  assert.deepEqual(
+    await reverseImportWithContext(context, "batch-a", reversalInput(0)),
+    {
+      ok: false,
+      status: 409,
+      message: "This import changed. Reload it before reversing it.",
+      impacts: undefined,
+    },
+  );
+});
+
+test("reversal route enforces CSRF before its authenticated action and returns private progress", async () => {
+  let calls = 0;
+  const rejectedPost = createImportReversalPost(async () => {
+    calls += 1;
+    throw new Error("cross-site request reached the action");
+  });
+  const rejected = await rejectedPost(
+    new Request("https://yield.example/api/import/commit/batch-a/reverse", {
+      method: "POST",
+      headers: {
+        origin: "https://attacker.example",
+        "content-type": "application/json",
+      },
+      body: "{}",
+    }),
+    { params: Promise.resolve({ batchId: "batch-a" }) },
+  );
+  assert.equal(rejected.status, 403);
+  assert.equal(calls, 0);
+
+  const { database, version } = await commitBatch(await migratedDatabase(), 1);
+  const authenticatedPost = createImportReversalPost((batchId, value) =>
+    reverseImportWithContext(
+      {
+        client: createSqliteSqlClient(database),
+        userId: "user-a",
+        requestId: "route-request",
+      },
+      batchId,
+      value,
+    ),
+  );
+  const response = await authenticatedPost(
+    new Request("https://yield.example/api/import/commit/batch-a/reverse", {
+      method: "POST",
+      headers: {
+        origin: "https://yield.example",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(reversalInput(version, "route-reversal")),
+    }),
+    { params: Promise.resolve({ batchId: "batch-a" }) },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "private, no-store");
+  const body = (await response.json()) as { ok: boolean };
+  assert.equal(body.ok, true);
+});
+
+test("one reversal invocation stays within D1 query, statement, and parameter budgets", async () => {
+  const { database, version } = await commitBatch(await migratedDatabase(), 2);
+  const base = createSqliteSqlClient(database);
+  let queries = 0;
+  let statements = 0;
+  let largestAtomicUnit = 0;
+  let largestParameterCount = 0;
+  const client: SqlClient = {
+    async all(sql, params) {
+      queries += 1;
+      largestParameterCount = Math.max(
+        largestParameterCount,
+        params?.length ?? 0,
+      );
+      return base.all(sql, params);
+    },
+    async get(sql, params) {
+      queries += 1;
+      largestParameterCount = Math.max(
+        largestParameterCount,
+        params?.length ?? 0,
+      );
+      return base.get(sql, params);
+    },
+    async run(sql, params) {
+      queries += 1;
+      statements += 1;
+      largestParameterCount = Math.max(
+        largestParameterCount,
+        params?.length ?? 0,
+      );
+      return base.run(sql, params);
+    },
+    async batch(batchStatements) {
+      queries += batchStatements.length;
+      statements += batchStatements.length;
+      largestAtomicUnit = Math.max(largestAtomicUnit, batchStatements.length);
+      largestParameterCount = Math.max(
+        largestParameterCount,
+        ...batchStatements.map((statement) => statement.params?.length ?? 0),
+      );
+      return base.batch!(batchStatements);
+    },
+  };
+  const result = await createOwnedImportReversalRepository(client, {
+    chunkSize: IMPORT_REVERSAL_LIMITS.maxChunkSize,
+  }).reverse("user-a", "batch-a", reversalInput(version, "budget-reversal"));
+  assert.equal(result.ok, true);
+  assert.ok(
+    queries <= IMPORT_REVERSAL_LIMITS.maxQueriesPerInvocation,
+    `${queries} D1 queries`,
+  );
+  assert.ok(
+    statements <= IMPORT_REVERSAL_LIMITS.maxStatementsPerInvocation,
+    `${statements} D1 statements`,
+  );
+  assert.ok(
+    largestAtomicUnit <= IMPORT_REVERSAL_LIMITS.maxStatementsPerAtomicUnit,
+  );
+  assert.ok(
+    largestParameterCount <= IMPORT_REVERSAL_LIMITS.maxParametersPerStatement,
+  );
+  assert.throws(
+    () =>
+      createOwnedImportReversalRepository(base, {
+        chunkSize: IMPORT_REVERSAL_LIMITS.maxChunkSize + 1,
+      }),
+    /invalid_import_reversal_chunk_size/,
+  );
+});
+
 test("reversal resumes after a bounded failure and corrected upload supersedes only reversed batches", async () => {
   const { database, version } = await commitBatch(await migratedDatabase(), 3);
   const client = createSqliteSqlClient(database);
@@ -339,4 +541,13 @@ test("reversal resumes after a bounded failure and corrected upload supersedes o
     fileSha256: "file-wrong-owner",
   });
   assert.deepEqual(crossUser, { ok: false, reason: "not_found" });
+});
+
+test("corrected upload action forwards the superseded batch reference", async () => {
+  const source = await readFile(
+    new URL("../app/import-actions.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /form\.get\("supersedesBatchId"\)/);
+  assert.match(source, /supersedesBatchId: supersedesBatchId \|\| null/);
 });

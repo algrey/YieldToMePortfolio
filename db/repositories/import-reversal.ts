@@ -7,7 +7,10 @@ const MAX_CHUNK_SIZE = 2;
 
 export const IMPORT_REVERSAL_LIMITS = {
   maxChunkSize: MAX_CHUNK_SIZE,
-  maxQueriesPerInvocation: 20,
+  maxQueriesPerInvocation: 50,
+  maxStatementsPerAtomicUnit: 10,
+  maxStatementsPerInvocation: 50,
+  maxParametersPerStatement: 100,
 } as const;
 
 export type ImportReversalInput = {
@@ -160,7 +163,10 @@ export function createOwnedImportReversalRepository(
          AND dependent.portfolio_security_id = source.portfolio_security_id
          AND dependent.type = 'sell'
          AND dependent.status = 'posted'
-         AND dependent.trade_at > source.trade_at
+         AND (
+           dependent.trade_at > source.trade_at
+           OR (dependent.trade_at = source.trade_at AND dependent.id > source.id)
+         )
         WHERE source_row.user_id = ?
           AND source_row.batch_id = ?
           AND source_row.commit_status IN ('committed', 'reversed')

@@ -439,7 +439,7 @@ Status: DONE (2026-08-03).
 
 ### IMP-003B — Import reversal and corrected re-import
 
-Status: DONE on 2026-08-03.
+Status: DONE (2026-08-03).
 
 - Objective: reverse a committed batch and stage a corrected successor without deleting provenance.
 - Dependencies: IMP-003A.
@@ -450,7 +450,8 @@ Status: DONE on 2026-08-03.
 - Tests: clean reversal, repeated reversal, dependent later sale, corrected re-import, partial-failure resume, cross-user denial.
 - Risks: later-lot dependencies and irreversible operator misunderstanding.
 - Parallel safe: no.
-- Completion note: Added owner-scoped, bounded, idempotent batch reversal with compensating ledger/cash effects, queued rebuild evidence, exact later-sale impact blocking, immutable reversed source rows, audit events, and corrected uploads linked through `supersedes_batch_id`. Integration coverage includes clean/repeated reversal, dependency blocking, corrected re-import, partial resume, and cross-user denial; `npm test` passes all 157 tests.
+- Completion note: Added owner-scoped, bounded, idempotent batch reversal with compensating ledger/cash effects, queued rebuild evidence, exact later-sale impact blocking, immutable reversed source rows, audit events, and corrected uploads linked through `supersedes_batch_id`. Integration coverage includes clean/repeated reversal, dependency blocking, corrected re-import, partial resume, and cross-user denial; the full repository suite passes.
+- Review resolution: Corrected uploads now forward the optional superseded batch ID through the authenticated upload action, and equal-timestamp dependent sales follow the stable transaction-ID ordering when blocking reversal. The reversal HTTP boundary enforces same-origin checks before its authenticated action and keeps private no-store responses; the action core is independently testable without bypassing owner context. Integration coverage now includes direct cross-owner denial, malformed, stale and unconfirmed actions, cross-site route rejection before action execution, authenticated route completion, and instrumented query, statement, atomic-unit, parameter, and chunk-size bounds.
 
 ### LED-002A — Pure FIFO allocation engine
 
