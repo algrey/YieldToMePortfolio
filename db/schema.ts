@@ -1461,3 +1461,232 @@ export const auditEvents = sqliteTable(
     ),
   ],
 );
+
+export const taxLots = sqliteTable(
+  "tax_lots",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    portfolioSecurityId: text("portfolio_security_id").notNull(),
+    openingTransactionId: text("opening_transaction_id").notNull(),
+    acquiredAt: text("acquired_at").notNull(),
+    originalQuantityDecimal: text("original_quantity_decimal").notNull(),
+    openQuantityDecimal: text("open_quantity_decimal").notNull(),
+    nativeBasisDecimal: text("native_basis_decimal"),
+    baseBasisDecimal: text("base_basis_decimal"),
+    basisStatus: text("basis_status").notNull(),
+    status: text("status").notNull(),
+    calculationRunId: text("calculation_run_id").notNull(),
+    calculationVersion: integer("calculation_version").notNull(),
+    rebuiltAt: text("rebuilt_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "tax_lots_portfolio_id_user_id_portfolios_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "tax_lots_security_id_user_id_portfolio_id_fk",
+      columns: [table.portfolioSecurityId, table.userId, table.portfolioId],
+      foreignColumns: [
+        portfolioSecurities.id,
+        portfolioSecurities.userId,
+        portfolioSecurities.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "tax_lots_opening_transaction_owner_security_fk",
+      columns: [
+        table.openingTransactionId,
+        table.userId,
+        table.portfolioId,
+        table.portfolioSecurityId,
+      ],
+      foreignColumns: [
+        transactions.id,
+        transactions.userId,
+        transactions.portfolioId,
+        transactions.portfolioSecurityId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "tax_lots_calculation_run_owner_portfolio_fk",
+      columns: [table.calculationRunId, table.userId, table.portfolioId],
+      foreignColumns: [
+        calculationRuns.id,
+        calculationRuns.userId,
+        calculationRuns.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    check(
+      "tax_lots_basis_status_check",
+      sql`${table.basisStatus} IN ('complete', 'incomplete_fx', 'incomplete_basis')`,
+    ),
+    check(
+      "tax_lots_status_check",
+      sql`${table.status} IN ('open', 'closed', 'incomplete')`,
+    ),
+    uniqueIndex("tax_lots_id_user_unique").on(table.id, table.userId),
+    uniqueIndex("tax_lots_id_user_portfolio_security_unique").on(
+      table.id,
+      table.userId,
+      table.portfolioId,
+      table.portfolioSecurityId,
+    ),
+    uniqueIndex("tax_lots_opening_transaction_unique").on(
+      table.openingTransactionId,
+    ),
+    index("tax_lots_fifo_idx").on(
+      table.portfolioId,
+      table.portfolioSecurityId,
+      table.acquiredAt,
+      table.id,
+    ),
+  ],
+);
+
+export const lotAllocations = sqliteTable(
+  "lot_allocations",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    portfolioSecurityId: text("portfolio_security_id").notNull(),
+    sellTransactionId: text("sell_transaction_id").notNull(),
+    taxLotId: text("tax_lot_id").notNull(),
+    allocationSequence: integer("allocation_sequence").notNull(),
+    matchedQuantityDecimal: text("matched_quantity_decimal").notNull(),
+    allocatedBaseBasisDecimal: text("allocated_base_basis_decimal"),
+    baseNetProceedsDecimal: text("base_net_proceeds_decimal"),
+    feeBaseDecimal: text("fee_base_decimal"),
+    taxBaseDecimal: text("tax_base_decimal"),
+    baseRealisedGainDecimal: text("base_realised_gain_decimal"),
+    basisStatus: text("basis_status").notNull(),
+    calculationRunId: text("calculation_run_id").notNull(),
+    calculationVersion: integer("calculation_version").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "lot_allocations_sell_transaction_owner_security_fk",
+      columns: [
+        table.sellTransactionId,
+        table.userId,
+        table.portfolioId,
+        table.portfolioSecurityId,
+      ],
+      foreignColumns: [
+        transactions.id,
+        transactions.userId,
+        transactions.portfolioId,
+        transactions.portfolioSecurityId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "lot_allocations_lot_owner_portfolio_security_fk",
+      columns: [
+        table.taxLotId,
+        table.userId,
+        table.portfolioId,
+        table.portfolioSecurityId,
+      ],
+      foreignColumns: [
+        taxLots.id,
+        taxLots.userId,
+        taxLots.portfolioId,
+        taxLots.portfolioSecurityId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "lot_allocations_calculation_run_owner_portfolio_fk",
+      columns: [table.calculationRunId, table.userId, table.portfolioId],
+      foreignColumns: [
+        calculationRuns.id,
+        calculationRuns.userId,
+        calculationRuns.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    check(
+      "lot_allocations_basis_status_check",
+      sql`${table.basisStatus} IN ('complete', 'incomplete_fx', 'incomplete_basis')`,
+    ),
+    uniqueIndex("lot_allocations_sell_lot_sequence_unique").on(
+      table.sellTransactionId,
+      table.taxLotId,
+      table.allocationSequence,
+    ),
+    index("lot_allocations_owner_sell_idx").on(
+      table.userId,
+      table.portfolioId,
+      table.sellTransactionId,
+    ),
+  ],
+);
+
+export const holdingProjections = sqliteTable(
+  "holding_projections",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    portfolioSecurityId: text("portfolio_security_id").notNull(),
+    quantityDecimal: text("quantity_decimal").notNull(),
+    nativeOpenBasisDecimal: text("native_open_basis_decimal"),
+    baseOpenBasisDecimal: text("base_open_basis_decimal"),
+    averageBaseCostDecimal: text("average_base_cost_decimal"),
+    completeness: text("completeness").notNull(),
+    status: text("status").notNull().default("ready"),
+    lastLedgerHighWater: text("last_ledger_high_water").notNull(),
+    calculationRunId: text("calculation_run_id").notNull(),
+    calculationVersion: integer("calculation_version").notNull(),
+    rebuiltAt: text("rebuilt_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "holding_projections_portfolio_id_user_id_portfolios_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "holding_projections_security_id_user_id_portfolio_id_fk",
+      columns: [table.portfolioSecurityId, table.userId, table.portfolioId],
+      foreignColumns: [
+        portfolioSecurities.id,
+        portfolioSecurities.userId,
+        portfolioSecurities.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "holding_projections_calculation_run_owner_portfolio_fk",
+      columns: [table.calculationRunId, table.userId, table.portfolioId],
+      foreignColumns: [
+        calculationRuns.id,
+        calculationRuns.userId,
+        calculationRuns.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    check(
+      "holding_projections_completeness_check",
+      sql`${table.completeness} IN ('complete', 'partial', 'incomplete')`,
+    ),
+    check(
+      "holding_projections_status_check",
+      sql`${table.status} IN ('ready', 'invalidated')`,
+    ),
+    uniqueIndex("holding_projections_id_user_portfolio_unique").on(
+      table.id,
+      table.userId,
+      table.portfolioId,
+    ),
+    uniqueIndex("holding_projections_portfolio_security_unique").on(
+      table.portfolioId,
+      table.portfolioSecurityId,
+    ),
+    index("holding_projections_owner_portfolio_idx").on(
+      table.userId,
+      table.portfolioId,
+      table.status,
+    ),
+  ],
+);

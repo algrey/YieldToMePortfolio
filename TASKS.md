@@ -463,7 +463,7 @@ Status: DONE on 2026-07-30.
 
 ### LED-002B — Owned lot and holding projection rebuild
 
-Status: READY.
+Status: DONE on 2026-08-03.
 
 - Objective: persist and deterministically rebuild owner-scoped lots, allocations, and current holding projections.
 - Dependencies: LED-002A, LED-001B.
@@ -474,6 +474,7 @@ Status: READY.
 - Tests: cross-portfolio link rejection, rebuild/idempotency, concurrent invalidation, supplied FIFO results, incomplete basis.
 - Risks: publishing projections from stale ledger state.
 - Parallel safe: no; central projection path.
+- Completion note: Added owner-scoped tax-lot, allocation, and holding-projection schema with composite membership constraints; exact-decimal, security-grouped FIFO projection assembly; and a lease/high-water-guarded atomic rebuild repository. Added integration coverage for FIFO reconciliation, idempotency, stale publication rejection, incomplete basis, reversal replay, and cross-portfolio links. Updated the generated migrations and schema contract checks.
 
 ## Market data and calculations
 

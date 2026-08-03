@@ -1,0 +1,429 @@
+import assert from "node:assert/strict";
+import { readFile, readdir } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
+import test from "node:test";
+import {
+  createCalculationRunRepository,
+  createOwnedProjectionRepository,
+  createSqliteSqlClient,
+} from "../db/repositories/index.ts";
+
+async function createMigratedDatabase(): Promise<DatabaseSync> {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON;");
+  const migrationFiles = (await readdir(new URL("../drizzle", import.meta.url)))
+    .filter((file) => file.endsWith(".sql"))
+    .sort();
+  for (const migrationFile of migrationFiles) {
+    database.exec(
+      await readFile(
+        new URL(`../drizzle/${migrationFile}`, import.meta.url),
+        "utf8",
+      ),
+    );
+  }
+  return database;
+}
+
+function seedLedger(database: DatabaseSync): void {
+  database.exec(`
+    INSERT INTO currencies (code, numeric_code, name, minor_unit_digits, is_active)
+    VALUES ('AUD', 36, 'Australian dollar', 2, 1);
+    INSERT INTO users (id, status, primary_email, timezone, created_at, updated_at, version)
+    VALUES
+      ('user-a', 'active', 'a@example.com', 'Australia/Sydney', '2026-08-03', '2026-08-03', 1),
+      ('user-b', 'active', 'b@example.com', 'Australia/Sydney', '2026-08-03', '2026-08-03', 1);
+    INSERT INTO portfolios (
+      id, user_id, code, name, base_currency_code, timezone,
+      accounting_method, status, created_at, updated_at, version
+    ) VALUES
+      ('portfolio-a', 'user-a', 'A', 'Alice', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-03', '2026-08-03', 1),
+      ('portfolio-b', 'user-b', 'B', 'Bob', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-03', '2026-08-03', 1);
+    INSERT INTO portfolio_securities (
+      id, user_id, portfolio_id, source_symbol, source_currency_code,
+      status, created_at, updated_at
+    ) VALUES
+      ('membership-a', 'user-a', 'portfolio-a', 'ABC', 'AUD', 'unresolved', '2026-08-03', '2026-08-03'),
+      ('membership-b', 'user-b', 'portfolio-b', 'ABC', 'AUD', 'unresolved', '2026-08-03', '2026-08-03');
+  `);
+}
+
+function insertTransaction(
+  database: DatabaseSync,
+  values: {
+    id: string;
+    userId?: string;
+    portfolioId?: string;
+    portfolioSecurityId?: string | null;
+    type: string;
+    status?: string;
+    tradeAt: string;
+    quantityDecimal?: string | null;
+    unitPriceDecimal?: string | null;
+    grossAmountDecimal?: string | null;
+    feeAmountDecimal?: string;
+    taxAmountDecimal?: string;
+    fxRateToBaseDecimal?: string | null;
+    reversesTransactionId?: string | null;
+  },
+): void {
+  const userId = values.userId ?? "user-a";
+  const portfolioId = values.portfolioId ?? "portfolio-a";
+  database
+    .prepare(
+      `INSERT INTO transactions (
+        id, user_id, portfolio_id, portfolio_security_id, type, status,
+        trade_at, local_trade_date, quantity_decimal, unit_price_decimal,
+        currency_code, gross_amount_decimal, fee_amount_decimal,
+        tax_amount_decimal, fx_rate_to_base_decimal, source_type,
+        reverses_transaction_id,
+        created_by_user_id, calculation_version, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'AUD', ?, ?, ?, ?, 'manual', ?, ?, 1, ?)`,
+    )
+    .run(
+      values.id,
+      userId,
+      portfolioId,
+      values.portfolioSecurityId === undefined
+        ? "membership-a"
+        : values.portfolioSecurityId,
+      values.type,
+      values.status ?? "posted",
+      values.tradeAt,
+      values.tradeAt.slice(0, 10),
+      values.quantityDecimal ?? null,
+      values.unitPriceDecimal ?? null,
+      values.grossAmountDecimal ?? null,
+      values.feeAmountDecimal ?? "0",
+      values.taxAmountDecimal ?? "0",
+      values.fxRateToBaseDecimal ?? null,
+      values.reversesTransactionId ?? null,
+      userId,
+      values.tradeAt,
+    );
+}
+
+async function startRun(
+  database: DatabaseSync,
+  input: {
+    id: string;
+    version: number;
+    highWater: string;
+    worker: string;
+    now: string;
+  },
+) {
+  const client = createSqliteSqlClient(database);
+  const runs = createCalculationRunRepository(client);
+  const requested = await runs.request("user-a", {
+    id: input.id,
+    portfolioId: "portfolio-a",
+    rangeFrom: "2026-01-01",
+    rangeTo: "2026-12-31",
+    calculationVersion: input.version,
+    reason: "transaction_change",
+    invalidationSource: input.highWater,
+    ledgerHighWaterStart: input.highWater,
+    idempotencyKey: `rebuild-${input.id}`,
+    now: input.now,
+  });
+  const claimed = await runs.claim(
+    "user-a",
+    "portfolio-a",
+    requested.id,
+    input.worker,
+    "2026-08-04T00:00:00Z",
+    input.now,
+  );
+  assert.equal(claimed.ok, true);
+  return { client, runId: requested.id };
+}
+
+test("owned projection rebuild publishes FIFO lots atomically and rejects stale work", async () => {
+  const database = await createMigratedDatabase();
+  seedLedger(database);
+  insertTransaction(database, {
+    id: "buy-1",
+    type: "buy",
+    tradeAt: "2026-01-01T00:00:00Z",
+    quantityDecimal: "10",
+    unitPriceDecimal: "20",
+    grossAmountDecimal: "200",
+    feeAmountDecimal: "10",
+    fxRateToBaseDecimal: "1",
+  });
+  insertTransaction(database, {
+    id: "buy-2",
+    type: "buy",
+    tradeAt: "2026-01-02T00:00:00Z",
+    quantityDecimal: "5",
+    unitPriceDecimal: "24",
+    grossAmountDecimal: "120",
+    feeAmountDecimal: "5",
+    fxRateToBaseDecimal: "1",
+  });
+  insertTransaction(database, {
+    id: "sell-1",
+    type: "sell",
+    tradeAt: "2026-01-03T00:00:00Z",
+    quantityDecimal: "12",
+    unitPriceDecimal: "30",
+    grossAmountDecimal: "360",
+    feeAmountDecimal: "6",
+    fxRateToBaseDecimal: "1",
+  });
+
+  const first = await startRun(database, {
+    id: "run-1",
+    version: 1,
+    highWater: "sell-1",
+    worker: "worker-1",
+    now: "2026-08-03T01:00:00Z",
+  });
+  const projections = createOwnedProjectionRepository(first.client);
+  const published = await projections.rebuild("user-a", {
+    portfolioId: "portfolio-a",
+    calculationRunId: first.runId,
+    leaseOwner: "worker-1",
+    currentLedgerHighWater: "sell-1",
+    now: "2026-08-03T01:05:00Z",
+  });
+  assert.equal(published.ok, true);
+  if (!published.ok) return;
+  assert.deepEqual(
+    {
+      lots: published.lotCount,
+      allocations: published.allocationCount,
+      holdings: published.holdingCount,
+      reconciliation: published.reconciliation,
+    },
+    {
+      lots: 2,
+      allocations: 2,
+      holdings: 1,
+      reconciliation: {
+        holdingQuantityEqualsOpenLots: true,
+        allocationQuantityEqualsSales: true,
+      },
+    },
+  );
+  assert.deepEqual(
+    database
+      .prepare(
+        `SELECT id, open_quantity_decimal, native_basis_decimal,
+                base_basis_decimal, status
+         FROM tax_lots ORDER BY id`,
+      )
+      .all()
+      .map((row) => Object.assign({}, row)),
+    [
+      {
+        id: "buy-1",
+        open_quantity_decimal: "0",
+        native_basis_decimal: "0",
+        base_basis_decimal: "0",
+        status: "closed",
+      },
+      {
+        id: "buy-2",
+        open_quantity_decimal: "3",
+        native_basis_decimal: "75",
+        base_basis_decimal: "75",
+        status: "open",
+      },
+    ],
+  );
+  assert.deepEqual(
+    database
+      .prepare(
+        `SELECT sell_transaction_id, tax_lot_id, allocation_sequence,
+                matched_quantity_decimal
+         FROM lot_allocations ORDER BY allocation_sequence`,
+      )
+      .all()
+      .map((row) => Object.assign({}, row)),
+    [
+      {
+        sell_transaction_id: "sell-1",
+        tax_lot_id: "buy-1",
+        allocation_sequence: 1,
+        matched_quantity_decimal: "10",
+      },
+      {
+        sell_transaction_id: "sell-1",
+        tax_lot_id: "buy-2",
+        allocation_sequence: 2,
+        matched_quantity_decimal: "2",
+      },
+    ],
+  );
+  assert.deepEqual(
+    Object.assign(
+      {},
+      database
+        .prepare(
+          `SELECT quantity_decimal, native_open_basis_decimal,
+                  base_open_basis_decimal, average_base_cost_decimal,
+                  completeness, last_ledger_high_water
+           FROM holding_projections`,
+        )
+        .get(),
+    ),
+    {
+      quantity_decimal: "3",
+      native_open_basis_decimal: "75",
+      base_open_basis_decimal: "75",
+      average_base_cost_decimal: "25",
+      completeness: "complete",
+      last_ledger_high_water: "sell-1",
+    },
+  );
+
+  const retry = await projections.rebuild("user-a", {
+    portfolioId: "portfolio-a",
+    calculationRunId: first.runId,
+    leaseOwner: "worker-1",
+    currentLedgerHighWater: "sell-1",
+    now: "2026-08-03T01:10:00Z",
+  });
+  assert.equal(retry.ok, true);
+  if (retry.ok) assert.equal(retry.idempotent, true);
+
+  const stale = await startRun(database, {
+    id: "run-stale",
+    version: 2,
+    highWater: "sell-1",
+    worker: "worker-stale",
+    now: "2026-08-03T02:00:00Z",
+  });
+  const staleResult = await createOwnedProjectionRepository(
+    stale.client,
+  ).rebuild("user-a", {
+    portfolioId: "portfolio-a",
+    calculationRunId: stale.runId,
+    leaseOwner: "worker-stale",
+    currentLedgerHighWater: "newer-ledger-high-water",
+    now: "2026-08-03T02:05:00Z",
+  });
+  assert.deepEqual(staleResult, { ok: false, reason: "stale_ledger" });
+  assert.equal(
+    (
+      database
+        .prepare("SELECT status FROM calculation_runs WHERE id = 'run-stale'")
+        .get() as { status: string }
+    ).status,
+    "running",
+  );
+  assert.equal(
+    (
+      database
+        .prepare("SELECT count(*) AS count FROM holding_projections")
+        .get() as { count: number }
+    ).count,
+    1,
+  );
+
+  insertTransaction(database, {
+    id: "buy-incomplete",
+    type: "buy",
+    tradeAt: "2026-01-04T00:00:00Z",
+    quantityDecimal: "1",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "10",
+    feeAmountDecimal: "0",
+    portfolioSecurityId: "membership-a",
+  });
+  const incomplete = await startRun(database, {
+    id: "run-incomplete",
+    version: 3,
+    highWater: "buy-incomplete",
+    worker: "worker-incomplete",
+    now: "2026-08-03T03:00:00Z",
+  });
+  const incompleteResult = await createOwnedProjectionRepository(
+    incomplete.client,
+  ).rebuild("user-a", {
+    portfolioId: "portfolio-a",
+    calculationRunId: incomplete.runId,
+    leaseOwner: "worker-incomplete",
+    currentLedgerHighWater: "buy-incomplete",
+    now: "2026-08-03T03:05:00Z",
+  });
+  assert.equal(incompleteResult.ok, true);
+  assert.deepEqual(
+    Object.assign(
+      {},
+      database
+        .prepare(
+          `SELECT quantity_decimal, base_open_basis_decimal, completeness
+           FROM holding_projections`,
+        )
+        .get(),
+    ),
+    {
+      quantity_decimal: "4",
+      base_open_basis_decimal: null,
+      completeness: "incomplete",
+    },
+  );
+
+  database.exec(
+    `UPDATE transactions SET status = 'reversed' WHERE id = 'sell-1';`,
+  );
+  insertTransaction(database, {
+    id: "reverse-sell-1",
+    type: "sell",
+    tradeAt: "2026-01-05T00:00:00Z",
+    quantityDecimal: "12",
+    unitPriceDecimal: "30",
+    grossAmountDecimal: "360",
+    feeAmountDecimal: "6",
+    reversesTransactionId: "sell-1",
+  });
+  const reversed = await startRun(database, {
+    id: "run-reversed",
+    version: 4,
+    highWater: "reverse-sell-1",
+    worker: "worker-reversed",
+    now: "2026-08-03T04:00:00Z",
+  });
+  const reversedResult = await createOwnedProjectionRepository(
+    reversed.client,
+  ).rebuild("user-a", {
+    portfolioId: "portfolio-a",
+    calculationRunId: reversed.runId,
+    leaseOwner: "worker-reversed",
+    currentLedgerHighWater: "reverse-sell-1",
+    now: "2026-08-03T04:05:00Z",
+  });
+  assert.equal(reversedResult.ok, true);
+  assert.equal(
+    (
+      database
+        .prepare("SELECT count(*) AS count FROM lot_allocations")
+        .get() as { count: number }
+    ).count,
+    0,
+  );
+  assert.equal(
+    (
+      database
+        .prepare("SELECT quantity_decimal FROM holding_projections")
+        .get() as { quantity_decimal: string }
+    ).quantity_decimal,
+    "16",
+  );
+
+  assert.throws(() => {
+    database
+      .prepare(
+        `INSERT INTO holding_projections (
+          id, user_id, portfolio_id, portfolio_security_id, quantity_decimal,
+          completeness, status, last_ledger_high_water, calculation_run_id,
+          calculation_version, rebuilt_at
+        ) VALUES ('cross-owner', 'user-b', 'portfolio-b', 'membership-a',
+                   '1', 'complete', 'ready', 'x', 'run-stale', 2, '2026-08-03')`,
+      )
+      .run();
+  }, /FOREIGN KEY constraint failed/);
+});

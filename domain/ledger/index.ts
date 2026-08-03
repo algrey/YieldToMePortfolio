@@ -38,3 +38,13 @@ export {
   type PostingValidationFailure,
   type PreparedLedgerPosting,
 } from "./posting.ts";
+export {
+  buildLedgerProjections,
+  type ProjectionAllocation,
+  type ProjectionBuildFailure,
+  type ProjectionBuildResult,
+  type ProjectionBuildSuccess,
+  type ProjectionHolding,
+  type ProjectionLedgerTransaction,
+  type ProjectionLot,
+} from "./projections.ts";

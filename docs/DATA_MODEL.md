@@ -273,11 +273,14 @@ Disposable but inspectable FIFO projection:
 - acquired timestamp/date;
 - original/open quantity decimal;
 - native/base total basis decimal;
+- explicit `basis_status` (`complete`, `incomplete_fx`, or `incomplete_basis`);
 - allocated acquisition fees/taxes;
 - status;
-- calculation version and rebuilt time.
+- calculation run, version, and rebuilt time.
 
-Unique opening lot identity. A buy can produce one lot in v1.
+Unique opening lot identity. A buy can produce one lot in v1. LED-002B
+rebuilds lots from the owner-scoped ledger high-water mark and retains closed
+lots in the disposable projection so allocations remain inspectable.
 
 ### `lot_allocations`
 
@@ -330,6 +333,12 @@ Current disposable projection:
 - completeness status.
 
 Unique `(portfolio_id, portfolio_security_id)`. Must reconcile to lots and posted transactions, including an owner-private unresolved membership.
+
+Publication is guarded by the claimed calculation run, lease owner, and
+ledger high-water mark. A stale or lost-lease run cannot delete or insert
+projection rows. Rebuilds replace the run's lots, allocations, and holdings
+atomically; repeated publication at the same completed high-water mark is
+idempotent.
 
 The projection’s home-currency values are stored/rebuilt for reporting. Native security prices, transaction amounts, and lot provenance remain available. Switching the UI between native and home currency never rewrites the projection or ledger.
 
@@ -992,7 +1001,11 @@ CREATE TABLE tax_lots (
   open_quantity_decimal TEXT NOT NULL,
   native_basis_decimal TEXT,
   base_basis_decimal TEXT,
+  basis_status TEXT NOT NULL CHECK (
+    basis_status IN ('complete', 'incomplete_fx', 'incomplete_basis')
+  ),
   status TEXT NOT NULL CHECK (status IN ('open', 'closed', 'incomplete')),
+  calculation_run_id TEXT NOT NULL,
   calculation_version INTEGER NOT NULL,
   rebuilt_at TEXT NOT NULL,
   FOREIGN KEY (portfolio_id, user_id)
@@ -1004,6 +1017,8 @@ CREATE TABLE tax_lots (
   ) REFERENCES transactions(
     id, user_id, portfolio_id, portfolio_security_id
   ) ON DELETE RESTRICT,
+  FOREIGN KEY (calculation_run_id, user_id, portfolio_id)
+    REFERENCES calculation_runs(id, user_id, portfolio_id) ON DELETE RESTRICT,
   UNIQUE (id, user_id),
   UNIQUE (id, user_id, portfolio_id, portfolio_security_id),
   UNIQUE (opening_transaction_id)
@@ -1022,7 +1037,13 @@ CREATE TABLE lot_allocations (
   matched_quantity_decimal TEXT NOT NULL,
   allocated_base_basis_decimal TEXT,
   base_net_proceeds_decimal TEXT,
+  fee_base_decimal TEXT,
+  tax_base_decimal TEXT,
   base_realised_gain_decimal TEXT,
+  basis_status TEXT NOT NULL CHECK (
+    basis_status IN ('complete', 'incomplete_fx', 'incomplete_basis')
+  ),
+  calculation_run_id TEXT NOT NULL,
   calculation_version INTEGER NOT NULL,
   FOREIGN KEY (
     sell_transaction_id, user_id, portfolio_id, portfolio_security_id
@@ -1034,7 +1055,36 @@ CREATE TABLE lot_allocations (
   ) REFERENCES tax_lots(
     id, user_id, portfolio_id, portfolio_security_id
   ) ON DELETE RESTRICT,
+  FOREIGN KEY (calculation_run_id, user_id, portfolio_id)
+    REFERENCES calculation_runs(id, user_id, portfolio_id) ON DELETE RESTRICT,
   UNIQUE (sell_transaction_id, tax_lot_id, allocation_sequence)
+);
+
+CREATE TABLE holding_projections (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  portfolio_id TEXT NOT NULL,
+  portfolio_security_id TEXT NOT NULL,
+  quantity_decimal TEXT NOT NULL,
+  native_open_basis_decimal TEXT,
+  base_open_basis_decimal TEXT,
+  average_base_cost_decimal TEXT,
+  completeness TEXT NOT NULL CHECK (
+    completeness IN ('complete', 'partial', 'incomplete')
+  ),
+  status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('ready', 'invalidated')),
+  last_ledger_high_water TEXT NOT NULL,
+  calculation_run_id TEXT NOT NULL,
+  calculation_version INTEGER NOT NULL,
+  rebuilt_at TEXT NOT NULL,
+  FOREIGN KEY (portfolio_id, user_id)
+    REFERENCES portfolios(id, user_id) ON DELETE RESTRICT,
+  FOREIGN KEY (portfolio_security_id, user_id, portfolio_id)
+    REFERENCES portfolio_securities(id, user_id, portfolio_id) ON DELETE RESTRICT,
+  FOREIGN KEY (calculation_run_id, user_id, portfolio_id)
+    REFERENCES calculation_runs(id, user_id, portfolio_id) ON DELETE RESTRICT,
+  UNIQUE (id, user_id, portfolio_id),
+  UNIQUE (portfolio_id, portfolio_security_id)
 );
 
 CREATE TABLE price_observations (

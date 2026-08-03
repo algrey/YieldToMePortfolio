@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `tax_lots_id_user_portfolio_security_unique` ON `tax_lots` (`id`,`user_id`,`portfolio_id`,`portfolio_security_id`);

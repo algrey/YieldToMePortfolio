@@ -81,3 +81,10 @@ export {
   type CompleteCalculationRunResult,
   type RequestCalculationRunInput,
 } from "./calculation-runs.ts";
+export {
+  createOwnedProjectionRepository,
+  type ProjectionRebuildFailure,
+  type ProjectionRebuildInput,
+  type ProjectionRebuildResult,
+  type ProjectionRebuildSuccess,
+} from "./projections.ts";
