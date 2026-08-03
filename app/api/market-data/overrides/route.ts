@@ -2,7 +2,8 @@ import {
   listManualOverrideAction,
   removeManualOverrideAction,
   saveManualOverrideAction,
-} from "../../../market-data-actions";
+} from "../../../market-data-actions.ts";
+import { rejectCrossSiteMutation } from "../../../mutation-request.ts";
 
 export async function GET(request: Request): Promise<Response> {
   const url = new URL(request.url);
@@ -17,6 +18,8 @@ export async function GET(request: Request): Promise<Response> {
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const rejected = rejectCrossSiteMutation(request);
+  if (rejected) return rejected;
   const result = await saveManualOverrideAction(
     await request.json().catch(() => null),
   );
@@ -27,6 +30,8 @@ export async function POST(request: Request): Promise<Response> {
 }
 
 export async function DELETE(request: Request): Promise<Response> {
+  const rejected = rejectCrossSiteMutation(request);
+  if (rejected) return rejected;
   const input = (await request.json().catch(() => null)) as {
     overrideId?: unknown;
   } | null;

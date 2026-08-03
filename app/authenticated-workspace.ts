@@ -9,6 +9,7 @@ import { createOwnedPortfolioRepository } from "../db/repositories/owned-portfol
 import { createOwnedUserSettingsRepository } from "../db/repositories/owned-portfolios";
 import { createOwnedWorkspace } from "./owned-workspace";
 import type { OwnedWorkspace } from "./components/portfolio-shell";
+import { loadOwnedQuotes } from "./owned-quotes";
 
 function isPrincipal(value: unknown): value is VerifiedAccessPrincipal {
   if (typeof value !== "object" || value === null) return false;
@@ -32,11 +33,14 @@ function unavailableWorkspace(message: string): OwnedWorkspace {
     message,
     activePortfolio: null,
     portfolios: [],
+    quotes: [],
+    quoteViewState: "empty",
   };
 }
 
 export async function loadAuthenticatedWorkspace(
   requestedPortfolioId?: string,
+  options: { includeQuotes?: boolean } = {},
 ): Promise<OwnedWorkspace> {
   const principalHeader = (await headers()).get(VERIFIED_PRINCIPAL_HEADER);
   if (!principalHeader) {
@@ -73,13 +77,39 @@ export async function loadAuthenticatedWorkspace(
     const settings = await createOwnedUserSettingsRepository(client).get(
       result.context.user.id,
     );
-    return settings
+    const configuredWorkspace = settings
       ? {
           ...workspace,
           holdingCurrencyView: settings.defaultHoldingCurrencyView,
           settingsVersion: settings.version,
         }
       : workspace;
+    if (
+      !options.includeQuotes ||
+      configuredWorkspace.activePortfolio === null
+    ) {
+      return configuredWorkspace;
+    }
+    const quotes = await loadOwnedQuotes(
+      client,
+      result.context.user.id,
+      configuredWorkspace.activePortfolio.id,
+    );
+    const unavailable = quotes.filter(
+      (quote) => quote.state === "unavailable",
+    ).length;
+    return {
+      ...configuredWorkspace,
+      quotes,
+      quoteViewState:
+        quotes.length === 0
+          ? "empty"
+          : unavailable === quotes.length
+            ? "provider-error"
+            : unavailable > 0
+              ? "partial"
+              : "populated",
+    };
   } catch {
     return unavailableWorkspace("Portfolio data is temporarily unavailable.");
   }

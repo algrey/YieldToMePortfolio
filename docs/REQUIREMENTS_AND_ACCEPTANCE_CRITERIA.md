@@ -103,6 +103,7 @@ Browser mutations shall be same-origin and protected against CSRF and replay.
 Acceptance:
 
 - Mutations reject disallowed `Origin`/`Sec-Fetch-Site` values.
+- Quote refresh and manual-override POST/DELETE endpoints apply these checks before authentication or database work.
 - State-changing requests use non-idempotent methods appropriately and an application CSRF token if the final cookie policy requires it.
 - Import commit and destructive reversals require an idempotency key and explicit confirmation.
 

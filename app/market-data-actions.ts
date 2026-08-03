@@ -4,7 +4,12 @@ import {
   type SaveManualOverrideInput,
 } from "../db/repositories/index.ts";
 import { randomUUID } from "node:crypto";
-import { getAuthenticatedSqlContext } from "./portfolio-actions";
+import type { SqlClient } from "../db/repositories/sql-client.ts";
+
+async function authenticatedSqlContext(portfolioId?: string) {
+  const { getAuthenticatedSqlContext } = await import("./portfolio-actions.ts");
+  return getAuthenticatedSqlContext(portfolioId);
+}
 
 type MarketDataActionFailure = {
   ok: false;
@@ -42,13 +47,25 @@ function validDate(value: unknown): value is string {
   );
 }
 
-function recentRefreshWindow(
+export const UI_REFRESH_MAX_DAYS = 5;
+export const UI_REFRESH_COOLDOWN_MS = 15 * 60 * 1000;
+
+export type MarketDataSqlContext = {
+  client: SqlClient;
+  userId: string;
+  requestId: string;
+};
+
+export function recentRefreshWindow(
   value: unknown,
+  now = new Date(),
 ): { from: string; to: string } | null {
   if (value !== undefined && !validDate(value)) return null;
-  const to = validDate(value) ? value : new Date().toISOString().slice(0, 10);
+  const today = now.toISOString().slice(0, 10);
+  const to = validDate(value) ? value : today;
+  if (to > today) return null;
   const fromDate = new Date(`${to}T00:00:00Z`);
-  fromDate.setUTCDate(fromDate.getUTCDate() - 4);
+  fromDate.setUTCDate(fromDate.getUTCDate() - (UI_REFRESH_MAX_DAYS - 1));
   return { from: fromDate.toISOString().slice(0, 10), to };
 }
 
@@ -70,9 +87,26 @@ export async function requestMarketDataRefreshAction(
   if (!portfolioId || portfolioId.length > 100) {
     return { ok: false, status: 400, message: "A portfolio is required." };
   }
-  const context = await getAuthenticatedSqlContext(portfolioId);
+  const context = await authenticatedSqlContext(portfolioId);
   if (!context.ok) return context;
-  const window = recentRefreshWindow(input.rangeTo);
+  return requestMarketDataRefreshForContext(context, input);
+}
+
+export async function requestMarketDataRefreshForContext(
+  context: MarketDataSqlContext,
+  value: unknown,
+  now = new Date(),
+): Promise<{ ok: true; jobs: RefreshJobSummary[] } | MarketDataActionFailure> {
+  const input =
+    typeof value === "object" && value !== null
+      ? (value as Record<string, unknown>)
+      : {};
+  const portfolioId =
+    typeof input.portfolioId === "string" ? input.portfolioId.trim() : "";
+  if (!portfolioId || portfolioId.length > 100) {
+    return { ok: false, status: 400, message: "A portfolio is required." };
+  }
+  const window = recentRefreshWindow(input.rangeTo, now);
   if (!window) {
     return { ok: false, status: 400, message: "The refresh date is invalid." };
   }
@@ -80,11 +114,11 @@ export async function requestMarketDataRefreshAction(
     return { ok: false, status: 400, message: "The refresh date is invalid." };
   }
   const rangeFrom = validDate(input.rangeFrom) ? input.rangeFrom : window.from;
-  if (rangeFrom > window.to) {
+  if (rangeFrom > window.to || rangeFrom < window.from) {
     return {
       ok: false,
       status: 400,
-      message: "The refresh interval is invalid.",
+      message: `Refreshes are limited to the most recent ${UI_REFRESH_MAX_DAYS} days.`,
     };
   }
 
@@ -138,13 +172,38 @@ export async function requestMarketDataRefreshAction(
       };
     }
 
+    const completedSince = new Date(
+      now.getTime() - UI_REFRESH_COOLDOWN_MS,
+    ).toISOString();
+    const recent = await context.client.all<{ target_key: string }>(
+      `SELECT DISTINCT job.target_key
+         FROM market_data_refresh_jobs job
+         JOIN security_provider_mappings spm
+           ON spm.id = job.mapping_id
+         JOIN portfolio_securities ps
+           ON ps.security_id = spm.security_id
+        WHERE ps.user_id = ? AND ps.portfolio_id = ?
+          AND job.provider_id = 'yahoo-compatible'
+          AND job.scope_key = 'deployment' AND job.target_kind = 'price'
+          AND job.status = 'completed' AND job.completed_at >= ?`,
+      [context.userId, portfolioId, completedSince],
+    );
+    const recentTargets = new Set(recent.map((row) => row.target_key));
+    const eligibleTargets = targets.filter(
+      (row) => !recentTargets.has(String(row.mapping_id)),
+    );
+    if (eligibleTargets.length === 0 && targets.length > 0) {
+      return {
+        ok: false,
+        status: 429,
+        message:
+          "Quotes were refreshed recently. Try again after the cooldown.",
+      };
+    }
     const repository = createMarketDataRefreshRepository(context.client);
-    const idempotencyKey =
-      typeof input.idempotencyKey === "string" && input.idempotencyKey.trim()
-        ? input.idempotencyKey.trim().slice(0, 160)
-        : context.requestId;
+    const bucket = Math.floor(now.getTime() / UI_REFRESH_COOLDOWN_MS);
     const jobs = await Promise.all(
-      targets.map(async (row, index) => {
+      eligibleTargets.map(async (row) => {
         const job = await repository.request({
           id: randomUUID(),
           providerId: "yahoo-compatible",
@@ -155,8 +214,8 @@ export async function requestMarketDataRefreshAction(
           scope: { kind: "deployment", userId: null },
           rangeFrom,
           rangeTo: window.to,
-          idempotencyKey: `${idempotencyKey}:${index}`,
-          now: new Date().toISOString(),
+          idempotencyKey: `ui:${portfolioId}:${row.mapping_id}:${rangeFrom}:${window.to}:${bucket}`,
+          now: now.toISOString(),
         });
         return {
           id: job.id,
@@ -183,21 +242,141 @@ export async function saveManualOverrideAction(
   | { ok: true; override: unknown; invalidationId: string | null }
   | MarketDataActionFailure
 > {
-  const input = value as Record<string, unknown>;
+  const input =
+    typeof value === "object" && value !== null
+      ? (value as Record<string, unknown>)
+      : {};
   const portfolioId =
-    typeof input?.portfolioId === "string" ? input.portfolioId : undefined;
-  const context = await getAuthenticatedSqlContext(portfolioId);
+    typeof input.portfolioId === "string" ? input.portfolioId.trim() : "";
+  if (!portfolioId || portfolioId.length > 100) {
+    return { ok: false, status: 400, message: "A portfolio is required." };
+  }
+  const context = await authenticatedSqlContext(portfolioId);
   if (!context.ok) return context;
-  const type = input?.type;
+  return saveManualOverrideForContext(context, input);
+}
+
+export async function saveManualOverrideForContext(
+  context: MarketDataSqlContext,
+  value: unknown,
+): Promise<
+  | { ok: true; override: unknown; invalidationId: string | null }
+  | MarketDataActionFailure
+> {
+  const input =
+    typeof value === "object" && value !== null
+      ? (value as Record<string, unknown>)
+      : {};
+  const portfolioId =
+    typeof input.portfolioId === "string" ? input.portfolioId.trim() : "";
+  const type = input.type;
+  if (
+    !portfolioId ||
+    !["price", "fx_rate"].includes(String(type)) ||
+    typeof input.targetKey !== "string" ||
+    typeof input.effectiveFrom !== "string" ||
+    typeof input.valueJson !== "string" ||
+    typeof input.reason !== "string"
+  ) {
+    return { ok: false, status: 400, message: "Override fields are invalid." };
+  }
+  let valueRecord: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(input.valueJson);
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      throw new Error("invalid value");
+    }
+    valueRecord = parsed as Record<string, unknown>;
+  } catch {
+    return { ok: false, status: 400, message: "Override value is invalid." };
+  }
+
+  let securityId: string | null = null;
+  if (type === "price") {
+    securityId =
+      typeof input.securityId === "string" ? input.securityId.trim() : null;
+    if (!securityId || input.targetKey !== securityId) {
+      return {
+        ok: false,
+        status: 400,
+        message: "The price target is not canonical.",
+      };
+    }
+    const ownedTarget = await context.client.get<{ currency_code: string }>(
+      `SELECT s.primary_currency_code AS currency_code
+         FROM portfolio_securities ps
+         JOIN securities s ON s.id = ps.security_id
+        WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.security_id = ?
+          AND ps.status IN ('held', 'watch') LIMIT 1`,
+      [context.userId, portfolioId, securityId],
+    );
+    if (!ownedTarget) {
+      return {
+        ok: false,
+        status: 404,
+        message: "The requested quote target was not found.",
+      };
+    }
+    if (valueRecord.currencyCode !== ownedTarget.currency_code) {
+      return {
+        ok: false,
+        status: 400,
+        message: "The price currency must match the security currency.",
+      };
+    }
+  } else {
+    const base = valueRecord.baseCurrencyCode;
+    const quote = valueRecord.quoteCurrencyCode;
+    if (
+      typeof base !== "string" ||
+      typeof quote !== "string" ||
+      !/^[A-Z]{3}$/.test(base) ||
+      !/^[A-Z]{3}$/.test(quote) ||
+      base === quote ||
+      input.targetKey !== `${base}/${quote}`
+    ) {
+      return {
+        ok: false,
+        status: 400,
+        message: "The FX target and currencies are not canonical.",
+      };
+    }
+    const pair = await context.client.get<{ id: string }>(
+      `SELECT p.id
+         FROM portfolios p
+         JOIN currencies base ON base.code = ? AND base.is_active = 1
+         JOIN currencies quote ON quote.code = ? AND quote.is_active = 1
+        WHERE p.id = ? AND p.user_id = ? AND p.base_currency_code = ?
+          AND EXISTS (
+            SELECT 1 FROM portfolio_securities ps
+            JOIN securities s ON s.id = ps.security_id
+            WHERE ps.user_id = p.user_id AND ps.portfolio_id = p.id
+              AND ps.status IN ('held', 'watch')
+              AND s.primary_currency_code = ?
+          ) LIMIT 1`,
+      [base, quote, portfolioId, context.userId, quote, base],
+    );
+    if (!pair) {
+      return {
+        ok: false,
+        status: 404,
+        message: "The requested FX target was not found for this portfolio.",
+      };
+    }
+  }
   const scope = {
-    portfolioId: portfolioId ?? null,
-    securityId: typeof input?.securityId === "string" ? input.securityId : null,
+    portfolioId,
+    securityId,
     type,
-    targetKey: input?.targetKey,
-    effectiveFrom: input?.effectiveFrom,
-    effectiveTo: input?.effectiveTo ?? null,
-    valueJson: input?.valueJson,
-    reason: input?.reason,
+    targetKey: input.targetKey,
+    effectiveFrom: input.effectiveFrom,
+    effectiveTo: input.effectiveTo ?? null,
+    valueJson: input.valueJson,
+    reason: input.reason,
     supersedesOverrideId:
       typeof input?.supersedesOverrideId === "string"
         ? input.supersedesOverrideId
@@ -205,17 +384,6 @@ export async function saveManualOverrideAction(
     requestId: context.requestId,
     calculationVersion: input?.calculationVersion,
   };
-  if (
-    !["price", "fx_rate", "security_mapping", "transaction_fx"].includes(
-      String(type),
-    ) ||
-    typeof scope.targetKey !== "string" ||
-    typeof scope.effectiveFrom !== "string" ||
-    typeof scope.valueJson !== "string" ||
-    typeof scope.reason !== "string"
-  ) {
-    return { ok: false, status: 400, message: "Override fields are invalid." };
-  }
   try {
     const result = await createOwnedManualOverrideRepository(
       context.client,
@@ -251,7 +419,7 @@ export async function removeManualOverrideAction(
   | { ok: true; override: unknown; invalidationId: string | null }
   | MarketDataActionFailure
 > {
-  const context = await getAuthenticatedSqlContext();
+  const context = await authenticatedSqlContext();
   if (!context.ok) return context;
   if (!overrideId || overrideId.length > 100) {
     return {
@@ -296,7 +464,7 @@ export async function listManualOverrideAction(
   if (!portfolioId || portfolioId.length > 100) {
     return { ok: false, status: 400, message: "A portfolio is required." };
   }
-  const context = await getAuthenticatedSqlContext(portfolioId);
+  const context = await authenticatedSqlContext(portfolioId);
   if (!context.ok) return context;
   try {
     const overrides = await createOwnedManualOverrideRepository(

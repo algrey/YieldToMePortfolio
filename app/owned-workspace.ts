@@ -12,6 +12,8 @@ export function createOwnedWorkspace(
       message: "Your private workspace is unavailable.",
       activePortfolio: null,
       portfolios: [],
+      quotes: [],
+      quoteViewState: "empty",
     };
   }
 
@@ -32,6 +34,8 @@ export function createOwnedWorkspace(
       portfolios,
       holdingCurrencyView: "native",
       settingsVersion: 1,
+      quotes: [],
+      quoteViewState: "empty",
     };
   }
 
@@ -52,5 +56,7 @@ export function createOwnedWorkspace(
     portfolios,
     holdingCurrencyView: "native",
     settingsVersion: 1,
+    quotes: [],
+    quoteViewState: "empty",
   };
 }

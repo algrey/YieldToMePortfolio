@@ -187,12 +187,15 @@ The following secondary information is relocated:
 
 Exact timestamps remain a detail/audit concern. Compact lists show a business date only when it helps interpretation.
 
+The authenticated Quotes route loads owner-constrained held/watch securities and selects validated observations plus effective owner overrides on the server. Each quote retains its own availability state independent of display sorting. Source, exact observation timestamp, reported delay, access scope, quality, and fallback reason are suppressed from the compact row but included in its accessible explanation.
+
 ## 9. Empty and error states
 
 The overflow state menu is a review aid and is not a proposed production control.
 
 - **Empty portfolio:** no fabricated zero totals; shows next-step guidance.
 - **Partial pricing:** one holding displays `Price unavailable`; its value and dependent movement/gain are unavailable; the summary changes to `Known value`, reduces the included totals, and names priced coverage.
+- **Partial quotes:** availability is attached to the durable security target before sorting; changing ticker, price, or change order cannot move the unavailable state to another quote.
 - **Provider unavailable:** retains last-known values and displays one specific banner; it does not blank the table or replace values with zero.
 - **Populated portfolio:** default fixture state.
 

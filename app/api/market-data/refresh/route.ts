@@ -1,6 +1,9 @@
-import { requestMarketDataRefreshAction } from "../../../market-data-actions";
+import { requestMarketDataRefreshAction } from "../../../market-data-actions.ts";
+import { rejectCrossSiteMutation } from "../../../mutation-request.ts";
 
 export async function POST(request: Request): Promise<Response> {
+  const rejected = rejectCrossSiteMutation(request);
+  if (rejected) return rejected;
   const result = await requestMarketDataRefreshAction(
     await request.json().catch(() => null),
   );

@@ -185,6 +185,7 @@ Provider errors are typed as authentication, entitlement, rate limit, unavailabl
 - FX refreshes required currency pairs once per daily window.
 - Dividend/split refresh runs at a lower cadence plus targeted post-event correction.
 - Manual refresh requests create/coalesce a job and return status; they do not issue one client-side provider request per holding.
+- The compact quote UI limits manual price refreshes to the most recent five calendar days. Requests in the same 15-minute target window share a deterministic idempotency key, and a successfully completed target remains rate-limited for that cooldown instead of recreating provider work.
 - Scheduled refresh jobs persist their lease and date high-water in D1, process at most five target chunks/provider requests per invocation, and keep each observation write below the 100-bound-parameter limit; observation writes and the matching checkpoint are one guarded D1 batch, active-target coalescing is unique-index enforced, configuration that exceeds query/chunk budgets fails closed, and `waitUntil` is not the durability mechanism.
 
 ### Corrections
@@ -193,6 +194,7 @@ Provider errors are typed as authentication, entitlement, rate limit, unavailabl
 - Changed historical observation invalidates snapshots from affected date.
 - Corporate-action correction invalidates the security’s affected ledger/snapshot range.
 - Manual override takes selection priority for its effective interval but does not delete source data.
+- UI price overrides use the canonical `security_id` as both durable target key and security reference, and the submitted currency must match the security master. UI FX overrides use an uppercase `BASE/QUOTE` key, active canonical currencies, and a portfolio-relevant pair whose quote currency is the portfolio base currency.
 
 ## 10. Cache and retention rules
 

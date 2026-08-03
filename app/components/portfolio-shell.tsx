@@ -11,7 +11,11 @@ import {
   type PortfolioPrototype,
   type Tone,
 } from "../prototype-data";
-import { quoteDisplayState, quoteExplanation } from "../quote-contract";
+import {
+  quoteDisplayState,
+  quoteExplanation,
+  type QuoteRow,
+} from "../quote-contract";
 import { BrandMark } from "./brand-mark";
 import { ServiceWorkerRegistration } from "./service-worker-registration";
 
@@ -48,6 +52,8 @@ export type OwnedWorkspace = {
     status: string;
     version: number;
   }>;
+  quotes?: QuoteRow[];
+  quoteViewState?: ViewState;
 };
 const primaryPortfolioSections: PortfolioSection[] = [
   "overview",
@@ -222,10 +228,6 @@ function OwnedWorkspaceScreen({
         <p>{workspace.message ?? "Try again shortly."}</p>
       </section>
     );
-  }
-
-  if (workspace.activePortfolio && activeSection === "quotes") {
-    return null;
   }
 
   if (workspace.status === "empty" || workspace.activePortfolio === null) {
@@ -673,11 +675,13 @@ function HoldingsScreen({
 
 function QuotesScreen({
   portfolio,
+  ownedQuotes,
   viewState,
   portfolioId,
   readOnly,
 }: {
   portfolio: PortfolioPrototype | null;
+  ownedQuotes?: QuoteRow[];
   viewState: ViewState;
   portfolioId: string;
   readOnly: boolean;
@@ -703,19 +707,57 @@ function QuotesScreen({
   >([]);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
+  const quoteRows = useMemo<QuoteRow[]>(() => {
+    if (ownedQuotes) return ownedQuotes;
+    const previewQuotes = portfolio?.quotes ?? [];
+    const unavailableSymbol =
+      viewState === "partial"
+        ? previewQuotes[previewQuotes.length - 1]?.symbol
+        : undefined;
+    return previewQuotes.map((quote) => {
+      const state = quoteDisplayState(
+        viewState === "provider-error" ? "stale" : "current",
+        quote.symbol !== unavailableSymbol,
+      );
+      return {
+        targetKey: quote.symbol,
+        portfolioSecurityId: quote.symbol,
+        securityId: quote.symbol,
+        symbol: quote.symbol,
+        name: quote.name,
+        currencyCode: "AUD",
+        price: quote.price,
+        change: quote.change,
+        percent: quote.percent,
+        tone: quote.tone,
+        marketDate: quote.marketDate,
+        state,
+        provenance: {
+          source: "provider",
+          providerId: "fixture-provider",
+          observationAt: null,
+          delayedMinutes: 20,
+          scope: "deployment",
+          quality: state === "stale" ? "stale_candidate" : "observed",
+          fallbackReason:
+            state === "unavailable"
+              ? "No validated fixture observation is available."
+              : "Static review fixture selected.",
+        },
+        sort: quote.sort,
+      };
+    });
+  }, [ownedQuotes, portfolio?.quotes, viewState]);
+
   const rows = useMemo(() => {
     if (sortKey === "ticker") {
-      return [...(portfolio?.quotes ?? [])].sort((left, right) => {
+      return [...quoteRows].sort((left, right) => {
         const compared = left.symbol.localeCompare(right.symbol);
         return direction === "ascending" ? compared : -compared;
       });
     }
-    return sortByExactKey(
-      portfolio?.quotes ?? [],
-      (quote) => quote.sort[sortKey],
-      direction,
-    );
-  }, [direction, portfolio?.quotes, sortKey]);
+    return sortByExactKey(quoteRows, (quote) => quote.sort[sortKey], direction);
+  }, [direction, quoteRows, sortKey]);
 
   function handleSort(nextKey: QuoteSort) {
     if (nextKey === sortKey) {
@@ -944,11 +986,8 @@ function QuotesScreen({
               onSort={handleSort}
             />
           </div>
-          {rows.map((quote, index) => {
-            const state = quoteDisplayState(
-              viewState,
-              index === rows.length - 1,
-            );
+          {rows.map((quote) => {
+            const state = quote.state;
             const unavailable = state === "unavailable";
             const explanationId = `quote-explanation-${quote.symbol.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
             return (
@@ -981,12 +1020,13 @@ function QuotesScreen({
                   {unavailable ? "—" : quote.percent}
                 </ToneValue>
                 <span id={explanationId} className="visually-hidden">
-                  {quoteExplanation(state, quote.marketDate)}
+                  {quoteExplanation(quote)}
                 </span>
               </button>
             );
           })}
-          {viewState === "provider-error" ? (
+          {viewState === "provider-error" &&
+          rows.some((quote) => quote.state !== "unavailable") ? (
             <p className="data-explanation">
               Last known observations remain visible. Exact source and
               observation times are available in the row explanation, not
@@ -998,7 +1038,10 @@ function QuotesScreen({
       {correctionOpen ? (
         <QuoteCorrectionDialog
           portfolioId={portfolioId}
-          defaultTargetKey={rows[0]?.symbol ?? ""}
+          quoteTargets={rows}
+          portfolioBaseCurrency={
+            portfolio?.homeCurrency ?? rows[0]?.currencyCode ?? "AUD"
+          }
           readOnly={readOnly}
           onClose={() => setCorrectionOpen(false)}
           onMessage={setActionMessage}
@@ -1010,19 +1053,31 @@ function QuotesScreen({
 
 function QuoteCorrectionDialog({
   portfolioId,
-  defaultTargetKey,
+  quoteTargets,
+  portfolioBaseCurrency,
   readOnly,
   onClose,
   onMessage,
 }: {
   portfolioId: string;
-  defaultTargetKey: string;
+  quoteTargets: QuoteRow[];
+  portfolioBaseCurrency: string;
   readOnly: boolean;
   onClose: () => void;
   onMessage: (message: string | null) => void;
 }) {
   const [type, setType] = useState<"price" | "fx_rate">("price");
   const [pending, setPending] = useState(false);
+  const fxTargetKeys = [
+    ...new Set(quoteTargets.map((quote) => quote.currencyCode)),
+  ]
+    .filter((currency) => currency !== portfolioBaseCurrency)
+    .map((currency) => `${currency}/${portfolioBaseCurrency}`);
+  const [selectedTargetKey, setSelectedTargetKey] = useState(
+    quoteTargets[0]?.targetKey ?? "",
+  );
+  const [selectedFxBase = "", selectedFxQuote = ""] =
+    selectedTargetKey.split("/");
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1032,20 +1087,22 @@ function QuoteCorrectionDialog({
       return;
     }
     const targetKey = String(form.get("targetKey") ?? "").trim();
+    const [fxBaseCurrency = "", fxQuoteCurrency = ""] = targetKey.split("/");
+    const selectedQuote = quoteTargets.find(
+      (quote) => quote.targetKey === targetKey,
+    );
     const effectiveFrom = String(form.get("effectiveFrom") ?? "").trim();
     const reason = String(form.get("reason") ?? "").trim();
     const valueJson =
       type === "price"
         ? JSON.stringify({
             closeDecimal: String(form.get("value") ?? "").trim(),
-            currencyCode: String(form.get("currencyCode") ?? "").trim(),
+            currencyCode: selectedQuote?.currencyCode ?? "",
           })
         : JSON.stringify({
             rateDecimal: String(form.get("value") ?? "").trim(),
-            baseCurrencyCode: String(form.get("baseCurrencyCode") ?? "").trim(),
-            quoteCurrencyCode: String(
-              form.get("quoteCurrencyCode") ?? "",
-            ).trim(),
+            baseCurrencyCode: fxBaseCurrency,
+            quoteCurrencyCode: fxQuoteCurrency,
           });
     setPending(true);
     onMessage(null);
@@ -1057,6 +1114,7 @@ function QuoteCorrectionDialog({
           portfolioId,
           type,
           targetKey,
+          securityId: type === "price" ? selectedQuote?.securityId : null,
           effectiveFrom,
           valueJson,
           reason,
@@ -1094,9 +1152,16 @@ function QuoteCorrectionDialog({
           Correction type
           <select
             value={type}
-            onChange={(event) =>
-              setType(event.target.value === "fx_rate" ? "fx_rate" : "price")
-            }
+            onChange={(event) => {
+              const nextType =
+                event.target.value === "fx_rate" ? "fx_rate" : "price";
+              setType(nextType);
+              setSelectedTargetKey(
+                nextType === "price"
+                  ? (quoteTargets[0]?.targetKey ?? "")
+                  : (fxTargetKeys[0] ?? ""),
+              );
+            }}
           >
             <option value="price">Price</option>
             <option value="fx_rate">FX rate</option>
@@ -1104,7 +1169,24 @@ function QuoteCorrectionDialog({
         </label>
         <label>
           Target key
-          <input name="targetKey" required defaultValue={defaultTargetKey} />
+          <select
+            name="targetKey"
+            required
+            value={selectedTargetKey}
+            onChange={(event) => setSelectedTargetKey(event.target.value)}
+          >
+            {type === "price"
+              ? quoteTargets.map((quote) => (
+                  <option key={quote.securityId} value={quote.targetKey}>
+                    {quote.symbol} · {quote.name} ({quote.currencyCode})
+                  </option>
+                ))
+              : fxTargetKeys.map((pair) => (
+                  <option key={pair} value={pair}>
+                    {pair}
+                  </option>
+                ))}
+          </select>
         </label>
         <label>
           Effective date
@@ -1114,23 +1196,14 @@ function QuoteCorrectionDialog({
           {type === "price" ? "Price" : "Rate"}
           <input name="value" inputMode="decimal" required />
         </label>
-        {type === "price" ? (
-          <label>
-            Currency
-            <input
-              name="currencyCode"
-              defaultValue="AUD"
-              maxLength={3}
-              required
-            />
-          </label>
-        ) : (
+        {type === "fx_rate" ? (
           <div className="quote-dialog-grid">
             <label>
               Base currency
               <input
                 name="baseCurrencyCode"
-                defaultValue="USD"
+                value={selectedFxBase}
+                readOnly
                 maxLength={3}
                 required
               />
@@ -1139,13 +1212,14 @@ function QuoteCorrectionDialog({
               Quote currency
               <input
                 name="quoteCurrencyCode"
-                defaultValue="AUD"
+                value={selectedFxQuote}
+                readOnly
                 maxLength={3}
                 required
               />
             </label>
           </div>
-        )}
+        ) : null}
         <label>
           Reason
           <textarea name="reason" required maxLength={500} />
@@ -1983,9 +2057,10 @@ export function PortfolioShell({
         ownedWorkspace.activePortfolio ? (
           <QuotesScreen
             portfolio={null}
+            ownedQuotes={ownedWorkspace.quotes ?? []}
             portfolioId={ownedWorkspace.activePortfolio.id}
             readOnly={false}
-            viewState="empty"
+            viewState={ownedWorkspace.quoteViewState ?? "empty"}
           />
         ) : null}
         {!ownedMode && activeSection === "details" ? (

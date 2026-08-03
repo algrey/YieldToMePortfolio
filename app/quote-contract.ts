@@ -1,29 +1,66 @@
+import type { Tone } from "./prototype-data.ts";
+
 export type QuoteDisplayState =
-  "current" | "fallback" | "stale" | "partial" | "unavailable";
+  "current" | "fallback" | "stale" | "unavailable";
+
+export type QuoteProvenance = {
+  source: "provider" | "manual" | "none";
+  providerId: string | null;
+  observationAt: string | null;
+  delayedMinutes: number | null;
+  scope: "deployment" | "owner" | "none";
+  quality: string | null;
+  fallbackReason: string;
+};
+
+export type QuoteRow = {
+  targetKey: string;
+  portfolioSecurityId: string;
+  securityId: string;
+  symbol: string;
+  name: string;
+  currencyCode: string;
+  price: string;
+  change: string;
+  percent: string;
+  tone: Tone;
+  marketDate: string;
+  state: QuoteDisplayState;
+  provenance: QuoteProvenance;
+  sort: { ticker: string; price: string; change: string };
+};
 
 export function quoteDisplayState(
-  viewState: "populated" | "empty" | "partial" | "provider-error",
-  isLastRow: boolean,
+  selectionState: QuoteDisplayState,
+  hasUsablePrice: boolean,
 ): QuoteDisplayState {
-  if (viewState === "partial" && isLastRow) return "unavailable";
-  if (viewState === "provider-error") return "stale";
-  return "current";
+  return hasUsablePrice ? selectionState : "unavailable";
 }
 
-export function quoteExplanation(
-  state: QuoteDisplayState,
-  businessDate: string,
-): string {
-  switch (state) {
-    case "current":
-      return `Validated quote for ${businessDate}. Routine source and timestamp details are available in the quote explanation.`;
-    case "fallback":
-      return `Fallback quote dated ${businessDate}. The selected observation is retained with its source and fallback reason.`;
-    case "stale":
-      return `Last-known quote dated ${businessDate}. The provider is unavailable or the observation is stale; refresh can be retried.`;
-    case "partial":
-      return `Partial pricing: this quote is not included because its usable price is missing.`;
-    case "unavailable":
-      return "Price unavailable: no usable price exists for this quote.";
+export function quoteExplanation(quote: QuoteRow): string {
+  const { state, marketDate, provenance } = quote;
+  const source =
+    provenance.source === "provider"
+      ? `provider ${provenance.providerId ?? "unknown"}`
+      : provenance.source === "manual"
+        ? "owner-entered manual correction"
+        : "no source";
+  const timestamp = provenance.observationAt ?? "not available";
+  const delay =
+    provenance.delayedMinutes === null
+      ? "delay not reported"
+      : `${provenance.delayedMinutes} minute delay`;
+  const quality = provenance.quality ?? "not available";
+  const details = `Source: ${source}; observation timestamp: ${timestamp}; ${delay}; scope: ${provenance.scope}; quality: ${quality}; fallback: ${provenance.fallbackReason}.`;
+
+  if (state === "unavailable") {
+    return `Price unavailable: no usable price exists for this quote. ${details}`;
   }
+  if (state === "stale") {
+    return `Last-known quote dated ${marketDate}; the observation is stale. ${details}`;
+  }
+  if (state === "fallback") {
+    return `Fallback quote dated ${marketDate}. ${details}`;
+  }
+  return `Validated quote for ${marketDate}. ${details}`;
 }

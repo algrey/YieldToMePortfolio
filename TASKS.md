@@ -753,11 +753,11 @@ Status: PENDING.
 
 ### UI-004 — Compact quotes, refresh, and overrides
 
-Status: IN PROGRESS (review 2026-08-03).
+Status: DONE (2026-08-03).
 
 - Objective: expose compact quote views and controlled refresh/correction workflows without calling EOD data live.
 - Dependencies: UI-001, MKT-003B.
-- Requirements: MKT-003, MKT-005, MKT-006, MKT-008, QUAL-001.
+- Requirements: AUTH-004, MKT-003, MKT-005, MKT-006, MKT-008, QUAL-001.
 - Files: Quotes route/components/actions/tests.
 - Deliver: preferred observation, EOD/manual fallback, previous close/change, refresh state, manual price/FX override with reason/history; `Price unavailable` only when no usable price exists.
 - Acceptance: active quotes prefer the approved source; compact quote/holding views generally suppress timestamps, source, delay, and fallback labels; state remains accessible in an explanation and inline status is reserved for action-required conditions; refresh is coalesced/rate-limited; overrides are reversible.
@@ -766,6 +766,7 @@ Status: IN PROGRESS (review 2026-08-03).
 - Parallel safe: yes.
 - Completion: Added compact quote state explanations, honest missing/stale/partial handling, owner-scoped no-store refresh and correction endpoints, durable coalesced refresh requests, reversible price/FX correction UI, and accessibility/regression coverage.
 - Review findings: The authenticated portfolio route always renders Quotes with a null portfolio and `empty` state, so owner quote data never appears. The compact explanation only contains a generic business date and does not expose the selected source, timestamp, delay, scope, quality, or fallback reason; partial pricing is inferred from the last rendered row and changes when sorting. The correction dialog sends a display symbol even though the domain override selector uses a durable target key, so corrections may never apply to the intended quote, and server validation does not verify currencies/targets against canonical records. Refresh requests default idempotency to a per-request ID, accept arbitrarily large historical ranges, and have no post-completion rate limit, so repeated/concurrent requests can recreate provider work. The new mutation routes also do not enforce the documented Origin/Sec-Fetch same-origin checks. Add an owner-scoped quote read path, provenance-backed state and durable target mapping, canonical override validation, bounded/rate-limited refresh requests, mutation CSRF checks, and endpoint/concurrency/responsive regression coverage before marking this task done.
+- Review resolution: Added the owner-scoped quote read model and provenance-backed per-security state; corrections now submit and validate canonical security/FX targets and currencies; browser mutations enforce same-origin metadata; UI refreshes are bounded to five days, deterministic under concurrency, and subject to a 15-minute post-completion cooldown. Behavioral integration tests cover quote loading, stable partial state, endpoint rejection, canonical corrections, concurrent refresh coalescing, and cooldown. Responsive quote actions/table/dialog were verified at 320, 390, 430, and 1,440 px with no horizontal overflow.
 
 ### UI-005A — Portfolio settings and ledger inspection
 

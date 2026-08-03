@@ -31,7 +31,9 @@ export default async function PortfolioSectionPage({
   }
 
   if (portfolioId !== "preview") {
-    const workspace = await loadAuthenticatedWorkspace(portfolioId);
+    const workspace = await loadAuthenticatedWorkspace(portfolioId, {
+      includeQuotes: section === "quotes",
+    });
     if (workspace.status === "unavailable") {
       return (
         <PortfolioShell
