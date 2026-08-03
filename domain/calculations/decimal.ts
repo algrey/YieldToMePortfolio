@@ -1,6 +1,35 @@
+import Decimal from "decimal.js";
+
+export const DECIMAL_LIMITS = Object.freeze({
+  inputDigits: 64,
+  inputScale: 24,
+  exactResultDigits: 256,
+  resultScale: 96,
+  allocationScale: 24,
+  workingPrecision: 320,
+});
+
+const FinancialDecimal = Decimal.clone({
+  precision: DECIMAL_LIMITS.workingPrecision,
+  rounding: Decimal.ROUND_HALF_EVEN,
+  toExpNeg: -1_000,
+  toExpPos: 1_000,
+  minE: -1_000,
+  maxE: 1_000,
+});
+
+/**
+ * Opaque exact-decimal value. The legacy name is retained for callers, but the
+ * implementation is decimal.js rather than a bespoke fraction type.
+ */
+const DECIMAL_VALUE: unique symbol = Symbol("financial-decimal-value");
+const DECIMAL_SOURCE_SCALE: unique symbol = Symbol("financial-decimal-scale");
+const DECIMAL_EXACT_DIGITS: unique symbol = Symbol("financial-decimal-digits");
+
 export type DecimalFraction = Readonly<{
-  numerator: bigint;
-  denominator: bigint;
+  [DECIMAL_VALUE]: Decimal;
+  [DECIMAL_SOURCE_SCALE]: number | null;
+  [DECIMAL_EXACT_DIGITS]: number | null;
 }>;
 
 export type DecimalRoundingMode = "half-even";
@@ -25,115 +54,154 @@ export type ProportionalAllocationResult =
       reason:
         | "invalid_decimal"
         | "invalid_scale"
+        | "negative_total"
+        | "invalid_allocated"
         | "non_positive_denominator"
         | "part_exceeds_denominator";
     };
 
-const POW10_CACHE: bigint[] = [1n];
+const DECIMAL_PATTERN = /^-?(0|[1-9]\d*)(?:\.(\d+))?$/;
 
-function pow10(scale: number): bigint {
-  if (!Number.isSafeInteger(scale) || scale < 0) {
-    throw new Error("Decimal scale must be a non-negative safe integer.");
-  }
-  while (POW10_CACHE.length <= scale) {
-    const previous = POW10_CACHE[POW10_CACHE.length - 1] ?? 1n;
-    POW10_CACHE.push(previous * 10n);
-  }
-  return POW10_CACHE[scale] ?? 1n;
+function validScale(scale: number, maximum: number): boolean {
+  return Number.isSafeInteger(scale) && scale >= 0 && scale <= maximum;
 }
 
-function gcd(left: bigint, right: bigint): bigint {
-  let a = left < 0n ? -left : left;
-  let b = right < 0n ? -right : right;
-  while (b !== 0n) {
-    const next = a % b;
-    a = b;
-    b = next;
-  }
-  return a;
-}
-
-function normalizeFraction(
-  numerator: bigint,
-  denominator: bigint,
+function wrap(
+  decimal: Decimal,
+  sourceScale: number | null,
+  exactDigits: number | null,
 ): DecimalFraction {
-  if (denominator === 0n)
-    throw new Error("Decimal denominator cannot be zero.");
-  if (numerator === 0n) return { numerator: 0n, denominator: 1n };
+  if (!decimal.isFinite()) throw new Error("Invalid decimal result.");
+  if (exactDigits !== null && exactDigits > DECIMAL_LIMITS.exactResultDigits) {
+    throw new Error("Decimal result precision exceeds the supported boundary.");
+  }
+  return Object.freeze({
+    [DECIMAL_VALUE]: decimal,
+    [DECIMAL_SOURCE_SCALE]: sourceScale,
+    [DECIMAL_EXACT_DIGITS]: exactDigits,
+  });
+}
 
-  const sign = denominator < 0n ? -1n : 1n;
-  const normalizedNumerator = numerator * sign;
-  const normalizedDenominator = denominator < 0n ? -denominator : denominator;
-  const divisor = gcd(normalizedNumerator, normalizedDenominator);
-  return {
-    numerator: normalizedNumerator / divisor,
-    denominator: normalizedDenominator / divisor,
-  };
+const decimalValue = (value: DecimalFraction): Decimal => value[DECIMAL_VALUE];
+const sourceScale = (value: DecimalFraction): number | null =>
+  value[DECIMAL_SOURCE_SCALE];
+const exactDigitCount = (value: DecimalFraction): number | null =>
+  value[DECIMAL_EXACT_DIGITS];
+
+function combinedScale(
+  left: DecimalFraction,
+  right: DecimalFraction,
+  operation: "add" | "multiply",
+): number | null {
+  if (sourceScale(left) === null || sourceScale(right) === null) return null;
+  const scale =
+    operation === "add"
+      ? Math.max(sourceScale(left)!, sourceScale(right)!)
+      : sourceScale(left)! + sourceScale(right)!;
+  if (!validScale(scale, DECIMAL_LIMITS.resultScale)) {
+    throw new Error("Decimal result scale exceeds the supported boundary.");
+  }
+  return scale;
+}
+
+function trimFixed(value: string): string {
+  const trimmed = value
+    .replace(/(?:\.0+|(\.\d+?)0+)$/, "$1")
+    .replace(/\.$/, "");
+  return trimmed === "-0" ? "0" : trimmed;
 }
 
 export function parseDecimal(value: string): DecimalFraction {
-  const match = /^([+-]?)(\d+)(?:\.(\d+))?$/.exec(value.trim());
-  if (match === null) throw new Error(`Invalid decimal string: ${value}`);
-
-  const sign = match[1] === "-" ? -1n : 1n;
-  const integerDigits = match[2] ?? "0";
-  const fractionDigits = match[3] ?? "";
-  const digits = `${integerDigits}${fractionDigits}`.replace(/^0+(?=\d)/, "");
-  return normalizeFraction(
-    BigInt(digits.length > 0 ? digits : "0") * sign,
-    pow10(fractionDigits.length),
-  );
+  const match = DECIMAL_PATTERN.exec(value);
+  if (match === null) throw new Error("Invalid decimal string.");
+  if (/^-0(?:\.0+)?$/.test(value)) {
+    throw new Error("Invalid decimal string: negative zero is not canonical.");
+  }
+  const fraction = match[2] ?? "";
+  const digitCount = value.replace("-", "").replace(".", "").length;
+  if (
+    digitCount > DECIMAL_LIMITS.inputDigits ||
+    fraction.length > DECIMAL_LIMITS.inputScale
+  ) {
+    throw new Error("Invalid decimal string: supported boundary exceeded.");
+  }
+  const decimal = new FinancialDecimal(value);
+  return wrap(decimal, fraction.length, decimal.sd());
 }
 
 export function fromInteger(value: bigint): DecimalFraction {
-  return { numerator: value, denominator: 1n };
+  const text = value.toString();
+  if (text.replace("-", "").length > DECIMAL_LIMITS.inputDigits) {
+    throw new Error("Invalid decimal integer: supported boundary exceeded.");
+  }
+  const decimal = new FinancialDecimal(text);
+  return wrap(decimal, 0, decimal.sd());
 }
 
 export function isZero(value: DecimalFraction): boolean {
-  return value.numerator === 0n;
+  return decimalValue(value).isZero();
 }
 
 export function compareDecimal(
   left: DecimalFraction,
   right: DecimalFraction,
 ): number {
-  const leftNumerator = left.numerator * right.denominator;
-  const rightNumerator = right.numerator * left.denominator;
-  return leftNumerator === rightNumerator
-    ? 0
-    : leftNumerator < rightNumerator
-      ? -1
-      : 1;
+  return decimalValue(left).comparedTo(decimalValue(right));
 }
 
 export function addDecimal(
   left: DecimalFraction,
   right: DecimalFraction,
 ): DecimalFraction {
-  return normalizeFraction(
-    left.numerator * right.denominator + right.numerator * left.denominator,
-    left.denominator * right.denominator,
+  return wrap(
+    decimalValue(left).plus(decimalValue(right)),
+    combinedScale(left, right, "add"),
+    exactDigitCount(left) === null || exactDigitCount(right) === null
+      ? null
+      : decimalValue(left).plus(decimalValue(right)).sd(),
   );
 }
 
 export function negateDecimal(value: DecimalFraction): DecimalFraction {
-  return { numerator: -value.numerator, denominator: value.denominator };
+  return wrap(
+    decimalValue(value).negated(),
+    sourceScale(value),
+    exactDigitCount(value),
+  );
 }
 
 export function subtractDecimal(
   left: DecimalFraction,
   right: DecimalFraction,
 ): DecimalFraction {
-  return addDecimal(left, negateDecimal(right));
+  return wrap(
+    decimalValue(left).minus(decimalValue(right)),
+    combinedScale(left, right, "add"),
+    exactDigitCount(left) === null || exactDigitCount(right) === null
+      ? null
+      : decimalValue(left).minus(decimalValue(right)).sd(),
+  );
 }
 
 export function multiplyDecimal(
   left: DecimalFraction,
   right: DecimalFraction,
 ): DecimalFraction {
-  return normalizeFraction(
-    left.numerator * right.numerator,
-    left.denominator * right.denominator,
+  const productDigitBound =
+    exactDigitCount(left) === null || exactDigitCount(right) === null
+      ? null
+      : exactDigitCount(left)! + exactDigitCount(right)!;
+  if (
+    productDigitBound !== null &&
+    productDigitBound > DECIMAL_LIMITS.exactResultDigits
+  ) {
+    throw new Error("Decimal result precision exceeds the supported boundary.");
+  }
+  const product = decimalValue(left).times(decimalValue(right));
+  return wrap(
+    product,
+    combinedScale(left, right, "multiply"),
+    productDigitBound === null ? null : product.sd(),
   );
 }
 
@@ -141,24 +209,8 @@ export function divideDecimal(
   left: DecimalFraction,
   right: DecimalFraction,
 ): DecimalFraction {
-  if (right.numerator === 0n) throw new Error("Cannot divide by zero.");
-  return normalizeFraction(
-    left.numerator * right.denominator,
-    left.denominator * right.numerator,
-  );
-}
-
-function roundHalfEvenInteger(numerator: bigint, denominator: bigint): bigint {
-  const quotient = numerator / denominator;
-  const remainder = numerator % denominator;
-  const doubledRemainder = remainder * 2n;
-  if (
-    doubledRemainder > denominator ||
-    (doubledRemainder === denominator && quotient % 2n !== 0n)
-  ) {
-    return quotient + 1n;
-  }
-  return quotient;
+  if (decimalValue(right).isZero()) throw new Error("Cannot divide by zero.");
+  return wrap(decimalValue(left).dividedBy(decimalValue(right)), null, null);
 }
 
 export function roundDecimal(
@@ -167,15 +219,13 @@ export function roundDecimal(
   _mode: DecimalRoundingMode = "half-even",
 ): DecimalFraction {
   void _mode;
-  const absoluteNumerator =
-    value.numerator < 0n ? -value.numerator : value.numerator;
-  const rounded = roundHalfEvenInteger(
-    absoluteNumerator * pow10(scale),
-    value.denominator,
-  );
-  return normalizeFraction(
-    value.numerator < 0n ? -rounded : rounded,
-    pow10(scale),
+  if (!validScale(scale, DECIMAL_LIMITS.resultScale)) {
+    throw new Error("Decimal scale is outside the supported boundary.");
+  }
+  return wrap(
+    decimalValue(value).toDecimalPlaces(scale, Decimal.ROUND_HALF_EVEN),
+    scale,
+    decimalValue(value).toDecimalPlaces(scale, Decimal.ROUND_HALF_EVEN).sd(),
   );
 }
 
@@ -183,22 +233,13 @@ export function formatDecimalFixed(
   value: DecimalFraction,
   scale: number,
 ): string {
-  const divisor = pow10(scale);
-  const absoluteNumerator =
-    value.numerator < 0n ? -value.numerator : value.numerator;
-  const roundedInteger = roundHalfEvenInteger(
-    absoluteNumerator * divisor,
-    value.denominator,
-  );
-  const signedRoundedInteger =
-    value.numerator < 0n ? -roundedInteger : roundedInteger;
-  const absoluteRoundedInteger =
-    signedRoundedInteger < 0n ? -signedRoundedInteger : signedRoundedInteger;
-  const integerPart = absoluteRoundedInteger / divisor;
-  const fractionPart = absoluteRoundedInteger % divisor;
-  const sign = signedRoundedInteger < 0n ? "-" : "";
-  if (scale === 0) return `${sign}${integerPart}`;
-  return `${sign}${integerPart}.${fractionPart.toString().padStart(scale, "0")}`;
+  if (!validScale(scale, DECIMAL_LIMITS.resultScale)) {
+    throw new Error("Decimal scale is outside the supported boundary.");
+  }
+  const formatted = decimalValue(value).toFixed(scale, Decimal.ROUND_HALF_EVEN);
+  return /^-0(?:\.0+)?$/.test(formatted)
+    ? formatted.replace("-", "")
+    : formatted;
 }
 
 export function formatDecimalTrimmed(
@@ -207,8 +248,16 @@ export function formatDecimalTrimmed(
   options: DecimalOptions = {},
 ): string {
   const fixed = formatDecimalFixed(value, scale);
-  if (options.trimTrailingZeros === false || !fixed.includes(".")) return fixed;
-  return fixed.replace(/(?:\.0+|(\.\d+?)0+)$/, "$1").replace(/\.$/, "");
+  return options.trimTrailingZeros === false ? fixed : trimFixed(fixed);
+}
+
+export function formatDecimalExact(value: DecimalFraction): string {
+  if (sourceScale(value) === null) {
+    throw new Error("An explicit rounding scale is required for division.");
+  }
+  return trimFixed(
+    decimalValue(value).toFixed(sourceScale(value)!, Decimal.ROUND_HALF_EVEN),
+  );
 }
 
 export function toDecimal(
@@ -216,7 +265,11 @@ export function toDecimal(
 ): DecimalFraction {
   if (typeof value === "bigint") return fromInteger(value);
   if (typeof value === "string") return parseDecimal(value);
-  return normalizeFraction(value.numerator, value.denominator);
+  return wrap(
+    new FinancialDecimal(decimalValue(value)),
+    sourceScale(value),
+    exactDigitCount(value),
+  );
 }
 
 export function toIntegerString(value: DecimalFraction): string {
@@ -227,7 +280,7 @@ export function allocateProportional(
   input: ProportionalAllocationInput,
 ): ProportionalAllocationResult {
   const scale = input.scale ?? 18;
-  if (!Number.isSafeInteger(scale) || scale < 0) {
+  if (!validScale(scale, DECIMAL_LIMITS.allocationScale)) {
     return { ok: false, reason: "invalid_scale" };
   }
 
@@ -243,13 +296,20 @@ export function allocateProportional(
   } catch {
     return { ok: false, reason: "invalid_decimal" };
   }
-  if (compareDecimal(denominator, fromInteger(0n)) <= 0) {
-    return { ok: false, reason: "non_positive_denominator" };
+  const zero = fromInteger(0n);
+  if (compareDecimal(total, zero) < 0) {
+    return { ok: false, reason: "negative_total" };
   }
   if (
-    compareDecimal(part, fromInteger(0n)) < 0 ||
-    compareDecimal(part, denominator) > 0
+    compareDecimal(allocated, zero) < 0 ||
+    compareDecimal(allocated, total) > 0
   ) {
+    return { ok: false, reason: "invalid_allocated" };
+  }
+  if (compareDecimal(denominator, zero) <= 0) {
+    return { ok: false, reason: "non_positive_denominator" };
+  }
+  if (compareDecimal(part, zero) < 0 || compareDecimal(part, denominator) > 0) {
     return { ok: false, reason: "part_exceeds_denominator" };
   }
 

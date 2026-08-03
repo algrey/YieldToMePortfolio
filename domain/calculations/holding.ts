@@ -1,6 +1,7 @@
 import {
   addDecimal,
   compareDecimal,
+  formatDecimalExact,
   formatDecimalTrimmed,
   fromInteger,
   divideDecimal,
@@ -22,6 +23,9 @@ export type CalculationUnavailableReason =
   | "zero_basis"
   | "missing_proceeds"
   | "missing_matched_basis"
+  | "invalid_proceeds"
+  | "invalid_realised_gain"
+  | "too_many_lots"
   | "invalid_input";
 
 export type CalculationValue =
@@ -55,6 +59,7 @@ export type SingleDateHoldingResult = Readonly<{
 }>;
 
 const ZERO = fromInteger(0n);
+export const CALCULATION_LIMITS = Object.freeze({ maxHoldingLots: 10_000 });
 
 function unavailable(reason: CalculationUnavailableReason): CalculationValue {
   return { status: "unavailable", reason };
@@ -66,10 +71,13 @@ function unavailableReason(
   return value.status === "unavailable" ? value.reason : "invalid_input";
 }
 
-function available(value: DecimalFraction, scale = 18): CalculationValue {
+function available(value: DecimalFraction, scale?: number): CalculationValue {
   return {
     status: "available",
-    valueDecimal: formatDecimalTrimmed(value, scale),
+    valueDecimal:
+      scale === undefined
+        ? formatDecimalExact(value)
+        : formatDecimalTrimmed(value, scale),
   };
 }
 
@@ -145,8 +153,17 @@ export function calculateNativeMarketValue(
 export function calculateOpenBasis(
   lots: readonly HoldingLotBasis[],
 ): CalculationValue {
+  if (lots.length > CALCULATION_LIMITS.maxHoldingLots) {
+    return unavailable("too_many_lots");
+  }
   let total = ZERO;
   for (const lot of lots) {
+    const quantity = positive(
+      lot.remainingQuantityDecimal,
+      "missing_quantity",
+      "invalid_quantity",
+    );
+    if (isCalculationValue(quantity)) return quantity;
     if (lot.remainingBasisDecimal === null)
       return unavailable("incomplete_basis");
     const basis = nonNegative(
@@ -166,12 +183,15 @@ export function calculateRealisedGain(
     matchedBasisDecimal: string | null;
   }>,
 ): CalculationValue {
-  const proceeds = nonNegative(
-    input.netProceedsDecimal,
-    "missing_proceeds",
-    "invalid_input",
-  );
-  if (isCalculationValue(proceeds)) return proceeds;
+  if (input.netProceedsDecimal === null) {
+    return unavailable("missing_proceeds");
+  }
+  let proceeds: DecimalFraction;
+  try {
+    proceeds = parseDecimal(input.netProceedsDecimal);
+  } catch {
+    return unavailable("invalid_proceeds");
+  }
   const basis = nonNegative(
     input.matchedBasisDecimal,
     "missing_matched_basis",
@@ -246,7 +266,7 @@ export function calculateSingleDateHolding(
           try {
             return available(parseDecimal(input.realisedGainDecimal));
           } catch {
-            return unavailable("invalid_input");
+            return unavailable("invalid_realised_gain");
           }
         })();
   const totalGain =

@@ -2,6 +2,7 @@ import {
   addDecimal,
   divideDecimal,
   formatDecimalTrimmed,
+  isZero,
   multiplyDecimal,
   parseDecimal,
   type DecimalFraction,
@@ -139,7 +140,7 @@ export function convertValueWithFx(
   }
 
   const rate = parseDecimal(fxRate);
-  if (rate.numerator === 0n) {
+  if (isZero(rate)) {
     return null;
   }
 

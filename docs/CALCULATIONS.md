@@ -9,11 +9,13 @@ This document defines financial behavior. Interface labels and implementations m
 
 ### Decimal arithmetic
 
-- Parse quantity, money, price, rate, percentage, and allocation values with an arbitrary-precision decimal library.
+- Parse quantity, money, price, rate, percentage, and allocation values through the `decimal.js` `10.6.0` domain wrapper. Callers may supply canonical decimal strings or internal decimal values only; JavaScript `number` is excluded from the contract.
 - Never use JavaScript `number` for a financial calculation or equality decision.
 - Preserve source precision in normalized observations and transactions.
 - Use canonical decimal strings for persistence and API transport.
 - Reject NaN, infinity, exponent notation, locale separators after parsing, and zero/negative rates where prohibited.
+- A source decimal is bounded to 64 digits and 24 fractional places before construction. Exact operation chains are bounded to 256 significant digits and 96 fractional places with 320 working digits; work outside those limits fails closed instead of allocating an unbounded power or silently rounding.
+- Addition, subtraction, and multiplication retain their exact finite result scale. Division is marked as requiring an explicit rounding scale and cannot be serialized as an exact stored result without that boundary.
 
 ### Currency direction
 
@@ -36,6 +38,7 @@ Native price/transaction observations remain stored in `N`. Holding projections,
 - Display percentage to two decimal places by default.
 - Use decimal half-even for report/display rounding.
 - Allocation uses proportional unrounded values, rounds each except the final allocation, and assigns the exact remainder to the final item so totals reconcile.
+- Allocation scale is explicitly bounded to 24 places; negative totals, non-positive denominators, invalid parts, and allocated amounts outside zero-to-total fail with stable reasons.
 
 ### Signs
 

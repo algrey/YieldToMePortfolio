@@ -3,6 +3,7 @@ export {
   allocateProportional,
   compareDecimal,
   divideDecimal,
+  formatDecimalExact,
   formatDecimalFixed,
   formatDecimalTrimmed,
   fromInteger,
@@ -18,6 +19,7 @@ export {
   type DecimalRoundingMode,
   type ProportionalAllocationInput,
   type ProportionalAllocationResult,
+  DECIMAL_LIMITS,
 } from "./decimal.ts";
 export {
   calculateHolding,
@@ -25,6 +27,7 @@ export {
   calculateOpenBasis,
   calculateRealisedGain,
   calculateSingleDateHolding,
+  CALCULATION_LIMITS,
   type CalculationUnavailableReason,
   type CalculationValue,
   type HoldingLotBasis,

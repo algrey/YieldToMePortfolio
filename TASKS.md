@@ -420,7 +420,7 @@ Status: DONE (2026-07-30).
 
 ### IMP-003A — Idempotent import commit and resume
 
-Status: IN PROGRESS (review 2026-08-03).
+Status: DONE (2026-08-03).
 
 - Objective: turn an approved staged batch into bounded, resumable ledger effects with no duplicate visibility.
 - Dependencies: LED-001B, LED-002B, IMP-002B, OPS-001.
@@ -650,6 +650,7 @@ Status: IN PROGRESS (review 2026-08-03).
 - Parallel safe: yes with market adapters using fixture contracts.
 - Completion note: Added the exact-decimal calculation foundation, proportional allocation with reconciled final residuals, native holding value/basis/gain results, stable unavailable reasons, and deterministic FIFO calculation fixtures. Existing preview decimal callers now use the shared domain implementation.
 - Review findings: The implementation is a bespoke bigint fraction rather than the documented reviewed arbitrary-precision decimal dependency, accepts unbounded decimal length/scale (including potentially unbounded `pow10` work), and rounds most available holding/basis/gain outputs to 18 places despite the calculation rules requiring source precision to be retained. The “FIFO” fixture supplies precomputed basis/realised gain instead of exercising the ledger FIFO result, and the required invariant/property coverage is absent for malformed inputs, denominator/scale boundaries, negative/zero cases, and allocation reconciliation. An explicit `null` previous price was also reported as `missing_price`; this review corrects it to the stable `missing_previous_price` reason. Complete bounded, source-precision-safe decimal semantics and ledger-integrated invariant coverage before marking this task done. This domain task has no mobile surface.
+- Review resolution: Replaced the bespoke fraction with exact-pinned `decimal.js` `10.6.0` behind canonical string-only input and bounded input/result/allocation limits; exact finite holding, basis, and gain outputs now retain their calculated source scale while division and display/allocation rounding remain explicit. The CALC fixture derives remaining quantity/basis and realised gain from the production FIFO allocator, and deterministic invariant coverage now exercises malformed and boundary inputs, algebraic identities, zero/negative states, named unavailable reasons, and final-residual reconciliation. The Worker production build verifies the dependency’s runtime compatibility; no mobile validation applies to this pure domain task.
 
 ### CALC-001B — FX conversion, daily movement, and partial totals
 

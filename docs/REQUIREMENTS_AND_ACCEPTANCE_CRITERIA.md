@@ -270,6 +270,7 @@ Acceptance:
 - No calculation path uses binary floating point for financial values.
 - Intermediate calculations retain provider/import precision.
 - Rounding occurs only at defined output or allocation boundaries.
+- Decimal length, source scale, exact-result precision, and allocation scale are bounded and fail closed with deterministic reasons when exceeded.
 
 ### CALC-002 — Current market value
 

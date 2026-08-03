@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  DECIMAL_LIMITS,
+  CALCULATION_LIMITS,
   addDecimal,
   allocateProportional,
   calculateNativeMarketValue,
@@ -9,106 +11,184 @@ import {
   calculateSingleDateHolding,
   compareDecimal,
   divideDecimal,
+  formatDecimalExact,
   formatDecimalFixed,
   multiplyDecimal,
   parseDecimal,
   roundDecimal,
   subtractDecimal,
 } from "../domain/calculations/index.ts";
+import { allocateFifoSale, createFifoLot } from "../domain/ledger/index.ts";
 import {
   expectedFifoHoldingResult,
   fifoHoldingFixture,
 } from "./fixtures/calc-001a.ts";
 
-test("decimal primitives preserve exact values and use half-even boundaries", () => {
+test("reviewed decimal primitives preserve bounded source precision and half-even rounding", () => {
   const large = multiplyDecimal(
     parseDecimal("123456789012345678.90"),
     parseDecimal("3"),
   );
-  assert.equal(formatDecimalFixed(large, 2), "370370367037037036.70");
+  assert.equal(formatDecimalExact(large), "370370367037037036.7");
+  assert.equal(
+    formatDecimalExact(
+      multiplyDecimal(
+        parseDecimal("0.123456789012345678901234"),
+        parseDecimal("7.654321098765432109876543"),
+      ),
+    ),
+    "0.944977904923029902975151828684588861743630354062",
+  );
+  assert.deepEqual(
+    calculateNativeMarketValue({
+      quantityDecimal: "0.123456789012345678901234",
+      priceDecimal: "7.654321098765432109876543",
+    }),
+    {
+      status: "available",
+      valueDecimal: "0.944977904923029902975151828684588861743630354062",
+    },
+  );
+  assert.deepEqual(
+    calculateOpenBasis([
+      {
+        remainingQuantityDecimal: "1",
+        remainingBasisDecimal: "0.123456789012345678901234",
+      },
+      {
+        remainingQuantityDecimal: "1",
+        remainingBasisDecimal: "0.000000000000000000000001",
+      },
+    ]),
+    { status: "available", valueDecimal: "0.123456789012345678901235" },
+  );
+  assert.deepEqual(
+    calculateRealisedGain({
+      netProceedsDecimal: "100.123456789012345678901234",
+      matchedBasisDecimal: "0.000000000000000000000001",
+    }),
+    { status: "available", valueDecimal: "100.123456789012345678901233" },
+  );
   assert.equal(
     formatDecimalFixed(addDecimal(parseDecimal("0.1"), parseDecimal("0.2")), 2),
     "0.30",
   );
-  assert.equal(
-    formatDecimalFixed(roundDecimal(parseDecimal("2.5"), 0), 0),
-    "2",
+  assert.throws(
+    () =>
+      formatDecimalExact(divideDecimal(parseDecimal("1"), parseDecimal("3"))),
+    /explicit rounding scale is required/,
   );
-  assert.equal(
-    formatDecimalFixed(roundDecimal(parseDecimal("3.5"), 0), 0),
-    "4",
-  );
-  assert.equal(
-    formatDecimalFixed(roundDecimal(parseDecimal("-2.5"), 0), 0),
-    "-2",
-  );
-  assert.equal(
-    formatDecimalFixed(roundDecimal(parseDecimal("-3.5"), 0), 0),
-    "-4",
-  );
+  for (const [input, expected] of [
+    ["2.5", "2"],
+    ["3.5", "4"],
+    ["-2.5", "-2"],
+    ["-3.5", "-4"],
+  ] as const) {
+    assert.equal(
+      formatDecimalFixed(roundDecimal(parseDecimal(input), 0), 0),
+      expected,
+    );
+  }
   assert.equal(
     formatDecimalFixed(divideDecimal(parseDecimal("1"), parseDecimal("3")), 4),
     "0.3333",
   );
   assert.equal(compareDecimal(parseDecimal("1.00"), parseDecimal("1")), 0);
-  assert.equal(
-    formatDecimalFixed(
-      subtractDecimal(parseDecimal("10"), parseDecimal("12.5")),
-      2,
-    ),
-    "-2.50",
-  );
   assert.equal(formatDecimalFixed(parseDecimal("-0.004"), 2), "0.00");
-  assert.throws(() => parseDecimal("1e3"), /Invalid decimal/);
-  assert.throws(() => parseDecimal("1,000"), /Invalid decimal/);
 });
 
-test("proportional allocation assigns the exact rounded residual to the final item", () => {
-  const first = allocateProportional({
-    totalDecimal: "100",
-    partDecimal: "1",
-    denominatorDecimal: "3",
-    scale: 2,
-  });
-  assert.deepEqual(first, {
-    ok: true,
-    valueDecimal: "33.33",
-    nextAllocatedDecimal: "33.33",
-  });
-  const second = allocateProportional({
-    totalDecimal: "100",
-    partDecimal: "1",
-    denominatorDecimal: "3",
-    allocatedDecimal: first.ok ? first.nextAllocatedDecimal : "0",
-    scale: 2,
-  });
-  const final = allocateProportional({
-    totalDecimal: "100",
-    partDecimal: "1",
-    denominatorDecimal: "3",
-    allocatedDecimal: second.ok ? second.nextAllocatedDecimal : "0",
-    isFinal: true,
-    scale: 2,
-  });
-  assert.equal(final.ok, true);
-  if (final.ok) {
-    assert.equal(final.valueDecimal, "33.34");
-    assert.equal(final.nextAllocatedDecimal, "100");
+test("decimal parsing and operation boundaries reject malformed or unbounded work", () => {
+  for (const invalid of [
+    "",
+    " ",
+    "+1",
+    "01",
+    "1.",
+    ".1",
+    "1e3",
+    "1,000",
+    "NaN",
+    "Infinity",
+    "-0",
+    "-0.00",
+    "9".repeat(DECIMAL_LIMITS.inputDigits + 1),
+    `0.${"1".repeat(DECIMAL_LIMITS.inputScale + 1)}`,
+  ]) {
+    assert.throws(() => parseDecimal(invalid), /Invalid decimal/);
   }
-  let allocatedDecimal = "0";
-  for (const [index, partDecimal] of ["2", "3", "5"].entries()) {
-    const allocation = allocateProportional({
-      totalDecimal: "10",
-      partDecimal,
-      denominatorDecimal: "10",
-      allocatedDecimal,
-      isFinal: index === 2,
-      scale: 2,
-    });
-    assert.equal(allocation.ok, true);
-    if (allocation.ok) allocatedDecimal = allocation.nextAllocatedDecimal;
+
+  const maximum = parseDecimal("9".repeat(DECIMAL_LIMITS.inputDigits));
+  const squared = multiplyDecimal(maximum, maximum);
+  const cubed = multiplyDecimal(squared, maximum);
+  const fourth = multiplyDecimal(cubed, maximum);
+  assert.throws(
+    () => multiplyDecimal(fourth, maximum),
+    /precision exceeds the supported boundary/,
+  );
+  assert.throws(
+    () => formatDecimalFixed(parseDecimal("1"), DECIMAL_LIMITS.resultScale + 1),
+    /scale is outside the supported boundary/,
+  );
+});
+
+test("bounded decimal algebra retains exact invariants", () => {
+  const values = ["0", "0.0001", "1", "1.25", "999999.9999", "-7.5"];
+  for (const leftValue of values) {
+    for (const rightValue of values) {
+      const left = parseDecimal(leftValue);
+      const right = parseDecimal(rightValue);
+      assert.equal(
+        compareDecimal(addDecimal(left, right), addDecimal(right, left)),
+        0,
+      );
+      assert.equal(
+        compareDecimal(subtractDecimal(addDecimal(left, right), right), left),
+        0,
+      );
+      assert.equal(
+        compareDecimal(
+          multiplyDecimal(left, right),
+          multiplyDecimal(right, left),
+        ),
+        0,
+      );
+    }
   }
-  assert.equal(allocatedDecimal, "10");
+  for (const [a, b, c] of [
+    ["0.1", "0.2", "0.3"],
+    ["12.50", "3", "-2"],
+    ["999.999", "0.001", "7"],
+  ]) {
+    const left = multiplyDecimal(
+      parseDecimal(a),
+      addDecimal(parseDecimal(b), parseDecimal(c)),
+    );
+    const right = addDecimal(
+      multiplyDecimal(parseDecimal(a), parseDecimal(b)),
+      multiplyDecimal(parseDecimal(a), parseDecimal(c)),
+    );
+    assert.equal(compareDecimal(left, right), 0);
+  }
+});
+
+test("proportional allocations reconcile exactly and fail closed at every boundary", () => {
+  for (const denominator of [3, 7, 11]) {
+    let allocatedDecimal = "0";
+    for (let index = 0; index < denominator; index += 1) {
+      const allocation = allocateProportional({
+        totalDecimal: "100.01",
+        partDecimal: "1",
+        denominatorDecimal: String(denominator),
+        allocatedDecimal,
+        isFinal: index === denominator - 1,
+        scale: 2,
+      });
+      assert.equal(allocation.ok, true);
+      if (allocation.ok) allocatedDecimal = allocation.nextAllocatedDecimal;
+    }
+    assert.equal(allocatedDecimal, "100.01");
+  }
+
   assert.deepEqual(
     allocateProportional({
       totalDecimal: "100",
@@ -117,72 +197,148 @@ test("proportional allocation assigns the exact rounded residual to the final it
     }),
     { ok: false, reason: "part_exceeds_denominator" },
   );
+  assert.deepEqual(
+    allocateProportional({
+      totalDecimal: "-1",
+      partDecimal: "1",
+      denominatorDecimal: "1",
+    }),
+    { ok: false, reason: "negative_total" },
+  );
+  assert.deepEqual(
+    allocateProportional({
+      totalDecimal: "1",
+      partDecimal: "1",
+      denominatorDecimal: "0",
+    }),
+    { ok: false, reason: "non_positive_denominator" },
+  );
+  assert.deepEqual(
+    allocateProportional({
+      totalDecimal: "1",
+      partDecimal: "1",
+      denominatorDecimal: "1",
+      allocatedDecimal: "2",
+    }),
+    { ok: false, reason: "invalid_allocated" },
+  );
+  assert.deepEqual(
+    allocateProportional({
+      totalDecimal: "1",
+      partDecimal: "1",
+      denominatorDecimal: "1",
+      scale: DECIMAL_LIMITS.allocationScale + 1,
+    }),
+    { ok: false, reason: "invalid_scale" },
+  );
+  assert.deepEqual(
+    allocateProportional({
+      totalDecimal: "bad",
+      partDecimal: "1",
+      denominatorDecimal: "1",
+    }),
+    { ok: false, reason: "invalid_decimal" },
+  );
 });
 
-test("single-date FIFO holding fixtures calculate basis, value, gain, and movement", () => {
-  assert.deepEqual(
-    calculateSingleDateHolding(fifoHoldingFixture),
-    expectedFifoHoldingResult,
+test("ledger FIFO outputs drive the single-date holding calculation", () => {
+  const lots = fifoHoldingFixture.lots.map((input) => createFifoLot(input));
+  assert.ok(lots.every((lot) => lot !== null));
+  const fifo = allocateFifoSale(
+    lots.filter((lot) => lot !== null),
+    fifoHoldingFixture.sale,
   );
-  assert.deepEqual(
-    calculateOpenBasis([
-      { remainingQuantityDecimal: "10", remainingBasisDecimal: "210" },
-      { remainingQuantityDecimal: "3", remainingBasisDecimal: "50" },
-    ]),
-    { status: "available", valueDecimal: "260" },
-  );
-  assert.deepEqual(
-    calculateRealisedGain({
-      netProceedsDecimal: "354",
-      matchedBasisDecimal: "260",
-    }),
-    { status: "available", valueDecimal: "94" },
-  );
-  assert.deepEqual(
-    calculateRealisedGain({
-      netProceedsDecimal: "250",
-      matchedBasisDecimal: "260",
-    }),
-    { status: "available", valueDecimal: "-10" },
-  );
-});
+  assert.equal(fifo.ok, true);
+  if (!fifo.ok) return;
 
-test("missing values and zero denominators remain named unavailable results", () => {
-  assert.deepEqual(
-    calculateNativeMarketValue({ quantityDecimal: "10", priceDecimal: null }),
-    { status: "unavailable", reason: "missing_price" },
+  const openBasis = calculateOpenBasis(
+    fifo.remainingLots.map((lot) => ({
+      remainingQuantityDecimal: lot.openQuantityDecimal,
+      remainingBasisDecimal: lot.remainingBasisBaseDecimal,
+    })),
+  );
+  assert.equal(openBasis.status, "available");
+  const realisedGain = fifo.allocations.reduce(
+    (total, allocation) =>
+      addDecimal(
+        total,
+        parseDecimal(allocation.baseRealisedGainDecimal ?? "0"),
+      ),
+    parseDecimal("0"),
+  );
+  const quantity = fifo.remainingLots.reduce(
+    (total, lot) => addDecimal(total, parseDecimal(lot.openQuantityDecimal)),
+    parseDecimal("0"),
   );
   assert.deepEqual(
     calculateSingleDateHolding({
-      quantityDecimal: "10",
-      priceDecimal: "20",
-      previousPriceDecimal: null,
-      openBasisDecimal: "0",
-      realisedGainDecimal: null,
+      quantityDecimal: formatDecimalExact(quantity),
+      priceDecimal: fifoHoldingFixture.priceDecimal,
+      previousPriceDecimal: fifoHoldingFixture.previousPriceDecimal,
+      openBasisDecimal:
+        openBasis.status === "available" ? openBasis.valueDecimal : null,
+      realisedGainDecimal: formatDecimalExact(realisedGain),
     }),
-    {
-      quantity: { status: "available", valueDecimal: "10" },
-      nativeMarketValue: { status: "available", valueDecimal: "200" },
-      previousNativeMarketValue: {
-        status: "unavailable",
-        reason: "missing_previous_price",
-      },
-      dailyMovement: {
-        status: "unavailable",
-        reason: "missing_previous_price",
-      },
-      openBasis: { status: "available", valueDecimal: "0" },
-      unrealisedGain: { status: "available", valueDecimal: "200" },
-      unrealisedPercent: { status: "unavailable", reason: "zero_basis" },
-      realisedGain: { status: "unavailable", reason: "missing_proceeds" },
-      totalGain: { status: "unavailable", reason: "missing_proceeds" },
-      totalPercent: { status: "unavailable", reason: "missing_proceeds" },
-    },
+    expectedFifoHoldingResult,
+  );
+});
+
+test("holding calculations return stable reasons for missing, zero, negative, and bounded inputs", () => {
+  assert.deepEqual(
+    calculateNativeMarketValue({ quantityDecimal: "-1", priceDecimal: "10" }),
+    { status: "unavailable", reason: "invalid_quantity" },
+  );
+  assert.deepEqual(
+    calculateNativeMarketValue({ quantityDecimal: "1", priceDecimal: "0" }),
+    { status: "unavailable", reason: "invalid_price" },
+  );
+  assert.deepEqual(
+    calculateNativeMarketValue({ quantityDecimal: "1", priceDecimal: null }),
+    { status: "unavailable", reason: "missing_price" },
+  );
+  assert.deepEqual(
+    calculateRealisedGain({
+      netProceedsDecimal: "-5",
+      matchedBasisDecimal: "10",
+    }),
+    { status: "available", valueDecimal: "-15" },
+  );
+  assert.deepEqual(
+    calculateRealisedGain({
+      netProceedsDecimal: "bad",
+      matchedBasisDecimal: "10",
+    }),
+    { status: "unavailable", reason: "invalid_proceeds" },
   );
   assert.deepEqual(
     calculateOpenBasis([
-      { remainingQuantityDecimal: "2", remainingBasisDecimal: null },
+      { remainingQuantityDecimal: "0", remainingBasisDecimal: "1" },
     ]),
-    { status: "unavailable", reason: "incomplete_basis" },
+    { status: "unavailable", reason: "invalid_quantity" },
   );
+  assert.deepEqual(
+    calculateOpenBasis(
+      Array.from({ length: CALCULATION_LIMITS.maxHoldingLots + 1 }, () => ({
+        remainingQuantityDecimal: "1",
+        remainingBasisDecimal: "1",
+      })),
+    ),
+    { status: "unavailable", reason: "too_many_lots" },
+  );
+
+  const missingPrevious = calculateSingleDateHolding({
+    quantityDecimal: "10",
+    priceDecimal: "20",
+    previousPriceDecimal: null,
+    openBasisDecimal: "0",
+    realisedGainDecimal: null,
+  });
+  assert.deepEqual(missingPrevious.previousNativeMarketValue, {
+    status: "unavailable",
+    reason: "missing_previous_price",
+  });
+  assert.deepEqual(missingPrevious.unrealisedPercent, {
+    status: "unavailable",
+    reason: "zero_basis",
+  });
 });
