@@ -380,9 +380,11 @@ Provider selection uses deployment observations for the configured Yahoo-compati
 
 ### `market_data_refresh_jobs`
 
-Refresh jobs are durable D1 rows rather than in-memory or `waitUntil` work. Each row records the provider, price/FX target and scope, requested date range, bounded chunk size, resumable `high_water_date`, idempotency key, provider-request/observation counters, retry state, and conditional lease. Queued jobs may be coalesced for overlapping target/date windows; expired running leases are reclaimable. A successful chunk advances the high-water date and either queues the next chunk or completes the job. Provider failures retain a typed error kind and retry only while the bounded attempt policy allows.
+Refresh jobs are durable D1 rows rather than in-memory or `waitUntil` work. Each row records the provider, price/FX target and scope, requested date range, bounded chunk size, resumable `high_water_date`, idempotency key, provider-request/observation counters, retry state, and conditional lease. A partial unique index permits at most one queued/running row for a provider/scope/target; insert-and-range-extension execute in one D1 batch so concurrent requests coalesce without a read-then-write race. Expired running leases are reclaimable.
 
-Normalized price and FX writes use their provider/scope/date uniqueness keys with update-on-conflict semantics, so duplicate rows remain idempotent and a corrected provider observation updates the normalized value without creating a second fact.
+Normalized price and FX writes use their provider/scope/date uniqueness keys with update-on-conflict semantics, so duplicate rows remain idempotent and a corrected provider observation updates the normalized value without creating a second fact. Each bounded set of observation upserts and its lease/high-water/counter checkpoint execute in one guarded D1 batch. If any statement fails or the lease/high-water guard no longer matches, neither observations nor progress publish. Runtime configuration is rejected when it would exceed the five-observation/six-statement chunk, 100 parameters per statement, or 50-query invocation budget.
+
+Migration `0018` safely resolves any legacy duplicate active target rows before installing the unique index: the oldest row is queued to replay the union range from the beginning, and superseded active rows become failed with `coalesced_by_migration`. Replaying is intentional and correction-safe because normalized observation keys are idempotent.
 
 ### `split_events`
 

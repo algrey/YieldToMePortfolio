@@ -1268,6 +1268,9 @@ export const marketDataRefreshJobs = sqliteTable(
       table.targetKey,
       table.idempotencyKey,
     ),
+    uniqueIndex("market_data_refresh_jobs_one_active_target_unique")
+      .on(table.providerId, table.scopeKey, table.targetKind, table.targetKey)
+      .where(sql`${table.status} IN ('queued', 'running')`),
     index("market_data_refresh_jobs_claim_idx").on(
       table.status,
       table.nextAttemptAt,

@@ -7,7 +7,10 @@ import type {
   MarketDataRefreshJobRecord,
   RequestMarketDataRefreshInput,
 } from "../../db/repositories/market-data-refresh.ts";
-import type { createMarketDataRefreshRepository } from "../../db/repositories/market-data-refresh.ts";
+import {
+  MARKET_DATA_REFRESH_REPOSITORY_LIMITS,
+  type createMarketDataRefreshRepository,
+} from "../../db/repositories/market-data-refresh.ts";
 
 type RefreshRepository = ReturnType<typeof createMarketDataRefreshRepository>;
 
@@ -50,6 +53,33 @@ export const DEFAULT_MARKET_DATA_REFRESH_CONFIG: MarketDataRefreshConfig = {
   maxRetryDelayMs: 30_000,
   minProviderIntervalMs: 0,
 };
+
+function validateConfig(config: MarketDataRefreshConfig): void {
+  const positiveIntegers = [
+    config.maxJobsPerInvocation,
+    config.maxProviderRequestsPerInvocation,
+    config.maxChunkDays,
+    config.maxObservationsPerChunk,
+    config.maxAttempts,
+    config.leaseMs,
+  ];
+  const d1QueryBudget =
+    1 +
+    config.maxJobsPerInvocation * MARKET_DATA_REFRESH_LIMITS.maxD1QueriesPerJob;
+  if (
+    positiveIntegers.some((value) => !Number.isInteger(value) || value < 1) ||
+    config.retryBaseMs < 0 ||
+    config.maxRetryDelayMs < 0 ||
+    config.minProviderIntervalMs < 0 ||
+    config.maxProviderRequestsPerInvocation > config.maxJobsPerInvocation ||
+    config.maxChunkDays > DEFAULT_MARKET_DATA_REFRESH_CONFIG.maxChunkDays ||
+    config.maxObservationsPerChunk >
+      MARKET_DATA_REFRESH_REPOSITORY_LIMITS.maxObservationsPerChunk ||
+    d1QueryBudget > MARKET_DATA_REFRESH_LIMITS.maxD1QueriesPerInvocation
+  ) {
+    throw new Error("invalid_market_data_refresh_config");
+  }
+}
 
 export type MarketDataRefreshSummary = {
   jobsClaimed: number;
@@ -134,6 +164,7 @@ export function createMarketDataRefreshService(
     ...DEFAULT_MARKET_DATA_REFRESH_CONFIG,
     ...options.config,
   };
+  validateConfig(config);
 
   async function retryOrFail(
     job: MarketDataRefreshJobRecord,
@@ -284,25 +315,19 @@ export function createMarketDataRefreshService(
     }
 
     try {
-      const written =
-        activeJob.targetKind === "price"
-          ? await options.repository.upsertPriceObservations(
-              observations as PriceObservation[],
-            )
-          : await options.repository.upsertFxObservations(
-              observations as FxObservation[],
-            );
-      const progress = await options.repository.recordProgress(
-        activeJob.id,
+      const progress = await options.repository.commitChunk({
+        id: activeJob.id,
         leaseOwner,
-        chunkTo,
-        activeJob.providerRequestCount + 1,
-        activeJob.observationCount + written,
-        activeJob.correctionCount,
-        now(),
-      );
+        expectedHighWaterDate: activeJob.highWaterDate,
+        highWaterDate: chunkTo,
+        observations: observations as readonly (
+          PriceObservation | FxObservation
+        )[],
+        correctionCount: 0,
+        now: now(),
+      });
       if (progress.ok) {
-        summary.observationsWritten += written;
+        summary.observationsWritten += observations.length;
         if (progress.job.status === "completed") summary.jobsCompleted += 1;
       }
     } catch {

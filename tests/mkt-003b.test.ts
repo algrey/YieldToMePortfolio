@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   createMarketDataRefreshRepository,
   createSqliteSqlClient,
+  MARKET_DATA_REFRESH_REPOSITORY_LIMITS,
 } from "../db/repositories/index.ts";
 import {
   createMarketDataRefreshService,
@@ -301,6 +302,173 @@ test("extends an overlapping running refresh through its upper bound", async () 
   assert.equal(extended.status, "running");
 });
 
+test("an earlier request safely restarts an in-flight target from the union range", async () => {
+  const database = await createMigratedDatabase();
+  seedMarketData(database);
+  const repository = createMarketDataRefreshRepository(
+    createSqliteSqlClient(database),
+  );
+  const running = await repository.request(
+    priceJobInput(
+      "job-running-earlier",
+      "running-earlier-1",
+      "2026-07-29",
+      "2026-07-30",
+    ),
+  );
+  assert.equal(
+    (
+      await repository.claim(
+        running.id,
+        "worker-earlier",
+        "2026-08-03T01:05:00Z",
+        "2026-08-03T01:00:00Z",
+      )
+    ).ok,
+    true,
+  );
+  const restarted = await repository.request(
+    priceJobInput(
+      "job-earlier",
+      "running-earlier-2",
+      "2026-07-20",
+      "2026-07-21",
+    ),
+  );
+  assert.equal(restarted.id, running.id);
+  assert.equal(restarted.rangeFrom, "2026-07-20");
+  assert.equal(restarted.rangeTo, "2026-07-30");
+  assert.equal(restarted.status, "queued");
+  assert.equal(restarted.highWaterDate, null);
+  assert.equal(restarted.leaseOwner, null);
+});
+
+test("concurrent refresh requests coalesce through the active-target constraint", async () => {
+  const database = await createMigratedDatabase();
+  seedMarketData(database);
+  const repository = createMarketDataRefreshRepository(
+    createSqliteSqlClient(database),
+  );
+  const [left, right] = await Promise.all([
+    repository.request(
+      priceJobInput(
+        "job-concurrent-a",
+        "concurrent-a",
+        "2026-07-20",
+        "2026-07-22",
+      ),
+    ),
+    repository.request(
+      priceJobInput(
+        "job-concurrent-b",
+        "concurrent-b",
+        "2026-07-30",
+        "2026-08-02",
+      ),
+    ),
+  ]);
+  assert.equal(left.id, right.id);
+  const active = database
+    .prepare(
+      `SELECT id, range_from, range_to FROM market_data_refresh_jobs
+       WHERE status IN ('queued', 'running')`,
+    )
+    .all()
+    .map((row) => Object.assign({}, row));
+  assert.deepEqual(active, [
+    {
+      id: left.id,
+      range_from: "2026-07-20",
+      range_to: "2026-08-02",
+    },
+  ]);
+});
+
+test("observation writes roll back when the atomic checkpoint batch fails", async () => {
+  const database = await createMigratedDatabase();
+  seedMarketData(database);
+  const baseClient = createSqliteSqlClient(database);
+  let injected = false;
+  const failingClient = {
+    ...baseClient,
+    async batch(
+      statements: Parameters<NonNullable<typeof baseClient.batch>>[0],
+    ) {
+      if (
+        !injected &&
+        statements.some((statement) =>
+          statement.sql.includes("INSERT INTO price_observations"),
+        )
+      ) {
+        injected = true;
+        return baseClient.batch!([
+          ...statements.slice(0, -1),
+          { sql: "INSERT INTO deliberately_missing_table VALUES (1)" },
+          statements.at(-1)!,
+        ]);
+      }
+      return baseClient.batch!(statements);
+    },
+  };
+  let providerCalls = 0;
+  const provider = providerFor(async (request) => {
+    providerCalls += 1;
+    return { ok: true, value: [priceObservation(request.from, "101")] };
+  });
+  const service = createMarketDataRefreshService({
+    repository: createMarketDataRefreshRepository(failingClient),
+    provider,
+    now: () => "2026-08-03T01:00:00Z",
+    randomId: () => "worker-atomic-failure",
+    sleep: async () => undefined,
+    config: { retryBaseMs: 0 },
+  });
+  const job = await service.request(
+    priceJobInput("job-atomic", "atomic-1", "2026-07-29", "2026-07-29"),
+  );
+  const failed = await service.processPending();
+  assert.equal(failed.jobsRetried, 1);
+  assert.equal(providerCalls, 1);
+  assert.deepEqual(
+    Object.assign(
+      {},
+      database
+        .prepare(
+          `SELECT status, high_water_date, provider_request_count,
+                  observation_count
+           FROM market_data_refresh_jobs WHERE id = ?`,
+        )
+        .get(job.id),
+    ),
+    {
+      status: "queued",
+      high_water_date: null,
+      provider_request_count: 0,
+      observation_count: 0,
+    },
+  );
+  assert.equal(
+    (
+      database
+        .prepare("SELECT count(*) AS count FROM price_observations")
+        .get() as { count: number }
+    ).count,
+    0,
+  );
+
+  const resumed = await serviceFor(database, provider).processPending();
+  assert.equal(resumed.jobsCompleted, 1);
+  assert.equal(providerCalls, 2);
+  assert.equal(
+    (
+      database
+        .prepare("SELECT count(*) AS count FROM price_observations")
+        .get() as { count: number }
+    ).count,
+    1,
+  );
+});
+
 test("retries throttled work, reclaims expired leases, and preserves user scope", async () => {
   const database = await createMigratedDatabase();
   seedMarketData(database);
@@ -393,20 +561,76 @@ test("limits Cron work to bounded job and provider request budgets", async () =>
     maxWorkerMemoryBytes: 128 * 1024 * 1024,
     maxD1QueriesPerJob: 8,
   });
+  assert.deepEqual(MARKET_DATA_REFRESH_REPOSITORY_LIMITS, {
+    maxObservationsPerChunk: 5,
+    maxStatementsPerChunk: 6,
+    maxBoundParametersPerStatement: 100,
+  });
+  const disabledProvider = providerFor(async () => ({ ok: true, value: [] }));
+  assert.throws(
+    () =>
+      createMarketDataRefreshService({
+        repository: createMarketDataRefreshRepository(
+          createSqliteSqlClient(new DatabaseSync(":memory:")),
+        ),
+        provider: disabledProvider,
+        config: { maxJobsPerInvocation: 7 },
+      }),
+    /invalid_market_data_refresh_config/,
+  );
+  assert.throws(
+    () =>
+      createMarketDataRefreshService({
+        repository: createMarketDataRefreshRepository(
+          createSqliteSqlClient(new DatabaseSync(":memory:")),
+        ),
+        provider: disabledProvider,
+        config: { maxObservationsPerChunk: 6 },
+      }),
+    /invalid_market_data_refresh_config/,
+  );
+  assert.throws(
+    () =>
+      createMarketDataRefreshService({
+        repository: createMarketDataRefreshRepository(
+          createSqliteSqlClient(new DatabaseSync(":memory:")),
+        ),
+        provider: disabledProvider,
+        config: { maxProviderRequestsPerInvocation: 6 },
+      }),
+    /invalid_market_data_refresh_config/,
+  );
   const database = await createMigratedDatabase();
   seedMarketData(database);
   const provider = providerFor(async () => ({ ok: true, value: [] }));
   const service = serviceFor(database, provider, {
     config: { maxJobsPerInvocation: 2, maxProviderRequestsPerInvocation: 2 },
   });
-  for (const [index, date] of [
-    "2026-07-29",
-    "2026-07-30",
-    "2026-07-31",
-  ].entries()) {
-    await service.request(
-      priceJobInput(`job-${index}`, `budget-${index}`, date, date),
-    );
+  const requests = [
+    priceJobInput("job-0", "budget-0", "2026-07-29", "2026-07-29"),
+    {
+      ...priceJobInput("job-1", "budget-1", "2026-07-30", "2026-07-30"),
+      targetKey: "mapping-b",
+      mappingId: "mapping-b",
+      securityId: "security-b",
+    },
+    {
+      id: "job-2",
+      providerId: "yahoo-compatible",
+      targetKind: "fx" as const,
+      targetKey: "AUD/USD",
+      baseCurrencyCode: "AUD",
+      quoteCurrencyCode: "USD",
+      scope: { kind: "user" as const, userId: "user-a" },
+      rangeFrom: "2026-07-31",
+      rangeTo: "2026-07-31",
+      chunkDays: 1,
+      idempotencyKey: "budget-2",
+      now: "2026-08-03T01:00:00Z",
+    },
+  ];
+  for (const request of requests) {
+    await service.request(request);
   }
   const summary = await service.processPending();
   assert.equal(summary.jobsClaimed, 2);

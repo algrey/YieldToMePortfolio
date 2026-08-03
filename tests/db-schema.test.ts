@@ -176,6 +176,12 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "manual_overrides_active_idx",
     "manual_overrides_id_user_unique",
   ]);
+  assert.deepEqual(indexNames(database, "market_data_refresh_jobs"), [
+    "market_data_refresh_jobs_claim_idx",
+    "market_data_refresh_jobs_idempotency_unique",
+    "market_data_refresh_jobs_one_active_target_unique",
+    "market_data_refresh_jobs_target_idx",
+  ]);
   assert.deepEqual(indexNames(database, "import_batches"), [
     "import_batches_id_user_unique",
     "import_batches_owner_status_updated_at_idx",
@@ -751,6 +757,82 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     },
   ]);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check;").all(), []);
+});
+
+test("active refresh-job migration coalesces legacy duplicate targets", async () => {
+  const migrationFiles = (await readdir(new URL("../drizzle", import.meta.url)))
+    .filter((file) => file.endsWith(".sql"))
+    .sort();
+  const latest = migrationFiles.at(-1);
+  assert.equal(latest, "0018_groovy_dragon_lord.sql");
+  const priorSql = (
+    await Promise.all(
+      migrationFiles
+        .slice(0, -1)
+        .map((file) =>
+          readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8"),
+        ),
+    )
+  ).join("\n");
+  const database = createMigratedDatabase(priorSql);
+  database.exec(`
+    INSERT INTO currencies (code, numeric_code, name, minor_unit_digits)
+    VALUES
+      ('AUD', 36, 'Australian dollar', 2),
+      ('USD', 840, 'United States dollar', 2);
+    INSERT INTO market_data_providers (
+      id, code, name, capabilities_json, rate_limit_json
+    ) VALUES ('provider-a', 'provider-a', 'Provider A', '{}', '{}');
+    INSERT INTO market_data_refresh_jobs (
+      id, provider_id, target_kind, target_key,
+      base_currency_code, quote_currency_code,
+      access_scope, scope_key, range_from, range_to, high_water_date,
+      chunk_days, status, lease_owner, lease_expires_at, next_attempt_at,
+      idempotency_key, created_at, updated_at
+    ) VALUES
+      ('legacy-a', 'provider-a', 'fx', 'AUD/USD', 'AUD', 'USD',
+       'deployment', 'deployment', '2026-07-20', '2026-07-22', NULL,
+       1, 'queued', NULL, NULL, '2026-08-03T00:00:00Z',
+       'legacy-a', '2026-08-03T00:00:00Z', '2026-08-03T00:00:00Z'),
+      ('legacy-b', 'provider-a', 'fx', 'AUD/USD', 'AUD', 'USD',
+       'deployment', 'deployment', '2026-07-30', '2026-08-02', '2026-07-31',
+       1, 'running', 'old-worker', '2026-08-03T00:05:00Z',
+       '2026-08-03T00:00:00Z', 'legacy-b',
+       '2026-08-03T00:01:00Z', '2026-08-03T00:01:00Z');
+  `);
+  database.exec(
+    await readFile(new URL(`../drizzle/${latest}`, import.meta.url), "utf8"),
+  );
+  assert.deepEqual(
+    database
+      .prepare(
+        `SELECT id, range_from, range_to, high_water_date, status,
+                lease_owner, last_error_kind
+         FROM market_data_refresh_jobs ORDER BY id`,
+      )
+      .all()
+      .map((row) => Object.assign({}, row)),
+    [
+      {
+        id: "legacy-a",
+        range_from: "2026-07-20",
+        range_to: "2026-08-02",
+        high_water_date: null,
+        status: "queued",
+        lease_owner: null,
+        last_error_kind: null,
+      },
+      {
+        id: "legacy-b",
+        range_from: "2026-07-30",
+        range_to: "2026-08-02",
+        high_water_date: "2026-07-31",
+        status: "failed",
+        lease_owner: null,
+        last_error_kind: "coalesced_by_migration",
+      },
+    ],
+  );
 });
 
 function seedSecurityMasterFixture(database: DatabaseSync): void {

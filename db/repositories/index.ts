@@ -91,7 +91,9 @@ export {
 } from "./projections.ts";
 export {
   createMarketDataRefreshRepository,
+  MARKET_DATA_REFRESH_REPOSITORY_LIMITS,
   type ClaimMarketDataRefreshResult,
+  type CommitMarketDataRefreshChunkInput,
   type MarketDataRefreshJobRecord,
   type MarketDataRefreshJobStatus,
   type ProgressMarketDataRefreshResult,

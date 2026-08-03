@@ -66,6 +66,16 @@ export type ProgressMarketDataRefreshResult =
   | { ok: true; job: MarketDataRefreshJobRecord }
   | { ok: false; reason: "not-owned" | "invalid-progress" };
 
+export type CommitMarketDataRefreshChunkInput = {
+  id: string;
+  leaseOwner: string;
+  expectedHighWaterDate: string | null;
+  highWaterDate: string;
+  observations: readonly (PriceObservation | FxObservation)[];
+  correctionCount: number;
+  now: string;
+};
+
 export type RetryMarketDataRefreshResult =
   | { ok: true; job: MarketDataRefreshJobRecord }
   | { ok: false; reason: "not-owned" | "failed" };
@@ -78,6 +88,18 @@ const JOB_COLUMNS = `
   provider_request_count, observation_count, correction_count, last_error_kind,
   idempotency_key, started_at, completed_at, created_at, updated_at
 `;
+
+export const MARKET_DATA_REFRESH_REPOSITORY_LIMITS = {
+  maxObservationsPerChunk: 5,
+  maxStatementsPerChunk: 6,
+  maxBoundParametersPerStatement: 100,
+} as const;
+
+const CHUNK_LEASE_GUARD = `EXISTS (
+  SELECT 1 FROM market_data_refresh_jobs
+  WHERE id = ? AND status = 'running' AND lease_owner = ?
+    AND lease_expires_at > ? AND high_water_date IS ?
+)`;
 
 function mapJob(row: Record<string, unknown>): MarketDataRefreshJobRecord {
   const accessScope = String(row.access_scope);
@@ -135,6 +157,7 @@ function observationScopeValues(
 
 function writeStatements(
   observations: readonly (PriceObservation | FxObservation)[],
+  guardParams: readonly unknown[],
 ): SqlStatement[] {
   return observations.map((observation) => {
     const [accessScope, scopeUserId, scopeKey] = observationScopeValues(
@@ -148,7 +171,8 @@ function writeStatements(
           market_timezone, currency_code, close_decimal, previous_close_decimal,
           adjustment_state, quality, delayed_minutes, ingested_at,
           provider_revision_id, payload_sha256
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE ${CHUNK_LEASE_GUARD}
         ON CONFLICT (
           provider_id, scope_key, mapping_id, interval, observation_at,
           adjustment_state
@@ -184,6 +208,7 @@ function writeStatements(
           observation.ingestedAt,
           observation.providerRevisionId,
           observation.payloadSha256,
+          ...guardParams,
         ],
       };
     }
@@ -193,7 +218,8 @@ function writeStatements(
         id, provider_id, access_scope, scope_user_id, scope_key,
         base_currency_code, quote_currency_code, rate_decimal, interval,
         observed_at, market_date, quality, ingested_at, payload_sha256
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE ${CHUNK_LEASE_GUARD}
       ON CONFLICT (
         provider_id, scope_key, base_currency_code, quote_currency_code,
         interval, observed_at
@@ -218,22 +244,34 @@ function writeStatements(
         observation.quality,
         observation.ingestedAt,
         observation.payloadSha256,
+        ...guardParams,
       ],
     };
   });
 }
 
-async function runWriteBatch(
+async function runAtomicBatch(
   client: SqlClient,
   statements: readonly SqlStatement[],
-): Promise<void> {
-  if (statements.length === 0) return;
+): Promise<Array<Record<string, unknown>>> {
   if (client.batch) {
-    await client.batch(statements);
-    return;
+    const results = await client.batch(statements);
+    return results.at(-1)?.results ?? [];
   }
-  for (const statement of statements) {
-    await client.run(statement.sql, statement.params);
+  await client.run("BEGIN IMMEDIATE TRANSACTION");
+  try {
+    for (const statement of statements.slice(0, -1)) {
+      await client.run(statement.sql, statement.params);
+    }
+    const last = statements.at(-1);
+    const rows = last
+      ? await client.all<Record<string, unknown>>(last.sql, last.params)
+      : [];
+    await client.run("COMMIT");
+    return rows;
+  } catch (error) {
+    await client.run("ROLLBACK").catch(() => undefined);
+    throw error;
   }
 }
 
@@ -265,6 +303,20 @@ export function createMarketDataRefreshRepository(client: SqlClient) {
     return row ? mapJob(row) : null;
   }
 
+  async function getActiveTarget(
+    input: RequestMarketDataRefreshInput,
+  ): Promise<MarketDataRefreshJobRecord | null> {
+    const [, , scopeKey] = scopeValues(input.scope);
+    const row = await client.get<Record<string, unknown>>(
+      `SELECT ${JOB_COLUMNS} FROM market_data_refresh_jobs
+       WHERE provider_id = ? AND scope_key = ? AND target_kind = ?
+         AND target_key = ? AND status IN ('queued', 'running')
+       LIMIT 1`,
+      [input.providerId, scopeKey, input.targetKind, input.targetKey],
+    );
+    return row ? mapJob(row) : null;
+  }
+
   return {
     get,
 
@@ -272,83 +324,88 @@ export function createMarketDataRefreshRepository(client: SqlClient) {
       input: RequestMarketDataRefreshInput,
     ): Promise<MarketDataRefreshJobRecord> {
       const [accessScope, scopeUserId, scopeKey] = scopeValues(input.scope);
-      const existingActive = await client.get<Record<string, unknown>>(
-        `SELECT ${JOB_COLUMNS} FROM market_data_refresh_jobs
-         WHERE provider_id = ? AND scope_key = ? AND target_kind = ?
-           AND target_key = ? AND status IN ('queued', 'running')
-           AND range_from <= ? AND range_to >= ?
-         ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, created_at
-         LIMIT 1`,
-        [
-          input.providerId,
-          scopeKey,
-          input.targetKind,
-          input.targetKey,
-          input.rangeTo,
-          input.rangeFrom,
-        ],
-      );
-      if (existingActive) {
-        const existing = mapJob(existingActive);
-        if (existing.status === "queued") {
-          await client.run(
-            `UPDATE market_data_refresh_jobs
-             SET range_from = MIN(range_from, ?), range_to = MAX(range_to, ?),
-                 updated_at = ?
-             WHERE id = ? AND status = 'queued'`,
-            [input.rangeFrom, input.rangeTo, input.now, existing.id],
-          );
-          return (await get(existing.id)) ?? existing;
-        }
-        // A running job may have already advanced its high-water mark, so
-        // only extend the upper bound. Its lower bound must remain stable to
-        // avoid implying that already-processed dates were backfilled.
-        if (input.rangeTo > existing.rangeTo) {
-          await client.run(
-            `UPDATE market_data_refresh_jobs
-             SET range_to = MAX(range_to, ?), updated_at = ?
-             WHERE id = ? AND status = 'running' AND range_to < ?`,
-            [input.rangeTo, input.now, existing.id, input.rangeTo],
-          );
-          return (await get(existing.id)) ?? existing;
-        }
-        return existing;
-      }
-
-      await client.run(
-        `INSERT INTO market_data_refresh_jobs (
+      await runAtomicBatch(client, [
+        {
+          sql: `INSERT OR IGNORE INTO market_data_refresh_jobs (
           id, provider_id, target_kind, target_key, mapping_id, security_id,
           base_currency_code, quote_currency_code, access_scope, scope_user_id,
           scope_key, range_from, range_to, chunk_days, status, attempt,
           next_attempt_at, provider_request_count, observation_count,
           correction_count, idempotency_key, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0,
-          ?, 0, 0, 0, ?, ?, ?)
-        ON CONFLICT (
-          provider_id, scope_key, target_kind, target_key, idempotency_key
-        ) DO NOTHING`,
-        [
-          input.id,
-          input.providerId,
-          input.targetKind,
-          input.targetKey,
-          input.mappingId ?? null,
-          input.securityId ?? null,
-          input.baseCurrencyCode ?? null,
-          input.quoteCurrencyCode ?? null,
-          accessScope,
-          scopeUserId,
-          scopeKey,
-          input.rangeFrom,
-          input.rangeTo,
-          input.chunkDays ?? 5,
-          input.now,
-          input.idempotencyKey,
-          input.now,
-          input.now,
-        ],
-      );
-      const result = await getByIdempotency(input);
+          ?, 0, 0, 0, ?, ?, ?)`,
+          params: [
+            input.id,
+            input.providerId,
+            input.targetKind,
+            input.targetKey,
+            input.mappingId ?? null,
+            input.securityId ?? null,
+            input.baseCurrencyCode ?? null,
+            input.quoteCurrencyCode ?? null,
+            accessScope,
+            scopeUserId,
+            scopeKey,
+            input.rangeFrom,
+            input.rangeTo,
+            input.chunkDays ?? 5,
+            input.now,
+            input.idempotencyKey,
+            input.now,
+            input.now,
+          ],
+        },
+        {
+          sql: `UPDATE market_data_refresh_jobs
+                SET range_from = CASE
+                      WHEN status = 'queued' OR ? < range_from
+                        THEN MIN(range_from, ?)
+                      ELSE range_from
+                    END,
+                    range_to = MAX(range_to, ?),
+                    high_water_date = CASE
+                      WHEN status = 'running' AND ? < range_from THEN NULL
+                      ELSE high_water_date
+                    END,
+                    status = CASE
+                      WHEN status = 'running' AND ? < range_from THEN 'queued'
+                      ELSE status
+                    END,
+                    lease_owner = CASE
+                      WHEN status = 'running' AND ? < range_from THEN NULL
+                      ELSE lease_owner
+                    END,
+                    lease_expires_at = CASE
+                      WHEN status = 'running' AND ? < range_from THEN NULL
+                      ELSE lease_expires_at
+                    END,
+                    next_attempt_at = CASE
+                      WHEN status = 'running' AND ? < range_from THEN ?
+                      ELSE next_attempt_at
+                    END,
+                    updated_at = ?
+                WHERE provider_id = ? AND scope_key = ? AND target_kind = ?
+                  AND target_key = ? AND status IN ('queued', 'running')`,
+          params: [
+            input.rangeFrom,
+            input.rangeFrom,
+            input.rangeTo,
+            input.rangeFrom,
+            input.rangeFrom,
+            input.rangeFrom,
+            input.rangeFrom,
+            input.rangeFrom,
+            input.now,
+            input.now,
+            input.providerId,
+            scopeKey,
+            input.targetKind,
+            input.targetKey,
+          ],
+        },
+      ]);
+      const result =
+        (await getByIdempotency(input)) ?? (await getActiveTarget(input));
       if (!result) throw new Error("market_data_refresh_job_not_visible");
       return result;
     },
@@ -391,60 +448,75 @@ export function createMarketDataRefreshRepository(client: SqlClient) {
       return job ? { ok: true, job } : { ok: false, reason: "not-claimable" };
     },
 
-    async recordProgress(
-      id: string,
-      leaseOwner: string,
-      highWaterDate: string,
-      providerRequestCount: number,
-      observationCount: number,
-      correctionCount: number,
-      now: string,
+    async commitChunk(
+      input: CommitMarketDataRefreshChunkInput,
     ): Promise<ProgressMarketDataRefreshResult> {
-      const existing = await get(id);
       if (
-        !existing ||
-        existing.status !== "running" ||
-        existing.leaseOwner !== leaseOwner ||
-        existing.leaseExpiresAt === null ||
-        existing.leaseExpiresAt <= now
-      ) {
-        return { ok: false, reason: "not-owned" };
-      }
-      if (
-        highWaterDate < existing.rangeFrom ||
-        highWaterDate > existing.rangeTo ||
-        (existing.highWaterDate !== null &&
-          highWaterDate <= existing.highWaterDate)
+        input.observations.length >
+          MARKET_DATA_REFRESH_REPOSITORY_LIMITS.maxObservationsPerChunk ||
+        !Number.isInteger(input.correctionCount) ||
+        input.correctionCount < 0
       ) {
         return { ok: false, reason: "invalid-progress" };
       }
-      const completed = highWaterDate >= existing.rangeTo;
-      const result = await client.run(
-        `UPDATE market_data_refresh_jobs
-         SET high_water_date = ?, status = ?, lease_owner = NULL,
-             lease_expires_at = NULL, next_attempt_at = ?,
-             provider_request_count = ?, observation_count = ?,
-             correction_count = ?, completed_at = ?, last_error_kind = NULL,
-             updated_at = ?
-         WHERE id = ? AND status = 'running' AND lease_owner = ?
-           AND lease_expires_at > ?`,
-        [
-          highWaterDate,
-          completed ? "completed" : "queued",
-          now,
-          providerRequestCount,
-          observationCount,
-          correctionCount,
-          completed ? now : null,
-          now,
-          id,
-          leaseOwner,
-          now,
+      const guardParams = [
+        input.id,
+        input.leaseOwner,
+        input.now,
+        input.expectedHighWaterDate,
+      ];
+      const statements = writeStatements(input.observations, guardParams);
+      statements.push({
+        sql: `UPDATE market_data_refresh_jobs
+              SET high_water_date = ?,
+                  status = CASE WHEN ? >= range_to THEN 'completed'
+                                ELSE 'queued' END,
+                  lease_owner = NULL, lease_expires_at = NULL,
+                  next_attempt_at = ?,
+                  provider_request_count = provider_request_count + 1,
+                  observation_count = observation_count + ?,
+                  correction_count = correction_count + ?,
+                  completed_at = CASE WHEN ? >= range_to THEN ? ELSE NULL END,
+                  last_error_kind = NULL, updated_at = ?
+              WHERE id = ? AND status = 'running' AND lease_owner = ?
+                AND lease_expires_at > ? AND high_water_date IS ?
+                AND ? >= range_from AND ? <= range_to
+                AND (high_water_date IS NULL OR ? > high_water_date)
+              RETURNING ${JOB_COLUMNS}`,
+        params: [
+          input.highWaterDate,
+          input.highWaterDate,
+          input.now,
+          input.observations.length,
+          input.correctionCount,
+          input.highWaterDate,
+          input.now,
+          input.now,
+          input.id,
+          input.leaseOwner,
+          input.now,
+          input.expectedHighWaterDate,
+          input.highWaterDate,
+          input.highWaterDate,
+          input.highWaterDate,
         ],
-      );
-      if (result.changes !== 1) return { ok: false, reason: "not-owned" };
-      const job = await get(id);
-      return job ? { ok: true, job } : { ok: false, reason: "not-owned" };
+      });
+      if (
+        statements.length >
+          MARKET_DATA_REFRESH_REPOSITORY_LIMITS.maxStatementsPerChunk ||
+        statements.some(
+          (statement) =>
+            (statement.params?.length ?? 0) >
+            MARKET_DATA_REFRESH_REPOSITORY_LIMITS.maxBoundParametersPerStatement,
+        )
+      ) {
+        return { ok: false, reason: "invalid-progress" };
+      }
+      const rows = await runAtomicBatch(client, statements);
+      const row = rows[0];
+      return row
+        ? { ok: true, job: mapJob(row) }
+        : { ok: false, reason: "not-owned" };
     },
 
     async retry(
@@ -484,22 +556,6 @@ export function createMarketDataRefreshRepository(client: SqlClient) {
       if (result.changes !== 1) return { ok: false, reason: "not-owned" };
       const job = await get(id);
       return job ? { ok: true, job } : { ok: false, reason: "failed" };
-    },
-
-    async upsertPriceObservations(
-      observations: readonly PriceObservation[],
-    ): Promise<number> {
-      const statements = writeStatements(observations);
-      await runWriteBatch(client, statements);
-      return observations.length;
-    },
-
-    async upsertFxObservations(
-      observations: readonly FxObservation[],
-    ): Promise<number> {
-      const statements = writeStatements(observations);
-      await runWriteBatch(client, statements);
-      return observations.length;
     },
   };
 }
