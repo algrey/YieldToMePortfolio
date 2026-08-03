@@ -680,7 +680,7 @@ Status: DONE (follow-up review resolution completed 2026-08-04).
 
 ### CALC-002 — Historical snapshots and rebuild
 
-Status: PENDING.
+Status: READY.
 
 - Objective: produce reproducible historical value series from dated ledger, price, FX, and cash facts.
 - Dependencies: CALC-001B, MKT-003B, LED-002B, DB-004.
@@ -758,7 +758,7 @@ Status: PENDING.
 
 ### UI-003 — Holdings table and mobile cards
 
-Status: PENDING.
+Status: READY.
 
 - Objective: reproduce the reference’s dense holdings utility with a distinct, usable mobile hierarchy.
 - Dependencies: UI-001, CALC-001B.
