@@ -776,7 +776,7 @@ Status: DONE (2026-08-03).
 
 ### UI-005A — Portfolio settings and ledger inspection
 
-Status: READY.
+Status: DONE on 2026-08-03.
 
 - Objective: expose owned portfolio settings and read-only ledger/lot/cash provenance without combining them with financial write workflows.
 - Dependencies: UI-001, LED-002B.
@@ -787,6 +787,7 @@ Status: READY.
 - Tests: empty/populated/incomplete states, cross-user routes/actions, keyboard/mobile.
 - Risks: turning projections into editable truth or exposing an unscoped direct detail route.
 - Parallel safe: yes with import UI after shared shell.
+- Completion note: Added an owner-scoped read-only portfolio inspection model and authenticated Details view for settings, transactions, FIFO lots/matches, cash accounts/entries, exact-decimal edge formatting, business-date lists, expandable timestamp/provenance evidence, and a separate manual-entry/correction link.
 
 ### UI-005B — Import upload, mapping, and preview
 

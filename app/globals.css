@@ -1294,6 +1294,198 @@ dd {
   text-align: right;
 }
 
+.owned-details-screen {
+  display: grid;
+  gap: 16px;
+  padding: 18px 12px calc(40px + env(safe-area-inset-bottom));
+}
+
+.inspection-intro,
+.inspection-panel {
+  min-width: 0;
+  border-bottom: 1px solid var(--divider);
+  padding-bottom: 18px;
+}
+
+.inspection-intro h1 {
+  max-width: 720px;
+  margin-top: 5px;
+  font-family: var(--serif);
+  font-size: clamp(2rem, 9vw, 3.6rem);
+  font-weight: 400;
+  letter-spacing: -0.055em;
+  line-height: 0.98;
+}
+
+.inspection-intro > p:not(.eyebrow),
+.inspection-note {
+  max-width: 680px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.inspection-action,
+.inspection-heading button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  margin-top: 16px;
+  padding: 8px 12px;
+  border: 1px solid var(--green);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--cream);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.72rem;
+  text-decoration: none;
+}
+
+.inspection-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.inspection-heading h2,
+.inspection-subheading {
+  margin-top: 4px;
+  font-family: var(--serif);
+  font-size: 1.26rem;
+  font-weight: 400;
+  letter-spacing: -0.025em;
+}
+
+.inspection-heading button {
+  flex: 0 0 auto;
+  margin-top: 0;
+  border-color: var(--divider);
+}
+
+.inspection-settings,
+.inspection-facts {
+  margin-top: 14px;
+  border-top: 1px solid var(--divider);
+}
+
+.inspection-settings div,
+.inspection-facts div {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--divider);
+}
+
+.inspection-settings dt,
+.inspection-facts dt {
+  color: var(--muted);
+  font-size: 0.69rem;
+}
+
+.inspection-settings dd,
+.inspection-facts dd {
+  max-width: 65%;
+  overflow-wrap: anywhere;
+  font-size: 0.75rem;
+  text-align: right;
+}
+
+.inspection-record-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.inspection-record {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--divider);
+  background: var(--surface-raised);
+}
+
+.inspection-record.compact {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 16px;
+}
+
+.inspection-record-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.inspection-record-heading > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.inspection-record-heading strong {
+  overflow: hidden;
+  font-size: 0.8rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspection-record-heading span,
+.inspection-record-heading time,
+.inspection-amount {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.inspection-record-heading time,
+.inspection-amount {
+  flex: 0 0 auto;
+  text-align: right;
+}
+
+.inspection-facts {
+  margin-top: 10px;
+}
+
+.inspection-evidence {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.5;
+}
+
+.inspection-evidence summary {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--cream);
+  cursor: pointer;
+}
+
+.inspection-evidence p,
+.inspection-evidence ul {
+  margin-top: 7px;
+}
+
+.inspection-evidence li + li {
+  margin-top: 6px;
+}
+
+.inspection-empty {
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.inspection-subheading {
+  margin-top: 24px;
+}
+
 .empty-state,
 .news-placeholder {
   min-height: calc(100dvh - var(--app-bar) - var(--tabs) - 1px);
@@ -2087,6 +2279,24 @@ dd {
     display: grid;
     grid-template-columns: minmax(0, 1.5fr) minmax(310px, 0.7fr);
     gap: 0 42px;
+  }
+
+  .owned-details-screen {
+    width: min(calc(100% - 56px), 1180px);
+    grid-template-columns: minmax(0, 0.72fr) minmax(0, 1.28fr);
+    gap: 24px 42px;
+    margin: 0 auto;
+    padding-inline: 0;
+  }
+
+  .inspection-intro,
+  .owned-details-screen > .inspection-panel:nth-of-type(2) {
+    grid-column: 1 / -1;
+  }
+
+  .owned-details-screen > .inspection-panel:nth-of-type(3),
+  .owned-details-screen > .inspection-panel:nth-of-type(4) {
+    grid-column: span 1;
   }
 
   .details-history {

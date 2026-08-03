@@ -16,7 +16,9 @@ import {
   quoteExplanation,
   type QuoteRow,
 } from "../quote-contract";
+import type { PortfolioInspection } from "../../db/repositories/portfolio-inspection";
 import { BrandMark } from "./brand-mark";
+import { OwnedPortfolioDetails } from "./portfolio-details";
 import { ServiceWorkerRegistration } from "./service-worker-registration";
 
 export const portfolioSections = [
@@ -1482,6 +1484,7 @@ export function PortfolioShell({
   overviewHref = "/",
   holdingSymbol = null,
   ownedWorkspace,
+  ownedDetails = null,
 }: {
   activeSection: PortfolioSection;
   reviewBadgeLabel?: string;
@@ -1490,6 +1493,7 @@ export function PortfolioShell({
   overviewHref?: string;
   holdingSymbol?: string | null;
   ownedWorkspace?: OwnedWorkspace;
+  ownedDetails?: PortfolioInspection | null;
 }) {
   const router = useRouter();
   const portfolios = portfolioPrototypesOverride ?? portfolioPrototypes;
@@ -2012,10 +2016,17 @@ export function PortfolioShell({
 
       <main className={`screen-content screen-${activeSection}`}>
         {ownedMode ? (
-          <OwnedWorkspaceScreen
-            activeSection={activeSection}
-            workspace={ownedWorkspace}
-          />
+          activeSection === "details" && ownedWorkspace.activePortfolio ? (
+            <OwnedPortfolioDetails
+              inspection={ownedDetails}
+              onOpenSettings={() => setOpenMenu("prototype")}
+            />
+          ) : (
+            <OwnedWorkspaceScreen
+              activeSection={activeSection}
+              workspace={ownedWorkspace}
+            />
+          )
         ) : null}
         {!ownedMode && activeSection === "overview" ? (
           <OverviewScreen
@@ -2190,10 +2201,22 @@ export function PortfolioShell({
               <span>Import / export</span>
               <small>Prototype only</small>
             </button>
-            <button type="button">
-              <span>Settings</span>
-              <small>Prototype only</small>
-            </button>
+            {ownedMode ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setDrawerOpen(false);
+                  setOpenMenu("prototype");
+                }}
+              >
+                <span>Settings</span>
+              </button>
+            ) : (
+              <button type="button">
+                <span>Settings</span>
+                <small>Prototype only</small>
+              </button>
+            )}
             <p className="drawer-note">{reviewNote}</p>
           </aside>
         </div>

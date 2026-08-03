@@ -102,6 +102,15 @@ export {
   type ProjectionRepositoryOptions,
 } from "./projections.ts";
 export {
+  loadOwnedPortfolioInspection,
+  type PortfolioInspection,
+  type PortfolioInspectionCashAccount,
+  type PortfolioInspectionCashEntry,
+  type PortfolioInspectionLot,
+  type PortfolioInspectionLotAllocation,
+  type PortfolioInspectionTransaction,
+} from "./portfolio-inspection.ts";
+export {
   createMarketDataRefreshRepository,
   MARKET_DATA_REFRESH_REPOSITORY_LIMITS,
   type ClaimMarketDataRefreshResult,

@@ -6,6 +6,7 @@ import {
 import { createPreviewPortfolioPrototypes } from "../../../preview-route-data";
 import { loadPreviewValuationFixture } from "../../../preview-valuation";
 import { loadAuthenticatedWorkspace } from "../../../authenticated-workspace";
+import { loadAuthenticatedPortfolioInspection } from "../../../portfolio-inspection";
 
 const portfolioSections = [
   "overview",
@@ -43,10 +44,15 @@ export default async function PortfolioSectionPage({
       );
     }
     if (workspace.activePortfolio === null) notFound();
+    const inspection =
+      section === "details"
+        ? await loadAuthenticatedPortfolioInspection(portfolioId)
+        : null;
     return (
       <PortfolioShell
         activeSection={section as PortfolioSection}
         ownedWorkspace={workspace}
+        ownedDetails={inspection}
       />
     );
   }
