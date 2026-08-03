@@ -2392,6 +2392,48 @@ dd {
   color: var(--green-bright);
 }
 
+.import-successor-form {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--divider);
+}
+
+.import-successor-form label {
+  display: grid;
+  gap: 7px;
+  color: var(--cream);
+  font-size: 0.8rem;
+}
+
+.import-successor-form input[type="file"],
+.import-successor-form button {
+  min-height: 44px;
+}
+
+.import-successor-form input[type="file"] {
+  width: 100%;
+  padding: 9px;
+  border: 1px solid var(--divider);
+  color: var(--muted);
+}
+
+.import-successor-form button {
+  justify-self: start;
+  padding: 0 14px;
+  border: 1px solid var(--green);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--green-bright);
+  cursor: pointer;
+}
+
+.import-successor-form button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
 .history-commit-progress {
   padding: 16px;
   border: 1px solid color-mix(in srgb, var(--warning) 42%, transparent);

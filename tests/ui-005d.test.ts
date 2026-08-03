@@ -31,6 +31,12 @@ test("import reversal UI keeps confirmation, impact, progress, and successor bou
     /\/api\/import\/commit\/\$\{historyDetail\.batch\.id\}\/reverse/,
   );
   assert.match(review, /idempotencyKey/);
+  assert.match(review, /form\.set\("supersedesBatchId", supersededBatchId\)/);
+  assert.match(review, /loadHistoryDetail\(result\.review\.batch\.id\)/);
+  assert.match(
+    review,
+    /key=\{`\$\{historyDetail\.batch\.id\}:\$\{historyDetail\.batch\.version\}`\}/,
+  );
   assert.match(service, /supersedes_batch_id/);
   assert.match(service, /successorBatchId/);
   assert.match(styles, /\.import-reversal-button[\s\S]*min-height: 44px/);
@@ -63,7 +69,8 @@ test("reversal detail renders blocked impacts and preserves source evidence", ()
     process.stdout.write(renderToStaticMarkup(createElement(ImportHistoryDetailPanel, {
       detail, pending: false, onLoadMore() {}, onResume() {}, reversal,
       reversalPending: false, reversalRetryAvailable: false,
-      onReverse() {}, onOpenSuccessor() {}
+      successorPending: false, onReverse() {}, onOpenSuccessor() {},
+      onStageSuccessor() {}
     })));
   `;
   const html = execFileSync(
@@ -76,4 +83,46 @@ test("reversal detail renders blocked impacts and preserves source evidence", ()
   assert.match(html, /Exact dependent trade time/);
   assert.match(html, /Immutable source rows/);
   assert.match(html, /Open corrected successor batch/);
+});
+
+test("reversed import renders an operable corrected-successor upload", () => {
+  const componentUrl = new URL(
+    "../app/components/import-history-detail.tsx",
+    import.meta.url,
+  ).href;
+  const script = `
+    import { createElement } from "react";
+    import { renderToStaticMarkup } from "react-dom/server";
+    import { ImportHistoryDetailPanel } from ${JSON.stringify(componentUrl)};
+    const detail = {
+      batch: { id: "batch-a", filename: "source.csv", status: "reversed", version: 6,
+        targetPortfolioId: "portfolio-a", totalRows: 1, transactionRows: 1,
+        errorCount: 0, warningCount: 0, createdAt: "2026-08-03T00:00:00Z",
+        updatedAt: "2026-08-04T00:01:00Z", parsedAt: "2026-08-03T00:00:30Z",
+        committedAt: "2026-08-03T00:02:00Z", reversedAt: "2026-08-04T00:00:00Z",
+        supersedesBatchId: null },
+      successorBatchId: null,
+      rows: [], issues: [], mappings: [], audit: [],
+      progress: { highWaterRow: 2, idempotencyKey: null, committedRows: 1,
+        skippedRows: 0, remainingRows: 0 },
+      pagination: { offset: 0, limit: 50, hasMore: false, nextOffset: null,
+        rowsHaveMore: false, issuesHaveMore: false, mappingsHaveMore: false,
+        auditHaveMore: false }
+    };
+    process.stdout.write(renderToStaticMarkup(createElement(ImportHistoryDetailPanel, {
+      detail, pending: false, onLoadMore() {}, onResume() {}, reversal: null,
+      reversalPending: false, reversalRetryAvailable: false,
+      successorPending: false, onReverse() {}, onOpenSuccessor() {},
+      onStageSuccessor() {}
+    })));
+  `;
+  const html = execFileSync(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "--eval", script],
+    { encoding: "utf8" },
+  );
+  assert.match(html, /This committed import is reversed/);
+  assert.match(html, /name="correctedFile"/);
+  assert.match(html, /accept="\.csv,text\/csv"/);
+  assert.match(html, />Stage corrected successor</);
 });

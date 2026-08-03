@@ -1,6 +1,7 @@
 import type { ImportHistoryDetail } from "../import-history-service.ts";
 import type { ImportReversalActionResult } from "../import-reversal-service.ts";
 import { useState } from "react";
+import type { FormEvent } from "react";
 
 function displayValue(value: unknown): string {
   if (value === null || value === undefined) return "Not recorded";
@@ -24,8 +25,10 @@ export function ImportHistoryDetailPanel({
   reversal,
   reversalPending,
   reversalRetryAvailable,
+  successorPending,
   onReverse,
   onOpenSuccessor,
+  onStageSuccessor,
 }: {
   detail: ImportHistoryDetail;
   pending: boolean;
@@ -34,8 +37,10 @@ export function ImportHistoryDetailPanel({
   reversal: ImportReversalActionResult | null;
   reversalPending: boolean;
   reversalRetryAvailable: boolean;
+  successorPending: boolean;
   onReverse: (expectedVersion: number) => void;
   onOpenSuccessor: (batchId: string) => void;
+  onStageSuccessor: (file: File) => void;
 }) {
   const [confirmation, setConfirmation] = useState(false);
   const resumable =
@@ -87,6 +92,40 @@ export function ImportHistoryDetailPanel({
                     ? "Checking reversal…"
                     : "Retry reversal request"}
                 </button>
+              ) : null}
+              {!detail.successorBatchId && detail.batch.targetPortfolioId ? (
+                <form
+                  className="import-successor-form"
+                  onSubmit={(event: FormEvent<HTMLFormElement>) => {
+                    event.preventDefault();
+                    const file = new FormData(event.currentTarget).get(
+                      "correctedFile",
+                    );
+                    if (file instanceof File && file.size > 0) {
+                      onStageSuccessor(file);
+                    }
+                  }}
+                >
+                  <label>
+                    Corrected CSV file
+                    <input
+                      name="correctedFile"
+                      type="file"
+                      accept=".csv,text/csv"
+                      required
+                    />
+                  </label>
+                  <button type="submit" disabled={successorPending}>
+                    {successorPending
+                      ? "Preparing corrected preview…"
+                      : "Stage corrected successor"}
+                  </button>
+                </form>
+              ) : !detail.successorBatchId ? (
+                <p className="import-reversal-error" role="alert">
+                  This batch has no single target portfolio, so a corrected
+                  successor cannot be staged from this view.
+                </p>
               ) : null}
             </>
           ) : (

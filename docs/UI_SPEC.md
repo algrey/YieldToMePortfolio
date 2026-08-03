@@ -211,7 +211,7 @@ The overflow state menu is a review aid and is not a proposed production control
 - The history chart has a text alternative.
 - Reduced-motion preferences suppress nonessential animation.
 - Import history loads durable row, issue, mapping, and audit evidence in bounded pages. A reloaded partial commit names its persisted high-water and remaining work, retains a 44 px resume control at narrow widths, and never labels the batch complete before the server does.
-- Import reversal is an explicit confirmed operation: dependent-fact impacts are listed with business dates and exact timestamps in evidence, progress remains resumable, source rows stay visible after reversal, and corrected successor batches are directly reachable without exposing another owner’s history.
+- Import reversal is an explicit confirmed operation: dependent-fact impacts are listed with business dates and exact timestamps in evidence, progress remains resumable, source rows stay visible after reversal, and an owner can stage a corrected CSV against the reversed batch or directly open its existing successor without exposing another owner’s history.
 - Manual ledger forms remain disabled until a private server-issued retry key is available. Create, reverse, and replacement operations retain their exact key across network failures; correction buttons remain labelled 44 px controls and never reuse a key for another target.
 
 ## 11. Rendered review evidence

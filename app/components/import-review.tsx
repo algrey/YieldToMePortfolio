@@ -119,6 +119,7 @@ export function ImportReview({
     null,
   );
   const [reversalKey, setReversalKey] = useState<string | null>(null);
+  const [successorPending, setSuccessorPending] = useState(false);
 
   useEffect(() => {
     void loadHistory();
@@ -244,6 +245,58 @@ export function ImportReview({
       );
     } finally {
       setReversalPending(false);
+    }
+  }
+
+  async function stageCorrectedSuccessor(file: File) {
+    if (
+      historyDetail?.batch.status !== "reversed" ||
+      !historyDetail.batch.targetPortfolioId
+    ) {
+      setMessage(
+        "Only a reversed import with one target portfolio can be corrected.",
+      );
+      return;
+    }
+    const supersededBatchId = historyDetail.batch.id;
+    const targetId = historyDetail.batch.targetPortfolioId;
+    const form = new FormData();
+    form.set("file", file);
+    form.set("targetPortfolioId", targetId);
+    form.set("supersedesBatchId", supersededBatchId);
+    setSuccessorPending(true);
+    setMessage(null);
+    try {
+      const response = await fetch("/api/import/preview", {
+        method: "POST",
+        body: form,
+      });
+      const result = (await response.json()) as
+        { ok: true; review: Review } | { ok: false; message: string };
+      if (!response.ok || result.ok === false) {
+        throw new Error(
+          result.ok === false
+            ? result.message
+            : "The corrected import preview could not be created.",
+        );
+      }
+      setTargetPortfolioId(targetId);
+      setReview(result.review);
+      setCommit(null);
+      setCommitConfirmed(false);
+      setCommitKey(null);
+      await Promise.all([
+        loadHistory(),
+        loadHistoryDetail(result.review.batch.id),
+      ]);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "The corrected import preview could not be created.",
+      );
+    } finally {
+      setSuccessorPending(false);
     }
   }
 
@@ -675,6 +728,7 @@ export function ImportReview({
 
       {historyDetail ? (
         <ImportHistoryDetailPanel
+          key={`${historyDetail.batch.id}:${historyDetail.batch.version}`}
           detail={historyDetail}
           pending={historyPending || commitPending}
           onLoadMore={() => {
@@ -689,10 +743,12 @@ export function ImportReview({
           reversal={reversal}
           reversalPending={reversalPending}
           reversalRetryAvailable={reversalKey !== null}
+          successorPending={successorPending}
           onReverse={(expectedVersion) =>
             void reverseHistoryImport(expectedVersion)
           }
           onOpenSuccessor={(batchId) => void loadHistoryDetail(batchId)}
+          onStageSuccessor={(file) => void stageCorrectedSuccessor(file)}
         />
       ) : null}
     </main>
