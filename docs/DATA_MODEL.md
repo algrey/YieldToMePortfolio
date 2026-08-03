@@ -375,6 +375,12 @@ Unique provider/pair/interval/observed time. Application derives and records inv
 
 Provider selection uses deployment observations for the configured Yahoo-compatible source. A future user-entitled observation must match the authenticated internal user; this scope is for privacy/entitlement isolation only.
 
+### `market_data_refresh_jobs`
+
+Refresh jobs are durable D1 rows rather than in-memory or `waitUntil` work. Each row records the provider, price/FX target and scope, requested date range, bounded chunk size, resumable `high_water_date`, idempotency key, provider-request/observation counters, retry state, and conditional lease. Queued jobs may be coalesced for overlapping target/date windows; expired running leases are reclaimable. A successful chunk advances the high-water date and either queues the next chunk or completes the job. Provider failures retain a typed error kind and retry only while the bounded attempt policy allows.
+
+Normalized price and FX writes use their provider/scope/date uniqueness keys with update-on-conflict semantics, so duplicate rows remain idempotent and a corrected provider observation updates the normalized value without creating a second fact.
+
 ### `split_events`
 
 Deferred provider capability; this is not part of the core schema:

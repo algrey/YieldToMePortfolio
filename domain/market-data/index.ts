@@ -8,6 +8,16 @@ export {
 export { createYahooCompatibleProvider } from "./yahoo-compatible.ts";
 export type { YahooCompatibleAdapterOptions } from "./yahoo-compatible.ts";
 export {
+  createMarketDataRefreshService,
+  DEFAULT_MARKET_DATA_REFRESH_CONFIG,
+  MARKET_DATA_REFRESH_LIMITS,
+} from "./ingestion.ts";
+export type {
+  MarketDataRefreshConfig,
+  MarketDataRefreshServiceOptions,
+  MarketDataRefreshSummary,
+} from "./ingestion.ts";
+export {
   normalizeFxObservation,
   normalizePriceObservation,
 } from "./normalize.ts";

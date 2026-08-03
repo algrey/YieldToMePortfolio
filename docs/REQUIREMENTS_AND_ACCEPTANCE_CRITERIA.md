@@ -202,6 +202,7 @@ Acceptance:
 - Compact views generally suppress timestamps, provider, delay, and fallback labels. Manual, stale, indicative, or fallback state is available through an adjacent accessible explanation, with inline status reserved for an action-required condition.
 - Adjusted and unadjusted prices cannot be mixed in one calculation without an explicit rule.
 - Duplicate provider observations are idempotent.
+- Refresh work is durable, resumable from a stored high-water date, and correction-safe; bounded scheduled chunks do not rely on request-lifetime background execution.
 
 ### MKT-004 — FX provenance
 

@@ -113,6 +113,13 @@
       "when": 1785720283952,
       "tag": "0015_rapid_wendigo",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1785726528550,
+      "tag": "0016_talented_christian_walker",
+      "breakpoints": true
     }
   ]
 }

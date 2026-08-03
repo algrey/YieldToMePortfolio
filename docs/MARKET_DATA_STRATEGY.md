@@ -185,6 +185,7 @@ Provider errors are typed as authentication, entitlement, rate limit, unavailabl
 - FX refreshes required currency pairs once per daily window.
 - Dividend/split refresh runs at a lower cadence plus targeted post-event correction.
 - Manual refresh requests create/coalesce a job and return status; they do not issue one client-side provider request per holding.
+- Scheduled refresh jobs persist their lease and date high-water in D1, process at most five target chunks/provider requests per invocation, and keep each observation write below the 100-bound-parameter limit; `waitUntil` is not the durability mechanism.
 
 ### Corrections
 

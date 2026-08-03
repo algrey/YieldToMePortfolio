@@ -102,6 +102,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "lot_allocations",
     "manual_overrides",
     "market_data_providers",
+    "market_data_refresh_jobs",
     "portfolio_daily_snapshots",
     "portfolio_securities",
     "portfolio_settings",

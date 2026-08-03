@@ -1151,6 +1151,138 @@ export const fxRateObservations = sqliteTable(
   ],
 );
 
+export const marketDataRefreshJobs = sqliteTable(
+  "market_data_refresh_jobs",
+  {
+    id: text("id").primaryKey(),
+    providerId: text("provider_id").notNull(),
+    targetKind: text("target_kind").notNull(),
+    targetKey: text("target_key").notNull(),
+    mappingId: text("mapping_id"),
+    securityId: text("security_id"),
+    baseCurrencyCode: text("base_currency_code"),
+    quoteCurrencyCode: text("quote_currency_code"),
+    accessScope: text("access_scope").notNull(),
+    scopeUserId: text("scope_user_id"),
+    scopeKey: text("scope_key").notNull(),
+    rangeFrom: text("range_from").notNull(),
+    rangeTo: text("range_to").notNull(),
+    highWaterDate: text("high_water_date"),
+    chunkDays: integer("chunk_days").notNull().default(5),
+    status: text("status").notNull().default("queued"),
+    attempt: integer("attempt").notNull().default(0),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: text("lease_expires_at"),
+    nextAttemptAt: text("next_attempt_at").notNull(),
+    providerRequestCount: integer("provider_request_count")
+      .notNull()
+      .default(0),
+    observationCount: integer("observation_count").notNull().default(0),
+    correctionCount: integer("correction_count").notNull().default(0),
+    lastErrorKind: text("last_error_kind"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    startedAt: text("started_at"),
+    completedAt: text("completed_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "market_data_refresh_jobs_provider_id_fk",
+      columns: [table.providerId],
+      foreignColumns: [marketDataProviders.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "market_data_refresh_jobs_scope_user_id_fk",
+      columns: [table.scopeUserId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "market_data_refresh_jobs_mapping_provider_security_fk",
+      columns: [table.mappingId, table.providerId, table.securityId],
+      foreignColumns: [
+        securityProviderMappings.id,
+        securityProviderMappings.providerId,
+        securityProviderMappings.securityId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "market_data_refresh_jobs_base_currency_fk",
+      columns: [table.baseCurrencyCode],
+      foreignColumns: [currencies.code],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "market_data_refresh_jobs_quote_currency_fk",
+      columns: [table.quoteCurrencyCode],
+      foreignColumns: [currencies.code],
+    }).onDelete("restrict"),
+    check(
+      "market_data_refresh_jobs_target_kind_check",
+      sql`${table.targetKind} IN ('price', 'fx')`,
+    ),
+    check(
+      "market_data_refresh_jobs_target_shape_check",
+      sql`(${table.targetKind} = 'price' AND ${table.mappingId} IS NOT NULL AND ${table.securityId} IS NOT NULL AND ${table.baseCurrencyCode} IS NULL AND ${table.quoteCurrencyCode} IS NULL) OR (${table.targetKind} = 'fx' AND ${table.mappingId} IS NULL AND ${table.securityId} IS NULL AND ${table.baseCurrencyCode} IS NOT NULL AND ${table.quoteCurrencyCode} IS NOT NULL AND ${table.baseCurrencyCode} <> ${table.quoteCurrencyCode})`,
+    ),
+    check(
+      "market_data_refresh_jobs_access_scope_check",
+      sql`${table.accessScope} IN ('deployment', 'user')`,
+    ),
+    check(
+      "market_data_refresh_jobs_scope_check",
+      sql`(${table.accessScope} = 'deployment' AND ${table.scopeUserId} IS NULL AND ${table.scopeKey} = 'deployment') OR (${table.accessScope} = 'user' AND ${table.scopeUserId} IS NOT NULL AND ${table.scopeKey} = ${table.scopeUserId})`,
+    ),
+    check(
+      "market_data_refresh_jobs_range_check",
+      sql`${table.rangeTo} >= ${table.rangeFrom}`,
+    ),
+    check(
+      "market_data_refresh_jobs_high_water_check",
+      sql`${table.highWaterDate} IS NULL OR (${table.highWaterDate} >= ${table.rangeFrom} AND ${table.highWaterDate} <= ${table.rangeTo})`,
+    ),
+    check(
+      "market_data_refresh_jobs_chunk_days_check",
+      sql`${table.chunkDays} BETWEEN 1 AND 5`,
+    ),
+    check(
+      "market_data_refresh_jobs_status_check",
+      sql`${table.status} IN ('queued', 'running', 'completed', 'failed')`,
+    ),
+    check("market_data_refresh_jobs_attempt_check", sql`${table.attempt} >= 0`),
+    check(
+      "market_data_refresh_jobs_provider_request_count_check",
+      sql`${table.providerRequestCount} >= 0`,
+    ),
+    check(
+      "market_data_refresh_jobs_observation_count_check",
+      sql`${table.observationCount} >= 0`,
+    ),
+    check(
+      "market_data_refresh_jobs_correction_count_check",
+      sql`${table.correctionCount} >= 0`,
+    ),
+    uniqueIndex("market_data_refresh_jobs_idempotency_unique").on(
+      table.providerId,
+      table.scopeKey,
+      table.targetKind,
+      table.targetKey,
+      table.idempotencyKey,
+    ),
+    index("market_data_refresh_jobs_claim_idx").on(
+      table.status,
+      table.nextAttemptAt,
+      table.leaseExpiresAt,
+    ),
+    index("market_data_refresh_jobs_target_idx").on(
+      table.providerId,
+      table.scopeKey,
+      table.targetKind,
+      table.targetKey,
+      table.status,
+    ),
+  ],
+);
+
 export const manualOverrides = sqliteTable(
   "manual_overrides",
   {

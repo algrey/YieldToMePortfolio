@@ -17,6 +17,7 @@ import {
   createRequestId,
   emitStructuredLog,
 } from "../domain/observability/index.ts";
+import { runScheduledMarketDataRefresh } from "./scheduled-refresh";
 
 const accessJwtVerifier = createAccessJwtVerifier();
 
@@ -119,6 +120,24 @@ const worker: ExportedHandler<Env> = {
       headers: authenticatedHeaders,
     });
     return await respond(await handler.fetch(authenticatedRequest, env, ctx));
+  },
+
+  async scheduled(_controller, env) {
+    const result = await runScheduledMarketDataRefresh(env);
+    emitStructuredLog({
+      level: result.ok ? "info" : "error",
+      event: "market.refresh",
+      action: "market.refresh.scheduled",
+      result: result.ok ? "success" : "failure",
+      requestId: "scheduled",
+      metadata: result.ok
+        ? {
+            skipped: result.skipped,
+            jobs: result.jobs,
+            providerRequests: result.providerRequests,
+          }
+        : { reason: result.reason },
+    });
   },
 };
 

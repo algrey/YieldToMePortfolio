@@ -88,3 +88,13 @@ export {
   type ProjectionRebuildResult,
   type ProjectionRebuildSuccess,
 } from "./projections.ts";
+export {
+  createMarketDataRefreshRepository,
+  type ClaimMarketDataRefreshResult,
+  type MarketDataRefreshJobRecord,
+  type MarketDataRefreshJobStatus,
+  type ProgressMarketDataRefreshResult,
+  type RefreshTargetKind,
+  type RequestMarketDataRefreshInput,
+  type RetryMarketDataRefreshResult,
+} from "./market-data-refresh.ts";
