@@ -548,6 +548,7 @@ test("atomic rollback, duplicate-file reuse, idempotency, ownership, and confirm
       fileSha256: "file-a",
     },
   );
+  if (!reused.ok) throw new Error("expected duplicate upload to be reusable");
   assert.equal(reused.reused, true);
   assert.equal(reused.batch.id, committed.batchId);
   const retry = await createOwnedImportCommitRepository(base).commit(

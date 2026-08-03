@@ -151,6 +151,16 @@ export async function createImportPreviewAction(
       byteSize: file.size,
       fileSha256: parseResult.fileFingerprint,
     });
+    if (!started.ok) {
+      return {
+        ok: false,
+        status: started.reason === "not_found" ? 404 : 409,
+        message:
+          started.reason === "not_found"
+            ? "The import batch to correct was not found."
+            : "A corrected import must supersede a reversed batch in the same portfolio.",
+      };
+    }
     if (!started.reused && started.batch.status === "uploaded") {
       const recorded = await createOwnedImportStagingRepository(
         context.client,

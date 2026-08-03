@@ -439,7 +439,7 @@ Status: DONE (2026-08-03).
 
 ### IMP-003B — Import reversal and corrected re-import
 
-Status: READY.
+Status: DONE on 2026-08-03.
 
 - Objective: reverse a committed batch and stage a corrected successor without deleting provenance.
 - Dependencies: IMP-003A.
@@ -450,6 +450,7 @@ Status: READY.
 - Tests: clean reversal, repeated reversal, dependent later sale, corrected re-import, partial-failure resume, cross-user denial.
 - Risks: later-lot dependencies and irreversible operator misunderstanding.
 - Parallel safe: no.
+- Completion note: Added owner-scoped, bounded, idempotent batch reversal with compensating ledger/cash effects, queued rebuild evidence, exact later-sale impact blocking, immutable reversed source rows, audit events, and corrected uploads linked through `supersedes_batch_id`. Integration coverage includes clean/repeated reversal, dependency blocking, corrected re-import, partial resume, and cross-user denial; `npm test` passes all 157 tests.
 
 ### LED-002A — Pure FIFO allocation engine
 

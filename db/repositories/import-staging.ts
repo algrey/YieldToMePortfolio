@@ -109,6 +109,7 @@ export type ImportMutationFailure =
 export type StartImportUploadInput = {
   id?: string;
   targetPortfolioId?: string | null;
+  supersedesBatchId?: string | null;
   parserFormat: string;
   parserVersion: string;
   filename: string;
@@ -126,6 +127,10 @@ export type StartImportUploadResult =
       ok: true;
       reused: true;
       batch: ImportBatchRecord;
+    }
+  | {
+      ok: false;
+      reason: "not_found" | "invalid_supersession";
     };
 
 export type RecordParsedImportResultInput = {
@@ -776,6 +781,28 @@ export function createOwnedImportStagingRepository(
     ): Promise<StartImportUploadResult> {
       const createdAt = nowIso(now);
       const batchId = input.id ?? randomUUID();
+      let targetPortfolioId = input.targetPortfolioId ?? null;
+      if (input.supersedesBatchId) {
+        const superseded = await client.get<{
+          id: string;
+          target_portfolio_id: string | null;
+          status: ImportBatchStatus;
+        }>(
+          `SELECT id, target_portfolio_id, status
+           FROM import_batches
+           WHERE id = ? AND user_id = ? LIMIT 1`,
+          [input.supersedesBatchId, userId],
+        );
+        if (!superseded) return { ok: false, reason: "not_found" };
+        if (
+          superseded.status !== "reversed" ||
+          (targetPortfolioId !== null &&
+            targetPortfolioId !== superseded.target_portfolio_id)
+        ) {
+          return { ok: false, reason: "invalid_supersession" };
+        }
+        targetPortfolioId = superseded.target_portfolio_id;
+      }
       const insertedRows = await client.all<Record<string, unknown>>(
         `
           INSERT INTO import_batches (
@@ -789,7 +816,7 @@ export function createOwnedImportStagingRepository(
           )
           VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            NULL, NULL, NULL, NULL, NULL, ?, ?, NULL, NULL, NULL, 1
+            NULL, NULL, ?, NULL, NULL, ?, ?, NULL, NULL, NULL, 1
           )
           ON CONFLICT(user_id, file_sha256, parser_format, parser_version)
           DO NOTHING
@@ -805,12 +832,13 @@ export function createOwnedImportStagingRepository(
         [
           batchId,
           userId,
-          input.targetPortfolioId ?? null,
+          targetPortfolioId,
           input.parserFormat,
           input.parserVersion,
           input.filename,
           input.byteSize,
           input.fileSha256,
+          input.supersedesBatchId ?? null,
           createdAt,
           createdAt,
         ],

@@ -32,6 +32,16 @@ export {
   type TransitionImportBatchResult,
 } from "./import-staging.ts";
 export {
+  createOwnedImportReversalRepository,
+  IMPORT_REVERSAL_LIMITS,
+  type ImportReversalFailure,
+  type ImportReversalImpact,
+  type ImportReversalInput,
+  type ImportReversalOptions,
+  type ImportReversalResult,
+  type ImportReversalSuccess,
+} from "./import-reversal.ts";
+export {
   createIdentityRepository,
   type InternalIdentityRecord,
   type InternalIdentityStatus,
