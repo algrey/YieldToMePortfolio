@@ -81,10 +81,12 @@ export async function commitImportAction(
       status:
         result.reason === "not_found"
           ? 404
-          : result.reason === "atomic_failure" ||
-              result.reason === "injected_failure"
-            ? 503
-            : 409,
+          : result.reason === "invalid_idempotency_key"
+            ? 400
+            : result.reason === "atomic_failure" ||
+                result.reason === "injected_failure"
+              ? 503
+              : 409,
       message: messageFor(result.reason),
     };
   } catch {

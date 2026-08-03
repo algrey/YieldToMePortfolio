@@ -31,8 +31,10 @@ async function migratedDatabase(): Promise<DatabaseSync> {
            ('user-b', 'AUD', 'Australia/Sydney', '2026-08-03', '2026-08-03', 1);
     INSERT INTO portfolios (id, user_id, code, name, base_currency_code, timezone, accounting_method, status, created_at, updated_at, version)
     VALUES ('portfolio-a', 'user-a', 'A', 'Main', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-03', '2026-08-03', 1);
-    INSERT INTO portfolio_securities (id, user_id, portfolio_id, source_symbol, source_currency_code, status, created_at, updated_at)
-    VALUES ('membership-a', 'user-a', 'portfolio-a', 'ABC', 'AUD', 'unresolved', '2026-08-03', '2026-08-03');
+    INSERT INTO securities (id, canonical_name, asset_type, primary_currency_code, status, created_at, updated_at)
+    VALUES ('security-a', 'Alpha', 'equity', 'AUD', 'active', '2026-08-03', '2026-08-03');
+    INSERT INTO portfolio_securities (id, user_id, portfolio_id, security_id, source_symbol, source_currency_code, status, created_at, updated_at)
+    VALUES ('membership-a', 'user-a', 'portfolio-a', 'security-a', 'ABC', 'AUD', 'held', '2026-08-03', '2026-08-03');
     INSERT INTO import_batches (
       id, user_id, target_portfolio_id, parser_format, parser_version, filename,
       byte_size, file_sha256, status, created_at, updated_at, version
@@ -124,6 +126,16 @@ test("bounded commit resumes from the durable high-water row and is idempotent",
     ).commit_high_water_row,
     3,
   );
+  assert.equal(
+    (
+      database
+        .prepare(
+          "SELECT fx_observed_at FROM transactions WHERE id = (SELECT commit_transaction_id FROM import_rows WHERE id = 'row-1')",
+        )
+        .get() as { fx_observed_at: string | null }
+    ).fx_observed_at,
+    null,
+  );
 
   const resumed = await createOwnedImportCommitRepository(client, {
     chunkSize: 2,
@@ -140,6 +152,22 @@ test("bounded commit resumes from the durable high-water row and is idempotent",
   assert.equal(resumed.status, "committed");
   assert.equal(resumed.highWaterRow, 4);
   assert.equal(resumed.committedRows, 3);
+  assert.deepEqual(
+    (
+      database
+        .prepare(
+          "SELECT chunk_index, committed_row_count FROM import_commit_chunks ORDER BY chunk_index",
+        )
+        .all() as Array<{
+        chunk_index: number;
+        committed_row_count: number;
+      }>
+    ).map((row) => ({ ...row })),
+    [
+      { chunk_index: 0, committed_row_count: 2 },
+      { chunk_index: 1, committed_row_count: 1 },
+    ],
+  );
   assert.equal(
     (
       database.prepare("SELECT count(*) AS count FROM transactions").get() as {

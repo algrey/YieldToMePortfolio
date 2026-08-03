@@ -420,7 +420,7 @@ Status: DONE (2026-07-30).
 
 ### IMP-003A — Idempotent import commit and resume
 
-Status: DONE on 2026-08-03.
+Status: IN PROGRESS (review 2026-08-03).
 
 - Objective: turn an approved staged batch into bounded, resumable ledger effects with no duplicate visibility.
 - Dependencies: LED-001B, LED-002B, IMP-002B, OPS-001.
@@ -432,6 +432,9 @@ Status: DONE on 2026-08-03.
 - Risks: D1 limits or exposing partially committed rows before final status.
 - Parallel safe: no; integrates ledger/import/audit.
 - Completion note: Added owner-scoped explicit commit with bounded D1 chunks, durable high-water/chunk markers, idempotent duplicate handling, atomic ledger effects, and queued rebuild finalization; failure-injection tests verify resumable behavior.
+- Review finding: Commit does not re-run the server-issued reconciliation or verify current blocking issues, parser/mapping state, and exact preview version before moving a batch to `committing`; it also never consumes portfolio/security mapping decisions from IMP-002B, so an approved mapped batch cannot reliably resolve its staged targets. Add an owner-scoped server revalidation step and persist/apply only its validated mapping result before commit.
+- Review finding: Finalization creates a rebuild request with `ledger_high_water_start = import:<batch>:<row>` rather than the portfolio's actual ledger high-water identifier, and assumes one non-null batch portfolio. Derive durable rebuild requests from the affected owned portfolio(s) and their real committed ledger high-water values, with tests for per-row portfolio mappings and rebuild claim/completion.
+- Review finding: Tests cover one injected failure boundary and a manually prepared staged fixture, but do not cover every chunk boundary, duplicate-file commit through the staging path, D1 query/parameter budgets, blocked issue-state commits, stale exact preview versions, mapping consumption, or rebuild high-water correctness.
 
 ### IMP-003B — Import reversal and corrected re-import
 

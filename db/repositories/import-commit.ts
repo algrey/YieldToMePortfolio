@@ -274,6 +274,15 @@ export function createOwnedImportCommitRepository(
     if (!isCash && !row.targetPortfolioSecurityId) {
       return { ok: false, reason: "mapping_incomplete" };
     }
+    if (!isCash) {
+      const membership = await client.get<{ id: string }>(
+        `SELECT id FROM portfolio_securities
+         WHERE id = ? AND user_id = ? AND portfolio_id = ?
+           AND status <> 'unresolved' AND security_id IS NOT NULL LIMIT 1`,
+        [row.targetPortfolioSecurityId, userId, portfolioId],
+      );
+      if (!membership) return { ok: false, reason: "mapping_incomplete" };
+    }
     let fxRate: string | null = null;
     let fxRateSource: string | null = null;
     if (
@@ -332,7 +341,7 @@ export function createOwnedImportCommitRepository(
         taxAmountDecimal: "0",
         fxRateToBaseDecimal: fxRate,
         fxRateSource,
-        fxObservedAt: normalized.tradeAtUtc,
+        fxObservedAt: fxRate === null ? null : normalized.tradeAtUtc,
         sourceType: "csv_import",
         idempotencyKey: `import:${batch.id}:${commitKey}:${row.id}`,
         tradeAt: normalized.tradeAtUtc,
@@ -520,6 +529,7 @@ export function createOwnedImportCommitRepository(
         if (options.failAtChunk === chunkIndex)
           return { ok: false, reason: "injected_failure", resumable: true };
         const statements: SqlStatement[] = [];
+        let committedRowCount = 0;
         for (const row of chunk) {
           if (row.rowClass !== "transaction") {
             statements.push({
@@ -589,6 +599,7 @@ export function createOwnedImportCommitRepository(
               batch.id,
             ],
           });
+          committedRowCount += 1;
         }
         const firstPhysicalRow =
           chunk[0]?.physicalRowNumber ?? batch.commitHighWaterRow;
@@ -607,7 +618,7 @@ export function createOwnedImportCommitRepository(
             chunkIndex,
             firstPhysicalRow,
             lastPhysicalRow,
-            chunk.length,
+            committedRowCount,
             nowIso(now),
           ],
         });
