@@ -266,6 +266,41 @@ test("coalesces refreshes, resumes high-water chunks, and upserts corrections", 
   );
 });
 
+test("extends an overlapping running refresh through its upper bound", async () => {
+  const database = await createMigratedDatabase();
+  seedMarketData(database);
+  const repository = createMarketDataRefreshRepository(
+    createSqliteSqlClient(database),
+  );
+  const running = await repository.request(
+    priceJobInput("job-running", "running-1", "2026-07-29", "2026-07-30"),
+  );
+  assert.equal(
+    (
+      await repository.claim(
+        running.id,
+        "worker-1",
+        "2026-08-03T01:05:00Z",
+        "2026-08-03T01:00:00Z",
+      )
+    ).ok,
+    true,
+  );
+
+  const extended = await repository.request(
+    priceJobInput(
+      "job-running-extension",
+      "running-2",
+      "2026-07-30",
+      "2026-08-02",
+    ),
+  );
+  assert.equal(extended.id, running.id);
+  assert.equal(extended.rangeFrom, "2026-07-29");
+  assert.equal(extended.rangeTo, "2026-08-02");
+  assert.equal(extended.status, "running");
+});
+
 test("retries throttled work, reclaims expired leases, and preserves user scope", async () => {
   const database = await createMigratedDatabase();
   seedMarketData(database);

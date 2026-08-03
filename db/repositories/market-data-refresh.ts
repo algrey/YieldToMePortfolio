@@ -300,6 +300,18 @@ export function createMarketDataRefreshRepository(client: SqlClient) {
           );
           return (await get(existing.id)) ?? existing;
         }
+        // A running job may have already advanced its high-water mark, so
+        // only extend the upper bound. Its lower bound must remain stable to
+        // avoid implying that already-processed dates were backfilled.
+        if (input.rangeTo > existing.rangeTo) {
+          await client.run(
+            `UPDATE market_data_refresh_jobs
+             SET range_to = MAX(range_to, ?), updated_at = ?
+             WHERE id = ? AND status = 'running' AND range_to < ?`,
+            [input.rangeTo, input.now, existing.id, input.rangeTo],
+          );
+          return (await get(existing.id)) ?? existing;
+        }
         return existing;
       }
 

@@ -586,7 +586,7 @@ Status: DONE (2026-08-03).
 
 ### MKT-003B — Bounded ingestion and refresh jobs
 
-Status: DONE on 2026-08-03.
+Status: IN PROGRESS (review 2026-08-03).
 
 - Objective: ingest current/daily price and FX observations reliably within Cloudflare/D1 limits.
 - Dependencies: MKT-003A, MKT-002, MKT-004, OPS-001.
@@ -598,6 +598,7 @@ Status: DONE on 2026-08-03.
 - Risks: Worker subrequest/execution limits; add Queue only after measurement.
 - Parallel safe: no; shared ingestion path.
 - Completion note: Added the durable D1 refresh-job schema/migration, idempotent price/FX upserts, overlap coalescing, lease claim/reclaim, bounded high-water chunk processing, typed retry/failure handling, and a Cron scheduled handler configured for five jobs/provider requests per invocation without `waitUntil` durability.
+- Review finding: Chunk observation writes and the high-water checkpoint are separate D1 operations, leaving a failure window that can replay provider work and upserts before the checkpoint advances; the read-then-insert overlap check is also race-prone under concurrent refresh requests, and the declared D1/query and chunk budgets are not enforced when configuration changes. Finish with an atomic bounded chunk/checkpoint commit, race-safe overlap coalescing, explicit budget enforcement, and failure/concurrency regression tests before marking this task done.
 
 ### MKT-004 — Yahoo-compatible FX adapter
 
