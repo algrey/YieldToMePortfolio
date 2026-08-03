@@ -420,7 +420,7 @@ Status: DONE (2026-07-30).
 
 ### IMP-003A — Idempotent import commit and resume
 
-Status: PENDING.
+Status: READY.
 
 - Objective: turn an approved staged batch into bounded, resumable ledger effects with no duplicate visibility.
 - Dependencies: LED-001B, LED-002B, IMP-002B, OPS-001.
@@ -633,7 +633,7 @@ Status: DEFERRED; not required by the core ledger/valuation release.
 
 ### CALC-001A — Decimal primitives, basis, gain, and current value
 
-Status: PENDING.
+Status: READY.
 
 - Objective: implement the exact-decimal calculation foundation and single-date holding results.
 - Dependencies: LED-002B, MKT-001 fixture contract.
@@ -768,7 +768,7 @@ Status: DONE on 2026-08-03.
 
 ### UI-005A — Portfolio settings and ledger inspection
 
-Status: PENDING.
+Status: READY.
 
 - Objective: expose owned portfolio settings and read-only ledger/lot/cash provenance without combining them with financial write workflows.
 - Dependencies: UI-001, LED-002B.
