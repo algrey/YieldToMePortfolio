@@ -81,6 +81,8 @@ The actual selected observation date remains in calculation evidence but is gene
 
 For an imported/manual transaction, a validated explicit transaction FX fact takes precedence over market observations. A missing or legacy-zero transaction FX remains unknown; the calculation engine does not silently substitute a later provider rate without a separate attributed correction.
 
+The calculation boundary accepts separate transaction and valuation FX inputs. A transaction input checks its explicit attributed rate first and does not fall through to a provider rate when that explicit fact is malformed or directionally inconsistent. A valuation input uses the date-attributable selected observation supplied by the market-data selector. Both inputs normalize only the direct native-to-home pair, its explicit inverse, or identity; inversion uses decimal half-even rounding at 18 places, matching the normalized v1 FX adapter boundary.
+
 ### Staleness defaults
 
 - EOD: current through the end of the next expected trading session; stale after two missed expected sessions.
@@ -101,6 +103,8 @@ For a holding price observed on market date `d`:
 The holding menu can display `P_native,d`/native value or `P_home,d`/home value. Both views use the same quantity and price observation. The selected FX rate, date, and source remain available in the adjacent explanation and are generally suppressed in the compact view.
 
 Changing the toggle is presentation-only. It does not update transactions, lots, security currency, price observations, or holdings. If date-appropriate FX is unavailable, native price/value remains visible and the home view is unavailable—not zero. A change to the user’s home currency is different: it is an explicit settings/recalculation operation that rebuilds derived home-currency projections and snapshots without rewriting native facts.
+
+The calculation result therefore contains one immutable native-fact set plus optional home price/value fields. Compact presentation fields contain only status, currency, and decimal value/reason. The adjacent explanation retains FX source, source identifier, supplied direction/rate, market date, exact observation time, and whether inversion occurred. Requesting the home view while FX is unavailable falls back to the native facts with an explicit fallback flag rather than fabricating a converted value.
 
 ## 3. Ledger normalization
 
@@ -238,10 +242,10 @@ For a holding retained across the comparison boundary:
 Decomposition:
 
 - local price contribution: `Q_t × (P_t − P_prev) × FX_prev`
-- FX contribution: `Q_t × P_t × (FX_t − FX_prev)`
+- pure FX contribution: `Q_t × P_prev × (FX_t − FX_prev)`
 - cross term: `Q_t × (P_t − P_prev) × (FX_t − FX_prev)`
 
-The headline full movement uses the exact combined formula. If a decomposition is shown, add the cross term to FX contribution by convention so components reconcile.
+The headline full movement uses the exact combined formula. If a decomposition is shown, add the cross term to the pure FX contribution by convention. The displayed FX contribution is therefore `Q_t × P_t × (FX_t − FX_prev)`, and local price contribution plus that displayed FX contribution reconciles exactly to the headline.
 
 Quantity timing:
 
@@ -283,6 +287,8 @@ Coverage accompanies each total:
 - known and excluded values where knowable.
 
 If any non-zero holding or cash account is excluded, the UI calls the result `Known value` or another explicit partial-total label. It never presents the sum as the complete portfolio value, and it never invents a dollar value for an excluded component whose price/FX is unknown.
+
+The current-total contract is a discriminated result: `complete`/`portfolio_value`, `partial`/`known_value`, or `unavailable`/`value_unavailable`. A security contributes to both `InvestedValue` and `CoveredOpenBasis` only when its home market value and home basis are both available; value-only and basis-only positions are excluded from both aligned amounts and listed in coverage. Converted cash is tracked separately. Because the status and label are produced from the same coverage computation, an incomplete result cannot serialize with the complete discriminator.
 
 ## 8. Historical values and snapshots
 

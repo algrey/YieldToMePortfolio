@@ -659,7 +659,7 @@ Status: DONE (review fixes completed 2026-08-03).
 
 ### CALC-001B — FX conversion, daily movement, and partial totals
 
-Status: READY.
+Status: DONE (2026-08-03).
 
 - Objective: add date-attributable home-currency presentation and coverage-aligned portfolio totals.
 - Dependencies: CALC-001A, MKT-003A, MKT-004.
@@ -670,6 +670,7 @@ Status: READY.
 - Tests: foreign buy/sell/current FX, direct/inverse/identity, flat-price/FX movement, missing components, aligned coverage sets, rounding.
 - Risks: rate inversion or subtracting uncovered basis from covered value.
 - Parallel safe: yes after MKT-003A contract freezes.
+- Completion note: Added bounded exact-decimal transaction/valuation FX resolution with explicit transaction precedence, native/home holding presentation and provenance explanations, reconciled price/FX daily movement, signed cash conversion, and discriminated complete/partial portfolio totals whose invested value and basis share one aligned coverage set. Deterministic fixtures cover foreign buy/sell/current rates, direct/inverse/identity conversion, missing components, compact provenance suppression, cash, decomposition, coverage, and rounding; the aggregate repository gate passes.
 
 ### CALC-002 — Historical snapshots and rebuild
 

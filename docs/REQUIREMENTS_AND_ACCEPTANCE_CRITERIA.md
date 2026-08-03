@@ -61,6 +61,7 @@ Acceptance:
 - The toggle changes presentation only; it does not rewrite native security prices, transaction amounts, quantities, or ledger facts.
 - Holding projections, cost basis, snapshots, and portfolio totals retain home-currency monetary values while their native inputs/provenance remain available.
 - Missing FX leaves native values visible and home-currency values unavailable rather than zero.
+- Compact native/home results omit routine FX provenance, while the adjacent explanation retains the selected rate direction, rate/date, source, exact observation time, and inversion evidence.
 
 ## Authentication, privacy, and authorization
 
@@ -141,6 +142,7 @@ Acceptance:
 - The user’s home currency is the canonical portfolio reporting currency; native transaction/security currency remains source truth.
 - Missing FX remains missing and blocks only dependent metrics.
 - A zero import FX rate is treated as unknown, not as a valid rate.
+- A validated explicit transaction FX fact takes precedence over selected market observations; an invalid explicit fact fails closed and is not silently replaced.
 
 ### LED-003 — Fees and cash impact
 
@@ -286,6 +288,7 @@ Acceptance:
 - Native/home presentation uses the same selected price and that valuation date’s FX observation; toggling cannot change the underlying holding.
 - Missing price or FX produces an unavailable component, not zero.
 - Cash and securities are subtotaled separately.
+- Portfolio invested value and covered basis use the same priced-and-converted holding set; value-only or basis-only positions are excluded from both aligned amounts and disclosed in coverage.
 
 ### CALC-003 — Cost basis and unrealised gain
 
@@ -316,6 +319,7 @@ Acceptance:
 - Formula is `Q × (P_t × FX_t − P_prev × FX_prev)`.
 - Quantity is the end-of-day comparison quantity under the documented timing rule.
 - Local-price and FX contributions can be shown separately.
+- Decomposition assigns the price/FX cross term to the displayed FX contribution so the displayed components reconcile exactly to the headline movement.
 
 ### CALC-006 — Portfolio history
 

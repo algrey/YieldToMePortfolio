@@ -26,7 +26,16 @@ export type CalculationUnavailableReason =
   | "invalid_proceeds"
   | "invalid_realised_gain"
   | "too_many_lots"
-  | "invalid_input";
+  | "invalid_input"
+  | "missing_fx"
+  | "missing_previous_fx"
+  | "invalid_fx"
+  | "invalid_transaction_fx"
+  | "fx_direction_mismatch"
+  | "missing_balance"
+  | "invalid_balance"
+  | "incomplete_quantity_timing"
+  | "zero_previous_value";
 
 export type CalculationValue =
   | { status: "available"; valueDecimal: string }
