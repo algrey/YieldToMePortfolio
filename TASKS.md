@@ -439,7 +439,7 @@ Status: DONE (2026-08-03).
 
 ### IMP-003B — Import reversal and corrected re-import
 
-Status: PENDING.
+Status: READY.
 
 - Objective: reverse a committed batch and stage a corrected successor without deleting provenance.
 - Dependencies: IMP-003A.
@@ -810,7 +810,7 @@ Status: DONE (2026-08-02).
 
 ### UI-005C — Import commit, progress, and history
 
-Status: PENDING.
+Status: READY.
 
 - Objective: expose explicit, idempotent commit over an immutable reviewed preview and make its outcome inspectable.
 - Dependencies: UI-005B, IMP-003A.
@@ -838,7 +838,7 @@ Status: PENDING.
 
 ### UI-005E — Manual ledger entry and correction
 
-Status: PENDING.
+Status: READY.
 
 - Objective: expose the core manual trade/cash/split write path without mixing it into import or read-only projection screens.
 - Dependencies: UI-005A, LED-001B, LED-002B.
