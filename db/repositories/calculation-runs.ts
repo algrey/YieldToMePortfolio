@@ -116,6 +116,7 @@ export function createCalculationRunRepository(sql: SqlClient) {
   }
 
   return {
+    get,
     async request(
       userId: string,
       input: RequestCalculationRunInput,

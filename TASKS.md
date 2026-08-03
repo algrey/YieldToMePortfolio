@@ -680,7 +680,7 @@ Status: DONE (follow-up review resolution completed 2026-08-04).
 
 ### CALC-002 — Historical snapshots and rebuild
 
-Status: READY.
+Status: DONE (2026-08-04).
 
 - Objective: produce reproducible historical value series from dated ledger, price, FX, and cash facts.
 - Dependencies: CALC-001B, MKT-003B, LED-002B, DB-004.
@@ -691,6 +691,7 @@ Status: READY.
 - Tests: trades across boundaries, weekend/holiday, FX gaps, corrections/invalidation, calculation-version change, partial history.
 - Risks: exchange/portfolio timezone cutoff; D1 growth.
 - Parallel safe: no with snapshot UI contract; can precede UI.
+- Completion: added deterministic ledger-replayed historical snapshots, bounded resumable calculation-run rebuilds, owner-scoped invalidation and completed-version chart reads, explicit stale/missing market-data coverage, and zero-component handling. Verified with CALC-002 domain/repository fixtures plus repository-wide checks.
 
 ### DIV-001 — Dividend events, receipts, and forecasts
 

@@ -148,3 +148,12 @@ export {
   type RequestMarketDataRefreshInput,
   type RetryMarketDataRefreshResult,
 } from "./market-data-refresh.ts";
+export {
+  createHistoricalSnapshotRepository,
+  type HistoricalSeriesPoint,
+  type HistoricalSeriesResponse,
+  type HistoricalSnapshotRebuildInput,
+  type HistoricalSnapshotRequest,
+  type SnapshotRebuildResult,
+  type SnapshotRepositoryOptions,
+} from "./snapshots.ts";

@@ -316,6 +316,19 @@ Only claim complete history where:
 
 Otherwise store partial status and exclusions.
 
+Historical points are published only from a completed calculation run. The run
+replays a bounded local-date range and checkpoints the date and holding offset;
+retrying a lease produces the same values and coverage for the same ledger
+high-water and calculation version. A chart request selects one completed
+version and never mixes dates from another version or an unfinished rebuild.
+Coverage distinguishes zero holdings/cash (which require no quote or FX) from
+non-zero components excluded for missing or stale price/FX, incomplete basis,
+or an incomplete ledger boundary. Stale selections remain explicit gaps even
+when a fallback value is retained in the source facts. Compact chart points
+carry date, values, completeness, exclusions, and coverage only; observation
+timestamps and provider provenance remain detail/audit evidence rather than
+routine chart labels.
+
 ### Snapshot invalidation
 
 - Transaction change: invalidate from its local effective date.

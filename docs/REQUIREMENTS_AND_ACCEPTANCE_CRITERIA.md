@@ -333,6 +333,8 @@ Acceptance:
 - History does not back-cast current quantities.
 - Missing days follow the documented exchange-calendar fallback.
 - Incomplete pre-import activity is labelled and excluded from performance claims.
+- Non-zero components excluded by missing/stale price or FX are identified in coverage; explicit zero positions and zero cash balances do not create a gap.
+- A chart reads one completed calculation version. Rebuilds are bounded, resumable, deterministic for a fixed ledger high-water, and do not expose unfinished dates; routine chart points do not print observation timestamps.
 
 ### CALC-007 — Return metrics
 
