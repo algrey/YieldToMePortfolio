@@ -659,7 +659,7 @@ Status: DONE (review fixes completed 2026-08-03).
 
 ### CALC-001B — FX conversion, daily movement, and partial totals
 
-Status: PENDING.
+Status: READY.
 
 - Objective: add date-attributable home-currency presentation and coverage-aligned portfolio totals.
 - Dependencies: CALC-001A, MKT-003A, MKT-004.
@@ -830,7 +830,7 @@ Status: DONE (2026-08-03).
 
 ### UI-005D — Import reversal and corrected successor
 
-Status: PENDING.
+Status: READY.
 
 - Objective: make committed batch provenance and safe correction/reversal understandable.
 - Dependencies: UI-005C, IMP-003B.
