@@ -181,6 +181,26 @@ test("owned projection rebuild publishes FIFO lots atomically and rejects stale 
     now: "2026-08-03T01:00:00Z",
   });
   const projections = createOwnedProjectionRepository(first.client);
+  assert.deepEqual(
+    await projections.rebuild("user-b", {
+      portfolioId: "portfolio-a",
+      calculationRunId: first.runId,
+      leaseOwner: "worker-1",
+      currentLedgerHighWater: "sell-1",
+      now: "2026-08-03T01:01:00Z",
+    }),
+    { ok: false, reason: "not_found" },
+  );
+  assert.deepEqual(
+    await projections.rebuild("user-a", {
+      portfolioId: "portfolio-b",
+      calculationRunId: first.runId,
+      leaseOwner: "worker-1",
+      currentLedgerHighWater: "sell-1",
+      now: "2026-08-03T01:01:00Z",
+    }),
+    { ok: false, reason: "not_found" },
+  );
   const published = await projections.rebuild("user-a", {
     portfolioId: "portfolio-a",
     calculationRunId: first.runId,
