@@ -354,3 +354,204 @@ test("CALC-002 rejects a fact set over the bounded rebuild budget before loading
     0,
   );
 });
+
+test("CALC-002 rejects an overlong run instead of publishing a truncated range", async () => {
+  const db = await database();
+  const repository = createHistoricalSnapshotRepository(
+    createSqliteSqlClient(db),
+  );
+  const run = await repository.request("user-a", {
+    id: "run-overlong",
+    portfolioId: "portfolio-a",
+    rangeFrom: "2020-01-01",
+    rangeTo: "2031-01-01",
+    calculationVersion: 10,
+    reason: "invalid-range-regression",
+    ledgerHighWaterStart: "trade-a",
+    idempotencyKey: "invalid-range-regression",
+    now: "2026-08-03T00:00:00Z",
+  });
+  assert.equal(
+    (
+      await repository.claim(
+        "user-a",
+        "portfolio-a",
+        run.id,
+        "worker-a",
+        "2026-08-03T01:00:00Z",
+        "2026-08-03T00:01:00Z",
+      )
+    ).ok,
+    true,
+  );
+  assert.deepEqual(
+    await repository.rebuild("user-a", {
+      portfolioId: "portfolio-a",
+      calculationRunId: run.id,
+      leaseOwner: "worker-a",
+      currentLedgerHighWater: "trade-a",
+      now: "2026-08-03T00:02:00Z",
+    }),
+    { ok: false, reason: "invalid-run" },
+  );
+  assert.equal(
+    (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM snapshot_publications WHERE calculation_version = 10",
+        )
+        .get() as { count: number }
+    ).count,
+    0,
+  );
+});
+
+test("CALC-002 cannot advance a checkpoint after its lease expires during a chunk", async () => {
+  const db = await database();
+  const baseSql = createSqliteSqlClient(db);
+  let expireBeforeBatch = true;
+  const sql = {
+    ...baseSql,
+    async batch(statements: Parameters<NonNullable<typeof baseSql.batch>>[0]) {
+      if (expireBeforeBatch) {
+        expireBeforeBatch = false;
+        db.exec(
+          "UPDATE calculation_runs SET lease_expires_at = '2026-08-03T00:01:00Z' WHERE id = 'run-expired-chunk'",
+        );
+      }
+      return baseSql.batch!(statements);
+    },
+  };
+  const repository = createHistoricalSnapshotRepository(sql);
+  const run = await repository.request("user-a", {
+    id: "run-expired-chunk",
+    portfolioId: "portfolio-a",
+    rangeFrom: "2026-08-01",
+    rangeTo: "2026-08-01",
+    calculationVersion: 11,
+    reason: "lease-regression",
+    ledgerHighWaterStart: "trade-a",
+    idempotencyKey: "lease-regression",
+    now: "2026-08-03T00:00:00Z",
+  });
+  assert.equal(
+    (
+      await repository.claim(
+        "user-a",
+        "portfolio-a",
+        run.id,
+        "worker-a",
+        "2026-08-03T01:00:00Z",
+        "2026-08-03T00:01:00Z",
+      )
+    ).ok,
+    true,
+  );
+  assert.deepEqual(
+    await repository.rebuild("user-a", {
+      portfolioId: "portfolio-a",
+      calculationRunId: run.id,
+      leaseOwner: "worker-a",
+      currentLedgerHighWater: "trade-a",
+      now: "2026-08-03T00:02:00Z",
+    }),
+    { ok: false, reason: "not-owned" },
+  );
+  assert.deepEqual(
+    Object.assign(
+      {},
+      db
+        .prepare(
+          "SELECT processed_snapshot_count, processed_holding_count FROM calculation_runs WHERE id = 'run-expired-chunk'",
+        )
+        .get(),
+    ),
+    { processed_snapshot_count: 0, processed_holding_count: 0 },
+  );
+  assert.equal(
+    (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM portfolio_daily_snapshots WHERE calculation_run_id = 'run-expired-chunk'",
+        )
+        .get() as { count: number }
+    ).count,
+    0,
+  );
+});
+
+test("CALC-002 keeps calculation versions independently published", async () => {
+  const db = await database();
+  const repository = createHistoricalSnapshotRepository(
+    createSqliteSqlClient(db),
+  );
+
+  async function publish(version: number, cutoff: string) {
+    const id = `run-version-${version}`;
+    const run = await repository.request("user-a", {
+      id,
+      portfolioId: "portfolio-a",
+      rangeFrom: "2026-08-01",
+      rangeTo: "2026-08-01",
+      calculationVersion: version,
+      reason: "version-regression",
+      ledgerHighWaterStart: "trade-a",
+      marketDataCutoff: cutoff,
+      idempotencyKey: id,
+      now: cutoff,
+    });
+    assert.equal(
+      (
+        await repository.claim(
+          "user-a",
+          "portfolio-a",
+          run.id,
+          id,
+          "2026-08-06T01:00:00Z",
+          "2026-08-06T00:00:00Z",
+        )
+      ).ok,
+      true,
+    );
+    const rebuilt = await repository.rebuild("user-a", {
+      portfolioId: "portfolio-a",
+      calculationRunId: run.id,
+      leaseOwner: id,
+      currentLedgerHighWater: "trade-a",
+      now: "2026-08-06T00:01:00Z",
+    });
+    assert.equal(rebuilt.ok && rebuilt.status, "completed");
+  }
+
+  await publish(12, "2026-08-03T00:00:00Z");
+  db.exec(`
+    INSERT INTO price_observations (id, provider_id, access_scope, scope_user_id, scope_key, mapping_id, security_id, interval, observation_at, market_date, market_timezone, currency_code, close_decimal, adjustment_state, quality, ingested_at)
+      VALUES ('price-version-correction', 'provider-a', 'deployment', NULL, 'deployment', 'mapping-a', 'security-a', 'eod', '2026-08-01T12:00:00Z', '2026-08-01', 'UTC', 'AUD', '20', 'raw', 'corrected', '2026-08-04T00:00:00Z');
+  `);
+  await publish(13, "2026-08-05T00:00:00Z");
+
+  assert.equal(
+    (
+      await repository.loadSeries(
+        "user-a",
+        "portfolio-a",
+        "2026-08-01",
+        "2026-08-01",
+        12,
+      )
+    )?.points[0]?.totalValueDecimal,
+    "100",
+  );
+  assert.equal(
+    (
+      await repository.loadSeries(
+        "user-a",
+        "portfolio-a",
+        "2026-08-01",
+        "2026-08-01",
+        13,
+      )
+    )?.points[0]?.totalValueDecimal,
+    "200",
+  );
+});

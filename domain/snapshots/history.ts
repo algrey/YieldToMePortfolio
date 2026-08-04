@@ -79,6 +79,7 @@ export type SnapshotGap = {
     | "incomplete_history"
     | "missing_price"
     | "stale_price"
+    | "missing_session"
     | "missing_fx"
     | "stale_fx"
     | "incomplete_basis"
@@ -360,7 +361,11 @@ function priceSelection(
     userId: input.userId,
     scope: input.priceScope,
     currencyCode: security.currencyCode,
-    observations: security.priceObservations,
+    // Ledger replay already applies explicit splits, so adjusted closes would
+    // double-adjust historical value. Snapshot valuation uses raw closes only.
+    observations: security.priceObservations.filter(
+      (observation) => observation.adjustmentState === "raw",
+    ),
     overrides: input.overrides,
     maxPriorCalendarDays: input.maxPriorCalendarDays,
   });
@@ -656,6 +661,12 @@ export function buildHistoricalSnapshots(
                   ? "stale_fx"
                   : "missing_fx";
           gaps.push({ kind, componentId: holding.portfolioSecurityId });
+        }
+        if (holding.calendarStatus === "missing_session") {
+          gaps.push({
+            kind: "missing_session",
+            componentId: holding.portfolioSecurityId,
+          });
         }
         if (holding.basisDecimal === null) {
           gaps.push({

@@ -222,14 +222,23 @@ function parseCoverage(value: unknown): Record<string, unknown> {
 }
 
 function dateRange(from: string, to: string): string[] {
+  const validDate = (value: string) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const timestamp = Date.parse(`${value}T00:00:00Z`);
+    return (
+      Number.isFinite(timestamp) &&
+      new Date(timestamp).toISOString().slice(0, 10) === value
+    );
+  };
+  if (!validDate(from) || !validDate(to)) return [];
   const start = Date.parse(`${from}T00:00:00Z`);
   const end = Date.parse(`${to}T00:00:00Z`);
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start)
     return [];
-  return Array.from(
-    { length: Math.min(Math.floor((end - start) / 86_400_000) + 1, 3_660) },
-    (_, index) =>
-      new Date(start + index * 86_400_000).toISOString().slice(0, 10),
+  const count = Math.floor((end - start) / 86_400_000) + 1;
+  if (count > 3_660) return [];
+  return Array.from({ length: count }, (_, index) =>
+    new Date(start + index * 86_400_000).toISOString().slice(0, 10),
   );
 }
 
@@ -237,6 +246,10 @@ function daysBefore(date: string, days: number): string {
   const timestamp = Date.parse(`${date}T00:00:00Z`);
   return new Date(timestamp - days * 86_400_000).toISOString().slice(0, 10);
 }
+
+// A chunk rebuilds the requested date plus the preceding point for daily
+// movement, so retain one day beyond the selector's five-day fallback window.
+const SNAPSHOT_QUERY_LOOKBACK_DAYS = 6;
 
 export function createHistoricalSnapshotRepository(
   sql: SqlClient,
@@ -279,11 +292,12 @@ export function createHistoricalSnapshotRepository(
        JOIN portfolio_securities ps ON ps.security_id = po.security_id
        WHERE ps.user_id = ? AND ps.portfolio_id = ?
          AND po.market_date BETWEEN ? AND ? AND po.ingested_at <= ?
+         AND po.adjustment_state = 'raw'
          AND (po.access_scope = 'deployment' OR (po.access_scope = 'user' AND po.scope_user_id = ?))`,
       [
         userId,
         run.portfolioId,
-        daysBefore(asOfDate, 5),
+        daysBefore(asOfDate, SNAPSHOT_QUERY_LOOKBACK_DAYS),
         asOfDate,
         run.marketDataCutoff ?? run.updatedAt,
         userId,
@@ -293,29 +307,60 @@ export function createHistoricalSnapshotRepository(
       `SELECT COUNT(*) AS count FROM fx_rate_observations fx
        WHERE fx.market_date BETWEEN ? AND ? AND fx.ingested_at <= ?
          AND (fx.access_scope = 'deployment' OR (fx.access_scope = 'user' AND fx.scope_user_id = ?))
-         AND (fx.base_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?)
-           OR fx.quote_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?))`,
+         AND (
+           (fx.base_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?)
+             AND fx.quote_currency_code IN (
+               SELECT source_currency_code FROM portfolio_securities WHERE user_id = ? AND portfolio_id = ?
+               UNION SELECT currency_code FROM cash_accounts WHERE user_id = ? AND portfolio_id = ?
+             ))
+           OR
+           (fx.quote_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?)
+             AND fx.base_currency_code IN (
+               SELECT source_currency_code FROM portfolio_securities WHERE user_id = ? AND portfolio_id = ?
+               UNION SELECT currency_code FROM cash_accounts WHERE user_id = ? AND portfolio_id = ?
+             ))
+         )`,
       [
-        daysBefore(asOfDate, 5),
+        daysBefore(asOfDate, SNAPSHOT_QUERY_LOOKBACK_DAYS),
         asOfDate,
         run.marketDataCutoff ?? run.updatedAt,
         userId,
         run.portfolioId,
         userId,
+        userId,
         run.portfolioId,
         userId,
+        run.portfolioId,
+        run.portfolioId,
+        userId,
+        userId,
+        run.portfolioId,
+        userId,
+        run.portfolioId,
       ],
     );
     const cashCount = await sql.get<{ count: number }>(
       `SELECT COUNT(*) AS count FROM cash_ledger_entries WHERE user_id = ? AND portfolio_id = ? AND local_effective_date <= ?`,
       [userId, run.portfolioId, asOfDate],
     );
+    const cashAccountCount = await sql.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM cash_accounts WHERE user_id = ? AND portfolio_id = ?`,
+      [userId, run.portfolioId],
+    );
+    const overrideCount = await sql.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM manual_overrides
+       WHERE user_id = ? AND (portfolio_id = ? OR portfolio_id IS NULL)
+         AND status = 'active'`,
+      [userId, run.portfolioId],
+    );
     const factCount =
       Number(securityCount?.count ?? 0) +
       Number(transactionCount?.count ?? 0) +
       Number(priceCount?.count ?? 0) +
       Number(fxCount?.count ?? 0) +
-      Number(cashCount?.count ?? 0);
+      Number(cashCount?.count ?? 0) +
+      Number(cashAccountCount?.count ?? 0) +
+      Number(overrideCount?.count ?? 0);
     if (factCount > maxFacts) throw new Error("snapshot_fact_limit");
     const securityRows = await sql.all<SecurityRow>(
       `SELECT ps.id AS portfolio_security_id, ps.security_id, ps.source_currency_code AS currency_code,
@@ -343,12 +388,13 @@ export function createHistoricalSnapshotRepository(
        JOIN portfolio_securities ps ON ps.security_id = po.security_id
        WHERE ps.user_id = ? AND ps.portfolio_id = ?
          AND po.market_date BETWEEN ? AND ? AND po.ingested_at <= ?
+         AND po.adjustment_state = 'raw'
          AND (po.access_scope = 'deployment' OR (po.access_scope = 'user' AND po.scope_user_id = ?))
        ORDER BY po.security_id, po.market_date, po.observation_at, po.id LIMIT ?`,
       [
         userId,
         run.portfolioId,
-        daysBefore(asOfDate, 5),
+        daysBefore(asOfDate, SNAPSHOT_QUERY_LOOKBACK_DAYS),
         asOfDate,
         run.marketDataCutoff ?? run.updatedAt,
         userId,
@@ -359,18 +405,37 @@ export function createHistoricalSnapshotRepository(
       `SELECT fx.* FROM fx_rate_observations fx
        WHERE fx.market_date BETWEEN ? AND ? AND fx.ingested_at <= ?
          AND (fx.access_scope = 'deployment' OR (fx.access_scope = 'user' AND fx.scope_user_id = ?))
-         AND (fx.base_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?)
-           OR fx.quote_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?))
+         AND (
+           (fx.base_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?)
+             AND fx.quote_currency_code IN (
+               SELECT source_currency_code FROM portfolio_securities WHERE user_id = ? AND portfolio_id = ?
+               UNION SELECT currency_code FROM cash_accounts WHERE user_id = ? AND portfolio_id = ?
+             ))
+           OR
+           (fx.quote_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?)
+             AND fx.base_currency_code IN (
+               SELECT source_currency_code FROM portfolio_securities WHERE user_id = ? AND portfolio_id = ?
+               UNION SELECT currency_code FROM cash_accounts WHERE user_id = ? AND portfolio_id = ?
+             ))
+         )
        ORDER BY fx.base_currency_code, fx.quote_currency_code, fx.market_date, fx.observed_at, fx.id LIMIT ?`,
       [
-        daysBefore(asOfDate, 5),
+        daysBefore(asOfDate, SNAPSHOT_QUERY_LOOKBACK_DAYS),
         asOfDate,
         run.marketDataCutoff ?? run.updatedAt,
         userId,
         run.portfolioId,
         userId,
+        userId,
         run.portfolioId,
         userId,
+        run.portfolioId,
+        run.portfolioId,
+        userId,
+        userId,
+        run.portfolioId,
+        userId,
+        run.portfolioId,
         maxFacts,
       ],
     );
@@ -707,6 +772,9 @@ export function createHistoricalSnapshotRepository(
         return { ok: false, reason: "stale-ledger" };
       }
       const dates = dateRange(run.rangeFrom, run.rangeTo);
+      if (dates.length === 0) {
+        return { ok: false, reason: "invalid-run" };
+      }
       const pointDate = dates[run.processedSnapshotCount];
       if (!pointDate) {
         return completeAndPublish(
@@ -779,7 +847,8 @@ export function createHistoricalSnapshotRepository(
       statements.push({
         sql: `UPDATE calculation_runs SET processed_snapshot_count = ?, processed_holding_count = ?, updated_at = ?
           WHERE id = ? AND user_id = ? AND portfolio_id = ? AND status = 'running'
-            AND lease_owner = ? AND ledger_high_water_start = ?
+            AND lease_owner = ? AND lease_expires_at > ?
+            AND ledger_high_water_start = ?
             AND processed_snapshot_count = ? AND processed_holding_count = ?`,
         params: [
           nextSnapshot,
@@ -789,6 +858,7 @@ export function createHistoricalSnapshotRepository(
           userId,
           input.portfolioId,
           input.leaseOwner,
+          input.now,
           input.currentLedgerHighWater,
           run.processedSnapshotCount,
           run.processedHoldingCount,
@@ -797,6 +867,12 @@ export function createHistoricalSnapshotRepository(
       await batch(statements);
       const after = await runs.get(userId, input.portfolioId, run.id);
       if (!after) return { ok: false, reason: "invalid-run" };
+      if (
+        after.processedSnapshotCount !== nextSnapshot ||
+        after.processedHoldingCount !== nextHolding
+      ) {
+        return { ok: false, reason: "not-owned" };
+      }
       if (nextSnapshot >= dates.length && nextHolding === 0) {
         const completed = await completeAndPublish(
           userId,

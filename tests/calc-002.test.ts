@@ -309,6 +309,42 @@ test("CALC-002 preserves inverse FX direction and distinguishes holidays from mi
     missingSession.points[1]?.coverage.marketDataStates[0]?.calendarStatus,
     "missing_session",
   );
+  assert.equal(missingSession.points[1]?.completeness, "partial");
+  assert.equal(missingSession.points[1]?.excludedFromPerformance, true);
+  assert.ok(
+    missingSession.points[1]?.coverage.gaps.some(
+      (gap) => gap.kind === "missing_session",
+    ),
+  );
+});
+
+test("CALC-002 does not multiply split-adjusted prices by split-replayed quantities", () => {
+  const raw = price("raw-price", "mapping-1", "2026-08-01", "10");
+  const result = buildHistoricalSnapshots(
+    baseInput({
+      rangeFrom: "2026-08-01",
+      rangeTo: "2026-08-01",
+      securities: [
+        {
+          ...baseInput().securities[0],
+          priceObservations: [
+            raw,
+            {
+              ...raw,
+              id: "adjusted-price",
+              closeDecimal: "5",
+              adjustmentState: "split_adjusted",
+              observationAt: "2026-08-01T10:00:00Z",
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.points[0]?.totalValueDecimal, "100");
+  assert.equal(result.points[0]?.holdings[0]?.priceObservationId, "raw-price");
 });
 
 test("CALC-002 replays compensating cash reversals without double-subtracting", () => {
