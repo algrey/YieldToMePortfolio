@@ -57,6 +57,7 @@ test("CALC-002 rebuild is owner-scoped, bounded, resumable, and only completed r
     calculationVersion: 7,
     reason: "historical_rebuild",
     ledgerHighWaterStart: "trade-a",
+    marketDataCutoff: "2026-08-03T00:00:00Z",
     idempotencyKey: "history-7",
     now: "2026-08-03T00:00:00Z",
   });
@@ -129,6 +130,96 @@ test("CALC-002 rebuild is owner-scoped, bounded, resumable, and only completed r
     series?.points.map((point) => point.totalValueDecimal),
     ["100", "110"],
   );
+  db.exec(`
+    INSERT INTO price_observations (id, provider_id, access_scope, scope_user_id, scope_key, mapping_id, security_id, interval, observation_at, market_date, market_timezone, currency_code, close_decimal, adjustment_state, quality, ingested_at)
+      VALUES ('price-correction-after-cutoff', 'provider-a', 'deployment', NULL, 'deployment', 'mapping-a', 'security-a', 'eod', '2026-08-02T12:00:00Z', '2026-08-02', 'UTC', 'AUD', '999', 'raw', 'corrected', '2026-08-04T00:00:00Z');
+  `);
+  const replacement = await repository.request("user-a", {
+    id: "run-a-replacement",
+    portfolioId: "portfolio-a",
+    rangeFrom: "2026-08-01",
+    rangeTo: "2026-08-02",
+    calculationVersion: 7,
+    reason: "same-version-correction",
+    ledgerHighWaterStart: "trade-a",
+    marketDataCutoff: "2026-08-03T00:00:00Z",
+    idempotencyKey: "history-7-replacement",
+    now: "2026-08-05T00:00:00Z",
+  });
+  assert.equal(
+    (
+      await repository.claim(
+        "user-a",
+        "portfolio-a",
+        replacement.id,
+        "worker-b",
+        "2026-08-05T01:00:00Z",
+        "2026-08-05T00:01:00Z",
+      )
+    ).ok,
+    true,
+  );
+  const replacementFirst = await repository.rebuild("user-a", {
+    portfolioId: "portfolio-a",
+    calculationRunId: replacement.id,
+    leaseOwner: "worker-b",
+    currentLedgerHighWater: "trade-a",
+    now: "2026-08-05T00:02:00Z",
+  });
+  assert.equal(replacementFirst.ok && replacementFirst.status, "progress");
+  assert.equal(
+    (
+      await repository.rebuild("user-a", {
+        portfolioId: "portfolio-a",
+        calculationRunId: replacement.id,
+        leaseOwner: "worker-wrong",
+        currentLedgerHighWater: "trade-a",
+        now: "2026-08-05T00:03:00Z",
+      })
+    ).ok,
+    false,
+  );
+  assert.deepEqual(
+    (
+      await repository.loadSeries(
+        "user-a",
+        "portfolio-a",
+        "2026-08-01",
+        "2026-08-02",
+        7,
+      )
+    )?.points.map((point) => point.totalValueDecimal),
+    ["100", "110"],
+  );
+  const replacementComplete = await repository.rebuild("user-a", {
+    portfolioId: "portfolio-a",
+    calculationRunId: replacement.id,
+    leaseOwner: "worker-b",
+    currentLedgerHighWater: "trade-a",
+    now: "2026-08-05T00:04:00Z",
+  });
+  assert.equal(
+    replacementComplete.ok && replacementComplete.status,
+    "completed",
+  );
+  const publishedRun = db
+    .prepare(
+      "SELECT calculation_run_id FROM snapshot_publications WHERE portfolio_id = 'portfolio-a' AND calculation_version = 7",
+    )
+    .get() as { calculation_run_id: string };
+  assert.equal(publishedRun.calculation_run_id, "run-a-replacement");
+  assert.deepEqual(
+    (
+      await repository.loadSeries(
+        "user-a",
+        "portfolio-a",
+        "2026-08-01",
+        "2026-08-02",
+        7,
+      )
+    )?.points.map((point) => point.totalValueDecimal),
+    ["100", "110"],
+  );
   assert.equal(
     await repository.invalidateRange(
       "user-a",
@@ -137,7 +228,7 @@ test("CALC-002 rebuild is owner-scoped, bounded, resumable, and only completed r
       "2026-08-02",
       7,
     ),
-    2,
+    4,
   );
   assert.equal(
     (
@@ -208,4 +299,58 @@ test("CALC-002 excludes another owner's scoped FX observations", async () => {
   assert.deepEqual(series?.points[0]?.coverage.excludedCashAccountIds, [
     "cash-usd",
   ]);
+});
+
+test("CALC-002 rejects a fact set over the bounded rebuild budget before loading rows", async () => {
+  const db = await database();
+  const repository = createHistoricalSnapshotRepository(
+    createSqliteSqlClient(db),
+    {
+      maxFacts: 1,
+    },
+  );
+  const run = await repository.request("user-a", {
+    id: "run-fact-limit",
+    portfolioId: "portfolio-a",
+    rangeFrom: "2026-08-01",
+    rangeTo: "2026-08-01",
+    calculationVersion: 9,
+    reason: "fact-limit",
+    ledgerHighWaterStart: "trade-a",
+    idempotencyKey: "fact-limit",
+    now: "2026-08-03T00:00:00Z",
+  });
+  assert.equal(
+    (
+      await repository.claim(
+        "user-a",
+        "portfolio-a",
+        run.id,
+        "worker-a",
+        "2026-08-03T01:00:00Z",
+        "2026-08-03T00:01:00Z",
+      )
+    ).ok,
+    true,
+  );
+  assert.deepEqual(
+    await repository.rebuild("user-a", {
+      portfolioId: "portfolio-a",
+      calculationRunId: run.id,
+      leaseOwner: "worker-a",
+      currentLedgerHighWater: "trade-a",
+      now: "2026-08-03T00:02:00Z",
+    }),
+    { ok: false, reason: "build-failed" },
+  );
+  assert.equal(
+    (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM portfolio_daily_snapshots WHERE calculation_version = 9",
+        )
+        .get() as { count: number }
+    ).count,
+    0,
+  );
 });

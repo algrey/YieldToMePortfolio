@@ -235,6 +235,82 @@ test("CALC-002 marks partial history and uses prior-session fallback without tim
   );
 });
 
+test("CALC-002 preserves inverse FX direction and distinguishes holidays from missing sessions", () => {
+  const inverse = buildHistoricalSnapshots(
+    baseInput({
+      securities: [
+        {
+          ...baseInput().securities[0],
+          currencyCode: "USD",
+          priceObservations: [
+            price("usd-price", "mapping-1", "2026-08-01", "10", "USD"),
+          ],
+        },
+      ],
+      fxObservations: [
+        {
+          id: "usd-aud",
+          kind: "fx",
+          providerId: "provider",
+          providerRevisionId: null,
+          scope: { kind: "deployment", userId: null },
+          baseCurrencyCode: "USD",
+          quoteCurrencyCode: "AUD",
+          rateDecimal: "1.25",
+          interval: "eod",
+          observedAt: "2026-08-01T08:00:00Z",
+          marketDate: "2026-08-01",
+          quality: "observed",
+          delayedMinutes: null,
+          ingestedAt: "2026-08-01T09:00:00Z",
+          payloadSha256: null,
+        },
+      ],
+      rangeFrom: "2026-08-01",
+      rangeTo: "2026-08-01",
+    }),
+  );
+  assert.equal(inverse.ok, true);
+  if (!inverse.ok) return;
+  assert.equal(inverse.points[0]?.totalValueDecimal, "125");
+
+  const calendarInput = baseInput({
+    rangeFrom: "2026-08-07",
+    rangeTo: "2026-08-08",
+    securities: [
+      {
+        ...baseInput().securities[0],
+        expectedTradingDates: ["2026-08-07"],
+        transactions: [buy("buy-1", "2026-08-07", "10", "10")],
+        priceObservations: [price("friday", "mapping-1", "2026-08-07", "10")],
+      },
+    ],
+  });
+  const holiday = buildHistoricalSnapshots(calendarInput);
+  assert.equal(holiday.ok, true);
+  if (!holiday.ok) return;
+  assert.equal(
+    holiday.points[1]?.coverage.marketDataStates[0]?.calendarStatus,
+    "holiday",
+  );
+
+  const missingSession = buildHistoricalSnapshots({
+    ...calendarInput,
+    securities: [
+      {
+        ...calendarInput.securities[0]!,
+        expectedTradingDates: ["2026-08-07", "2026-08-08"],
+      },
+    ],
+  });
+  assert.equal(missingSession.ok, true);
+  if (!missingSession.ok) return;
+  assert.equal(
+    missingSession.points[1]?.coverage.marketDataStates[0]?.calendarStatus,
+    "missing_session",
+  );
+});
+
 test("CALC-002 replays compensating cash reversals without double-subtracting", () => {
   const result = buildHistoricalSnapshots(
     baseInput({

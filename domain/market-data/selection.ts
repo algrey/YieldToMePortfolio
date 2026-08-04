@@ -463,9 +463,14 @@ export function selectFxObservation(input: FxSelectionInput): FxSelection {
   const candidates = input.observations
     .filter((observation) => {
       const age = dayAge(input.asOf, observation.marketDate);
-      return (
+      const direct =
         observation.baseCurrencyCode === input.baseCurrencyCode &&
-        observation.quoteCurrencyCode === input.quoteCurrencyCode &&
+        observation.quoteCurrencyCode === input.quoteCurrencyCode;
+      const inverse =
+        observation.baseCurrencyCode === input.quoteCurrencyCode &&
+        observation.quoteCurrencyCode === input.baseCurrencyCode;
+      return (
+        (direct || inverse) &&
         age !== null &&
         age >= 0 &&
         age <= (input.maxPriorCalendarDays ?? DEFAULT_MAX_PRIOR_DAYS) &&

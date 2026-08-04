@@ -64,6 +64,7 @@ export type HistoricalSecurityInput = {
   currencyCode: string;
   transactions: readonly SnapshotLedgerTransaction[];
   priceObservations: readonly SnapshotPriceObservation[];
+  expectedTradingDates?: readonly string[];
 };
 
 export type HistoricalCashAccountInput = {
@@ -111,6 +112,7 @@ export type SnapshotMarketDataState = {
   fxState: FxSelection["status"];
   priceObservationId: string | null;
   fxObservationId: string | null;
+  calendarStatus: "session" | "holiday" | "missing_session" | "unknown";
 };
 
 export type HistoricalHoldingSnapshot = {
@@ -176,6 +178,7 @@ type PreparedHolding = HistoricalHoldingSnapshot & {
   fxRateDecimal: string | null;
   priceStatus: PriceSelection["status"];
   fxStatus: FxSelection["status"];
+  calendarStatus: SnapshotMarketDataState["calendarStatus"];
 };
 
 type PreparedCash = {
@@ -404,6 +407,7 @@ function holdingAt(
       fxRateDecimal: null,
       priceStatus: "unavailable",
       fxStatus: "unavailable",
+      calendarStatus: "unknown",
     };
   }
   if (!nonZero(projection.quantity)) {
@@ -423,6 +427,7 @@ function holdingAt(
       fxRateDecimal: null,
       priceStatus: "unavailable",
       fxStatus: "unavailable",
+      calendarStatus: "unknown",
     };
   }
   const price = priceSelection(security, date, input);
@@ -441,6 +446,14 @@ function holdingAt(
       : null;
   const priceUsable = price.selected !== null && price.status !== "stale";
   const fxUsable = fx.selected !== null && fx.status !== "stale";
+  const calendarStatus =
+    security.expectedTradingDates === undefined
+      ? "unknown"
+      : !security.expectedTradingDates.includes(date)
+        ? "holiday"
+        : price.selected !== null && price.selected.marketDate === date
+          ? "session"
+          : "missing_session";
   const baseValue =
     priceUsable &&
     fxUsable &&
@@ -465,6 +478,7 @@ function holdingAt(
     fxRateDecimal: fx.selected?.rateDecimal ?? null,
     priceStatus: price.status,
     fxStatus: fx.status,
+    calendarStatus,
   };
 }
 
@@ -627,6 +641,7 @@ export function buildHistoricalSnapshots(
           fxState: holding.fxStatus,
           priceObservationId: holding.priceObservationId,
           fxObservationId: holding.fxObservationId,
+          calendarStatus: holding.calendarStatus,
         });
         if (holding.nativeValueDecimal !== null) valuedHoldingCount += 1;
         if (holding.baseValueDecimal !== null) convertedHoldingCount += 1;
@@ -698,6 +713,7 @@ export function buildHistoricalSnapshots(
           fxState: account.fxStatus,
           priceObservationId: null,
           fxObservationId: null,
+          calendarStatus: "unknown",
         });
         if (account.valueDecimal !== null) convertedCashAccountCount += 1;
         if (account.valueDecimal === null) {

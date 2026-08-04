@@ -18,6 +18,7 @@ export type CalculationRunRecord = {
   leaseExpiresAt: string | null;
   ledgerHighWaterStart: string;
   ledgerHighWaterEnd: string | null;
+  marketDataCutoff: string | null;
   processedSnapshotCount: number;
   processedHoldingCount: number;
   processedLedgerCount: number;
@@ -41,6 +42,7 @@ export type RequestCalculationRunInput = {
   reason: string;
   invalidationSource?: string | null;
   ledgerHighWaterStart: string;
+  marketDataCutoff?: string | null;
   idempotencyKey: string;
   now: string;
 };
@@ -74,6 +76,8 @@ function mapRun(row: Record<string, unknown>): CalculationRunRecord {
       row.ledger_high_water_end === null
         ? null
         : String(row.ledger_high_water_end),
+    marketDataCutoff:
+      row.market_data_cutoff === null ? null : String(row.market_data_cutoff),
     processedSnapshotCount: Number(row.processed_snapshot_count),
     processedHoldingCount: Number(row.processed_holding_count),
     processedLedgerCount: Number(row.processed_ledger_count),
@@ -127,7 +131,8 @@ export function createCalculationRunRepository(sql: SqlClient) {
             id, user_id, portfolio_id, range_from, range_to,
             calculation_version, reason, invalidation_source, status, attempt,
             ledger_high_water_start, idempotency_key, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?)
+            , market_data_cutoff
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?)
           ON CONFLICT (user_id, portfolio_id, calculation_version, idempotency_key)
           DO NOTHING
         `,
@@ -144,6 +149,7 @@ export function createCalculationRunRepository(sql: SqlClient) {
           input.idempotencyKey,
           input.now,
           input.now,
+          input.marketDataCutoff ?? input.now,
         ],
       );
 

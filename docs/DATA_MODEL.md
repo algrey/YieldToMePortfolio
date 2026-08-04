@@ -561,9 +561,13 @@ Broker-provided prices use the existing price-observation/provider mapping shape
 - completeness/status;
 - ledger high-water mark;
 - market-data cutoff;
+- calculation run identity;
 - calculation version and rebuilt time.
 
-Unique `(portfolio_id, snapshot_date, calculation_version)`. Index latest dates.
+New rebuild rows are unique by `(portfolio_id, snapshot_date, calculation_version, calculation_run_id)`.
+`snapshot_publications` atomically points each owner/version to the completed
+run, so same-version replacements cannot overwrite a readable series before
+publication. Legacy rows may retain a null run identity.
 
 ### `holding_daily_snapshots`
 
@@ -571,10 +575,17 @@ Per portfolio/portfolio-security/date details supporting drill-down:
 
 - quantity, native/base value and basis;
 - selected price/FX observation IDs;
+- calculation run identity;
 - daily movement and completeness;
 - calculation version.
 
 Can be retained for relevant history or regenerated; define pruning only after measuring D1 size.
+
+### `snapshot_publications`
+
+One owner-scoped pointer per portfolio/calculation version to the completed
+snapshot run and its ledger high-water. Replacing this pointer is the chart
+publication switch; rows from queued, running, or failed runs are not selected.
 
 ### `manual_overrides`
 

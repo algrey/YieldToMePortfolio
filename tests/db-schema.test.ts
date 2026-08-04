@@ -115,6 +115,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "securities",
     "security_identifiers",
     "security_provider_mappings",
+    "snapshot_publications",
     "tax_lots",
     "transactions",
     "user_identities",
@@ -139,6 +140,10 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "holding_snapshots_chart_idx",
     "holding_snapshots_id_user_portfolio_unique",
     "holding_snapshots_security_date_version_unique",
+  ]);
+  assert.deepEqual(indexNames(database, "snapshot_publications"), [
+    "snapshot_publications_owner_portfolio_idx",
+    "snapshot_publications_owner_version_unique",
   ]);
   assert.deepEqual(indexNames(database, "holding_projections"), [
     "holding_projections_id_user_portfolio_unique",

@@ -335,6 +335,8 @@ Acceptance:
 - Incomplete pre-import activity is labelled and excluded from performance claims.
 - Non-zero components excluded by missing/stale price or FX are identified in coverage; explicit zero positions and zero cash balances do not create a gap.
 - A chart reads one completed calculation version. Rebuilds are bounded, resumable, deterministic for a fixed ledger high-water, and do not expose unfinished dates; routine chart points do not print observation timestamps.
+- Same-version rebuilds stage under a run identity and atomically switch the published run only after completion. Price/FX selection is pinned to the run’s persisted ingestion cutoff, and inverse directional FX observations are normalized through the calculation contract.
+- Calendar-aware fallback distinguishes a known exchange holiday from a missing quote on an expected trading session; an unknown calendar remains explicitly unknown.
 
 ### CALC-007 — Return metrics
 

@@ -319,8 +319,10 @@ Otherwise store partial status and exclusions.
 Historical points are published only from a completed calculation run. The run
 replays a bounded local-date range and checkpoints the date and holding offset;
 retrying a lease produces the same values and coverage for the same ledger
-high-water and calculation version. A chart request selects one completed
-version and never mixes dates from another version or an unfinished rebuild.
+high-water, calculation version, and persisted market-data ingestion cutoff. A
+chart request selects one completed version and never mixes dates from another
+version or an unfinished rebuild. Same-version replacements stage under their
+own run identity and switch the publication pointer only after completion.
 Coverage distinguishes zero holdings/cash (which require no quote or FX) from
 non-zero components excluded for missing or stale price/FX, incomplete basis,
 or an incomplete ledger boundary. Stale selections remain explicit gaps even
@@ -339,7 +341,7 @@ routine chart labels.
 
 ### Chart gaps
 
-Carry a prior market close only across non-trading dates within the FX fallback window and retain the selected observation date in the point explanation. Do not interpolate missing prices. Break or mark the series when a required value exceeds staleness policy.
+Carry a prior market close only across known exchange holidays within the FX fallback window. If the calendar says a date was an expected trading session but no session quote exists, mark a missing-session gap rather than labelling it a holiday. If no exchange calendar is available, retain an unknown-calendar explanation. Do not interpolate missing prices. Break or mark the series when a required value exceeds staleness policy.
 
 ## 9. Realised, unrealised, and headline returns
 

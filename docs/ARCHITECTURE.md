@@ -313,6 +313,7 @@ Use a hybrid of normalized observations and derived daily snapshots:
 - Provider daily history is fetched from the earliest relevant transaction date, cached in D1, and refreshed for corrections.
 - FX history follows the same date range.
 - `portfolio_daily_snapshots` stores reproducible derived totals and coverage, keyed by portfolio, local date, and calculation version.
+- Snapshot rebuild rows are run-scoped; `snapshot_publications` atomically selects the completed run for each portfolio/version so retries never replace a readable series early.
 - A ledger, mapping, corporate-action, override, or historical-data change invalidates the affected date range.
 - Recent dates can recompute eagerly; long ranges recompute in bounded chunks.
 - Snapshots are disposable projections. They can be rebuilt from ledger + normalized observations + calculation version.

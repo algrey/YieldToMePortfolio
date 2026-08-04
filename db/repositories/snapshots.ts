@@ -69,6 +69,7 @@ export type HistoricalSeriesResponse = {
 export type SnapshotRepositoryOptions = {
   maxHoldingRowsPerChunk?: number;
   maxFacts?: number;
+  expectedTradingDatesBySecurity?: Readonly<Record<string, readonly string[]>>;
 };
 
 type PortfolioRow = {
@@ -232,6 +233,11 @@ function dateRange(from: string, to: string): string[] {
   );
 }
 
+function daysBefore(date: string, days: number): string {
+  const timestamp = Date.parse(`${date}T00:00:00Z`);
+  return new Date(timestamp - days * 86_400_000).toISOString().slice(0, 10);
+}
+
 export function createHistoricalSnapshotRepository(
   sql: SqlClient,
   options: SnapshotRepositoryOptions = {},
@@ -246,6 +252,7 @@ export function createHistoricalSnapshotRepository(
   async function loadFacts(
     userId: string,
     run: CalculationRunRecord,
+    asOfDate: string,
   ): Promise<{
     baseCurrencyCode: string;
     historyCompleteFrom: string | null;
@@ -259,6 +266,57 @@ export function createHistoricalSnapshotRepository(
       [run.portfolioId, userId],
     );
     if (!portfolio) throw new Error("portfolio_not_found");
+    const securityCount = await sql.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM portfolio_securities WHERE user_id = ? AND portfolio_id = ?`,
+      [userId, run.portfolioId],
+    );
+    const transactionCount = await sql.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM transactions WHERE user_id = ? AND portfolio_id = ? AND local_trade_date <= ?`,
+      [userId, run.portfolioId, asOfDate],
+    );
+    const priceCount = await sql.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM price_observations po
+       JOIN portfolio_securities ps ON ps.security_id = po.security_id
+       WHERE ps.user_id = ? AND ps.portfolio_id = ?
+         AND po.market_date BETWEEN ? AND ? AND po.ingested_at <= ?
+         AND (po.access_scope = 'deployment' OR (po.access_scope = 'user' AND po.scope_user_id = ?))`,
+      [
+        userId,
+        run.portfolioId,
+        daysBefore(asOfDate, 5),
+        asOfDate,
+        run.marketDataCutoff ?? run.updatedAt,
+        userId,
+      ],
+    );
+    const fxCount = await sql.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM fx_rate_observations fx
+       WHERE fx.market_date BETWEEN ? AND ? AND fx.ingested_at <= ?
+         AND (fx.access_scope = 'deployment' OR (fx.access_scope = 'user' AND fx.scope_user_id = ?))
+         AND (fx.base_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?)
+           OR fx.quote_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?))`,
+      [
+        daysBefore(asOfDate, 5),
+        asOfDate,
+        run.marketDataCutoff ?? run.updatedAt,
+        userId,
+        run.portfolioId,
+        userId,
+        run.portfolioId,
+        userId,
+      ],
+    );
+    const cashCount = await sql.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM cash_ledger_entries WHERE user_id = ? AND portfolio_id = ? AND local_effective_date <= ?`,
+      [userId, run.portfolioId, asOfDate],
+    );
+    const factCount =
+      Number(securityCount?.count ?? 0) +
+      Number(transactionCount?.count ?? 0) +
+      Number(priceCount?.count ?? 0) +
+      Number(fxCount?.count ?? 0) +
+      Number(cashCount?.count ?? 0);
+    if (factCount > maxFacts) throw new Error("snapshot_fact_limit");
     const securityRows = await sql.all<SecurityRow>(
       `SELECT ps.id AS portfolio_security_id, ps.security_id, ps.source_currency_code AS currency_code,
          (SELECT m.id FROM security_provider_mappings m
@@ -267,8 +325,8 @@ export function createHistoricalSnapshotRepository(
           ORDER BY m.valid_from DESC, m.id DESC LIMIT 1) AS mapping_id
        FROM portfolio_securities ps
        WHERE ps.user_id = ? AND ps.portfolio_id = ?
-       ORDER BY ps.id`,
-      [run.rangeTo, run.rangeFrom, userId, run.portfolioId],
+       ORDER BY ps.id LIMIT ?`,
+      [asOfDate, run.rangeFrom, userId, run.portfolioId, maxFacts],
     );
     const transactionRows = await sql.all<TransactionRow>(
       `SELECT id, portfolio_security_id, type, status, trade_at, local_trade_date,
@@ -277,47 +335,61 @@ export function createHistoricalSnapshotRepository(
          reverses_transaction_id
        FROM transactions
        WHERE user_id = ? AND portfolio_id = ? AND local_trade_date <= ?
-       ORDER BY local_trade_date, trade_at, id`,
-      [userId, run.portfolioId, run.rangeTo],
+       ORDER BY local_trade_date, trade_at, id LIMIT ?`,
+      [userId, run.portfolioId, asOfDate, maxFacts],
     );
     const priceRows = await sql.all<Record<string, unknown>>(
       `SELECT po.* FROM price_observations po
        JOIN portfolio_securities ps ON ps.security_id = po.security_id
-       WHERE ps.user_id = ? AND ps.portfolio_id = ? AND po.market_date <= ?
+       WHERE ps.user_id = ? AND ps.portfolio_id = ?
+         AND po.market_date BETWEEN ? AND ? AND po.ingested_at <= ?
          AND (po.access_scope = 'deployment' OR (po.access_scope = 'user' AND po.scope_user_id = ?))
-       ORDER BY po.security_id, po.market_date, po.observation_at, po.id`,
-      [userId, run.portfolioId, run.rangeTo, userId],
+       ORDER BY po.security_id, po.market_date, po.observation_at, po.id LIMIT ?`,
+      [
+        userId,
+        run.portfolioId,
+        daysBefore(asOfDate, 5),
+        asOfDate,
+        run.marketDataCutoff ?? run.updatedAt,
+        userId,
+        maxFacts,
+      ],
     );
     const fxRows = await sql.all<Record<string, unknown>>(
       `SELECT fx.* FROM fx_rate_observations fx
-       WHERE fx.base_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?)
-         AND fx.market_date <= ?
+       WHERE fx.market_date BETWEEN ? AND ? AND fx.ingested_at <= ?
          AND (fx.access_scope = 'deployment' OR (fx.access_scope = 'user' AND fx.scope_user_id = ?))
-       ORDER BY fx.base_currency_code, fx.quote_currency_code, fx.market_date, fx.observed_at, fx.id`,
-      [run.portfolioId, userId, run.rangeTo, userId],
+         AND (fx.base_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?)
+           OR fx.quote_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?))
+       ORDER BY fx.base_currency_code, fx.quote_currency_code, fx.market_date, fx.observed_at, fx.id LIMIT ?`,
+      [
+        daysBefore(asOfDate, 5),
+        asOfDate,
+        run.marketDataCutoff ?? run.updatedAt,
+        userId,
+        run.portfolioId,
+        userId,
+        run.portfolioId,
+        userId,
+        maxFacts,
+      ],
     );
     const accountRows = await sql.all<CashAccountRow>(
-      `SELECT id, currency_code, completeness FROM cash_accounts WHERE user_id = ? AND portfolio_id = ? ORDER BY id`,
-      [userId, run.portfolioId],
+      `SELECT id, currency_code, completeness FROM cash_accounts WHERE user_id = ? AND portfolio_id = ? ORDER BY id LIMIT ?`,
+      [userId, run.portfolioId, maxFacts],
     );
     const entryRows = await sql.all<CashEntryRow>(
       `SELECT id, cash_account_id, local_effective_date, signed_amount_decimal, status, reverses_entry_id
        FROM cash_ledger_entries WHERE user_id = ? AND portfolio_id = ? AND local_effective_date <= ?
-       ORDER BY local_effective_date, effective_at, id`,
-      [userId, run.portfolioId, run.rangeTo],
+       ORDER BY local_effective_date, effective_at, id LIMIT ?`,
+      [userId, run.portfolioId, asOfDate, maxFacts],
     );
     const overrideRows = await sql.all<Record<string, unknown>>(
       `SELECT * FROM manual_overrides
        WHERE user_id = ? AND (portfolio_id = ? OR portfolio_id IS NULL)
-         AND status = 'active'`,
-      [userId, run.portfolioId],
+         AND status = 'active' LIMIT ?`,
+      [userId, run.portfolioId, maxFacts],
     );
-    const factsCount =
-      transactionRows.length +
-      entryRows.length +
-      priceRows.length +
-      fxRows.length;
-    if (factsCount > maxFacts) throw new Error("snapshot_fact_limit");
     const pricesBySecurity = new Map<string, SnapshotPriceObservation[]>();
     for (const row of priceRows) {
       const mapped = mapPrice(row);
@@ -359,6 +431,8 @@ export function createHistoricalSnapshotRepository(
       priceObservations: row.security_id
         ? (pricesBySecurity.get(row.security_id) ?? [])
         : [],
+      expectedTradingDates:
+        options.expectedTradingDatesBySecurity?.[row.portfolio_security_id],
     }));
     const entriesByAccount = new Map<string, SnapshotCashLedgerEntry[]>();
     for (const row of entryRows) {
@@ -402,6 +476,7 @@ export function createHistoricalSnapshotRepository(
     run: CalculationRunRecord,
     point: HistoricalSnapshotPoint,
     marketDataCutoff: string | null,
+    now: string,
   ): SqlStatement {
     return {
       sql: `INSERT INTO portfolio_daily_snapshots
@@ -409,9 +484,14 @@ export function createHistoricalSnapshotRepository(
          securities_value_decimal, cash_value_decimal, total_value_decimal,
          cost_basis_decimal, unrealised_gain_decimal, realised_gain_to_date_decimal,
          daily_movement_decimal, coverage_json, completeness, status,
-         ledger_high_water, market_data_cutoff, calculation_version, rebuilt_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?)
-        ON CONFLICT (portfolio_id, snapshot_date, calculation_version) DO UPDATE SET
+         ledger_high_water, market_data_cutoff, calculation_run_id,
+         calculation_version, rebuilt_at)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?, ?
+        WHERE EXISTS (SELECT 1 FROM calculation_runs
+          WHERE id = ? AND user_id = ? AND portfolio_id = ?
+            AND status = 'running' AND lease_owner = ? AND lease_expires_at > ?
+            AND processed_snapshot_count = ? AND processed_holding_count = ?)
+        ON CONFLICT (portfolio_id, snapshot_date, calculation_version, calculation_run_id) DO UPDATE SET
           user_id = excluded.user_id, base_currency_code = excluded.base_currency_code,
           securities_value_decimal = excluded.securities_value_decimal,
           cash_value_decimal = excluded.cash_value_decimal,
@@ -422,7 +502,9 @@ export function createHistoricalSnapshotRepository(
           daily_movement_decimal = excluded.daily_movement_decimal,
           coverage_json = excluded.coverage_json, completeness = excluded.completeness,
           status = 'ready', ledger_high_water = excluded.ledger_high_water,
-          market_data_cutoff = excluded.market_data_cutoff, rebuilt_at = excluded.rebuilt_at`,
+          market_data_cutoff = excluded.market_data_cutoff,
+          calculation_run_id = excluded.calculation_run_id,
+          rebuilt_at = excluded.rebuilt_at`,
       params: [
         `${run.id}:portfolio:${point.date}`,
         userId,
@@ -440,8 +522,16 @@ export function createHistoricalSnapshotRepository(
         point.completeness,
         run.ledgerHighWaterStart,
         marketDataCutoff,
+        run.id,
         run.calculationVersion,
         run.updatedAt,
+        run.id,
+        userId,
+        run.portfolioId,
+        run.leaseOwner,
+        now,
+        run.processedSnapshotCount,
+        run.processedHoldingCount,
       ],
     };
   }
@@ -451,19 +541,26 @@ export function createHistoricalSnapshotRepository(
     run: CalculationRunRecord,
     point: HistoricalSnapshotPoint,
     holding: HistoricalSnapshotPoint["holdings"][number],
+    now: string,
   ): SqlStatement {
     return {
       sql: `INSERT INTO holding_daily_snapshots
         (id, user_id, portfolio_id, portfolio_security_id, portfolio_snapshot_id,
          snapshot_date, quantity_decimal, native_value_decimal, base_value_decimal,
          basis_decimal, price_observation_id, fx_observation_id,
-         daily_movement_decimal, completeness, status, calculation_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?)
-        ON CONFLICT (portfolio_id, portfolio_security_id, snapshot_date, calculation_version) DO UPDATE SET
+         calculation_run_id, daily_movement_decimal, completeness, status,
+         calculation_version)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?
+        WHERE EXISTS (SELECT 1 FROM calculation_runs
+          WHERE id = ? AND user_id = ? AND portfolio_id = ?
+            AND status = 'running' AND lease_owner = ? AND lease_expires_at > ?
+            AND processed_snapshot_count = ? AND processed_holding_count = ?)
+        ON CONFLICT (portfolio_id, portfolio_security_id, snapshot_date, calculation_version, calculation_run_id) DO UPDATE SET
           user_id = excluded.user_id, portfolio_snapshot_id = excluded.portfolio_snapshot_id,
           quantity_decimal = excluded.quantity_decimal, native_value_decimal = excluded.native_value_decimal,
           base_value_decimal = excluded.base_value_decimal, basis_decimal = excluded.basis_decimal,
           price_observation_id = excluded.price_observation_id, fx_observation_id = excluded.fx_observation_id,
+          calculation_run_id = excluded.calculation_run_id,
           daily_movement_decimal = excluded.daily_movement_decimal, completeness = excluded.completeness,
           status = 'ready'`,
       params: [
@@ -479,10 +576,87 @@ export function createHistoricalSnapshotRepository(
         holding.basisDecimal,
         holding.priceObservationId,
         holding.fxObservationId,
+        run.id,
         holding.dailyMovementDecimal,
         holding.completeness,
         run.calculationVersion,
+        run.id,
+        userId,
+        run.portfolioId,
+        run.leaseOwner,
+        now,
+        run.processedSnapshotCount,
+        run.processedHoldingCount,
       ],
+    };
+  }
+
+  async function completeAndPublish(
+    userId: string,
+    input: HistoricalSnapshotRebuildInput,
+    run: CalculationRunRecord,
+    processedSnapshotCount: number,
+    processedHoldingCount: number,
+  ): Promise<SnapshotRebuildResult> {
+    const publicationId = `${input.portfolioId}:${run.calculationVersion}`;
+    await batch([
+      {
+        sql: `UPDATE calculation_runs
+          SET status = 'completed', ledger_high_water_end = ?,
+              processed_snapshot_count = ?, processed_holding_count = ?,
+              completed_at = ?, lease_owner = NULL, lease_expires_at = NULL,
+              updated_at = ?
+          WHERE user_id = ? AND portfolio_id = ? AND id = ?
+            AND status = 'running' AND lease_owner = ?
+            AND lease_expires_at > ? AND ledger_high_water_start = ?`,
+        params: [
+          input.currentLedgerHighWater,
+          processedSnapshotCount,
+          processedHoldingCount,
+          input.now,
+          input.now,
+          userId,
+          input.portfolioId,
+          run.id,
+          input.leaseOwner,
+          input.now,
+          input.currentLedgerHighWater,
+        ],
+      },
+      {
+        sql: `INSERT INTO snapshot_publications
+          (id, user_id, portfolio_id, calculation_version, calculation_run_id,
+           ledger_high_water, published_at)
+          SELECT ?, ?, ?, ?, id, ledger_high_water_end, ?
+          FROM calculation_runs
+          WHERE id = ? AND user_id = ? AND portfolio_id = ?
+            AND status = 'completed' AND ledger_high_water_end = ?
+          ON CONFLICT (user_id, portfolio_id, calculation_version) DO UPDATE SET
+            calculation_run_id = excluded.calculation_run_id,
+            ledger_high_water = excluded.ledger_high_water,
+            published_at = excluded.published_at`,
+        params: [
+          publicationId,
+          userId,
+          input.portfolioId,
+          run.calculationVersion,
+          input.now,
+          run.id,
+          userId,
+          input.portfolioId,
+          input.currentLedgerHighWater,
+        ],
+      },
+    ]);
+    const completed = await runs.get(userId, input.portfolioId, run.id);
+    if (!completed || completed.status !== "completed") {
+      return { ok: false, reason: "not-owned" };
+    }
+    return {
+      ok: true,
+      status: "completed",
+      run: completed,
+      pointDate: null,
     };
   }
 
@@ -532,17 +706,28 @@ export function createHistoricalSnapshotRepository(
       if (run.ledgerHighWaterStart !== input.currentLedgerHighWater) {
         return { ok: false, reason: "stale-ledger" };
       }
+      const dates = dateRange(run.rangeFrom, run.rangeTo);
+      const pointDate = dates[run.processedSnapshotCount];
+      if (!pointDate) {
+        return completeAndPublish(
+          userId,
+          input,
+          run,
+          run.processedSnapshotCount,
+          run.processedHoldingCount,
+        );
+      }
       let facts;
       try {
-        facts = await loadFacts(userId, run);
+        facts = await loadFacts(userId, run, pointDate);
       } catch {
         return { ok: false, reason: "build-failed" };
       }
       const built = buildHistoricalSnapshots({
         userId,
         baseCurrencyCode: facts.baseCurrencyCode,
-        rangeFrom: run.rangeFrom,
-        rangeTo: run.rangeTo,
+        rangeFrom: pointDate,
+        rangeTo: pointDate,
         calculationVersion: run.calculationVersion,
         ledgerHistoryCompleteFrom: facts.historyCompleteFrom,
         securities: facts.securities,
@@ -551,32 +736,15 @@ export function createHistoricalSnapshotRepository(
         overrides: facts.overrides,
       });
       if (!built.ok) return { ok: false, reason: "build-failed" };
-      const point = built.points[run.processedSnapshotCount];
+      const point = built.points[0];
       if (!point) {
-        const completed = await runs.complete(
+        return completeAndPublish(
           userId,
-          input.portfolioId,
-          run.id,
-          input.leaseOwner,
-          input.currentLedgerHighWater,
-          input.now,
+          input,
+          run,
           run.processedSnapshotCount,
           run.processedHoldingCount,
         );
-        return completed.ok
-          ? {
-              ok: true,
-              status: "completed",
-              run: completed.run,
-              pointDate: null,
-            }
-          : {
-              ok: false,
-              reason:
-                completed.reason === "stale-ledger"
-                  ? "stale-ledger"
-                  : "not-owned",
-            };
       }
       const holdingStart = run.processedHoldingCount;
       const holdingEnd = Math.min(
@@ -590,11 +758,14 @@ export function createHistoricalSnapshotRepository(
             userId,
             run,
             point,
-            input.marketDataCutoff ?? input.now,
+            run.marketDataCutoff ?? run.updatedAt,
+            input.now,
           ),
         );
       for (const holding of point.holdings.slice(holdingStart, holdingEnd)) {
-        statements.push(holdingStatement(userId, run, point, holding));
+        statements.push(
+          holdingStatement(userId, run, point, holding, input.now),
+        );
       }
       const nextHolding = holdingEnd >= point.holdings.length ? 0 : holdingEnd;
       const nextSnapshot =
@@ -622,31 +793,17 @@ export function createHistoricalSnapshotRepository(
       await batch(statements);
       const after = await runs.get(userId, input.portfolioId, run.id);
       if (!after) return { ok: false, reason: "invalid-run" };
-      if (nextSnapshot >= built.points.length && nextHolding === 0) {
-        const completed = await runs.complete(
+      if (nextSnapshot >= dates.length && nextHolding === 0) {
+        const completed = await completeAndPublish(
           userId,
-          input.portfolioId,
-          run.id,
-          input.leaseOwner,
-          input.currentLedgerHighWater,
-          input.now,
+          input,
+          run,
           nextSnapshot,
           nextHolding,
         );
         return completed.ok
-          ? {
-              ok: true,
-              status: "completed",
-              run: completed.run,
-              pointDate: point.date,
-            }
-          : {
-              ok: false,
-              reason:
-                completed.reason === "stale-ledger"
-                  ? "stale-ledger"
-                  : "not-owned",
-            };
+          ? { ...completed, pointDate: point.date }
+          : completed;
       }
       return {
         ok: true,
@@ -688,10 +845,18 @@ export function createHistoricalSnapshotRepository(
       calculationVersion: number,
     ): Promise<HistoricalSeriesResponse | null> {
       const run = await sql.get<Record<string, unknown>>(
-        `SELECT p.base_currency_code, r.ledger_high_water_end, r.range_from, r.range_to, r.calculation_version FROM calculation_runs r
+        `SELECT p.base_currency_code, r.ledger_high_water_end,
+           r.range_from, r.range_to, r.calculation_version,
+           sp.calculation_run_id
+         FROM snapshot_publications sp
+         JOIN calculation_runs r
+           ON r.id = sp.calculation_run_id AND r.user_id = sp.user_id
+          AND r.portfolio_id = sp.portfolio_id
          JOIN portfolios p ON p.id = r.portfolio_id AND p.user_id = r.user_id
-         WHERE r.user_id = ? AND r.portfolio_id = ? AND r.calculation_version = ? AND r.status = 'completed'
-           AND range_from <= ? AND range_to >= ? ORDER BY r.completed_at DESC, r.id DESC LIMIT 1`,
+         WHERE sp.user_id = ? AND sp.portfolio_id = ?
+           AND sp.calculation_version = ? AND r.status = 'completed'
+           AND r.range_from <= ? AND r.range_to >= ?
+         LIMIT 1`,
         [userId, portfolioId, calculationVersion, rangeFrom, rangeTo],
       );
       if (!run) return null;
@@ -700,13 +865,15 @@ export function createHistoricalSnapshotRepository(
            daily_movement_decimal, completeness, coverage_json
          FROM portfolio_daily_snapshots
          WHERE user_id = ? AND portfolio_id = ? AND snapshot_date BETWEEN ? AND ?
-           AND calculation_version = ? AND ledger_high_water = ? AND status = 'ready' ORDER BY snapshot_date`,
+           AND calculation_version = ? AND calculation_run_id = ?
+           AND ledger_high_water = ? AND status = 'ready' ORDER BY snapshot_date`,
         [
           userId,
           portfolioId,
           rangeFrom,
           rangeTo,
           calculationVersion,
+          String(run.calculation_run_id),
           String(run.ledger_high_water_end),
         ],
       );

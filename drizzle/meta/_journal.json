@@ -148,6 +148,13 @@
       "when": 1785748932614,
       "tag": "0020_omniscient_greymalkin",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1785814884241,
+      "tag": "0021_overrated_kang",
+      "breakpoints": true
     }
   ]
 }

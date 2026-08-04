@@ -1498,6 +1498,7 @@ export const portfolioDailySnapshots = sqliteTable(
     status: text("status").notNull().default("ready"),
     ledgerHighWater: text("ledger_high_water").notNull(),
     marketDataCutoff: text("market_data_cutoff"),
+    calculationRunId: text("calculation_run_id"),
     calculationVersion: integer("calculation_version").notNull(),
     rebuiltAt: text("rebuilt_at").notNull(),
   },
@@ -1531,6 +1532,7 @@ export const portfolioDailySnapshots = sqliteTable(
       table.portfolioId,
       table.snapshotDate,
       table.calculationVersion,
+      table.calculationRunId,
     ),
     index("portfolio_snapshots_chart_idx").on(
       table.portfolioId,
@@ -1554,6 +1556,7 @@ export const holdingDailySnapshots = sqliteTable(
     basisDecimal: text("basis_decimal"),
     priceObservationId: text("price_observation_id"),
     fxObservationId: text("fx_observation_id"),
+    calculationRunId: text("calculation_run_id"),
     dailyMovementDecimal: text("daily_movement_decimal"),
     completeness: text("completeness").notNull(),
     status: text("status").notNull().default("ready"),
@@ -1609,6 +1612,7 @@ export const holdingDailySnapshots = sqliteTable(
       table.portfolioSecurityId,
       table.snapshotDate,
       table.calculationVersion,
+      table.calculationRunId,
     ),
     index("holding_snapshots_chart_idx").on(
       table.portfolioId,
@@ -1635,6 +1639,7 @@ export const calculationRuns = sqliteTable(
     leaseExpiresAt: text("lease_expires_at"),
     ledgerHighWaterStart: text("ledger_high_water_start").notNull(),
     ledgerHighWaterEnd: text("ledger_high_water_end"),
+    marketDataCutoff: text("market_data_cutoff"),
     processedSnapshotCount: integer("processed_snapshot_count")
       .notNull()
       .default(0),
@@ -1704,6 +1709,45 @@ export const calculationRuns = sqliteTable(
       table.portfolioId,
       table.status,
       table.createdAt,
+    ),
+  ],
+);
+
+export const snapshotPublications = sqliteTable(
+  "snapshot_publications",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    calculationVersion: integer("calculation_version").notNull(),
+    calculationRunId: text("calculation_run_id").notNull(),
+    ledgerHighWater: text("ledger_high_water").notNull(),
+    publishedAt: text("published_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "snapshot_publications_portfolio_owner_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "snapshot_publications_run_owner_portfolio_fk",
+      columns: [table.calculationRunId, table.userId, table.portfolioId],
+      foreignColumns: [
+        calculationRuns.id,
+        calculationRuns.userId,
+        calculationRuns.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    uniqueIndex("snapshot_publications_owner_version_unique").on(
+      table.userId,
+      table.portfolioId,
+      table.calculationVersion,
+    ),
+    index("snapshot_publications_owner_portfolio_idx").on(
+      table.userId,
+      table.portfolioId,
+      table.publishedAt,
     ),
   ],
 );
