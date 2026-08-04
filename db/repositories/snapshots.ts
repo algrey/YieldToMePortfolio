@@ -21,7 +21,10 @@ import {
 } from "./calculation-runs.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 
-export type HistoricalSnapshotRequest = RequestCalculationRunInput & {
+export type HistoricalSnapshotRequest = Omit<
+  RequestCalculationRunInput,
+  "calendarEvidenceJson"
+> & {
   ledgerHistoryCompleteFrom?: string | null;
   calendarEvidence?: Readonly<Record<string, readonly string[]>>;
 };
@@ -81,6 +84,17 @@ type PortfolioRow = {
 
 type CalendarEvidence = Readonly<Record<string, readonly string[]>>;
 
+function isValidCalendarDate(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+  const timestamp = Date.parse(`${value}T00:00:00Z`);
+  return (
+    Number.isFinite(timestamp) &&
+    new Date(timestamp).toISOString().slice(0, 10) === value
+  );
+}
+
 function serializeCalendarEvidence(
   evidence: CalendarEvidence | undefined,
 ): string | null {
@@ -88,30 +102,41 @@ function serializeCalendarEvidence(
   const calendars = Object.fromEntries(
     Object.keys(evidence)
       .sort()
-      .map((key) => [key, [...new Set(evidence[key] ?? [])].sort()]),
+      .map((key) => {
+        if (key.length === 0) throw new Error("invalid_calendar_evidence");
+        const dates = evidence[key] ?? [];
+        if (dates.some((date) => !isValidCalendarDate(date))) {
+          throw new Error("invalid_calendar_evidence");
+        }
+        return [key, [...new Set(dates)].sort()];
+      }),
   );
   return JSON.stringify({ version: 1, calendars });
 }
 
-function parseCalendarEvidence(value: string | null): CalendarEvidence {
+function parseCalendarEvidence(value: string | null): CalendarEvidence | null {
   if (!value) return {};
   try {
     const parsed: unknown = JSON.parse(value);
-    if (typeof parsed !== "object" || parsed === null) return {};
-    const calendars = (parsed as { calendars?: unknown }).calendars;
-    if (typeof calendars !== "object" || calendars === null) return {};
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const envelope = parsed as { version?: unknown; calendars?: unknown };
+    if (envelope.version !== 1) return null;
+    const calendars = envelope.calendars;
+    if (typeof calendars !== "object" || calendars === null) return null;
     const result: Record<string, readonly string[]> = {};
     for (const [key, dates] of Object.entries(calendars)) {
       if (
-        Array.isArray(dates) &&
-        dates.every((date): date is string => typeof date === "string")
+        key.length === 0 ||
+        !Array.isArray(dates) ||
+        !dates.every(isValidCalendarDate)
       ) {
-        result[key] = dates;
+        return null;
       }
+      result[key] = dates;
     }
     return result;
   } catch {
-    return {};
+    return null;
   }
 }
 
@@ -527,6 +552,7 @@ export function createHistoricalSnapshotRepository(
       transactionsBySecurity.set(row.portfolio_security_id, existing);
     }
     const calendarEvidence = parseCalendarEvidence(run.calendarEvidenceJson);
+    if (calendarEvidence === null) throw new Error("invalid_calendar_evidence");
     const securities = securityRows.map((row) => ({
       portfolioSecurityId: row.portfolio_security_id,
       securityId: row.security_id,
@@ -770,11 +796,9 @@ export function createHistoricalSnapshotRepository(
       userId: string,
       input: HistoricalSnapshotRequest,
     ): Promise<CalculationRunRecord> {
-      const calendarEvidenceJson =
-        input.calendarEvidenceJson ??
-        serializeCalendarEvidence(
-          input.calendarEvidence ?? options.expectedTradingDatesBySecurity,
-        );
+      const calendarEvidenceJson = serializeCalendarEvidence(
+        input.calendarEvidence ?? options.expectedTradingDatesBySecurity,
+      );
       return runs.request(userId, {
         ...input,
         calendarEvidenceJson,

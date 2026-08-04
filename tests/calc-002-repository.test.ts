@@ -572,3 +572,64 @@ test("CALC-002 keeps calculation versions independently published", async () => 
     "200",
   );
 });
+
+test("CALC-002 rejects malformed calendar evidence at request and retry boundaries", async () => {
+  const db = await database();
+  const repository = createHistoricalSnapshotRepository(
+    createSqliteSqlClient(db),
+  );
+  await assert.rejects(
+    repository.request("user-a", {
+      id: "run-invalid-calendar-request",
+      portfolioId: "portfolio-a",
+      rangeFrom: "2026-08-01",
+      rangeTo: "2026-08-01",
+      calculationVersion: 14,
+      reason: "calendar-validation",
+      ledgerHighWaterStart: "trade-a",
+      calendarEvidence: { "holding-a": ["2026-02-30"] },
+      idempotencyKey: "invalid-calendar-request",
+      now: "2026-08-03T00:00:00Z",
+    }),
+    /invalid_calendar_evidence/,
+  );
+
+  const run = await repository.request("user-a", {
+    id: "run-invalid-calendar-retry",
+    portfolioId: "portfolio-a",
+    rangeFrom: "2026-08-01",
+    rangeTo: "2026-08-01",
+    calculationVersion: 14,
+    reason: "calendar-validation",
+    ledgerHighWaterStart: "trade-a",
+    calendarEvidence: { "holding-a": ["2026-08-01"] },
+    idempotencyKey: "invalid-calendar-retry",
+    now: "2026-08-03T00:00:00Z",
+  });
+  db.prepare(
+    "UPDATE calculation_runs SET calendar_evidence_json = ? WHERE id = ?",
+  ).run('{"version":2,"calendars":{}}', run.id);
+  assert.equal(
+    (
+      await repository.claim(
+        "user-a",
+        "portfolio-a",
+        run.id,
+        "worker-a",
+        "2026-08-03T01:00:00Z",
+        "2026-08-03T00:01:00Z",
+      )
+    ).ok,
+    true,
+  );
+  assert.deepEqual(
+    await repository.rebuild("user-a", {
+      portfolioId: "portfolio-a",
+      calculationRunId: run.id,
+      leaseOwner: "worker-a",
+      currentLedgerHighWater: "trade-a",
+      now: "2026-08-03T00:02:00Z",
+    }),
+    { ok: false, reason: "build-failed" },
+  );
+});
