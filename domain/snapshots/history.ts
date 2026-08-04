@@ -170,6 +170,7 @@ export type HistoricalSnapshotBuildResult =
     };
 
 type PreparedHolding = HistoricalHoldingSnapshot & {
+  ledgerValid: boolean;
   priceDecimal: string | null;
   fxEvidence: FxEvidence | null;
   fxRateDecimal: string | null;
@@ -181,6 +182,7 @@ type PreparedCash = {
   accountId: string;
   currencyCode: string;
   balanceDecimal: string;
+  balanceValid: boolean;
   valueDecimal: string | null;
   fxEvidence: FxEvidence | null;
   fxRateDecimal: string | null;
@@ -246,17 +248,12 @@ function nonZero(value: string): boolean {
   return parsed !== null && compareDecimal(parsed, ZERO) !== 0;
 }
 
-function activeEntries<
-  T extends { id: string; status: string; reversesEntryId: string | null },
->(entries: readonly T[]): T[] {
-  const reversed = new Set(
-    entries
-      .filter((entry) => entry.reversesEntryId !== null)
-      .map((entry) => entry.reversesEntryId as string),
-  );
-  return entries.filter(
-    (entry) => entry.status === "posted" && !reversed.has(entry.id),
-  );
+function activeEntries<T extends { status: string }>(
+  entries: readonly T[],
+): T[] {
+  // Cash reversals are compensating entries. Both the immutable original and
+  // its negating entry must remain in the balance replay.
+  return entries.filter((entry) => entry.status === "posted");
 }
 
 function toFxEvidence(selection: FxSelection): FxEvidence | null {
@@ -401,6 +398,7 @@ function holdingAt(
       fxObservationId: null,
       dailyMovementDecimal: null,
       completeness: "incomplete",
+      ledgerValid: false,
       priceDecimal: null,
       fxEvidence: null,
       fxRateDecimal: null,
@@ -419,6 +417,7 @@ function holdingAt(
       fxObservationId: null,
       dailyMovementDecimal: null,
       completeness: "complete",
+      ledgerValid: true,
       priceDecimal: null,
       fxEvidence: null,
       fxRateDecimal: null,
@@ -460,6 +459,7 @@ function holdingAt(
     fxObservationId: fxId(fx),
     dailyMovementDecimal: null,
     completeness,
+    ledgerValid: true,
     priceDecimal: price.selected?.closeDecimal ?? null,
     fxEvidence,
     fxRateDecimal: fx.selected?.rateDecimal ?? null,
@@ -476,13 +476,30 @@ function cashAt(
   const entries = activeEntries(
     account.entries.filter((entry) => entry.localDate <= date),
   );
-  const balance =
-    addValues(entries.map((entry) => entry.signedAmountDecimal)) ?? "0";
+  const calculatedBalance = addValues(
+    entries.map((entry) => entry.signedAmountDecimal),
+  );
+  const balance = calculatedBalance ?? "0";
+  if (calculatedBalance === null) {
+    return {
+      accountId: account.id,
+      currencyCode: account.currencyCode,
+      balanceDecimal: balance,
+      balanceValid: false,
+      valueDecimal: null,
+      fxEvidence: null,
+      fxRateDecimal: null,
+      fxStatus: "unavailable",
+      dailyMovementDecimal: null,
+      completeness: "incomplete",
+    };
+  }
   if (!nonZero(balance)) {
     return {
       accountId: account.id,
       currencyCode: account.currencyCode,
       balanceDecimal: balance,
+      balanceValid: true,
       valueDecimal: "0",
       fxEvidence: null,
       fxRateDecimal: null,
@@ -508,6 +525,7 @@ function cashAt(
     accountId: account.id,
     currencyCode: account.currencyCode,
     balanceDecimal: balance,
+    balanceValid: true,
     valueDecimal: value,
     fxEvidence,
     fxRateDecimal: fx.selected?.rateDecimal ?? null,
@@ -597,7 +615,12 @@ export function buildHistoricalSnapshots(
     let zeroHoldingCount = 0;
     for (const holding of holdings) {
       const previous = previousHoldings.get(holding.portfolioSecurityId);
-      if (nonZero(holding.quantityDecimal)) {
+      if (!holding.ledgerValid) {
+        gaps.push({
+          kind: "invalid_ledger",
+          componentId: holding.portfolioSecurityId,
+        });
+      } else if (nonZero(holding.quantityDecimal)) {
         marketDataStates.push({
           componentId: holding.portfolioSecurityId,
           priceState: holding.priceStatus,
@@ -622,12 +645,6 @@ export function buildHistoricalSnapshots(
         if (holding.basisDecimal === null) {
           gaps.push({
             kind: "incomplete_basis",
-            componentId: holding.portfolioSecurityId,
-          });
-        }
-        if (holding.completeness === "incomplete") {
-          gaps.push({
-            kind: "invalid_ledger",
             componentId: holding.portfolioSecurityId,
           });
         }
@@ -672,7 +689,9 @@ export function buildHistoricalSnapshots(
     let zeroCashAccountCount = 0;
     for (const account of cash) {
       const previous = previousCash.get(account.accountId);
-      if (nonZero(account.balanceDecimal)) {
+      if (!account.balanceValid) {
+        gaps.push({ kind: "cash_incomplete", componentId: account.accountId });
+      } else if (nonZero(account.balanceDecimal)) {
         marketDataStates.push({
           componentId: account.accountId,
           priceState: null,
@@ -691,6 +710,7 @@ export function buildHistoricalSnapshots(
         zeroCashAccountCount += 1;
       }
       if (
+        account.balanceValid &&
         nonZero(account.balanceDecimal) &&
         account.completeness !== "complete"
       ) {
@@ -766,13 +786,15 @@ export function buildHistoricalSnapshots(
     const excludedHoldingIds = holdings
       .filter(
         (holding) =>
-          nonZero(holding.quantityDecimal) && holding.baseValueDecimal === null,
+          (!holding.ledgerValid || nonZero(holding.quantityDecimal)) &&
+          holding.baseValueDecimal === null,
       )
       .map((holding) => holding.portfolioSecurityId);
     const excludedCashAccountIds = cash
       .filter(
         (account) =>
-          nonZero(account.balanceDecimal) && account.valueDecimal === null,
+          (!account.balanceValid || nonZero(account.balanceDecimal)) &&
+          account.valueDecimal === null,
       )
       .map((account) => account.accountId);
     const coverage: SnapshotCoverage = {

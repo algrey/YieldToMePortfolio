@@ -234,3 +234,98 @@ test("CALC-002 marks partial history and uses prior-session fallback without tim
     ),
   );
 });
+
+test("CALC-002 replays compensating cash reversals without double-subtracting", () => {
+  const result = buildHistoricalSnapshots(
+    baseInput({
+      rangeTo: "2026-08-02",
+      securities: [],
+      cashAccounts: [
+        {
+          id: "cash-aud",
+          currencyCode: "AUD",
+          completeness: "complete",
+          entries: [
+            {
+              id: "cash-original",
+              accountId: "cash-aud",
+              localDate: "2026-08-01",
+              signedAmountDecimal: "100",
+              status: "posted",
+              reversesEntryId: null,
+            },
+            {
+              id: "cash-reversal",
+              accountId: "cash-aud",
+              localDate: "2026-08-02",
+              signedAmountDecimal: "-100",
+              status: "posted",
+              reversesEntryId: "cash-original",
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(
+    result.points.map((point) => point.cashValueDecimal),
+    ["100", "0"],
+  );
+});
+
+test("CALC-002 marks malformed ledger and cash facts as gaps instead of zero", () => {
+  const invalidLedger = buildHistoricalSnapshots(
+    baseInput({
+      securities: [
+        {
+          ...baseInput().securities[0],
+          transactions: [buy("invalid-buy", "2026-08-01", "invalid", "10")],
+        },
+      ],
+    }),
+  );
+  assert.equal(invalidLedger.ok, true);
+  if (!invalidLedger.ok) return;
+  assert.equal(invalidLedger.points[0]?.totalValueDecimal, null);
+  assert.equal(invalidLedger.points[0]?.completeness, "incomplete");
+  assert.deepEqual(invalidLedger.points[0]?.coverage.excludedHoldingIds, [
+    "holding-1",
+  ]);
+  assert.ok(
+    invalidLedger.points[0]?.coverage.gaps.some(
+      (gap) => gap.kind === "invalid_ledger",
+    ),
+  );
+
+  const invalidCash = buildHistoricalSnapshots(
+    baseInput({
+      securities: [],
+      cashAccounts: [
+        {
+          id: "cash-aud",
+          currencyCode: "AUD",
+          completeness: "complete",
+          entries: [
+            {
+              id: "invalid-cash",
+              accountId: "cash-aud",
+              localDate: "2026-08-01",
+              signedAmountDecimal: "invalid",
+              status: "posted",
+              reversesEntryId: null,
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.equal(invalidCash.ok, true);
+  if (!invalidCash.ok) return;
+  assert.equal(invalidCash.points[0]?.totalValueDecimal, null);
+  assert.equal(invalidCash.points[0]?.completeness, "incomplete");
+  assert.deepEqual(invalidCash.points[0]?.coverage.excludedCashAccountIds, [
+    "cash-aud",
+  ]);
+});

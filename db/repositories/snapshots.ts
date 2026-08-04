@@ -284,15 +284,17 @@ export function createHistoricalSnapshotRepository(
       `SELECT po.* FROM price_observations po
        JOIN portfolio_securities ps ON ps.security_id = po.security_id
        WHERE ps.user_id = ? AND ps.portfolio_id = ? AND po.market_date <= ?
+         AND (po.access_scope = 'deployment' OR (po.access_scope = 'user' AND po.scope_user_id = ?))
        ORDER BY po.security_id, po.market_date, po.observation_at, po.id`,
-      [userId, run.portfolioId, run.rangeTo],
+      [userId, run.portfolioId, run.rangeTo, userId],
     );
     const fxRows = await sql.all<Record<string, unknown>>(
       `SELECT fx.* FROM fx_rate_observations fx
        WHERE fx.base_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?)
          AND fx.market_date <= ?
+         AND (fx.access_scope = 'deployment' OR (fx.access_scope = 'user' AND fx.scope_user_id = ?))
        ORDER BY fx.base_currency_code, fx.quote_currency_code, fx.market_date, fx.observed_at, fx.id`,
-      [run.portfolioId, userId, run.rangeTo],
+      [run.portfolioId, userId, run.rangeTo, userId],
     );
     const accountRows = await sql.all<CashAccountRow>(
       `SELECT id, currency_code, completeness FROM cash_accounts WHERE user_id = ? AND portfolio_id = ? ORDER BY id`,

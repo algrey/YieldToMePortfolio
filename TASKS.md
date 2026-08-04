@@ -680,7 +680,7 @@ Status: DONE (follow-up review resolution completed 2026-08-04).
 
 ### CALC-002 — Historical snapshots and rebuild
 
-Status: DONE (2026-08-04).
+Status: IN PROGRESS (review reopened 2026-08-04).
 
 - Objective: produce reproducible historical value series from dated ledger, price, FX, and cash facts.
 - Dependencies: CALC-001B, MKT-003B, LED-002B, DB-004.
@@ -692,6 +692,8 @@ Status: DONE (2026-08-04).
 - Risks: exchange/portfolio timezone cutoff; D1 growth.
 - Parallel safe: no with snapshot UI contract; can precede UI.
 - Completion: added deterministic ledger-replayed historical snapshots, bounded resumable calculation-run rebuilds, owner-scoped invalidation and completed-version chart reads, explicit stale/missing market-data coverage, and zero-component handling. Verified with CALC-002 domain/repository fixtures plus repository-wide checks.
+- Review fixes: owner-specific market observations are now filtered to the authenticated owner, compensating cash reversals replay to zero instead of double-subtracting, and malformed ledger/cash facts remain explicit gaps rather than zero components.
+- Review finding: the task is not complete. A same-version rebuild currently upserts rows keyed only by portfolio/date/version, so it can remove dates from the previously readable completed series before the new run completes; chart publication must retain the prior series until an atomic run-scoped publication switch, with a repeated-rebuild regression test. Each invocation also reloads unbounded SQL result sets and recomputes the full date/fact cross-product before writing one chunk, while `maxFacts` is enforced only after reads; fact loading and replay must be durably bounded and resume from checkpoints under the documented D1 limits. Market observations are not pinned or filtered by a persisted ingestion cutoff, so a retry can produce different output for the same ledger high-water/version. FX selection accepts only the portfolio-base-to-native stored direction despite the calculation contract supporting inverse evidence, and the calendar-day fallback cannot distinguish a holiday from a missing trading-session quote. Add coverage for same-version publication isolation, lease loss/chunk failure, calculation-version changes, corrected market data at a fixed cutoff, inverse FX, and actual exchange-holiday versus missing-session behavior before returning this task to `DONE`.
 
 ### DIV-001 — Dividend events, receipts, and forecasts
 
