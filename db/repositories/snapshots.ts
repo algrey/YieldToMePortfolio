@@ -718,6 +718,10 @@ export function createHistoricalSnapshotRepository(
         );
       }
       let facts;
+      const buildFromDate =
+        run.processedSnapshotCount > 0
+          ? dates[run.processedSnapshotCount - 1]!
+          : pointDate;
       try {
         facts = await loadFacts(userId, run, pointDate);
       } catch {
@@ -726,7 +730,7 @@ export function createHistoricalSnapshotRepository(
       const built = buildHistoricalSnapshots({
         userId,
         baseCurrencyCode: facts.baseCurrencyCode,
-        rangeFrom: pointDate,
+        rangeFrom: buildFromDate,
         rangeTo: pointDate,
         calculationVersion: run.calculationVersion,
         ledgerHistoryCompleteFrom: facts.historyCompleteFrom,
@@ -736,7 +740,7 @@ export function createHistoricalSnapshotRepository(
         overrides: facts.overrides,
       });
       if (!built.ok) return { ok: false, reason: "build-failed" };
-      const point = built.points[0];
+      const point = built.points[built.points.length - 1];
       if (!point) {
         return completeAndPublish(
           userId,
