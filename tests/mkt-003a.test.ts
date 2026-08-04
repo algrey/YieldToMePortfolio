@@ -130,6 +130,63 @@ test("selects delayed/best-effort before EOD, then bounded prior sessions", () =
   assert.equal(unavailable.display, null);
 });
 
+test("historical selection stops at the portfolio-local end of day", () => {
+  const usClose = price({
+    marketDate: "2026-08-01",
+    observationAt: "2026-08-01T20:00:00Z",
+    closeDecimal: "101",
+  });
+  const beforeSydneyCutoff = price({
+    marketDate: "2026-08-01",
+    observationAt: "2026-08-01T06:00:00Z",
+    closeDecimal: "100",
+  });
+  const blocked = selectPriceObservation({
+    asOf: "2026-08-01",
+    portfolioTimezone: "Australia/Sydney",
+    targetKey: "security-a",
+    observations: [usClose],
+  });
+  assert.equal(blocked.status, "unavailable");
+  const selected = selectPriceObservation({
+    asOf: "2026-08-01",
+    portfolioTimezone: "Australia/Sydney",
+    targetKey: "security-a",
+    observations: [usClose, beforeSydneyCutoff],
+  });
+  assert.equal(selected.selected?.closeDecimal, "100");
+
+  const fxBlocked = selectFxObservation({
+    asOf: "2026-08-01",
+    portfolioTimezone: "Australia/Sydney",
+    targetKey: "USD->AUD",
+    baseCurrencyCode: "USD",
+    quoteCurrencyCode: "AUD",
+    observations: [
+      fx({
+        marketDate: "2026-08-01",
+        observedAt: "2026-08-01T20:00:00Z",
+      }),
+    ],
+  });
+  assert.equal(fxBlocked.status, "unavailable");
+
+  // Sydney moves from UTC+10 to UTC+11 on this transition; the cutoff is
+  // evaluated by the timezone database rather than a fixed offset.
+  const dstClose = selectPriceObservation({
+    asOf: "2026-10-03",
+    portfolioTimezone: "Australia/Sydney",
+    targetKey: "security-a",
+    observations: [
+      price({
+        marketDate: "2026-10-03",
+        observationAt: "2026-10-03T16:00:00Z",
+      }),
+    ],
+  });
+  assert.equal(dstClose.status, "unavailable");
+});
+
 test("selection respects deployment and authenticated user observation scope", () => {
   const deployment = price({ closeDecimal: "40" });
   const userObservation = price({

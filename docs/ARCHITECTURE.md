@@ -314,6 +314,7 @@ Use a hybrid of normalized observations and derived daily snapshots:
 - FX history follows the same date range.
 - `portfolio_daily_snapshots` stores reproducible derived totals and coverage, keyed by portfolio, local date, and calculation version.
 - Snapshot rebuild rows are run-scoped; `snapshot_publications` atomically selects the completed run for each portfolio/version so retries never replace a readable series early.
+- A run persists both its market-data ingestion cutoff and canonical trading-calendar evidence. Historical selectors compare each observation instant with the portfolio timezone’s local end-of-day cutoff and retries never consult mutable process-local calendar state.
 - A ledger, mapping, corporate-action, override, or historical-data change invalidates the affected date range.
 - Recent dates can recompute eagerly; long ranges recompute in bounded chunks.
 - Snapshots are disposable projections. They can be rebuilt from ledger + normalized observations + calculation version.

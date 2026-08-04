@@ -113,6 +113,8 @@ export type SnapshotMarketDataState = {
   fxState: FxSelection["status"];
   priceObservationId: string | null;
   fxObservationId: string | null;
+  priceMarketDate: string | null;
+  fxMarketDate: string | null;
   calendarStatus: "session" | "holiday" | "missing_session" | "unknown";
 };
 
@@ -147,6 +149,7 @@ export type HistoricalSnapshotPoint = {
 export type HistoricalSnapshotBuildInput = {
   userId?: string;
   baseCurrencyCode: string;
+  portfolioTimezone?: string;
   rangeFrom: string;
   rangeTo: string;
   calculationVersion: number;
@@ -179,6 +182,8 @@ type PreparedHolding = HistoricalHoldingSnapshot & {
   fxRateDecimal: string | null;
   priceStatus: PriceSelection["status"];
   fxStatus: FxSelection["status"];
+  priceMarketDate: string | null;
+  fxMarketDate: string | null;
   calendarStatus: SnapshotMarketDataState["calendarStatus"];
 };
 
@@ -190,6 +195,7 @@ type PreparedCash = {
   valueDecimal: string | null;
   fxEvidence: FxEvidence | null;
   fxRateDecimal: string | null;
+  fxMarketDate: string | null;
   fxStatus: FxSelection["status"];
   dailyMovementDecimal: string | null;
   completeness: "complete" | "partial" | "incomplete";
@@ -359,6 +365,7 @@ function priceSelection(
     asOf: date,
     targetKey: security.mappingId ?? security.portfolioSecurityId,
     userId: input.userId,
+    portfolioTimezone: input.portfolioTimezone,
     scope: input.priceScope,
     currencyCode: security.currencyCode,
     // Ledger replay already applies explicit splits, so adjusted closes would
@@ -380,6 +387,7 @@ function fxSelection(
     asOf: date,
     targetKey: `${input.baseCurrencyCode}/${currencyCode}`,
     userId: input.userId,
+    portfolioTimezone: input.portfolioTimezone,
     scope: input.fxScope,
     baseCurrencyCode: input.baseCurrencyCode,
     quoteCurrencyCode: currencyCode,
@@ -412,6 +420,8 @@ function holdingAt(
       fxRateDecimal: null,
       priceStatus: "unavailable",
       fxStatus: "unavailable",
+      priceMarketDate: null,
+      fxMarketDate: null,
       calendarStatus: "unknown",
     };
   }
@@ -432,6 +442,8 @@ function holdingAt(
       fxRateDecimal: null,
       priceStatus: "unavailable",
       fxStatus: "unavailable",
+      priceMarketDate: null,
+      fxMarketDate: null,
       calendarStatus: "unknown",
     };
   }
@@ -483,6 +495,8 @@ function holdingAt(
     fxRateDecimal: fx.selected?.rateDecimal ?? null,
     priceStatus: price.status,
     fxStatus: fx.status,
+    priceMarketDate: price.selected?.marketDate ?? null,
+    fxMarketDate: fx.selected?.marketDate ?? null,
     calendarStatus,
   };
 }
@@ -509,6 +523,7 @@ function cashAt(
       fxEvidence: null,
       fxRateDecimal: null,
       fxStatus: "unavailable",
+      fxMarketDate: null,
       dailyMovementDecimal: null,
       completeness: "incomplete",
     };
@@ -523,6 +538,7 @@ function cashAt(
       fxEvidence: null,
       fxRateDecimal: null,
       fxStatus: "current",
+      fxMarketDate: null,
       dailyMovementDecimal: null,
       completeness: "complete",
     };
@@ -549,6 +565,7 @@ function cashAt(
     fxEvidence,
     fxRateDecimal: fx.selected?.rateDecimal ?? null,
     fxStatus: fx.status,
+    fxMarketDate: fx.selected?.marketDate ?? null,
     dailyMovementDecimal: null,
     completeness:
       account.completeness === "incomplete" || value === null
@@ -646,6 +663,8 @@ export function buildHistoricalSnapshots(
           fxState: holding.fxStatus,
           priceObservationId: holding.priceObservationId,
           fxObservationId: holding.fxObservationId,
+          priceMarketDate: holding.priceMarketDate,
+          fxMarketDate: holding.fxMarketDate,
           calendarStatus: holding.calendarStatus,
         });
         if (holding.nativeValueDecimal !== null) valuedHoldingCount += 1;
@@ -724,6 +743,8 @@ export function buildHistoricalSnapshots(
           fxState: account.fxStatus,
           priceObservationId: null,
           fxObservationId: null,
+          priceMarketDate: null,
+          fxMarketDate: account.fxMarketDate,
           calendarStatus: "unknown",
         });
         if (account.valueDecimal !== null) convertedCashAccountCount += 1;

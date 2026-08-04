@@ -23,6 +23,7 @@ import type { SqlClient, SqlStatement } from "./sql-client.ts";
 
 export type HistoricalSnapshotRequest = RequestCalculationRunInput & {
   ledgerHistoryCompleteFrom?: string | null;
+  calendarEvidence?: Readonly<Record<string, readonly string[]>>;
 };
 
 export type HistoricalSnapshotRebuildInput = {
@@ -74,8 +75,45 @@ export type SnapshotRepositoryOptions = {
 
 type PortfolioRow = {
   base_currency_code: string;
+  timezone: string;
   history_complete_from: string | null;
 };
+
+type CalendarEvidence = Readonly<Record<string, readonly string[]>>;
+
+function serializeCalendarEvidence(
+  evidence: CalendarEvidence | undefined,
+): string | null {
+  if (!evidence) return null;
+  const calendars = Object.fromEntries(
+    Object.keys(evidence)
+      .sort()
+      .map((key) => [key, [...new Set(evidence[key] ?? [])].sort()]),
+  );
+  return JSON.stringify({ version: 1, calendars });
+}
+
+function parseCalendarEvidence(value: string | null): CalendarEvidence {
+  if (!value) return {};
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (typeof parsed !== "object" || parsed === null) return {};
+    const calendars = (parsed as { calendars?: unknown }).calendars;
+    if (typeof calendars !== "object" || calendars === null) return {};
+    const result: Record<string, readonly string[]> = {};
+    for (const [key, dates] of Object.entries(calendars)) {
+      if (
+        Array.isArray(dates) &&
+        dates.every((date): date is string => typeof date === "string")
+      ) {
+        result[key] = dates;
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
 
 type SecurityRow = {
   portfolio_security_id: string;
@@ -273,9 +311,10 @@ export function createHistoricalSnapshotRepository(
     cashAccounts: HistoricalCashAccountInput[];
     fxObservations: SnapshotFxObservation[];
     overrides: ManualOverride[];
+    portfolioTimezone: string;
   }> {
     const portfolio = await sql.get<PortfolioRow>(
-      `SELECT base_currency_code, history_complete_from FROM portfolios WHERE id = ? AND user_id = ?`,
+      `SELECT base_currency_code, timezone, history_complete_from FROM portfolios WHERE id = ? AND user_id = ?`,
       [run.portfolioId, userId],
     );
     if (!portfolio) throw new Error("portfolio_not_found");
@@ -487,6 +526,7 @@ export function createHistoricalSnapshotRepository(
       });
       transactionsBySecurity.set(row.portfolio_security_id, existing);
     }
+    const calendarEvidence = parseCalendarEvidence(run.calendarEvidenceJson);
     const securities = securityRows.map((row) => ({
       portfolioSecurityId: row.portfolio_security_id,
       securityId: row.security_id,
@@ -496,8 +536,7 @@ export function createHistoricalSnapshotRepository(
       priceObservations: row.security_id
         ? (pricesBySecurity.get(row.security_id) ?? [])
         : [],
-      expectedTradingDates:
-        options.expectedTradingDatesBySecurity?.[row.portfolio_security_id],
+      expectedTradingDates: calendarEvidence[row.portfolio_security_id],
     }));
     const entriesByAccount = new Map<string, SnapshotCashLedgerEntry[]>();
     for (const row of entryRows) {
@@ -524,6 +563,7 @@ export function createHistoricalSnapshotRepository(
       })),
       fxObservations: fxRows.map(mapFx),
       overrides: overrideRows.map(mapOverride),
+      portfolioTimezone: portfolio.timezone,
     };
   }
 
@@ -730,7 +770,15 @@ export function createHistoricalSnapshotRepository(
       userId: string,
       input: HistoricalSnapshotRequest,
     ): Promise<CalculationRunRecord> {
-      return runs.request(userId, input);
+      const calendarEvidenceJson =
+        input.calendarEvidenceJson ??
+        serializeCalendarEvidence(
+          input.calendarEvidence ?? options.expectedTradingDatesBySecurity,
+        );
+      return runs.request(userId, {
+        ...input,
+        calendarEvidenceJson,
+      });
     },
 
     async claim(
@@ -798,6 +846,7 @@ export function createHistoricalSnapshotRepository(
       const built = buildHistoricalSnapshots({
         userId,
         baseCurrencyCode: facts.baseCurrencyCode,
+        portfolioTimezone: facts.portfolioTimezone,
         rangeFrom: buildFromDate,
         rangeTo: pointDate,
         calculationVersion: run.calculationVersion,

@@ -48,6 +48,13 @@ test("CALC-002 rebuild is owner-scoped, bounded, resumable, and only completed r
   const sql = createSqliteSqlClient(db);
   const repository = createHistoricalSnapshotRepository(sql, {
     maxHoldingRowsPerChunk: 1,
+    expectedTradingDatesBySecurity: { "holding-a": ["2026-08-01"] },
+  });
+  const retryRepository = createHistoricalSnapshotRepository(sql, {
+    maxHoldingRowsPerChunk: 1,
+    expectedTradingDatesBySecurity: {
+      "holding-a": ["2026-08-01", "2026-08-02"],
+    },
   });
   const run = await repository.request("user-a", {
     id: "run-a",
@@ -104,14 +111,14 @@ test("CALC-002 rebuild is owner-scoped, bounded, resumable, and only completed r
     ),
     null,
   );
-  await repository.rebuild("user-a", {
+  await retryRepository.rebuild("user-a", {
     portfolioId: "portfolio-a",
     calculationRunId: run.id,
     leaseOwner: "worker-a",
     currentLedgerHighWater: "trade-a",
     now: "2026-08-03T00:03:00Z",
   });
-  await repository.rebuild("user-a", {
+  await retryRepository.rebuild("user-a", {
     portfolioId: "portfolio-a",
     calculationRunId: run.id,
     leaseOwner: "worker-a",
@@ -130,6 +137,15 @@ test("CALC-002 rebuild is owner-scoped, bounded, resumable, and only completed r
     series?.points.map((point) => point.totalValueDecimal),
     ["100", "110"],
   );
+  assert.equal(
+    (
+      series?.points[1]?.coverage.marketDataStates as Array<{
+        calendarStatus: string;
+      }>
+    )[0]?.calendarStatus,
+    "holiday",
+  );
+  assert.match(run.calendarEvidenceJson ?? "", /holding-a/);
   db.exec(`
     INSERT INTO price_observations (id, provider_id, access_scope, scope_user_id, scope_key, mapping_id, security_id, interval, observation_at, market_date, market_timezone, currency_code, close_decimal, adjustment_state, quality, ingested_at)
       VALUES ('price-correction-after-cutoff', 'provider-a', 'deployment', NULL, 'deployment', 'mapping-a', 'security-a', 'eod', '2026-08-02T12:00:00Z', '2026-08-02', 'UTC', 'AUD', '999', 'raw', 'corrected', '2026-08-04T00:00:00Z');
@@ -143,6 +159,7 @@ test("CALC-002 rebuild is owner-scoped, bounded, resumable, and only completed r
     reason: "same-version-correction",
     ledgerHighWaterStart: "trade-a",
     marketDataCutoff: "2026-08-03T00:00:00Z",
+    calendarEvidence: { "holding-a": ["2026-08-01"] },
     idempotencyKey: "history-7-replacement",
     now: "2026-08-05T00:00:00Z",
   });

@@ -80,6 +80,8 @@ export type SelectionOptions = {
 
 export type PriceSelectionInput = SelectionOptions & {
   asOf: string;
+  /** The portfolio-local date cutoff used to prevent look-ahead history. */
+  portfolioTimezone?: string;
   targetKey: string;
   userId?: string;
   scope?: ObservationScope;
@@ -91,6 +93,8 @@ export type PriceSelectionInput = SelectionOptions & {
 
 export type FxSelectionInput = SelectionOptions & {
   asOf: string;
+  /** The portfolio-local date cutoff used to prevent look-ahead history. */
+  portfolioTimezone?: string;
   baseCurrencyCode: string;
   quoteCurrencyCode: string;
   targetKey: string;
@@ -152,6 +156,44 @@ function dayAge(asOf: string, marketDate: string): number | null {
     (Date.parse(`${asOf}T00:00:00Z`) - Date.parse(`${marketDate}T00:00:00Z`)) /
       86_400_000,
   );
+}
+
+function localDateAt(
+  timestamp: string,
+  timezone: string | undefined,
+): string | null {
+  if (!timezone) return null;
+  const instant = Date.parse(timestamp);
+  if (!Number.isFinite(instant)) return null;
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date(instant));
+    const values = new Map(
+      parts
+        .filter((part) => part.type !== "literal")
+        .map((part) => [part.type, part.value]),
+    );
+    const year = values.get("year");
+    const month = values.get("month");
+    const day = values.get("day");
+    return year && month && day ? `${year}-${month}-${day}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function availableByPortfolioCutoff(
+  observedAt: string,
+  asOf: string,
+  portfolioTimezone: string | undefined,
+): boolean {
+  if (!portfolioTimezone) return true;
+  const localDate = localDateAt(observedAt, portfolioTimezone);
+  return localDate !== null && localDate <= asOf;
 }
 
 function activeOverride(
@@ -313,6 +355,11 @@ export function selectPriceObservation(
         age <= (input.maxPriorCalendarDays ?? DEFAULT_MAX_PRIOR_DAYS) &&
         scopeMatches(observation, input.scope) &&
         isPositive(observation.closeDecimal) &&
+        availableByPortfolioCutoff(
+          observation.observationAt,
+          input.asOf,
+          input.portfolioTimezone,
+        ) &&
         (!input.currencyCode || observation.currencyCode === input.currencyCode)
       );
     })
@@ -475,7 +522,12 @@ export function selectFxObservation(input: FxSelectionInput): FxSelection {
         age >= 0 &&
         age <= (input.maxPriorCalendarDays ?? DEFAULT_MAX_PRIOR_DAYS) &&
         scopeMatches(observation, input.scope) &&
-        isPositive(observation.rateDecimal)
+        isPositive(observation.rateDecimal) &&
+        availableByPortfolioCutoff(
+          observation.observedAt,
+          input.asOf,
+          input.portfolioTimezone,
+        )
       );
     })
     .sort((left, right) => {

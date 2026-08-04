@@ -609,6 +609,8 @@ Type-specific values may move to separate tables if query complexity justifies i
 - reason/invalidation source;
 - status, attempt, lease;
 - ledger high-water, completed-security/output-offset checkpoints, and counts;
+- immutable market-data ingestion cutoff and canonical trading-calendar
+  evidence JSON captured when the run is requested;
 - started/completed timestamps;
 - redacted error category.
 

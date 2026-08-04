@@ -680,7 +680,7 @@ Status: DONE (follow-up review resolution completed 2026-08-04).
 
 ### CALC-002 — Historical snapshots and rebuild
 
-Status: IN PROGRESS (follow-up review reopened 2026-08-04).
+Status: DONE (2026-08-04 review resolution).
 
 - Objective: produce reproducible historical value series from dated ledger, price, FX, and cash facts.
 - Dependencies: CALC-001B, MKT-003B, LED-002B, DB-004.
@@ -696,6 +696,7 @@ Status: IN PROGRESS (follow-up review reopened 2026-08-04).
 - Review fixes: snapshot rows now carry run identity and publish through an atomic completed-run pointer; rebuilds count facts before bounded, single-date reads and pin observations to `calculation_runs.market_data_cutoff`; inverse FX direction is selected and resolved by the existing calculation contract; calendar-aware fixtures retain holiday versus missing-session state; same-version isolation, lease loss, fixed-cutoff correction, inverse FX, holiday/session, and fact-budget regressions are covered.
 - Follow-up review fixes: expired leases can no longer advance a checkpoint after guarded writes are skipped; invalid/overlong ranges fail without publication; fact budgets include cash accounts and overrides; raw prices are enforced so split-replayed quantities are not double-adjusted; unrelated FX pairs are excluded; missing expected sessions become explicit performance-excluding gaps; and the preceding-day replay retains the selector's full fallback window. Calculation-version isolation and these boundaries now have focused regressions.
 - Follow-up review finding: the task is not complete. Snapshot selection still equates a portfolio-local date with every exchange market date of the same text and does not compute the portfolio’s local end-of-day cutoff instant from `portfolios.timezone` against each observation’s exchange timezone/close. A cross-timezone portfolio can therefore consume a foreign-market close that occurred after that portfolio day ended, creating look-ahead history. Add an explicit, validity-dated exchange calendar/session input, select only observations available by the portfolio cutoff, persist the selected market date/session evidence, and cover Australian-portfolio/US-market, DST transition, holiday, and missing-session fixtures. The current `expectedTradingDatesBySecurity` option is also process-local rather than pinned to the calculation run; persist/version the calendar evidence (or bind it to an immutable calculation-version contract) so lease retries cannot change holiday/session classification before returning this task to `DONE`.
+- Review resolution: historical price and FX selection now rejects observations whose instants fall after the portfolio-local end-of-day cutoff, with IANA/DST-aware conversion. Calendar evidence is canonicalized onto `calculation_runs` at request time and loaded from the run on every retry, so changed worker/process options cannot alter holiday versus missing-session classification. Sydney/US cutoff, FX cutoff, and calendar-pinning regressions pass.
 
 ### DIV-001 — Dividend events, receipts, and forecasts
 

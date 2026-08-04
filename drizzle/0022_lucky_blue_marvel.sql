@@ -1,0 +1,1 @@
+ALTER TABLE `calculation_runs` ADD `calendar_evidence_json` text;

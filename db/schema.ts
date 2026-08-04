@@ -1640,6 +1640,7 @@ export const calculationRuns = sqliteTable(
     ledgerHighWaterStart: text("ledger_high_water_start").notNull(),
     ledgerHighWaterEnd: text("ledger_high_water_end"),
     marketDataCutoff: text("market_data_cutoff"),
+    calendarEvidenceJson: text("calendar_evidence_json"),
     processedSnapshotCount: integer("processed_snapshot_count")
       .notNull()
       .default(0),
