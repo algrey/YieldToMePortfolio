@@ -251,6 +251,28 @@ Status: DEFERRED; not in the v1 release scope.
 - Dependencies: AUTH-002, LED-001B, MKT-001.
 - Requirements: BRK-001.
 - Files: architecture decision, broker adapter contracts/fixtures, data-model extension, security threat model, future task split.
+
+**Context:**
+
+- `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md` — `BRK-001 — Broker adapter compatibility`
+- `docs/CONSOLIDATED_PRODUCT_SPEC.md` — `Future broker synchronization` workflow
+- `docs/ARCHITECTURE.md` — `Future broker synchronization boundary`
+- `docs/DATA_MODEL.md` — `Future broker-sync extension`
+- `docs/IMPLEMENTATION_PLAN.md` — `Deferred backlog triggers` (broker synchronization promotion gate)
+
+**Likely code:**
+
+- `domain/market-data/contracts.ts`
+- `domain/ledger/event-validation.ts`
+- `domain/imports/reconciliation.ts`
+- `db/schema.ts`
+- No broker-specific module exists yet; choose its location only after this deferred task is promoted and its provider/security scope is approved.
+
+**Verification:**
+
+- Extend the existing provider, ledger, import-reconciliation, identity, and schema suites rather than creating a parallel financial path: `tests/mkt-001.test.ts`, `tests/led-001b.test.ts`, `tests/imp-002b.test.ts`, `tests/auth-002.test.ts`, and `tests/db-schema.test.ts`.
+- Run task-scoped broker contract fixtures for cursor replay, corrections, ownership denial, and token redaction; run `npm run typecheck` and `npm run build` if Worker/runtime contracts or configuration are touched.
+
 - Deliver: choose an initial broker candidate/use case; define connection/account/transaction/position/cash/quote capabilities, encrypted token lifecycle, cursor/idempotency, portfolio mapping, reconciliation, correction, and disconnection behavior.
 - Acceptance: a sanitized fixture demonstrates repeat sync without duplicate ledger effects; positions only reconcile; optional quotes use the market-data abstraction and user entitlement; no broker password/screen scraping.
 - Tests: adapter contract, repeated cursor page, corrected/deleted broker record, cross-user account mapping denial, token redaction/revocation, reconciliation drift.
@@ -540,6 +562,28 @@ Status: DEFERRED; not required by the core ledger/valuation release.
 - Dependencies: LED-001A, DB-002, DB-003.
 - Requirements: DIV-001, DIV-002.
 - Files: schema/migration/repositories/tests.
+
+**Context:**
+
+- `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md` — `DIV-001 — Dividend events and receipts` and `DIV-002 — Dividend forecasts`
+- `docs/DATA_MODEL.md` — `split_events`, `dividend_events`, `dividend_receipts`, and `Transaction boundaries and invariants`
+- `docs/CALCULATIONS.md` — `Dividends (deferred)` → `Actual receipt`
+- `docs/ARCHITECTURE.md` — `Domain module boundaries` (dividend-module promotion rule)
+
+**Likely code:**
+
+- `db/schema.ts`
+- `db/repositories/index.ts`
+- `domain/market-data/contracts.ts`
+- `domain/ledger/event-validation.ts`
+- `tests/db-schema.test.ts`
+- `drizzle/` (generated migration only after this task is promoted)
+
+**Verification:**
+
+- Extend `tests/db-schema.test.ts` with migration, revision, ownership, cash-link, and estimated-versus-actual constraints.
+- Run `node --experimental-strip-types --test tests/db-schema.test.ts tests/led-001a.test.ts tests/mkt-001.test.ts` and inspect the generated migration before the inherited repository gates.
+
 - Deliver: corrected/superseded split/dividend events, owner-scoped actual receipts/cash links, and separate estimate inputs; no estimated receipt row.
 - Acceptance: an event cannot masquerade as an actual receipt; receipt transaction/membership/cash links are owner/portfolio constrained.
 - Tests: event revisions, receipt ownership/cash linkage, estimated-vs-actual constraints.
@@ -632,6 +676,28 @@ Status: DEFERRED; not required by the core ledger/valuation release.
 - Dependencies: MKT-002, DB-005.
 - Requirements: MKT-002, DIV-001, DIV-002.
 - Files: capability-specific adapters/fixtures/tests.
+
+**Context:**
+
+- `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md` — `MKT-002 — Provider abstraction`, `DIV-001 — Dividend events and receipts`, and `DIV-002 — Dividend forecasts`
+- `docs/MARKET_DATA_STRATEGY.md` — `Provider abstraction`, `Historical strategy`, and `Data gaps and manual fallback`
+- `docs/CALCULATIONS.md` — `Dividends (deferred)` and `Deterministic test fixtures`
+- `docs/DATA_MODEL.md` — `split_events` and `dividend_events`
+
+**Likely code:**
+
+- `domain/market-data/contracts.ts`
+- `domain/market-data/yahoo-compatible.ts`
+- `domain/market-data/normalize.ts`
+- `domain/market-data/index.ts`
+- `db/repositories/market-data.ts`
+- `tests/mkt-001.test.ts` and `tests/mkt-002.test.ts`
+
+**Verification:**
+
+- Extend the provider contract/adapter fixtures for split corrections, raw-versus-adjusted continuity, and missing/irregular dividend events.
+- Run `node --experimental-strip-types --test tests/mkt-001.test.ts tests/mkt-002.test.ts tests/mkt-003b.test.ts` and `npm run build` to verify the server-only adapter remains Worker-compatible.
+
 - Deliver: adjustment definitions, split revisions, and dividend events as actually supported; no inferred actual receipts.
 - Acceptance: raw/adjusted series cannot double-apply a split; missing/irregular dividend data yields unavailable, not an annualized guess.
 - Tests: split correction, raw/adjusted continuity, missing/special/irregular dividend events, schema change.
@@ -686,6 +752,29 @@ Status: IN PROGRESS (calendar-model review reopened 2026-08-04).
 - Dependencies: CALC-001B, MKT-003B, LED-002B, DB-004.
 - Requirements: LED-005, MKT-005, CALC-005, CALC-006.
 - Files: snapshot services/jobs/repositories, chart response contract, tests.
+
+**Context:**
+
+- `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md` — `CALC-005 — Daily movement` and `CALC-006 — Portfolio history`
+- `docs/CALCULATIONS.md` — `Historical values and snapshots`, especially `Daily holding value` and `Chart gaps`
+- `docs/ARCHITECTURE.md` — `Historical-data strategy`
+- `docs/DATA_MODEL.md` — `exchanges`, `portfolio_daily_snapshots`, `holding_daily_snapshots`, `snapshot_publications`, and `calculation_runs`
+- Current task review finding below — bounded validity-dated exchange-session evidence, portfolio-cutoff mapping, and persisted selected-session identity
+
+**Likely code:**
+
+- `domain/snapshots/history.ts`
+- `domain/snapshots/index.ts`
+- `db/repositories/snapshots.ts`
+- `db/repositories/calculation-runs.ts`
+- `db/schema.ts`
+- `tests/calc-002.test.ts`, `tests/calc-002-repository.test.ts`, `tests/db-004.test.ts`, and `tests/db-schema.test.ts`
+
+**Verification:**
+
+- Run `node --experimental-strip-types --test tests/calc-002.test.ts tests/calc-002-repository.test.ts tests/db-004.test.ts tests/db-schema.test.ts`.
+- Add focused normal-day/DST/weekend/holiday, evidence-size boundary, lease-retry determinism, ownership, and migration fixtures; inspect any generated migration before the inherited repository gates.
+
 - Deliver: daily quantities/cash, price/FX join, coverage/completeness, versioned snapshot invalidation and bounded rebuild.
 - Acceptance: no back-cast current quantity; unsupported ranges/gaps are marked without routinely printing observation timestamps; rebuild is deterministic and resumable.
 - Tests: trades across boundaries, weekend/holiday, FX gaps, corrections/invalidation, calculation-version change, partial history.
@@ -708,6 +797,28 @@ Status: DEFERRED; actual income and forecasting do not block the core ledger/val
 - Dependencies: LED-001B, DB-005, MKT-005, CALC-001B.
 - Requirements: DIV-001, DIV-002.
 - Files: dividend domain/service/repositories, tests.
+
+**Context:**
+
+- `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md` — `DIV-001 — Dividend events and receipts` and `DIV-002 — Dividend forecasts`
+- `docs/CALCULATIONS.md` — `Dividends (deferred)`, `Missing-data and error behavior`, and dividend fixture family in `Deterministic test fixtures`
+- `docs/DATA_MODEL.md` — `dividend_events`, `dividend_receipts`, and `Transaction boundaries and invariants`
+- `docs/MARKET_DATA_STRATEGY.md` — `Data gaps and manual fallback` (dividend gap behavior)
+
+**Likely code:**
+
+- `domain/market-data/contracts.ts`
+- `domain/ledger/posting.ts`
+- `domain/calculations/`
+- `db/schema.ts`
+- `db/repositories/ledger.ts`, `db/repositories/market-data.ts`, and `db/repositories/audit.ts`
+- No dividend domain/repository module exists yet; add one only when `DB-005` and `MKT-005` are promoted and complete.
+
+**Verification:**
+
+- Add deterministic dividend domain/repository tests covering declared versus paid, eligibility, payment-date FX, withholding, irregular history, corrections, ownership, audit, and atomic cash posting.
+- Re-run the shared boundaries with `node --experimental-strip-types --test tests/calc-001b.test.ts tests/led-001b.test.ts tests/mkt-001.test.ts tests/mkt-003a.test.ts tests/db-schema.test.ts`.
+
 - Deliver: declared/paid/corrected event ingestion; actual receipts/cash; declared-then-TTM forecast; withholding assumption; gross/net/yield labels.
 - Acceptance: estimates never post cash or enter actual returns; actual payment-date FX; irregular history does not over-annualize; provenance/method visible.
 - Tests: declared vs paid, eligibility, special/irregular dividend, withholding, franking info, missing FX/history, corrections.
@@ -758,6 +869,28 @@ Status: PENDING.
 - Dependencies: UI-001, CALC-002.
 - Requirements: CALC-002, CALC-006, CALC-007, MKT-005, PRD-004, QUAL-001.
 - Files: Overview route/components/contracts/tests.
+
+**Context:**
+
+- `docs/CONSOLIDATED_PRODUCT_SPEC.md` — `Overview`, `Inspect a number`, responsive behavior, and `Product state contract`
+- `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md` — `CALC-002 — Current market value`, `CALC-006 — Portfolio history`, `CALC-007 — Return metrics`, and `QUAL-001 — Accessibility`
+- `docs/CALCULATIONS.md` — `Historical values and snapshots`, `Realised, unrealised, and headline returns`, and `Missing-data and error behavior`
+- `docs/UI_SPEC.md` — `Overview`, responsive rules, empty/error states, and interaction/accessibility rules
+
+**Likely code:**
+
+- `app/portfolio/[portfolioId]/[section]/page.tsx`
+- `app/authenticated-workspace.ts`
+- `app/components/portfolio-shell.tsx`
+- `app/globals.css`
+- `db/repositories/snapshots.ts`
+- `tests/rendered-html.test.mjs`, `tests/calc-002.test.ts`, and `tests/calc-002-repository.test.ts`
+
+**Verification:**
+
+- Add task-scoped Overview render/read-model tests for complete, partial, empty, stale, unavailable, and cross-owner states; keep chart text alternatives in semantic assertions.
+- Run `node --experimental-strip-types --test tests/calc-002.test.ts tests/calc-002-repository.test.ts tests/rendered-html.test.mjs`, `npm run build`, and keyboard/320/390/430/desktop visual QA.
+
 - Deliver: value/cash/cost/gain/daily summaries; history chart/ranges; allocation summary; coverage/formula drill-down; income remains absent/unavailable until DIV-001.
 - Acceptance: partial/missing states are unambiguous; routine observation timestamps are suppressed; chart has a text alternative; mobile hierarchy works.
 - Tests: complete/partial/empty/stale histories, coverage, accessibility, responsive snapshots.
@@ -772,6 +905,30 @@ Status: READY.
 - Dependencies: UI-001, CALC-001B.
 - Requirements: CALC-002, MKT-005, PRD-004, PRD-005, QUAL-001.
 - Files: Holdings route/components/tests.
+
+**Context:**
+
+- `docs/CONSOLIDATED_PRODUCT_SPEC.md` — `Holdings`, `View a foreign holding in home currency`, responsive behavior, and `Product state contract`
+- `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md` — `PRD-005 — Native/home-currency display`, `CALC-002 — Current market value`, `MKT-005 — Market-data freshness and partial coverage`, and `QUAL-001 — Accessibility`
+- `docs/CALCULATIONS.md` — `Native/home display toggle`, `Holding values`, and `Missing-data and error behavior`
+- `docs/UI_SPEC.md` — `Holdings pattern`, responsive rules, mobile relocation rules, empty/error states, and interaction/accessibility rules
+
+**Likely code:**
+
+- `app/portfolio/[portfolioId]/[section]/page.tsx`
+- `app/authenticated-workspace.ts`
+- `app/owned-workspace.ts`
+- `app/components/portfolio-shell.tsx`
+- `app/globals.css`
+- `db/repositories/projections.ts`
+- `domain/calculations/holding.ts` and `domain/calculations/multi-currency.ts`
+- `tests/ui-001.test.ts`, `tests/calc-001b.test.ts`, and `tests/rendered-html.test.mjs`
+
+**Verification:**
+
+- Add owner-scoped holdings read-model/render tests for mixed currencies, long names, missing price/FX/basis, exact zero quantity, deterministic missing-value sorting, and native/home display without mutating facts.
+- Run `node --experimental-strip-types --test tests/ui-001.test.ts tests/calc-001b.test.ts tests/rendered-html.test.mjs`, `npm run build`, and keyboard sorting plus 320/390/430/desktop overflow QA.
+
 - Deliver: dense sortable desktop table; mobile cards; native/home price-value menu for foreign holdings; quantity/basis/price/value/daily/gain columns; cash separation; row/FX explanation.
 - Acceptance: sort missing values predictably; no horizontal dependency on mobile; compact views show `Price unavailable` when needed and generally suppress timestamps/source/fallback labels.
 - Tests: mixed currencies, long names, missing data, zero quantity, keyboard sorting, responsive QA.
@@ -918,6 +1075,27 @@ Status: PENDING.
 - Dependencies: AUTH-002, OPS-001, IMP-003B, MKT-003B, CALC-002.
 - Requirements: AUTH-005, OPS-004.
 - Files: lifecycle/export services, policy/runbook, UI/actions, integration tests.
+
+**Context:**
+
+- `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md` — `AUTH-005 — Account lifecycle`, `AUTH-003 — Per-user authorization`, and `OPS-004 — Data retention and deletion`
+- `docs/ARCHITECTURE.md` — `Identity rules`, `Tenant isolation pattern`, and `Operational design` → `Retention`
+- `docs/DATA_MODEL.md` — `Identity and ownership`, owner-scoped observation fields in `Prices, FX, corporate actions, and fundamentals`, and `Deletion behavior`
+- `docs/CONSOLIDATED_PRODUCT_SPEC.md` — disabled/deleting-account state in `Product state contract`
+
+**Likely code:**
+
+- `domain/auth/identity-lifecycle.ts` and `domain/auth/request-context.ts`
+- `db/schema.ts`
+- `db/repositories/identity.ts`, `db/repositories/audit.ts`, and the owner-scoped repositories under `db/repositories/`
+- `app/authenticated-workspace.ts`, `app/portfolio-actions.ts`, and `app/components/portfolio-shell.tsx`
+- `tests/auth-002.test.ts`, `tests/ops-001.test.ts`, and `tests/db-schema.test.ts`
+
+**Verification:**
+
+- Add a schema-derived export-manifest completeness test so every owned table and user-scoped observation is either exported or explicitly classified; include disabled-session, repeat-request, redaction, and cross-owner fixtures.
+- Run `node --experimental-strip-types --test tests/auth-002.test.ts tests/ops-001.test.ts tests/db-schema.test.ts`, `npm run build`, and an export drill against synthetic non-production owner data only.
+
 - Deliver: disable/session revocation; immutable deletion request; owned ledger/import/market/projection export; exact row/object manifest and retention classifications.
 - Acceptance: a disabled user cannot authenticate; export and manifest cover every owned table/access-scoped observation without including another user; no purge occurs in this task.
 - Tests: disable/session, export completeness/counts, repeated request, cross-user exclusion, redaction.
@@ -932,6 +1110,28 @@ Status: PENDING.
 - Dependencies: OPS-003A, OPS-002.
 - Requirements: OPS-004.
 - Files: purge jobs/services, policy/runbook, confirmation UI/actions, integration tests.
+
+**Context:**
+
+- `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md` — `OPS-004 — Data retention and deletion`, `AUTH-004 — Mutation protection`, and `AUTH-005 — Account lifecycle`
+- `docs/ARCHITECTURE.md` — `CSRF and browser security`, `Operational design` → `Recovery` and `Retention`, plus `Threat summary`
+- `docs/DATA_MODEL.md` — `Deletion behavior`, `Transaction boundaries and invariants`, and owner relationships in `Relationship map`
+- `docs/OPS-002_BACKUP_RESTORE_RUNBOOK.md` — recovery evidence and non-production restore discipline relevant to the purge disclosure
+
+**Likely code:**
+
+- `db/schema.ts`
+- `db/repositories/sql-client.ts`, `db/repositories/identity.ts`, `db/repositories/audit.ts`, and the owner-scoped repositories under `db/repositories/`
+- `domain/auth/identity-lifecycle.ts` and `domain/auth/request-context.ts`
+- `app/mutation-request.ts`, `app/portfolio-actions.ts`, and `app/components/portfolio-shell.tsx`
+- `worker/scheduled-refresh.ts` (bounded durable-job pattern only)
+- `tests/auth-002.test.ts`, `tests/ops-001.test.ts`, `tests/ops-002.test.ts`, and `tests/db-schema.test.ts`
+
+**Verification:**
+
+- Add task-scoped purge tests for exact manifest resolution, foreign-key ordering, bounded failure/resume, idempotent repeat, audit tombstone, provider/user-scoped observation removal, CSRF/confirmation, and byte-for-byte preservation of another owner’s fixture rows.
+- Run `node --experimental-strip-types --test tests/auth-002.test.ts tests/ops-001.test.ts tests/ops-002.test.ts tests/db-schema.test.ts`, `npm run build`, and a recoverability/deletion drill only against an isolated synthetic non-production database.
+
 - Deliver: cooling-off/confirmation; deletion-pending state; bounded purge in foreign-key order; user-scoped market-data purge; permitted audit tombstone; completion proof.
 - Acceptance: every manifest target is gone, retained audit data matches the documented minimum, a repeated or resumed purge is safe, restore policy is explicit, and other owners are byte-for-byte unaffected in fixtures.
 - Tests: target resolution, partial-failure resume, FK order, provider purge, repeat, cross-user preservation, restore-policy interaction.
@@ -946,6 +1146,28 @@ Status: PENDING.
 - Dependencies: AUTH-002, UI-001, UI-002, UI-003, UI-004, UI-005A, UI-005B, UI-005C, UI-005D, UI-005E, PWA-001.
 - Requirements: PRD-001, AUTH-003, AUTH-004.
 - Files: security test suites, threat review, remediation files.
+
+**Context:**
+
+- `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md` — `AUTH-001 — Cloudflare Access boundary`, `AUTH-003 — Per-user authorization`, `AUTH-004 — Mutation protection`, and `PLAT-002 — PWA foundation`
+- `docs/ARCHITECTURE.md` — `Request and authorization flow`, `CSRF and browser security`, `Tenant isolation pattern`, `PWA and offline architecture`, and `Threat summary`
+- `docs/IMPLEMENTATION_PLAN.md` — `Security implementation checklist` and `Testing strategy` → integration and route/render coverage
+- `docs/CONSOLIDATED_PRODUCT_SPEC.md` — authorization/offline states in `Product state contract`
+
+**Likely code:**
+
+- `worker/index.ts` and `worker/response-security.ts`
+- `domain/auth/` and `domain/observability/`
+- `db/repositories/`
+- `app/api/`, `app/mutation-request.ts`, and authenticated actions under `app/`
+- `public/sw.js`
+- `tests/access-jwt.test.ts`, `tests/auth-002.test.ts`, `tests/security-headers.test.ts`, `tests/ops-001.test.ts`, and the `tests/ui-*.test.ts` route/action suites
+
+**Verification:**
+
+- Build an explicit route/repository/destructive-action matrix and link every owned operation to unauthenticated, cross-owner, CSRF/replay where applicable, private-cache, and redacted-error evidence.
+- Run `npm run check`; separately inspect service-worker cache allow/deny behavior, built client assets for secrets/private fixture leakage, and dependency audit findings. No high-severity finding may remain open.
+
 - Deliver: route/repository cross-tenant matrix; Access-token failure matrix; CSRF/header/CSP review; dependency audit; private-cache and redacted-error audit.
 - Acceptance: no high-severity open finding; every owned read/write and destructive action has a denial test; no protected response enters Cache Storage.
 - Tests: automated security/isolation suite plus focused manual threat checklist.
@@ -960,6 +1182,27 @@ Status: PENDING.
 - Dependencies: UI-001, UI-002, UI-003, UI-004, UI-005A, UI-005B, UI-005C, UI-005D, UI-005E, PWA-001.
 - Requirements: PRD-004, QUAL-001.
 - Files: accessibility/responsive test suites, audit checklist, remediation files.
+
+**Context:**
+
+- `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md` — `PRD-004 — Responsive application shell` and `QUAL-001 — Accessibility`
+- `docs/CONSOLIDATED_PRODUCT_SPEC.md` — `Responsive behavior` and `Product state contract`
+- `docs/UI_SPEC.md` — responsive rules, mobile relocation rules, empty/error states, and interaction/accessibility rules
+- `docs/IMPLEMENTATION_PLAN.md` — `Testing strategy` → route/render and end-to-end/UAT
+
+**Likely code:**
+
+- `app/components/portfolio-shell.tsx`, `app/components/portfolio-details.tsx`, `app/components/import-review.tsx`, `app/components/import-history-detail.tsx`, and `app/components/manual-ledger-entry.tsx`
+- `app/globals.css`
+- `app/portfolio/` and `app/import/`
+- `tests/ui-*.test.ts` and `tests/rendered-html.test.mjs`
+- `docs/ui-captures/` (existing responsive evidence pattern)
+
+**Verification:**
+
+- Run `npm run check` plus automated semantic/name/role/state/contrast checks added by this task.
+- Complete and record keyboard-only core flows, VoiceOver, reduced-motion, 200% zoom, and 320/390/430/desktop checks; verify no document overflow, visible focus, 44 px targets, chart text alternatives, and non-color status meaning.
+
 - Deliver: semantic/name/role/state audit; focus order and visible focus; chart/table alternatives; contrast/reduced-motion; 320 px/iPhone layout audit.
 - Acceptance: automated scans have no serious/critical issue; every core flow completes keyboard-only; documented VoiceOver checks and 200% zoom/narrow-width checks pass.
 - Tests: automated accessibility checks plus named manual assistive-tech/device cases.
@@ -974,6 +1217,27 @@ Status: PENDING.
 - Dependencies: UI-002, UI-003, UI-004, UI-005D, UI-005E, PWA-001, OPS-002, OPS-003B, QA-001A, QA-001B.
 - Requirements: OPS-002, OPS-003, QUAL-002.
 - Files: release checklist/evidence, fixture expectations, runbooks; only fixes needed by evidence.
+
+**Context:**
+
+- `docs/CONSOLIDATED_PRODUCT_SPEC.md` — `Success measures` → release readiness and the full `Product state contract`
+- `docs/IMPLEMENTATION_PLAN.md` — `Phase gates`, `First release slices`, and `Testing strategy` → end-to-end/UAT
+- `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md` — `OPS-002 — Observability`, `OPS-003 — Backup and recovery`, and `QUAL-002 — Automated quality gate`
+- `docs/ARCHITECTURE.md` — `Operational design` → environments and recovery
+- `docs/CSV_IMPORT_SPEC.md` — `Staged workflow`, `Idempotency and duplicate detection`, and `Batch reversal and corrected re-import`
+
+**Likely code:**
+
+- `docs/PREVIEW_DEPLOYMENT.md`, `docs/PREVIEW_EVIDENCE.json`, `docs/OPS-002_BACKUP_RESTORE_RUNBOOK.md`, and `docs/OPS-002_DRILL_RECORD_2026-08-03.md`
+- `scripts/preview-harness.mjs`, `scripts/capture-fixture-html.mjs`, and `scripts/ops-002-restore-drill.ts`
+- `tests/` (full release gate and fixture evidence)
+- Application files only when a release-gate failure demonstrates an in-scope defect.
+
+**Verification:**
+
+- Run `npm run check` and `npm run preview:harness`, then smoke every required direct route in the clean preview environment.
+- Record supplied-CSV stage/map/commit/retry/reverse evidence, calculation reconciliation, Access invite/offboard and cross-owner checks, desktop/iPhone/PWA/keyboard UAT, restore and verified-deletion drills, redacted observability evidence, known limitations, and the serial go/no-go decision.
+
 - Deliver: clean preview environment; Access invite/offboard test; supplied CSV end-to-end; calculation reconciliation; iPhone/desktop/PWA tests; backup/deletion drill evidence; go/no-go record.
 - Acceptance: every non-deferred task required by those dependencies is DONE; all product success measures and phase gates pass; owner/source scope is active; no critical/high issue; known limitations are documented.
 - Tests: full lint/build/unit/integration/render/E2E suite plus manual UAT.
