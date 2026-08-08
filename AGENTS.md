@@ -6,6 +6,10 @@ Build YieldToMe as a trustworthy, private portfolio ledger and reporting product
 
 ## Read before changing code
 
+### Orchestrator
+
+Before planning, changing architecture, selecting tasks, or reviewing broad project behavior, read as needed:
+
 1. `docs/CONSOLIDATED_PRODUCT_SPEC.md`
 2. `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md`
 3. `docs/ARCHITECTURE.md`
@@ -17,6 +21,68 @@ Build YieldToMe as a trustworthy, private portfolio ledger and reporting product
 9. `TASKS.md`
 
 The numbered files already in `docs/` and `YieldToMe_Visual_Style_Guide.md` are source evidence. Preserve them unless a task explicitly archives or replaces them.
+
+### Worker
+
+For an explicitly assigned `TASKS.md` item, do not read all project documentation by default.
+
+1. Read the assigned task, including its requirement IDs, dependencies, acceptance criteria, context references, likely code locations, and verification guidance.
+2. Read only the normative document sections directly relevant to that task.
+3. Inspect the target files and the minimum nearby code needed to understand interfaces, imports, tests, and callers.
+4. Read additional files only when required to resolve a concrete implementation question.
+5. Do not perform repository-wide discovery merely to gain general context.
+
+The orchestrator is responsible for routing broader architectural or product context to the worker when required.
+
+## Agent roles
+
+Roles are model- and vendor-independent. The model used for each role is runtime configuration and should not be encoded in this file or `TASKS.md`.
+
+### Orchestrator
+
+The orchestrator owns:
+
+- planning and architecture;
+- task selection and dependency management;
+- context routing;
+- assignment of work to workers;
+- review of worker output;
+- resolution of cross-task or architectural questions;
+- maintenance of `TASKS.md`.
+
+The orchestrator may inspect the repository and normative specifications broadly when required to perform these responsibilities.
+
+### Worker
+
+A worker is a task-isolated implementation agent.
+
+A worker:
+
+- implements only the assigned task;
+- uses the minimum context necessary for that task;
+- may follow local imports, types, tests, callers, and established patterns as required;
+- does not independently select additional tasks;
+- does not redesign architecture or materially expand scope;
+- does not spawn or delegate to sub-agents unless explicitly instructed by the orchestrator;
+- reports implementation results concisely.
+
+### Reviewer
+
+The reviewer independently verifies the completed task against its acceptance criteria, relevant requirements/specifications, implementation diff, tests, and applicable security, ownership, financial, privacy, and data-integrity rules.
+
+Prefer diff-focused review and targeted source inspection. Do not broadly re-index the repository.
+
+The reviewer may directly fix defects only when the change is small, local, unambiguous, low-risk, and within the existing task scope. Rerun relevant verification after any reviewer change.
+
+Do not use review to redesign architecture, perform unrelated refactoring, add dependencies, broaden scope, or implement speculative improvements.
+
+Classify findings as:
+- **Blocking:** required before the task can be considered complete.
+- **Follow-up:** valid work outside the current task scope.
+
+For larger blocking fixes or changes requiring architectural judgment, return the finding to the orchestrator rather than implementing it.
+
+For material non-blocking work, propose a follow-up `TASKS.md` item. Do not create backlog items for trivial style preferences or speculative cleanup.
 
 ## Approved stack
 
@@ -68,7 +134,7 @@ Before completing a task, run `npm run format:check`, `npm run lint`, and the re
 - After the task's required verification passes, stage only the files that implement that task, including its required migration and documentation updates, then create one focused commit before reporting completion.
 - Use an imperative, task-scoped commit subject. Prefix a `TASKS.md` task commit with its stable ID (for example, `FND-002A: configure Worker bindings`).
 - Do not use `git add -A`, `git add .`, or an indiscriminate commit in a dirty worktree. Never commit secrets, generated runtime state, exports, uploads, or another task's changes.
-- If an existing uncommitted change overlaps the task and cannot be cleanly separated, stop before staging or committing and ask the user how to proceed.
+- If an existing uncommitted change overlaps the task and cannot be cleanly separated, stop before staging or committing and ask the orchestrator or user how to proceed.
 - If a prompt changes no repository files, no commit is required; say so explicitly in the completion note.
 
 ## Coding conventions
@@ -107,6 +173,46 @@ Before completing a task, run `npm run format:check`, `npm run lint`, and the re
 - Do not call a price “live” unless the contract and data timestamps prove it. Otherwise omit a freshness claim from the compact UI.
 - Do not implement self-service registration while Cloudflare Access remains the only identity gateway.
 
+## Worker context and token-efficiency rules
+
+- Prefer targeted file reads, symbol searches, and narrow directory listings over repository-wide scans.
+- Do not recursively read or index the repository unless explicitly required.
+- Do not repeatedly read unchanged files already available in the active task context.
+- For large files, search for the relevant symbol, heading, requirement ID, or section before reading more.
+- Prefer `git diff`, `git status --short`, and task-scoped history over broad Git history inspection.
+- Treat `TASKS.md` `Context`, `Likely code`, and `Verification` fields as routing guidance, not exhaustive boundaries.
+- A worker may inspect files not explicitly named in the task when directly necessary to follow an import or type dependency, locate an existing implementation or pattern, identify affected callers, update relevant tests, or satisfy an acceptance criterion.
+- Do not perform broad repository exploration simply to understand the project generally.
+
+### Ignore by default
+
+Do not read these unless the assigned task specifically requires them:
+
+- `node_modules/`
+- `.git/`
+- `dist/`
+- `.next/`
+- coverage output
+- temporary/cache directories
+- `*.log`
+- `build/`, except when diagnosing or changing build packaging
+- lockfiles, except when adding, removing, upgrading, or diagnosing dependencies
+- generated migration output, except when creating, verifying, or diagnosing a migration
+
+### Escalation to the orchestrator
+
+Stop implementation and report the decision required when a task requires:
+
+- an architectural decision not already documented;
+- an undocumented product assumption that materially affects behavior;
+- a new dependency;
+- a new Cloudflare product or binding;
+- a persistence or schema approach outside the task;
+- a material scope expansion;
+- reconciliation of conflicting normative requirements.
+
+Do not invent the missing decision.
+
 ## Definition of done
 
 A task is done only when:
@@ -143,6 +249,17 @@ A task is done only when:
 - Do not hand-edit generated migration SQL after generation without documenting why and re-running migration tests.
 - Do not change `.openai/hosting.json`, Worker bindings, Access audience/issuer behavior, provider configuration, calculation rules, or retention/deletion behavior as incidental cleanup.
 - Never commit `.env*` secrets, runtime state, exports, uploaded CSVs, D1 files, provider payload dumps, or access tokens.
+
+## Worker completion output
+
+Keep completion reports concise. Return:
+
+- files changed;
+- substantive implementation decisions;
+- verification commands and whether they passed;
+- blockers, uncertainties, or required orchestrator decisions.
+
+Do not restate the task, summarize unchanged architecture, reproduce large diffs, or explain routine implementation details unless requested.
 
 ## Decision log
 
