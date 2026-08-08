@@ -61,6 +61,7 @@ function baseInput(
   return {
     userId: "user-1",
     baseCurrencyCode: "AUD",
+    portfolioTimezone: "Australia/Sydney",
     rangeFrom: "2026-08-01",
     rangeTo: "2026-08-03",
     calculationVersion: 1,
@@ -71,6 +72,8 @@ function baseInput(
         securityId: "security-1",
         mappingId: "mapping-1",
         currencyCode: "AUD",
+        exchangeId: "exchange-x",
+        exchangeMic: "XASX",
         transactions: [buy("buy-1", "2026-08-01", "10", "10")],
         priceObservations: [
           price("price-1", "mapping-1", "2026-08-01", "10"),
@@ -89,6 +92,32 @@ function baseInput(
     ],
     fxObservations: [],
     ...overrides,
+  };
+}
+
+function calendarEvidence(
+  sessions: readonly { marketDate: string; closeAt?: string }[],
+) {
+  return {
+    version: 2 as const,
+    calendars: [
+      {
+        exchangeId: "exchange-x",
+        mic: "XASX",
+        calendarCode: "fixture",
+        timezone: "Australia/Sydney",
+        validFrom: "2026-01-01",
+        validTo: "2026-12-31",
+        source: "fixture",
+        revision: "2026-08-01",
+        sessions: sessions.map((session) => ({
+          sessionId: `XASX-${session.marketDate}`,
+          marketDate: session.marketDate,
+          openAt: `${session.marketDate}T00:00:00Z`,
+          closeAt: session.closeAt ?? `${session.marketDate}T06:00:00Z`,
+        })),
+      },
+    ],
   };
 }
 
@@ -280,13 +309,15 @@ test("CALC-002 preserves inverse FX direction and distinguishes holidays from mi
     securities: [
       {
         ...baseInput().securities[0],
-        expectedTradingDates: ["2026-08-07"],
         transactions: [buy("buy-1", "2026-08-07", "10", "10")],
         priceObservations: [price("friday", "mapping-1", "2026-08-07", "10")],
       },
     ],
   });
-  const holiday = buildHistoricalSnapshots(calendarInput);
+  const holiday = buildHistoricalSnapshots({
+    ...calendarInput,
+    calendarEvidence: calendarEvidence([{ marketDate: "2026-08-07" }]),
+  });
   assert.equal(holiday.ok, true);
   if (!holiday.ok) return;
   assert.equal(
@@ -299,9 +330,12 @@ test("CALC-002 preserves inverse FX direction and distinguishes holidays from mi
     securities: [
       {
         ...calendarInput.securities[0]!,
-        expectedTradingDates: ["2026-08-07", "2026-08-08"],
       },
     ],
+    calendarEvidence: calendarEvidence([
+      { marketDate: "2026-08-07" },
+      { marketDate: "2026-08-08" },
+    ]),
   });
   assert.equal(missingSession.ok, true);
   if (!missingSession.ok) return;
@@ -316,6 +350,420 @@ test("CALC-002 preserves inverse FX direction and distinguishes holidays from mi
       (gap) => gap.kind === "missing_session",
     ),
   );
+});
+
+test("CALC-002 maps Sydney cutoffs to completed New York sessions across DST", () => {
+  const result = buildHistoricalSnapshots({
+    ...baseInput(),
+    rangeFrom: "2026-08-03",
+    rangeTo: "2026-08-04",
+    portfolioTimezone: "Australia/Sydney",
+    securities: [
+      {
+        ...baseInput().securities[0]!,
+        exchangeId: "exchange-us",
+        exchangeMic: "XNYS",
+        transactions: [buy("buy-us", "2026-08-03", "10", "10")],
+        priceObservations: [
+          price("us-friday", "mapping-1", "2026-07-31", "10"),
+          price("us-monday", "mapping-1", "2026-08-03", "12"),
+        ],
+      },
+    ],
+    calendarEvidence: {
+      version: 2,
+      calendars: [
+        {
+          exchangeId: "exchange-us",
+          mic: "XNYS",
+          calendarCode: "nyse",
+          timezone: "America/New_York",
+          validFrom: "2026-07-01",
+          validTo: "2026-08-31",
+          source: "fixture",
+          revision: "2026-08-01",
+          sessions: [
+            {
+              sessionId: "XNYS-2026-07-31",
+              marketDate: "2026-07-31",
+              openAt: "2026-07-31T13:30:00Z",
+              closeAt: "2026-07-31T20:00:00Z",
+            },
+            {
+              sessionId: "XNYS-2026-08-03",
+              marketDate: "2026-08-03",
+              openAt: "2026-08-03T13:30:00Z",
+              closeAt: "2026-08-03T20:00:00Z",
+            },
+          ],
+        },
+      ],
+    },
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(
+    result.points[0]?.holdings[0]?.calendarSessionId,
+    "XNYS-2026-07-31",
+  );
+  assert.equal(result.points[0]?.holdings[0]?.priceObservationId, "us-friday");
+  assert.equal(
+    result.points[1]?.holdings[0]?.calendarSessionId,
+    "XNYS-2026-08-03",
+  );
+  assert.equal(result.points[1]?.holdings[0]?.priceObservationId, "us-monday");
+});
+
+test("CALC-002 applies the portfolio cutoff to a completed prior exchange session", () => {
+  const result = buildHistoricalSnapshots({
+    ...baseInput(),
+    rangeFrom: "2026-08-03",
+    rangeTo: "2026-08-03",
+    securities: [
+      {
+        ...baseInput().securities[0]!,
+        exchangeId: "exchange-us",
+        exchangeMic: "XNYS",
+        transactions: [buy("buy-us", "2026-08-03", "10", "10")],
+        priceObservations: [
+          {
+            ...price("us-friday-close", "mapping-1", "2026-07-31", "10"),
+            observationAt: "2026-07-31T20:00:00Z",
+          },
+        ],
+      },
+    ],
+    calendarEvidence: {
+      version: 2,
+      calendars: [
+        {
+          exchangeId: "exchange-us",
+          mic: "XNYS",
+          calendarCode: "nyse",
+          timezone: "America/New_York",
+          validFrom: "2026-07-01",
+          validTo: "2026-08-31",
+          source: "fixture",
+          revision: "2026-08-01",
+          sessions: [
+            {
+              sessionId: "XNYS-2026-07-31",
+              marketDate: "2026-07-31",
+              openAt: "2026-07-31T13:30:00Z",
+              closeAt: "2026-07-31T20:00:00Z",
+            },
+            {
+              sessionId: "XNYS-2026-08-03",
+              marketDate: "2026-08-03",
+              openAt: "2026-08-03T13:30:00Z",
+              closeAt: "2026-08-03T20:00:00Z",
+            },
+          ],
+        },
+      ],
+    },
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(
+    result.points[0]?.holdings[0]?.priceObservationId,
+    "us-friday-close",
+  );
+});
+
+test("CALC-002 uses the correct non-overlapping calendar validity interval", () => {
+  const calendarEvidence = {
+    version: 2 as const,
+    calendars: [
+      {
+        exchangeId: "exchange-x",
+        mic: "XASX",
+        calendarCode: "fixture-v1",
+        timezone: "Australia/Sydney",
+        validFrom: "2026-01-01",
+        validTo: "2026-08-01",
+        source: "fixture",
+        revision: "v1",
+        sessions: [
+          {
+            sessionId: "XASX-v1-2026-08-01",
+            marketDate: "2026-08-01",
+            openAt: "2026-08-01T00:00:00Z",
+            closeAt: "2026-08-01T06:00:00Z",
+          },
+        ],
+      },
+      {
+        exchangeId: "exchange-x",
+        mic: "XASX",
+        calendarCode: "fixture-v2",
+        timezone: "Australia/Sydney",
+        validFrom: "2026-08-02",
+        validTo: "2026-08-02",
+        source: "fixture",
+        revision: "v2",
+        sessions: [
+          {
+            sessionId: "XASX-v2-2026-08-02",
+            marketDate: "2026-08-02",
+            openAt: "2026-08-02T00:00:00Z",
+            closeAt: "2026-08-02T06:00:00Z",
+          },
+        ],
+      },
+    ],
+  };
+  const result = buildHistoricalSnapshots({
+    ...baseInput(),
+    calendarEvidence,
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(
+    result.points.map((point) => point.holdings[0]?.calendarSessionId),
+    ["XASX-v1-2026-08-01", "XASX-v2-2026-08-02", null],
+  );
+  const overlap = buildHistoricalSnapshots({
+    ...baseInput(),
+    calendarEvidence: {
+      ...calendarEvidence,
+      calendars: [
+        calendarEvidence.calendars[0]!,
+        { ...calendarEvidence.calendars[1]!, validFrom: "2026-08-01" },
+      ],
+    },
+  });
+  assert.deepEqual(overlap, { ok: false, reason: "invalid_calendar_evidence" });
+});
+
+test("CALC-002 handles Sydney and New York DST offset transition", () => {
+  const result = buildHistoricalSnapshots({
+    ...baseInput(),
+    rangeFrom: "2026-11-02",
+    rangeTo: "2026-11-04",
+    securities: [
+      {
+        ...baseInput().securities[0]!,
+        exchangeId: "exchange-us",
+        exchangeMic: "XNYS",
+        transactions: [buy("buy-us", "2026-11-02", "10", "10")],
+        priceObservations: [
+          price("us-oct-30", "mapping-1", "2026-10-30", "10"),
+          price("us-nov-02", "mapping-1", "2026-11-02", "12"),
+        ],
+      },
+    ],
+    calendarEvidence: {
+      version: 2,
+      calendars: [
+        {
+          exchangeId: "exchange-us",
+          mic: "XNYS",
+          calendarCode: "nyse",
+          timezone: "America/New_York",
+          validFrom: "2026-10-01",
+          validTo: "2026-11-30",
+          source: "fixture",
+          revision: "2026-11-transition",
+          sessions: [
+            {
+              sessionId: "XNYS-2026-10-30",
+              marketDate: "2026-10-30",
+              openAt: "2026-10-30T13:30:00Z",
+              closeAt: "2026-10-30T20:00:00Z",
+            },
+            {
+              sessionId: "XNYS-2026-11-02",
+              marketDate: "2026-11-02",
+              openAt: "2026-11-02T14:30:00Z",
+              closeAt: "2026-11-02T21:00:00Z",
+            },
+            {
+              sessionId: "XNYS-2026-11-03",
+              marketDate: "2026-11-03",
+              openAt: "2026-11-03T14:30:00Z",
+              closeAt: "2026-11-03T21:00:00Z",
+            },
+          ],
+        },
+      ],
+    },
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(
+    result.points.map((point) => point.holdings[0]?.calendarSessionId),
+    ["XNYS-2026-10-30", "XNYS-2026-11-02", "XNYS-2026-11-03"],
+  );
+  assert.equal(
+    result.points[1]?.holdings[0]?.calendarSessionCloseAt,
+    "2026-11-02T21:00:00Z",
+  );
+});
+
+test("CALC-002 carries the preceding interval session across a timezone change", () => {
+  const result = buildHistoricalSnapshots({
+    ...baseInput(),
+    portfolioTimezone: "UTC",
+    rangeFrom: "2026-08-02",
+    rangeTo: "2026-08-02",
+    securities: [
+      {
+        ...baseInput().securities[0]!,
+        exchangeId: "exchange-us",
+        exchangeMic: "XNYS",
+        transactions: [buy("buy-us", "2026-08-02", "10", "10")],
+        priceObservations: [
+          price("preceding-session", "mapping-1", "2026-08-01", "10"),
+        ],
+      },
+    ],
+    calendarEvidence: {
+      version: 2,
+      calendars: [
+        {
+          exchangeId: "exchange-us",
+          mic: "XNYS",
+          calendarCode: "legacy",
+          timezone: "UTC",
+          validFrom: "2026-01-01",
+          validTo: "2026-08-01",
+          source: "fixture",
+          revision: "legacy",
+          sessions: [
+            {
+              sessionId: "XNYS-legacy-2026-08-01",
+              marketDate: "2026-08-01",
+              openAt: "2026-08-01T00:00:00Z",
+              closeAt: "2026-08-01T23:00:00Z",
+            },
+          ],
+        },
+        {
+          exchangeId: "exchange-us",
+          mic: "XNYS",
+          calendarCode: "current",
+          timezone: "America/Los_Angeles",
+          validFrom: "2026-08-02",
+          validTo: "2026-12-31",
+          source: "fixture",
+          revision: "current",
+          sessions: [
+            {
+              sessionId: "XNYS-current-2026-08-02",
+              marketDate: "2026-08-02",
+              openAt: "2026-08-02T16:00:00Z",
+              closeAt: "2026-08-03T00:00:00Z",
+            },
+          ],
+        },
+      ],
+    },
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(
+    result.points[0]?.holdings[0]?.calendarSessionId,
+    "XNYS-legacy-2026-08-01",
+  );
+  assert.equal(
+    result.points[0]?.holdings[0]?.priceObservationId,
+    "preceding-session",
+  );
+  assert.equal(
+    result.points[0]?.coverage.marketDataStates[0]?.calendarStatus,
+    "session",
+  );
+});
+
+test("CALC-002 distinguishes weekday exchange holidays from missing expected quotes", () => {
+  const result = buildHistoricalSnapshots({
+    ...baseInput(),
+    portfolioTimezone: "UTC",
+    rangeFrom: "2026-11-25",
+    rangeTo: "2026-11-27",
+    securities: [
+      {
+        ...baseInput().securities[0]!,
+        exchangeId: "exchange-us",
+        exchangeMic: "XNYS",
+        transactions: [buy("buy-us", "2026-11-25", "10", "10")],
+        priceObservations: [
+          price("us-nov-25", "mapping-1", "2026-11-25", "10"),
+        ],
+      },
+    ],
+    calendarEvidence: {
+      version: 2,
+      calendars: [
+        {
+          exchangeId: "exchange-us",
+          mic: "XNYS",
+          calendarCode: "nyse",
+          timezone: "America/New_York",
+          validFrom: "2026-11-01",
+          validTo: "2026-11-30",
+          source: "fixture",
+          revision: "2026-11-holiday",
+          sessions: [
+            {
+              sessionId: "XNYS-2026-11-25",
+              marketDate: "2026-11-25",
+              openAt: "2026-11-25T14:30:00Z",
+              closeAt: "2026-11-25T21:00:00Z",
+            },
+            {
+              sessionId: "XNYS-2026-11-27",
+              marketDate: "2026-11-27",
+              openAt: "2026-11-27T14:30:00Z",
+              closeAt: "2026-11-27T21:00:00Z",
+            },
+          ],
+        },
+      ],
+    },
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(
+    result.points[1]?.coverage.marketDataStates[0]?.calendarStatus,
+    "holiday",
+  );
+  assert.equal(
+    result.points[2]?.coverage.marketDataStates[0]?.calendarStatus,
+    "missing_session",
+  );
+  assert.ok(
+    result.points[2]?.coverage.gaps.some(
+      (gap) => gap.kind === "missing_session",
+    ),
+  );
+});
+
+test("CALC-002 rejects malformed calendar shapes and timezones", () => {
+  const malformed = buildHistoricalSnapshots({
+    ...baseInput(),
+    calendarEvidence: {
+      version: 2,
+      calendars: [
+        {
+          exchangeId: "exchange-x",
+          mic: "XASX",
+          calendarCode: "fixture",
+          timezone: "not-an-iana-zone",
+          validFrom: "2026-01-01",
+          validTo: "2026-12-31",
+          source: "fixture",
+          revision: "2026-08-01",
+          sessions: [null],
+        },
+      ],
+    } as never,
+  });
+  assert.deepEqual(malformed, {
+    ok: false,
+    reason: "invalid_calendar_evidence",
+  });
 });
 
 test("CALC-002 does not multiply split-adjusted prices by split-replayed quantities", () => {

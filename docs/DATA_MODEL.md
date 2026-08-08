@@ -575,6 +575,8 @@ Per portfolio/portfolio-security/date details supporting drill-down:
 
 - quantity, native/base value and basis;
 - selected price/FX observation IDs;
+- selected exchange/MIC session ID, market date, close instant, and the pinned
+  calendar-evidence version;
 - calculation run identity;
 - daily movement and completeness;
 - calculation version.
@@ -609,8 +611,11 @@ Type-specific values may move to separate tables if query complexity justifies i
 - reason/invalidation source;
 - status, attempt, lease;
 - ledger high-water, completed-security/output-offset checkpoints, and counts;
-- immutable market-data ingestion cutoff and canonical trading-calendar
-  evidence JSON captured when the run is requested;
+- immutable market-data ingestion cutoff and bounded canonical version-2
+  trading-calendar session evidence JSON captured when the run is requested.
+  Each validity-dated exchange/MIC entry carries timezone, provenance/revision,
+  and session open/close instants; the payload is shared across holdings rather
+  than a duplicated per-holding market-date map;
 - started/completed timestamps;
 - redacted error category.
 

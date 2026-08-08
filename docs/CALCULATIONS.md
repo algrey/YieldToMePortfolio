@@ -302,7 +302,7 @@ Build end-of-local-day quantities by replaying posted ledger events in effective
 
 `HoldingValue_s,d = Q_s,d × P_s,d × FX_s,d`
 
-Use the security’s exchange market date and the portfolio’s local snapshot cutoff. An observation is eligible only when its recorded observation instant, converted through the portfolio’s IANA timezone (including DST), is on or before that local date’s end. This prevents a later foreign-market close from becoming look-ahead history. The selected price date, FX date, and calendar/session classification are recorded.
+Use the security’s validity-dated exchange/MIC session evidence and the portfolio’s local snapshot cutoff. For each local date, map the cutoff instant to the latest exchange session whose recorded close instant is complete by that cutoff; an observation is eligible only when its recorded observation instant, converted through the portfolio’s IANA timezone (including DST), is on or before that local date’s end. This prevents a later foreign-market close from becoming look-ahead history. The selected price date, FX date, selected session identity/close, and calendar/session classification are recorded.
 
 ### Portfolio daily value
 
@@ -343,10 +343,15 @@ routine chart labels.
 
 Carry a prior market close only across known exchange holidays within the FX fallback window. If the calendar says a date was an expected trading session but no session quote exists, mark a missing-session gap rather than labelling it a holiday. If no exchange calendar is available, retain an unknown-calendar explanation. Do not interpolate missing prices. Break or mark the series when a required value exceeds staleness policy.
 
-Trading-calendar evidence is captured as a versioned, canonical input on the
-calculation run. Lease retries and replacement workers must use that persisted
-evidence rather than process-local calendar state, so holiday/session
-classification cannot change during a rebuild.
+Trading-calendar evidence is captured as a bounded, versioned, canonical input
+on the calculation run. It contains provenance, validity dates, exchange/MIC
+identity, IANA timezone, and completed session IDs with open/close instants;
+it is not a per-holding date list. Lease retries and replacement workers must
+use that persisted evidence rather than process-local calendar state, so
+holiday/session classification cannot change during a rebuild. A session that
+is expected and complete by the cutoff but has no matching quote is a
+`missing_session` gap; a date outside the evidence’s validity interval remains
+`unknown`.
 
 ## 9. Realised, unrealised, and headline returns
 

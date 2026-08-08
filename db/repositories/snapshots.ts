@@ -7,6 +7,9 @@ import {
   type SnapshotFxObservation,
   type SnapshotLedgerTransaction,
   type SnapshotPriceObservation,
+  type HistoricalCalendarEvidence,
+  type HistoricalExchangeSession,
+  HISTORICAL_CALENDAR_LIMITS,
 } from "../../domain/snapshots/history.ts";
 import type {
   FxObservation,
@@ -26,7 +29,7 @@ export type HistoricalSnapshotRequest = Omit<
   "calendarEvidenceJson"
 > & {
   ledgerHistoryCompleteFrom?: string | null;
-  calendarEvidence?: Readonly<Record<string, readonly string[]>>;
+  calendarEvidence?: HistoricalCalendarEvidence;
 };
 
 export type HistoricalSnapshotRebuildInput = {
@@ -73,7 +76,7 @@ export type HistoricalSeriesResponse = {
 export type SnapshotRepositoryOptions = {
   maxHoldingRowsPerChunk?: number;
   maxFacts?: number;
-  expectedTradingDatesBySecurity?: Readonly<Record<string, readonly string[]>>;
+  calendarEvidence?: HistoricalCalendarEvidence;
 };
 
 type PortfolioRow = {
@@ -81,8 +84,6 @@ type PortfolioRow = {
   timezone: string;
   history_complete_from: string | null;
 };
-
-type CalendarEvidence = Readonly<Record<string, readonly string[]>>;
 
 function isValidCalendarDate(value: unknown): value is string {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
@@ -96,47 +97,152 @@ function isValidCalendarDate(value: unknown): value is string {
 }
 
 function serializeCalendarEvidence(
-  evidence: CalendarEvidence | undefined,
+  evidence: HistoricalCalendarEvidence | undefined,
 ): string | null {
   if (!evidence) return null;
-  const calendars = Object.fromEntries(
-    Object.keys(evidence)
-      .sort()
-      .map((key) => {
-        if (key.length === 0) throw new Error("invalid_calendar_evidence");
-        const dates = evidence[key] ?? [];
-        if (dates.some((date) => !isValidCalendarDate(date))) {
-          throw new Error("invalid_calendar_evidence");
-        }
-        return [key, [...new Set(dates)].sort()];
-      }),
-  );
-  return JSON.stringify({ version: 1, calendars });
+  if (
+    evidence.version !== 2 ||
+    !Array.isArray(evidence.calendars) ||
+    evidence.calendars.length > HISTORICAL_CALENDAR_LIMITS.maxCalendars
+  ) {
+    throw new Error("invalid_calendar_evidence");
+  }
+  const calendars = evidence.calendars
+    .map((calendar) => {
+      if (
+        typeof calendar !== "object" ||
+        calendar === null ||
+        typeof calendar.mic !== "string" ||
+        calendar.mic.length === 0 ||
+        typeof calendar.calendarCode !== "string" ||
+        calendar.calendarCode.length === 0 ||
+        !isValidTimezone(calendar.timezone) ||
+        typeof calendar.source !== "string" ||
+        calendar.source.length === 0 ||
+        typeof calendar.revision !== "string" ||
+        calendar.revision.length === 0 ||
+        (calendar.exchangeId !== undefined &&
+          calendar.exchangeId !== null &&
+          (typeof calendar.exchangeId !== "string" ||
+            calendar.exchangeId.length === 0)) ||
+        !Array.isArray(calendar.sessions) ||
+        !isValidCalendarDate(calendar.validFrom) ||
+        !isValidCalendarDate(calendar.validTo) ||
+        calendar.validTo < calendar.validFrom
+      ) {
+        throw new Error("invalid_calendar_evidence");
+      }
+      const sessionIds = new Set<string>();
+      const sessions = calendar.sessions
+        .map((session: HistoricalExchangeSession) => {
+          if (
+            typeof session !== "object" ||
+            session === null ||
+            typeof session.sessionId !== "string" ||
+            session.sessionId.length === 0 ||
+            sessionIds.has(session.sessionId) ||
+            !isValidCalendarDate(session.marketDate) ||
+            !isValidInstant(session.openAt) ||
+            !isValidInstant(session.closeAt) ||
+            session.marketDate < calendar.validFrom ||
+            session.marketDate > calendar.validTo ||
+            Date.parse(session.openAt) >= Date.parse(session.closeAt)
+          ) {
+            throw new Error("invalid_calendar_evidence");
+          }
+          sessionIds.add(session.sessionId);
+          return {
+            sessionId: session.sessionId,
+            marketDate: session.marketDate,
+            openAt: session.openAt,
+            closeAt: session.closeAt,
+          };
+        })
+        .sort(
+          (left: HistoricalExchangeSession, right: HistoricalExchangeSession) =>
+            left.marketDate.localeCompare(right.marketDate) ||
+            left.closeAt.localeCompare(right.closeAt) ||
+            left.sessionId.localeCompare(right.sessionId),
+        );
+      return {
+        exchangeId: calendar.exchangeId ?? null,
+        mic: calendar.mic,
+        calendarCode: calendar.calendarCode,
+        timezone: calendar.timezone,
+        validFrom: calendar.validFrom,
+        validTo: calendar.validTo,
+        source: calendar.source,
+        revision: calendar.revision,
+        sessions,
+      };
+    })
+    .sort(
+      (left, right) =>
+        `${left.exchangeId ?? ""}/${left.mic}`.localeCompare(
+          `${right.exchangeId ?? ""}/${right.mic}`,
+        ) ||
+        left.validFrom.localeCompare(right.validFrom) ||
+        left.validTo.localeCompare(right.validTo) ||
+        left.revision.localeCompare(right.revision),
+    );
+  for (let index = 1; index < calendars.length; index += 1) {
+    const previous = calendars[index - 1]!;
+    const current = calendars[index]!;
+    if (
+      `${previous.exchangeId ?? ""}/${previous.mic}` ===
+        `${current.exchangeId ?? ""}/${current.mic}` &&
+      previous.validTo >= current.validFrom
+    ) {
+      throw new Error("invalid_calendar_evidence");
+    }
+  }
+  if (
+    calendars.reduce((count, calendar) => count + calendar.sessions.length, 0) >
+    HISTORICAL_CALENDAR_LIMITS.maxSessions
+  ) {
+    throw new Error("invalid_calendar_evidence");
+  }
+  const result = JSON.stringify({ version: 2, calendars });
+  if (result.length > HISTORICAL_CALENDAR_LIMITS.maxEvidenceBytes) {
+    throw new Error("invalid_calendar_evidence");
+  }
+  return result;
 }
 
-function parseCalendarEvidence(value: string | null): CalendarEvidence | null {
-  if (!value) return {};
+function parseCalendarEvidence(
+  value: string | null,
+): HistoricalCalendarEvidence | undefined | null {
+  if (!value) return undefined;
   try {
     const parsed: unknown = JSON.parse(value);
     if (typeof parsed !== "object" || parsed === null) return null;
     const envelope = parsed as { version?: unknown; calendars?: unknown };
-    if (envelope.version !== 1) return null;
-    const calendars = envelope.calendars;
-    if (typeof calendars !== "object" || calendars === null) return null;
-    const result: Record<string, readonly string[]> = {};
-    for (const [key, dates] of Object.entries(calendars)) {
-      if (
-        key.length === 0 ||
-        !Array.isArray(dates) ||
-        !dates.every(isValidCalendarDate)
-      ) {
-        return null;
-      }
-      result[key] = dates;
-    }
-    return result;
+    if (envelope.version !== 2 || !Array.isArray(envelope.calendars))
+      return null;
+    const calendars =
+      envelope.calendars as HistoricalCalendarEvidence["calendars"];
+    const evidence = { version: 2 as const, calendars };
+    return serializeCalendarEvidence(evidence) === value ? evidence : null;
   } catch {
     return null;
+  }
+}
+
+function isValidInstant(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    Number.isFinite(Date.parse(value)) &&
+    value.endsWith("Z")
+  );
+}
+
+function isValidTimezone(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -145,6 +251,8 @@ type SecurityRow = {
   security_id: string | null;
   currency_code: string;
   mapping_id: string | null;
+  exchange_id: string | null;
+  exchange_mic: string | null;
 };
 
 type TransactionRow = Record<string, unknown> & {
@@ -310,6 +418,72 @@ function daysBefore(date: string, days: number): string {
   return new Date(timestamp - days * 86_400_000).toISOString().slice(0, 10);
 }
 
+function daysAfter(date: string, days: number): string {
+  const timestamp = Date.parse(`${date}T00:00:00Z`);
+  return new Date(timestamp + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+function localDateAt(timestamp: number, timezone: string): string | null {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date(timestamp));
+    const values = new Map(
+      parts
+        .filter((part) => part.type !== "literal")
+        .map((part) => [part.type, part.value]),
+    );
+    const year = values.get("year");
+    const month = values.get("month");
+    const day = values.get("day");
+    return year && month && day ? `${year}-${month}-${day}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function portfolioCutoff(date: string, timezone: string): number | null {
+  const start = Date.parse(`${date}T00:00:00Z`) - 36 * 60 * 60 * 1000;
+  if (!Number.isFinite(start)) return null;
+  let low = start;
+  let high = start + 4 * 86_400_000;
+  if (localDateAt(high, timezone) === null) return null;
+  for (let index = 0; index < 52; index += 1) {
+    const middle = Math.floor((low + high) / 2);
+    const local = localDateAt(middle, timezone);
+    if (local !== null && local <= date) low = middle + 1;
+    else high = middle;
+  }
+  return low - 1;
+}
+
+function marketDateUpperBound(
+  asOfDate: string,
+  portfolioTimezone: string,
+  evidence: HistoricalCalendarEvidence | undefined,
+): string {
+  if (!evidence) return asOfDate;
+  const cutoff = portfolioCutoff(asOfDate, portfolioTimezone);
+  if (cutoff === null) return asOfDate;
+  const maximumSafeDate = daysAfter(asOfDate, 2);
+  let upper = asOfDate;
+  for (const calendar of evidence.calendars) {
+    for (const session of calendar.sessions) {
+      if (
+        Date.parse(session.closeAt) <= cutoff &&
+        session.marketDate > upper &&
+        session.marketDate <= maximumSafeDate
+      ) {
+        upper = session.marketDate;
+      }
+    }
+  }
+  return upper;
+}
+
 // A chunk rebuilds the requested date plus the preceding point for daily
 // movement, so retain one day beyond the selector's five-day fallback window.
 const SNAPSHOT_QUERY_LOOKBACK_DAYS = 6;
@@ -337,12 +511,20 @@ export function createHistoricalSnapshotRepository(
     fxObservations: SnapshotFxObservation[];
     overrides: ManualOverride[];
     portfolioTimezone: string;
+    calendarEvidence: HistoricalCalendarEvidence | undefined;
   }> {
     const portfolio = await sql.get<PortfolioRow>(
       `SELECT base_currency_code, timezone, history_complete_from FROM portfolios WHERE id = ? AND user_id = ?`,
       [run.portfolioId, userId],
     );
     if (!portfolio) throw new Error("portfolio_not_found");
+    const calendarEvidence = parseCalendarEvidence(run.calendarEvidenceJson);
+    if (calendarEvidence === null) throw new Error("invalid_calendar_evidence");
+    const marketDateTo = marketDateUpperBound(
+      asOfDate,
+      portfolio.timezone,
+      calendarEvidence ?? undefined,
+    );
     const securityCount = await sql.get<{ count: number }>(
       `SELECT COUNT(*) AS count FROM portfolio_securities WHERE user_id = ? AND portfolio_id = ?`,
       [userId, run.portfolioId],
@@ -362,7 +544,7 @@ export function createHistoricalSnapshotRepository(
         userId,
         run.portfolioId,
         daysBefore(asOfDate, SNAPSHOT_QUERY_LOOKBACK_DAYS),
-        asOfDate,
+        marketDateTo,
         run.marketDataCutoff ?? run.updatedAt,
         userId,
       ],
@@ -428,11 +610,14 @@ export function createHistoricalSnapshotRepository(
     if (factCount > maxFacts) throw new Error("snapshot_fact_limit");
     const securityRows = await sql.all<SecurityRow>(
       `SELECT ps.id AS portfolio_security_id, ps.security_id, ps.source_currency_code AS currency_code,
+         s.exchange_id, e.mic AS exchange_mic,
          (SELECT m.id FROM security_provider_mappings m
           WHERE m.security_id = ps.security_id AND m.status = 'verified'
             AND m.valid_from <= ? AND (m.valid_to IS NULL OR m.valid_to >= ?)
           ORDER BY m.valid_from DESC, m.id DESC LIMIT 1) AS mapping_id
        FROM portfolio_securities ps
+       LEFT JOIN securities s ON s.id = ps.security_id
+       LEFT JOIN exchanges e ON e.id = s.exchange_id
        WHERE ps.user_id = ? AND ps.portfolio_id = ?
        ORDER BY ps.id LIMIT ?`,
       [asOfDate, run.rangeFrom, userId, run.portfolioId, maxFacts],
@@ -459,7 +644,7 @@ export function createHistoricalSnapshotRepository(
         userId,
         run.portfolioId,
         daysBefore(asOfDate, SNAPSHOT_QUERY_LOOKBACK_DAYS),
-        asOfDate,
+        marketDateTo,
         run.marketDataCutoff ?? run.updatedAt,
         userId,
         maxFacts,
@@ -551,18 +736,17 @@ export function createHistoricalSnapshotRepository(
       });
       transactionsBySecurity.set(row.portfolio_security_id, existing);
     }
-    const calendarEvidence = parseCalendarEvidence(run.calendarEvidenceJson);
-    if (calendarEvidence === null) throw new Error("invalid_calendar_evidence");
     const securities = securityRows.map((row) => ({
       portfolioSecurityId: row.portfolio_security_id,
       securityId: row.security_id,
       mappingId: row.mapping_id,
       currencyCode: row.currency_code,
+      exchangeId: row.exchange_id,
+      exchangeMic: row.exchange_mic,
       transactions: transactionsBySecurity.get(row.portfolio_security_id) ?? [],
       priceObservations: row.security_id
         ? (pricesBySecurity.get(row.security_id) ?? [])
         : [],
-      expectedTradingDates: calendarEvidence[row.portfolio_security_id],
     }));
     const entriesByAccount = new Map<string, SnapshotCashLedgerEntry[]>();
     for (const row of entryRows) {
@@ -590,6 +774,7 @@ export function createHistoricalSnapshotRepository(
       fxObservations: fxRows.map(mapFx),
       overrides: overrideRows.map(mapOverride),
       portfolioTimezone: portfolio.timezone,
+      calendarEvidence: calendarEvidence ?? undefined,
     };
   }
 
@@ -679,9 +864,10 @@ export function createHistoricalSnapshotRepository(
         (id, user_id, portfolio_id, portfolio_security_id, portfolio_snapshot_id,
          snapshot_date, quantity_decimal, native_value_decimal, base_value_decimal,
          basis_decimal, price_observation_id, fx_observation_id,
-         calculation_run_id, daily_movement_decimal, completeness, status,
+         calendar_session_id, calendar_session_date, calendar_session_close_at,
+         calendar_evidence_version, calculation_run_id, daily_movement_decimal, completeness, status,
          calculation_version)
-        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?
         WHERE EXISTS (SELECT 1 FROM calculation_runs
           WHERE id = ? AND user_id = ? AND portfolio_id = ?
             AND status = 'running' AND lease_owner = ? AND lease_expires_at > ?
@@ -691,6 +877,10 @@ export function createHistoricalSnapshotRepository(
           quantity_decimal = excluded.quantity_decimal, native_value_decimal = excluded.native_value_decimal,
           base_value_decimal = excluded.base_value_decimal, basis_decimal = excluded.basis_decimal,
           price_observation_id = excluded.price_observation_id, fx_observation_id = excluded.fx_observation_id,
+          calendar_session_id = excluded.calendar_session_id,
+          calendar_session_date = excluded.calendar_session_date,
+          calendar_session_close_at = excluded.calendar_session_close_at,
+          calendar_evidence_version = excluded.calendar_evidence_version,
           calculation_run_id = excluded.calculation_run_id,
           daily_movement_decimal = excluded.daily_movement_decimal, completeness = excluded.completeness,
           status = 'ready'`,
@@ -707,6 +897,10 @@ export function createHistoricalSnapshotRepository(
         holding.basisDecimal,
         holding.priceObservationId,
         holding.fxObservationId,
+        holding.calendarSessionId,
+        holding.calendarSessionDate,
+        holding.calendarSessionCloseAt,
+        holding.calendarEvidenceVersion,
         run.id,
         holding.dailyMovementDecimal,
         holding.completeness,
@@ -797,7 +991,7 @@ export function createHistoricalSnapshotRepository(
       input: HistoricalSnapshotRequest,
     ): Promise<CalculationRunRecord> {
       const calendarEvidenceJson = serializeCalendarEvidence(
-        input.calendarEvidence ?? options.expectedTradingDatesBySecurity,
+        input.calendarEvidence ?? options.calendarEvidence,
       );
       return runs.request(userId, {
         ...input,
@@ -879,6 +1073,7 @@ export function createHistoricalSnapshotRepository(
         cashAccounts: facts.cashAccounts,
         fxObservations: facts.fxObservations,
         overrides: facts.overrides,
+        calendarEvidence: facts.calendarEvidence,
       });
       if (!built.ok) return { ok: false, reason: "build-failed" };
       const point = built.points[built.points.length - 1];

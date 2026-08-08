@@ -746,7 +746,7 @@ Status: DONE (follow-up review resolution completed 2026-08-04).
 
 ### CALC-002 — Historical snapshots and rebuild
 
-Status: IN PROGRESS (calendar-model review reopened 2026-08-04).
+Status: DONE (independent calendar/repository review resolved 2026-08-09).
 
 - Objective: produce reproducible historical value series from dated ledger, price, FX, and cash facts.
 - Dependencies: CALC-001B, MKT-003B, LED-002B, DB-004.
@@ -788,6 +788,7 @@ Status: IN PROGRESS (calendar-model review reopened 2026-08-04).
 - Review resolution: historical price and FX selection now rejects observations whose instants fall after the portfolio-local end-of-day cutoff, with IANA/DST-aware conversion. Calendar evidence is canonicalized onto `calculation_runs` at request time and loaded from the run on every retry, so changed worker/process options cannot alter holiday versus missing-session classification. Sydney/US cutoff, FX cutoff, and calendar-pinning regressions pass.
 - Calendar-model review fixes: malformed/version-mismatched persisted calendar evidence now fails the rebuild instead of silently becoming an unknown calendar, and snapshot requests can no longer bypass canonical serialization with caller-supplied raw JSON.
 - Calendar-model review finding: the task is not complete. The pinned payload remains an unbounded `portfolio_security_id -> market-date[]` map, not validity-dated exchange/MIC sessions with close instants. Although the observation-instant filter prevents the direct look-ahead case, holiday/missing-session classification and fallback still compare the portfolio-local date to exchange date text; for cross-timezone holdings the latest session completed by the portfolio cutoff may be the preceding exchange date. Replace the per-holding date duplication with bounded, provenance/versioned exchange-session evidence (or immutable references/digests), map each portfolio cutoff to the latest completed session, and persist the selected session identity. Add Australian-portfolio/US-session fixtures across normal days and DST, Friday/weekend/Monday and exchange holidays, plus size/boundary and retry-determinism tests before returning this task to `DONE`.
+- Calendar-model review resolution: replaced the per-holding date map with a bounded canonical version-2 exchange/MIC session envelope carrying non-overlapping validity intervals, IANA timezone, provenance/revision, and session open/close instants. Historical rebuilds evaluate each validity candidate in its own timezone, map each portfolio-local cutoff to the applicable interval, carry the latest completed session across interval boundaries, classify holidays versus completed-session quote gaps, and persist selected session identity/date/close plus evidence version on holding snapshots. Repository price loading uses a bounded pinned-session market-date upper window while domain filtering enforces the exact portfolio cutoff. Sydney/New York DST transitions, timezone-change interval fallback, Friday/weekend/Monday fallback, weekday holiday/missing-session, validity-boundary, following-market-date, evidence-size, and lease-retry pinning fixtures pass; migration `0023_brave_mockingbird.sql` adds the holding evidence columns.
 
 ### DIV-001 — Dividend events, receipts, and forecasts
 

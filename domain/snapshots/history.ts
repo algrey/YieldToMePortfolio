@@ -34,6 +34,12 @@ const ZERO = fromInteger(0n);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DAY_MS = 86_400_000;
 
+export const HISTORICAL_CALENDAR_LIMITS = Object.freeze({
+  maxCalendars: 256,
+  maxSessions: 50_000,
+  maxEvidenceBytes: 2_000_000,
+});
+
 export const HISTORICAL_SNAPSHOT_LIMITS = Object.freeze({
   maxRangeDays: 3_660,
   maxSecurities: 10_000,
@@ -62,9 +68,34 @@ export type HistoricalSecurityInput = {
   securityId: string | null;
   mappingId: string | null;
   currencyCode: string;
+  exchangeId?: string | null;
+  exchangeMic?: string | null;
   transactions: readonly SnapshotLedgerTransaction[];
   priceObservations: readonly SnapshotPriceObservation[];
-  expectedTradingDates?: readonly string[];
+};
+
+export type HistoricalExchangeSession = {
+  sessionId: string;
+  marketDate: string;
+  openAt: string;
+  closeAt: string;
+};
+
+export type HistoricalExchangeCalendarEvidence = {
+  exchangeId?: string | null;
+  mic: string;
+  calendarCode: string;
+  timezone: string;
+  validFrom: string;
+  validTo: string;
+  source: string;
+  revision: string;
+  sessions: readonly HistoricalExchangeSession[];
+};
+
+export type HistoricalCalendarEvidence = {
+  version: 2;
+  calendars: readonly HistoricalExchangeCalendarEvidence[];
 };
 
 export type HistoricalCashAccountInput = {
@@ -116,6 +147,10 @@ export type SnapshotMarketDataState = {
   priceMarketDate: string | null;
   fxMarketDate: string | null;
   calendarStatus: "session" | "holiday" | "missing_session" | "unknown";
+  exchangeMic?: string | null;
+  calendarSessionId?: string | null;
+  calendarSessionDate?: string | null;
+  calendarSessionCloseAt?: string | null;
 };
 
 export type HistoricalHoldingSnapshot = {
@@ -126,6 +161,10 @@ export type HistoricalHoldingSnapshot = {
   basisDecimal: string | null;
   priceObservationId: string | null;
   fxObservationId: string | null;
+  calendarSessionId: string | null;
+  calendarSessionDate: string | null;
+  calendarSessionCloseAt: string | null;
+  calendarEvidenceVersion: number | null;
   dailyMovementDecimal: string | null;
   completeness: "complete" | "partial" | "incomplete";
 };
@@ -161,6 +200,7 @@ export type HistoricalSnapshotBuildInput = {
   priceScope?: ObservationScope;
   fxScope?: ObservationScope;
   maxPriorCalendarDays?: number;
+  calendarEvidence?: HistoricalCalendarEvidence;
 };
 
 export type HistoricalSnapshotBuildResult =
@@ -172,7 +212,8 @@ export type HistoricalSnapshotBuildResult =
         | "range_too_large"
         | "too_many_securities"
         | "too_many_transactions"
-        | "too_many_cash_entries";
+        | "too_many_cash_entries"
+        | "invalid_calendar_evidence";
     };
 
 type PreparedHolding = HistoricalHoldingSnapshot & {
@@ -226,6 +267,242 @@ function parse(value: string): DecimalFraction | null {
     return parseDecimal(value);
   } catch {
     return null;
+  }
+}
+
+function localDateAt(timestamp: string, timezone: string): string | null {
+  const instant = Date.parse(timestamp);
+  if (!Number.isFinite(instant)) return null;
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date(instant));
+    const values = new Map(
+      parts
+        .filter((part) => part.type !== "literal")
+        .map((part) => [part.type, part.value]),
+    );
+    const year = values.get("year");
+    const month = values.get("month");
+    const day = values.get("day");
+    return year && month && day ? `${year}-${month}-${day}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function portfolioCutoff(date: string, timezone: string): number | null {
+  if (!isValidDate(date)) return null;
+  const start = Date.parse(`${date}T00:00:00Z`) - 36 * 60 * 60 * 1000;
+  let low = start;
+  let high = start + 4 * DAY_MS;
+  if (localDateAt(new Date(high).toISOString(), timezone) === null) return null;
+  // Find the first instant after the requested local date. This remains
+  // correct across the one-hour offset changes at DST boundaries.
+  for (let index = 0; index < 52; index += 1) {
+    const middle = Math.floor((low + high) / 2);
+    const local = localDateAt(new Date(middle).toISOString(), timezone);
+    if (local !== null && local <= date) low = middle + 1;
+    else high = middle;
+  }
+  return low - 1;
+}
+
+function validInstant(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    Number.isFinite(Date.parse(value)) &&
+    value.endsWith("Z")
+  );
+}
+
+function validTimezone(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function exchangeCalendarsFor(
+  security: HistoricalSecurityInput,
+  evidence: HistoricalCalendarEvidence | undefined,
+): HistoricalExchangeCalendarEvidence[] {
+  if (!evidence) return [];
+  return evidence.calendars
+    .filter(
+      (calendar) =>
+        (security.exchangeId !== undefined &&
+          security.exchangeId !== null &&
+          calendar.exchangeId === security.exchangeId) ||
+        ((security.exchangeId === undefined || security.exchangeId === null) &&
+          security.exchangeMic !== undefined &&
+          security.exchangeMic !== null &&
+          calendar.mic === security.exchangeMic),
+    )
+    .slice()
+    .sort(
+      (left, right) =>
+        left.validFrom.localeCompare(right.validFrom) ||
+        left.validTo.localeCompare(right.validTo) ||
+        left.revision.localeCompare(right.revision),
+    );
+}
+
+function sessionAtCutoff(
+  security: HistoricalSecurityInput,
+  date: string,
+  input: HistoricalSnapshotBuildInput,
+): {
+  calendar: HistoricalExchangeCalendarEvidence;
+  session: HistoricalExchangeSession | null;
+  status: SnapshotMarketDataState["calendarStatus"];
+} | null {
+  const cutoff = portfolioCutoff(date, input.portfolioTimezone ?? "UTC");
+  const candidates = exchangeCalendarsFor(security, input.calendarEvidence);
+  if (candidates.length === 0 || cutoff === null) return null;
+  const applicable = candidates
+    .map((candidate) => ({
+      calendar: candidate,
+      exchangeDate: localDateAt(
+        new Date(cutoff).toISOString(),
+        candidate.timezone,
+      ),
+    }))
+    .filter(
+      (
+        candidate,
+      ): candidate is {
+        calendar: HistoricalExchangeCalendarEvidence;
+        exchangeDate: string;
+      } =>
+        candidate.exchangeDate !== null &&
+        candidate.exchangeDate >= candidate.calendar.validFrom &&
+        candidate.exchangeDate <= candidate.calendar.validTo,
+    );
+  if (applicable.length !== 1) {
+    return { calendar: candidates[0]!, session: null, status: "unknown" };
+  }
+  const { calendar, exchangeDate } = applicable[0]!;
+  const sessions = candidates
+    .flatMap((candidate) =>
+      candidate.sessions.map((session) => ({ calendar: candidate, session })),
+    )
+    .filter(
+      ({ session }) => session.closeAt && Date.parse(session.closeAt) <= cutoff,
+    )
+    .sort(
+      (left, right) =>
+        Date.parse(right.session.closeAt) - Date.parse(left.session.closeAt) ||
+        right.session.sessionId.localeCompare(left.session.sessionId),
+    );
+  const selected = sessions[0] ?? null;
+  const session = selected?.session ?? null;
+  const expected = calendar.sessions.find(
+    (candidate) => candidate.marketDate === exchangeDate,
+  );
+  if (!expected) {
+    return { calendar, session, status: session ? "holiday" : "unknown" };
+  }
+  if (
+    Date.parse(expected.closeAt) <= cutoff &&
+    session?.marketDate !== expected.marketDate
+  ) {
+    return { calendar, session, status: "missing_session" };
+  }
+  return { calendar, session, status: "session" };
+}
+
+function validCalendarEvidence(
+  evidence: HistoricalCalendarEvidence | undefined,
+): boolean {
+  if (!evidence) return true;
+  if (
+    evidence.version !== 2 ||
+    !Array.isArray(evidence.calendars) ||
+    evidence.calendars.length > HISTORICAL_CALENDAR_LIMITS.maxCalendars
+  ) {
+    return false;
+  }
+  let sessionCount = 0;
+  const calendarsByIdentity = new Map<
+    string,
+    HistoricalExchangeCalendarEvidence[]
+  >();
+  for (const calendar of evidence.calendars) {
+    if (
+      typeof calendar !== "object" ||
+      calendar === null ||
+      typeof calendar.mic !== "string" ||
+      calendar.mic.length === 0 ||
+      typeof calendar.calendarCode !== "string" ||
+      calendar.calendarCode.length === 0 ||
+      !validTimezone(calendar.timezone) ||
+      typeof calendar.source !== "string" ||
+      calendar.source.length === 0 ||
+      typeof calendar.revision !== "string" ||
+      calendar.revision.length === 0 ||
+      (calendar.exchangeId !== undefined &&
+        calendar.exchangeId !== null &&
+        (typeof calendar.exchangeId !== "string" ||
+          calendar.exchangeId.length === 0)) ||
+      !Array.isArray(calendar.sessions) ||
+      !isValidDate(calendar.validFrom) ||
+      !isValidDate(calendar.validTo) ||
+      calendar.validTo < calendar.validFrom
+    ) {
+      return false;
+    }
+    const identity = `${calendar.exchangeId ?? ""}/${calendar.mic}`;
+    const calendars = calendarsByIdentity.get(identity) ?? [];
+    calendars.push(calendar);
+    calendarsByIdentity.set(identity, calendars);
+    const sessionIds = new Set<string>();
+    for (const session of calendar.sessions) {
+      sessionCount += 1;
+      if (
+        typeof session !== "object" ||
+        session === null ||
+        typeof session.sessionId !== "string" ||
+        session.sessionId.length === 0 ||
+        sessionIds.has(session.sessionId) ||
+        !isValidDate(session.marketDate) ||
+        session.marketDate < calendar.validFrom ||
+        session.marketDate > calendar.validTo ||
+        !validInstant(session.openAt) ||
+        !validInstant(session.closeAt) ||
+        Date.parse(session.openAt) >= Date.parse(session.closeAt)
+      ) {
+        return false;
+      }
+      sessionIds.add(session.sessionId);
+    }
+  }
+  for (const calendars of calendarsByIdentity.values()) {
+    calendars.sort(
+      (left, right) =>
+        left.validFrom.localeCompare(right.validFrom) ||
+        left.validTo.localeCompare(right.validTo),
+    );
+    for (let index = 1; index < calendars.length; index += 1) {
+      if (calendars[index - 1]!.validTo >= calendars[index]!.validFrom) {
+        return false;
+      }
+    }
+  }
+  if (sessionCount > HISTORICAL_CALENDAR_LIMITS.maxSessions) return false;
+  try {
+    return (
+      JSON.stringify(evidence).length <=
+      HISTORICAL_CALENDAR_LIMITS.maxEvidenceBytes
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -360,19 +637,32 @@ function priceSelection(
   security: HistoricalSecurityInput,
   date: string,
   input: HistoricalSnapshotBuildInput,
+  selectorDate = date,
 ): PriceSelection {
+  const cutoff = input.portfolioTimezone
+    ? portfolioCutoff(date, input.portfolioTimezone)
+    : null;
+  const observations = security.priceObservations.filter((observation) => {
+    if (observation.adjustmentState !== "raw") return false;
+    if (observation.marketDate > selectorDate) return false;
+    if (!input.portfolioTimezone) return true;
+    if (cutoff === null) return false;
+    const observedAt = Date.parse(observation.observationAt);
+    return Number.isFinite(observedAt) && observedAt <= cutoff;
+  });
   return selectPriceObservation({
-    asOf: date,
+    asOf: selectorDate,
     targetKey: security.mappingId ?? security.portfolioSecurityId,
     userId: input.userId,
-    portfolioTimezone: input.portfolioTimezone,
+    // Availability is filtered against the requested portfolio-local cutoff
+    // above. Passing no timezone here avoids applying the selected exchange
+    // session date as a second, narrower cutoff.
+    portfolioTimezone: cutoff === null ? input.portfolioTimezone : undefined,
     scope: input.priceScope,
     currencyCode: security.currencyCode,
     // Ledger replay already applies explicit splits, so adjusted closes would
     // double-adjust historical value. Snapshot valuation uses raw closes only.
-    observations: security.priceObservations.filter(
-      (observation) => observation.adjustmentState === "raw",
-    ),
+    observations,
     overrides: input.overrides,
     maxPriorCalendarDays: input.maxPriorCalendarDays,
   });
@@ -412,6 +702,10 @@ function holdingAt(
       basisDecimal: null,
       priceObservationId: null,
       fxObservationId: null,
+      calendarSessionId: null,
+      calendarSessionDate: null,
+      calendarSessionCloseAt: null,
+      calendarEvidenceVersion: input.calendarEvidence?.version ?? null,
       dailyMovementDecimal: null,
       completeness: "incomplete",
       ledgerValid: false,
@@ -434,6 +728,10 @@ function holdingAt(
       basisDecimal: projection.basis,
       priceObservationId: null,
       fxObservationId: null,
+      calendarSessionId: null,
+      calendarSessionDate: null,
+      calendarSessionCloseAt: null,
+      calendarEvidenceVersion: input.calendarEvidence?.version ?? null,
       dailyMovementDecimal: null,
       completeness: "complete",
       ledgerValid: true,
@@ -447,7 +745,9 @@ function holdingAt(
       calendarStatus: "unknown",
     };
   }
-  const price = priceSelection(security, date, input);
+  const calendar = sessionAtCutoff(security, date, input);
+  const sessionDate = calendar?.session?.marketDate ?? date;
+  const price = priceSelection(security, date, input, sessionDate);
   const fx = fxSelection(security.currencyCode, date, input);
   const fxEvidence = toFxEvidence(fx);
   const calculation = calculateNativeHomeHolding({
@@ -463,14 +763,14 @@ function holdingAt(
       : null;
   const priceUsable = price.selected !== null && price.status !== "stale";
   const fxUsable = fx.selected !== null && fx.status !== "stale";
-  const calendarStatus =
-    security.expectedTradingDates === undefined
-      ? "unknown"
-      : !security.expectedTradingDates.includes(date)
-        ? "holiday"
-        : price.selected !== null && price.selected.marketDate === date
-          ? "session"
-          : "missing_session";
+  let calendarStatus = calendar?.status ?? "unknown";
+  if (
+    calendar?.status === "session" &&
+    calendar.session !== null &&
+    price.selected?.marketDate !== calendar.session.marketDate
+  ) {
+    calendarStatus = "missing_session";
+  }
   const baseValue =
     priceUsable &&
     fxUsable &&
@@ -487,6 +787,10 @@ function holdingAt(
     basisDecimal: projection.basis,
     priceObservationId: priceId(price),
     fxObservationId: fxId(fx),
+    calendarSessionId: calendar?.session?.sessionId ?? null,
+    calendarSessionDate: calendar?.session?.marketDate ?? null,
+    calendarSessionCloseAt: calendar?.session?.closeAt ?? null,
+    calendarEvidenceVersion: input.calendarEvidence?.version ?? null,
     dailyMovementDecimal: null,
     completeness,
     ledgerValid: true,
@@ -611,6 +915,9 @@ export function buildHistoricalSnapshots(
       input.rangeTo >= input.rangeFrom;
     return { ok: false, reason: valid ? "range_too_large" : "invalid_range" };
   }
+  if (!validCalendarEvidence(input.calendarEvidence)) {
+    return { ok: false, reason: "invalid_calendar_evidence" };
+  }
   if (input.securities.length > HISTORICAL_SNAPSHOT_LIMITS.maxSecurities) {
     return { ok: false, reason: "too_many_securities" };
   }
@@ -666,6 +973,13 @@ export function buildHistoricalSnapshots(
           priceMarketDate: holding.priceMarketDate,
           fxMarketDate: holding.fxMarketDate,
           calendarStatus: holding.calendarStatus,
+          exchangeMic:
+            input.securities.find(
+              (security) =>
+                security.portfolioSecurityId === holding.portfolioSecurityId,
+            )?.exchangeMic ?? null,
+          calendarSessionId: holding.calendarSessionId,
+          calendarSessionDate: holding.calendarSessionDate,
         });
         if (holding.nativeValueDecimal !== null) valuedHoldingCount += 1;
         if (holding.baseValueDecimal !== null) convertedHoldingCount += 1;
@@ -746,6 +1060,9 @@ export function buildHistoricalSnapshots(
           priceMarketDate: null,
           fxMarketDate: account.fxMarketDate,
           calendarStatus: "unknown",
+          exchangeMic: null,
+          calendarSessionId: null,
+          calendarSessionDate: null,
         });
         if (account.valueDecimal !== null) convertedCashAccountCount += 1;
         if (account.valueDecimal === null) {

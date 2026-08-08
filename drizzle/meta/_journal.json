@@ -162,6 +162,13 @@
       "when": 1785817474352,
       "tag": "0022_lucky_blue_marvel",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1786226511105,
+      "tag": "0023_brave_mockingbird",
+      "breakpoints": true
     }
   ]
 }

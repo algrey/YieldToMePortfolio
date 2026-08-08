@@ -24,8 +24,10 @@ async function database(): Promise<DatabaseSync> {
       ('user-b', 'active', 'b@example.com', 'Australia/Sydney', '2026-08-01', '2026-08-01', 1);
     INSERT INTO portfolios (id, user_id, code, name, base_currency_code, timezone, accounting_method, history_complete_from, status, created_at, updated_at, version)
       VALUES ('portfolio-a', 'user-a', 'A', 'Alice', 'AUD', 'Australia/Sydney', 'fifo', '2026-08-01', 'active', '2026-08-01', '2026-08-01', 1);
-    INSERT INTO securities (id, asset_type, primary_currency_code, canonical_name, status, created_at, updated_at)
-      VALUES ('security-a', 'equity', 'AUD', 'Example', 'active', '2026-08-01', '2026-08-01');
+    INSERT INTO exchanges (id, mic, name, country_code, timezone, default_currency_code, calendar_code, is_active)
+      VALUES ('exchange-a', 'XASX', 'Fixture exchange', 'AU', 'Australia/Sydney', 'AUD', 'fixture', 1);
+    INSERT INTO securities (id, asset_type, exchange_id, primary_currency_code, canonical_name, status, created_at, updated_at)
+      VALUES ('security-a', 'equity', 'exchange-a', 'AUD', 'Example', 'active', '2026-08-01', '2026-08-01');
     INSERT INTO market_data_providers (id, code, name, status, capabilities_json, rate_limit_json)
       VALUES ('provider-a', 'fixture', 'Fixture', 'enabled', '{}', '{}');
     INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
@@ -43,18 +45,40 @@ async function database(): Promise<DatabaseSync> {
   return db;
 }
 
+function calendarEvidence(dates: readonly string[], exchangeId = "exchange-a") {
+  return {
+    version: 2 as const,
+    calendars: [
+      {
+        exchangeId,
+        mic: "XASX",
+        calendarCode: "fixture",
+        timezone: "Australia/Sydney",
+        validFrom: "2026-01-01",
+        validTo: "2026-12-31",
+        source: "fixture",
+        revision: "2026-08-01",
+        sessions: dates.map((marketDate) => ({
+          sessionId: `XASX-${marketDate}`,
+          marketDate,
+          openAt: `${marketDate}T00:00:00Z`,
+          closeAt: `${marketDate}T06:00:00Z`,
+        })),
+      },
+    ],
+  };
+}
+
 test("CALC-002 rebuild is owner-scoped, bounded, resumable, and only completed runs publish chart points", async () => {
   const db = await database();
   const sql = createSqliteSqlClient(db);
   const repository = createHistoricalSnapshotRepository(sql, {
     maxHoldingRowsPerChunk: 1,
-    expectedTradingDatesBySecurity: { "holding-a": ["2026-08-01"] },
+    calendarEvidence: calendarEvidence(["2026-08-01"]),
   });
   const retryRepository = createHistoricalSnapshotRepository(sql, {
     maxHoldingRowsPerChunk: 1,
-    expectedTradingDatesBySecurity: {
-      "holding-a": ["2026-08-01", "2026-08-02"],
-    },
+    calendarEvidence: calendarEvidence(["2026-08-01", "2026-08-02"]),
   });
   const run = await repository.request("user-a", {
     id: "run-a",
@@ -135,7 +159,7 @@ test("CALC-002 rebuild is owner-scoped, bounded, resumable, and only completed r
   assert.ok(series);
   assert.deepEqual(
     series?.points.map((point) => point.totalValueDecimal),
-    ["100", "110"],
+    ["100", "100"],
   );
   assert.equal(
     (
@@ -145,7 +169,7 @@ test("CALC-002 rebuild is owner-scoped, bounded, resumable, and only completed r
     )[0]?.calendarStatus,
     "holiday",
   );
-  assert.match(run.calendarEvidenceJson ?? "", /holding-a/);
+  assert.match(run.calendarEvidenceJson ?? "", /XASX-2026-08-01/);
   db.exec(`
     INSERT INTO price_observations (id, provider_id, access_scope, scope_user_id, scope_key, mapping_id, security_id, interval, observation_at, market_date, market_timezone, currency_code, close_decimal, adjustment_state, quality, ingested_at)
       VALUES ('price-correction-after-cutoff', 'provider-a', 'deployment', NULL, 'deployment', 'mapping-a', 'security-a', 'eod', '2026-08-02T12:00:00Z', '2026-08-02', 'UTC', 'AUD', '999', 'raw', 'corrected', '2026-08-04T00:00:00Z');
@@ -159,7 +183,7 @@ test("CALC-002 rebuild is owner-scoped, bounded, resumable, and only completed r
     reason: "same-version-correction",
     ledgerHighWaterStart: "trade-a",
     marketDataCutoff: "2026-08-03T00:00:00Z",
-    calendarEvidence: { "holding-a": ["2026-08-01"] },
+    calendarEvidence: calendarEvidence(["2026-08-01"]),
     idempotencyKey: "history-7-replacement",
     now: "2026-08-05T00:00:00Z",
   });
@@ -206,7 +230,7 @@ test("CALC-002 rebuild is owner-scoped, bounded, resumable, and only completed r
         7,
       )
     )?.points.map((point) => point.totalValueDecimal),
-    ["100", "110"],
+    ["100", "100"],
   );
   const replacementComplete = await repository.rebuild("user-a", {
     portfolioId: "portfolio-a",
@@ -235,7 +259,7 @@ test("CALC-002 rebuild is owner-scoped, bounded, resumable, and only completed r
         7,
       )
     )?.points.map((point) => point.totalValueDecimal),
-    ["100", "110"],
+    ["100", "100"],
   );
   assert.equal(
     await repository.invalidateRange(
@@ -316,6 +340,72 @@ test("CALC-002 excludes another owner's scoped FX observations", async () => {
   assert.deepEqual(series?.points[0]?.coverage.excludedCashAccountIds, [
     "cash-usd",
   ]);
+});
+
+test("CALC-002 loads a following exchange market date completed before portfolio EOD", async () => {
+  const db = await database();
+  db.exec(
+    `UPDATE portfolios SET timezone = 'America/Los_Angeles' WHERE id = 'portfolio-a';
+     INSERT INTO price_observations (id, provider_id, access_scope, scope_user_id, scope_key, mapping_id, security_id, interval, observation_at, market_date, market_timezone, currency_code, close_decimal, adjustment_state, quality, ingested_at)
+       VALUES ('price-following-market-date', 'provider-a', 'deployment', NULL, 'deployment', 'mapping-a', 'security-a', 'eod', '2026-08-02T06:00:00Z', '2026-08-02', 'Australia/Sydney', 'AUD', '12', 'raw', 'observed', '2026-08-02T07:00:00Z');`,
+  );
+  const repository = createHistoricalSnapshotRepository(
+    createSqliteSqlClient(db),
+  );
+  const run = await repository.request("user-a", {
+    id: "run-following-market-date",
+    portfolioId: "portfolio-a",
+    rangeFrom: "2026-08-01",
+    rangeTo: "2026-08-01",
+    calculationVersion: 16,
+    reason: "following-market-date",
+    ledgerHighWaterStart: "trade-a",
+    marketDataCutoff: "2026-08-03T00:00:00Z",
+    calendarEvidence: calendarEvidence(["2026-08-01", "2026-08-02"]),
+    idempotencyKey: "following-market-date",
+    now: "2026-08-03T00:00:00Z",
+  });
+  assert.equal(
+    (
+      await repository.claim(
+        "user-a",
+        "portfolio-a",
+        run.id,
+        "worker-following",
+        "2026-08-03T01:00:00Z",
+        "2026-08-03T00:01:00Z",
+      )
+    ).ok,
+    true,
+  );
+  const rebuilt = await repository.rebuild("user-a", {
+    portfolioId: "portfolio-a",
+    calculationRunId: run.id,
+    leaseOwner: "worker-following",
+    currentLedgerHighWater: "trade-a",
+    now: "2026-08-03T00:02:00Z",
+  });
+  assert.equal(rebuilt.ok && rebuilt.status, "completed");
+  const holding = db
+    .prepare(
+      `SELECT base_value_decimal, price_observation_id, calendar_session_date
+       FROM holding_daily_snapshots WHERE calculation_run_id = ?`,
+    )
+    .get(run.id) as
+    | {
+        base_value_decimal: string;
+        price_observation_id: string;
+        calendar_session_date: string;
+      }
+    | undefined;
+  assert.deepEqual(
+    { ...holding },
+    {
+      base_value_decimal: "120",
+      price_observation_id: "price-following-market-date",
+      calendar_session_date: "2026-08-02",
+    },
+  );
 });
 
 test("CALC-002 rejects a fact set over the bounded rebuild budget before loading rows", async () => {
@@ -587,7 +677,7 @@ test("CALC-002 rejects malformed calendar evidence at request and retry boundari
       calculationVersion: 14,
       reason: "calendar-validation",
       ledgerHighWaterStart: "trade-a",
-      calendarEvidence: { "holding-a": ["2026-02-30"] },
+      calendarEvidence: calendarEvidence(["2026-02-30"]),
       idempotencyKey: "invalid-calendar-request",
       now: "2026-08-03T00:00:00Z",
     }),
@@ -602,13 +692,13 @@ test("CALC-002 rejects malformed calendar evidence at request and retry boundari
     calculationVersion: 14,
     reason: "calendar-validation",
     ledgerHighWaterStart: "trade-a",
-    calendarEvidence: { "holding-a": ["2026-08-01"] },
+    calendarEvidence: calendarEvidence(["2026-08-01"]),
     idempotencyKey: "invalid-calendar-retry",
     now: "2026-08-03T00:00:00Z",
   });
   db.prepare(
     "UPDATE calculation_runs SET calendar_evidence_json = ? WHERE id = ?",
-  ).run('{"version":2,"calendars":{}}', run.id);
+  ).run('{"version":3,"calendars":[]}', run.id);
   assert.equal(
     (
       await repository.claim(
@@ -631,5 +721,48 @@ test("CALC-002 rejects malformed calendar evidence at request and retry boundari
       now: "2026-08-03T00:02:00Z",
     }),
     { ok: false, reason: "build-failed" },
+  );
+});
+
+test("CALC-002 bounds canonical calendar evidence before creating a run", async () => {
+  const db = await database();
+  const repository = createHistoricalSnapshotRepository(
+    createSqliteSqlClient(db),
+  );
+  const sessions = Array.from({ length: 50_001 }, (_, index) => ({
+    sessionId: `XASX-${index}`,
+    marketDate: "2026-08-01",
+    openAt: "2026-08-01T00:00:00Z",
+    closeAt: "2026-08-01T06:00:00Z",
+  }));
+  await assert.rejects(
+    repository.request("user-a", {
+      id: "run-calendar-too-large",
+      portfolioId: "portfolio-a",
+      rangeFrom: "2026-08-01",
+      rangeTo: "2026-08-01",
+      calculationVersion: 15,
+      reason: "calendar-boundary",
+      ledgerHighWaterStart: "trade-a",
+      calendarEvidence: {
+        version: 2,
+        calendars: [
+          {
+            exchangeId: "exchange-a",
+            mic: "XASX",
+            calendarCode: "fixture",
+            timezone: "Australia/Sydney",
+            validFrom: "2026-01-01",
+            validTo: "2026-12-31",
+            source: "fixture",
+            revision: "2026-08-01",
+            sessions,
+          },
+        ],
+      },
+      idempotencyKey: "calendar-too-large",
+      now: "2026-08-03T00:00:00Z",
+    }),
+    /invalid_calendar_evidence/,
   );
 });
