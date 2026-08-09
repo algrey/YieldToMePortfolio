@@ -116,6 +116,10 @@ Acceptance:
 
 - Disabled users cannot access data even if an upstream session remains valid.
 - Deletion is a deliberate audited job with a retention policy and export option.
+- Disable and deletion-request mutations revoke internal identities immediately; repeated requests are idempotent.
+- The export manifest covers every owned ledger, import, projection, and user-scoped market observation row, with shared and operational data explicitly classified and no other owner included.
+- Export capture is D1-first and resumable: bounded chunks are reconciled before a bounded, cursor-checkpointed SHA-256 chain finalization; download pages support cursor and deterministic numbered traversal, and artifacts expire under the explicit `operational-35-days` retention class. Operational counts carry an explicit stable cutoff so later access audits remain attributable without changing finalized evidence.
+- Revoked users may recover only the exact existing lifecycle request/status/export path matched to their verified issuer, subject, request type, and idempotency key; they cannot regain workspace access. OPS-003A does not purge source financial data.
 - The UI does not claim self-service registration or password recovery.
 
 ## Portfolio ledger and cash
@@ -519,6 +523,7 @@ Acceptance:
 - Disabled, deletion-requested, and purged states are distinct.
 - Provider data follows the application retention and deletion policy.
 - Deletion is idempotent, audited, and verified.
+- Lifecycle request records are immutable; OPS-003A records the exact owner-scoped export manifest before any later purge task.
 
 ### QUAL-001 — Accessibility
 

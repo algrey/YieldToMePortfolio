@@ -1074,7 +1074,7 @@ Status: DONE on 2026-08-03.
 
 ### OPS-003A — Offboarding and owned-data export
 
-Status: PENDING.
+Status: DONE (2026-08-10).
 
 - Objective: stop access immediately and produce a complete, owner-scoped export/deletion manifest without deleting data.
 - Dependencies: AUTH-002, OPS-001, IMP-003B, MKT-003B, CALC-002.
@@ -1106,6 +1106,8 @@ Status: PENDING.
 - Tests: disable/session, export completeness/counts, repeated request, cross-user exclusion, redaction.
 - Risks: an incomplete manifest would make later deletion unverifiable.
 - Parallel safe: no; it defines the purge input.
+- Escalation handoff (2026-08-09): Four normal-worker implementation/revision passes and independent review resolved whole-export assembly, owner-path coverage, revoked retries, lifecycle-state distinction, checkpoint atomicity, SHA-256 integrity, oversized-row fragmentation, cursor pagination, and migration-trigger justification. Remaining blockers are bounded/resumable final manifest hashing; a stable operational audit high-water; consistent exact-key recovery authorization; complete empty/disabled-account processing and multipart delivery UI; ambiguous-network idempotency; unexpected-failure job/audit semantics; representative financial/API/UI/security fixtures; and a synthetic D1 export drill. The configured `escalation-worker` accepted this handoff after its runtime configuration was restored.
+- Completion note (2026-08-10): Implemented immediate disable/session revocation, immutable and idempotent lifecycle requests, exact-key revoked-principal recovery, and owner-scoped export jobs with bounded capture, oversized-row fragmentation, guarded resumable checkpoints, SHA-256 manifests, 35-day expiry, access auditing, and server-cursor multipart delivery. The active, empty, disabled, and deletion-pending UI paths automatically advance bounded work and traverse every download part. Representative ledger, import, market, calculation, projection, redaction, mutation-race, failure, authorization, and cross-owner fixtures pass; no purge, new dependency, binding, or Cloudflare product was added. A loopback-enabled Miniflare drill applied the migration chain to synthetic D1 data and completed/traversed the export without mutating source rows. Final independent review accepted the escalated result with no blockers or follow-up work.
 
 ### OPS-003B — Retention and verified deletion
 

@@ -86,6 +86,11 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
   };
   assert.equal(foreignKeysEnabled.foreign_keys, 1);
   assert.deepEqual(tableNames(database), [
+    "account_export_checkpoint_guards",
+    "account_export_chunks",
+    "account_export_jobs",
+    "account_export_manifest",
+    "account_lifecycle_requests",
     "audit_events",
     "calculation_runs",
     "cash_accounts",

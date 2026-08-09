@@ -56,6 +56,8 @@ The orchestrator may inspect the repository and normative specifications broadly
 
 A worker is a task-isolated implementation agent.
 
+Each Worker invocation starts with fresh context containing only the assigned task and context explicitly routed by the Orchestrator; do not reuse conversational context from previous tasks.
+
 A worker:
 
 - implements only the assigned task;
@@ -66,9 +68,21 @@ A worker:
 - does not spawn or delegate to sub-agents unless explicitly instructed by the orchestrator;
 - reports implementation results concisely.
 
+### External workers
+
+A Worker may run through an external agent CLI rather than as a native orchestrator sub-agent.
+
+The same Worker scope, context, verification, escalation, and completion rules apply regardless of runtime.
+
+The orchestrator must provide external workers with the assigned task and minimum required context. External workers must not independently select backlog work or assume orchestrator responsibilities.
+
 ### Reviewer
 
 The reviewer independently verifies the completed task against its acceptance criteria, relevant requirements/specifications, implementation diff, tests, and applicable security, ownership, financial, privacy, and data-integrity rules.
+
+Each Reviewer invocation starts with fresh context and receives only the task, relevant requirements/specifications, implementation diff, and verification evidence required for independent review.
+
+For repeated fix-review cycles, prefer a fresh Reviewer context to reduce anchoring; reuse reviewer context only when the cost of reconstructing the review packet is materially higher.
 
 Prefer diff-focused review and targeted source inspection. Do not broadly re-index the repository.
 
@@ -77,12 +91,38 @@ The reviewer may directly fix defects only when the change is small, local, unam
 Do not use review to redesign architecture, perform unrelated refactoring, add dependencies, broaden scope, or implement speculative improvements.
 
 Classify findings as:
+
 - **Blocking:** required before the task can be considered complete.
 - **Follow-up:** valid work outside the current task scope.
 
 For larger blocking fixes or changes requiring architectural judgment, return the finding to the orchestrator rather than implementing it.
 
 For material non-blocking work, propose a follow-up `TASKS.md` item. Do not create backlog items for trivial style preferences or speculative cleanup.
+
+### Implementation escalation
+
+Use the normal Worker for initial implementation and ordinary review corrections.
+
+Escalate the task to the configured `escalation-worker` when any of these occur:
+
+- the same blocking issue remains after two Worker correction attempts;
+- successive Worker attempts materially repeat the same failed approach;
+- the Reviewer identifies a blocking issue that requires substantially deeper reasoning but remains within the existing task scope;
+- tests continue to fail after two reasonable task-scoped correction attempts.
+
+Before escalating, provide the escalation Worker with:
+
+- the original task and acceptance criteria;
+- the current diff;
+- relevant Reviewer findings;
+- failed verification output;
+- a concise summary of approaches already attempted.
+
+The escalation Worker owns resolving the existing task, not redesigning or expanding it.
+
+After escalation, send the result through the normal Reviewer before marking the task complete.
+
+Do not escalate merely because a task is large, unfamiliar, or has a first-attempt failure.
 
 ## Approved stack
 

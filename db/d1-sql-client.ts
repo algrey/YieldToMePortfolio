@@ -10,14 +10,19 @@ export async function getSqlClient(): Promise<SqlClient> {
   if (!runtimeEnv.DB)
     throw new Error("Cloudflare D1 binding `DB` is unavailable.");
 
+  return createD1SqlClient(runtimeEnv.DB);
+}
+
+/** D1 adapter exported for synthetic Miniflare drills without runtime globals. */
+export function createD1SqlClient(database: D1Database): SqlClient {
   return {
     async all<T extends Record<string, unknown>>(
       sql: string,
       params: readonly unknown[] = [],
     ) {
       return (
-        await runtimeEnv
-          .DB!.prepare(sql)
+        await database
+          .prepare(sql)
           .bind(...params)
           .all<T>()
       ).results;
@@ -27,15 +32,15 @@ export async function getSqlClient(): Promise<SqlClient> {
       params: readonly unknown[] = [],
     ) {
       return (
-        (await runtimeEnv
-          .DB!.prepare(sql)
+        (await database
+          .prepare(sql)
           .bind(...params)
           .first<T>()) ?? undefined
       );
     },
     async run(sql: string, params: readonly unknown[] = []) {
-      const result = await runtimeEnv
-        .DB!.prepare(sql)
+      const result = await database
+        .prepare(sql)
         .bind(...params)
         .run();
       return {
@@ -46,11 +51,9 @@ export async function getSqlClient(): Promise<SqlClient> {
     async batch(
       statements: readonly SqlStatement[],
     ): Promise<SqlBatchResult[]> {
-      const results = await runtimeEnv.DB!.batch(
+      const results = await database.batch(
         statements.map((statement) =>
-          runtimeEnv
-            .DB!.prepare(statement.sql)
-            .bind(...(statement.params ?? [])),
+          database.prepare(statement.sql).bind(...(statement.params ?? [])),
         ),
       );
       return results.map((result) => ({

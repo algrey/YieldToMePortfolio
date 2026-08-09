@@ -96,6 +96,27 @@ export async function getAuthenticatedSqlContext(portfolioId?: string) {
   }
 }
 
+/** Lifecycle retries need verified identity and D1 access without restoring workspace access. */
+export async function getVerifiedPrincipalSqlContext() {
+  const principal = await readPrincipal();
+  if (!principal.ok) return principal;
+  try {
+    const { getSqlClient } = await import("../db/d1-sql-client");
+    return {
+      ok: true as const,
+      client: await getSqlClient(),
+      principal: principal.principal,
+      requestId: principal.requestId,
+    };
+  } catch {
+    return {
+      ok: false as const,
+      status: 503 as const,
+      message: "Account lifecycle data is temporarily unavailable.",
+    };
+  }
+}
+
 export async function createPortfolioAction(value: unknown) {
   const validation = validatePortfolioActionInput(value);
   if (!validation.ok)

@@ -234,7 +234,7 @@ External provider-use decisions are handled separately by the operator. The prod
 - Dependency lock and review.
 - Cross-tenant test matrix for every repository/route.
 - Structured redacted audit and operational logs.
-- Account disable/delete and provider purge paths.
+- Account disable/delete and provider purge paths; OPS-003A currently stops after immediate identity revocation and immutable owner-scoped export/deletion manifests, with no financial-data purge.
 
 ## 8. Testing strategy
 

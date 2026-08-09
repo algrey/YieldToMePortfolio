@@ -648,6 +648,51 @@ Append-only:
 
 No raw access tokens, secret values, CSV bytes, or full financial objects.
 
+### `account_lifecycle_requests`
+
+Immutable, owner-scoped records for `disable`, `deletion`, and `export` requests.
+Each row carries the verified actor, owner, request idempotency key, export
+option, bounded job reference, and creation timestamps. Final exact row/object
+counts and the SHA-256 chain manifest digest live on the export job and manifest,
+not on the immutable intent row. Export jobs persist resumable cursors, expiry, manifests,
+and bounded chunks; no whole export is stored in a single D1 value or returned
+in one response. A unique owner/type/key constraint makes retries deterministic;
+database triggers reject request updates and deletes. Export classification
+explicitly includes ledger, normalized import evidence, projections, and
+user-scoped price, FX, refresh, and verified mapping observations while
+classifying shared reference and mutable export-control tables with explicit
+retention. Original CSV bytes and provider payloads are not stored.
+
+`account_export_jobs`, `account_export_manifest`, and `account_export_chunks`
+are bounded, owner-linked operational artifacts. Jobs persist before the
+request succeeds, advance deterministic table/row cursors, reconcile source
+counts/digests before completion, then advance a persisted finalization
+chunk cursor and SHA-256 accumulator over at most 100 chunk records per
+checkpoint. Oversized rows persist at most four fragments in one checkpoint
+and resume from `capture_fragment_offset`. Downloads expose cursor pages and
+deterministic numbered parts without assembling the export in Worker memory until the
+35-day `operational-35-days` artifact expiry. These artifacts are retained as later purge inputs;
+OPS-003A never removes source financial rows.
+Process/download audit access is separately represented as the operational
+`audit_events.process_download` manifest input and is excluded from the normal
+financial snapshot cutoff, so access logging cannot make reconciliation loop.
+Its manifest row stores the exact audit-rowid high-water in `cutoff_cursor`;
+access audits written after finalization remain attributable but do not change
+the frozen count/digest supplied to OPS-003B. Other operational rows record the
+export-job version used as their cutoff.
+
+Temporary artifacts remain in D1, which Cloudflare documents as AES-256-GCM
+encrypted at rest and TLS encrypted in transit; downloaded pages rely on HTTPS.
+No external long-term export store or additional binding/product is introduced.
+<https://developers.cloudflare.com/d1/reference/data-security/>
+
+The append-only lifecycle triggers are intentionally appended to the generated
+Drizzle migration because the schema DSL cannot express immutable intent. The
+same still-uncommitted task migration was regenerated as the bounded
+finalization fields were added, then its trigger statements were re-appended;
+the generated schema and trigger statements are applied and tested together;
+the trigger source is never hidden in runtime setup.
+
 ## 10. Deletion behavior
 
 Default foreign-key actions:

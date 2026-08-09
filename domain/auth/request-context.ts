@@ -8,6 +8,7 @@ import {
   createOwnedPortfolioRepository,
   type OwnedPortfolioRecord,
 } from "../../db/repositories/owned-portfolios.ts";
+import { createIdentityRepository } from "../../db/repositories/identity.ts";
 import type { SqlClient } from "../../db/repositories/sql-client.ts";
 
 export type AuthenticatedRequestContext = {
@@ -17,7 +18,12 @@ export type AuthenticatedRequestContext = {
 
 export type RequestContextResult =
   | { ok: true; context: AuthenticatedRequestContext }
-  | { ok: false; reason: "identity" | "portfolio-not-found" };
+  | { ok: false; reason: "identity" | "portfolio-not-found" }
+  | {
+      ok: false;
+      reason: "lifecycle";
+      lifecycle: "disabled" | "deletion_pending";
+    };
 
 export async function resolveAuthenticatedRequestContext(
   client: SqlClient,
@@ -30,6 +36,23 @@ export async function resolveAuthenticatedRequestContext(
     options,
   ).resolve(principal);
   if (!identity.ok) {
+    if (
+      identity.reason === "user-not-active" ||
+      identity.reason === "identity-revoked"
+    ) {
+      const linked = await createIdentityRepository(client).findAccessIdentity(
+        principal.issuer,
+        principal.subject,
+      );
+      return {
+        ok: false,
+        reason: "lifecycle",
+        lifecycle:
+          linked?.userStatus === "deletion_pending"
+            ? "deletion_pending"
+            : "disabled",
+      };
+    }
     return { ok: false, reason: "identity" };
   }
 

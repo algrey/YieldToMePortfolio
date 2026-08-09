@@ -18,6 +18,8 @@ import {
 } from "../quote-contract";
 import type { PortfolioInspection } from "../../db/repositories/portfolio-inspection";
 import { BrandMark } from "./brand-mark";
+import { AccountLifecycleRecovery } from "./account-lifecycle-recovery";
+import { AccountLifecycleControls } from "./account-lifecycle-controls";
 import { OwnedPortfolioDetails } from "./portfolio-details";
 import { ServiceWorkerRegistration } from "./service-worker-registration";
 import { subtractCalendarMonths } from "../overview-range";
@@ -48,6 +50,7 @@ export type OwnedWorkspace = {
   holdingCurrencyView?: "native" | "home";
   settingsVersion?: number;
   message?: string;
+  lifecycle?: "disabled" | "deletion_pending";
   activePortfolio: {
     id: string;
     name: string;
@@ -730,21 +733,32 @@ function OwnedWorkspaceScreen({
 }) {
   if (workspace.status === "unavailable") {
     return (
-      <section className="empty-state" aria-labelledby="workspace-error-title">
-        <p className="eyebrow">Private workspace</p>
-        <h1 id="workspace-error-title">Portfolio data unavailable</h1>
-        <p>{workspace.message ?? "Try again shortly."}</p>
-      </section>
+      <>
+        <section
+          className="empty-state"
+          aria-labelledby="workspace-error-title"
+        >
+          <p className="eyebrow">Private workspace</p>
+          <h1 id="workspace-error-title">Portfolio data unavailable</h1>
+          <p>{workspace.message ?? "Try again shortly."}</p>
+        </section>
+        {workspace.lifecycle ? (
+          <AccountLifecycleRecovery lifecycle={workspace.lifecycle} />
+        ) : null}
+      </>
     );
   }
 
   if (workspace.status === "empty" || workspace.activePortfolio === null) {
     return (
-      <EmptyState
-        title="No portfolios yet"
-        message="Create a portfolio to begin tracking holdings and history."
-        showAction={false}
-      />
+      <>
+        <EmptyState
+          title="No portfolios yet"
+          message="Create a portfolio to begin tracking holdings and history."
+          showAction={false}
+        />
+        <AccountLifecycleControls />
+      </>
     );
   }
 

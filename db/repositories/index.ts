@@ -81,6 +81,21 @@ export type {
   AuditResult,
 } from "./audit.ts";
 export {
+  ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS,
+  ACCOUNT_EXPORT_LIMITS,
+  ACCOUNT_EXPORT_JOB_ID_PATTERN,
+  createAccountLifecycleRepository,
+  isD1ReservedTable,
+  type AccountExportCursor,
+  type AccountExportJob,
+  type AccountExportManifestItem,
+  type AccountLifecycleRequest,
+  type AccountLifecycleRequestInput,
+  type AccountLifecycleRequestType,
+  type ExportRetentionClass,
+  type ExportTableClassification,
+} from "./account-lifecycle.ts";
+export {
   buildLedgerPostingStatements,
   createOwnedLedgerRepository,
   LEDGER_INVENTORY_LIMITS,

@@ -1825,6 +1825,250 @@ export const auditEvents = sqliteTable(
   ],
 );
 
+export const accountLifecycleRequests = sqliteTable(
+  "account_lifecycle_requests",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    actorUserId: text("actor_user_id"),
+    requestType: text("request_type").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    status: text("status").notNull().default("completed"),
+    includeExport: integer("include_export", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    exportJobId: text("export_job_id"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "account_lifecycle_requests_user_id_users_id_fk",
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "account_lifecycle_requests_actor_user_id_users_id_fk",
+      columns: [table.actorUserId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    check(
+      "account_lifecycle_requests_type_check",
+      sql`${table.requestType} IN ('disable', 'deletion', 'export')`,
+    ),
+    check(
+      "account_lifecycle_requests_status_check",
+      sql`${table.status} IN ('completed')`,
+    ),
+    check(
+      "account_lifecycle_requests_include_export_check",
+      sql`${table.includeExport} IN (0, 1)`,
+    ),
+    uniqueIndex("account_lifecycle_requests_owner_type_key_unique").on(
+      table.userId,
+      table.requestType,
+      table.idempotencyKey,
+    ),
+    uniqueIndex("account_lifecycle_requests_id_owner_unique").on(
+      table.id,
+      table.userId,
+    ),
+    index("account_lifecycle_requests_owner_type_created_idx").on(
+      table.userId,
+      table.requestType,
+      table.createdAt,
+    ),
+  ],
+);
+
+export const accountExportJobs = sqliteTable(
+  "account_export_jobs",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    lifecycleRequestId: text("lifecycle_request_id").notNull(),
+    phase: text("phase").notNull().default("capture"),
+    status: text("status").notNull().default("queued"),
+    tableIndex: integer("table_index").notNull().default(0),
+    rowCursor: integer("row_cursor").notNull().default(0),
+    reconcileTableIndex: integer("reconcile_table_index").notNull().default(0),
+    reconcileRowCursor: integer("reconcile_row_cursor").notNull().default(0),
+    reconcileDigest: text("reconcile_digest").notNull().default("0"),
+    reconcileRowCount: integer("reconcile_row_count").notNull().default(0),
+    captureFragmentOffset: integer("capture_fragment_offset")
+      .notNull()
+      .default(0),
+    finalizeTableName: text("finalize_table_name").notNull().default(""),
+    finalizeChunkIndex: integer("finalize_chunk_index").notNull().default(-1),
+    finalizeDigest: text("finalize_digest").notNull().default("0"),
+    operationalAuditHighWater: integer("operational_audit_high_water")
+      .notNull()
+      .default(0),
+    rowCount: integer("row_count").notNull().default(0),
+    objectCount: integer("object_count").notNull().default(0),
+    version: integer("version").notNull().default(1),
+    manifestDigest: text("manifest_digest"),
+    expiresAt: text("expires_at").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "account_export_jobs_user_id_users_id_fk",
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "account_export_jobs_request_owner_fk",
+      columns: [table.lifecycleRequestId, table.userId],
+      foreignColumns: [
+        accountLifecycleRequests.id,
+        accountLifecycleRequests.userId,
+      ],
+    }).onDelete("restrict"),
+    check(
+      "account_export_jobs_phase_check",
+      sql`${table.phase} IN ('capture', 'reconcile', 'finalize')`,
+    ),
+    check(
+      "account_export_jobs_status_check",
+      sql`${table.status} IN ('queued', 'running', 'completed', 'failed', 'expired')`,
+    ),
+    check(
+      "account_export_jobs_cursor_check",
+      sql`${table.tableIndex} >= 0 AND ${table.rowCursor} >= 0`,
+    ),
+    check(
+      "account_export_jobs_reconcile_cursor_check",
+      sql`${table.reconcileTableIndex} >= 0 AND ${table.reconcileRowCursor} >= 0`,
+    ),
+    check(
+      "account_export_jobs_count_check",
+      sql`${table.rowCount} >= 0 AND ${table.objectCount} >= 0 AND ${table.reconcileRowCount} >= 0 AND ${table.captureFragmentOffset} >= 0 AND ${table.finalizeChunkIndex} >= -1 AND ${table.operationalAuditHighWater} >= 0`,
+    ),
+    uniqueIndex("account_export_jobs_request_unique").on(
+      table.lifecycleRequestId,
+    ),
+    uniqueIndex("account_export_jobs_id_owner_unique").on(
+      table.id,
+      table.userId,
+    ),
+    index("account_export_jobs_owner_status_idx").on(
+      table.userId,
+      table.status,
+      table.updatedAt,
+    ),
+  ],
+);
+
+export const accountExportCheckpointGuards = sqliteTable(
+  "account_export_checkpoint_guards",
+  {
+    id: text("id").primaryKey(),
+    exportJobId: text("export_job_id").notNull(),
+    userId: text("user_id").notNull(),
+    expectedVersion: integer("expected_version").notNull(),
+    valid: integer("valid").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "account_export_checkpoint_guards_job_owner_fk",
+      columns: [table.exportJobId, table.userId],
+      foreignColumns: [accountExportJobs.id, accountExportJobs.userId],
+    }).onDelete("restrict"),
+    check(
+      "account_export_checkpoint_guards_valid_check",
+      sql`${table.valid} = 1`,
+    ),
+    index("account_export_checkpoint_guards_owner_job_idx").on(
+      table.userId,
+      table.exportJobId,
+    ),
+  ],
+);
+
+export const accountExportManifest = sqliteTable(
+  "account_export_manifest",
+  {
+    id: text("id").primaryKey(),
+    exportJobId: text("export_job_id").notNull(),
+    userId: text("user_id").notNull(),
+    tableName: text("table_name").notNull(),
+    classification: text("classification").notNull(),
+    retention: text("retention").notNull(),
+    reason: text("reason").notNull(),
+    sourceRowCount: integer("source_row_count").notNull().default(0),
+    capturedRowCount: integer("captured_row_count").notNull().default(0),
+    objectCount: integer("object_count").notNull().default(0),
+    digest: text("digest").notNull().default("0"),
+    cutoffCursor: text("cutoff_cursor"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "account_export_manifest_job_owner_fk",
+      columns: [table.exportJobId, table.userId],
+      foreignColumns: [accountExportJobs.id, accountExportJobs.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "account_export_manifest_user_fk",
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    uniqueIndex("account_export_manifest_job_table_unique").on(
+      table.exportJobId,
+      table.tableName,
+    ),
+    index("account_export_manifest_owner_job_idx").on(
+      table.userId,
+      table.exportJobId,
+    ),
+  ],
+);
+
+export const accountExportChunks = sqliteTable(
+  "account_export_chunks",
+  {
+    id: text("id").primaryKey(),
+    exportJobId: text("export_job_id").notNull(),
+    userId: text("user_id").notNull(),
+    tableName: text("table_name").notNull(),
+    chunkIndex: integer("chunk_index").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    rowCount: integer("row_count").notNull(),
+    digest: text("digest").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "account_export_chunks_job_owner_fk",
+      columns: [table.exportJobId, table.userId],
+      foreignColumns: [accountExportJobs.id, accountExportJobs.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "account_export_chunks_user_fk",
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    check(
+      "account_export_chunks_index_check",
+      sql`${table.chunkIndex} >= 0 AND ${table.rowCount} BETWEEN 1 AND 8`,
+    ),
+    uniqueIndex("account_export_chunks_job_table_index_unique").on(
+      table.exportJobId,
+      table.tableName,
+      table.chunkIndex,
+    ),
+    index("account_export_chunks_owner_job_idx").on(
+      table.userId,
+      table.exportJobId,
+      table.chunkIndex,
+    ),
+  ],
+);
+
 export const taxLots = sqliteTable(
   "tax_lots",
   {

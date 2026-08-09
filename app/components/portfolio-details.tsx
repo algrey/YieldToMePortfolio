@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { AccountLifecycleControls } from "./account-lifecycle-controls";
 import {
   formatDecimalFixed,
   formatDecimalTrimmed,
@@ -367,6 +368,7 @@ export function OwnedPortfolioDetails({
       </section>
 
       <SettingsPanel inspection={inspection} onOpenSettings={onOpenSettings} />
+      <AccountLifecycleControls />
 
       <section
         className="inspection-panel"

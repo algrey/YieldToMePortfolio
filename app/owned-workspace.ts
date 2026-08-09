@@ -9,7 +9,13 @@ export function createOwnedWorkspace(
   if (!result.ok) {
     return {
       status: "unavailable",
-      message: "Your private workspace is unavailable.",
+      message:
+        result.reason === "lifecycle"
+          ? result.lifecycle === "deletion_pending"
+            ? "Deletion is pending. Use the lifecycle support path to resume the existing export; portfolio details remain unavailable."
+            : "Account access is disabled. Use the lifecycle support path to resume an existing export; portfolio details remain unavailable."
+          : "Your private workspace is unavailable.",
+      lifecycle: result.reason === "lifecycle" ? result.lifecycle : undefined,
       activePortfolio: null,
       portfolios: [],
       quotes: [],
