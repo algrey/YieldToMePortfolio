@@ -15,7 +15,7 @@
   --warning: #e6bd6a;
   --content: 1440px;
   --app-bar: 52px;
-  --tabs: 42px;
+  --tabs: 44px;
   --sans:
     Inter, Geist, -apple-system, BlinkMacSystemFont, "SF Pro Text",
     "Helvetica Neue", Arial, sans-serif;
@@ -386,7 +386,7 @@ dd {
 
 .primary-tabs a {
   min-width: 76px;
-  min-height: 42px;
+  min-height: 44px;
   display: inline-flex;
   flex: 1 0 auto;
   align-items: center;
@@ -2574,6 +2574,17 @@ dd {
 }
 
 @media (max-width: 350px) {
+  .overview-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .overview-kpis dd {
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
   .primary-tabs a {
     min-width: 64px;
     font-size: 0.62rem;
