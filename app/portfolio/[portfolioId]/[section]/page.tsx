@@ -35,6 +35,7 @@ export default async function PortfolioSectionPage({
     const workspace = await loadAuthenticatedWorkspace(portfolioId, {
       includeQuotes: section === "quotes",
       includeOverview: section === "overview",
+      includeHoldings: section === "holdings",
     });
     if (workspace.status === "unavailable") {
       return (

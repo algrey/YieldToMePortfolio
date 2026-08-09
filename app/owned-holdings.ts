@@ -1,0 +1,1206 @@
+import type { SqlClient } from "../db/repositories/sql-client.ts";
+import { createOwnedManualOverrideRepository } from "../db/repositories/market-data.ts";
+import {
+  calculateCashConversion,
+  calculateDailyMovement,
+  calculateNativeHomeHolding,
+  type FxEvidence,
+} from "../domain/calculations/index.ts";
+import {
+  addDecimal,
+  divideDecimal,
+  formatDecimalExact,
+  formatDecimalFixed,
+  formatDecimalTrimmed,
+  isZero,
+  multiplyDecimal,
+  parseDecimal,
+  parseDecimalResult,
+  subtractDecimal,
+} from "../domain/calculations/index.ts";
+import {
+  selectFxObservation,
+  selectPriceObservation,
+  type FxSelection,
+  type PriceSelection,
+} from "../domain/market-data/selection.ts";
+import type {
+  FxObservation,
+  PriceObservation,
+} from "../domain/market-data/contracts.ts";
+import type {
+  OwnedCashSummary,
+  OwnedHoldingRow,
+  OwnedHoldingValue,
+} from "./owned-holdings-contract.ts";
+import type { Tone } from "./prototype-data.ts";
+
+const MAX_HELD = 500;
+const MAX_PROJECTIONS = 500;
+const MAX_OBSERVATIONS = 2_000;
+const MAX_CASH_ACCOUNTS = 100;
+const MAX_CASH_ENTRIES = 10_000;
+const MAX_SELECTION_LOOKBACK_DAYS = 24;
+const OVERRIDE_TARGET_CHUNK = 32;
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
+const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+const DECIMAL = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
+const CURRENCY = /^[A-Z]{3}$/;
+
+function priorDate(value: string): string {
+  const dateValue = new Date(`${value}T00:00:00Z`);
+  dateValue.setUTCDate(dateValue.getUTCDate() - 1);
+  return dateValue.toISOString().slice(0, 10);
+}
+function localDate(now: Date, timezone: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(now);
+    const values = Object.fromEntries(
+      parts.map((part) => [part.type, part.value]),
+    );
+    const result = `${values.year}-${values.month}-${values.day}`;
+    if (!DATE.test(result)) throw new Error("invalid_local_date");
+    return result;
+  } catch {
+    throw new Error("invalid_portfolio_timezone");
+  }
+}
+
+type Row = Record<string, unknown>;
+type Identity = {
+  id: string;
+  securityId: string;
+  symbol: string;
+  name: string;
+  exchange: string;
+  currencyCode: string;
+};
+type Projection = {
+  id: string;
+  portfolioSecurityId: string;
+  quantity: string;
+  nativeBasis: string | null;
+  homeBasis: string | null;
+};
+
+function field(row: Row, key: string): unknown {
+  return row[key];
+}
+function requiredText(row: Row, key: string, pattern?: RegExp): string {
+  const value = field(row, key);
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    (pattern && !pattern.test(value))
+  )
+    throw new Error(`invalid_${key}`);
+  return value;
+}
+function optionalText(row: Row, key: string, pattern?: RegExp): string | null {
+  const value = field(row, key);
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string" || (pattern && !pattern.test(value)))
+    throw new Error(`invalid_${key}`);
+  return value;
+}
+function integer(row: Row, key: string): number {
+  const value = field(row, key);
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throw new Error(`invalid_${key}`);
+  return value;
+}
+function sourceDecimal(
+  value: string | null,
+  key: string,
+  positive = false,
+): string | null {
+  if (value === null) return null;
+  if (!DECIMAL.test(value)) throw new Error(`invalid_${key}`);
+  const parsed = parseDecimal(value);
+  if (positive && isZero(parsed)) throw new Error(`invalid_${key}`);
+  return value;
+}
+function resultDecimal(value: string | null, key: string): string | null {
+  if (value === null) return null;
+  if (!DECIMAL.test(value)) throw new Error(`invalid_${key}`);
+  parseDecimalResult(value);
+  return value;
+}
+function enumValue<T extends string>(
+  value: string,
+  key: string,
+  allowed: readonly T[],
+): T {
+  if (!allowed.includes(value as T)) throw new Error(`invalid_${key}`);
+  return value as T;
+}
+function scope(
+  row: Row,
+): { kind: "deployment"; userId: null } | { kind: "user"; userId: string } {
+  const access = requiredText(row, "access_scope");
+  const scopeUser = optionalText(row, "scope_user_id");
+  const scopeKey = requiredText(row, "scope_key");
+  if (
+    access === "deployment" &&
+    scopeUser === null &&
+    scopeKey === "deployment"
+  )
+    return { kind: "deployment", userId: null };
+  if (access === "user" && scopeUser !== null && scopeKey === scopeUser)
+    return { kind: "user", userId: scopeUser };
+  throw new Error("invalid_observation_scope");
+}
+function available(currencyCode: string, value: string): OwnedHoldingValue {
+  return { status: "available", currencyCode, value, reason: null };
+}
+function unavailable(currencyCode: string, reason: string): OwnedHoldingValue {
+  return { status: "unavailable", currencyCode, value: null, reason };
+}
+function tone(value: string | null): Tone {
+  return value === null || /^0(?:\.0*)?$/.test(value)
+    ? "neutral"
+    : value.startsWith("-")
+      ? "negative"
+      : "positive";
+}
+function money(
+  value: string | null,
+  currencyCode: string,
+  reason = "missing_value",
+): OwnedHoldingValue {
+  return value === null
+    ? unavailable(currencyCode, reason)
+    : available(currencyCode, value);
+}
+function evidence(selection: PriceSelection | FxSelection): FxEvidence | null {
+  const selected = selection.selected;
+  if (!selected) return null;
+  return {
+    rateDecimal:
+      "rateDecimal" in selected ? selected.rateDecimal : selected.closeDecimal,
+    baseCurrencyCode:
+      "baseCurrencyCode" in selected
+        ? selected.baseCurrencyCode
+        : selected.currencyCode,
+    quoteCurrencyCode:
+      "quoteCurrencyCode" in selected
+        ? selected.quoteCurrencyCode
+        : selected.currencyCode,
+    marketDate: selected.marketDate,
+    observedAt:
+      "observedAt" in selected ? selected.observedAt : selected.observationAt,
+    source:
+      selection.explanation.source === "manual"
+        ? "manual"
+        : selection.explanation.source === "identity"
+          ? "identity"
+          : "provider",
+    sourceId: selection.explanation.providerId,
+    selectionState: selection.status as FxEvidence["selectionState"],
+    quality: selected.quality === "identity" ? "identity" : selected.quality,
+    fallback: selection.explanation.fallback,
+    selectionReason: selection.explanation.reason,
+  };
+}
+function choosePrice(
+  input: Parameters<typeof selectPriceObservation>[0],
+  userId: string,
+): Promise<PriceSelection> {
+  return Promise.all([
+    selectPriceObservation(input),
+    selectPriceObservation({ ...input, scope: { kind: "user", userId } }),
+  ]).then(([deployment, user]) =>
+    user.selected &&
+    (!deployment.selected ||
+      user.selected.marketDate >= deployment.selected.marketDate)
+      ? user
+      : deployment,
+  );
+}
+function chooseFx(
+  input: Parameters<typeof selectFxObservation>[0],
+  userId: string,
+): FxSelection {
+  const deployment = selectFxObservation(input);
+  const user = selectFxObservation({
+    ...input,
+    scope: { kind: "user", userId },
+  });
+  return user.selected &&
+    (!deployment.selected ||
+      user.selected.marketDate >= deployment.selected.marketDate)
+    ? user
+    : deployment;
+}
+function unavailableFxSelection(reason: string): FxSelection {
+  return {
+    status: "unavailable",
+    selected: null,
+    display: null,
+    explanation: {
+      reason,
+      source: "none",
+      providerId: null,
+      observationAt: null,
+      marketDate: null,
+      quality: null,
+      fallback: false,
+      overrideId: null,
+    },
+  };
+}
+
+function mapPrice(row: Row): PriceObservation {
+  const accessScope = scope(row);
+  return {
+    kind: "price",
+    providerId: requiredText(row, "provider_id"),
+    providerRevisionId: optionalText(row, "provider_revision_id"),
+    mappingId: requiredText(row, "mapping_id"),
+    securityId: requiredText(row, "security_id"),
+    scope: accessScope,
+    interval: enumValue(requiredText(row, "interval"), "interval", [
+      "eod",
+      "delayed",
+      "intraday",
+    ]),
+    observationAt: requiredText(row, "observation_at", ISO),
+    marketDate: requiredText(row, "market_date", DATE),
+    marketTimezone: requiredText(row, "market_timezone"),
+    currencyCode: requiredText(row, "currency_code", CURRENCY),
+    closeDecimal: sourceDecimal(
+      requiredText(row, "close_decimal"),
+      "close_decimal",
+      true,
+    )!,
+    previousCloseDecimal: sourceDecimal(
+      optionalText(row, "previous_close_decimal"),
+      "previous_close_decimal",
+      true,
+    ),
+    adjustmentState: enumValue(
+      requiredText(row, "adjustment_state"),
+      "adjustment_state",
+      ["raw", "split_adjusted", "total_return_adjusted"],
+    ),
+    adjustmentFactor: null,
+    quality: enumValue(requiredText(row, "quality"), "quality", [
+      "observed",
+      "corrected",
+      "indicative",
+      "stale_candidate",
+    ]),
+    delayedMinutes:
+      field(row, "delayed_minutes") === null
+        ? null
+        : integer(row, "delayed_minutes"),
+    ingestedAt: requiredText(row, "ingested_at", ISO),
+    payloadSha256: optionalText(row, "payload_sha256"),
+  };
+}
+function mapFx(row: Row): FxObservation {
+  const accessScope = scope(row);
+  return {
+    kind: "fx",
+    providerId: requiredText(row, "provider_id"),
+    providerRevisionId: optionalText(row, "provider_revision_id"),
+    scope: accessScope,
+    baseCurrencyCode: requiredText(row, "base_currency_code", CURRENCY),
+    quoteCurrencyCode: requiredText(row, "quote_currency_code", CURRENCY),
+    rateDecimal: sourceDecimal(
+      requiredText(row, "rate_decimal"),
+      "rate_decimal",
+      true,
+    )!,
+    interval: enumValue(requiredText(row, "interval"), "interval", [
+      "eod",
+      "delayed",
+      "intraday",
+    ]),
+    observedAt: requiredText(row, "observed_at", ISO),
+    marketDate: requiredText(row, "market_date", DATE),
+    quality: enumValue(requiredText(row, "quality"), "quality", [
+      "observed",
+      "corrected",
+      "indicative",
+      "stale_candidate",
+    ]),
+    delayedMinutes: null,
+    ingestedAt: requiredText(row, "ingested_at", ISO),
+    payloadSha256: optionalText(row, "payload_sha256"),
+  };
+}
+
+export async function loadOwnedHoldings(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  now = new Date(),
+): Promise<{
+  status: "complete" | "partial" | "empty" | "unavailable";
+  homeCurrencyCode: string;
+  rows: OwnedHoldingRow[];
+  cash: OwnedCashSummary;
+  coverage: {
+    total: number;
+    nonZero: number;
+    zero: number;
+    priced: number;
+    converted: number;
+    basis: number;
+  };
+}> {
+  const nowIso = now.toISOString();
+  const portfolio = await client.get<Row>(
+    `SELECT base_currency_code, timezone FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
+    [portfolioId, userId],
+  );
+  if (!portfolio) throw new Error("not_owned");
+  const timezone = requiredText(portfolio, "timezone");
+  const asOf = localDate(now, timezone);
+  const homeCurrencyCode = requiredText(
+    portfolio,
+    "base_currency_code",
+    CURRENCY,
+  );
+  const heldCountRow = await client.get<Row>(
+    `SELECT count(*) AS count FROM portfolio_securities WHERE user_id = ? AND portfolio_id = ? AND status = 'held'`,
+    [userId, portfolioId],
+  );
+  const heldCount = integer(heldCountRow ?? {}, "count");
+  if (heldCount > MAX_HELD) throw new Error("too_many_holdings");
+  if (heldCount === 0) {
+    const cash = await loadCash(
+      client,
+      userId,
+      portfolioId,
+      homeCurrencyCode,
+      asOf,
+      nowIso,
+      timezone,
+    );
+    return {
+      status:
+        cash.cashSubtotal === null
+          ? "empty"
+          : cash.status === "complete"
+            ? "complete"
+            : "partial",
+      homeCurrencyCode,
+      rows: [],
+      cash,
+      coverage: {
+        total: 0,
+        nonZero: 0,
+        zero: 0,
+        priced: 0,
+        converted: 0,
+        basis: 0,
+      },
+    };
+  }
+  const publicationCount = await client.get<Row>(
+    `SELECT count(*) AS count FROM projection_publications pp WHERE pp.user_id = ? AND pp.portfolio_id = ?`,
+    [userId, portfolioId],
+  );
+  if (integer(publicationCount ?? {}, "count") !== 1)
+    throw new Error("invalid_projection_publication_count");
+  const publication = await client.get<Row>(
+    `SELECT pp.calculation_run_id, pp.calculation_version, pp.ledger_high_water, r.status AS run_status, r.calculation_version AS run_version, r.ledger_high_water_end, p.base_currency_code FROM projection_publications pp JOIN portfolios p ON p.id = pp.portfolio_id AND p.user_id = pp.user_id JOIN calculation_runs r ON r.id = pp.calculation_run_id AND r.user_id = pp.user_id AND r.portfolio_id = pp.portfolio_id WHERE pp.user_id = ? AND pp.portfolio_id = ? LIMIT 1`,
+    [userId, portfolioId],
+  );
+  if (!publication) throw new Error("missing_projection_publication");
+  const runId = requiredText(publication, "calculation_run_id");
+  const version = integer(publication, "calculation_version");
+  if (
+    requiredText(publication, "run_status") !== "completed" ||
+    integer(publication, "run_version") !== version ||
+    requiredText(publication, "ledger_high_water") !==
+      requiredText(publication, "ledger_high_water_end") ||
+    requiredText(publication, "base_currency_code") !== homeCurrencyCode
+  )
+    throw new Error("invalid_projection_publication");
+  const identities = (
+    await client.all<Row>(
+      `SELECT ps.id, ps.security_id, COALESCE(ps.display_symbol, ps.source_symbol) AS symbol, COALESCE(ps.display_name, s.canonical_name, ps.source_name, ps.source_symbol) AS name, COALESCE(e.mic, e.name, ps.source_exchange_alias, 'N/A') AS exchange, s.primary_currency_code FROM portfolio_securities ps JOIN securities s ON s.id = ps.security_id LEFT JOIN exchanges e ON e.id = s.exchange_id WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held' ORDER BY ps.id LIMIT ?`,
+      [userId, portfolioId, MAX_HELD],
+    )
+  ).map((row): Identity => ({
+    id: requiredText(row, "id"),
+    securityId: requiredText(row, "security_id"),
+    symbol: requiredText(row, "symbol"),
+    name: requiredText(row, "name"),
+    exchange: requiredText(row, "exchange"),
+    currencyCode: requiredText(row, "primary_currency_code", CURRENCY),
+  }));
+  if (identities.length !== heldCount)
+    throw new Error("invalid_held_security_count");
+  const projectionRows = await client.all<Row>(
+    `SELECT id, portfolio_security_id, quantity_decimal, native_open_basis_decimal, base_open_basis_decimal, completeness, status, calculation_run_id, calculation_version, last_ledger_high_water FROM holding_projections WHERE user_id = ? AND portfolio_id = ? AND calculation_run_id = ? AND status = 'ready' ORDER BY portfolio_security_id LIMIT ?`,
+    [userId, portfolioId, runId, MAX_PROJECTIONS + 1],
+  );
+  if (
+    projectionRows.length > MAX_PROJECTIONS ||
+    projectionRows.length !== heldCount
+  )
+    throw new Error("invalid_projection_count");
+  const projections = projectionRows.map((row): Projection => {
+    if (
+      requiredText(row, "calculation_run_id") !== runId ||
+      integer(row, "calculation_version") !== version ||
+      requiredText(row, "last_ledger_high_water") !==
+        requiredText(publication, "ledger_high_water") ||
+      !["complete", "partial", "incomplete"].includes(
+        requiredText(row, "completeness"),
+      )
+    )
+      throw new Error("invalid_projection_row");
+    return {
+      id: requiredText(row, "id"),
+      portfolioSecurityId: requiredText(row, "portfolio_security_id"),
+      quantity: resultDecimal(
+        requiredText(row, "quantity_decimal"),
+        "quantity_decimal",
+      )!,
+      nativeBasis: resultDecimal(
+        optionalText(row, "native_open_basis_decimal"),
+        "native_open_basis_decimal",
+      ),
+      homeBasis: resultDecimal(
+        optionalText(row, "base_open_basis_decimal"),
+        "base_open_basis_decimal",
+      ),
+    };
+  });
+  const ids = new Set(identities.map((row) => row.id));
+  const projectionIds = new Set(
+    projections.map((row) => row.portfolioSecurityId),
+  );
+  if (
+    projectionIds.size !== projections.length ||
+    projections.some((row) => !ids.has(row.portfolioSecurityId))
+  )
+    throw new Error("projection_identity_mismatch");
+  const priceCountRow = await client.get<Row>(
+    `SELECT count(*) AS count FROM price_observations po WHERE po.adjustment_state = 'raw' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?)) AND EXISTS (SELECT 1 FROM portfolio_securities ps WHERE ps.security_id = po.security_id AND ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held')`,
+    [asOf, asOf, nowIso, nowIso, userId, userId, portfolioId],
+  );
+  const priceCount = integer(priceCountRow ?? {}, "count");
+  if (priceCount > MAX_OBSERVATIONS)
+    throw new Error("too_many_price_observations");
+  const prices = await client.all<Row>(
+    `SELECT po.* FROM price_observations po WHERE po.adjustment_state = 'raw' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?)) AND EXISTS (SELECT 1 FROM portfolio_securities ps WHERE ps.security_id = po.security_id AND ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held') ORDER BY po.security_id, po.market_date DESC, po.observation_at DESC LIMIT ?`,
+    [
+      asOf,
+      asOf,
+      nowIso,
+      nowIso,
+      userId,
+      userId,
+      portfolioId,
+      MAX_OBSERVATIONS + 1,
+    ],
+  );
+  if (prices.length > MAX_OBSERVATIONS)
+    throw new Error("too_many_price_observations");
+  const priceObservations = prices.map(mapPrice);
+  const cashCurrencies = (
+    await client.all<Row>(
+      `SELECT currency_code FROM cash_accounts WHERE user_id = ? AND portfolio_id = ? AND status = 'active' ORDER BY id LIMIT ?`,
+      [userId, portfolioId, MAX_CASH_ACCOUNTS + 1],
+    )
+  ).map((row) => requiredText(row, "currency_code", CURRENCY));
+  if (cashCurrencies.length > MAX_CASH_ACCOUNTS)
+    throw new Error("too_many_cash_accounts");
+  const relevantCurrencies = [
+    ...new Set([
+      homeCurrencyCode,
+      ...identities.map((identity) => identity.currencyCode),
+      ...cashCurrencies,
+    ]),
+  ];
+  const fxPredicate = `(
+    fx.base_currency_code <> fx.quote_currency_code AND
+    (fx.base_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?)
+      AND fx.quote_currency_code IN (
+        SELECT s.primary_currency_code FROM portfolio_securities ps JOIN securities s ON s.id = ps.security_id WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held'
+        UNION SELECT currency_code FROM cash_accounts WHERE user_id = ? AND portfolio_id = ? AND status = 'active'
+      ))
+    OR
+    (fx.quote_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?)
+      AND fx.base_currency_code IN (
+        SELECT s.primary_currency_code FROM portfolio_securities ps JOIN securities s ON s.id = ps.security_id WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held'
+        UNION SELECT currency_code FROM cash_accounts WHERE user_id = ? AND portfolio_id = ? AND status = 'active'
+      ))
+  )`;
+  const fxPredicateParams = [
+    portfolioId,
+    userId,
+    userId,
+    portfolioId,
+    userId,
+    portfolioId,
+    portfolioId,
+    userId,
+    userId,
+    portfolioId,
+    userId,
+    portfolioId,
+  ];
+  const fxCountRow = await client.get<Row>(
+    `SELECT count(*) AS count FROM fx_rate_observations fx WHERE fx.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND fx.observed_at <= ? AND fx.ingested_at <= ? AND ((fx.access_scope = 'deployment' AND fx.scope_user_id IS NULL) OR (fx.access_scope = 'user' AND fx.scope_user_id = ?)) AND ${fxPredicate}`,
+    [asOf, asOf, nowIso, nowIso, userId, ...fxPredicateParams],
+  );
+  const fxCount = integer(fxCountRow ?? {}, "count");
+  if (fxCount > MAX_OBSERVATIONS) throw new Error("too_many_fx_observations");
+  const fxRows = (
+    await client.all<Row>(
+      `SELECT fx.* FROM fx_rate_observations fx WHERE fx.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND fx.observed_at <= ? AND fx.ingested_at <= ? AND ((fx.access_scope = 'deployment' AND fx.scope_user_id IS NULL) OR (fx.access_scope = 'user' AND fx.scope_user_id = ?)) AND ${fxPredicate} ORDER BY fx.market_date DESC, fx.observed_at DESC LIMIT ?`,
+      [
+        asOf,
+        asOf,
+        nowIso,
+        nowIso,
+        userId,
+        ...fxPredicateParams,
+        MAX_OBSERVATIONS + 1,
+      ],
+    )
+  ).map(mapFx);
+  if (fxRows.length > MAX_OBSERVATIONS)
+    throw new Error("too_many_fx_observations");
+  const overrideRepo = createOwnedManualOverrideRepository(client);
+  const overrideTargets = [
+    ...identities.map((identity) => identity.securityId),
+    ...relevantCurrencies
+      .filter((currency) => currency !== homeCurrencyCode)
+      .map((currency) => `${homeCurrencyCode}/${currency}`),
+  ];
+  const uniqueOverrideTargets = [...new Set(overrideTargets)];
+  const overrideLists: Awaited<
+    ReturnType<typeof overrideRepo.listBoundedRelevant>
+  >[] = [];
+  let overrideRemaining = MAX_OBSERVATIONS;
+  for (
+    let index = 0;
+    index < uniqueOverrideTargets.length;
+    index += OVERRIDE_TARGET_CHUNK
+  ) {
+    const list = await overrideRepo.listBoundedRelevant(
+      userId,
+      uniqueOverrideTargets.slice(index, index + OVERRIDE_TARGET_CHUNK),
+      overrideRemaining + 1,
+    );
+    if (list.length > overrideRemaining) throw new Error("too_many_overrides");
+    overrideLists.push(list);
+    overrideRemaining -= list.length;
+  }
+  const overrides = overrideLists
+    .flat()
+    .filter(
+      (row) =>
+        (row.type === "price" || row.type === "fx_rate") &&
+        (row.portfolioId === null || row.portfolioId === portfolioId),
+    );
+  const projectionBySecurity = new Map(
+    projections.map((row) => [row.portfolioSecurityId, row]),
+  );
+  const tradeRows = await client.all<Row>(
+    `SELECT portfolio_security_id, local_trade_date, trade_at, status FROM transactions WHERE user_id = ? AND portfolio_id = ? AND local_trade_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND status IN ('posted', 'reversed') ORDER BY local_trade_date, trade_at, id LIMIT ?`,
+    [userId, portfolioId, asOf, asOf, MAX_OBSERVATIONS + 1],
+  );
+  if (tradeRows.length > MAX_OBSERVATIONS)
+    throw new Error("too_many_trade_facts");
+  const trades = tradeRows.map((row) => ({
+    securityId: optionalText(row, "portfolio_security_id"),
+    localDate: requiredText(row, "local_trade_date", DATE),
+    tradeAt: requiredText(row, "trade_at", ISO),
+    status: enumValue(requiredText(row, "status"), "transaction_status", [
+      "posted",
+      "reversed",
+    ]),
+  }));
+  const rows = await Promise.all(
+    identities.map(async (identity): Promise<OwnedHoldingRow> => {
+      const projection = projectionBySecurity.get(identity.id);
+      if (!projection) throw new Error("missing_projection_row");
+      const quantity = projection.quantity;
+      const zero = isZero(parseDecimalResult(quantity));
+      const nativeBasis = projection.nativeBasis;
+      const homeBasis = projection.homeBasis;
+      const priceSelection = await choosePrice(
+        {
+          asOf,
+          portfolioTimezone: timezone,
+          now: nowIso,
+          targetKey: identity.securityId,
+          userId,
+          scope: { kind: "deployment", userId: null },
+          currencyCode: identity.currencyCode,
+          observations: priceObservations.filter(
+            (row) => row.securityId === identity.securityId,
+          ),
+          overrides: overrides.filter(
+            (row) =>
+              row.targetKey === identity.securityId &&
+              (row.portfolioId === null || row.portfolioId === portfolioId),
+          ),
+        },
+        userId,
+      );
+      const price = priceSelection.selected?.closeDecimal ?? null;
+      const marketDate = priceSelection.selected?.marketDate ?? asOf;
+      const previousSelection = await choosePrice(
+        {
+          asOf: priorDate(marketDate),
+          portfolioTimezone: timezone,
+          now: nowIso,
+          targetKey: identity.securityId,
+          userId,
+          scope: { kind: "deployment", userId: null },
+          currencyCode: identity.currencyCode,
+          observations: priceObservations.filter(
+            (row) => row.securityId === identity.securityId,
+          ),
+          overrides: overrides.filter(
+            (row) =>
+              row.targetKey === identity.securityId &&
+              (row.portfolioId === null || row.portfolioId === portfolioId),
+          ),
+        },
+        userId,
+      );
+      const previousPrice = previousSelection.selected?.closeDecimal ?? null;
+      const fxSelection = chooseFx(
+        {
+          asOf: marketDate,
+          portfolioTimezone: timezone,
+          baseCurrencyCode: homeCurrencyCode,
+          quoteCurrencyCode: identity.currencyCode,
+          targetKey: `${homeCurrencyCode}/${identity.currencyCode}`,
+          userId,
+          scope: { kind: "deployment", userId: null },
+          observations: fxRows,
+          overrides: overrides.filter(
+            (row) =>
+              row.type === "fx_rate" &&
+              row.targetKey ===
+                `${homeCurrencyCode}/${identity.currencyCode}` &&
+              (row.portfolioId === null || row.portfolioId === portfolioId),
+          ),
+        },
+        userId,
+      );
+      const currentFx = evidence(fxSelection);
+      const previousFxSelection = previousSelection.selected
+        ? chooseFx(
+            {
+              asOf: previousSelection.selected.marketDate,
+              portfolioTimezone: timezone,
+              baseCurrencyCode: homeCurrencyCode,
+              quoteCurrencyCode: identity.currencyCode,
+              targetKey: `${homeCurrencyCode}/${identity.currencyCode}`,
+              userId,
+              scope: { kind: "deployment", userId: null },
+              observations: fxRows,
+              overrides: overrides.filter(
+                (row) =>
+                  row.type === "fx_rate" &&
+                  row.targetKey ===
+                    `${homeCurrencyCode}/${identity.currencyCode}` &&
+                  (row.portfolioId === null || row.portfolioId === portfolioId),
+              ),
+            },
+            userId,
+          )
+        : unavailableFxSelection("previous_price_unavailable");
+      const previousFx = evidence(previousFxSelection);
+      const currentPriceObservation = priceSelection.selected?.observation;
+      const previousPriceObservation = previousSelection.selected?.observation;
+      const priceClassComparable =
+        Boolean(priceSelection.selected && previousSelection.selected) &&
+        priceSelection.selected?.source ===
+          previousSelection.selected?.source &&
+        priceSelection.selected?.providerId ===
+          previousSelection.selected?.providerId &&
+        priceSelection.selected?.interval ===
+          previousSelection.selected?.interval &&
+        priceSelection.selected?.quality ===
+          previousSelection.selected?.quality &&
+        (currentPriceObservation?.adjustmentState ?? "manual") ===
+          (previousPriceObservation?.adjustmentState ?? "manual") &&
+        (currentPriceObservation?.mappingId ?? identity.securityId) ===
+          (previousPriceObservation?.mappingId ?? identity.securityId);
+      const fxClassComparable =
+        Boolean(fxSelection.selected && previousFxSelection.selected) &&
+        fxSelection.selected?.source === previousFxSelection.selected?.source &&
+        fxSelection.selected?.providerId ===
+          previousFxSelection.selected?.providerId &&
+        fxSelection.selected?.interval ===
+          previousFxSelection.selected?.interval &&
+        fxSelection.selected?.quality ===
+          previousFxSelection.selected?.quality &&
+        fxSelection.selected?.baseCurrencyCode ===
+          previousFxSelection.selected?.baseCurrencyCode &&
+        fxSelection.selected?.quoteCurrencyCode ===
+          previousFxSelection.selected?.quoteCurrencyCode;
+      const quantityTiming = (() => {
+        const previousObservedAt = previousSelection.selected?.observationAt;
+        const currentObservedAt = priceSelection.selected?.observationAt;
+        if (
+          !previousSelection.selected ||
+          !priceSelection.selected ||
+          !currentObservedAt ||
+          !previousObservedAt
+        )
+          return "incomplete" as const;
+        return trades.some(
+          (trade) =>
+            trade.securityId === identity.id &&
+            trade.tradeAt > previousObservedAt &&
+            trade.tradeAt <= nowIso,
+        )
+          ? ("incomplete" as const)
+          : ("comparable" as const);
+      })();
+      const holding = zero
+        ? null
+        : calculateNativeHomeHolding({
+            quantityDecimal: quantity,
+            nativePriceDecimal: price,
+            nativeCurrencyCode: identity.currencyCode,
+            homeCurrencyCode,
+            valuationFx: currentFx,
+          });
+      const nativeValue = zero
+        ? "0"
+        : holding?.facts.nativeMarketValue.status === "available"
+          ? holding.facts.nativeMarketValue.valueDecimal
+          : null;
+      const homePrice = zero
+        ? holding?.facts.homePrice.status === "available"
+          ? holding.facts.homePrice.valueDecimal
+          : null
+        : holding?.facts.homePrice.status === "available"
+          ? holding.facts.homePrice.valueDecimal
+          : null;
+      const homeValue = zero
+        ? "0"
+        : holding?.facts.homeMarketValue.status === "available"
+          ? holding.facts.homeMarketValue.valueDecimal
+          : null;
+      const dailyResult = zero
+        ? null
+        : !priceClassComparable || !fxClassComparable
+          ? null
+          : calculateDailyMovement({
+              quantityDecimal: quantity,
+              currentPriceDecimal: price,
+              previousPriceDecimal: previousPrice,
+              nativeCurrencyCode: identity.currencyCode,
+              homeCurrencyCode,
+              currentFx,
+              previousFx,
+              quantityTiming,
+            });
+      const daily = zero
+        ? "0"
+        : dailyResult?.compact.homeMovement.status === "available"
+          ? dailyResult.compact.homeMovement.valueDecimal
+          : null;
+      const dailyPercent = zero
+        ? null
+        : dailyResult?.compact.homePercent.status === "available"
+          ? dailyResult.compact.homePercent.valueDecimal
+          : null;
+      const gain =
+        homeValue !== null && homeBasis !== null
+          ? formatDecimalExact(
+              subtractDecimal(
+                parseDecimalResult(homeValue),
+                parseDecimalResult(homeBasis),
+              ),
+            )
+          : null;
+      const gainPercent =
+        gain !== null &&
+        homeBasis !== null &&
+        !isZero(parseDecimalResult(homeBasis))
+          ? formatDecimalTrimmed(
+              multiplyDecimal(
+                divideDecimal(
+                  parseDecimalResult(gain),
+                  parseDecimalResult(homeBasis),
+                ),
+                parseDecimalResult("100"),
+              ),
+              2,
+            )
+          : null;
+      const average =
+        nativeBasis !== null && !zero
+          ? formatDecimalTrimmed(
+              divideDecimal(
+                parseDecimalResult(nativeBasis),
+                parseDecimalResult(quantity),
+              ),
+              12,
+            )
+          : null;
+      const nativeCurrency = identity.currencyCode;
+      const fxDetail = holding?.explanation.fx.explanation;
+      const priceDetail = priceSelection.selected
+        ? `current price source ${priceSelection.explanation.source} ${priceSelection.explanation.providerId ?? "identity"}, source ID ${priceSelection.selected.observation?.mappingId ?? "not supplied"}, value ${priceSelection.selected.closeDecimal}, market date ${priceSelection.selected.marketDate}, observation ${priceSelection.selected.observationAt ?? "not supplied"}, quality ${priceSelection.selected.quality}, selector ${priceSelection.status}, fallback ${priceSelection.explanation.fallback}, reason ${priceSelection.explanation.reason}`
+        : `price unavailable: ${priceSelection.explanation.reason}`;
+      const previousPriceDetail = previousSelection.selected
+        ? `previous price source ${previousSelection.explanation.source} ${previousSelection.explanation.providerId ?? "identity"}, source ID ${previousSelection.selected.observation?.mappingId ?? "not supplied"}, value ${previousSelection.selected.closeDecimal}, market date ${previousSelection.selected.marketDate}, observation ${previousSelection.selected.observationAt ?? "not supplied"}, quality ${previousSelection.selected.quality}, selector ${previousSelection.status}, fallback ${previousSelection.explanation.fallback}, reason ${previousSelection.explanation.reason}`
+        : `previous price unavailable, selector unavailable, reason ${previousSelection.explanation.reason}, actionability action_required`;
+      const previousFxDetail = previousFx
+        ? `previous FX source ${previousFx.source} ${previousFx.sourceId ?? "identity"}, supplied direction ${previousFx.baseCurrencyCode}/${previousFx.quoteCurrencyCode}, requested native→home ${nativeCurrency}/${homeCurrencyCode}, supplied rate ${previousFx.rateDecimal}, market date ${previousFx.marketDate}, observation ${previousFx.observedAt ?? "not supplied"}, inverted ${homeCurrencyCode === nativeCurrency ? "false" : previousFx.baseCurrencyCode === homeCurrencyCode && previousFx.quoteCurrencyCode === nativeCurrency ? "true" : "false"}, selector ${previousFxSelection.status}, quality ${previousFx.quality ?? "none"}, fallback ${previousFx.fallback}, reason ${previousFx.selectionReason ?? "none"}, actionability ${previousFxSelection.status === "stale" || previousFxSelection.status === "fallback" || previousFxSelection.selected?.source === "manual" || previousFx.quality === "indicative" || previousFx.quality === "corrected" || previousFx.quality === "stale_candidate" ? "explanation" : "none"}`
+        : `previous FX unavailable, supplied rate unavailable, inversion unavailable/not applicable, selector unavailable, reason ${previousFxSelection.explanation.reason}, actionability action_required`;
+      const fxDetailText = fxDetail
+        ? `FX source ${fxDetail.source} ${fxDetail.sourceId ?? "identity"}, supplied ${fxDetail.suppliedBaseCurrencyCode ?? homeCurrencyCode}/${fxDetail.suppliedQuoteCurrencyCode ?? nativeCurrency} ${fxDetail.suppliedRateDecimal ?? "supplied rate unavailable"}, market date ${fxDetail.marketDate ?? marketDate}, observation ${fxDetail.observedAt ?? "not supplied"}, inverted ${fxDetail.inverted}, selector ${fxDetail.selectionState}, quality ${fxDetail.quality ?? "none"}, fallback ${fxDetail.fallback}, reason ${fxDetail.selectionReason ?? "none"}, actionability ${fxDetail.actionability}`
+        : `FX unavailable: supplied rate unavailable, inversion unavailable/not applicable, selector unavailable, reason ${fxSelection.explanation.reason}, actionability action_required`;
+      const explanation = `${priceDetail}; ${previousPriceDetail}; ${fxDetailText}; ${previousFxDetail}. ${priceSelection.status === "stale" || fxSelection.status === "stale" ? "Action required: stale data." : ""}`;
+      return {
+        id: identity.id,
+        securityId: identity.securityId,
+        symbol: identity.symbol,
+        name: identity.name,
+        exchange: identity.exchange,
+        currencyCode: nativeCurrency,
+        quantity,
+        averageNativeCost: average,
+        nativeBasis: money(nativeBasis, nativeCurrency, "missing_basis"),
+        homeBasis: money(homeBasis, homeCurrencyCode, "missing_basis"),
+        nativePrice: price,
+        nativeValue: money(nativeValue, nativeCurrency, "missing_price"),
+        homePrice: money(homePrice, homeCurrencyCode, "missing_fx"),
+        homeValue: money(homeValue, homeCurrencyCode, "missing_fx"),
+        dailyMovement: money(daily, homeCurrencyCode, "missing_previous_fx"),
+        dailyPercent: money(dailyPercent, "%", "zero_previous_value"),
+        unrealisedGain: money(gain, homeCurrencyCode, "missing_basis"),
+        unrealisedPercent: money(gainPercent, "%", "zero_basis"),
+        dailyTone: tone(daily),
+        gainTone: tone(gain),
+        priceState: priceSelection.status,
+        actionStatus: zero
+          ? "none"
+          : priceSelection.status === "stale" || fxSelection.status === "stale"
+            ? "stale"
+            : priceSelection.status === "unavailable"
+              ? "missing_price"
+              : fxSelection.status === "unavailable"
+                ? "missing_fx"
+                : !previousSelection.selected || !previousFxSelection.selected
+                  ? "missing_previous"
+                  : !priceClassComparable ||
+                      !fxClassComparable ||
+                      quantityTiming === "incomplete"
+                    ? "incomparable"
+                    : "none",
+        explanation,
+        sort: {
+          ticker: identity.symbol,
+          value: homeValue,
+          daily: dailyPercent,
+          gain: gainPercent,
+        },
+      };
+    }),
+  );
+  const cash = await loadCash(
+    client,
+    userId,
+    portfolioId,
+    homeCurrencyCode,
+    asOf,
+    nowIso,
+    timezone,
+    fxRows,
+    overrides,
+  );
+  const securityCoverage = {
+    total: rows.length,
+    nonZero: rows.filter((row) => !isZero(parseDecimalResult(row.quantity)))
+      .length,
+    zero: rows.filter((row) => isZero(parseDecimalResult(row.quantity))).length,
+    priced: rows.filter((row) => row.nativePrice !== null).length,
+    converted: rows.filter(
+      (row) =>
+        row.homeValue.status === "available" &&
+        !isZero(parseDecimalResult(row.quantity)),
+    ).length,
+    basis: rows.filter(
+      (row) =>
+        row.homeBasis.status === "available" &&
+        !isZero(parseDecimalResult(row.quantity)),
+    ).length,
+  };
+  const knownSecurityValues = rows.filter(
+    (row) =>
+      row.homeValue.status === "available" &&
+      !isZero(parseDecimalResult(row.quantity)),
+  );
+  const securitiesSubtotal = knownSecurityValues.reduce(
+    (total, row) =>
+      addDecimal(total, parseDecimalResult(row.homeValue.value ?? "0")),
+    parseDecimalResult("0"),
+  );
+  const securitiesKnown =
+    securityCoverage.converted > 0 ||
+    (securityCoverage.total > 0 && securityCoverage.nonZero === 0);
+  const cashKnown = cash.cashSubtotal !== null;
+  const knownComponentCount = (securitiesKnown ? 1 : 0) + (cashKnown ? 1 : 0);
+  const knownTotal =
+    knownComponentCount > 0
+      ? formatDecimalExact(
+          addDecimal(
+            securitiesKnown ? securitiesSubtotal : parseDecimalResult("0"),
+            cashKnown
+              ? parseDecimalResult(cash.cashSubtotal!)
+              : parseDecimalResult("0"),
+          ),
+        )
+      : null;
+  const coveragePartial =
+    rows.some(
+      (row) =>
+        !isZero(parseDecimalResult(row.quantity)) &&
+        (row.homeValue.status === "unavailable" ||
+          row.homeBasis.status === "unavailable"),
+    ) || cash.status !== "complete";
+  return {
+    status: coveragePartial ? "partial" : "complete",
+    homeCurrencyCode,
+    rows,
+    coverage: securityCoverage,
+    cash: {
+      ...cash,
+      securitiesSubtotal: securitiesKnown
+        ? formatDecimalExact(securitiesSubtotal)
+        : null,
+      knownTotal,
+      status: coveragePartial ? "partial" : cash.status,
+    },
+  };
+}
+
+async function loadCash(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  homeCurrencyCode: string,
+  asOf: string,
+  nowIso: string,
+  timezone: string,
+  fxRows: FxObservation[] = [],
+  overrides: Awaited<
+    ReturnType<ReturnType<typeof createOwnedManualOverrideRepository>["list"]>
+  > = [],
+): Promise<OwnedCashSummary> {
+  const accounts = await client.all<Row>(
+    `SELECT id, currency_code, completeness, status FROM cash_accounts WHERE user_id = ? AND portfolio_id = ? AND status = 'active' ORDER BY id LIMIT ?`,
+    [userId, portfolioId, MAX_CASH_ACCOUNTS + 1],
+  );
+  if (accounts.length > MAX_CASH_ACCOUNTS)
+    throw new Error("cash_account_limit");
+  if (fxRows.length === 0) {
+    const currencies = [
+      ...new Set([
+        homeCurrencyCode,
+        ...accounts.map((row) => requiredText(row, "currency_code", CURRENCY)),
+      ]),
+    ];
+    const cashFxPredicate = `(
+      fx.base_currency_code <> fx.quote_currency_code AND
+      (fx.base_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?)
+        AND fx.quote_currency_code IN (
+          SELECT currency_code FROM cash_accounts WHERE user_id = ? AND portfolio_id = ? AND status = 'active'
+        ))
+      OR
+      (fx.quote_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?)
+        AND fx.base_currency_code IN (
+          SELECT currency_code FROM cash_accounts WHERE user_id = ? AND portfolio_id = ? AND status = 'active'
+        ))
+    )`;
+    const cashFxPredicateParams = [
+      portfolioId,
+      userId,
+      userId,
+      portfolioId,
+      portfolioId,
+      userId,
+      userId,
+      portfolioId,
+    ];
+    const cashFxCount = await client.get<Row>(
+      `SELECT count(*) AS count FROM fx_rate_observations fx WHERE fx.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND fx.observed_at <= ? AND fx.ingested_at <= ? AND ((fx.access_scope = 'deployment' AND fx.scope_user_id IS NULL) OR (fx.access_scope = 'user' AND fx.scope_user_id = ?)) AND ${cashFxPredicate}`,
+      [asOf, asOf, nowIso, nowIso, userId, ...cashFxPredicateParams],
+    );
+    if (integer(cashFxCount ?? {}, "count") > MAX_OBSERVATIONS)
+      throw new Error("too_many_fx_observations");
+    const cashFxRows = await client.all<Row>(
+      `SELECT fx.* FROM fx_rate_observations fx WHERE fx.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND fx.observed_at <= ? AND fx.ingested_at <= ? AND ((fx.access_scope = 'deployment' AND fx.scope_user_id IS NULL) OR (fx.access_scope = 'user' AND fx.scope_user_id = ?)) AND ${cashFxPredicate} ORDER BY fx.market_date DESC, fx.observed_at DESC LIMIT ?`,
+      [
+        asOf,
+        asOf,
+        nowIso,
+        nowIso,
+        userId,
+        ...cashFxPredicateParams,
+        MAX_OBSERVATIONS + 1,
+      ],
+    );
+    if (cashFxRows.length > MAX_OBSERVATIONS)
+      throw new Error("too_many_fx_observations");
+    fxRows = cashFxRows.map(mapFx);
+    const overrideRepo = createOwnedManualOverrideRepository(client);
+    const overrideTargets = currencies
+      .filter((currency) => currency !== homeCurrencyCode)
+      .map((currency) => `${homeCurrencyCode}/${currency}`);
+    const overrideLists: Awaited<
+      ReturnType<typeof overrideRepo.listBoundedRelevant>
+    >[] = [];
+    let overrideRemaining = MAX_OBSERVATIONS;
+    for (
+      let index = 0;
+      index < overrideTargets.length;
+      index += OVERRIDE_TARGET_CHUNK
+    ) {
+      const list = await overrideRepo.listBoundedRelevant(
+        userId,
+        overrideTargets.slice(index, index + OVERRIDE_TARGET_CHUNK),
+        overrideRemaining + 1,
+      );
+      if (list.length > overrideRemaining)
+        throw new Error("too_many_overrides");
+      overrideLists.push(list);
+      overrideRemaining -= list.length;
+    }
+    overrides = overrideLists.flat().filter((row) => row.type === "fx_rate");
+  }
+  const entries = await client.all<Row>(
+    `SELECT cle.cash_account_id, cle.signed_amount_decimal, cle.status, cle.local_effective_date, cle.effective_at FROM cash_ledger_entries cle JOIN cash_accounts ca ON ca.id = cle.cash_account_id AND ca.user_id = cle.user_id AND ca.portfolio_id = cle.portfolio_id WHERE cle.user_id = ? AND cle.portfolio_id = ? AND ca.status = 'active' AND cle.local_effective_date <= ? AND cle.effective_at <= ? ORDER BY cle.cash_account_id, cle.local_effective_date, cle.effective_at, cle.id LIMIT ?`,
+    [userId, portfolioId, asOf, nowIso, MAX_CASH_ENTRIES + 1],
+  );
+  if (entries.length > MAX_CASH_ENTRIES) throw new Error("cash_entry_limit");
+  const entriesByAccount = new Map<string, Row[]>();
+  for (const entry of entries) {
+    const id = requiredText(entry, "cash_account_id");
+    const list = entriesByAccount.get(id) ?? [];
+    list.push(entry);
+    entriesByAccount.set(id, list);
+  }
+  let cashTotal: string | null = "0";
+  let knownAccounts = 0;
+  let nonZeroAccounts = 0;
+  let zeroAccounts = 0;
+  let convertedAccounts = 0;
+  let incomplete = false;
+  for (const account of accounts) {
+    const id = requiredText(account, "id");
+    const currency = requiredText(account, "currency_code", CURRENCY);
+    const completeness = requiredText(account, "completeness");
+    if (!["complete", "opening_balance", "incomplete"].includes(completeness))
+      throw new Error("invalid_cash_completeness");
+    let balance = "0";
+    for (const entry of entriesByAccount.get(id) ?? []) {
+      const status = requiredText(entry, "status");
+      if (status !== "posted" && status !== "reversed")
+        throw new Error("invalid_cash_entry_status");
+      if (status !== "posted") continue;
+      balance = formatDecimalExact(
+        addDecimal(
+          parseDecimalResult(balance),
+          parseDecimalResult(
+            sourceDecimal(
+              requiredText(entry, "signed_amount_decimal"),
+              "signed_amount_decimal",
+            )!,
+          ),
+        ),
+      );
+    }
+    if (completeness === "incomplete") incomplete = true;
+    if (isZero(parseDecimalResult(balance))) {
+      knownAccounts += 1;
+      zeroAccounts += 1;
+      continue;
+    }
+    nonZeroAccounts += 1;
+    const selection = chooseFx(
+      {
+        asOf,
+        portfolioTimezone: timezone,
+        baseCurrencyCode: homeCurrencyCode,
+        quoteCurrencyCode: currency,
+        targetKey: `${homeCurrencyCode}/${currency}`,
+        userId,
+        scope: { kind: "deployment", userId: null },
+        observations: fxRows,
+        overrides: overrides.filter(
+          (row) =>
+            row.type === "fx_rate" &&
+            row.targetKey === `${homeCurrencyCode}/${currency}`,
+        ),
+      },
+      userId,
+    );
+    const converted = calculateCashConversion({
+      balanceDecimal: balance,
+      currencyCode: currency,
+      homeCurrencyCode,
+      valuationFx: evidence(selection),
+    });
+    if (converted.compact.homeValue.status !== "available") {
+      incomplete = true;
+      continue;
+    }
+    knownAccounts += 1;
+    convertedAccounts += 1;
+    cashTotal = formatDecimalExact(
+      addDecimal(
+        parseDecimalResult(cashTotal),
+        parseDecimalResult(converted.compact.homeValue.valueDecimal),
+      ),
+    );
+  }
+  return {
+    currencyCode: homeCurrencyCode,
+    securitiesSubtotal: null,
+    cashSubtotal: knownAccounts === 0 ? null : cashTotal,
+    knownTotal: knownAccounts === 0 ? null : cashTotal,
+    status: incomplete ? "partial" : "complete",
+    explanation: incomplete
+      ? "Cash is partial because an account, entry, or attributable FX observation is incomplete."
+      : "Cash is the bounded sum of posted owner-scoped entries.",
+    coverage: {
+      total: accounts.length,
+      nonZero: nonZeroAccounts,
+      zero: zeroAccounts,
+      converted: convertedAccounts,
+    },
+  };
+}
+
+export function formatOwnedHoldingDecimal(
+  value: string | null,
+  scale = 2,
+): string {
+  return value === null
+    ? "—"
+    : formatDecimalFixed(parseDecimalResult(value), scale);
+}
+export function formatOwnedHoldingPrice(value: string | null): string {
+  return value === null
+    ? "Price unavailable"
+    : formatDecimalTrimmed(parseDecimalResult(value), 6, {
+        trimTrailingZeros: true,
+      });
+}

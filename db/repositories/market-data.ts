@@ -389,5 +389,44 @@ export function createOwnedManualOverrideRepository(
     return rows.map(mapOverride);
   }
 
-  return { get, list, remove, save };
+  async function listBounded(
+    userId: string,
+    limit: number,
+    targetKey?: string,
+  ): Promise<ManualOverrideRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10000)
+      throw new Error("invalid_override_limit");
+    const rows = await client.all<Record<string, unknown>>(
+      `SELECT ${OVERRIDE_COLUMNS} FROM manual_overrides
+       WHERE user_id = ? ${targetKey ? "AND target_key = ?" : ""}
+       ORDER BY created_at ASC, id ASC LIMIT ?`,
+      targetKey ? [userId, targetKey, limit] : [userId, limit],
+    );
+    return rows.map(mapOverride);
+  }
+
+  async function listBoundedRelevant(
+    userId: string,
+    targetKeys: readonly string[],
+    limit: number,
+  ): Promise<ManualOverrideRecord[]> {
+    if (
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > 10000 ||
+      targetKeys.length === 0 ||
+      targetKeys.some(
+        (targetKey) => typeof targetKey !== "string" || targetKey.length === 0,
+      )
+    )
+      throw new Error("invalid_override_scope");
+    const placeholders = targetKeys.map(() => "?").join(",");
+    const rows = await client.all<Record<string, unknown>>(
+      `SELECT ${OVERRIDE_COLUMNS} FROM manual_overrides WHERE user_id = ? AND type IN ('price', 'fx_rate') AND target_key IN (${placeholders}) ORDER BY created_at ASC, id ASC LIMIT ?`,
+      [userId, ...targetKeys, limit],
+    );
+    return rows.map(mapOverride);
+  }
+
+  return { get, list, listBounded, listBoundedRelevant, remove, save };
 }

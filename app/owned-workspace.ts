@@ -14,6 +14,8 @@ export function createOwnedWorkspace(
       portfolios: [],
       quotes: [],
       quoteViewState: "empty",
+      holdings: [],
+      holdingsViewState: "empty",
     };
   }
 
@@ -36,6 +38,8 @@ export function createOwnedWorkspace(
       settingsVersion: 1,
       quotes: [],
       quoteViewState: "empty",
+      holdings: [],
+      holdingsViewState: "empty",
     };
   }
 
@@ -58,5 +62,7 @@ export function createOwnedWorkspace(
     settingsVersion: 1,
     quotes: [],
     quoteViewState: "empty",
+    holdings: [],
+    holdingsViewState: "empty",
   };
 }

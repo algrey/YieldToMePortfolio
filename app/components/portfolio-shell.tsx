@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   historyBars,
   overviewRows,
@@ -23,6 +23,14 @@ import { ServiceWorkerRegistration } from "./service-worker-registration";
 import { subtractCalendarMonths } from "../overview-range";
 import { sampleOverviewChartPoints } from "../overview-chart";
 import { overviewFormulaTotal, overviewStateCopy } from "../overview-copy";
+import {
+  sortOwnedHoldings,
+  type OwnedCashSummary,
+  type OwnedHoldingCoverage,
+  type OwnedHoldingRow,
+} from "../owned-holdings-contract";
+import { formatDecimalFixed, formatDecimalTrimmed } from "../preview-decimal";
+import { parseDecimalResult } from "../../domain/calculations/index.ts";
 
 export const portfolioSections = [
   "overview",
@@ -60,6 +68,10 @@ export type OwnedWorkspace = {
   quotes?: QuoteRow[];
   quoteViewState?: ViewState;
   overview?: OwnedOverviewData;
+  holdings?: OwnedHoldingRow[];
+  cash?: OwnedCashSummary;
+  holdingCoverage?: OwnedHoldingCoverage;
+  holdingsViewState?: "complete" | "partial" | "empty" | "unavailable";
 };
 export type OwnedOverviewData = {
   status:
@@ -260,6 +272,452 @@ function EmptyState({
       <p>{message}</p>
       {showAction ? <button type="button">Preview add menu</button> : null}
     </section>
+  );
+}
+
+function ownedHoldingAmount(
+  value: {
+    status: "available" | "unavailable";
+    currencyCode: string;
+    value: string | null;
+    reason?: string | null;
+  },
+  scale = 2,
+) {
+  if (value.status !== "available" || value.value === null)
+    return value.reason === "missing_basis"
+      ? "Basis unavailable"
+      : "Price unavailable";
+  try {
+    return `${value.currencyCode} ${formatDecimalFixed(parseDecimalResult(value.value), scale)}`;
+  } catch {
+    return value.reason === "missing_basis"
+      ? "Basis unavailable"
+      : "Price unavailable";
+  }
+}
+function ownedHoldingDecimal(value: string | null, scale = 2): string {
+  if (value === null) return "—";
+  try {
+    return formatDecimalFixed(parseDecimalResult(value), scale);
+  } catch {
+    return "—";
+  }
+}
+function ownedHoldingTrimmed(value: string | null, scale = 6): string {
+  if (value === null) return "—";
+  try {
+    return formatDecimalTrimmed(parseDecimalResult(value), scale, {
+      trimTrailingZeros: true,
+    });
+  } catch {
+    return "—";
+  }
+}
+function ownedHoldingPercent(
+  value: OwnedHoldingRow["dailyPercent"],
+): ReactNode {
+  return value.status === "available" && value.value !== null ? (
+    (() => {
+      try {
+        return `${formatDecimalTrimmed(parseDecimalResult(value.value), 2, { trimTrailingZeros: true })}%`;
+      } catch {
+        return (
+          <>
+            <span aria-hidden="true">—</span>
+            <span className="sr-only">Percentage unavailable</span>
+          </>
+        );
+      }
+    })()
+  ) : (
+    <>
+      <span aria-hidden="true">—</span>
+      <span className="sr-only">Percentage unavailable</span>
+    </>
+  );
+}
+
+function OwnedHoldingsScreen({
+  rows,
+  homeCurrencyCode,
+  view,
+  state,
+  cash,
+  coverage,
+}: {
+  rows: readonly OwnedHoldingRow[];
+  homeCurrencyCode: string;
+  view: "native" | "home";
+  state: "complete" | "partial" | "empty" | "unavailable";
+  cash?: OwnedCashSummary;
+  coverage?: OwnedHoldingCoverage;
+}) {
+  const [sortKey, setSortKey] = useState<"ticker" | "value" | "daily" | "gain">(
+    "daily",
+  );
+  const [direction, setDirection] = useState<Direction>("descending");
+  const [selectedHolding, setSelectedHolding] =
+    useState<OwnedHoldingRow | null>(null);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const openerRef = useRef<HTMLButtonElement | null>(null);
+  const [holdingViews, setHoldingViews] = useState<
+    Record<string, "native" | "home">
+  >({});
+  const sortableRows = useMemo(
+    () =>
+      rows.map((row) => {
+        const rowView = holdingViews[row.id] ?? view;
+        const home = rowView === "home" && row.homeValue.status === "available";
+        return {
+          ...row,
+          sort: {
+            ...row.sort,
+            value: home ? row.homeValue.value : row.nativeValue.value,
+            daily: row.dailyPercent.value,
+            gain: row.unrealisedPercent.value,
+          },
+        };
+      }),
+    [holdingViews, rows, view],
+  );
+  const sortedRows = useMemo(
+    () => sortOwnedHoldings(sortableRows, sortKey, direction),
+    [direction, sortableRows, sortKey],
+  );
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (selectedHolding && dialog && !dialog.open) {
+      dialog.showModal();
+      dialog.querySelector<HTMLButtonElement>(".sheet-close")?.focus();
+    }
+    if (!selectedHolding && openerRef.current) {
+      openerRef.current.focus();
+      openerRef.current = null;
+    }
+  }, [selectedHolding]);
+
+  function handleSort(nextKey: "ticker" | "value" | "daily" | "gain") {
+    if (nextKey === sortKey) {
+      setDirection((current) =>
+        current === "ascending" ? "descending" : "ascending",
+      );
+    } else {
+      setSortKey(nextKey);
+      setDirection(nextKey === "ticker" ? "ascending" : "descending");
+    }
+  }
+
+  if (state === "unavailable") {
+    return (
+      <EmptyState
+        title="Holdings unavailable"
+        message="The published holdings projection is temporarily unavailable. No values were substituted."
+        showAction={false}
+      />
+    );
+  }
+  if (state === "empty" && sortedRows.length === 0 && !cash?.cashSubtotal)
+    return <EmptyState />;
+
+  return (
+    <div className="holdings-layout owned-holdings-layout">
+      <section className="holdings-list" aria-label="Portfolio holdings">
+        {sortedRows.length === 0 ? (
+          <p className="empty-inline">
+            No security holdings. Cash is shown separately.
+          </p>
+        ) : null}
+        <div className="holdings-grid table-heading sticky-heading">
+          <SortButton
+            label="Ticker"
+            sortKey="ticker"
+            activeKey={sortKey}
+            direction={direction}
+            onSort={handleSort}
+          />
+          <SortButton
+            label={`Value / ${view === "home" ? homeCurrencyCode : "native"}`}
+            sortKey="value"
+            activeKey={sortKey}
+            direction={direction}
+            onSort={handleSort}
+          />
+          <SortButton
+            label="Daily"
+            sortKey="daily"
+            activeKey={sortKey}
+            direction={direction}
+            onSort={handleSort}
+          />
+          <SortButton
+            label="Total"
+            sortKey="gain"
+            activeKey={sortKey}
+            direction={direction}
+            onSort={handleSort}
+          />
+        </div>
+        <div className="holding-rows">
+          {sortedRows.map((holding) => {
+            const rowView = holdingViews[holding.id] ?? view;
+            const homeAvailable =
+              holding.homeValue.status === "available" &&
+              holding.homePrice.status === "available";
+            const usedNativeFallback = rowView === "home" && !homeAvailable;
+            const selectedValue =
+              rowView === "home" && !usedNativeFallback
+                ? holding.homeValue
+                : holding.nativeValue;
+            const selectedPrice =
+              rowView === "home" && !usedNativeFallback
+                ? holding.homePrice
+                : holding.nativePrice === null
+                  ? {
+                      status: "unavailable" as const,
+                      value: null,
+                      currencyCode: holding.currencyCode,
+                    }
+                  : {
+                      status: "available" as const,
+                      value: holding.nativePrice,
+                      currencyCode: holding.currencyCode,
+                    };
+            const basis = holding.homeBasis;
+            const priceLabel = usedNativeFallback
+              ? holding.nativePrice === null
+                ? "Price unavailable"
+                : `${holding.currencyCode} ${ownedHoldingTrimmed(holding.nativePrice)} · native fallback`
+              : selectedPrice.status === "available" &&
+                  selectedPrice.value !== null
+                ? `${selectedPrice.currencyCode} ${ownedHoldingTrimmed(selectedPrice.value)}`
+                : holding.nativePrice === null
+                  ? "Price unavailable"
+                  : `${holding.currencyCode} ${ownedHoldingTrimmed(holding.nativePrice)}`;
+            const statusLabel =
+              holding.actionStatus === "none"
+                ? ""
+                : ` · Action required: ${
+                    holding.actionStatus === "stale"
+                      ? "stale market data"
+                      : holding.actionStatus === "missing_price"
+                        ? "price unavailable"
+                        : holding.actionStatus === "missing_fx"
+                          ? "FX unavailable"
+                          : holding.actionStatus === "missing_previous"
+                            ? "previous comparison unavailable"
+                            : "comparison unavailable"
+                  }`;
+            return (
+              <button
+                className="holding-row holdings-grid"
+                type="button"
+                key={holding.id}
+                aria-label={`${holding.symbol}, ${holding.name}, open details`}
+                aria-haspopup="dialog"
+                onClick={(event) => {
+                  openerRef.current = event.currentTarget;
+                  setSelectedHolding(holding);
+                }}
+              >
+                <span className="row-primary symbol">{holding.symbol}</span>
+                <span className="row-primary numeric">
+                  {ownedHoldingAmount(selectedValue)}
+                </span>
+                <ToneValue
+                  tone={holding.dailyTone}
+                  className="row-primary numeric"
+                >
+                  {ownedHoldingAmount(holding.dailyMovement)}
+                </ToneValue>
+                <ToneValue
+                  tone={holding.gainTone}
+                  className="row-primary numeric"
+                >
+                  {ownedHoldingAmount(holding.unrealisedGain)}
+                </ToneValue>
+                <span className="row-secondary">
+                  {priceLabel}
+                  {statusLabel}
+                </span>
+                <span className="row-secondary numeric">
+                  Basis {ownedHoldingAmount(basis)}
+                </span>
+                <span className="row-secondary numeric">
+                  {ownedHoldingPercent(holding.dailyPercent)}
+                </span>
+                <span className="row-secondary numeric">
+                  {ownedHoldingPercent(holding.unrealisedPercent)}
+                </span>
+                <span className="row-tertiary">
+                  Avg{" "}
+                  {holding.averageNativeCost === null
+                    ? "Basis unavailable"
+                    : `${holding.currencyCode} ${ownedHoldingTrimmed(holding.averageNativeCost)}`}{" "}
+                  × {ownedHoldingDecimal(holding.quantity, 4)}
+                </span>
+                <span className="desktop-only holding-name">
+                  {holding.name} · {holding.exchange} · {holding.currencyCode}
+                </span>
+                <span className="sr-only">{holding.explanation}</span>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+      <aside className="portfolio-summary" aria-label="Holdings summary">
+        <p className="eyebrow">Cash separate</p>
+        <strong>{homeCurrencyCode} reporting values</strong>
+        <p>
+          Cash is not included in security rows. Price, FX, and basis gaps
+          remain unavailable rather than zero.
+        </p>
+        {cash ? (
+          <p>
+            Securities subtotal:{" "}
+            {cash.securitiesSubtotal === null
+              ? "Partial"
+              : `${cash.currencyCode} ${ownedHoldingDecimal(cash.securitiesSubtotal)}`}{" "}
+            · Cash subtotal:{" "}
+            {cash.cashSubtotal === null
+              ? "Unavailable"
+              : `${cash.currencyCode} ${ownedHoldingDecimal(cash.cashSubtotal)}`}{" "}
+            · Known total:{" "}
+            {cash.knownTotal === null
+              ? "Partial"
+              : `${cash.currencyCode} ${ownedHoldingDecimal(cash.knownTotal)}`}
+            <br />
+            Coverage: {cash.coverage.converted}/{cash.coverage.nonZero} non-zero
+            cash accounts converted ({cash.coverage.zero} zero).
+            {coverage ? (
+              <>
+                <br />
+                Securities: {coverage.converted}/{coverage.nonZero} non-zero
+                converted, {coverage.basis}/{coverage.nonZero} basis-covered (
+                {coverage.zero} zero).
+              </>
+            ) : null}
+          </p>
+        ) : null}
+      </aside>
+      {selectedHolding ? (
+        <dialog
+          ref={dialogRef}
+          className="holding-sheet"
+          aria-labelledby="owned-holding-sheet-title"
+          onCancel={(event) => {
+            event.preventDefault();
+            dialogRef.current?.close();
+            setSelectedHolding(null);
+          }}
+          onClose={() => setSelectedHolding(null)}
+        >
+          <button
+            className="sheet-close"
+            type="button"
+            onClick={() => dialogRef.current?.close()}
+          >
+            Close
+          </button>
+          <p className="eyebrow">Holding detail</p>
+          <h2 id="owned-holding-sheet-title">{selectedHolding.symbol}</h2>
+          <p>
+            {selectedHolding.name} · {selectedHolding.exchange} ·{" "}
+            {selectedHolding.currencyCode}
+          </p>
+          {selectedHolding.currencyCode !== homeCurrencyCode ? (
+            <label className="menu-field">
+              <span>Display values</span>
+              <select
+                value={holdingViews[selectedHolding.id] ?? view}
+                aria-label={`Display ${selectedHolding.symbol} values in native or home currency`}
+                onChange={(event) =>
+                  setHoldingViews((current) => ({
+                    ...current,
+                    [selectedHolding.id]: event.target.value as
+                      "native" | "home",
+                  }))
+                }
+              >
+                <option value="native">Native currency</option>
+                <option value="home">Home currency</option>
+              </select>
+            </label>
+          ) : null}
+          <dl className="detail-facts">
+            <div>
+              <dt>Quantity</dt>
+              <dd>{ownedHoldingDecimal(selectedHolding.quantity, 4)}</dd>
+            </div>
+            <div>
+              <dt>Price</dt>
+              <dd>
+                {(() => {
+                  const selectedView = holdingViews[selectedHolding.id] ?? view;
+                  const home =
+                    selectedView === "home" &&
+                    selectedHolding.homePrice.status === "available";
+                  const price = home
+                    ? selectedHolding.homePrice
+                    : selectedHolding.nativePrice === null
+                      ? {
+                          status: "unavailable" as const,
+                          value: null,
+                          currencyCode: selectedHolding.currencyCode,
+                        }
+                      : {
+                          status: "available" as const,
+                          value: selectedHolding.nativePrice,
+                          currencyCode: selectedHolding.currencyCode,
+                        };
+                  if (price.status !== "available" || price.value === null)
+                    return selectedHolding.nativePrice === null
+                      ? "Price unavailable"
+                      : `${selectedHolding.currencyCode} native fallback`;
+                  try {
+                    return `${price.currencyCode} ${ownedHoldingTrimmed(price.value)}${selectedView === "home" && !home ? " · native fallback" : ""}`;
+                  } catch {
+                    return "Price unavailable";
+                  }
+                })()}
+              </dd>
+            </div>
+            <div>
+              <dt>Value</dt>
+              <dd>
+                {ownedHoldingAmount(
+                  (holdingViews[selectedHolding.id] ?? view) === "home" &&
+                    selectedHolding.homeValue.status === "available"
+                    ? selectedHolding.homeValue
+                    : selectedHolding.nativeValue,
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>Gain</dt>
+              <dd>{ownedHoldingAmount(selectedHolding.unrealisedGain)}</dd>
+            </div>
+            <div>
+              <dt>Daily %</dt>
+              <dd>{ownedHoldingPercent(selectedHolding.dailyPercent)}</dd>
+            </div>
+            <div>
+              <dt>Unrealised %</dt>
+              <dd>{ownedHoldingPercent(selectedHolding.unrealisedPercent)}</dd>
+            </div>
+            <div>
+              <dt>Average cost × quantity</dt>
+              <dd>
+                {selectedHolding.averageNativeCost === null
+                  ? "Basis unavailable"
+                  : `${selectedHolding.currencyCode} ${ownedHoldingTrimmed(selectedHolding.averageNativeCost)} × ${ownedHoldingDecimal(selectedHolding.quantity, 4)}`}
+              </dd>
+            </div>
+          </dl>
+          <p className="detail-explanation">{selectedHolding.explanation}</p>
+        </dialog>
+      ) : null}
+    </div>
   );
 }
 
@@ -2444,6 +2902,18 @@ export function PortfolioShell({
               }
               portfolioId={ownedWorkspace.activePortfolio.id}
               portfolioName={ownedWorkspace.activePortfolio.name}
+            />
+          ) : activeSection === "holdings" && ownedWorkspace.activePortfolio ? (
+            <OwnedHoldingsScreen
+              rows={ownedWorkspace.holdings ?? []}
+              homeCurrencyCode={
+                ownedWorkspace.homeCurrencyCode ??
+                ownedWorkspace.activePortfolio.baseCurrencyCode
+              }
+              view={ownedWorkspace.holdingCurrencyView ?? "native"}
+              state={ownedWorkspace.holdingsViewState ?? "empty"}
+              cash={ownedWorkspace.cash}
+              coverage={ownedWorkspace.holdingCoverage}
             />
           ) : (
             <OwnedWorkspaceScreen

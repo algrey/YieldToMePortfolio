@@ -902,7 +902,7 @@ Status: DONE (2026-08-09 browser QA follow-up).
 
 ### UI-003 — Holdings table and mobile cards
 
-Status: READY.
+Status: DONE (2026-08-09 browser QA complete).
 
 - Objective: reproduce the reference’s dense holdings utility with a distinct, usable mobile hierarchy.
 - Dependencies: UI-001, CALC-001B.
@@ -937,6 +937,8 @@ Status: READY.
 - Tests: mixed currencies, long names, missing data, zero quantity, keyboard sorting, responsive QA.
 - Risks: too many mobile facts; prioritize market value and gain.
 - Parallel safe: yes.
+- Implementation evidence: Added an owner-scoped published-projection Holdings read model and authenticated route integration; exact-decimal native/home values, basis, daily movement, gain, cash separation, stable missing/stale/incomparable states, provenance explanations, deterministic sorting, desktop rows, mobile cards, and an accessible holding dialog. Independent code review passed after runtime regressions for ownership, missing data, weekend and trade-time comparability, price/FX evidence classes, durable security currency, fixed D1 bind/query budgets, and the 2,001-fact aggregate override ceiling. Task formatting, lint, typecheck, production build, and the 252-test repository suite pass.
+- Browser QA evidence: authenticated owned Holdings fixture exercised at 320x800, 390x844, 430x932, and 1440x900. Document width equaled the viewport at every width; mobile cards and the desktop table retained readable value/gain hierarchy, and long security/portfolio names stayed bounded. Sort controls exposed the active direction and reordered rows; the holding dialog moved focus inside and restored focus to its opener on close. Native/home selection changed displayed USD/AUD values without mutating row facts. `Price unavailable`, `FX unavailable`, `stale market data`, and `comparison unavailable` were visible as non-color text. The Browser input layer focused controls but failed to synthesize Enter/Escape events, so direct key activation was not independently observable; semantic handlers and automated coverage remain in place.
 
 ### UI-004 — Compact quotes, refresh, and overrides
 

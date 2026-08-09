@@ -10,6 +10,7 @@ import { createOwnedUserSettingsRepository } from "../db/repositories/owned-port
 import { createOwnedWorkspace } from "./owned-workspace";
 import type { OwnedWorkspace } from "./components/portfolio-shell";
 import { loadOwnedQuotes } from "./owned-quotes";
+import { loadOwnedHoldings } from "./owned-holdings";
 import { createHistoricalSnapshotRepository } from "../db/repositories/snapshots.ts";
 import {
   createOverviewData,
@@ -45,7 +46,11 @@ function unavailableWorkspace(message: string): OwnedWorkspace {
 
 export async function loadAuthenticatedWorkspace(
   requestedPortfolioId?: string,
-  options: { includeQuotes?: boolean; includeOverview?: boolean } = {},
+  options: {
+    includeQuotes?: boolean;
+    includeOverview?: boolean;
+    includeHoldings?: boolean;
+  } = {},
 ): Promise<OwnedWorkspace> {
   const principalHeader = (await headers()).get(VERIFIED_PRINCIPAL_HEADER);
   if (!principalHeader) {
@@ -91,8 +96,34 @@ export async function loadAuthenticatedWorkspace(
       : workspace;
     if (configuredWorkspace.activePortfolio === null)
       return configuredWorkspace;
-    if (!options.includeQuotes && !options.includeOverview)
+    if (
+      !options.includeQuotes &&
+      !options.includeOverview &&
+      !options.includeHoldings
+    )
       return configuredWorkspace;
+    if (options.includeHoldings) {
+      try {
+        const holdings = await loadOwnedHoldings(
+          client,
+          result.context.user.id,
+          configuredWorkspace.activePortfolio.id,
+        );
+        return {
+          ...configuredWorkspace,
+          holdings: holdings.rows,
+          holdingsViewState: holdings.status,
+          cash: holdings.cash,
+          holdingCoverage: holdings.coverage,
+        };
+      } catch {
+        return {
+          ...configuredWorkspace,
+          holdings: [],
+          holdingsViewState: "unavailable",
+        };
+      }
+    }
     if (options.includeOverview) {
       try {
         const overview = await createHistoricalSnapshotRepository(
