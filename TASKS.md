@@ -898,7 +898,7 @@ Status: DONE (2026-08-09 browser QA follow-up).
 - Risks: calling partial totals full totals or forecast actual.
 - Parallel safe: yes with UI-003/004/005 after shell/contracts.
 - Implementation evidence: Added an owner-scoped published-run Overview read model with strict run/range/fact/coverage validation, exact-decimal current/history/allocation presentation, explicit complete/partial/stale/incomplete/empty/unavailable states, formula and exclusion drill-down, bounded gap/extrema-preserving chart sampling with a semantic table alternative, calendar-correct range controls, and Overview-only loading that leaves other authenticated routes independent. Portfolio daily percentage remains explicitly unavailable until a calculation-layer comparable-denominator and cash-flow contract exists. Focused UI/CALC/render tests (46), the 228-test repository gate, lint, typecheck, production build, task-owned formatting, diff checks, and independent code review passed.
-- Browser QA follow-up: raised the shared section-tab target and links to 44px, and changed the 320px Overview KPI grid to wrap without ellipsis so all five headline values remain readable. Added responsive source assertions covering both fixes.
+- Browser QA follow-up: raised the shared section-tab target and links to 44px, and changed the 320px Overview KPI grid to wrap without ellipsis so all five headline values remain readable. Added responsive source assertions covering both fixes. In-app browser retesting on 2026-08-09 confirmed 44px section tabs, unclipped Overview KPI values, and no document-level horizontal overflow at 320, 390, 430, and 1,440px; the production build passed after the retest.
 
 ### UI-003 — Holdings table and mobile cards
 
