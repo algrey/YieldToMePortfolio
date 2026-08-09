@@ -110,7 +110,8 @@ The Unrealised label is left aligned. At 390 px, the first-line portfolio value 
 
 ### Overview
 
-- One dominant current-value figure, followed by compact Invested, Cash, and Unrealised facts.
+- One dominant current-value figure, followed by compact Securities, Cash, Cost, and Unrealised facts.
+- Daily movement is shown as an exact amount; portfolio daily percentage is `Percentage unavailable` until the calculation contract defines a comparable denominator and cash-flow treatment.
 - A low-chrome bar history treatment with text alternative.
 - Portfolio rows reuse the four financial columns instead of large portfolio cards.
 - An Overview row navigates to the selected portfolio’s Holdings screen.

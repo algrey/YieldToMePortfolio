@@ -10,6 +10,11 @@ import { createOwnedUserSettingsRepository } from "../db/repositories/owned-port
 import { createOwnedWorkspace } from "./owned-workspace";
 import type { OwnedWorkspace } from "./components/portfolio-shell";
 import { loadOwnedQuotes } from "./owned-quotes";
+import { createHistoricalSnapshotRepository } from "../db/repositories/snapshots.ts";
+import {
+  createOverviewData,
+  createUnavailableOverviewData,
+} from "./overview-read-model";
 
 function isPrincipal(value: unknown): value is VerifiedAccessPrincipal {
   if (typeof value !== "object" || value === null) return false;
@@ -40,7 +45,7 @@ function unavailableWorkspace(message: string): OwnedWorkspace {
 
 export async function loadAuthenticatedWorkspace(
   requestedPortfolioId?: string,
-  options: { includeQuotes?: boolean } = {},
+  options: { includeQuotes?: boolean; includeOverview?: boolean } = {},
 ): Promise<OwnedWorkspace> {
   const principalHeader = (await headers()).get(VERIFIED_PRINCIPAL_HEADER);
   if (!principalHeader) {
@@ -84,11 +89,30 @@ export async function loadAuthenticatedWorkspace(
           settingsVersion: settings.version,
         }
       : workspace;
-    if (
-      !options.includeQuotes ||
-      configuredWorkspace.activePortfolio === null
-    ) {
+    if (configuredWorkspace.activePortfolio === null)
       return configuredWorkspace;
+    if (!options.includeQuotes && !options.includeOverview)
+      return configuredWorkspace;
+    if (options.includeOverview) {
+      try {
+        const overview = await createHistoricalSnapshotRepository(
+          client,
+        ).loadPublishedOverview(
+          result.context.user.id,
+          configuredWorkspace.activePortfolio.id,
+        );
+        return {
+          ...configuredWorkspace,
+          overview: createOverviewData(overview),
+        };
+      } catch {
+        return {
+          ...configuredWorkspace,
+          overview: createUnavailableOverviewData(
+            configuredWorkspace.activePortfolio.baseCurrencyCode,
+          ),
+        };
+      }
     }
     const quotes = await loadOwnedQuotes(
       client,

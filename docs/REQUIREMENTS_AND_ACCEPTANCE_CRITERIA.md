@@ -338,6 +338,7 @@ Acceptance:
 - Same-version rebuilds stage under a run identity and atomically switch the published run only after completion. Price/FX selection is pinned to the run’s persisted ingestion cutoff, and inverse directional FX observations are normalized through the calculation contract.
 - Historical selection also applies the portfolio timezone’s local end-of-day cutoff to each observation instant, including DST transitions, so a later foreign-market close cannot create look-ahead history. Calendar-aware fallback distinguishes a known exchange holiday from a missing quote on an expected trading session; an unknown calendar remains explicitly unknown. Calendar evidence is canonicalized and pinned to the calculation run so retries cannot change that classification.
 - The pinned calendar evidence is bounded and validity-dated by exchange/MIC, includes provenance/version and session open/close instants, maps each portfolio-local cutoff to the latest completed session, and persists the selected session identity on holding snapshot detail; it is not duplicated as an unbounded per-holding date map.
+- Portfolio daily percentage is not a v1 acceptance claim: the UI shows the exact daily amount and `Percentage unavailable` until a calculation-layer comparable portfolio denominator and explicit cash-flow classification contract exist.
 
 ### CALC-007 — Return metrics
 
@@ -349,6 +350,7 @@ Acceptance:
 - Until the deferred dividend workflow exists, income is omitted or explicitly unavailable rather than inferred.
 - TWR/XIRR remain unavailable until explicit external cash-flow classification and complete history exist.
 - Any future return metric declares cash-flow and fee treatment.
+- A portfolio-wide daily percentage remains unavailable until its comparable denominator and cash-flow treatment are defined in the calculation layer; the UI must not derive one from a snapshot row or formatted display value.
 
 ### DIV-001 — Dividend events and receipts
 

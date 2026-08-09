@@ -20,6 +20,9 @@ import type { PortfolioInspection } from "../../db/repositories/portfolio-inspec
 import { BrandMark } from "./brand-mark";
 import { OwnedPortfolioDetails } from "./portfolio-details";
 import { ServiceWorkerRegistration } from "./service-worker-registration";
+import { subtractCalendarMonths } from "../overview-range";
+import { sampleOverviewChartPoints } from "../overview-chart";
+import { overviewFormulaTotal, overviewStateCopy } from "../overview-copy";
 
 export const portfolioSections = [
   "overview",
@@ -56,6 +59,51 @@ export type OwnedWorkspace = {
   }>;
   quotes?: QuoteRow[];
   quoteViewState?: ViewState;
+  overview?: OwnedOverviewData;
+};
+export type OwnedOverviewData = {
+  status:
+    "complete" | "partial" | "stale" | "incomplete" | "empty" | "unavailable";
+  currencyCode: string;
+  current: OwnedOverviewPoint | null;
+  history: readonly OwnedOverviewPoint[];
+  coverage: {
+    pricedHoldingCount: number | null;
+    nonZeroHoldingCount: number | null;
+    convertedCashAccountCount: number | null;
+    nonZeroCashAccountCount: number | null;
+    totalHoldingCount: number | null;
+    excluded: readonly { id: string; reason: string }[];
+    issues: readonly { id: string; reason: string }[];
+    marketDataStates: readonly {
+      id: string;
+      price: string;
+      fx: string;
+      calendar: string;
+    }[];
+  };
+  allocation: {
+    status: "complete" | "partial" | "unavailable";
+    rows: readonly {
+      id: string;
+      label: string;
+      value: string | null;
+      percent: string | null;
+    }[];
+  };
+};
+export type OwnedOverviewPoint = {
+  date: string;
+  value: string | null;
+  securities: string | null;
+  cash: string | null;
+  cost: string | null;
+  unrealised: string | null;
+  realised: string | null;
+  daily: string | null;
+  valueDecimal: string | null;
+  completeness: "complete" | "partial" | "incomplete";
+  barHeight: string;
 };
 const primaryPortfolioSections: PortfolioSection[] = [
   "overview",
@@ -264,6 +312,358 @@ function OwnedWorkspaceScreen({
       message={messages[activeSection]}
       showAction={false}
     />
+  );
+}
+
+function overviewDate(date: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return date;
+  return `${date.slice(8)} ${new Date(`${date}T00:00:00Z`).toLocaleDateString(
+    "en-AU",
+    { month: "short", timeZone: "UTC" },
+  )}`;
+}
+
+function OverviewFact({
+  label,
+  value,
+  signed = false,
+}: {
+  label: string;
+  value: string | null;
+  signed?: boolean;
+}) {
+  const unavailable = value === null;
+  const negative = value?.startsWith("−") || value?.startsWith("-");
+  const positive = !negative && value?.startsWith("+");
+  const zero = value !== null && /(?:^| )0\.00$/.test(value);
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd
+        className={
+          unavailable
+            ? "muted-copy"
+            : negative
+              ? "tone-negative"
+              : positive
+                ? "tone-positive"
+                : ""
+        }
+      >
+        {unavailable
+          ? "Unavailable"
+          : signed && !positive && !negative && !zero
+            ? `+${value}`
+            : value}
+      </dd>
+    </div>
+  );
+}
+
+function OwnedOverviewScreen({
+  data,
+  portfolioId,
+  portfolioName,
+}: {
+  data: OwnedOverviewData;
+  portfolioId: string;
+  portfolioName: string;
+}) {
+  const [range, setRange] = useState<"1M" | "3M" | "12M" | "All">("12M");
+  const history = useMemo(() => {
+    if (range === "All") return data.history;
+    const latest = data.history[data.history.length - 1];
+    if (!latest) return [];
+    const cutoffDate = subtractCalendarMonths(
+      latest.date,
+      range === "1M" ? 1 : range === "3M" ? 3 : 12,
+    );
+    return data.history.filter((point) => point.date >= cutoffDate);
+  }, [data.history, range]);
+  const chartHistory = useMemo(
+    () => sampleOverviewChartPoints(history),
+    [history],
+  );
+  const current = data.current;
+  const partial =
+    data.status === "partial" ||
+    data.status === "stale" ||
+    data.status === "incomplete";
+  const chartSampled = chartHistory.length < history.length;
+  const stateCopy = current ? overviewStateCopy(data, current) : null;
+
+  if (data.status === "unavailable") {
+    return (
+      <section
+        className="empty-state"
+        aria-labelledby="overview-unavailable-title"
+      >
+        <p className="eyebrow">Private workspace</p>
+        <h1 id="overview-unavailable-title">Overview unavailable</h1>
+        <p>Published valuation data could not be loaded. Try again shortly.</p>
+      </section>
+    );
+  }
+
+  if (data.status === "empty" || current === null) {
+    return (
+      <EmptyState
+        title="No valuation history yet"
+        message="Add posted transactions and validated market observations to publish portfolio value."
+        showAction={false}
+      />
+    );
+  }
+
+  return (
+    <div className="overview-screen owned-overview">
+      {stateCopy ? (
+        <p className="status-banner warning" role="status">
+          <strong>
+            {data.status === "stale"
+              ? "Stale coverage"
+              : data.status === "incomplete" && current?.value === null
+                ? "Value unavailable"
+                : "Known value"}
+          </strong>
+          <span>{stateCopy}</span>
+        </p>
+      ) : null}
+      <section className="overview-hero" aria-labelledby="owned-overview-title">
+        <div>
+          <p className="eyebrow">
+            {portfolioName} · {data.currencyCode}
+          </p>
+          <h1 id="owned-overview-title">
+            {current.value ?? "Value unavailable"}
+          </h1>
+          <p className="overview-movement">
+            <span
+              className={
+                current.daily === null
+                  ? "muted-copy"
+                  : current.daily.startsWith("−")
+                    ? "tone-negative"
+                    : "tone-positive"
+              }
+            >
+              {current.daily === null
+                ? "Daily movement unavailable"
+                : `${current.daily} today · Percentage unavailable`}
+            </span>
+            <span>as of {overviewDate(current.date)}</span>
+          </p>
+        </div>
+        <dl className="overview-kpis">
+          <OverviewFact label="Securities" value={current.securities} />
+          <OverviewFact label="Cash" value={current.cash} />
+          <OverviewFact
+            label={partial ? "Known unrealised" : "Unrealised"}
+            value={current.unrealised}
+            signed
+          />
+          <OverviewFact label="Cost" value={current.cost} />
+          <OverviewFact label="Realised" value={current.realised} signed />
+        </dl>
+      </section>
+
+      <section className="history-panel" aria-labelledby="owned-history-title">
+        <div className="section-heading compact">
+          <div>
+            <p className="eyebrow">Portfolio history</p>
+            <h2 id="owned-history-title">Published value</h2>
+          </div>
+          <div className="range-controls" aria-label="History range">
+            {(["1M", "3M", "12M", "All"] as const).map((option) => (
+              <button
+                key={option}
+                type="button"
+                aria-pressed={range === option}
+                onClick={() => setRange(option)}
+              >
+                {option}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div
+          className="history-bars"
+          role="img"
+          aria-label={`Published portfolio value history; ${history.length} daily points. ${chartSampled ? "Visual bars are bounded and gap markers are representative when needed; the table below contains every point." : "All points are shown."}`}
+        >
+          {chartHistory.map((point) => (
+            <span
+              key={point.date}
+              className={
+                point.valueDecimal === null
+                  ? "history-gap"
+                  : point.completeness !== "complete"
+                    ? "history-partial"
+                    : undefined
+              }
+              style={{ "--bar-height": point.barHeight } as React.CSSProperties}
+              title={`${overviewDate(point.date)}: ${point.value ?? "Unavailable"}`}
+            />
+          ))}
+        </div>
+        <p className="chart-coverage">
+          {history.length === 0
+            ? "No published points in this range."
+            : `${history.length} published daily point${history.length === 1 ? "" : "s"}; incomplete dates remain marked in the table.${chartSampled ? " Visual gap markers are representative; use the table for the complete gap record." : ""}`}
+        </p>
+        <details className="chart-table-details">
+          <summary>View history as a table</summary>
+          <table>
+            <caption>Published portfolio value history</caption>
+            <thead>
+              <tr>
+                <th scope="col">Date</th>
+                <th scope="col">Value</th>
+                <th scope="col">Daily</th>
+                <th scope="col">State</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((point) => (
+                <tr key={`${point.date}-row`}>
+                  <th scope="row">{overviewDate(point.date)}</th>
+                  <td>{point.value ?? "Unavailable"}</td>
+                  <td>
+                    {point.daily ?? "Unavailable"} (Percentage unavailable)
+                  </td>
+                  <td>{point.completeness}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      </section>
+
+      <section
+        className="portfolio-list overview-coverage"
+        aria-labelledby="overview-coverage-title"
+      >
+        <div className="section-heading compact">
+          <div>
+            <p className="eyebrow">Coverage</p>
+            <h2 id="overview-coverage-title">What is included</h2>
+          </div>
+        </div>
+        <dl className="overview-kpis">
+          <OverviewFact
+            label="Priced holdings"
+            value={
+              data.coverage.pricedHoldingCount === null
+                ? null
+                : `${data.coverage.pricedHoldingCount} / ${data.coverage.nonZeroHoldingCount ?? "—"} non-zero`
+            }
+          />
+          <OverviewFact
+            label="Converted cash"
+            value={
+              data.coverage.convertedCashAccountCount === null
+                ? null
+                : `${data.coverage.convertedCashAccountCount} / ${data.coverage.nonZeroCashAccountCount ?? "—"} non-zero`
+            }
+          />
+        </dl>
+        <section
+          className="allocation-summary"
+          aria-labelledby="allocation-title"
+        >
+          <h3 id="allocation-title">Allocation of valued securities</h3>
+          {data.allocation.status === "unavailable" ? (
+            <p className="muted-copy">
+              Allocation unavailable until current holding valuation facts are
+              published.
+            </p>
+          ) : (
+            <ul>
+              {data.allocation.rows.map((row) => (
+                <li key={row.id}>
+                  <span>{row.label}</span>
+                  <span>{row.percent ?? "Unavailable"}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {data.allocation.status === "partial" ? (
+            <p className="muted-copy">
+              Partial allocation: unavailable holdings are excluded.
+            </p>
+          ) : null}
+        </section>
+        <p className="muted-copy">Income is not included in this release.</p>
+        <details className="overview-drilldown">
+          <summary>Coverage and formula details</summary>
+          <p>
+            Known formula: {current.securities ?? "Unavailable"} securities +{" "}
+            {current.cash ?? "Unavailable"} cash ={" "}
+            {overviewFormulaTotal(current)}
+          </p>
+          <dl>
+            <div>
+              <dt>Priced holdings</dt>
+              <dd>
+                {data.coverage.pricedHoldingCount ?? "Unavailable"} /{" "}
+                {data.coverage.nonZeroHoldingCount ?? "Unavailable"} non-zero
+              </dd>
+            </div>
+            <div>
+              <dt>Holding snapshots</dt>
+              <dd>{data.coverage.totalHoldingCount ?? "Unavailable"} total</dd>
+            </div>
+            <div>
+              <dt>Converted cash</dt>
+              <dd>
+                {data.coverage.convertedCashAccountCount ?? "Unavailable"} /{" "}
+                {data.coverage.nonZeroCashAccountCount ?? "Unavailable"}{" "}
+                non-zero
+              </dd>
+            </div>
+          </dl>
+          <h3>
+            {data.coverage.issues.length > 0
+              ? "Coverage limitations"
+              : "Excluded components"}
+          </h3>
+          {data.coverage.issues.length === 0 ? (
+            <p>No exclusions or limitations recorded.</p>
+          ) : (
+            <ul>
+              {data.coverage.issues.map((item) => (
+                <li key={`${item.id}-${item.reason}`}>
+                  {item.id}: {item.reason}
+                </li>
+              ))}
+            </ul>
+          )}
+          <h3>Market state explanations</h3>
+          {data.coverage.marketDataStates.length === 0 ? (
+            <p>No market-data exceptions recorded.</p>
+          ) : (
+            <ul>
+              {data.coverage.marketDataStates.map((state) => (
+                <li key={state.id}>
+                  {state.id}: price {state.price}, FX {state.fx}, calendar{" "}
+                  {state.calendar}
+                </li>
+              ))}
+            </ul>
+          )}
+          {data.coverage.issues.length > 0 ? (
+            <p>
+              Review price, FX, and session limitations in{" "}
+              <Link href={`/portfolio/${portfolioId}/quotes`}>Quotes</Link>,
+              inspect calculation coverage in{" "}
+              <Link href={`/portfolio/${portfolioId}/details`}>Details</Link>,
+              and review history or quantity issues in the{" "}
+              <Link href={`/portfolio/${portfolioId}/ledger/new`}>ledger</Link>.
+            </p>
+          ) : null}
+        </details>
+      </section>
+    </div>
   );
 }
 
@@ -2020,6 +2420,30 @@ export function PortfolioShell({
             <OwnedPortfolioDetails
               inspection={ownedDetails}
               onOpenSettings={() => setOpenMenu("prototype")}
+            />
+          ) : activeSection === "overview" && ownedWorkspace.activePortfolio ? (
+            <OwnedOverviewScreen
+              data={
+                ownedWorkspace.overview ?? {
+                  status: "unavailable",
+                  currencyCode: ownedWorkspace.activePortfolio.baseCurrencyCode,
+                  current: null,
+                  history: [],
+                  coverage: {
+                    pricedHoldingCount: null,
+                    nonZeroHoldingCount: null,
+                    convertedCashAccountCount: null,
+                    nonZeroCashAccountCount: null,
+                    totalHoldingCount: null,
+                    excluded: [],
+                    issues: [],
+                    marketDataStates: [],
+                  },
+                  allocation: { status: "unavailable", rows: [] },
+                }
+              }
+              portfolioId={ownedWorkspace.activePortfolio.id}
+              portfolioName={ownedWorkspace.activePortfolio.name}
             />
           ) : (
             <OwnedWorkspaceScreen

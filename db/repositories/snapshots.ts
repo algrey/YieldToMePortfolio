@@ -11,6 +11,10 @@ import {
   type HistoricalExchangeSession,
   HISTORICAL_CALENDAR_LIMITS,
 } from "../../domain/snapshots/history.ts";
+import {
+  compareDecimal,
+  parseDecimalResult,
+} from "../../domain/calculations/index.ts";
 import type {
   FxObservation,
   ManualOverride,
@@ -72,6 +76,38 @@ export type HistoricalSeriesResponse = {
   points: readonly HistoricalSeriesPoint[];
   gaps: readonly { date: string; completeness: "partial" | "incomplete" }[];
 };
+
+export type PublishedOverviewSnapshot = {
+  id: string;
+  date: string;
+  totalValueDecimal: string | null;
+  securitiesValueDecimal: string | null;
+  cashValueDecimal: string | null;
+  costBasisDecimal: string | null;
+  unrealisedGainDecimal: string | null;
+  realisedGainToDateDecimal: string | null;
+  dailyMovementDecimal: string | null;
+  completeness: "complete" | "partial" | "incomplete";
+  coverage: Record<string, unknown>;
+};
+
+export type PublishedOverviewAllocation = {
+  securityId: string;
+  label: string;
+  quantityDecimal: string;
+  valueDecimal: string | null;
+  completeness: "complete" | "partial" | "incomplete";
+};
+
+export type PublishedOverviewReadModel = {
+  baseCurrencyCode: string;
+  calculationVersion: number;
+  current: PublishedOverviewSnapshot;
+  history: readonly PublishedOverviewSnapshot[];
+  allocation: readonly PublishedOverviewAllocation[];
+};
+
+const MAX_OVERVIEW_HISTORY_POINTS = 3_660;
 
 export type SnapshotRepositoryOptions = {
   maxHoldingRowsPerChunk?: number;
@@ -390,6 +426,139 @@ function parseCoverage(value: unknown): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const COVERAGE_COUNT_KEYS = [
+  "totalHoldingCount",
+  "nonZeroHoldingCount",
+  "pricedHoldingCount",
+  "convertedHoldingCount",
+  "basisCoveredHoldingCount",
+  "zeroHoldingCount",
+  "totalCashAccountCount",
+  "nonZeroCashAccountCount",
+  "convertedCashAccountCount",
+  "zeroCashAccountCount",
+] as const;
+const COVERAGE_GAP_KINDS = new Set([
+  "incomplete_history",
+  "missing_price",
+  "stale_price",
+  "missing_session",
+  "missing_fx",
+  "stale_fx",
+  "incomplete_basis",
+  "invalid_ledger",
+  "cash_incomplete",
+  "quantity_boundary",
+]);
+
+function validatedResultDecimal(
+  value: unknown,
+  options: { allowNegative?: boolean } = {},
+): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string") throw new Error("invalid_snapshot_decimal");
+  const parsed = parseDecimalResult(value);
+  if (
+    !options.allowNegative &&
+    compareDecimal(parsed, parseDecimalResult("0")) < 0
+  ) {
+    throw new Error("invalid_snapshot_decimal");
+  }
+  return value;
+}
+
+function validatedCoverage(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new Error("invalid_snapshot_coverage");
+  }
+  const coverage = value;
+  for (const key of COVERAGE_COUNT_KEYS) {
+    const count = coverage[key];
+    if (
+      typeof count !== "number" ||
+      !Number.isSafeInteger(count) ||
+      count < 0
+    ) {
+      throw new Error("invalid_snapshot_coverage");
+    }
+  }
+  const count = (key: (typeof COVERAGE_COUNT_KEYS)[number]) => {
+    const value = coverage[key];
+    if (typeof value !== "number") throw new Error("invalid_snapshot_coverage");
+    return value;
+  };
+  if (
+    count("nonZeroHoldingCount") + count("zeroHoldingCount") !==
+      count("totalHoldingCount") ||
+    count("pricedHoldingCount") > count("nonZeroHoldingCount") ||
+    count("convertedHoldingCount") > count("pricedHoldingCount") ||
+    count("basisCoveredHoldingCount") > count("nonZeroHoldingCount") ||
+    count("nonZeroCashAccountCount") + count("zeroCashAccountCount") !==
+      count("totalCashAccountCount") ||
+    count("convertedCashAccountCount") > count("nonZeroCashAccountCount")
+  ) {
+    throw new Error("invalid_snapshot_coverage");
+  }
+  if (typeof coverage.historyComplete !== "boolean") {
+    throw new Error("invalid_snapshot_coverage");
+  }
+  for (const key of ["excludedHoldingIds", "excludedCashAccountIds"] as const) {
+    const ids = coverage[key];
+    if (
+      !Array.isArray(ids) ||
+      ids.some((id) => typeof id !== "string" || id.length === 0)
+    ) {
+      throw new Error("invalid_snapshot_coverage");
+    }
+  }
+  const gaps = coverage.gaps;
+  if (
+    !Array.isArray(gaps) ||
+    gaps.some((gap) => {
+      if (!isRecord(gap)) return true;
+      return (
+        typeof gap.componentId !== "string" ||
+        typeof gap.kind !== "string" ||
+        !COVERAGE_GAP_KINDS.has(gap.kind)
+      );
+    })
+  ) {
+    throw new Error("invalid_snapshot_coverage");
+  }
+  if (!Array.isArray(coverage.marketDataStates)) {
+    throw new Error("invalid_snapshot_coverage");
+  }
+  const selectionStates = new Set([
+    "current",
+    "fallback",
+    "stale",
+    "unavailable",
+  ]);
+  for (const state of coverage.marketDataStates) {
+    if (!isRecord(state)) throw new Error("invalid_snapshot_coverage");
+    if (
+      typeof state.componentId !== "string" ||
+      (state.priceState !== null &&
+        (typeof state.priceState !== "string" ||
+          !selectionStates.has(state.priceState))) ||
+      (state.fxState !== null &&
+        (typeof state.fxState !== "string" ||
+          !selectionStates.has(state.fxState))) ||
+      (state.calendarStatus !== "session" &&
+        state.calendarStatus !== "holiday" &&
+        state.calendarStatus !== "missing_session" &&
+        state.calendarStatus !== "unknown")
+    ) {
+      throw new Error("invalid_snapshot_coverage");
+    }
+  }
+  return coverage;
 }
 
 function dateRange(from: string, to: string): string[] {
@@ -1272,6 +1441,321 @@ export function createHistoricalSnapshotRepository(
         rangeTo,
         points,
         gaps,
+      };
+    },
+
+    async loadPublishedOverview(
+      userId: string,
+      portfolioId: string,
+    ): Promise<PublishedOverviewReadModel | null> {
+      // The publication and every snapshot predicate carry the internal owner
+      // key. A portfolio id alone must never disclose whether another owner
+      // has a published calculation.
+      const publication = await sql.get<Record<string, unknown>>(
+        `SELECT sp.calculation_version, sp.calculation_run_id,
+                sp.ledger_high_water, p.base_currency_code
+         FROM snapshot_publications sp
+         JOIN portfolios p ON p.id = sp.portfolio_id AND p.user_id = sp.user_id
+         WHERE sp.user_id = ? AND sp.portfolio_id = ?
+         ORDER BY sp.calculation_version DESC, sp.published_at DESC
+         LIMIT 1`,
+        [userId, portfolioId],
+      );
+      if (!publication) return null;
+
+      const version = publication.calculation_version;
+      const runId = publication.calculation_run_id;
+      const ledgerHighWater = publication.ledger_high_water;
+      const currency = publication.base_currency_code;
+      if (
+        typeof version !== "number" ||
+        !Number.isSafeInteger(version) ||
+        version < 1 ||
+        typeof runId !== "string" ||
+        runId.length === 0 ||
+        typeof ledgerHighWater !== "string" ||
+        ledgerHighWater.length === 0 ||
+        typeof currency !== "string" ||
+        !/^[A-Z]{3}$/.test(currency)
+      ) {
+        throw new Error("invalid_snapshot_publication");
+      }
+      const run = await sql.get<Record<string, unknown>>(
+        `SELECT calculation_version, status, ledger_high_water_end,
+                range_from, range_to
+         FROM calculation_runs
+         WHERE id = ? AND user_id = ? AND portfolio_id = ? LIMIT 1`,
+        [runId, userId, portfolioId],
+      );
+      if (!run) throw new Error("invalid_snapshot_publication");
+      if (
+        run.status !== "completed" ||
+        run.calculation_version !== version ||
+        run.ledger_high_water_end !== ledgerHighWater ||
+        typeof run.range_from !== "string" ||
+        typeof run.range_to !== "string" ||
+        !isValidCalendarDate(run.range_from) ||
+        !isValidCalendarDate(run.range_to) ||
+        run.range_to < run.range_from
+      ) {
+        throw new Error("invalid_snapshot_publication");
+      }
+      const rangeFrom =
+        typeof run.range_from === "string" ? run.range_from : null;
+      const rangeTo = typeof run.range_to === "string" ? run.range_to : null;
+      if (rangeFrom === null || rangeTo === null) {
+        throw new Error("invalid_snapshot_publication");
+      }
+
+      const rows = await sql.all<Record<string, unknown>>(
+        `SELECT id, snapshot_date, base_currency_code, calculation_version,
+                calculation_run_id, ledger_high_water,
+                total_value_decimal, securities_value_decimal,
+                cash_value_decimal, cost_basis_decimal,
+                unrealised_gain_decimal, realised_gain_to_date_decimal,
+                daily_movement_decimal, completeness, coverage_json
+         FROM portfolio_daily_snapshots
+         WHERE user_id = ? AND portfolio_id = ?
+           AND calculation_version = ? AND calculation_run_id = ?
+           AND ledger_high_water = ? AND status = 'ready'
+         ORDER BY snapshot_date DESC
+         LIMIT ?`,
+        [
+          userId,
+          portfolioId,
+          version,
+          runId,
+          ledgerHighWater,
+          MAX_OVERVIEW_HISTORY_POINTS,
+        ],
+      );
+      if (rows.length === 0) throw new Error("invalid_snapshot_publication");
+
+      const mapSnapshot = (
+        row: Record<string, unknown>,
+      ): PublishedOverviewSnapshot => {
+        const date = row.snapshot_date;
+        const id = row.id;
+        const rowVersion = row.calculation_version;
+        const rowRunId = row.calculation_run_id;
+        const rowLedgerHighWater = row.ledger_high_water;
+        const baseCurrency = row.base_currency_code;
+        const completeness = row.completeness;
+        if (
+          typeof date !== "string" ||
+          typeof id !== "string" ||
+          id.length === 0 ||
+          rowVersion !== version ||
+          rowRunId !== runId ||
+          rowLedgerHighWater !== ledgerHighWater ||
+          !isValidCalendarDate(date) ||
+          date < rangeFrom ||
+          date > rangeTo ||
+          baseCurrency !== currency ||
+          (completeness !== "complete" &&
+            completeness !== "partial" &&
+            completeness !== "incomplete")
+        ) {
+          throw new Error("invalid_snapshot_fact");
+        }
+        let parsedCoverage: unknown;
+        try {
+          parsedCoverage =
+            typeof row.coverage_json === "string"
+              ? JSON.parse(row.coverage_json)
+              : null;
+        } catch {
+          throw new Error("invalid_snapshot_coverage");
+        }
+        const coverage = validatedCoverage(parsedCoverage);
+        if (
+          typeof coverage.historyComplete !== "boolean" ||
+          !Array.isArray(coverage.gaps) ||
+          !Array.isArray(coverage.excludedHoldingIds) ||
+          !Array.isArray(coverage.excludedCashAccountIds)
+        ) {
+          throw new Error("invalid_snapshot_coverage");
+        }
+        if (
+          (completeness === "partial" &&
+            (row.total_value_decimal === null ||
+              (coverage.gaps.length === 0 &&
+                coverage.excludedHoldingIds.length === 0 &&
+                coverage.excludedCashAccountIds.length === 0 &&
+                coverage.historyComplete === true))) ||
+          (completeness === "incomplete" &&
+            coverage.gaps.length === 0 &&
+            coverage.excludedHoldingIds.length === 0 &&
+            coverage.excludedCashAccountIds.length === 0 &&
+            coverage.historyComplete === true)
+        ) {
+          throw new Error("invalid_snapshot_fact");
+        }
+        if (
+          completeness === "complete" &&
+          (row.total_value_decimal === null ||
+            row.securities_value_decimal === null ||
+            row.cash_value_decimal === null ||
+            row.cost_basis_decimal === null ||
+            row.unrealised_gain_decimal === null ||
+            row.realised_gain_to_date_decimal === null ||
+            coverage.historyComplete !== true ||
+            coverage.gaps.length !== 0 ||
+            coverage.excludedHoldingIds.length !== 0 ||
+            coverage.excludedCashAccountIds.length !== 0 ||
+            coverage.pricedHoldingCount !== coverage.nonZeroHoldingCount ||
+            coverage.convertedHoldingCount !== coverage.nonZeroHoldingCount ||
+            coverage.basisCoveredHoldingCount !==
+              coverage.nonZeroHoldingCount ||
+            coverage.convertedCashAccountCount !==
+              coverage.nonZeroCashAccountCount)
+        ) {
+          throw new Error("invalid_snapshot_fact");
+        }
+        return {
+          id,
+          date,
+          totalValueDecimal: validatedResultDecimal(row.total_value_decimal, {
+            allowNegative: true,
+          }),
+          securitiesValueDecimal: validatedResultDecimal(
+            row.securities_value_decimal,
+          ),
+          cashValueDecimal: validatedResultDecimal(row.cash_value_decimal, {
+            allowNegative: true,
+          }),
+          costBasisDecimal: validatedResultDecimal(row.cost_basis_decimal),
+          unrealisedGainDecimal: validatedResultDecimal(
+            row.unrealised_gain_decimal,
+            { allowNegative: true },
+          ),
+          realisedGainToDateDecimal: validatedResultDecimal(
+            row.realised_gain_to_date_decimal,
+            { allowNegative: true },
+          ),
+          dailyMovementDecimal: validatedResultDecimal(
+            row.daily_movement_decimal,
+            { allowNegative: true },
+          ),
+          completeness,
+          coverage,
+        };
+      };
+
+      const expectedDates = dateRange(rangeFrom, rangeTo);
+      if (expectedDates.length === 0) {
+        throw new Error("invalid_snapshot_publication");
+      }
+      const snapshots = rows.map(mapSnapshot);
+      const dates = new Set(snapshots.map((snapshot) => snapshot.date));
+      if (
+        dates.size !== snapshots.length ||
+        snapshots.length !== expectedDates.length ||
+        expectedDates.some((date) => !dates.has(date))
+      ) {
+        throw new Error("invalid_snapshot_publication");
+      }
+      snapshots.sort((left, right) => right.date.localeCompare(left.date));
+      const current = snapshots[0]!;
+      if (current.date !== rangeTo) {
+        throw new Error("invalid_snapshot_publication");
+      }
+      const allocationRows = await sql.all<Record<string, unknown>>(
+        `SELECT h.portfolio_security_id, COALESCE(s.canonical_name, ps.source_symbol) AS label,
+                h.quantity_decimal, h.native_value_decimal, h.base_value_decimal,
+                h.basis_decimal, h.completeness, h.calculation_version,
+                h.calculation_run_id
+         FROM holding_daily_snapshots h
+         JOIN portfolio_securities ps
+           ON ps.id = h.portfolio_security_id AND ps.user_id = h.user_id
+          AND ps.portfolio_id = h.portfolio_id
+         LEFT JOIN securities s ON s.id = ps.security_id
+         WHERE h.user_id = ? AND h.portfolio_id = ?
+           AND h.snapshot_date = ? AND h.portfolio_snapshot_id = ?
+           AND h.calculation_version = ?
+           AND h.calculation_run_id = ? AND h.status = 'ready'
+         ORDER BY h.portfolio_security_id`,
+        [userId, portfolioId, current.date, current.id, version, runId],
+      );
+      const totalHoldingCount = current.coverage.totalHoldingCount;
+      if (
+        typeof totalHoldingCount !== "number" ||
+        allocationRows.length !== totalHoldingCount
+      ) {
+        throw new Error("invalid_snapshot_holding");
+      }
+      const childIds = new Set<string>();
+      const allocation = allocationRows.map((row) => {
+        if (
+          typeof row.portfolio_security_id !== "string" ||
+          row.portfolio_security_id.length === 0 ||
+          typeof row.label !== "string" ||
+          row.label.length === 0 ||
+          typeof row.quantity_decimal !== "string" ||
+          row.quantity_decimal.length === 0 ||
+          row.calculation_version !== version ||
+          row.calculation_run_id !== runId ||
+          (row.completeness !== "complete" &&
+            row.completeness !== "partial" &&
+            row.completeness !== "incomplete")
+        ) {
+          throw new Error("invalid_snapshot_holding");
+        }
+        if (childIds.has(row.portfolio_security_id)) {
+          throw new Error("invalid_snapshot_holding");
+        }
+        childIds.add(row.portfolio_security_id);
+        validatedResultDecimal(row.quantity_decimal);
+        validatedResultDecimal(row.native_value_decimal);
+        validatedResultDecimal(row.base_value_decimal);
+        validatedResultDecimal(row.basis_decimal);
+        return {
+          securityId: row.portfolio_security_id,
+          label: row.label,
+          quantityDecimal: row.quantity_decimal,
+          valueDecimal: validatedResultDecimal(row.base_value_decimal),
+          completeness: row.completeness,
+        } satisfies PublishedOverviewAllocation;
+      });
+      const allocationCounts = {
+        nonZero: 0,
+        zero: 0,
+        priced: 0,
+        converted: 0,
+        basis: 0,
+      };
+      for (const row of allocationRows) {
+        const quantity = validatedResultDecimal(row.quantity_decimal);
+        const nativeValue = validatedResultDecimal(row.native_value_decimal);
+        const baseValue = validatedResultDecimal(row.base_value_decimal);
+        const basis = validatedResultDecimal(row.basis_decimal);
+        if (quantity === null) throw new Error("invalid_snapshot_holding");
+        const quantityValue = parseDecimalResult(quantity);
+        if (compareDecimal(quantityValue, parseDecimalResult("0")) > 0) {
+          allocationCounts.nonZero += 1;
+          if (nativeValue !== null) allocationCounts.priced += 1;
+          if (baseValue !== null) allocationCounts.converted += 1;
+          if (basis !== null) allocationCounts.basis += 1;
+        } else {
+          allocationCounts.zero += 1;
+        }
+      }
+      if (
+        allocationCounts.nonZero !== current.coverage.nonZeroHoldingCount ||
+        allocationCounts.zero !== current.coverage.zeroHoldingCount ||
+        allocationCounts.priced !== current.coverage.pricedHoldingCount ||
+        allocationCounts.converted !== current.coverage.convertedHoldingCount ||
+        allocationCounts.basis !== current.coverage.basisCoveredHoldingCount
+      ) {
+        throw new Error("invalid_snapshot_holding");
+      }
+
+      return {
+        baseCurrencyCode: currency,
+        calculationVersion: version,
+        current,
+        history: snapshots.slice().reverse(),
+        allocation,
       };
     },
   };

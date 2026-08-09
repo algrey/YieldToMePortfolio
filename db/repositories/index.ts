@@ -152,6 +152,8 @@ export {
   createHistoricalSnapshotRepository,
   type HistoricalSeriesPoint,
   type HistoricalSeriesResponse,
+  type PublishedOverviewReadModel,
+  type PublishedOverviewSnapshot,
   type HistoricalSnapshotRebuildInput,
   type HistoricalSnapshotRequest,
   type SnapshotRebuildResult,

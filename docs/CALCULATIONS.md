@@ -261,6 +261,14 @@ Unavailable when previous comparable value is zero/missing.
 
 Portfolio daily movement is the sum of comparable security movements plus currency movement on cash accounts, excluding external deposits/withdrawals and trade flows. V1 may initially show only the security sum and a coverage label until cash-FX classification is complete.
 
+Portfolio daily percentage is intentionally unavailable in v1. The holding-level
+percentage above has a comparable holding denominator, but a portfolio-wide
+denominator is not defined while trades, deposits, withdrawals, and cash-flow
+classification can change the portfolio between comparison closes. The UI must
+show the daily amount and `Percentage unavailable`; a portfolio percentage may
+only be added when a calculation-layer comparable denominator and cash-flow
+contract are promoted and tested.
+
 ## 7. Cash and portfolio totals
 
 For each cash currency `c`:
@@ -323,6 +331,9 @@ high-water, calculation version, and persisted market-data ingestion cutoff. A
 chart request selects one completed version and never mixes dates from another
 version or an unfinished rebuild. Same-version replacements stage under their
 own run identity and switch the publication pointer only after completion.
+The published run must reject a nominal `complete` point when required totals
+are null, coverage has a gap or exclusion, or the ledger history boundary is
+incomplete; partial points retain usable known values and identify exclusions.
 Coverage distinguishes zero holdings/cash (which require no quote or FX) from
 non-zero components excluded for missing or stale price/FX, incomplete basis,
 or an incomplete ledger boundary. Stale selections remain explicit gaps even
