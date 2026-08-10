@@ -9,7 +9,7 @@
   --green-bright: #84e88d;
   --cream: #f2efe7;
   --muted: #a5ada8;
-  --muted-dark: #75817c;
+  --muted-dark: #828e89;
   --divider: #22322d;
   --negative: #ff8177;
   --warning: #e6bd6a;
@@ -878,6 +878,23 @@ dd {
   padding: 0;
 }
 
+.quote-history-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.quote-history-heading button {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
 .quote-action-buttons {
   display: flex;
   flex: 0 0 auto;
@@ -1348,7 +1365,7 @@ dd {
 }
 
 .compact-select {
-  min-height: 36px;
+  min-height: 44px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1450,14 +1467,15 @@ dd {
 
 .period-tabs {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
-  gap: 2px;
+  gap: 4px 2px;
   margin-top: 8px;
 }
 
 .period-tabs button {
-  min-width: 40px;
-  min-height: 38px;
+  min-width: 44px;
+  min-height: 44px;
   padding: 0 5px;
   border: 0;
   border-bottom: 2px solid transparent;
@@ -2082,6 +2100,17 @@ dd {
 
 .holding-sheet::backdrop {
   background: rgb(0 0 0 / 58%);
+}
+
+.sheet-close {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.72rem;
 }
 
 .sheet-handle {

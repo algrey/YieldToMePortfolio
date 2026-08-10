@@ -1209,7 +1209,7 @@ Status: PENDING.
 
 ### QA-001B — Accessibility and responsive hardening
 
-Status: PENDING.
+Status: DONE (2026-08-10).
 
 - Objective: verify the completed core flows at keyboard, screen-reader, reduced-motion, high-zoom, iPhone, and narrow desktop boundaries.
 - Dependencies: UI-001, UI-002, UI-003, UI-004, UI-005A, UI-005B, UI-005C, UI-005D, UI-005E, PWA-001.
@@ -1241,6 +1241,7 @@ Status: PENDING.
 - Tests: automated accessibility checks plus named manual assistive-tech/device cases.
 - Risks: false confidence from automated scans; manual evidence is required.
 - Parallel safe: review can start per completed surface; final gate is serial.
+- Completion note (2026-08-10): Delivered `docs/QA-001B_ACCESSIBILITY_AUDIT.md` with programmatic semantic/name/role/state, focus, contrast, reduced-motion, touch-target, non-color-signal, and 320/390/430/desktop layout evidence, plus a named REQUIRES OWNER RUN manual checklist (7 keyboard-only flow traces, 8 VoiceOver cases, 7 physical-device/zoom cases) with no fabricated manual results. Fixed four blocking defects: color-only gain/loss signals on owned holdings rows and the holding dialog (signed prefixes per existing convention), missing drawer keyboard focus management (initial focus, restore, Escape, Tab containment), `--muted-dark` contrast below 4.5:1 (now #828e89, 4.56–5.64:1), and four sub-44px touch targets. Review caught a 320px period-tab overflow introduced by the 44px fix; remediated by wrapping `.period-tabs` with the audit doc corrected honestly. Automated coverage in `tests/qa-001b.test.ts` (10 tests). Owner manual runs (VoiceOver, physical iPhone, 200% zoom) remain outstanding and are folded into QA-002 UAT; capture regeneration for visually changed controls is a follow-up. Two review rounds; final independent review PASS; `npm run check` exit 0 (290 pass, 2 env-gated skips).
 
 ### QA-002 — Preview UAT and release readiness
 

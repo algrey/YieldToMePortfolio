@@ -278,6 +278,17 @@ function EmptyState({
   );
 }
 
+// Gain/movement figures must carry an explicit +/− sign so the direction
+// does not depend on colour alone (UI_SPEC §10, QUAL-001). Negative values
+// already come back "-"-prefixed from formatDecimalFixed/Trimmed; this only
+// adds the missing "+" for positive, non-zero values.
+function signPrefixed(formatted: string, signed: boolean): string {
+  if (!signed) return formatted;
+  if (formatted.startsWith("-") || formatted.startsWith("−")) return formatted;
+  if (/^0(?:\.0+)?$/.test(formatted)) return formatted;
+  return `+${formatted}`;
+}
+
 function ownedHoldingAmount(
   value: {
     status: "available" | "unavailable";
@@ -286,13 +297,18 @@ function ownedHoldingAmount(
     reason?: string | null;
   },
   scale = 2,
+  signed = false,
 ) {
   if (value.status !== "available" || value.value === null)
     return value.reason === "missing_basis"
       ? "Basis unavailable"
       : "Price unavailable";
   try {
-    return `${value.currencyCode} ${formatDecimalFixed(parseDecimalResult(value.value), scale)}`;
+    const formatted = signPrefixed(
+      formatDecimalFixed(parseDecimalResult(value.value), scale),
+      signed,
+    );
+    return `${value.currencyCode} ${formatted}`;
   } catch {
     return value.reason === "missing_basis"
       ? "Basis unavailable"
@@ -319,11 +335,18 @@ function ownedHoldingTrimmed(value: string | null, scale = 6): string {
 }
 function ownedHoldingPercent(
   value: OwnedHoldingRow["dailyPercent"],
+  signed = false,
 ): ReactNode {
   return value.status === "available" && value.value !== null ? (
     (() => {
       try {
-        return `${formatDecimalTrimmed(parseDecimalResult(value.value), 2, { trimTrailingZeros: true })}%`;
+        const formatted = signPrefixed(
+          formatDecimalTrimmed(parseDecimalResult(value.value), 2, {
+            trimTrailingZeros: true,
+          }),
+          signed,
+        );
+        return `${formatted}%`;
       } catch {
         return (
           <>
@@ -531,13 +554,13 @@ function OwnedHoldingsScreen({
                   tone={holding.dailyTone}
                   className="row-primary numeric"
                 >
-                  {ownedHoldingAmount(holding.dailyMovement)}
+                  {ownedHoldingAmount(holding.dailyMovement, 2, true)}
                 </ToneValue>
                 <ToneValue
                   tone={holding.gainTone}
                   className="row-primary numeric"
                 >
-                  {ownedHoldingAmount(holding.unrealisedGain)}
+                  {ownedHoldingAmount(holding.unrealisedGain, 2, true)}
                 </ToneValue>
                 <span className="row-secondary">
                   {priceLabel}
@@ -547,10 +570,10 @@ function OwnedHoldingsScreen({
                   Basis {ownedHoldingAmount(basis)}
                 </span>
                 <span className="row-secondary numeric">
-                  {ownedHoldingPercent(holding.dailyPercent)}
+                  {ownedHoldingPercent(holding.dailyPercent, true)}
                 </span>
                 <span className="row-secondary numeric">
-                  {ownedHoldingPercent(holding.unrealisedPercent)}
+                  {ownedHoldingPercent(holding.unrealisedPercent, true)}
                 </span>
                 <span className="row-tertiary">
                   Avg{" "}
@@ -698,15 +721,21 @@ function OwnedHoldingsScreen({
             </div>
             <div>
               <dt>Gain</dt>
-              <dd>{ownedHoldingAmount(selectedHolding.unrealisedGain)}</dd>
+              <dd className={`tone-${selectedHolding.gainTone}`}>
+                {ownedHoldingAmount(selectedHolding.unrealisedGain, 2, true)}
+              </dd>
             </div>
             <div>
               <dt>Daily %</dt>
-              <dd>{ownedHoldingPercent(selectedHolding.dailyPercent)}</dd>
+              <dd className={`tone-${selectedHolding.dailyTone}`}>
+                {ownedHoldingPercent(selectedHolding.dailyPercent, true)}
+              </dd>
             </div>
             <div>
               <dt>Unrealised %</dt>
-              <dd>{ownedHoldingPercent(selectedHolding.unrealisedPercent)}</dd>
+              <dd className={`tone-${selectedHolding.gainTone}`}>
+                {ownedHoldingPercent(selectedHolding.unrealisedPercent, true)}
+              </dd>
             </div>
             <div>
               <dt>Average cost × quantity</dt>
@@ -2412,6 +2441,8 @@ export function PortfolioShell({
   const [viewState, setViewState] = useState<ViewState>("populated");
   const [openMenu, setOpenMenu] = useState<OpenMenu>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const drawerOpenerRef = useRef<HTMLButtonElement | null>(null);
+  const drawerCloseRef = useRef<HTMLButtonElement>(null);
   const [selectedHolding, setSelectedHolding] = useState<Holding | null>(() =>
     holdingSymbol
       ? (portfolios
@@ -2438,6 +2469,31 @@ export function PortfolioShell({
       window.removeEventListener("offline", updateConnectivity);
     };
   }, []);
+
+  // The navigation drawer is a full-screen overlay: without moving focus in
+  // on open, restoring it to the trigger on close, and containing Tab while
+  // open, a keyboard user could tab into content visually hidden behind it.
+  useEffect(() => {
+    if (drawerOpen) {
+      drawerCloseRef.current?.focus();
+      return;
+    }
+    if (drawerOpenerRef.current) {
+      drawerOpenerRef.current.focus();
+      drawerOpenerRef.current = null;
+    }
+  }, [drawerOpen]);
+
+  useEffect(() => {
+    if (!drawerOpen) return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setDrawerOpen(false);
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [drawerOpen]);
 
   const portfolio =
     portfolios.find((item) => item.id === portfolioId) ?? portfolios[0];
@@ -2631,7 +2687,10 @@ export function PortfolioShell({
           type="button"
           aria-label="Open navigation menu"
           aria-expanded={drawerOpen}
-          onClick={() => setDrawerOpen(true)}
+          onClick={(event) => {
+            drawerOpenerRef.current = event.currentTarget;
+            setDrawerOpen(true);
+          }}
         >
           <span className="hamburger" aria-hidden="true">
             <i />
@@ -3076,6 +3135,22 @@ export function PortfolioShell({
             className="navigation-drawer"
             aria-label="Navigation"
             onMouseDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key !== "Tab") return;
+              const focusable = event.currentTarget.querySelectorAll<
+                HTMLAnchorElement | HTMLButtonElement
+              >("a[href], button:not([disabled])");
+              if (focusable.length === 0) return;
+              const first = focusable[0];
+              const last = focusable[focusable.length - 1];
+              if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+              }
+            }}
           >
             <div className="drawer-heading">
               <Link href="/" onClick={() => setDrawerOpen(false)}>
@@ -3083,6 +3158,7 @@ export function PortfolioShell({
                 <span className="wordmark">YieldToMe</span>
               </Link>
               <button
+                ref={drawerCloseRef}
                 type="button"
                 aria-label="Close navigation menu"
                 onClick={() => setDrawerOpen(false)}
