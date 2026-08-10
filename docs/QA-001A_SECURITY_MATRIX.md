@@ -168,39 +168,142 @@ configuration, and non-data-bearing 401/403 responses.
 
 ## 4. Dependency audit
 
-`npm audit` (2026-08-10, full workspace including devDependencies):
-**21 vulnerabilities (1 low, 4 moderate, 16 high)**.
+`npm audit` (2026-08-10, full workspace including devDependencies), as
+refreshed by **DEP-001** (dev/build toolchain upgrade, superseding the
+original QA-001A snapshot below):
+**6 vulnerabilities (0 low, 4 moderate, 2 high)**, down from the original
+**21 vulnerabilities (1 low, 4 moderate, 16 high)** recorded when QA-001A was
+first evidenced.
 
-All high-severity findings are in transitive dependencies of build/dev
-tooling — `next` (production dependency, but used only for type-compatible
-imports like `next/headers`/`next/navigation`/`next/link` under vinext's
-Next-compatible App Router; the actual runtime is vinext/Vite/Workers, not
-Next's own server), `vite`, `wrangler`/`miniflare`/`undici`/`ws` (local dev
-server and Cloudflare Workers emulation), and their nested `postcss`/`sharp`
-copies. None of these packages, at the versions currently pinned, ship in the
-Cloudflare Workers production bundle produced by `vinext build` (confirmed:
-`dist/client` contains no `next`, `vite`, `wrangler`, `undici`, or `ws` source
-and no Access configuration — see §5).
+**Finding QA-001A-F3 (resolved by DEP-001, 1 high advisory intentionally
+retained with documented justification):** DEP-001 upgraded the dev/build
+toolchain within `AGENTS.md`'s dependency rules (documented need, exact
+version, lockfile update, Cloudflare-runtime verification):
 
-**Finding QA-001A-F3 (residual risk, Orchestrator-accepted):**
-`npm audit fix --force` would upgrade `next` (16.2.6 → 16.3.0), `vite` (8.0.13
-→ 8.2.1), and `@cloudflare/vite-plugin` (1.37.1 → 1.51.1, pulling a newer
-`wrangler`/`miniflare`) outside the ranges currently pinned in
-`package.json`. Per `AGENTS.md`, dependency version changes need documented
-need, exact version, lockfile update, and Cloudflare-runtime verification —
-this is exactly the kind of change a Worker should not make unilaterally
-inside a security-audit task. **Not fixed in this task.**
+| Package                    | Before       | After              | Major?                       |
+| -------------------------- | ------------ | ------------------ | ---------------------------- |
+| `next`                     | 16.2.6       | 16.3.0             | No                           |
+| `eslint-config-next`       | 16.2.6       | 16.3.0             | No                           |
+| `react`                    | 19.2.6       | 19.2.8             | No                           |
+| `react-dom`                | 19.2.6       | 19.2.8             | No                           |
+| `react-server-dom-webpack` | 19.2.6       | 19.2.8             | No                           |
+| `vite`                     | 8.0.13       | 8.2.1              | No                           |
+| `@cloudflare/vite-plugin`  | 1.37.1       | 1.51.1             | No                           |
+| `wrangler`                 | 4.92.0       | 4.120.0            | No                           |
+| `miniflare` (transitive)   | 4.20260515.0 | 5.20260801.1-alpha | **Yes** (major + prerelease) |
+| `workerd` (transitive)     | 1.20260515.1 | 1.20260801.1       | No                           |
 
-All 16 high-severity advisories are confirmed confined to the dev/build
-toolchain (`next`, `vite`, `wrangler`/`miniflare`/`undici`/`ws`) and are not
-part of the production Workers bundle (see confirmation above and §5). The
-Orchestrator has reviewed this residual risk and accepted it for the scope of
-QA-001A, and has scheduled a dedicated toolchain-upgrade follow-up task
-(**DEP-001**) to evaluate and apply the upgrades with a full `vinext
-build`/Cloudflare-runtime verification smoke test, tracked separately from
-QA-001A. Per this documented risk acceptance, QA-001A's "no high-severity
-open finding" completion criterion is satisfied-with-documented-acceptance,
-not blocked.
+The eight rows above are the direct package-level bumps DEP-001 made, each
+non-major. However, bumping `wrangler` transitively carries `miniflare`
+across a **major version, into a prerelease/alpha** (`4.20260515.0` →
+`5.20260801.1-alpha`), and `workerd` along with it. This is not "all upgrades
+stayed within their existing major version" — the transitive `miniflare`
+jump is a real major/prerelease change and is called out explicitly rather
+than glossed over. It was not accepted on trust: both env-gated
+Miniflare-backed D1 drill suites (`tests/ops-003a.test.ts`,
+`tests/ops-003b.test.ts`) were run directly against the upgraded toolchain
+(27 passed, 0 failed — see the Cloudflare-runtime verification below),
+confirming the Worker executes correctly against the new `miniflare` major,
+not merely that it type-checks or builds.
+
+**Explicit `miniflare` devDependency pin added by DEP-001:**
+`tests/ops-003a.test.ts` and `tests/ops-003b.test.ts` `import` `miniflare`
+directly for their loopback D1 drills, but prior to this correction
+`miniflare` was not a declared `package.json` dependency at all — it only
+resolved transitively through `wrangler`'s (and `@cloudflare/vite-plugin`'s)
+dependency tree. That is fragile: a future `wrangler`/`@cloudflare/vite-plugin`
+bump could change or drop the transitive `miniflare` version out from under
+the drill harness with no `package.json` signal. `miniflare` is now pinned
+as an exact devDependency at `5.20260801.1-alpha` — the version already
+resolved transitively at the time of this fix (confirmed via `npm ls
+miniflare`) — so the pin changes nothing about what gets installed today; it
+only makes the drill harness's dependency explicit and gives it its own
+lockfile entry to bump deliberately in future. `npm ls miniflare` after the
+pin still shows a single deduped `5.20260801.1-alpha` install (both
+`@cloudflare/vite-plugin` and `wrangler`'s copies resolve to the same
+hoisted node_modules entry as the new direct devDependency) — no duplicate
+`miniflare` copy was introduced.
+
+This resolved every high-severity advisory across 14 of the 16 originally
+affected packages — `@cloudflare/vite-plugin`, `brace-expansion`,
+`fast-uri`, `js-yaml`, `miniflare`, `nanoid`, `next`, `postcss`,
+`react-server-dom-webpack`, `sharp`, `undici`, `vite`, `wrangler`, and `ws`
+— via the direct upgrades in the table above plus `npm audit fix` for the
+transitive ESLint-tool-chain advisories (`brace-expansion`, `fast-uri`,
+`js-yaml`; no direct pin changes required for those three). The remaining 2
+of the original 16 (`image-size` and `vinext`, counted high solely because
+it depends on `image-size`) are not fixed and are documented immediately
+below.
+
+**One high-severity issue remains, carried by a single unfixable package,
+with no upstream fix and no code change possible:** `image-size@2.0.2` (a
+transitive dependency of `vinext`, used only at build/dev time inside
+`vinext`'s metadata-route/static-image-size inference — confirmed by
+inspecting `node_modules/vinext/dist/index.js` and
+`node_modules/vinext/dist/server/metadata-route-build-data.js`, the only two
+files that import it) carries two unpatched DoS GHSAs —
+[GHSA-w3rx-r6r6-pgpr](https://github.com/advisories/GHSA-w3rx-r6r6-pgpr) and
+[GHSA-5p2g-fcmc-qvqq](https://github.com/advisories/GHSA-5p2g-fcmc-qvqq)
+(infinite loops parsing malformed ICNS/JXL/HEIF image data). `npm audit`
+reports this as **2 high-severity package entries** — `image-size` itself,
+plus `vinext` counted high solely because it depends on `image-size` — not
+two independently vulnerable packages requiring separate remediation.
+`image-size`'s latest published release is `2.0.2` itself — there is no
+fixed version to upgrade to. `npm audit fix --force`'s only suggested "fix"
+is downgrading `vinext` to `0.0.45`, the last release before `image-size`
+became a dependency at all; that is a feature removal, not a security fix,
+and downgrading a direct production dependency to chase a phantom fix is out
+of DEP-001's "smallest upgrade that clears the advisory" mandate. Risk is
+low and accepted: `image-size` here only ever processes this repository's
+own known, developer-controlled image assets under `public/`/`app/` at
+build time (`vinext build`) — never a request body, an uploaded file, or any
+other attacker-controlled input at runtime — so the DoS is not reachable
+from the deployed Workers bundle or from CSV/import/portfolio request
+handling. **Residual risk accepted; tracked here, no further follow-up task
+required unless `image-size` ships a fix or `vinext` drops the dependency,**
+at which point a routine dependency bump (not a new task) is sufficient.
+
+The pre-existing moderate `esbuild`/`@esbuild-kit/*`/`drizzle-kit` advisory
+chain (4 moderate) is unchanged by DEP-001 and was already out of scope: the
+only fix path is downgrading `drizzle-kit` to `0.18.1` (`isSemVerMajor:
+true`), a disruptive major regression of the schema-migration tool for a
+moderate-severity, dev-only advisory. Not addressed here; DEP-001's
+acceptance criterion is "no undispositioned **high**-severity advisory,"
+which is now met.
+
+All packages implicated in the original 16 high advisories — `next`, `vite`,
+`wrangler`/`miniflare`/`undici`/`ws`, and their nested `postcss`/`sharp`
+copies — are confirmed confined to the dev/build toolchain and are not part
+of the production Workers bundle produced by `vinext build` (confirmed:
+`dist/client` contains no `next`, `vite`, `wrangler`, `undici`, or `ws`
+source and no Access configuration — see §5). Per this documented
+disposition, QA-001A's "no high-severity open finding" completion criterion
+remains satisfied: the one retained high-severity issue (`image-size`,
+counted twice by `npm audit` as `image-size` plus its dependent `vinext`)
+has an explicit written risk acceptance above, and every other high
+advisory is fixed.
+
+**Cloudflare-runtime verification performed for DEP-001:** `vinext check`
+(100% compatible, 0 issues), `vinext build` (succeeds, 24 API route handlers
+
+- 5 pages, matching §1's route count), the full automated suite (290 passed,
+  0 failed, 2 skipped — see below), and both env-gated loopback-Miniflare D1
+  drills run explicitly against the upgraded `wrangler`/`miniflare`
+  (`OPS003A_D1_DRILL=1 OPS003B_D1_DRILL=1 node --experimental-strip-types
+--test tests/ops-003a.test.ts tests/ops-003b.test.ts`): 27 passed, 0 failed —
+  "synthetic non-production D1 drill completes, traverses, and preserves
+  source rows" and "isolated loopback D1 deletion drill completes and
+  preserves the other owner" both pass against a real Miniflare-backed D1
+  instance under the new toolchain, confirming the Worker executes correctly
+  under `wrangler` 4.120.0/`@cloudflare/vite-plugin` 1.51.1, not just that it
+  compiles. One test assertion (`tests/runtime-config.test.ts` "wrangler
+  source and generated worker config stay aligned with the task profile") was
+  updated to expect a `migrations_dir` field that the upgraded
+  `wrangler`/`@cloudflare/vite-plugin` now adds by default to every generated
+  `d1_databases` entry; this repository applies D1 migrations via explicit
+  `drizzle/*.sql` files and `wrangler d1 execute`
+  (`docs/OPS-002_BACKUP_RESTORE_RUNBOOK.md`), never `wrangler d1 migrations
+apply`, so the field is inert generated metadata, not a behavior change.
 
 ## 5. Private-cache and built-asset audit
 
@@ -287,18 +390,18 @@ not blocked.
 
 ## 8. Findings summary
 
-| ID         | Severity          | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Disposition                                                                                                                                                                                                                               |
-| ---------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| QA-001A-F1 | High              | 7 mutation routes (`POST /api/portfolios`, `PATCH`/`DELETE /api/portfolios/:portfolioId`, `POST /api/portfolios/:portfolioId/restore`, `PATCH /api/settings/holding-currency-view`, `PATCH /api/settings/home-currency`, `POST /api/import/preview`, `PATCH /api/import/preview/:batchId/mappings`) were missing the `rejectCrossSiteMutation` CSRF gate that every sibling mutation route applies, violating `AUTH-004`.                                                 | **Fixed** in this task — gate added ahead of all other work in each route; regression coverage added in `tests/qa-001a.test.ts`                                                                                                           |
-| QA-001A-F2 | Informational     | `authorizeExportJobRequest` grants "owns job" for any active identity regardless of the requested `jobId`; the actual data read is independently owner-scoped, so this is not exploitable.                                                                                                                                                                                                                                                                                | No code change — documented in §1/§7 as verified-safe; consider tightening `authorizeExportJobRequest` in a future readability pass (not security-blocking)                                                                               |
-| QA-001A-F3 | High (dependency) | `npm audit` reports 16 high-severity advisories, all in dev/build tooling (`next`, `vite`, `wrangler`/`miniflare`/`undici`/`ws`) not present in the Workers production bundle; fixing requires version bumps outside the pinned ranges.                                                                                                                                                                                                                                   | **Residual risk accepted by the Orchestrator** for this task's scope; not an application-level vulnerability in the deployed bundle; follow-up toolchain-upgrade task **DEP-001** scheduled with required Cloudflare-runtime verification |
-| QA-001A-F4 | High              | The root route `/` (`app/page.tsx`) renders authenticated private portfolio data via `loadAuthenticatedWorkspace(undefined, { includeOverview: true })` into `PortfolioShell`, but `isPrivateRequest` (`worker/response-security.ts`) only matched `/api*`, `/import*`, `/portfolio*` — so `/` responses carried no `cache-control` header at all, making an authenticated private page cacheable, and contradicting this document's earlier "100% coverage" claim in §5. | **Fixed** in this task — added an exact `pathname === "/"` match to `isPrivateRequest`; regression coverage added in `tests/security-headers.test.ts`; §5 and §7 updated to describe the fix accurately                                   |
+| ID         | Severity          | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Disposition                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ---------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| QA-001A-F1 | High              | 7 mutation routes (`POST /api/portfolios`, `PATCH`/`DELETE /api/portfolios/:portfolioId`, `POST /api/portfolios/:portfolioId/restore`, `PATCH /api/settings/holding-currency-view`, `PATCH /api/settings/home-currency`, `POST /api/import/preview`, `PATCH /api/import/preview/:batchId/mappings`) were missing the `rejectCrossSiteMutation` CSRF gate that every sibling mutation route applies, violating `AUTH-004`.                                                 | **Fixed** in this task — gate added ahead of all other work in each route; regression coverage added in `tests/qa-001a.test.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| QA-001A-F2 | Informational     | `authorizeExportJobRequest` grants "owns job" for any active identity regardless of the requested `jobId`; the actual data read is independently owner-scoped, so this is not exploitable.                                                                                                                                                                                                                                                                                | No code change — documented in §1/§7 as verified-safe; consider tightening `authorizeExportJobRequest` in a future readability pass (not security-blocking)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| QA-001A-F3 | High (dependency) | `npm audit` originally reported 16 high-severity advisories, all in dev/build tooling (`next`, `vite`, `wrangler`/`miniflare`/`undici`/`ws`) not present in the Workers production bundle.                                                                                                                                                                                                                                                                                | **Resolved by DEP-001** — non-major direct upgrades to `next`, `react`/`react-dom`/`react-server-dom-webpack`, `vite`, `@cloudflare/vite-plugin`, and `wrangler` (see §4 table), which transitively moved `miniflare` across a major version (`4.x` → `5.x-alpha`), together cleared 14 of the original 16 high-severity packages. The remaining 2 (`image-size` and `vinext`, counted high solely as its dependent) share one unfixable root cause with no upstream fix and are documented as an accepted, build-time-only, non-reachable risk in §4. Full quality gate and Miniflare-backed D1 drills (validating the transitive `miniflare` major bump) re-verified on the upgraded toolchain. |
+| QA-001A-F4 | High              | The root route `/` (`app/page.tsx`) renders authenticated private portfolio data via `loadAuthenticatedWorkspace(undefined, { includeOverview: true })` into `PortfolioShell`, but `isPrivateRequest` (`worker/response-security.ts`) only matched `/api*`, `/import*`, `/portfolio*` — so `/` responses carried no `cache-control` header at all, making an authenticated private page cacheable, and contradicting this document's earlier "100% coverage" claim in §5. | **Fixed** in this task — added an exact `pathname === "/"` match to `isPrivateRequest`; regression coverage added in `tests/security-headers.test.ts`; §5 and §7 updated to describe the fix accurately                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
 No findings remain open at Blocking/High severity within this task's scope
-(QA-001A-F1 and QA-001A-F4 are fixed; QA-001A-F3 is a dependency-upgrade
-decision outside a Worker's authority, not an active application-level
-vulnerability in the deployed bundle, and is satisfied-with-documented-
-acceptance per the Orchestrator's risk-acceptance decision above).
+(QA-001A-F1 and QA-001A-F4 are fixed; QA-001A-F3 is resolved by DEP-001,
+with its one remaining high-severity issue — `image-size`, counted twice by
+`npm audit` as `image-size` plus its dependent `vinext` — carrying an
+explicit, justified risk acceptance in §4 because no upstream fix exists).
 
 ## 9. Verification run
 
@@ -317,3 +420,20 @@ were added to `.prettierignore` (Orchestrator-approved) so Prettier no longer
 reformats pre-existing, out-of-scope agent-tooling config/docs that predate
 this task and are not part of QA-001A; no content under those directories was
 changed.
+
+### DEP-001 re-verification (2026-08-10, post dev/build toolchain upgrade)
+
+- `npm audit` — 6 vulnerabilities (0 low, 4 moderate, 2 high), down from 21
+  (1 low, 4 moderate, 16 high); disposition in §4.
+- `npm run check` — passes end-to-end on the upgraded toolchain (Prettier,
+  ESLint, `tsc`, `vinext check` at 100% compatible, `vinext build`, full
+  test suite: 290 passed, 0 failed, 2 skipped).
+- `OPS003A_D1_DRILL=1 OPS003B_D1_DRILL=1 node --experimental-strip-types
+--test tests/ops-003a.test.ts tests/ops-003b.test.ts` — 27 passed, 0
+  failed; both loopback-Miniflare D1 drills executed against the upgraded
+  `wrangler`/`@cloudflare/vite-plugin`, confirming Worker/D1 execution
+  correctness under the new toolchain (not just successful compilation).
+- `tests/runtime-config.test.ts` updated to expect the `migrations_dir`
+  field the upgraded toolchain now adds by default to generated
+  `d1_databases` entries; see §4 for why this is inert generated metadata
+  rather than a behavior change.

@@ -1185,7 +1185,7 @@ Status: DONE (2026-08-10).
 
 ### DEP-001 — Dev/build toolchain dependency upgrades
 
-Status: PENDING.
+Status: DONE (2026-08-10).
 
 - Objective: resolve the high-severity `npm audit` advisories accepted during QA-001A by upgrading the dev/build toolchain (`next`, `vite`, `wrangler`/`miniflare`/`undici`/`ws`) with Cloudflare-runtime verification.
 - Dependencies: QA-001A.
@@ -1206,6 +1206,7 @@ Status: PENDING.
 - Acceptance: no undispositioned high-severity advisory remains; full quality gate passes on the upgraded toolchain.
 - Risks: build-toolchain majors changing Worker output; verify runtime behavior, not just compile success.
 - Parallel safe: no; touches shared build configuration.
+- Completion note (2026-08-10): Upgraded next 16.2.6→16.3.0, react/react-dom/react-server-dom-webpack 19.2.6→19.2.8, vite 8.0.13→8.2.1, @cloudflare/vite-plugin 1.37.1→1.51.1, wrangler 4.92.0→4.120.0 (all direct bumps non-major; wrangler transitively moved miniflare to 5.20260801.1-alpha and workerd to 1.20260801.1, validated by 27/27 Miniflare-backed D1 drill tests). `npm audit` dropped from 21 (16 high) to 6 (4 moderate, 2 high); the sole remaining high root cause is `image-size@2.0.2` (no fixed upstream release, two GHSAs, build-time-only reachability, absent from the deployed bundle) with explicit risk acceptance in `docs/QA-001A_SECURITY_MATRIX.md` §4; the 4 moderates are the pre-existing esbuild/drizzle-kit chain, documented out of scope. Added an exact `miniflare` devDependency pin (drill tests import it directly), accommodated the generated `migrations_dir` field in `tests/runtime-config.test.ts` (inert; migrations apply via `wrangler d1 execute`), and refreshed matrix §4/§8. Two review rounds; final independent review PASS; `npm run check` exit 0 (290 pass, 2 env-gated skips).
 
 ### QA-001B — Accessibility and responsive hardening
 

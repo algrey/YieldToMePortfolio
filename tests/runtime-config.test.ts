@@ -173,11 +173,18 @@ test("wrangler source and generated worker config stay aligned with the task pro
 
   const generatedAssets = generatedConfig.assets as { binding?: string };
   assert.equal(generatedAssets.binding, "ASSETS");
+  // DEP-001: wrangler >=4.120.0 / @cloudflare/vite-plugin >=1.51.1 fill in a
+  // default `migrations_dir` on every generated `d1_databases` entry. This
+  // repository applies D1 migrations via explicit `drizzle/*.sql` files and
+  // `wrangler d1 execute` (see docs/OPS-002_BACKUP_RESTORE_RUNBOOK.md), never
+  // `wrangler d1 migrations apply`, so the field is inert generated metadata,
+  // not a behavior change.
   assert.deepEqual(generatedConfig.d1_databases, [
     {
       binding: "DB",
       database_name: "yieldtome-portfolio",
       database_id: "17b674b8-034a-4e78-9916-dab14499bb9c",
+      migrations_dir: "../../migrations",
     },
   ]);
   assert.deepEqual(generatedConfig.r2_buckets, []);
