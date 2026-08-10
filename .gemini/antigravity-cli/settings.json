@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "command(ls)",
+      "command(cat)",
+      "command(head)",
+      "command(tail)",
+      "command(find)",
+      "command(grep)",
+      "command(sed)",
+      "command(pwd)",
+      "command(git)",
+      "command(node)",
+      "command(npm)",
+      "command(npx)"
+    ],
+    "deny": [
+      "command(rm -rf)",
+      "command(sudo)"
+    ]
+  }
+}
