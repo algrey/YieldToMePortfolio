@@ -31,7 +31,11 @@ import {
   type OwnedHoldingCoverage,
   type OwnedHoldingRow,
 } from "../owned-holdings-contract";
-import { formatDecimalFixed, formatDecimalTrimmed } from "../preview-decimal";
+import {
+  formatDecimalFixed,
+  formatDecimalTrimmed,
+  groupThousands,
+} from "../preview-decimal";
 import { parseDecimalResult } from "../../domain/calculations/index.ts";
 
 export const portfolioSections = [
@@ -305,7 +309,9 @@ function ownedHoldingAmount(
       : "Price unavailable";
   try {
     const formatted = signPrefixed(
-      formatDecimalFixed(parseDecimalResult(value.value), scale),
+      groupThousands(
+        formatDecimalFixed(parseDecimalResult(value.value), scale),
+      ),
       signed,
     );
     return `${value.currencyCode} ${formatted}`;
@@ -318,7 +324,7 @@ function ownedHoldingAmount(
 function ownedHoldingDecimal(value: string | null, scale = 2): string {
   if (value === null) return "—";
   try {
-    return formatDecimalFixed(parseDecimalResult(value), scale);
+    return groupThousands(formatDecimalFixed(parseDecimalResult(value), scale));
   } catch {
     return "—";
   }
@@ -326,9 +332,11 @@ function ownedHoldingDecimal(value: string | null, scale = 2): string {
 function ownedHoldingTrimmed(value: string | null, scale = 6): string {
   if (value === null) return "—";
   try {
-    return formatDecimalTrimmed(parseDecimalResult(value), scale, {
-      trimTrailingZeros: true,
-    });
+    return groupThousands(
+      formatDecimalTrimmed(parseDecimalResult(value), scale, {
+        trimTrailingZeros: true,
+      }),
+    );
   } catch {
     return "—";
   }

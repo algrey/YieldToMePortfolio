@@ -276,6 +276,25 @@ export function formatDecimalTrimmed(
   return options.trimTrailingZeros === false ? fixed : trimFixed(fixed);
 }
 
+/**
+ * Insert thousands separators into the integer part of an already-formatted
+ * fixed/trimmed decimal string, e.g. "1234567.89" -> "1,234,567.89". Operates
+ * purely on the string so exact decimal precision is preserved; money must never
+ * be routed through JavaScript binary floating point. A leading sign ("-" or the
+ * "−" U+2212 minus used in the UI) and the fractional part are passed through
+ * unchanged. This is display-only: do not feed its output back into parsing.
+ */
+export function groupThousands(fixed: string): string {
+  const hasSign = fixed.startsWith("-") || fixed.startsWith("−");
+  const signChar = hasSign ? fixed.slice(0, 1) : "";
+  const unsigned = hasSign ? fixed.slice(1) : fixed;
+  const dotIndex = unsigned.indexOf(".");
+  const integerPart = dotIndex === -1 ? unsigned : unsigned.slice(0, dotIndex);
+  const fractionPart = dotIndex === -1 ? "" : unsigned.slice(dotIndex);
+  const grouped = integerPart.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${signChar}${grouped}${fractionPart}`;
+}
+
 export function formatDecimalExact(value: DecimalFraction): string {
   if (sourceScale(value) === null) {
     throw new Error("An explicit rounding scale is required for division.");

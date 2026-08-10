@@ -3,6 +3,7 @@ import { AccountLifecycleControls } from "./account-lifecycle-controls";
 import {
   formatDecimalFixed,
   formatDecimalTrimmed,
+  groupThousands,
   parseDecimal,
 } from "../../domain/calculations/decimal.ts";
 import type {
@@ -35,7 +36,7 @@ function decimal(value: string | null, empty = "—"): string {
 function money(value: string | null, currency: string): string {
   if (value === null) return "Unavailable";
   try {
-    return `${currency} ${formatDecimalFixed(parseDecimal(value), 2)}`;
+    return `${currency} ${groupThousands(formatDecimalFixed(parseDecimal(value), 2))}`;
   } catch {
     return "Unavailable";
   }

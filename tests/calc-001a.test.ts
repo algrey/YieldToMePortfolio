@@ -13,6 +13,7 @@ import {
   divideDecimal,
   formatDecimalExact,
   formatDecimalFixed,
+  groupThousands,
   multiplyDecimal,
   parseDecimal,
   roundDecimal,
@@ -100,6 +101,23 @@ test("reviewed decimal primitives preserve bounded source precision and half-eve
   );
   assert.equal(compareDecimal(parseDecimal("1.00"), parseDecimal("1")), 0);
   assert.equal(formatDecimalFixed(parseDecimal("-0.004"), 2), "0.00");
+});
+
+test("groupThousands inserts separators without altering exact value", () => {
+  // Below the grouping threshold: unchanged.
+  assert.equal(groupThousands("0.00"), "0.00");
+  assert.equal(groupThousands("999.99"), "999.99");
+  // Grouping the integer part; fractional digits preserved verbatim.
+  assert.equal(groupThousands("1000.00"), "1,000.00");
+  assert.equal(groupThousands("1234567.89"), "1,234,567.89");
+  assert.equal(groupThousands("921536.34"), "921,536.34");
+  // No fractional part.
+  assert.equal(groupThousands("1000000"), "1,000,000");
+  // Trimmed fractions (variable scale) are preserved.
+  assert.equal(groupThousands("12345.6789"), "12,345.6789");
+  // Both ASCII "-" and the UI minus sign U+2212 are passed through.
+  assert.equal(groupThousands("-1234.56"), "-1,234.56");
+  assert.equal(groupThousands("−1234567"), "−1,234,567");
 });
 
 test("decimal parsing and operation boundaries reject malformed or unbounded work", () => {

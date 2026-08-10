@@ -3,6 +3,7 @@ import {
   divideDecimal,
   formatDecimalFixed,
   formatDecimalTrimmed,
+  groupThousands,
   multiplyDecimal,
   parseDecimal,
   subtractDecimal,
@@ -41,9 +42,8 @@ function formatUnsignedCurrency(
 
   const sign = amount.startsWith("-") ? "−" : "";
   const absolute = sign.length > 0 ? amount.slice(1) : amount;
-  return `${sign}${currencyPrefix(currency)}${formatDecimalFixed(
-    parseDecimal(absolute),
-    2,
+  return `${sign}${currencyPrefix(currency)}${groupThousands(
+    formatDecimalFixed(parseDecimal(absolute), 2),
   )}`;
 }
 
@@ -64,10 +64,10 @@ function formatPrice(amount: string | null, currency: string): string {
 
   const sign = amount.startsWith("-") ? "−" : amount.startsWith("+") ? "+" : "";
   const absolute = sign.length > 0 ? amount.slice(1) : amount;
-  return `${sign}${currencyPrefix(currency)}${formatDecimalTrimmed(
-    parseDecimal(absolute),
-    6,
-    { trimTrailingZeros: true },
+  return `${sign}${currencyPrefix(currency)}${groupThousands(
+    formatDecimalTrimmed(parseDecimal(absolute), 6, {
+      trimTrailingZeros: true,
+    }),
   )}`;
 }
 

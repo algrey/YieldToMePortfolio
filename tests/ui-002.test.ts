@@ -66,7 +66,7 @@ function model(overrides: Record<string, unknown> = {}) {
 test("UI-002 read model formats a complete overview without timestamps", () => {
   const overview = createOverviewData(model());
   assert.equal(overview.status, "complete");
-  assert.equal(overview.current?.value, "AUD 1000.25");
+  assert.equal(overview.current?.value, "AUD 1,000.25");
   assert.equal(overview.current?.daily, "+AUD 5.25");
   assert.equal(overview.allocation.status, "complete");
   assert.equal(overview.current?.date, "2026-08-08");

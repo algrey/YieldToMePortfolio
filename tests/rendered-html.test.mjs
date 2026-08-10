@@ -126,10 +126,10 @@ test("server-renders a direct holding detail route from the shared valuation", a
   assert.match(html, /Plsgroup Fpo \[pls\]/);
   assert.match(html, /ASX[\s\S]*AUD/);
   assert.match(html, /A\$2\.09/);
-  assert.match(html, /Market value[\s\S]*A\$41800\.00/);
-  assert.match(html, /Open cost[\s\S]*A\$39300\.00/);
-  assert.match(html, /\+A\$4200\.00/);
-  assert.match(html, /Total gain[\s\S]*\+A\$2500\.00/);
+  assert.match(html, /Market value[\s\S]*A\$41,800\.00/);
+  assert.match(html, /Open cost[\s\S]*A\$39,300\.00/);
+  assert.match(html, /\+A\$4,200\.00/);
+  assert.match(html, /Total gain[\s\S]*\+A\$2,500\.00/);
   assert.match(html, /A\$1\.965 × 20,000 shares/);
   assert.match(html, /Fixture market data/);
   assert.match(html, /Back to holdings/);
@@ -145,8 +145,8 @@ test("server-renders the preview overview route", async () => {
   const html = await response.text();
   assert.match(html, /Fixture market data/);
   assert.match(html, /Aus Stocks · AUD/);
-  assert.match(html, /A\$921536\.34/);
-  assert.match(html, /A\$900780\.12/);
+  assert.match(html, /A\$921,536\.34/);
+  assert.match(html, /A\$900,780\.12/);
   assert.match(html, /Portfolio history/);
   assert.match(html, /Aus Stocks/);
 });

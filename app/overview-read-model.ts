@@ -3,6 +3,7 @@ import {
   compareDecimal,
   divideDecimal,
   formatDecimalFixed,
+  groupThousands,
   multiplyDecimal,
   parseDecimalResult,
   subtractDecimal,
@@ -204,7 +205,7 @@ function formatMoney(
       : signed && compareDecimal(parsedValue, parseDecimalResult("0")) > 0
         ? "+"
         : "";
-    return `${sign}${currencyCode} ${formatDecimalFixed(parsed, 2)}`;
+    return `${sign}${currencyCode} ${groupThousands(formatDecimalFixed(parsed, 2))}`;
   } catch {
     return null;
   }

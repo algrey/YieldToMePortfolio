@@ -7,6 +7,7 @@ export {
   formatDecimalFixed,
   formatDecimalTrimmed,
   fromInteger,
+  groupThousands,
   isZero,
   multiplyDecimal,
   negateDecimal,
