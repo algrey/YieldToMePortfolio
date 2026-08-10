@@ -173,11 +173,19 @@ export async function createImportPreviewAction(
         parseResult,
       });
       if (!recorded.ok) {
-        return {
-          ok: false,
-          status: 409,
-          message: "The uploaded preview changed while it was being prepared.",
-        };
+        return recorded.reason === "atomic_failure"
+          ? {
+              ok: false,
+              status: 503,
+              message:
+                "The import is still in progress and can be resumed safely.",
+            }
+          : {
+              ok: false,
+              status: 409,
+              message:
+                "The uploaded preview changed while it was being prepared.",
+            };
       }
     }
     const review = await loadReview(

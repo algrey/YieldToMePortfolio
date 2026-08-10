@@ -178,10 +178,6 @@ export function createIdentityRepository(client: SqlClient) {
       input: ProvisionInternalIdentityInput,
       auditInput: AppendAuditEventInput,
     ): Promise<InternalIdentityRecord> {
-      if (!client.batch) {
-        const record = await this.provision(input);
-        return record;
-      }
       const userId = randomUUID();
       const identityId = randomUUID();
       const email = input.principal.email;
@@ -297,8 +293,6 @@ export function createIdentityRepository(client: SqlClient) {
       authenticatedAt: string,
       auditInput: AppendAuditEventInput,
     ): Promise<InternalIdentityRecord> {
-      if (!client.batch)
-        return await this.touch(record, email, authenticatedAt);
       await client.batch([
         {
           sql: `

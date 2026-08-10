@@ -62,6 +62,12 @@ function createRecordedSqlClient(database: DatabaseSync) {
       statements.push(sql.replace(/\s+/g, " ").trim());
       return await baseClient.run(sql, params);
     },
+    async batch(batchStatements: Parameters<typeof baseClient.batch>[0]) {
+      for (const statement of batchStatements) {
+        statements.push(statement.sql.replace(/\s+/g, " ").trim());
+      }
+      return await baseClient.batch(batchStatements);
+    },
   };
 }
 

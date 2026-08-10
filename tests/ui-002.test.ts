@@ -513,6 +513,9 @@ test("UI-002 published snapshot lookup is owner-scoped", async () => {
     async run() {
       return { changes: 0, lastInsertRowId: 0 };
     },
+    async batch() {
+      throw new Error("unexpected batch write");
+    },
   };
   const repository = createHistoricalSnapshotRepository(sql);
   assert.equal(

@@ -86,19 +86,14 @@ only, not real secrets):
 CLOUDFLARE_ACCESS_ISSUER=http://127.0.0.1:8799
 CLOUDFLARE_ACCESS_AUDIENCE=yieldtome-local-dev
 YIELDTOME_WORKERS_PLAN=paid
-YIELDTOME_DEV_D1_TX_SHIM=enabled
 ```
 
 The issuer/audience must match the gateway. `YIELDTOME_WORKERS_PLAN=paid` enables
 the CSV import profile locally (it fails closed on the free plan).
 
-`YIELDTOME_DEV_D1_TX_SHIM=enabled` is a **temporary local-dev workaround**.
-Several repositories wrap writes in SQL `BEGIN … COMMIT`, which Cloudflare D1
-rejects — this breaks CSV import (and other write paths) on real D1. The shim
-(in `db/d1-sql-client.ts`, active only in the `local` runtime and only with this
-opt-in var) neutralizes those statements so the app is testable end to end;
-writes then autocommit individually, so it is **not** atomic and is not a fix.
-Tracked by **QA-003** in `TASKS.md`; remove it with the real fix.
+Repository write paths use D1's `batch()` API for atomic multi-statement
+writes (D1 rejects SQL-level `BEGIN`/`COMMIT`/`ROLLBACK`), so local D1 and
+production D1 use the same atomic write path — no local-only shim is needed.
 
 ### Run it (two terminals)
 

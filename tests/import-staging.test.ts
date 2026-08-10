@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   createOwnedImportStagingRepository,
   createSqliteSqlClient,
+  type SqlClient,
 } from "../db/repositories/index.ts";
 import {
   parseStrictVersionedCsvImport,
@@ -65,6 +66,12 @@ function createRecordedSqlClient(database: DatabaseSync) {
     ): Promise<{ changes: number; lastInsertRowId: number }> {
       statements.push(sql.replace(/\s+/g, " ").trim());
       return await baseClient.run(sql, params);
+    },
+    async batch(batchStatements: Parameters<typeof baseClient.batch>[0]) {
+      for (const statement of batchStatements) {
+        statements.push(statement.sql.replace(/\s+/g, " ").trim());
+      }
+      return await baseClient.batch(batchStatements);
     },
   };
 }
@@ -417,4 +424,318 @@ test("denies cross-user access and enforces row bounds with foreign keys enabled
       );
     `);
   }, /CHECK constraint failed: import_rows_physical_row_number_check/);
+});
+
+// QA-003 B4(a): a stale `expectedVersion` must leave `persistParsedResult`'s
+// atomic batch untouched — the version/status pre-check rejects it before
+// any write is attempted, and the same batch remains retryable with the
+// correct version afterward.
+test("stale expectedVersion on recordParseResult persists nothing and stays retryable", async () => {
+  const database = createMigratedDatabase(await loadMigrationSql());
+  seedReferenceData(database);
+  const client = createSqliteSqlClient(database);
+  const repository = createOwnedImportStagingRepository(
+    client,
+    () => "2026-07-29T15:00:00Z",
+  );
+
+  const csv = makeCsv([
+    `"1","ABC","Alpha",,"ASX","Main","AUD","3","12.50","0","2025-07-16 GMT+1000","14:35:00",,"Buy",,,"note"`,
+  ]);
+  const parseResult = await parseStrictVersionedCsvImport(csv);
+  assert.equal(parseResult.ok, true);
+  if (!parseResult.ok) {
+    return;
+  }
+
+  const upload = await repository.startUpload("user-a", {
+    parserFormat: IMPORT_FORMAT,
+    parserVersion: SUPPORTED_IMPORT_PARSER_VERSION,
+    filename: "stale-version.csv",
+    byteSize: Buffer.byteLength(csv),
+    fileSha256: parseResult.fileFingerprint,
+    targetPortfolioId: "portfolio-a",
+  });
+  assert.equal(upload.ok, true);
+  if (!upload.ok) {
+    return;
+  }
+
+  const staleResult = await repository.recordParseResult(
+    "user-a",
+    upload.batch.id,
+    { expectedVersion: upload.batch.version + 1, parseResult },
+  );
+  assert.equal(staleResult.ok, false);
+  if (staleResult.ok) {
+    return;
+  }
+  assert.equal(staleResult.reason, "version_conflict");
+
+  const rows = await repository.listRows("user-a", upload.batch.id);
+  assert.equal(rows.length, 0);
+  const issues = await repository.listIssues("user-a", upload.batch.id);
+  assert.equal(issues.length, 0);
+
+  const unchangedBatch = await repository.get("user-a", upload.batch.id);
+  assert.ok(unchangedBatch);
+  assert.equal(unchangedBatch?.status, "uploaded");
+  assert.equal(unchangedBatch?.version, upload.batch.version);
+
+  const retried = await repository.recordParseResult(
+    "user-a",
+    upload.batch.id,
+    { expectedVersion: upload.batch.version, parseResult },
+  );
+  assert.equal(retried.ok, true);
+});
+
+// QA-003 B4(c): if any statement in `persistParsedResult`'s single atomic
+// `batch()` call fails, D1/`node:sqlite`'s batch() semantics roll back every
+// statement in that call — so nothing persists, not even the earlier
+// statements that would otherwise have succeeded. Simulated here by
+// wrapping the client to append one statement that is guaranteed to
+// violate a NOT NULL constraint after the real statements.
+test("a mid-batch statement failure persists nothing via batch() atomicity", async () => {
+  const database = createMigratedDatabase(await loadMigrationSql());
+  seedReferenceData(database);
+  const baseClient = createSqliteSqlClient(database);
+  const injectingClient: SqlClient = {
+    ...baseClient,
+    async batch(statements) {
+      return await baseClient.batch([
+        ...statements,
+        {
+          sql: "INSERT INTO import_rows (id) VALUES ('mid-batch-injected-failure')",
+          params: [],
+        },
+      ]);
+    },
+  };
+  const repository = createOwnedImportStagingRepository(
+    injectingClient,
+    () => "2026-07-29T15:30:00Z",
+  );
+
+  const csv = makeCsv([
+    `"1","ABC","Alpha",,"ASX","Main","AUD","3","12.50","0","2025-07-16 GMT+1000","14:35:00",,"Buy",,,"note"`,
+  ]);
+  const parseResult = await parseStrictVersionedCsvImport(csv);
+  assert.equal(parseResult.ok, true);
+  if (!parseResult.ok) {
+    return;
+  }
+
+  const upload = await repository.startUpload("user-a", {
+    parserFormat: IMPORT_FORMAT,
+    parserVersion: SUPPORTED_IMPORT_PARSER_VERSION,
+    filename: "mid-batch-failure.csv",
+    byteSize: Buffer.byteLength(csv),
+    fileSha256: parseResult.fileFingerprint,
+    targetPortfolioId: "portfolio-a",
+  });
+  assert.equal(upload.ok, true);
+  if (!upload.ok) {
+    return;
+  }
+
+  const recorded = await repository.recordParseResult(
+    "user-a",
+    upload.batch.id,
+    { expectedVersion: upload.batch.version, parseResult },
+  );
+  assert.equal(recorded.ok, false);
+  if (recorded.ok) {
+    return;
+  }
+  assert.equal(recorded.reason, "atomic_failure");
+
+  const verifyRepository = createOwnedImportStagingRepository(baseClient);
+  const rows = await verifyRepository.listRows("user-a", upload.batch.id);
+  assert.equal(rows.length, 0);
+  const issues = await verifyRepository.listIssues("user-a", upload.batch.id);
+  assert.equal(issues.length, 0);
+  const unchangedBatch = await verifyRepository.get("user-a", upload.batch.id);
+  assert.ok(unchangedBatch);
+  assert.equal(unchangedBatch?.status, "uploaded");
+  assert.equal(unchangedBatch?.version, upload.batch.version);
+});
+
+const PARSE_RESULT_PRECHECK_SQL =
+  "SELECT id, status, version FROM import_batches WHERE id = ? AND user_id = ? LIMIT 1";
+
+/**
+ * Wraps `baseClient` so that the FIRST time `persistParsedResult`'s
+ * version/status pre-check `get()` runs, a concurrent writer's
+ * `uploaded -> failed` transition (its own version bump) is applied to the
+ * real database strictly AFTER that pre-check read returns but BEFORE the
+ * repository's `batch()` call executes. This reproduces the exact race the
+ * PRE-state guard must reject: by the time the guarded inserts and the
+ * closing UPDATE run, `import_batches` is already one version ahead of
+ * what the caller observed.
+ */
+function createConcurrentBumpClient(
+  baseClient: SqlClient,
+  batchId: string,
+): SqlClient {
+  let injected = false;
+  return {
+    ...baseClient,
+    async get<T extends Record<string, unknown>>(
+      sql: string,
+      params: readonly unknown[] = [],
+    ): Promise<T | undefined> {
+      const result = await baseClient.get<T>(sql, params);
+      if (
+        !injected &&
+        sql.replace(/\s+/g, " ").trim() === PARSE_RESULT_PRECHECK_SQL
+      ) {
+        injected = true;
+        await baseClient.run(
+          `UPDATE import_batches
+           SET status = 'failed', failure_category = 'concurrent_writer',
+               updated_at = ?, version = version + 1
+           WHERE id = ?`,
+          ["2026-07-29T15:00:01Z", batchId],
+        );
+      }
+      return result;
+    },
+  };
+}
+
+// QA-003 B1/B2: a concurrent writer's version bump landing strictly between
+// `persistParsedResult`'s pre-check read and its atomic `batch()` call must
+// make the ENTIRE call a no-op — zero rows, zero issues, `version_conflict`
+// — for the parsed-rows (success) path. Guarding the child inserts on the
+// version the closing UPDATE would bump *to* (rather than the PRE-state
+// version/status the caller actually observed) let this exact race persist
+// ghost rows into a batch whose state this call never wrote; this test
+// exercises the real guard the way the stale-`expectedVersion` tests above
+// cannot, since those are rejected by the pre-check before any batch is
+// issued.
+test("a concurrent uploaded->failed bump between the pre-check and the atomic batch blocks every guarded insert (parsed rows)", async () => {
+  const database = createMigratedDatabase(await loadMigrationSql());
+  seedReferenceData(database);
+  const baseClient = createSqliteSqlClient(database);
+  const setupRepository = createOwnedImportStagingRepository(baseClient);
+
+  const csv = makeCsv([
+    `"1","ABC","Alpha",,"ASX","Main","AUD","3","12.50","0","2025-07-16 GMT+1000","14:35:00",,"Buy",,,"note"`,
+  ]);
+  const parseResult = await parseStrictVersionedCsvImport(csv);
+  assert.equal(parseResult.ok, true);
+  if (!parseResult.ok) {
+    return;
+  }
+
+  const upload = await setupRepository.startUpload("user-a", {
+    parserFormat: IMPORT_FORMAT,
+    parserVersion: SUPPORTED_IMPORT_PARSER_VERSION,
+    filename: "concurrent-bump-rows.csv",
+    byteSize: Buffer.byteLength(csv),
+    fileSha256: parseResult.fileFingerprint,
+    targetPortfolioId: "portfolio-a",
+  });
+  assert.equal(upload.ok, true);
+  if (!upload.ok) {
+    return;
+  }
+
+  const injectingClient = createConcurrentBumpClient(
+    baseClient,
+    upload.batch.id,
+  );
+  const repository = createOwnedImportStagingRepository(
+    injectingClient,
+    () => "2026-07-29T15:00:00Z",
+  );
+
+  const recorded = await repository.recordParseResult(
+    "user-a",
+    upload.batch.id,
+    { expectedVersion: upload.batch.version, parseResult },
+  );
+  assert.equal(recorded.ok, false);
+  if (recorded.ok) {
+    return;
+  }
+  assert.equal(recorded.reason, "version_conflict");
+
+  const verifyRepository = createOwnedImportStagingRepository(baseClient);
+  const rows = await verifyRepository.listRows("user-a", upload.batch.id);
+  assert.equal(rows.length, 0);
+  const issues = await verifyRepository.listIssues("user-a", upload.batch.id);
+  assert.equal(issues.length, 0);
+
+  const finalBatch = await verifyRepository.get("user-a", upload.batch.id);
+  assert.ok(finalBatch);
+  assert.equal(finalBatch?.status, "failed");
+  assert.equal(finalBatch?.failureCategory, "concurrent_writer");
+  assert.equal(finalBatch?.version, upload.batch.version + 1);
+});
+
+// QA-003 B1/B2: same race as above, exercised against the parse-FAILURE
+// (batch-level issues) path — this path has no unique-index safety net at
+// all, so an unguarded/mis-guarded insert here would silently persist
+// issue rows into a batch a concurrent writer already moved on from.
+test("a concurrent uploaded->failed bump between the pre-check and the atomic batch blocks every guarded insert (parse-failure issues)", async () => {
+  const database = createMigratedDatabase(await loadMigrationSql());
+  seedReferenceData(database);
+  const baseClient = createSqliteSqlClient(database);
+  const setupRepository = createOwnedImportStagingRepository(baseClient);
+
+  const csv = [
+    "Id,Symbol,Name,Display Symbol,Exchange,Portfolio,Currency,Shares Owned,Cost Per Share,Commission,Transaction Date,Transaction Time,Purchase Exchange Rate,Type,Accounting,Accounting Execution Ids,Extra",
+    `"1","ABC","Alpha",,"ASX","Main","AUD",,,,,,,,,,`,
+  ].join("\n");
+  const parseResult = await parseStrictVersionedCsvImport(csv);
+  assert.equal(parseResult.ok, false);
+  if (parseResult.ok) {
+    return;
+  }
+
+  const upload = await setupRepository.startUpload("user-a", {
+    parserFormat: IMPORT_FORMAT,
+    parserVersion: SUPPORTED_IMPORT_PARSER_VERSION,
+    filename: "concurrent-bump-issues.csv",
+    byteSize: Buffer.byteLength(csv),
+    fileSha256: parseResult.fileFingerprint,
+  });
+  assert.equal(upload.ok, true);
+  if (!upload.ok) {
+    return;
+  }
+
+  const injectingClient = createConcurrentBumpClient(
+    baseClient,
+    upload.batch.id,
+  );
+  const repository = createOwnedImportStagingRepository(
+    injectingClient,
+    () => "2026-07-29T15:00:00Z",
+  );
+
+  const recorded = await repository.recordParseResult(
+    "user-a",
+    upload.batch.id,
+    { expectedVersion: upload.batch.version, parseResult },
+  );
+  assert.equal(recorded.ok, false);
+  if (recorded.ok) {
+    return;
+  }
+  assert.equal(recorded.reason, "version_conflict");
+
+  const verifyRepository = createOwnedImportStagingRepository(baseClient);
+  const rows = await verifyRepository.listRows("user-a", upload.batch.id);
+  assert.equal(rows.length, 0);
+  const issues = await verifyRepository.listIssues("user-a", upload.batch.id);
+  assert.equal(issues.length, 0);
+
+  const finalBatch = await verifyRepository.get("user-a", upload.batch.id);
+  assert.ok(finalBatch);
+  assert.equal(finalBatch?.status, "failed");
+  assert.equal(finalBatch?.failureCategory, "concurrent_writer");
+  assert.equal(finalBatch?.version, upload.batch.version + 1);
 });

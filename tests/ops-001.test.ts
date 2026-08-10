@@ -70,6 +70,16 @@ function createAuditFailingClient(database: DatabaseSync) {
       }
       return await base.run(sql, params);
     },
+    async batch(batchStatements: Parameters<typeof base.batch>[0]) {
+      if (
+        batchStatements.some((statement) =>
+          /INSERT INTO audit_events/i.test(statement.sql),
+        )
+      ) {
+        throw new Error("injected audit failure");
+      }
+      return await base.batch(batchStatements);
+    },
   };
 }
 

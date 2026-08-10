@@ -8,7 +8,7 @@ import type {
   NormalizedImportRow,
   ParsedImportRow,
 } from "../../domain/imports/index.ts";
-import type { SqlClient } from "./sql-client.ts";
+import type { SqlClient, SqlStatement } from "./sql-client.ts";
 
 export type ImportBatchStatus =
   | "uploaded"
@@ -128,7 +128,8 @@ export type ImportIssueRecord = {
 export type ImportMutationFailure =
   | { ok: false; reason: "not_found" }
   | { ok: false; reason: "version_conflict" }
-  | { ok: false; reason: "invalid_transition" };
+  | { ok: false; reason: "invalid_transition" }
+  | { ok: false; reason: "atomic_failure" };
 
 export type StartImportUploadInput = {
   id?: string;
@@ -419,30 +420,251 @@ function isValidTransition(
   return allowedTransitions[currentStatus].includes(nextStatus);
 }
 
-async function withTransaction<T>(
-  client: SqlClient,
-  operation: () => Promise<T>,
-): Promise<T> {
-  await client.run("BEGIN IMMEDIATE TRANSACTION");
-  try {
-    const result = await operation();
-    await client.run("COMMIT");
-    return result;
-  } catch (error) {
-    await client.run("ROLLBACK").catch(() => undefined);
-    if (error instanceof ImportMutationAbort) {
-      return error.result as T;
-    }
-    throw error;
-  }
+// The real upload/parse row cap is `DEFAULT_IMPORT_LIMITS.maxRows` (100,000
+// rows, `domain/imports/strict-versioned-parser.ts`; also documented in
+// `docs/CSV_IMPORT_SPEC.md` §7). `persistParsedResult` below issues one
+// child statement per row plus one per row-level issue in a single D1
+// `batch()` call (see docs/DATA_MODEL.md §11 for the atomicity technique),
+// so its statement count is bounded by that row cap, not by a
+// staging-specific chunk size. The normative fixture (`docs/Example_Portfolio.csv`,
+// 244 rows) stays far inside D1's verified ~1000-statement batch ceiling;
+// pathological uploads near the 100,000-row cap could exceed it, in which
+// case the batch call fails closed (`atomic_failure`, nothing persisted)
+// rather than partially applying — see docs/CSV_IMPORT_SPEC.md §7 for the
+// documented risk.
+
+/** Builds one guarded `import_issues` insert statement: the row is only
+ * materialized if the batch's PRE-state (version = expectedVersion, status =
+ * 'uploaded') still holds at execution time within the same `batch()` call
+ * as the closing `import_batches` UPDATE (see `runAtomicPersist`). */
+function issueInsertStatement(
+  userId: string,
+  batchId: string,
+  importRowId: string | null,
+  physicalRowNumber: number | null,
+  issue: ParsedImportIssue,
+  createdAt: string,
+  expectedVersion: number,
+): SqlStatement {
+  const id = randomUUID();
+  return {
+    sql: `
+      INSERT INTO import_issues (
+        id, user_id, batch_id, row_id, physical_row_number, field, severity,
+        code, message, suggested_resolution_type, resolved_value,
+        resolved_by_user_id, resolved_at, created_at, updated_at, version
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, 1
+      WHERE EXISTS (
+        SELECT 1 FROM import_batches
+        WHERE id = ? AND user_id = ? AND version = ? AND status = 'uploaded'
+      )
+    `,
+    params: [
+      id,
+      userId,
+      batchId,
+      importRowId,
+      physicalRowNumber,
+      issue.field ?? null,
+      issue.severity,
+      issue.code,
+      issue.message,
+      createdAt,
+      createdAt,
+      batchId,
+      userId,
+      expectedVersion,
+    ],
+  };
 }
 
-class ImportMutationAbort extends Error {
-  public readonly result: ImportMutationFailure;
+/** Builds one guarded `import_rows` insert statement (see `issueInsertStatement`). */
+function rowInsertStatement(
+  userId: string,
+  batchId: string,
+  rowId: string,
+  row: ParsedImportRow,
+  validationStatus: ImportRowStatus,
+  errorCount: number,
+  warningCount: number,
+  infoCount: number,
+  createdAt: string,
+  expectedVersion: number,
+): SqlStatement {
+  return {
+    sql: `
+      INSERT INTO import_rows (
+        id, user_id, batch_id, physical_row_number, row_class,
+        original_fields_json, normalized_fields_json, normalized_fingerprint,
+        validation_status, target_portfolio_id, target_portfolio_security_id,
+        commit_status, commit_transaction_id, error_count, warning_count,
+        info_count, created_at, updated_at, version
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'staged', NULL, ?, ?, ?, ?, ?, 1
+      WHERE EXISTS (
+        SELECT 1 FROM import_batches
+        WHERE id = ? AND user_id = ? AND version = ? AND status = 'uploaded'
+      )
+    `,
+    params: [
+      rowId,
+      userId,
+      batchId,
+      row.rowNumber,
+      rowClassFromParserKind(row.kind),
+      toJson(row.rawFields),
+      toJson(row.normalized),
+      row.fingerprint,
+      validationStatus,
+      errorCount,
+      warningCount,
+      infoCount,
+      createdAt,
+      createdAt,
+      batchId,
+      userId,
+      expectedVersion,
+    ],
+  };
+}
 
-  constructor(result: ImportMutationFailure) {
-    super("import mutation aborted");
-    this.result = result;
+/** Builds guarded insert statements for a batch-level (row-independent) issue list. */
+function buildBatchIssueStatements(
+  userId: string,
+  batchId: string,
+  issues: readonly ParsedImportIssue[],
+  createdAt: string,
+  expectedVersion: number,
+): { statements: SqlStatement[]; issuesInserted: number } {
+  const statements = issues.map((issue) =>
+    issueInsertStatement(
+      userId,
+      batchId,
+      null,
+      null,
+      issue,
+      createdAt,
+      expectedVersion,
+    ),
+  );
+  return { statements, issuesInserted: statements.length };
+}
+
+/** Builds guarded insert statements for every parsed row and its issues. */
+function buildParsedRowStatements(
+  userId: string,
+  batchId: string,
+  parseResult: ImportParseSuccess,
+  createdAt: string,
+  expectedVersion: number,
+): {
+  statements: SqlStatement[];
+  rowsInserted: number;
+  issuesInserted: number;
+  hasError: boolean;
+} {
+  const statements: SqlStatement[] = [];
+  let rowsInserted = 0;
+  let issuesInserted = 0;
+  let hasError = false;
+
+  for (const row of parseResult.rows) {
+    const validationStatus = rowValidationStatus(row.issues);
+    const errorCount = row.issues.filter(
+      (issue) => issue.severity === "error",
+    ).length;
+    const warningCount = row.issues.filter(
+      (issue) => issue.severity === "warning",
+    ).length;
+    const infoCount = row.issues.filter(
+      (issue) => issue.severity === "info",
+    ).length;
+
+    if (errorCount > 0) {
+      hasError = true;
+    }
+
+    const rowId = randomUUID();
+    statements.push(
+      rowInsertStatement(
+        userId,
+        batchId,
+        rowId,
+        row,
+        validationStatus,
+        errorCount,
+        warningCount,
+        infoCount,
+        createdAt,
+        expectedVersion,
+      ),
+    );
+    rowsInserted += 1;
+
+    for (const issue of row.issues) {
+      statements.push(
+        issueInsertStatement(
+          userId,
+          batchId,
+          rowId,
+          row.rowNumber,
+          issue,
+          createdAt,
+          expectedVersion,
+        ),
+      );
+      issuesInserted += 1;
+    }
+  }
+
+  if (parseResult.issues.some((issue) => issue.severity === "error")) {
+    hasError = true;
+  }
+
+  return { statements, rowsInserted, issuesInserted, hasError };
+}
+
+type AtomicPersistOutcome =
+  { ok: true; batchRow: Record<string, unknown> | undefined } | { ok: false };
+
+/**
+ * Executes every child `import_rows`/`import_issues` insert FIRST, each
+ * guarded by `WHERE EXISTS (SELECT 1 FROM import_batches WHERE id = ? AND
+ * user_id = ? AND version = <expectedVersion> AND status = 'uploaded')` —
+ * the batch's PRE-state, never any post-bump version — followed by the
+ * version-checked `import_batches` UPDATE (`closing`, which also checks
+ * `version = <expectedVersion> AND status = 'uploaded'`) as the LAST
+ * statement of one atomic D1 `batch()` call.
+ *
+ * Because `batch()` executes as one indivisible unit with no interleaving
+ * from other writers, the PRE-state predicate uniquely identifies "no other
+ * writer has touched this batch since the caller's read": if it holds when
+ * the guarded inserts run, nothing else can have changed the row before
+ * `closing` runs moments later in the same call, so `closing` necessarily
+ * also matches and bumps the version. If a concurrent writer already bumped
+ * the version (or changed status) before this call started, the PRE-state
+ * predicate is stale for every statement in the batch — the inserts AND
+ * `closing` (whose own `status = 'uploaded'` predicate matches the same
+ * pre-state) all no-op together, leaving the batch exactly as the concurrent
+ * writer left it. (Guarding the inserts on the version `closing` would bump
+ * *to*, instead of the version it requires *going in*, is unsound: a
+ * concurrent writer's own single bump can independently produce that same
+ * post-bump value, so the inserts would fire even when this call's own
+ * `closing` no-ops against the now-stale pre-bump version it still checks.)
+ * A thrown error (e.g. the batch exceeding a D1 platform limit) means D1
+ * rolled back the whole call; nothing persisted either way.
+ */
+async function runAtomicPersist(
+  client: SqlClient,
+  childStatements: readonly SqlStatement[],
+  closing: SqlStatement,
+): Promise<AtomicPersistOutcome> {
+  try {
+    const results = await client.batch([...childStatements, closing]);
+    return { ok: true, batchRow: results[results.length - 1]?.results[0] };
+  } catch {
+    return { ok: false };
   }
 }
 
@@ -489,298 +711,59 @@ export function createOwnedImportStagingRepository(
     return row ? createBatchRecord(row) : null;
   }
 
-  async function insertIssueRows(
-    userId: string,
-    batchId: string,
-    importRowId: string,
-    row: ParsedImportRow,
-    issueRows: ParsedImportIssue[],
-    createdAt: string,
-  ): Promise<number> {
-    let inserted = 0;
-    for (const issue of issueRows) {
-      await client.run(
-        `
-          INSERT INTO import_issues (
-            id, user_id, batch_id, row_id, physical_row_number, field, severity,
-            code, message, suggested_resolution_type, resolved_value,
-            resolved_by_user_id, resolved_at, created_at, updated_at, version
-          )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, 1)
-        `,
-        [
-          randomUUID(),
-          userId,
-          batchId,
-          importRowId,
-          row.rowNumber,
-          issue.field ?? null,
-          issue.severity,
-          issue.code,
-          issue.message,
-          null,
-          null,
-          createdAt,
-          createdAt,
-        ],
-      );
-      inserted += 1;
-    }
-
-    return inserted;
-  }
-
-  async function insertBatchIssues(
-    userId: string,
-    batchId: string,
-    issues: readonly ParsedImportIssue[],
-    createdAt: string,
-  ): Promise<number> {
-    let inserted = 0;
-    for (const issue of issues) {
-      await client.run(
-        `
-          INSERT INTO import_issues (
-            id, user_id, batch_id, row_id, physical_row_number, field, severity,
-            code, message, suggested_resolution_type, resolved_value,
-            resolved_by_user_id, resolved_at, created_at, updated_at, version
-          )
-          VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, 1)
-        `,
-        [
-          randomUUID(),
-          userId,
-          batchId,
-          issue.field ?? null,
-          issue.severity,
-          issue.code,
-          issue.message,
-          null,
-          createdAt,
-          createdAt,
-        ],
-      );
-      inserted += 1;
-    }
-
-    return inserted;
-  }
-
-  async function insertParsedRows(
-    userId: string,
-    batchId: string,
-    parseResult: ImportParseSuccess,
-    createdAt: string,
-  ): Promise<{
-    rowsInserted: number;
-    issuesInserted: number;
-    hasError: boolean;
-  }> {
-    let rowsInserted = 0;
-    let issuesInserted = 0;
-    let hasError = false;
-
-    for (const row of parseResult.rows) {
-      const validationStatus = rowValidationStatus(row.issues);
-      const errorCount = row.issues.filter(
-        (issue) => issue.severity === "error",
-      ).length;
-      const warningCount = row.issues.filter(
-        (issue) => issue.severity === "warning",
-      ).length;
-      const infoCount = row.issues.filter(
-        (issue) => issue.severity === "info",
-      ).length;
-
-      if (errorCount > 0) {
-        hasError = true;
-      }
-
-      const rowId = randomUUID();
-      await client.run(
-        `
-          INSERT INTO import_rows (
-            id, user_id, batch_id, physical_row_number, row_class,
-            original_fields_json, normalized_fields_json, normalized_fingerprint,
-            validation_status, target_portfolio_id, target_portfolio_security_id,
-            commit_status, commit_transaction_id, error_count, warning_count,
-            info_count, created_at, updated_at, version
-          )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1)
-        `,
-        [
-          rowId,
-          userId,
-          batchId,
-          row.rowNumber,
-          rowClassFromParserKind(row.kind),
-          toJson(row.rawFields),
-          toJson(row.normalized),
-          row.fingerprint,
-          validationStatus,
-          null,
-          null,
-          "staged",
-          errorCount,
-          warningCount,
-          infoCount,
-          createdAt,
-          createdAt,
-        ],
-      );
-      rowsInserted += 1;
-      issuesInserted += await insertIssueRows(
-        userId,
-        batchId,
-        rowId,
-        row,
-        row.issues,
-        createdAt,
-      );
-    }
-
-    if (parseResult.issues.some((issue) => issue.severity === "error")) {
-      hasError = true;
-    }
-
-    return { rowsInserted, issuesInserted, hasError };
-  }
-
   async function persistParsedResult(
     userId: string,
     batchId: string,
     input: RecordParsedImportResultInput,
   ): Promise<RecordParsedImportResult> {
-    return await withTransaction(client, async () => {
-      const current = await client.get<{
-        id: string;
-        status: ImportBatchStatus;
-        version: number;
-      }>(
-        "SELECT id, status, version FROM import_batches WHERE id = ? AND user_id = ? LIMIT 1",
-        [batchId, userId],
-      );
+    const current = await client.get<{
+      id: string;
+      status: ImportBatchStatus;
+      version: number;
+    }>(
+      "SELECT id, status, version FROM import_batches WHERE id = ? AND user_id = ? LIMIT 1",
+      [batchId, userId],
+    );
 
-      if (!current) {
-        throw new ImportMutationAbort({ ok: false, reason: "not_found" });
-      }
+    if (!current) {
+      return { ok: false, reason: "not_found" };
+    }
 
-      if (current.version !== input.expectedVersion) {
-        throw new ImportMutationAbort({
-          ok: false,
-          reason: "version_conflict",
-        });
-      }
+    if (current.version !== input.expectedVersion) {
+      return { ok: false, reason: "version_conflict" };
+    }
 
-      if (current.status !== "uploaded") {
-        throw new ImportMutationAbort({
-          ok: false,
-          reason: "invalid_transition",
-        });
-      }
+    if (current.status !== "uploaded") {
+      return { ok: false, reason: "invalid_transition" };
+    }
 
-      const updatedAt = nowIso(now);
+    const updatedAt = nowIso(now);
 
-      if (!input.parseResult.ok) {
-        const parseFailure = input.parseResult as ImportParseFailure;
-        const failureDetail = toJson({
-          code: parseFailure.code,
-          message: parseFailure.message,
-          headerSignature: parseFailure.header?.signature ?? null,
-          issueCount: parseFailure.issues.length,
-        });
-        const issuesInserted = await insertBatchIssues(
-          userId,
-          batchId,
-          parseFailure.issues,
-          updatedAt,
-        );
-
-        const updatedRows = await client.all<Record<string, unknown>>(
-          `
-            UPDATE import_batches
-            SET status = 'invalid',
-                failure_category = ?,
-                failure_detail = ?,
-                updated_at = ?,
-                parsed_at = ?,
-                version = version + 1
-            WHERE id = ? AND user_id = ? AND version = ?
-            RETURNING
-              id, user_id, target_portfolio_id, parser_format, parser_version,
-              filename, byte_size, file_sha256, status, total_rows, blank_rows,
-              definition_rows, transaction_rows, unsupported_rows, duplicate_rows,
-              error_count, warning_count, info_count, commit_idempotency_key,
-              reversal_idempotency_key, supersedes_batch_id, failure_category,
-              failure_detail, created_at, updated_at, parsed_at, committed_at,
-              reversed_at, version
-          `,
-          [
-            parseFailure.code,
-            failureDetail,
-            updatedAt,
-            updatedAt,
-            batchId,
-            userId,
-            input.expectedVersion,
-          ],
-        );
-
-        if (updatedRows.length === 0) {
-          throw new ImportMutationAbort(
-            await resolveMutationFailure(client, userId, batchId),
-          );
-        }
-
-        return {
-          ok: true,
-          batch: createBatchRecord(updatedRows[0] ?? {}),
-          rowsInserted: 0,
-          issuesInserted,
-        };
-      }
-
-      const parseSuccess = input.parseResult as ImportParseSuccess;
-      const summary = summarizeParseSuccess(parseSuccess);
-      const rowStats = await insertParsedRows(
+    if (!input.parseResult.ok) {
+      const parseFailure = input.parseResult as ImportParseFailure;
+      const failureDetail = toJson({
+        code: parseFailure.code,
+        message: parseFailure.message,
+        headerSignature: parseFailure.header?.signature ?? null,
+        issueCount: parseFailure.issues.length,
+      });
+      const { statements, issuesInserted } = buildBatchIssueStatements(
         userId,
         batchId,
-        parseSuccess,
+        parseFailure.issues,
         updatedAt,
+        input.expectedVersion,
       );
-
-      const batchStatus: ImportBatchStatus = rowStats.hasError
-        ? "invalid"
-        : "parsed";
-      const failureCategory = rowStats.hasError ? "validation_error" : null;
-      const failureDetail = rowStats.hasError
-        ? toJson({
-            errorCount: summary.errorCount,
-            warningCount: summary.warningCount,
-            infoCount: summary.infoCount,
-            totalRows: parseSuccess.summary.totalRows,
-          })
-        : null;
-
-      const updatedRows = await client.all<Record<string, unknown>>(
-        `
+      const closing: SqlStatement = {
+        sql: `
           UPDATE import_batches
-          SET status = ?,
-              total_rows = ?,
-              blank_rows = ?,
-              definition_rows = ?,
-              transaction_rows = ?,
-              unsupported_rows = ?,
-              duplicate_rows = ?,
-              error_count = ?,
-              warning_count = ?,
-              info_count = ?,
+          SET status = 'invalid',
               failure_category = ?,
               failure_detail = ?,
               updated_at = ?,
               parsed_at = ?,
               version = version + 1
-          WHERE id = ? AND user_id = ? AND version = ?
+          WHERE id = ? AND user_id = ? AND version = ? AND status = 'uploaded'
           RETURNING
             id, user_id, target_portfolio_id, parser_format, parser_version,
             filename, byte_size, file_sha256, status, total_rows, blank_rows,
@@ -790,18 +773,8 @@ export function createOwnedImportStagingRepository(
             failure_detail, created_at, updated_at, parsed_at, committed_at,
             reversed_at, version
         `,
-        [
-          batchStatus,
-          parseSuccess.summary.totalRows,
-          parseSuccess.summary.blankRows,
-          parseSuccess.summary.definitionRows,
-          parseSuccess.summary.transactionRows,
-          parseSuccess.summary.unsupportedRows,
-          parseSuccess.summary.duplicateRows,
-          summary.errorCount,
-          summary.warningCount,
-          summary.infoCount,
-          failureCategory,
+        params: [
+          parseFailure.code,
           failureDetail,
           updatedAt,
           updatedAt,
@@ -809,21 +782,111 @@ export function createOwnedImportStagingRepository(
           userId,
           input.expectedVersion,
         ],
-      );
+      };
 
-      if (updatedRows.length === 0) {
-        throw new ImportMutationAbort(
-          await resolveMutationFailure(client, userId, batchId),
-        );
+      const outcome = await runAtomicPersist(client, statements, closing);
+      if (!outcome.ok) {
+        return { ok: false, reason: "atomic_failure" };
+      }
+      const row = outcome.batchRow;
+      if (!row) {
+        return await resolveMutationFailure(client, userId, batchId);
       }
 
       return {
         ok: true,
-        batch: createBatchRecord(updatedRows[0] ?? {}),
-        rowsInserted: rowStats.rowsInserted,
-        issuesInserted: rowStats.issuesInserted,
+        batch: createBatchRecord(row),
+        rowsInserted: 0,
+        issuesInserted,
       };
-    });
+    }
+
+    const parseSuccess = input.parseResult as ImportParseSuccess;
+    const summary = summarizeParseSuccess(parseSuccess);
+    const { statements, rowsInserted, issuesInserted, hasError } =
+      buildParsedRowStatements(
+        userId,
+        batchId,
+        parseSuccess,
+        updatedAt,
+        input.expectedVersion,
+      );
+
+    const batchStatus: ImportBatchStatus = hasError ? "invalid" : "parsed";
+    const failureCategory = hasError ? "validation_error" : null;
+    const failureDetail = hasError
+      ? toJson({
+          errorCount: summary.errorCount,
+          warningCount: summary.warningCount,
+          infoCount: summary.infoCount,
+          totalRows: parseSuccess.summary.totalRows,
+        })
+      : null;
+
+    const closing: SqlStatement = {
+      sql: `
+        UPDATE import_batches
+        SET status = ?,
+            total_rows = ?,
+            blank_rows = ?,
+            definition_rows = ?,
+            transaction_rows = ?,
+            unsupported_rows = ?,
+            duplicate_rows = ?,
+            error_count = ?,
+            warning_count = ?,
+            info_count = ?,
+            failure_category = ?,
+            failure_detail = ?,
+            updated_at = ?,
+            parsed_at = ?,
+            version = version + 1
+        WHERE id = ? AND user_id = ? AND version = ? AND status = 'uploaded'
+        RETURNING
+          id, user_id, target_portfolio_id, parser_format, parser_version,
+          filename, byte_size, file_sha256, status, total_rows, blank_rows,
+          definition_rows, transaction_rows, unsupported_rows, duplicate_rows,
+          error_count, warning_count, info_count, commit_idempotency_key,
+          reversal_idempotency_key, supersedes_batch_id, failure_category,
+          failure_detail, created_at, updated_at, parsed_at, committed_at,
+          reversed_at, version
+      `,
+      params: [
+        batchStatus,
+        parseSuccess.summary.totalRows,
+        parseSuccess.summary.blankRows,
+        parseSuccess.summary.definitionRows,
+        parseSuccess.summary.transactionRows,
+        parseSuccess.summary.unsupportedRows,
+        parseSuccess.summary.duplicateRows,
+        summary.errorCount,
+        summary.warningCount,
+        summary.infoCount,
+        failureCategory,
+        failureDetail,
+        updatedAt,
+        updatedAt,
+        batchId,
+        userId,
+        input.expectedVersion,
+      ],
+    };
+
+    const outcome = await runAtomicPersist(client, statements, closing);
+    if (!outcome.ok) {
+      return { ok: false, reason: "atomic_failure" };
+    }
+    const row = outcome.batchRow;
+    if (!row) {
+      return await resolveMutationFailure(client, userId, batchId);
+    }
+
+    return {
+      ok: true,
+      batch: createBatchRecord(row),
+      rowsInserted,
+      issuesInserted,
+    };
   }
 
   return {
@@ -954,75 +1017,71 @@ export function createOwnedImportStagingRepository(
       batchId: string,
       input: TransitionImportBatchInput,
     ): Promise<TransitionImportBatchResult> {
-      return await withTransaction(client, async () => {
-        const current = await client.get<{
-          id: string;
-          status: ImportBatchStatus;
-          version: number;
-        }>(
-          "SELECT id, status, version FROM import_batches WHERE id = ? AND user_id = ? LIMIT 1",
-          [batchId, userId],
-        );
+      // A single `UPDATE ... RETURNING` statement is already atomic (D1 and
+      // SQLite both auto-commit one statement), so this needs no `batch()`
+      // wrapper. The pre-check reads below are read-only early exits: the
+      // `WHERE ... version = ?` guard on the write re-verifies the same
+      // precondition at write time, so a stale read cannot cause an invalid
+      // transition (any state change bumps `version`).
+      const current = await client.get<{
+        id: string;
+        status: ImportBatchStatus;
+        version: number;
+      }>(
+        "SELECT id, status, version FROM import_batches WHERE id = ? AND user_id = ? LIMIT 1",
+        [batchId, userId],
+      );
 
-        if (!current) {
-          throw new ImportMutationAbort({ ok: false, reason: "not_found" });
-        }
+      if (!current) {
+        return { ok: false, reason: "not_found" };
+      }
 
-        if (current.version !== input.expectedVersion) {
-          throw new ImportMutationAbort({
-            ok: false,
-            reason: "version_conflict",
-          });
-        }
+      if (current.version !== input.expectedVersion) {
+        return { ok: false, reason: "version_conflict" };
+      }
 
-        if (!isValidTransition(current.status, input.nextStatus)) {
-          throw new ImportMutationAbort({
-            ok: false,
-            reason: "invalid_transition",
-          });
-        }
+      if (!isValidTransition(current.status, input.nextStatus)) {
+        return { ok: false, reason: "invalid_transition" };
+      }
 
-        const updatedAt = nowIso(now);
-        const updatedRows = await client.all<Record<string, unknown>>(
-          `
-            UPDATE import_batches
-            SET status = ?,
-                failure_category = ?,
-                failure_detail = ?,
-                updated_at = ?,
-                version = version + 1
-            WHERE id = ? AND user_id = ? AND version = ?
-            RETURNING
-              id, user_id, target_portfolio_id, parser_format, parser_version,
-              filename, byte_size, file_sha256, status, total_rows, blank_rows,
-              definition_rows, transaction_rows, unsupported_rows, duplicate_rows,
-              error_count, warning_count, info_count, commit_idempotency_key,
-              reversal_idempotency_key, supersedes_batch_id, failure_category,
-              failure_detail, created_at, updated_at, parsed_at, committed_at,
-              reversed_at, version
-          `,
-          [
-            input.nextStatus,
-            input.failureCategory ?? null,
-            input.failureDetail ?? null,
-            updatedAt,
-            batchId,
-            userId,
-            input.expectedVersion,
-          ],
-        );
+      const updatedAt = nowIso(now);
+      const updatedRows = await client.all<Record<string, unknown>>(
+        `
+          UPDATE import_batches
+          SET status = ?,
+              failure_category = ?,
+              failure_detail = ?,
+              updated_at = ?,
+              version = version + 1
+          WHERE id = ? AND user_id = ? AND version = ?
+          RETURNING
+            id, user_id, target_portfolio_id, parser_format, parser_version,
+            filename, byte_size, file_sha256, status, total_rows, blank_rows,
+            definition_rows, transaction_rows, unsupported_rows, duplicate_rows,
+            error_count, warning_count, info_count, commit_idempotency_key,
+            reversal_idempotency_key, supersedes_batch_id, failure_category,
+            failure_detail, created_at, updated_at, parsed_at, committed_at,
+            reversed_at, version
+        `,
+        [
+          input.nextStatus,
+          input.failureCategory ?? null,
+          input.failureDetail ?? null,
+          updatedAt,
+          batchId,
+          userId,
+          input.expectedVersion,
+        ],
+      );
 
-        if (updatedRows.length === 0) {
-          throw new ImportMutationAbort(
-            await resolveMutationFailure(client, userId, batchId),
-          );
-        }
+      if (updatedRows.length === 0) {
+        return await resolveMutationFailure(client, userId, batchId);
+      }
 
-        return {
-          ok: true,
-          batch: createBatchRecord(updatedRows[0] ?? {}),
-        };
-      });
+      return {
+        ok: true,
+        batch: createBatchRecord(updatedRows[0] ?? {}),
+      };
     },
 
     async get(

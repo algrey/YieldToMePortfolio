@@ -250,29 +250,16 @@ function writeStatements(
   });
 }
 
+/**
+ * Executes `statements` as one D1-compatible atomic unit via `batch()` and
+ * returns the last statement's result rows (typically a `RETURNING` clause).
+ */
 async function runAtomicBatch(
   client: SqlClient,
   statements: readonly SqlStatement[],
 ): Promise<Array<Record<string, unknown>>> {
-  if (client.batch) {
-    const results = await client.batch(statements);
-    return results.at(-1)?.results ?? [];
-  }
-  await client.run("BEGIN IMMEDIATE TRANSACTION");
-  try {
-    for (const statement of statements.slice(0, -1)) {
-      await client.run(statement.sql, statement.params);
-    }
-    const last = statements.at(-1);
-    const rows = last
-      ? await client.all<Record<string, unknown>>(last.sql, last.params)
-      : [];
-    await client.run("COMMIT");
-    return rows;
-  } catch (error) {
-    await client.run("ROLLBACK").catch(() => undefined);
-    throw error;
-  }
+  const results = await client.batch(statements);
+  return results.at(-1)?.results ?? [];
 }
 
 export function createMarketDataRefreshRepository(client: SqlClient) {

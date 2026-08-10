@@ -238,6 +238,9 @@ test("inspection boundaries are exact and failures return the safe unavailable s
     async run() {
       throw new Error("unexpected mutation");
     },
+    async batch() {
+      throw new Error("unexpected batch write");
+    },
   };
   assert.equal(
     await loadPortfolioInspectionSafely(failingClient, "user-a", "portfolio-a"),

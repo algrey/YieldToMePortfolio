@@ -6,7 +6,6 @@ import {
   type InternalUserStatus,
 } from "../../db/repositories/identity.ts";
 import type { SqlClient } from "../../db/repositories/sql-client.ts";
-import { createAuditRepository } from "../../db/repositories/audit.ts";
 
 export type IdentityProvisioningPolicy = "active" | "pending" | "disabled";
 
@@ -75,22 +74,6 @@ function isActive(record: InternalIdentityRecord): boolean {
   return record.identityStatus === "active" && record.userStatus === "active";
 }
 
-async function withTransaction<T>(
-  client: SqlClient,
-  operation: () => Promise<T>,
-): Promise<T> {
-  if (client.batch) return await operation();
-  await client.run("BEGIN IMMEDIATE TRANSACTION");
-  try {
-    const result = await operation();
-    await client.run("COMMIT");
-    return result;
-  } catch (error) {
-    await client.run("ROLLBACK").catch(() => undefined);
-    throw error;
-  }
-}
-
 export function createIdentityLifecycleService(
   client: SqlClient,
   options: IdentityLifecycleOptions = {},
@@ -101,7 +84,6 @@ export function createIdentityLifecycleService(
   const defaultTimezone = options.defaultTimezone ?? "Australia/Sydney";
   const now = options.now ?? (() => new Date().toISOString());
   const requestId = options.requestId ?? randomUUID();
-  const audit = createAuditRepository(client, now);
 
   return {
     async resolve(
@@ -119,103 +101,79 @@ export function createIdentityLifecycleService(
         return { ok: false, reason: "missing-email" };
       }
 
-      return await withTransaction(client, async () => {
-        const existing = await repository.findAccessIdentity(
-          principal.issuer,
-          principal.subject,
-        );
-        if (existing !== null) {
-          if (existing.identityStatus === "revoked") {
-            return { ok: false, reason: "identity-revoked" };
-          }
+      const existing = await repository.findAccessIdentity(
+        principal.issuer,
+        principal.subject,
+      );
+      if (existing !== null) {
+        if (existing.identityStatus === "revoked") {
+          return { ok: false, reason: "identity-revoked" };
+        }
 
-          if (!isActive(existing)) {
-            return existing.userStatus === "pending"
-              ? { ok: false, reason: "provisioning-pending" }
-              : { ok: false, reason: "user-not-active" };
-          }
+        if (!isActive(existing)) {
+          return existing.userStatus === "pending"
+            ? { ok: false, reason: "provisioning-pending" }
+            : { ok: false, reason: "user-not-active" };
+        }
 
-          const authenticatedAt = now();
-          const auditInput = {
+        const authenticatedAt = now();
+        const updated = await repository.touchWithAudit(
+          existing,
+          email,
+          authenticatedAt,
+          {
             actorUserId: existing.userId,
             targetOwnerUserId: existing.userId,
             action: "auth.login",
             targetType: "user_identity",
             targetId: existing.identityId,
             requestId,
-            result: "success" as const,
+            result: "success",
             metadata: { provisioned: false },
             occurredAt: authenticatedAt,
-          };
-          const updated = client.batch
-            ? await repository.touchWithAudit(
-                existing,
-                email,
-                authenticatedAt,
-                auditInput,
-              )
-            : await repository.touch(existing, email, authenticatedAt);
-          if (!client.batch) await audit.append(auditInput);
-          return {
-            ok: true,
-            user: toInternalUser(updated),
-            provisioned: false,
-          };
-        }
+          },
+        );
+        return {
+          ok: true,
+          user: toInternalUser(updated),
+          provisioned: false,
+        };
+      }
 
-        if (provisioning === "disabled") {
-          return { ok: false, reason: "jit-disabled" };
-        }
+      if (provisioning === "disabled") {
+        return { ok: false, reason: "jit-disabled" };
+      }
 
-        const provisionInput = {
+      const provisioned = await repository.provisionWithAudit(
+        {
           principal: { ...principal, email },
           userStatus: provisioning,
           defaultHomeCurrencyCode,
           defaultTimezone,
           now: now(),
-        };
-        const provisionAuditInput = {
+        },
+        {
           actorUserId: "",
           targetOwnerUserId: "",
-          action: "auth.provision" as const,
+          action: "auth.provision",
           targetType: "user_identity",
           targetId: "",
           requestId,
-          result: "success" as const,
+          result: "success",
           metadata: { provisioned: true },
           occurredAt: now(),
-        };
-        const provisioned = client.batch
-          ? await repository.provisionWithAudit(
-              provisionInput,
-              provisionAuditInput,
-            )
-          : await repository.provision(provisionInput);
+        },
+      );
 
-        if (provisioned.userStatus !== "active") {
-          return { ok: false, reason: "provisioning-pending" };
-        }
+      if (provisioned.userStatus !== "active") {
+        return { ok: false, reason: "provisioning-pending" };
+      }
 
-        if (!client.batch) {
-          await audit.append({
-            actorUserId: provisioned.userId,
-            targetOwnerUserId: provisioned.userId,
-            action: "auth.provision",
-            targetType: "user_identity",
-            targetId: provisioned.identityId,
-            requestId,
-            result: "success",
-            metadata: { provisioned: true },
-            occurredAt: now(),
-          });
-        }
-
-        return {
-          ok: true,
-          user: toInternalUser(provisioned),
-          provisioned: true,
-        };
-      });
+      return {
+        ok: true,
+        user: toInternalUser(provisioned),
+        provisioned: true,
+      };
     },
   };
 }

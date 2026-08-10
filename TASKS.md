@@ -1291,7 +1291,7 @@ Status: DEFERRED; not required for the preview release (QA-002 records the gap a
 
 ### QA-003 — D1-incompatible SQL transactions in write paths (and remove local dev shim)
 
-Status: READY; blocking for any real D1 deployment (local, preview, or production) and for CSV import functioning.
+Status: DONE (2026-08-11).
 
 - Objective: replace SQL-level `BEGIN IMMEDIATE TRANSACTION`/`COMMIT`/`ROLLBACK` in the repository `withTransaction` helpers with a D1-compatible atomic mechanism (D1's `batch()` API), so multi-statement write paths work on Cloudflare D1; then remove the temporary local-dev transaction shim.
 - Evidence: against real Miniflare/workerd D1, CSV import preview fails with `D1_ERROR: To execute a transaction, please use the ... transaction() APIs instead of the SQL BEGIN TRANSACTION or SAVEPOINT statements` thrown from `db/repositories/import-staging.ts:426` (`client.run("BEGIN IMMEDIATE TRANSACTION")`). D1 rejects SQL transaction-control statements; `SqlClient.batch()` is the supported atomic primitive and is already used correctly elsewhere (e.g. `db/repositories/owned-portfolios.ts` `create`). Portfolio create and JIT provisioning work because they use `batch()`; import staging/commit and other paths do not.
@@ -1302,6 +1302,15 @@ Status: READY; blocking for any real D1 deployment (local, preview, or productio
 - Tests: add coverage that exercises the affected write paths against the D1 client (`createD1SqlClient` over a Miniflare/workerd D1), not only `node:sqlite`, so the `BEGIN` incompatibility cannot regress; keep existing atomic-rollback assertions meaningful under `batch()`.
 - Verification: `npm run check`; then, against a real local D1, run the supplied `docs/Example_Portfolio.csv` through stage → map → commit → reverse and confirm rows persist and counters/digests reconcile with the shim removed.
 - Risks: import-commit and ledger posting rely on documented atomic guards and version/count assertions; a naive conversion can silently drop atomicity. Treat as correctness-critical and route through the normal Worker/Reviewer flow.
+- Completion note (2026-08-11): Made `SqlClient.batch()` required and removed every SQL `BEGIN/COMMIT/ROLLBACK` fallback across the nine repositories and `domain/auth/identity-lifecycle.ts` (plus dead non-batch fallbacks in `db/repositories/identity.ts` that silently dropped audit events); deleted `wrapWithLocalDevTransactionShim` and all `YIELDTOME_DEV_D1_TX_SHIM` references. `persistParsedResult` in import staging was rebuilt as one atomic `batch()` with guard-conditional statements: child INSERTs first, each guarded `WHERE EXISTS (... version = expectedVersion AND status = 'uploaded')` on the pre-state, version-bumping UPDATE last with the identical predicate — review reproduced and killed two unsound designs on the way (chunked compensation that exceeded D1's 100-bound-parameter limit; a post-bump guard satisfied by concurrent writers). `atomic_failure` now maps to the 503 retryable message. New `tests/qa-003.test.ts` (gated `QA003_D1_DRILL=1`) drives owned-portfolios, identity, ledger, market-data, refresh, and the full stage→commit→reverse pipeline with the real 244-row `docs/Example_Portfolio.csv` against Miniflare/workerd D1, plus concurrent-bump and mid-batch-failure zero-persistence tests (sqlite + D1). Combined drills 40/40; `npm run check` exit 0 (295 pass, 7 env-gated skips). Docs updated: `docs/DATA_MODEL.md` §11 (guard-conditional batch technique, rejected alternatives, batch-ceiling assumption marked), `docs/CSV_IMPORT_SPEC.md` §7 (atomic-unit budget exemption, fail-closed large-import note), `docs/LOCAL_DEVELOPMENT.md` (shim removal). Three review rounds plus a reviewer-pre-approved status-predicate hardening; final review PASS. Residual (fails closed, deferred as IMP-005): the 100,000-row parser cap exceeds the single-batch statement ceiling; near-cap uploads fail with `atomic_failure` and nothing persisted.
+
+### IMP-005 — Large-import staging persistence beyond one atomic batch
+
+Status: DEFERRED; not required while realistic imports (hundreds of rows) fit one atomic batch — the oversized path fails closed with nothing persisted.
+
+- Objective: allow staging persistence of imports approaching the 100,000-row parser cap (`domain/imports/strict-versioned-parser.ts` `DEFAULT_IMPORT_LIMITS.maxRows`) by either tightening the effective row cap to the verified single-batch ceiling or designing a resumable multi-invocation parse-persistence job consistent with the import commit's high-water-cursor pattern.
+- Dependencies: QA-003.
+- Context: `docs/DATA_MODEL.md` §11 (guard-conditional single batch and the marked batch-ceiling assumption), `docs/CSV_IMPORT_SPEC.md` §7 fail-closed note. Also verify the actual workerd per-batch statement ceiling with a drill instead of the current documented assumption.
 
 ### IMP-004A — Wire import review to commit (mapping resolution, readiness, commit UI/actions)
 

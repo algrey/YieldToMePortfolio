@@ -112,24 +112,12 @@ function validOverrideValue(
   return validDecimal(record.rateDecimal);
 }
 
+/** Executes `statements` as one D1-compatible atomic unit via `batch()`. */
 async function atomic(
   client: SqlClient,
   statements: readonly SqlStatement[],
 ): Promise<void> {
-  if (client.batch) {
-    await client.batch(statements);
-    return;
-  }
-  await client.run("BEGIN IMMEDIATE TRANSACTION");
-  try {
-    for (const statement of statements) {
-      await client.run(statement.sql, statement.params);
-    }
-    await client.run("COMMIT");
-  } catch (error) {
-    await client.run("ROLLBACK").catch(() => undefined);
-    throw error;
-  }
+  await client.batch(statements);
 }
 
 export function createOwnedManualOverrideRepository(

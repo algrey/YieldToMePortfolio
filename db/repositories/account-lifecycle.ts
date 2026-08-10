@@ -586,18 +586,7 @@ export function createAccountLifecycleRepository(
   ) => {
     const guard = checkpointGuardStatements(jobId, userId, version);
     const batch = [guard.insert, ...statements, guard.remove];
-    if (client.batch) await client.batch(batch);
-    else {
-      await client.run("BEGIN IMMEDIATE TRANSACTION");
-      try {
-        for (const statement of batch)
-          await client.run(statement.sql, statement.params);
-        await client.run("COMMIT");
-      } catch (error) {
-        await client.run("ROLLBACK").catch(() => undefined);
-        throw error;
-      }
-    }
+    await client.batch(batch);
   };
   const finalizeExport = async (
     userId: string,
@@ -812,18 +801,7 @@ export function createAccountLifecycleRepository(
         ),
       );
       try {
-        if (client.batch) await client.batch(statements);
-        else {
-          await client.run("BEGIN IMMEDIATE TRANSACTION");
-          try {
-            for (const statement of statements)
-              await client.run(statement.sql, statement.params);
-            await client.run("COMMIT");
-          } catch (error) {
-            await client.run("ROLLBACK").catch(() => undefined);
-            throw error;
-          }
-        }
+        await client.batch(statements);
       } catch (error) {
         const retry = await get(
           input.userId,
@@ -1123,18 +1101,7 @@ export function createAccountLifecycleRepository(
             guard.remove,
           ];
           try {
-            if (client.batch) await client.batch(emptyCheckpoint);
-            else {
-              await client.run("BEGIN IMMEDIATE TRANSACTION");
-              try {
-                for (const statement of emptyCheckpoint)
-                  await client.run(statement.sql, statement.params);
-                await client.run("COMMIT");
-              } catch (error) {
-                await client.run("ROLLBACK").catch(() => undefined);
-                throw error;
-              }
-            }
+            await client.batch(emptyCheckpoint);
           } catch (error) {
             if (
               String(error).includes("account_export_checkpoint_guards_valid")
@@ -1264,18 +1231,7 @@ export function createAccountLifecycleRepository(
         });
         checkpointStatements.push(guard.remove);
         try {
-          if (client.batch) await client.batch(checkpointStatements);
-          else {
-            await client.run("BEGIN IMMEDIATE TRANSACTION");
-            try {
-              for (const statement of checkpointStatements)
-                await client.run(statement.sql, statement.params);
-              await client.run("COMMIT");
-            } catch (error) {
-              await client.run("ROLLBACK").catch(() => undefined);
-              throw error;
-            }
-          }
+          await client.batch(checkpointStatements);
         } catch (error) {
           if (String(error).includes("account_export_checkpoint_guards_valid"))
             return await report((await getJob(userId, jobId))!);
@@ -1543,18 +1499,7 @@ export function createAccountLifecycleRepository(
           sql: "DELETE FROM account_purge_audit_guards WHERE owner_user_id=? AND purge_job_id=?",
           params: [userId, jobId],
         };
-        if (client.batch) await client.batch([insert, ...statements, remove]);
-        else {
-          await client.run("BEGIN IMMEDIATE TRANSACTION");
-          try {
-            for (const statement of [insert, ...statements, remove])
-              await client.run(statement.sql, statement.params);
-            await client.run("COMMIT");
-          } catch (error) {
-            await client.run("ROLLBACK").catch(() => undefined);
-            throw error;
-          }
-        }
+        await client.batch([insert, ...statements, remove]);
       };
       const terminal = async (code: string): Promise<AccountPurgeResult> => {
         await guarded([

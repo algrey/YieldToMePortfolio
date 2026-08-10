@@ -24,7 +24,14 @@ export type SqlClient = {
     params?: readonly unknown[],
   ): Promise<T | undefined>;
   run(sql: string, params?: readonly unknown[]): Promise<SqlRunResult>;
-  batch?(statements: readonly SqlStatement[]): Promise<SqlBatchResult[]>;
+  /**
+   * Executes statements as one atomic unit, matching Cloudflare D1's
+   * `D1Database.batch()` semantics (D1 rejects SQL-level `BEGIN`/`COMMIT`/
+   * `ROLLBACK`, so `batch()` is the only supported atomic primitive). Every
+   * `SqlClient` implementation must provide this; repositories rely on it
+   * unconditionally instead of falling back to SQL transaction control.
+   */
+  batch(statements: readonly SqlStatement[]): Promise<SqlBatchResult[]>;
 };
 
 function executeAll<T extends Record<string, unknown>>(

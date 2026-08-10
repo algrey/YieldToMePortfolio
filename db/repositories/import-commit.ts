@@ -585,18 +585,7 @@ export function createOwnedImportCommitRepository(
       return { ok: false, reason: "atomic_failure", resumable: true };
     }
     try {
-      if (client.batch) await client.batch(statements);
-      else {
-        await client.run("BEGIN IMMEDIATE TRANSACTION");
-        try {
-          for (const statement of statements)
-            await client.run(statement.sql, statement.params);
-          await client.run("COMMIT");
-        } catch (error) {
-          await client.run("ROLLBACK").catch(() => undefined);
-          throw error;
-        }
-      }
+      await client.batch(statements);
     } catch {
       return { ok: false, reason: "atomic_failure", resumable: true };
     }
@@ -874,18 +863,7 @@ export function createOwnedImportCommitRepository(
           return { ok: false, reason: "atomic_failure", resumable: true };
         }
         try {
-          if (client.batch) await client.batch(statements);
-          else {
-            await client.run("BEGIN IMMEDIATE TRANSACTION");
-            try {
-              for (const statement of statements)
-                await client.run(statement.sql, statement.params);
-              await client.run("COMMIT");
-            } catch (error) {
-              await client.run("ROLLBACK").catch(() => undefined);
-              throw error;
-            }
-          }
+          await client.batch(statements);
         } catch {
           return { ok: false, reason: "atomic_failure", resumable: true };
         }
