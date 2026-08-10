@@ -84,6 +84,8 @@ export {
   ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS,
   ACCOUNT_EXPORT_LIMITS,
   ACCOUNT_EXPORT_JOB_ID_PATTERN,
+  ACCOUNT_PURGE_CONFIRMATION,
+  ACCOUNT_PURGE_LIMITS,
   createAccountLifecycleRepository,
   isD1ReservedTable,
   type AccountExportCursor,
@@ -92,6 +94,7 @@ export {
   type AccountLifecycleRequest,
   type AccountLifecycleRequestInput,
   type AccountLifecycleRequestType,
+  type AccountPurgeResult,
   type ExportRetentionClass,
   type ExportTableClassification,
 } from "./account-lifecycle.ts";

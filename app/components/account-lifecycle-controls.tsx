@@ -94,7 +94,7 @@ export function AccountLifecycleControls() {
     if (
       type === "deletion" &&
       !window.confirm(
-        "Request deletion and an owner-scoped export? Financial rows will remain retained.",
+        "Request deletion and an owner-scoped export? Access is revoked immediately. After a 24-hour cooling-off period, a separate final confirmation can permanently purge the account.",
       )
     )
       return;
@@ -211,7 +211,7 @@ export function AccountLifecycleControls() {
       <h2 id="account-lifecycle-title">Access and data export</h2>
       <p>
         Disable access immediately, or request deletion with an owner-scoped
-        export. Financial rows are not purged by these controls.
+        export. The deletion request does not itself purge financial rows.
       </p>
       <div className="inspection-actions">
         <button

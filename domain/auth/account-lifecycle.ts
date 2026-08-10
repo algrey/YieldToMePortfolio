@@ -8,6 +8,7 @@ import {
   createAccountLifecycleRepository,
   type AccountLifecycleRequest,
   type AccountLifecycleRequestType,
+  type AccountPurgeResult,
 } from "../../db/repositories/account-lifecycle.ts";
 import type { SqlClient } from "../../db/repositories/sql-client.ts";
 
@@ -109,5 +110,37 @@ export function createAccountLifecycleService(
       requestId?: string,
     ): Promise<AccountLifecycleResult> =>
       request(principal, "export", idempotencyKey, requestId, true),
+    purge: async (
+      principal: VerifiedAccessPrincipal,
+      idempotencyKey: string,
+      confirmation: string,
+      requestId?: string,
+    ): Promise<AccountPurgeResult> => {
+      const existing = await repository.getForPrincipal(
+        principal.issuer,
+        principal.subject,
+        "deletion",
+        idempotencyKey,
+      );
+      const userId = existing?.userId;
+      if (!userId) {
+        const resolved = await identity.resolve(principal);
+        if (!resolved.ok) return { ok: false, reason: "not-found" };
+        return await repository.purgeAccount(resolved.user.id, {
+          idempotencyKey,
+          confirmation,
+          actorUserId: resolved.user.id,
+          requestId,
+          now: now(),
+        });
+      }
+      return await repository.purgeAccount(userId, {
+        idempotencyKey,
+        confirmation,
+        actorUserId: userId,
+        requestId,
+        now: now(),
+      });
+    },
   };
 }

@@ -13,7 +13,9 @@ export function createOwnedWorkspace(
         result.reason === "lifecycle"
           ? result.lifecycle === "deletion_pending"
             ? "Deletion is pending. Use the lifecycle support path to resume the existing export; portfolio details remain unavailable."
-            : "Account access is disabled. Use the lifecycle support path to resume an existing export; portfolio details remain unavailable."
+            : result.lifecycle === "purged"
+              ? "Account has been verifiably purged. Financial ledger facts and portfolio details are permanently deleted."
+              : "Account access is disabled. Use the lifecycle support path to resume an existing export; portfolio details remain unavailable."
           : "Your private workspace is unavailable.",
       lifecycle: result.reason === "lifecycle" ? result.lifecycle : undefined,
       activePortfolio: null,

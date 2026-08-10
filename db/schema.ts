@@ -2069,6 +2069,79 @@ export const accountExportChunks = sqliteTable(
   ],
 );
 
+/**
+ * Durable, owner-scoped deletion state. The job deliberately has no foreign
+ * keys to user/export rows: its redacted completion proof must remain after
+ * those rows and artifacts have been purged.
+ */
+export const accountPurgeJobs = sqliteTable(
+  "account_purge_jobs",
+  {
+    id: text("id").primaryKey(),
+    ownerUserId: text("owner_user_id").notNull(),
+    deletionRequestId: text("deletion_request_id").notNull(),
+    deletionKeyDigest: text("deletion_key_digest").notNull(),
+    exportJobId: text("export_job_id").notNull(),
+    manifestDigest: text("manifest_digest").notNull(),
+    status: text("status").notNull().default("queued"),
+    phase: text("phase").notNull().default("validate_source"),
+    targetIndex: integer("target_index").notNull().default(0),
+    rowCursor: integer("row_cursor").notNull().default(0),
+    rollingDigest: text("rolling_digest").notNull().default("0"),
+    rollingCount: integer("rolling_count").notNull().default(0),
+    chunkTableName: text("chunk_table_name").notNull().default(""),
+    chunkIndex: integer("chunk_index").notNull().default(-1),
+    version: integer("version").notNull().default(1),
+    deletedCountsJson: text("deleted_counts_json").notNull().default("{}"),
+    failureCode: text("failure_code"),
+    eligibleAt: text("eligible_at").notNull(),
+    confirmedAt: text("confirmed_at").notNull(),
+    completedAt: text("completed_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    check(
+      "account_purge_jobs_status_check",
+      sql`${table.status} IN ('queued', 'running', 'completed', 'failed')`,
+    ),
+    check(
+      "account_purge_jobs_phase_check",
+      sql`${table.phase} IN ('validate_source', 'validate_chunks', 'purge', 'verify', 'cleanup', 'complete')`,
+    ),
+    check(
+      "account_purge_jobs_cursor_check",
+      sql`${table.targetIndex} >= 0 AND ${table.rowCursor} >= 0 AND ${table.rollingCount} >= 0 AND ${table.chunkIndex} >= -1`,
+    ),
+    uniqueIndex("account_purge_jobs_deletion_request_unique").on(
+      table.deletionRequestId,
+    ),
+    uniqueIndex("account_purge_jobs_owner_export_unique").on(
+      table.ownerUserId,
+      table.exportJobId,
+    ),
+    index("account_purge_jobs_owner_status_idx").on(
+      table.ownerUserId,
+      table.status,
+      table.updatedAt,
+    ),
+  ],
+);
+
+/** Transaction-local capability consumed only by the audit delete trigger. */
+export const accountPurgeAuditGuards = sqliteTable(
+  "account_purge_audit_guards",
+  {
+    ownerUserId: text("owner_user_id").primaryKey(),
+    purgeJobId: text("purge_job_id").notNull(),
+    expectedVersion: integer("expected_version").notNull(),
+    valid: integer("valid").notNull(),
+  },
+  (table) => [
+    check("account_purge_audit_guards_valid_check", sql`${table.valid} = 1`),
+  ],
+);
+
 export const taxLots = sqliteTable(
   "tax_lots",
   {

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 type LifecycleType = "disable" | "deletion" | "export";
+const PURGE_CONFIRMATION = "PERMANENTLY DELETE MY ACCOUNT";
 
 export function AccountLifecycleRecovery({
   lifecycle,
@@ -135,6 +136,47 @@ export function AccountLifecycleRecovery({
       setDownloading(false);
     }
   }
+  async function permanentlyDelete() {
+    if (!status || status.requestType !== "deletion" || pending) return;
+    const confirmation = window.prompt(
+      `This permanently deletes portfolio, ledger, import, projection, and user-scoped market data. Recovery remains possible only before purge begins. Backups are disaster-recovery evidence and are not used to selectively restore a purged account. Type ${PURGE_CONFIRMATION} to continue.`,
+    );
+    if (confirmation !== PURGE_CONFIRMATION) return;
+    setPending(true);
+    try {
+      for (let attempt = 0; attempt < 1_200; attempt += 1) {
+        const response = await fetch("/api/account/lifecycle", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            type: "purge",
+            idempotencyKey: status.idempotencyKey,
+            confirmation,
+          }),
+        });
+        const result = (await response.json()) as {
+          ok?: boolean;
+          message?: string;
+          request?: { status?: string; phase?: string };
+        };
+        if (!result.ok) {
+          setStatus((current) =>
+            current
+              ? { ...current, jobStatus: result.message ?? "Purge unavailable" }
+              : current,
+          );
+          return;
+        }
+        if (result.request?.status === "purged") {
+          window.location.reload();
+          return;
+        }
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      }
+    } finally {
+      setPending(false);
+    }
+  }
   return (
     <section className="empty-state" aria-labelledby="lifecycle-recovery-title">
       <p className="eyebrow">Account lifecycle</p>
@@ -172,6 +214,19 @@ export function AccountLifecycleRecovery({
                 ? "All export parts downloaded"
                 : `Download export part ${nextDownloadPart}`}
           </button>
+          {status.requestType === "deletion" ? (
+            <button
+              type="button"
+              onClick={() => void permanentlyDelete()}
+              disabled={pending}
+            >
+              Permanently delete account
+            </button>
+          ) : null}
+          <p>
+            Permanent deletion is available after a 24-hour cooling-off period
+            and requires a separate typed confirmation.
+          </p>
         </div>
       ) : (
         <p role="status">

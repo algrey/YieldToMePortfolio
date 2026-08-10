@@ -91,6 +91,8 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "account_export_jobs",
     "account_export_manifest",
     "account_lifecycle_requests",
+    "account_purge_audit_guards",
+    "account_purge_jobs",
     "audit_events",
     "calculation_runs",
     "cash_accounts",

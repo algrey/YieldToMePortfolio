@@ -17,11 +17,16 @@ export type ExportTableClassification = {
     | "scope_user_id"
     | "target_owner_user_id"
     | "verified_by_user_id"
+    | "owner_user_id"
     | null;
   retention: ExportRetentionClass;
   reason: string;
 };
 const PROCESS_DOWNLOAD_AUDIT_MANIFEST = "audit_events.process_download";
+const PURGE_CONTROL_TABLES = new Set([
+  "account_purge_jobs",
+  "account_purge_audit_guards",
+]);
 
 const owned = (
   ownerColumn: ExportTableClassification["ownerColumn"],
@@ -138,6 +143,14 @@ classifications.account_export_chunks = operational(
   "user_id",
   "Bounded export artifact storage; retained as purge input",
 );
+classifications.account_purge_jobs = operational(
+  "owner_user_id",
+  "Redacted durable purge checkpoint and completion proof",
+);
+classifications.account_purge_audit_guards = operational(
+  "owner_user_id",
+  "Ephemeral guarded purge checkpoint capability",
+);
 for (const name of [
   "currencies",
   "exchanges",
@@ -174,6 +187,32 @@ export type AccountLifecycleRequest = {
   createdAt: string;
   updatedAt: string;
 };
+export type AccountPurgeResult =
+  | {
+      ok: true;
+      status: "queued" | "running" | "purged";
+      jobId: string;
+      userId: string;
+      manifestDigest: string;
+      phase: string;
+      purgedAt: string | null;
+      purgedTableCounts: Record<string, number>;
+    }
+  | {
+      ok: false;
+      reason:
+        | "not-found"
+        | "user-not-deleting"
+        | "manifest-not-completed"
+        | "manifest-corrupt"
+        | "export-expired"
+        | "cooling-off"
+        | "confirmation-required"
+        | "source-mutated"
+        | "terminal-failure"
+        | "purge-failed";
+      message?: string;
+    };
 export type AccountExportJob = {
   id: string;
   userId: string;
@@ -218,6 +257,56 @@ export const ACCOUNT_EXPORT_LIMITS = Object.freeze({
 });
 export const ACCOUNT_EXPORT_JOB_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export const ACCOUNT_PURGE_CONFIRMATION = "PERMANENTLY DELETE MY ACCOUNT";
+export const ACCOUNT_PURGE_LIMITS = Object.freeze({
+  coolingOffHours: 24,
+  maxRowsPerStep: 100,
+  maxChunksPerStep: 100,
+});
+
+// Children precede parents. The list is intentionally explicit and is checked
+// against the completed manifest before any delete is permitted.
+const PURGE_TABLES_IN_FK_ORDER = [
+  "lot_allocations",
+  "tax_lots",
+  "holding_projections",
+  "holding_daily_snapshots",
+  "snapshot_publications",
+  "projection_publications",
+  "portfolio_daily_snapshots",
+  "calculation_runs",
+  "cash_ledger_entries",
+  "cash_accounts",
+  "manual_overrides",
+  "ledger_mutation_guards",
+  "manual_ledger_mutation_keys",
+  "import_issues",
+  "import_rows",
+  "import_commit_chunks",
+  "import_mapping_decisions",
+  "import_batches",
+  "transactions",
+  "portfolio_securities",
+  "portfolio_settings",
+  "portfolios",
+  "user_settings",
+  "price_observations",
+  "fx_rate_observations",
+  "market_data_refresh_jobs",
+  "security_provider_mappings",
+  "audit_events",
+  "user_identities",
+  "users",
+] as const;
+
+const PURGE_CLEANUP_TABLES = [
+  "account_export_chunks",
+  "account_export_checkpoint_guards",
+  "account_export_manifest",
+  "account_export_jobs",
+  "account_lifecycle_requests",
+] as const;
 
 export type AccountExportCursor = {
   tableName: string;
@@ -296,8 +385,8 @@ function rowOwnerPredicate(
 ): { sql: string; params: unknown[] } {
   if (table === "audit_events")
     return {
-      sql: "(target_owner_user_id = ? OR actor_user_id = ?) AND action NOT IN ('account.export.process','account.export.download')",
-      params: [userId, userId],
+      sql: "target_owner_user_id = ? AND action NOT IN ('account.export.process','account.export.download')",
+      params: [userId],
     };
   if (table === "security_provider_mappings")
     return { sql: "verified_by_user_id = ?", params: [userId] };
@@ -516,8 +605,8 @@ export function createAccountLifecycleRepository(
     at: string,
   ): Promise<AccountExportJob> => {
     const auditHighWater = await client.get<Record<string, unknown>>(
-      "SELECT COALESCE(MAX(rowid),0) AS rowid FROM audit_events WHERE target_owner_user_id=? OR actor_user_id=?",
-      [userId, userId],
+      "SELECT COALESCE(MAX(rowid),0) AS rowid FROM audit_events WHERE target_owner_user_id=?",
+      [userId],
     );
     const auditCutoff = Number(auditHighWater?.rowid ?? 0);
     const operationalCounts = new Map<string, number>();
@@ -526,11 +615,12 @@ export function createAccountLifecycleRepository(
     for (const [operationalTable, operationalClassification] of Object.entries(
       ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS,
     ).filter(([, value]) => value.classification === "operational")) {
+      if (PURGE_CONTROL_TABLES.has(operationalTable)) continue;
       const predicate =
         operationalTable === PROCESS_DOWNLOAD_AUDIT_MANIFEST
           ? {
-              sql: "rowid <= ? AND (target_owner_user_id = ? OR actor_user_id = ?) AND action IN ('account.export.process','account.export.download')",
-              params: [auditCutoff, userId, userId],
+              sql: "rowid <= ? AND target_owner_user_id = ? AND action IN ('account.export.process','account.export.download')",
+              params: [auditCutoff, userId],
             }
           : rowOwnerPredicate(
               operationalTable,
@@ -670,9 +760,10 @@ export function createAccountLifecycleRepository(
         for (const [tableName, classification] of Object.entries(
           ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS,
         ).filter(
-          ([, value]) =>
-            value.classification === "excluded" ||
-            value.classification === "operational",
+          ([name, value]) =>
+            !PURGE_CONTROL_TABLES.has(name) &&
+            (value.classification === "excluded" ||
+              value.classification === "operational"),
         ))
           statements.push({
             sql: "INSERT INTO account_export_manifest (id,export_job_id,user_id,table_name,classification,retention,reason,source_row_count,captured_row_count,object_count,digest,created_at,updated_at) VALUES (?,?,?,?,?,?,?,0,0,0,'0',?,?)",
@@ -1282,6 +1373,577 @@ export function createAccountLifecycleRepository(
         nextCursor,
         nextPart: part !== null && hasNext ? part + 1 : null,
       };
+    },
+    async purgeAccount(
+      userId: string,
+      options: {
+        idempotencyKey?: string;
+        confirmation?: string;
+        actorUserId?: string;
+        requestId?: string;
+        now?: string;
+      } = {},
+    ): Promise<AccountPurgeResult> {
+      const at = options.now ?? now();
+      const fail = (
+        reason: Extract<AccountPurgeResult, { ok: false }>["reason"],
+        message: string,
+      ): AccountPurgeResult => ({ ok: false, reason, message });
+      if (!options.idempotencyKey)
+        return fail("not-found", "The exact deletion request key is required.");
+      const requestRow = await client.get<Record<string, unknown>>(
+        `SELECT alr.*,u.status AS user_status,aej.status AS export_status,
+                aej.manifest_digest,aej.expires_at
+           FROM account_lifecycle_requests alr
+           JOIN users u ON u.id=alr.user_id
+           LEFT JOIN account_export_jobs aej
+             ON aej.id=alr.export_job_id AND aej.user_id=alr.user_id
+          WHERE alr.user_id=? AND alr.request_type='deletion'
+            AND alr.idempotency_key=? LIMIT 1`,
+        [userId, options.idempotencyKey],
+      );
+      if (!requestRow) return fail("not-found", "Deletion request not found.");
+
+      let purge = await client.get<Record<string, unknown>>(
+        "SELECT * FROM account_purge_jobs WHERE deletion_request_id=? AND owner_user_id=?",
+        [String(requestRow.id), userId],
+      );
+      if (!purge) {
+        if (options.confirmation !== ACCOUNT_PURGE_CONFIRMATION)
+          return fail(
+            "confirmation-required",
+            `Final confirmation must exactly match ${ACCOUNT_PURGE_CONFIRMATION}.`,
+          );
+        if (String(requestRow.user_status) !== "deletion_pending")
+          return fail(
+            "user-not-deleting",
+            "The account is not deletion pending.",
+          );
+        if (
+          !requestRow.export_job_id ||
+          String(requestRow.export_status) !== "completed" ||
+          !requestRow.manifest_digest
+        )
+          return fail(
+            "manifest-not-completed",
+            "The exact deletion export is not complete.",
+          );
+        if (
+          new Date(String(requestRow.expires_at)).getTime() <=
+          new Date(at).getTime()
+        )
+          return fail(
+            "export-expired",
+            "The exact deletion export has expired.",
+          );
+        const eligibleAt = new Date(
+          new Date(String(requestRow.created_at)).getTime() +
+            ACCOUNT_PURGE_LIMITS.coolingOffHours * 60 * 60 * 1000,
+        ).toISOString();
+        if (new Date(at).getTime() < new Date(eligibleAt).getTime())
+          return fail(
+            "cooling-off",
+            `Deletion can be confirmed after ${eligibleAt}. Recovery remains possible until purge starts; after completion, backups are not selectively restored.`,
+          );
+        const expectedNames = Object.keys(ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS)
+          .filter((name) => !PURGE_CONTROL_TABLES.has(name))
+          .sort();
+        const manifests = await client.all<Record<string, unknown>>(
+          "SELECT * FROM account_export_manifest WHERE export_job_id=? AND user_id=? ORDER BY table_name LIMIT 100",
+          [String(requestRow.export_job_id), userId],
+        );
+        if (
+          manifests.length !== expectedNames.length ||
+          manifests.some(
+            (row, index) => String(row.table_name) !== expectedNames[index],
+          )
+        )
+          return fail("manifest-corrupt", "The export manifest is incomplete.");
+        for (const row of manifests) {
+          const expected =
+            ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS[String(row.table_name)];
+          if (
+            !expected ||
+            String(row.classification) !== expected.classification ||
+            String(row.retention) !== expected.retention ||
+            (expected.classification !== "operational" &&
+              expected.classification !== "excluded" &&
+              Number(row.source_row_count) !== Number(row.captured_row_count))
+          )
+            return fail(
+              "manifest-corrupt",
+              "The export manifest does not reconcile.",
+            );
+        }
+        const id = randomUUID();
+        await client.run(
+          `INSERT INTO account_purge_jobs
+             (id,owner_user_id,deletion_request_id,deletion_key_digest,export_job_id,
+              manifest_digest,status,phase,eligible_at,confirmed_at,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,'queued','validate_source',?,?,?,?)`,
+          [
+            id,
+            userId,
+            String(requestRow.id),
+            digest(options.idempotencyKey),
+            String(requestRow.export_job_id),
+            String(requestRow.manifest_digest),
+            eligibleAt,
+            at,
+            at,
+            at,
+          ],
+        );
+        purge = await client.get<Record<string, unknown>>(
+          "SELECT * FROM account_purge_jobs WHERE id=?",
+          [id],
+        );
+      }
+      if (!purge) throw new Error("purge_job_not_persisted");
+      const counts = JSON.parse(String(purge.deleted_counts_json)) as Record<
+        string,
+        number
+      >;
+      const result = (row: Record<string, unknown>): AccountPurgeResult => ({
+        ok: true,
+        status:
+          String(row.status) === "completed"
+            ? "purged"
+            : String(row.status) === "queued"
+              ? "queued"
+              : "running",
+        jobId: String(row.id),
+        userId,
+        manifestDigest: String(row.manifest_digest),
+        phase: String(row.phase),
+        purgedAt: row.completed_at == null ? null : String(row.completed_at),
+        purgedTableCounts: JSON.parse(
+          String(row.deleted_counts_json),
+        ) as Record<string, number>,
+      });
+      if (String(purge.status) === "completed") return result(purge);
+      if (String(purge.status) === "failed")
+        return fail(
+          "terminal-failure",
+          `Purge stopped safely: ${String(purge.failure_code)}`,
+        );
+
+      const jobId = String(purge.id);
+      const version = Number(purge.version);
+      const guarded = async (statements: SqlStatement[]) => {
+        const insert: SqlStatement = {
+          sql: `INSERT INTO account_purge_audit_guards(owner_user_id,purge_job_id,expected_version,valid)
+                SELECT ?,?,?,CASE WHEN EXISTS(
+                  SELECT 1 FROM account_purge_jobs
+                   WHERE id=? AND owner_user_id=? AND version=? AND status IN ('queued','running')
+                ) THEN 1 ELSE 0 END`,
+          params: [userId, jobId, version, jobId, userId, version],
+        };
+        const remove: SqlStatement = {
+          sql: "DELETE FROM account_purge_audit_guards WHERE owner_user_id=? AND purge_job_id=?",
+          params: [userId, jobId],
+        };
+        if (client.batch) await client.batch([insert, ...statements, remove]);
+        else {
+          await client.run("BEGIN IMMEDIATE TRANSACTION");
+          try {
+            for (const statement of [insert, ...statements, remove])
+              await client.run(statement.sql, statement.params);
+            await client.run("COMMIT");
+          } catch (error) {
+            await client.run("ROLLBACK").catch(() => undefined);
+            throw error;
+          }
+        }
+      };
+      const terminal = async (code: string): Promise<AccountPurgeResult> => {
+        await guarded([
+          {
+            sql: "UPDATE account_purge_jobs SET status='failed',failure_code=?,version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+            params: [code, at, jobId, userId, version],
+          },
+        ]);
+        return fail("terminal-failure", `Purge stopped safely: ${code}`);
+      };
+
+      try {
+        if (String(purge.phase) === "validate_source") {
+          const manifests = await client.all<Record<string, unknown>>(
+            `SELECT * FROM account_export_manifest
+              WHERE export_job_id=? AND user_id=?
+                AND classification IN ('owned','user-scoped-observation')
+              ORDER BY table_name LIMIT 100`,
+            [String(purge.export_job_id), userId],
+          );
+          const manifest = manifests[Number(purge.target_index)];
+          if (!manifest) {
+            const allManifest = await client.all<Record<string, unknown>>(
+              "SELECT table_name,classification,retention,reason,source_row_count,captured_row_count,object_count,digest,cutoff_cursor FROM account_export_manifest WHERE export_job_id=? AND user_id=? ORDER BY table_name LIMIT 100",
+              [String(purge.export_job_id), userId],
+            );
+            const initial = digest(
+              JSON.stringify({
+                format: "yieldtome.account-export",
+                version: 2,
+                digestAlgorithm: "sha256-chain-v1",
+                ownerId: userId,
+                jobId: String(purge.export_job_id),
+                expiresAt: String(requestRow.expires_at),
+                tables: allManifest.map((row) => ({
+                  table: String(row.table_name),
+                  classification: String(row.classification),
+                  retention: String(row.retention),
+                  reason: String(row.reason),
+                  sourceRowCount: Number(row.source_row_count),
+                  capturedRowCount: Number(row.captured_row_count),
+                  objectCount: Number(row.object_count),
+                  digest: String(row.digest),
+                  cutoffCursor:
+                    row.cutoff_cursor == null
+                      ? null
+                      : String(row.cutoff_cursor),
+                })),
+              }),
+            );
+            await guarded([
+              {
+                sql: "UPDATE account_purge_jobs SET phase='validate_chunks',target_index=0,row_cursor=0,rolling_digest=?,rolling_count=0,chunk_table_name='',chunk_index=-1,status='running',version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+                params: [initial, at, jobId, userId, version],
+              },
+            ]);
+          } else {
+            const table = String(manifest.table_name);
+            const classification = ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS[table];
+            const predicate = rowOwnerPredicate(table, classification, userId);
+            const rows = await client.all<Record<string, unknown>>(
+              `SELECT rowid,* FROM "${table}" WHERE ${predicate.sql} AND rowid>? ORDER BY rowid LIMIT ?`,
+              [
+                ...predicate.params,
+                Number(purge.row_cursor),
+                ACCOUNT_EXPORT_LIMITS.chunkRows + 1,
+              ],
+            );
+            const page = rows.slice(0, ACCOUNT_EXPORT_LIMITS.chunkRows);
+            if (page.length) {
+              await guarded([
+                {
+                  sql: "UPDATE account_purge_jobs SET row_cursor=?,rolling_digest=?,rolling_count=rolling_count+?,status='running',version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+                  params: [
+                    Number(page.at(-1)?.rowid),
+                    foldRows(
+                      String(purge.rolling_digest),
+                      page.map((row) => sanitized(row, userId)),
+                    ),
+                    page.length,
+                    at,
+                    jobId,
+                    userId,
+                    version,
+                  ],
+                },
+              ]);
+            } else {
+              if (
+                Number(purge.rolling_count) !==
+                  Number(manifest.source_row_count) ||
+                String(purge.rolling_digest) !== String(manifest.digest)
+              )
+                return await terminal("source_mutated");
+              await guarded([
+                {
+                  sql: "UPDATE account_purge_jobs SET target_index=target_index+1,row_cursor=0,rolling_digest='0',rolling_count=0,status='running',version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+                  params: [at, jobId, userId, version],
+                },
+              ]);
+            }
+          }
+        } else if (String(purge.phase) === "validate_chunks") {
+          const predicate = String(purge.chunk_table_name)
+            ? " AND (table_name>? OR (table_name=? AND chunk_index>?))"
+            : "";
+          const params: unknown[] = String(purge.chunk_table_name)
+            ? [
+                String(purge.export_job_id),
+                userId,
+                String(purge.chunk_table_name),
+                String(purge.chunk_table_name),
+                Number(purge.chunk_index),
+                ACCOUNT_PURGE_LIMITS.maxChunksPerStep + 1,
+              ]
+            : [
+                String(purge.export_job_id),
+                userId,
+                ACCOUNT_PURGE_LIMITS.maxChunksPerStep + 1,
+              ];
+          const rows = await client.all<Record<string, unknown>>(
+            `SELECT table_name,chunk_index,row_count,digest FROM account_export_chunks WHERE export_job_id=? AND user_id=?${predicate} ORDER BY table_name,chunk_index LIMIT ?`,
+            params,
+          );
+          const page = rows.slice(0, ACCOUNT_PURGE_LIMITS.maxChunksPerStep);
+          let rolling = String(purge.rolling_digest);
+          for (const row of page)
+            rolling = digest(
+              rolling +
+                JSON.stringify({
+                  table: String(row.table_name),
+                  chunkIndex: Number(row.chunk_index),
+                  rowCount: Number(row.row_count),
+                  digest: String(row.digest),
+                }),
+            );
+          const last = page.at(-1);
+          if (rows.length > ACCOUNT_PURGE_LIMITS.maxChunksPerStep && last) {
+            await guarded([
+              {
+                sql: "UPDATE account_purge_jobs SET chunk_table_name=?,chunk_index=?,rolling_digest=?,rolling_count=rolling_count+?,status='running',version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+                params: [
+                  String(last.table_name),
+                  Number(last.chunk_index),
+                  rolling,
+                  page.length,
+                  at,
+                  jobId,
+                  userId,
+                  version,
+                ],
+              },
+            ]);
+          } else {
+            if (digest(rolling + ":end") !== String(purge.manifest_digest))
+              return await terminal("manifest_digest_mismatch");
+            await guarded([
+              {
+                sql: "UPDATE account_purge_jobs SET phase='purge',target_index=0,row_cursor=0,rolling_digest='0',rolling_count=0,status='running',version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+                params: [at, jobId, userId, version],
+              },
+            ]);
+          }
+        } else if (String(purge.phase) === "purge") {
+          const table = PURGE_TABLES_IN_FK_ORDER[Number(purge.target_index)];
+          if (!table) {
+            await guarded([
+              {
+                sql: "UPDATE account_purge_jobs SET phase='verify',target_index=0,status='running',version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+                params: [at, jobId, userId, version],
+              },
+            ]);
+          } else {
+            const classification = ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS[table];
+            if (table === "user_identities") {
+              await guarded([
+                {
+                  sql: "UPDATE user_identities SET email_at_link=NULL,last_authenticated_at=NULL,status='revoked',updated_at=?,version=version+1 WHERE user_id=?",
+                  params: [at, userId],
+                },
+                {
+                  sql: "UPDATE account_purge_jobs SET target_index=target_index+1,status='running',version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+                  params: [at, jobId, userId, version],
+                },
+              ]);
+              const current = await client.get<Record<string, unknown>>(
+                "SELECT * FROM account_purge_jobs WHERE id=?",
+                [jobId],
+              );
+              return current
+                ? result(current)
+                : fail("purge-failed", "Purge checkpoint was lost.");
+            }
+            if (table === "users") {
+              await guarded([
+                {
+                  sql: "UPDATE users SET status='purged',primary_email=?,display_name=NULL,terms_accepted_at=NULL,last_seen_at=NULL,updated_at=?,version=version+1 WHERE id=? AND status='deletion_pending'",
+                  params: [
+                    `purged-${digest(userId).slice(0, 24)}@purged.invalid`,
+                    at,
+                    userId,
+                  ],
+                },
+                {
+                  sql: "UPDATE account_purge_jobs SET target_index=target_index+1,status='running',version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+                  params: [at, jobId, userId, version],
+                },
+              ]);
+              const current = await client.get<Record<string, unknown>>(
+                "SELECT * FROM account_purge_jobs WHERE id=?",
+                [jobId],
+              );
+              return current
+                ? result(current)
+                : fail("purge-failed", "Purge checkpoint was lost.");
+            }
+            const predicate =
+              table === "audit_events"
+                ? {
+                    sql: "target_owner_user_id=?",
+                    params: [userId],
+                  }
+                : rowOwnerPredicate(table, classification, userId);
+            const extra =
+              table === "security_provider_mappings"
+                ? " AND NOT EXISTS (SELECT 1 FROM price_observations po WHERE po.mapping_id=security_provider_mappings.id) AND NOT EXISTS (SELECT 1 FROM market_data_refresh_jobs mrj WHERE mrj.mapping_id=security_provider_mappings.id)"
+                : "";
+            const rows = await client.all<{ rowid: number }>(
+              `SELECT rowid FROM "${table}" WHERE ${predicate.sql}${extra} ORDER BY rowid LIMIT ?`,
+              [...predicate.params, ACCOUNT_PURGE_LIMITS.maxRowsPerStep],
+            );
+            if (rows.length) {
+              counts[table] = (counts[table] ?? 0) + rows.length;
+              const marks = rows.map(() => "?").join(",");
+              await guarded([
+                {
+                  sql: `DELETE FROM "${table}" WHERE rowid IN (${marks}) AND ${predicate.sql}`,
+                  params: [
+                    ...rows.map((row) => row.rowid),
+                    ...predicate.params,
+                  ],
+                },
+                {
+                  sql: "UPDATE account_purge_jobs SET deleted_counts_json=?,status='running',version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+                  params: [JSON.stringify(counts), at, jobId, userId, version],
+                },
+              ]);
+            } else {
+              await guarded([
+                {
+                  sql: "UPDATE account_purge_jobs SET target_index=target_index+1,status='running',version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+                  params: [at, jobId, userId, version],
+                },
+              ]);
+            }
+          }
+        } else if (String(purge.phase) === "verify") {
+          const table = PURGE_TABLES_IN_FK_ORDER[Number(purge.target_index)];
+          if (table) {
+            const classification = ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS[table];
+            if (table === "user_identities") {
+              const invalid = await client.get<{ count: number }>(
+                "SELECT COUNT(*) AS count FROM user_identities WHERE user_id=? AND (email_at_link IS NOT NULL OR last_authenticated_at IS NOT NULL OR status<>'revoked')",
+                [userId],
+              );
+              if (Number(invalid?.count ?? 0) > 0)
+                return await terminal("verification_failed_user_identities");
+            } else if (table === "users") {
+              const invalid = await client.get<{ count: number }>(
+                "SELECT COUNT(*) AS count FROM users WHERE id=? AND (status<>'purged' OR display_name IS NOT NULL OR terms_accepted_at IS NOT NULL OR last_seen_at IS NOT NULL OR primary_email NOT LIKE 'purged-%@purged.invalid')",
+                [userId],
+              );
+              if (Number(invalid?.count ?? 0) > 0)
+                return await terminal("verification_failed_users");
+            } else {
+              const predicate =
+                table === "audit_events"
+                  ? {
+                      sql: "target_owner_user_id=?",
+                      params: [userId],
+                    }
+                  : rowOwnerPredicate(table, classification, userId);
+              const remaining = await client.get<{ count: number }>(
+                `SELECT COUNT(*) AS count FROM "${table}" WHERE ${predicate.sql}`,
+                predicate.params,
+              );
+              // A mapping referenced by another scope is shared and unchanged.
+              if (
+                Number(remaining?.count ?? 0) > 0 &&
+                table !== "security_provider_mappings"
+              )
+                return await terminal(`verification_failed_${table}`);
+            }
+            await guarded([
+              {
+                sql: "UPDATE account_purge_jobs SET target_index=target_index+1,version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+                params: [at, jobId, userId, version],
+              },
+            ]);
+          } else {
+            await guarded([
+              {
+                sql: "UPDATE account_purge_jobs SET phase='cleanup',target_index=0,version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+                params: [at, jobId, userId, version],
+              },
+            ]);
+          }
+        } else if (String(purge.phase) === "cleanup") {
+          const table = PURGE_CLEANUP_TABLES[Number(purge.target_index)];
+          if (table) {
+            const predicate =
+              table === "account_lifecycle_requests"
+                ? "user_id=? AND id<>?"
+                : "user_id=?";
+            const predicateParams: unknown[] =
+              table === "account_lifecycle_requests"
+                ? [userId, String(purge.deletion_request_id)]
+                : [userId];
+            const rows = await client.all<{ rowid: number }>(
+              `SELECT rowid FROM "${table}" WHERE ${predicate} ORDER BY rowid LIMIT ?`,
+              [...predicateParams, ACCOUNT_PURGE_LIMITS.maxRowsPerStep],
+            );
+            if (rows.length) {
+              counts[table] = (counts[table] ?? 0) + rows.length;
+              const marks = rows.map(() => "?").join(",");
+              await guarded([
+                {
+                  sql: `DELETE FROM "${table}" WHERE rowid IN (${marks}) AND ${predicate}`,
+                  params: [...rows.map((row) => row.rowid), ...predicateParams],
+                },
+                {
+                  sql: "UPDATE account_purge_jobs SET deleted_counts_json=?,version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+                  params: [JSON.stringify(counts), at, jobId, userId, version],
+                },
+              ]);
+            } else {
+              await guarded([
+                {
+                  sql: "UPDATE account_purge_jobs SET target_index=target_index+1,version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+                  params: [at, jobId, userId, version],
+                },
+              ]);
+            }
+          } else {
+            await guarded([
+              {
+                sql: "UPDATE account_purge_jobs SET phase='complete',status='completed',completed_at=?,version=version+1,updated_at=? WHERE id=? AND owner_user_id=? AND version=?",
+                params: [at, at, jobId, userId, version],
+              },
+              createAuditInsertStatement(
+                {
+                  actorUserId: null,
+                  targetOwnerUserId: null,
+                  action: "account.purge",
+                  targetType: "account_purge_job",
+                  targetId: jobId,
+                  requestId: options.requestId ?? randomUUID(),
+                  result: "success",
+                  metadata: {
+                    manifestDigest: String(purge.manifest_digest),
+                    completedAt: at,
+                    deletedCounts: counts,
+                  },
+                  occurredAt: at,
+                },
+                now,
+              ),
+            ]);
+          }
+        }
+      } catch (error) {
+        if (String(error).includes("account_purge_audit_guards_valid")) {
+          const current = await client.get<Record<string, unknown>>(
+            "SELECT * FROM account_purge_jobs WHERE id=?",
+            [jobId],
+          );
+          return current
+            ? result(current)
+            : fail("purge-failed", "Purge checkpoint was lost.");
+        }
+        return await terminal("unexpected_checkpoint_failure");
+      }
+      const current = await client.get<Record<string, unknown>>(
+        "SELECT * FROM account_purge_jobs WHERE id=? AND owner_user_id=?",
+        [jobId, userId],
+      );
+      return current
+        ? result(current)
+        : fail("purge-failed", "Purge checkpoint was lost.");
     },
   };
 }

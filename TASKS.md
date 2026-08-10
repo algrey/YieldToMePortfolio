@@ -1111,7 +1111,7 @@ Status: DONE (2026-08-10).
 
 ### OPS-003B — Retention and verified deletion
 
-Status: PENDING.
+Status: DONE (2026-08-10).
 
 - Objective: apply approved retention rules and execute an idempotent, auditable purge from the exact OPS-003A manifest.
 - Dependencies: OPS-003A, OPS-002.
@@ -1144,6 +1144,7 @@ Status: PENDING.
 - Tests: target resolution, partial-failure resume, FK order, provider purge, repeat, cross-user preservation, restore-policy interaction.
 - Risks: irreversible deletion; require exact target resolution and recoverability disclosure.
 - Parallel safe: no; destructive cross-domain path.
+- Completion note (2026-08-10): Implemented exact deletion-request/export binding, a 24-hour cooling-off period with typed confirmation, and a durable D1 purge state machine with guarded bounded validation, FK-ordered deletion, verification, artifact cleanup, and completion proof. Database-enforced source locks prevent owner reassignment or mutation after validation starts; retained data is limited to the exact deletion intent, redacted identity/user tombstones, purge proof, and one payload-free audit while shared mappings and every other owner's rows remain unchanged. The isolated Miniflare/D1 drill passed 14/14, the full automated suite passed, and fresh independent review accepted the escalated result with no blockers or follow-up work.
 
 ### QA-001A — Security and tenant-isolation hardening
 

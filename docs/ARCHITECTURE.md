@@ -415,6 +415,29 @@ Sources:
 - Exports: encrypted, access-logged, 35-day rotating operational retention unless a regulatory/business requirement changes it.
 - OPS-003A keeps temporary export artifacts inside D1: Cloudflare documents D1 AES-256-GCM encryption at rest and TLS encryption in transit. Downloaded pages rely on HTTPS; no external long-term export store or new binding/product is introduced. (<https://developers.cloudflare.com/d1/reference/data-security/>)
 - Account deletion: disable immediately, offer/export if requested, then purge owned D1 rows and derived exports within the documented window; retain only legally required minimal audit tombstone.
+- OPS-003B applies a 24-hour cooling-off period. Typed final confirmation
+  creates one D1-first purge job bound to the immutable deletion request, its
+  idempotency-key digest, and its exact completed, unexpired OPS-003A manifest.
+  Validation, FK-ordered deletion, and absence checks advance in guarded
+  batches of at most 100 rows/chunks; mismatch is terminal and fail-closed.
+- Migration-enforced source locks reject owner-row mutations once a purge job
+  exists unless the statement carries the exact live owner/job/version guard.
+  This closes the gap between bounded validation requests without an
+  interactive transaction. Artifact and unrelated lifecycle cleanup is also
+  bounded to 100 rows per checkpoint.
+- UPDATE locks authorize `OLD` and `NEW` ownership independently, preventing a
+  row from moving out of a locked owner or into another locked owner. Purge
+  job/guard tables are schema-classified but excluded from OPS-003A manifest
+  inputs, so exports completed before the purge schema remain valid.
+- Completion retains the immutable deletion intent, redacted revoked
+  issuer/subject linkage for exact-key status retries, an anonymized user row,
+  durable purge proof, and one payload-free audit. Provider mappings referenced
+  by another scope are shared and are not modified.
+- Audit ownership follows `target_owner_user_id`, not the actor. Evidence where
+  the deleting actor operated on another owner remains byte-for-byte unchanged.
+- Recovery is a separate operator decision before purge starts. After
+  completion, Time Travel and backups remain disaster-recovery controls and
+  must not selectively resurrect a purged account into production.
 - OPS-003A export manifests classify every schema table as owned, user-scoped observation, shared reference, or operational (`operational-35-days`), and retain exact row/object counts. It does not purge financial rows; the verified purge workflow consumes this manifest later.
 - Schema completeness excludes only D1-reserved `_cf_*` and `d1_*` namespaces. These are platform metadata rather than application data (`_cf_KV` is reserved and cannot be queried); every other non-SQLite table still fails export startup unless explicitly classified. (<https://developers.cloudflare.com/d1/best-practices/import-export-data/>)
 - Export completion is a resumable `finalize` phase. Each guarded D1 checkpoint folds at most 100 ordered chunk records into a persisted SHA-256 chain; oversized source rows emit at most four 12,000-character fragments per checkpoint. This avoids an invocation-wide chunk scan or an unbounded D1 batch while retaining deterministic independent verification.

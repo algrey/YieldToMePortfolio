@@ -4,14 +4,25 @@ import {
   getVerifiedPrincipalSqlContext,
 } from "./portfolio-actions.ts";
 
-export type AccountLifecycleActionType = "disable" | "deletion" | "export";
+export type AccountLifecycleActionType =
+  "disable" | "deletion" | "export" | "purge";
 
 export type AccountLifecycleActionResult =
   | {
       ok: true;
-      request: Awaited<
-        ReturnType<ReturnType<typeof createAccountLifecycleRepository>["get"]>
-      >;
+      request:
+        | Awaited<
+            ReturnType<
+              ReturnType<typeof createAccountLifecycleRepository>["get"]
+            >
+          >
+        | Awaited<
+            ReturnType<
+              ReturnType<
+                typeof createAccountLifecycleRepository
+              >["purgeAccount"]
+            >
+          >;
     }
   | { ok: false; status: 400 | 401 | 404 | 409 | 503; message: string };
 
@@ -31,6 +42,7 @@ export async function requestAccountLifecycleAction(
   const input = value as {
     idempotencyKey?: unknown;
     includeExport?: unknown;
+    confirmation?: unknown;
   } | null;
   if (!input || !validIdempotencyKey(input.idempotencyKey)) {
     return {
@@ -41,11 +53,35 @@ export async function requestAccountLifecycleAction(
   }
   const context = await getAuthenticatedSqlContext();
   if (!context.ok) {
-    // A revoked identity may only retry the exact immutable request already
-    // created for that issuer/subject. It never gets a user id from the body.
     const recovery = await getVerifiedPrincipalSqlContext();
     if (!recovery.ok) return context;
     const repository = createAccountLifecycleRepository(recovery.client);
+    if (type === "purge") {
+      const existing = await repository.getForPrincipal(
+        recovery.principal.issuer,
+        recovery.principal.subject,
+        "deletion",
+        input.idempotencyKey,
+      );
+      if (!existing) return context;
+      const purgeResult = await repository.purgeAccount(existing.userId, {
+        idempotencyKey: input.idempotencyKey,
+        confirmation:
+          typeof input.confirmation === "string"
+            ? input.confirmation
+            : undefined,
+        actorUserId: existing.userId,
+        requestId: recovery.requestId,
+      });
+      if (!purgeResult.ok) {
+        return {
+          ok: false,
+          status: 400,
+          message: purgeResult.message ?? "Purge could not be completed.",
+        };
+      }
+      return { ok: true, request: purgeResult };
+    }
     const existing = await repository.getForPrincipal(
       recovery.principal.issuer,
       recovery.principal.subject,
@@ -57,6 +93,25 @@ export async function requestAccountLifecycleAction(
   }
   try {
     const repository = createAccountLifecycleRepository(context.client);
+    if (type === "purge") {
+      const purgeResult = await repository.purgeAccount(context.userId, {
+        idempotencyKey: input.idempotencyKey,
+        confirmation:
+          typeof input.confirmation === "string"
+            ? input.confirmation
+            : undefined,
+        actorUserId: context.userId,
+        requestId: context.requestId,
+      });
+      if (!purgeResult.ok) {
+        return {
+          ok: false,
+          status: 400,
+          message: purgeResult.message ?? "Purge could not be completed.",
+        };
+      }
+      return { ok: true, request: purgeResult };
+    }
     const request = await repository.request({
       userId: context.userId,
       actorUserId: context.userId,

@@ -524,6 +524,20 @@ Acceptance:
 - Provider data follows the application retention and deletion policy.
 - Deletion is idempotent, audited, and verified.
 - Lifecycle request records are immutable; OPS-003A records the exact owner-scoped export manifest before any later purge task.
+- Final purge requires the exact deletion request key, that request's completed
+  unexpired export, a 24-hour cooling-off period, and a separate typed
+  confirmation. It validates source and manifest digests before bounded
+  foreign-key-ordered deletion, then verifies absence before completion.
+- Database source locks prevent owner rows changing between validation and
+  deletion checkpoints. Export/lifecycle cleanup is likewise bounded, audit
+  ownership follows `target_owner_user_id`, and a purge guard is authorized
+  only by its exact live job/version/status/phase.
+- Source-lock UPDATE checks both old and new ownership. Purge-control schema is
+  not retroactively required in an already-completed OPS-003A manifest.
+- Retention after purge is limited to immutable deletion intent, a redacted
+  revoked identity link, an anonymized user tombstone, one redacted completion
+  audit, and the durable purge proof. Shared rows used by another scope remain
+  byte-for-byte unchanged.
 
 ### QUAL-001 — Accessibility
 

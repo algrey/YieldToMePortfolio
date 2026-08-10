@@ -22,7 +22,7 @@ export type RequestContextResult =
   | {
       ok: false;
       reason: "lifecycle";
-      lifecycle: "disabled" | "deletion_pending";
+      lifecycle: "disabled" | "deletion_pending" | "purged";
     };
 
 export async function resolveAuthenticatedRequestContext(
@@ -44,13 +44,22 @@ export async function resolveAuthenticatedRequestContext(
         principal.issuer,
         principal.subject,
       );
+      const userRecord = !linked
+        ? await client.get<{ status: string }>(
+            "SELECT status FROM users AS u INNER JOIN account_lifecycle_requests AS alr ON alr.user_id = u.id INNER JOIN user_identities AS ui ON ui.user_id = alr.user_id WHERE ui.issuer=? AND ui.subject=? LIMIT 1",
+            [principal.issuer, principal.subject],
+          )
+        : null;
+      const status = linked?.userStatus ?? userRecord?.status;
       return {
         ok: false,
         reason: "lifecycle",
         lifecycle:
-          linked?.userStatus === "deletion_pending"
+          status === "deletion_pending"
             ? "deletion_pending"
-            : "disabled",
+            : status === "purged"
+              ? "purged"
+              : "disabled",
       };
     }
     return { ok: false, reason: "identity" };

@@ -5,7 +5,10 @@ import {
 import { rejectCrossSiteMutation } from "../../../mutation-request.ts";
 
 function lifecycleType(value: unknown): AccountLifecycleActionType | null {
-  return value === "disable" || value === "deletion" || value === "export"
+  return value === "disable" ||
+    value === "deletion" ||
+    value === "export" ||
+    value === "purge"
     ? value
     : null;
 }
@@ -44,6 +47,7 @@ export async function POST(request: Request): Promise<Response> {
     type?: unknown;
     idempotencyKey?: unknown;
     includeExport?: unknown;
+    confirmation?: unknown;
   } | null;
   try {
     body = (await readBoundedJson(request)) as typeof body;

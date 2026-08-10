@@ -686,6 +686,23 @@ encrypted at rest and TLS encrypted in transit; downloaded pages rely on HTTPS.
 No external long-term export store or additional binding/product is introduced.
 <https://developers.cloudflare.com/d1/reference/data-security/>
 
+`account_purge_jobs` is the durable OPS-003B state machine and completion
+proof. It stores opaque owner/request/export IDs, the SHA-256 deletion-key
+digest, exact manifest digest, bounded phase/cursors and counts, a redacted
+failure code, and confirmation/eligibility/completion times. It deliberately
+has no foreign keys to rows the purge removes. `account_purge_audit_guards` is
+an ephemeral checked capability inserted and removed in the same D1 batch as a
+checkpoint. The audit delete trigger joins the guard to the exact live purge
+owner, job, version, status, and phase; a syntactically valid guard grants no
+authority by itself. Ordinary audit updates and deletes remain prohibited.
+Per-owner source-lock triggers reject mutation between bounded validation and
+deletion checkpoints unless that exact guard is active.
+UPDATE triggers evaluate old and new owner columns separately; authority for
+one active purge owner never authorizes reassignment into or out of another.
+Purge job/guard tables are classified for schema completeness but are not
+OPS-003A capture inputs, preserving exact manifests completed before those
+tables existed.
+
 The append-only lifecycle triggers are intentionally appended to the generated
 Drizzle migration because the schema DSL cannot express immutable intent. The
 same still-uncommitted task migration was regenerated as the bounded
@@ -705,6 +722,20 @@ Default foreign-key actions:
 - Projection/snapshot rows: may be deleted/rebuilt by controlled jobs.
 
 This avoids accidental cascade deletion of financial history. The verified purge workflow is the only broad deletion path.
+
+OPS-003B deletes manifest-classified owner rows in an explicit child-before-
+parent order, at most 100 rows per checkpoint. User-scoped market rows use
+`scope_user_id`. A provider mapping is deleted only when no remaining row
+references it; otherwise it is shared reference data and stays byte-for-byte
+unchanged. Export artifacts are removed after independent absence checks.
+Identity email/authentication time and user contact/display fields are redacted
+while issuer/subject linkage and immutable deletion intent remain for exact
+revoked-principal retries.
+Artifact cleanup is separately resumable and deletes no more than 100 rows per
+checkpoint. It retains the exact deletion intent and removes unrelated disable,
+export, or superseded deletion requests. Audit ownership uses
+`target_owner_user_id`; actor-only involvement never targets another owner's
+evidence.
 
 ## 11. Transaction boundaries and invariants
 

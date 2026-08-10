@@ -50,7 +50,7 @@ export type OwnedWorkspace = {
   holdingCurrencyView?: "native" | "home";
   settingsVersion?: number;
   message?: string;
-  lifecycle?: "disabled" | "deletion_pending";
+  lifecycle?: "disabled" | "deletion_pending" | "purged";
   activePortfolio: {
     id: string;
     name: string;
@@ -742,7 +742,20 @@ function OwnedWorkspaceScreen({
           <h1 id="workspace-error-title">Portfolio data unavailable</h1>
           <p>{workspace.message ?? "Try again shortly."}</p>
         </section>
-        {workspace.lifecycle ? (
+        {workspace.lifecycle === "purged" ? (
+          <section
+            className="empty-state"
+            aria-labelledby="lifecycle-purged-title"
+          >
+            <p className="eyebrow">Account lifecycle</p>
+            <h2 id="lifecycle-purged-title">Account purged</h2>
+            <p>
+              This account has been verifiably purged. Financial ledger facts
+              and portfolio details are permanently deleted.
+            </p>
+          </section>
+        ) : workspace.lifecycle === "disabled" ||
+          workspace.lifecycle === "deletion_pending" ? (
           <AccountLifecycleRecovery lifecycle={workspace.lifecycle} />
         ) : null}
       </>
