@@ -70,12 +70,37 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    const method = request.method ?? "GET";
+    const hasBody = method !== "GET" && method !== "HEAD";
+    let body;
+    if (hasBody) {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      body = Buffer.concat(chunks);
+    }
+
+    const forwardedHeaders = new Headers();
+    for (const [key, value] of Object.entries(request.headers)) {
+      if (value === undefined) continue;
+      // `host` would point at this harness, not the worker's own origin;
+      // `cf-access-jwt-assertion` is always the harness-injected test
+      // principal below, never a client-supplied value.
+      if (key === "host" || key === "cf-access-jwt-assertion") continue;
+      forwardedHeaders.set(
+        key,
+        Array.isArray(value) ? value.join(", ") : value,
+      );
+    }
+    if (!forwardedHeaders.has("accept")) {
+      forwardedHeaders.set("accept", "text/html");
+    }
+    forwardedHeaders.set("Cf-Access-Jwt-Assertion", fixture.signToken());
+
     const workerResponse = await worker.fetch(
       new Request(url, {
-        headers: {
-          accept: request.headers.accept ?? "text/html",
-          "Cf-Access-Jwt-Assertion": fixture.signToken(),
-        },
+        method,
+        headers: forwardedHeaders,
+        body,
       }),
       {
         ASSETS: { fetch: fetchAsset },

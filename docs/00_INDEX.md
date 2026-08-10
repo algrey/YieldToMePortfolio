@@ -42,6 +42,9 @@ These files capture observations, inferences, and earlier proposals from the ref
 - `OPS-002_BACKUP_RESTORE_RUNBOOK.md` — backup/restore procedure and non-production restore discipline.
 - `OPS-002_DRILL_RECORD_2026-08-03.md` — dated record of the OPS-002 restore drill (RPO/RTO, verification results).
 - `OPS-003B_VERIFIED_DELETION_RUNBOOK.md` — verified account-deletion/offboarding runbook.
+- `QA-001A_SECURITY_MATRIX.md` — route/repository ownership matrix, Access-token failure matrix, CSRF/header/CSP review, dependency audit, and manual threat checklist.
+- `QA-001B_ACCESSIBILITY_AUDIT.md` — accessibility/responsive automated evidence, fixed defects, and the named owner-run manual checklist folded into QA-002.
+- `QA-002_RELEASE_READINESS.md` — release-readiness record: dependency completeness, automated quality gate, preview route/mutation smoke, supplied-CSV/calculation reconciliation, restore/deletion drills, redacted observability evidence, owner-run checklist, and the go/no-go decision.
 
 ## Preview deployment evidence
 

@@ -1246,7 +1246,7 @@ Status: DONE (2026-08-10).
 
 ### QA-002 — Preview UAT and release readiness
 
-Status: PENDING.
+Status: DONE (2026-08-10); owner-run UAT items remain open preconditions for promotion beyond preview.
 
 - Objective: provide evidence that the complete preview release meets product, security, data, device, and operational gates.
 - Dependencies: UI-002, UI-003, UI-004, UI-005D, UI-005E, PWA-001, OPS-002, OPS-003B, QA-001A, QA-001B.
@@ -1278,3 +1278,13 @@ Status: PENDING.
 - Tests: full lint/build/unit/integration/render/E2E suite plus manual UAT.
 - Risks: production data or credentials entering preview; maintain strict environment separation.
 - Parallel safe: test workstreams may run concurrently; go/no-go decision is serial.
+- Completion note (2026-08-10): Delivered `docs/QA-002_RELEASE_READINESS.md` with a conditional GO: every automated gate passed with recorded evidence (full quality gate 292 tests/290 pass/2 env-gated skips; all 9 direct routes smoke 200 through the preview harness; live CSRF 403 and full security-header checks; supplied-CSV 244-row stage/map/commit/reverse and FIFO/valuation reconciliation via cited tests; OPS-003A/B Miniflare drills 27/27; redacted observability; npm audit unchanged with documented acceptance), plus §12 traceability mapping all 12 product success measures and all 7 implementation-plan phase-gate sets to evidence with honest PARTIAL dispositions. Owner-run preconditions before promotion beyond preview are named step-by-step in §9: Access invite/offboard (A1–A5, preview Worker deployed but Access secrets intentionally unset), physical iPhone/desktop/PWA (D1–D4), zoom/motion (Z1–Z7), keyboard (K1–K7), VoiceOver (V1–V8). One in-scope defect found and fixed: `scripts/preview-harness.mjs` dropped request method/body, so mutation routes could never be smoked; it now forwards method/body/headers while stripping client-supplied `cf-access-jwt-assertion`. Four review rounds; final independent review PASS.
+
+### MKT-006 — Deployment-scoped market-data retention expiry
+
+Status: DEFERRED; not required for the preview release (QA-002 records the gap as a PARTIAL phase-gate disposition).
+
+- Objective: add time-based retention-duration expiry and a provider-removal purge routine for deployment-scoped (`scope_user_id IS NULL`) price/FX observations, completing the `docs/MARKET_DATA_STRATEGY.md` §10 retention obligations.
+- Dependencies: OPS-003B.
+- Requirements: OPS-004 and `docs/IMPLEMENTATION_PLAN.md` Phase 5 "provider retention obligations are operational".
+- Context: `docs/QA-002_RELEASE_READINESS.md` §12.2 Phase 5 row documents current coverage (user-scoped observations purged via OPS-003B's `PURGE_TABLES_IN_FK_ORDER`) and the residual gap (no `DELETE` against `price_observations`/`fx_rate_observations` outside `db/repositories/account-lifecycle.ts`; no time-based expiry job).
