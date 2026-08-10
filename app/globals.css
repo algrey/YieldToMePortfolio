@@ -2324,6 +2324,15 @@ dd {
   line-height: 1.35;
 }
 
+.import-mapping-list {
+  margin-top: 28px;
+}
+
+.import-mapping-list .import-mapping-form {
+  margin-top: 16px;
+  background: var(--forest-raised);
+}
+
 .import-mapping-form {
   margin-top: 24px;
   background: var(--forest-raised);

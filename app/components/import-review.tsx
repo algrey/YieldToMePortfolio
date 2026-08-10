@@ -42,6 +42,21 @@ type Review = {
       message: string;
     }>;
   };
+  securityCandidates: Array<{
+    id: string;
+    portfolioId: string;
+    sourceSymbol: string;
+    sourceExchangeAlias: string | null;
+    sourceCurrencyCode: string;
+    securityId: string | null;
+  }>;
+};
+
+type PendingMapping = {
+  key: string;
+  kind: "portfolio" | "security" | "fx";
+  sourceKey: string;
+  message: string;
 };
 
 type HistoryBatch = {
@@ -106,6 +121,7 @@ export function ImportReview({
   const [review, setReview] = useState<Review | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [readyPending, setReadyPending] = useState(false);
   const [commitPending, setCommitPending] = useState(false);
   const [commit, setCommit] = useState<CommitResult | null>(null);
   const [commitConfirmed, setCommitConfirmed] = useState(false);
@@ -340,10 +356,25 @@ export function ImportReview({
     }
   }
 
-  async function saveMapping(event: React.FormEvent<HTMLFormElement>) {
+  async function resolveMapping(
+    mapping: PendingMapping,
+    event: React.FormEvent<HTMLFormElement>,
+  ) {
     event.preventDefault();
     if (!review) return;
     const form = new FormData(event.currentTarget);
+    const targetId =
+      mapping.kind === "fx" ? null : String(form.get("targetId") ?? "");
+    const targetValue =
+      mapping.kind === "fx" ? String(form.get("targetValue") ?? "") : null;
+    if (mapping.kind !== "fx" && !targetId) {
+      setMessage("Choose a target before saving this mapping.");
+      return;
+    }
+    if (mapping.kind === "fx" && !targetValue) {
+      setMessage("Choose an FX direction before saving this mapping.");
+      return;
+    }
     setPending(true);
     setMessage(null);
     try {
@@ -353,13 +384,13 @@ export function ImportReview({
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            kind: String(form.get("kind")),
+            kind: mapping.kind,
             scope: "batch",
             confidence: "user",
-            sourceKey: String(form.get("sourceKey")),
-            normalizedSourceValue: String(form.get("normalizedSourceValue")),
-            targetId: String(form.get("targetId")),
-            targetValue: null,
+            sourceKey: mapping.sourceKey,
+            normalizedSourceValue: mapping.sourceKey,
+            targetId,
+            targetValue,
             expectedVersion: review.batch.version,
             expectedPreviewVersion: review.previewVersion,
           }),
@@ -383,6 +414,43 @@ export function ImportReview({
       );
     } finally {
       setPending(false);
+    }
+  }
+
+  async function markReady() {
+    if (!review || !review.preview.ready) return;
+    setReadyPending(true);
+    setMessage(null);
+    try {
+      const response = await fetch(
+        `/api/import/preview/${review.batch.id}/ready`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            expectedVersion: review.batch.version,
+            expectedPreviewVersion: review.previewVersion,
+          }),
+        },
+      );
+      const result = (await response.json()) as
+        { ok: true; review: Review } | { ok: false; message: string };
+      if (!response.ok || result.ok === false) {
+        throw new Error(
+          result.ok === false
+            ? result.message
+            : "This import could not be marked ready.",
+        );
+      }
+      setReview(result.review);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "This import could not be marked ready.",
+      );
+    } finally {
+      setReadyPending(false);
     }
   }
 
@@ -476,15 +544,38 @@ export function ImportReview({
     }
   }
 
-  const firstMappingIssue = review?.preview.issues.find(
-    (issue) =>
-      issue.code === "SECURITY_MAPPING_REQUIRED" ||
-      issue.code === "SECURITY_MAPPING_AMBIGUOUS" ||
-      issue.code === "PORTFOLIO_MAPPING_REQUIRED",
-  );
-  const mappingKind = firstMappingIssue?.code.startsWith("PORTFOLIO")
-    ? "portfolio"
-    : "security";
+  // One resolve form per distinct (kind, sourceKey) pending mapping, not per
+  // row: many transaction rows commonly share the same unresolved portfolio,
+  // security, or FX source key, and a `scope: "batch"` decision (saved
+  // below) resolves all of them at once.
+  const pendingMappings: PendingMapping[] = review
+    ? [
+        ...new Map(
+          review.preview.issues
+            .filter(
+              (issue) =>
+                issue.code === "PORTFOLIO_MAPPING_REQUIRED" ||
+                issue.code === "SECURITY_MAPPING_REQUIRED" ||
+                issue.code === "SECURITY_MAPPING_AMBIGUOUS" ||
+                issue.code === "FX_DIRECTION_REQUIRED",
+            )
+            .map((issue) => {
+              const kind: PendingMapping["kind"] =
+                issue.code === "PORTFOLIO_MAPPING_REQUIRED"
+                  ? "portfolio"
+                  : issue.code === "FX_DIRECTION_REQUIRED"
+                    ? "fx"
+                    : "security";
+              const sourceKey = issue.sourceKey ?? "";
+              const key = `${kind}:${sourceKey}`;
+              return [
+                key,
+                { key, kind, sourceKey, message: issue.message },
+              ] as const;
+            }),
+        ).values(),
+      ]
+    : [];
 
   return (
     <main className="import-review-page">
@@ -555,57 +646,169 @@ export function ImportReview({
             <span>{review.preview.counts.unresolved} unresolved</span>
           </div>
 
-          {firstMappingIssue ? (
-            <form className="import-mapping-form" onSubmit={saveMapping}>
-              <h3>Resolve a mapping</h3>
-              <input type="hidden" name="kind" value={mappingKind} />
-              <input
-                type="hidden"
-                name="sourceKey"
-                value={firstMappingIssue.sourceKey ?? ""}
-              />
-              <input
-                type="hidden"
-                name="normalizedSourceValue"
-                value={firstMappingIssue.sourceKey ?? ""}
-              />
-              <label>
-                Issue source
-                <input
-                  value={firstMappingIssue.sourceKey ?? "Not provided"}
-                  readOnly
-                />
-              </label>
-              <label>
-                {mappingKind === "portfolio"
-                  ? "Target portfolio"
-                  : "Target security candidate"}
-                <select name="targetId" required defaultValue="">
-                  <option value="" disabled>
-                    Choose a private{" "}
-                    {mappingKind === "portfolio" ? "portfolio" : "candidate"}
-                  </option>
-                  {mappingKind === "portfolio"
-                    ? portfolios.map((portfolio) => (
-                        <option value={portfolio.id} key={portfolio.id}>
-                          {portfolio.name} · {portfolio.homeCurrencyCode}
-                        </option>
-                      ))
-                    : review.preview.unresolvedCandidates.map((candidate) => (
-                        <option value={candidate.id} key={candidate.id}>
-                          {candidate.sourceSymbol} ·{" "}
-                          {candidate.sourceCurrencyCode} · {candidate.id}
-                        </option>
-                      ))}
-                </select>
-              </label>
-              <button type="submit" disabled={pending}>
-                Save mapping and refresh preview
-              </button>
-            </form>
+          {pendingMappings.length > 0 ? (
+            <section
+              className="import-mapping-list"
+              aria-labelledby="mappings-title"
+            >
+              <h3 id="mappings-title">
+                Resolve {pendingMappings.length} pending mapping
+                {pendingMappings.length === 1 ? "" : "s"}
+              </h3>
+              {pendingMappings.map((mapping) => {
+                if (mapping.kind === "fx") {
+                  const [nativeCurrency, homeCurrency] =
+                    mapping.sourceKey.split("->");
+                  return (
+                    <form
+                      className="import-mapping-form"
+                      key={mapping.key}
+                      onSubmit={(event) => void resolveMapping(mapping, event)}
+                    >
+                      <p>{mapping.message}</p>
+                      <label>
+                        Issue source
+                        <input value={mapping.sourceKey} readOnly />
+                      </label>
+                      <label>
+                        FX direction
+                        <select name="targetValue" required defaultValue="">
+                          <option value="" disabled>
+                            Choose how this rate converts
+                          </option>
+                          <option value="native_to_home">
+                            Converts {nativeCurrency ?? "native"} to{" "}
+                            {homeCurrency ?? "home"} currency
+                          </option>
+                          <option value="home_to_native">
+                            Converts {homeCurrency ?? "home"} to{" "}
+                            {nativeCurrency ?? "native"} currency (invert)
+                          </option>
+                        </select>
+                      </label>
+                      <button type="submit" disabled={pending}>
+                        Save mapping and refresh preview
+                      </button>
+                    </form>
+                  );
+                }
+                if (mapping.kind === "portfolio") {
+                  return (
+                    <form
+                      className="import-mapping-form"
+                      key={mapping.key}
+                      onSubmit={(event) => void resolveMapping(mapping, event)}
+                    >
+                      <p>{mapping.message}</p>
+                      <label>
+                        Issue source
+                        <input value={mapping.sourceKey} readOnly />
+                      </label>
+                      <label>
+                        Target portfolio
+                        <select name="targetId" required defaultValue="">
+                          <option value="" disabled>
+                            Choose a private portfolio
+                          </option>
+                          {portfolios.map((portfolio) => (
+                            <option value={portfolio.id} key={portfolio.id}>
+                              {portfolio.name} · {portfolio.homeCurrencyCode}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <button type="submit" disabled={pending}>
+                        Save mapping and refresh preview
+                      </button>
+                    </form>
+                  );
+                }
+                // Security mapping: only an existing owner-private security
+                // candidate that is already resolved (linked to a verified
+                // security) is a valid target -- committing against an
+                // unresolved candidate is never allowed (AGENTS.md: a
+                // ticker is not a durable security ID). A new symbol that
+                // matches no existing resolved candidate cannot be resolved
+                // from this screen: `securities` is a shared master writable
+                // only through a separate, server-verified path (see
+                // docs/DATA_MODEL.md), so no user decision here can create
+                // or change it.
+                const [portfolioId] = mapping.sourceKey.split("|");
+                const candidates = review.securityCandidates.filter(
+                  (candidate) =>
+                    candidate.portfolioId === portfolioId &&
+                    candidate.securityId !== null,
+                );
+                return (
+                  <div className="import-mapping-form" key={mapping.key}>
+                    <p>{mapping.message}</p>
+                    <p>
+                      Issue source: <code>{mapping.sourceKey}</code>
+                    </p>
+                    {candidates.length > 0 ? (
+                      <form
+                        onSubmit={(event) =>
+                          void resolveMapping(mapping, event)
+                        }
+                      >
+                        <label>
+                          Target security candidate
+                          <select name="targetId" required defaultValue="">
+                            <option value="" disabled>
+                              Choose an existing resolved candidate
+                            </option>
+                            {candidates.map((candidate) => (
+                              <option value={candidate.id} key={candidate.id}>
+                                {candidate.sourceSymbol} ·{" "}
+                                {candidate.sourceCurrencyCode} · {candidate.id}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <button type="submit" disabled={pending}>
+                          Save mapping and refresh preview
+                        </button>
+                      </form>
+                    ) : (
+                      <p role="note">
+                        No existing resolved security in this portfolio matches
+                        yet. This symbol needs to be linked to a verified
+                        security record before it can be committed; it stays a
+                        blocking issue until that happens.
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </section>
           ) : null}
 
-          {review.preview.ready ? (
+          {review.batch.status === "parsed" ||
+          review.batch.status === "needs_mapping" ? (
+            <section
+              className="import-commit-panel"
+              aria-labelledby="ready-title"
+            >
+              <p className="eyebrow">Readiness</p>
+              <h3 id="ready-title">Mark this import ready</h3>
+              <p>
+                {review.preview.ready
+                  ? "All required mappings are resolved and no blocking issues remain. Marking this import ready unlocks the explicit commit step below."
+                  : "Resolve every blocking issue and required mapping above before this import can be marked ready."}
+              </p>
+              <button
+                type="button"
+                onClick={() => void markReady()}
+                disabled={!review.preview.ready || readyPending}
+              >
+                {readyPending ? "Marking ready…" : "Mark import ready"}
+              </button>
+            </section>
+          ) : null}
+
+          {review.batch.status === "ready" ||
+          review.batch.status === "committing" ||
+          review.batch.status === "committed" ? (
             <section
               className="import-commit-panel"
               aria-labelledby="commit-title"

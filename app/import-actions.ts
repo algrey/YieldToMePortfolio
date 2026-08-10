@@ -5,12 +5,13 @@ import {
   type ImportMappingConfidence,
   type ImportMappingKind,
   type ImportMappingScope,
-} from "../db/repositories";
+} from "../db/repositories/index.ts";
 import { getAuthenticatedSqlContext } from "./portfolio-actions";
 import {
   buildImportReviewPreview,
   type ImportReviewPreview,
 } from "./import-preview";
+import { markImportReadyWithContext } from "./import-ready-service.ts";
 import {
   assessCsvImportUploadStart,
   parseStrictVersionedCsvImport,
@@ -292,4 +293,20 @@ export async function saveImportMappingAction(
       message: "The mapping service is temporarily unavailable.",
     };
   }
+}
+
+// The business logic (readiness precondition + `transitionStatus` call)
+// lives in `import-ready-service.ts`'s `markImportReadyWithContext`, which
+// deliberately avoids importing `./portfolio-actions.ts` (and the
+// `next/headers`/D1-binding resolution it pulls in) so it stays directly
+// testable against a plain `SqlClient`, matching `reverseImportWithContext`
+// in `import-reversal-service.ts`. This action only resolves the
+// authenticated context and delegates.
+export async function markImportReadyAction(
+  batchId: string,
+  value: unknown,
+): Promise<ImportActionSuccess | ImportActionFailure> {
+  const context = await getAuthenticatedSqlContext();
+  if (!context.ok) return context;
+  return markImportReadyWithContext(context, batchId, value);
 }

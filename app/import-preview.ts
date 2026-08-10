@@ -20,6 +20,11 @@ export type ImportReviewPreview = {
   preview: ImportReconciliationPreview;
   issues: ImportIssueRecord[];
   mappings: ImportReviewMapping[];
+  // All of the owner's portfolio-security candidates (resolved and
+  // unresolved), so the review UI can offer "map to an existing resolved
+  // security" as a target distinct from `preview.unresolvedCandidates`
+  // (which only lists candidates still awaiting resolution).
+  securityCandidates: ImportPreviewSecurityCandidate[];
 };
 
 export function buildImportReviewPreview(input: {
@@ -50,5 +55,6 @@ export function buildImportReviewPreview(input: {
     preview: built.preview,
     issues: input.issues,
     mappings: input.mappings,
+    securityCandidates: input.securityCandidates,
   };
 }

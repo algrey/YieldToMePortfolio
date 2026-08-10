@@ -50,9 +50,50 @@ test("import review controls keep mapping and issue content operable on mobile",
   ]);
 
   assert.match(component, /name="targetId"/);
-  assert.match(component, /name="sourceKey"/);
+  assert.match(component, /name="targetValue"/);
   assert.match(component, /aria-labelledby="issues-title"/);
+  assert.match(component, /aria-labelledby="mappings-title"/);
   assert.match(styles, /\.import-counts[\s\S]*grid-template-columns: 1fr 1fr/);
   assert.match(styles, /\.import-upload-form input[\s\S]*min-height: 44px/);
   assert.match(styles, /:focus-visible[\s\S]*outline: 2px solid/);
+});
+
+test("import review can resolve pending mappings, reach readiness, and confirm commit", async () => {
+  const [action, readyService, component, readyRoute] = await Promise.all([
+    readFile(new URL("../app/import-actions.ts", import.meta.url), "utf8"),
+    readFile(
+      new URL("../app/import-ready-service.ts", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../app/components/import-review.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL(
+        "../app/api/import/preview/[batchId]/ready/route.ts",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ]);
+
+  assert.match(action, /markImportReadyAction/);
+  assert.match(action, /markImportReadyWithContext/);
+  assert.match(readyService, /transitionStatus/);
+  assert.match(readyService, /preview\.ready/);
+  assert.doesNotMatch(action, /commitImportAction|commitLedgerAction/);
+  assert.match(readyRoute, /createImportReadyPost/);
+  assert.match(readyRoute, /markImportReadyAction/);
+
+  assert.match(component, /Mark import ready/);
+  assert.match(component, /FX direction/);
+  assert.match(component, /native_to_home/);
+  assert.match(component, /home_to_native/);
+  assert.match(component, /existing resolved security/);
+  assert.match(
+    component,
+    /review\.batch\.status === "ready"[\s\S]*review\.batch\.status === "committing"/,
+  );
+  assert.match(component, /markReady/);
 });

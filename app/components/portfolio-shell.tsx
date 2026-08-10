@@ -2842,7 +2842,7 @@ export function PortfolioShell({
                 {ownedMode ? (
                   <Link href="/import" onClick={() => setOpenMenu(null)}>
                     <span>Import CSV</span>
-                    <small>Review only</small>
+                    <small>Resolve &amp; commit</small>
                   </Link>
                 ) : (
                   <button type="button">
