@@ -28,6 +28,9 @@ npm run dev
 
 Then open `http://localhost:3000`.
 
+For running the full app locally — including a real local database, or a
+read-only fixture preview — see [Local development guide](docs/LOCAL_DEVELOPMENT.md).
+
 Useful checks:
 
 ```sh
