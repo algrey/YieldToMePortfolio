@@ -18,7 +18,7 @@ Normative sources:
 - `docs/IMPLEMENTATION_PLAN.md`
 - `TASKS.md`
 
-The numbered files in `docs/`, `docs/YieldToMe_Visual_Style_Guide.md`, and `docs/Example_Portfolio.csv` are preserved source evidence unless a task explicitly archives or replaces them.
+The numbered files in `docs/source-evidence/`, `docs/source-evidence/YieldToMe_Visual_Style_Guide.md`, and `docs/Example_Portfolio.csv` are preserved source evidence unless a task explicitly archives or replaces them.
 
 The Orchestrator may read these broadly when planning, resolving architecture/product questions, selecting tasks, or reviewing project-wide behavior. Workers and Reviewers should read only the task, routed normative sections, target code, and minimum nearby dependencies needed to do their job. Do not perform repository-wide discovery merely for general context.
 
@@ -188,7 +188,7 @@ When behavior changes, update the applicable normative document, acceptance crit
 
 Keep `TASKS.md` dependencies/status/evidence accurate. Preserve stable requirement IDs; deprecate rather than reuse them. Mark assumptions/missing evidence explicitly and never rewrite inference as observation.
 
-Do not modify preserved source evidence (`docs/01_*` through `docs/04_*`, `docs/YieldToMe_Visual_Style_Guide.md`, `docs/Example_Portfolio.csv`) without explicit task justification. Do not hand-edit generated migration SQL without documenting why and rerunning migration tests. Do not incidentally change `.openai/hosting.json`, Worker bindings, Access issuer/audience behavior, provider configuration, calculation rules, or retention/deletion behavior.
+Do not modify preserved source evidence (`docs/source-evidence/01_*` through `docs/source-evidence/04_*`, `docs/source-evidence/YieldToMe_Visual_Style_Guide.md`, `docs/Example_Portfolio.csv`) without explicit task justification. Do not hand-edit generated migration SQL without documenting why and rerunning migration tests. Do not incidentally change `.openai/hosting.json`, Worker bindings, Access issuer/audience behavior, provider configuration, calculation rules, or retention/deletion behavior.
 
 ## Completion output
 

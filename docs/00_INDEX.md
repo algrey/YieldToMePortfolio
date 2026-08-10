@@ -1,7 +1,8 @@
 # YieldToMe documentation index
 
 Status: consolidated foundation set  
-Date: 2026-07-28
+Date: 2026-07-28  
+Last reorganised: 2026-08-10 (source evidence moved into `source-evidence/`; index extended to cover operational and preview evidence added since the original consolidation)
 
 ## Normative documents
 
@@ -22,12 +23,12 @@ When a source note and a normative document differ, the normative set governs im
 
 ## Preserved source evidence
 
-- `01_SCREEN_INVENTORY_AND_NAVIGATION.md`
-- `02_DATA_MODEL_AND_CSV.md`
-- `03_CALCULATIONS_AND_INTERFACE.md`
-- `04_VIDEO_UNKNOWNS_AND_REBUILD_PLAN.md`
-- `YieldToMe_Visual_Style_Guide.md`
-- `Example_Portfolio.csv`
+- `source-evidence/01_SCREEN_INVENTORY_AND_NAVIGATION.md`
+- `source-evidence/02_DATA_MODEL_AND_CSV.md`
+- `source-evidence/03_CALCULATIONS_AND_INTERFACE.md`
+- `source-evidence/04_VIDEO_UNKNOWNS_AND_REBUILD_PLAN.md`
+- `source-evidence/YieldToMe_Visual_Style_Guide.md`
+- `Example_Portfolio.csv` — kept in `docs/` (not `source-evidence/`) because it is an active fixture read at runtime by `app/preview-portfolio-fixture.ts` and by `tests/imports.test.ts`, not only a historical reference.
 
 These files capture observations, inferences, and earlier proposals from the reference app. Preserve them for traceability. They are not themselves an implementation backlog.
 
@@ -35,6 +36,20 @@ These files capture observations, inferences, and earlier proposals from the ref
 
 - `UI_SPEC.md` — provisional typography, density, spacing, responsive, state, interaction, and mobile-information rules for owner review. It is not approved production UI guidance until its status is updated after feedback.
 - `ui-captures/` — 390 px principal-screen renders plus 320 px, 430 px, and desktop Holdings breakpoint evidence.
+
+## Operational runbooks and evidence
+
+- `OPS-002_BACKUP_RESTORE_RUNBOOK.md` — backup/restore procedure and non-production restore discipline.
+- `OPS-002_DRILL_RECORD_2026-08-03.md` — dated record of the OPS-002 restore drill (RPO/RTO, verification results).
+- `OPS-003B_VERIFIED_DELETION_RUNBOOK.md` — verified account-deletion/offboarding runbook.
+
+## Preview deployment evidence
+
+- `PREVIEW_DEPLOYMENT.md` — how the read-only fixture preview (`VSL-006`) is built, run, and reviewed.
+- `PREVIEW_EVIDENCE.json` — capture manifest (routes, fixture assertions, screenshot paths, smoke results) for the preview deployment.
+- `preview-evidence/` — 320/390/430 px screenshots of the preview overview/holdings/detail routes referenced by `PREVIEW_EVIDENCE.json`.
+
+This evidence is distinct from `UI_SPEC.md` and `ui-captures/` above: `ui-captures/` documents the earlier static-prototype review (`UI-PROT-001`), while `preview-evidence/` documents the later deployed read-only fixture preview (`VSL-006`). Neither supersedes the other; both remain current evidence for their respective tasks.
 
 ## Reference-content rule
 

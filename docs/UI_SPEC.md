@@ -23,10 +23,10 @@ The patterns below are candidates, not final product decisions. After owner revi
 
 ## 2. Evidence applied
 
-- `docs/YieldToMe_Visual_Style_Guide.md`: near-black green background, warm-white type, fresh green accent, fine dividers, restrained editorial headings, and the four-bar brand mark.
-- `docs/01_SCREEN_INVENTORY_AND_NAVIGATION.md`: persistent portfolio shell, anchored selector, dense sort row, three-line holdings, two-line quotes, sticky totals, direct holding drill-down, and simple long-form analysis.
-- `docs/03_CALCULATIONS_AND_INTERFACE.md`: four-column proportions, compact typography, 44 px aggregate targets, no mobile horizontal page scroll, and 70–78 px holding rows.
-- `docs/04_VIDEO_UNKNOWNS_AND_REBUILD_PLAN.md`: immediate tab changes, portfolio selector, drawer, row-level navigation, explicit empty/error behavior, and read-only fixture UI before production mutations.
+- `docs/source-evidence/YieldToMe_Visual_Style_Guide.md`: near-black green background, warm-white type, fresh green accent, fine dividers, restrained editorial headings, and the four-bar brand mark.
+- `docs/source-evidence/01_SCREEN_INVENTORY_AND_NAVIGATION.md`: persistent portfolio shell, anchored selector, dense sort row, three-line holdings, two-line quotes, sticky totals, direct holding drill-down, and simple long-form analysis.
+- `docs/source-evidence/03_CALCULATIONS_AND_INTERFACE.md`: four-column proportions, compact typography, 44 px aggregate targets, no mobile horizontal page scroll, and 70–78 px holding rows.
+- `docs/source-evidence/04_VIDEO_UNKNOWNS_AND_REBUILD_PLAN.md`: immediate tab changes, portfolio selector, drawer, row-level navigation, explicit empty/error behavior, and read-only fixture UI before production mutations.
 - Reference `01.png`: information density, line ordering, right-aligned numeric columns, active sort affordance, and fixed summary behavior.
 
 The screenshot and CSV fixtures are independent references. Prototype values reproduce the screenshot’s density and familiar ASX examples; they are not production calculations or a reconciled portfolio.

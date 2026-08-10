@@ -15,7 +15,7 @@ YieldToMe is a private, multi-currency portfolio tracking application being rebu
 - [Executable backlog](TASKS.md)
 - [Agent instructions](AGENTS.md)
 
-The original reverse-engineering notes, visual guide, and sample CSV remain in `docs/` as source evidence.
+The original reverse-engineering notes and visual guide remain in `docs/source-evidence/`, and the sample CSV remains in `docs/`, as source evidence.
 
 ## Local development
 

@@ -2,7 +2,7 @@
 
 Status: approved foundation specification  
 Date: 2026-07-28  
-Source evidence: the four numbered reverse-engineering documents, `YieldToMe_Visual_Style_Guide.md`, and `Example_Portfolio.csv`
+Source evidence: the four numbered reverse-engineering documents and `YieldToMe_Visual_Style_Guide.md` in `docs/source-evidence/`, and `docs/Example_Portfolio.csv`
 
 ## 1. Product statement
 
