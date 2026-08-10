@@ -1,9 +1,12 @@
 import { restorePortfolioAction } from "../../../../portfolio-actions";
+import { rejectCrossSiteMutation } from "../../../../mutation-request";
 
 export async function POST(
   request: Request,
   context: { params: Promise<{ portfolioId: string }> },
 ): Promise<Response> {
+  const rejected = rejectCrossSiteMutation(request);
+  if (rejected) return rejected;
   const { portfolioId } = await context.params;
   const body = (await request.json().catch(() => null)) as {
     expectedVersion?: unknown;

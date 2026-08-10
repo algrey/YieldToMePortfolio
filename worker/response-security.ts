@@ -54,6 +54,7 @@ export function isPrivateRequest(request: Request): boolean {
   const { pathname } = new URL(request.url);
 
   return (
+    pathname === "/" ||
     pathname === "/api" ||
     pathname.startsWith("/api/") ||
     pathname === "/import" ||

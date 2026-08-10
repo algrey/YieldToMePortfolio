@@ -1,9 +1,12 @@
 import { saveImportMappingAction } from "../../../../../import-actions";
+import { rejectCrossSiteMutation } from "../../../../../mutation-request";
 
 export async function PATCH(
   request: Request,
   context: { params: Promise<{ batchId: string }> },
 ): Promise<Response> {
+  const rejected = rejectCrossSiteMutation(request);
+  if (rejected) return rejected;
   const { batchId } = await context.params;
   const result = await saveImportMappingAction(
     batchId,

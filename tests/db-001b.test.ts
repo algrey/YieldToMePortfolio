@@ -242,4 +242,21 @@ test("owned portfolio repositories deny cross-user reads, writes, and optimistic
     return;
   }
   assert.equal(crossUserArchive.reason, "not_found");
+
+  const archivedByOwner = await portfolios.archive("user-a", "portfolio-a", {
+    expectedVersion: 1,
+  });
+  assert.equal(archivedByOwner.ok, true);
+  if (!archivedByOwner.ok) {
+    return;
+  }
+
+  const crossUserRestore = await portfolios.restore("user-b", "portfolio-a", {
+    expectedVersion: archivedByOwner.portfolio.version,
+  });
+  assert.equal(crossUserRestore.ok, false);
+  if (crossUserRestore.ok) {
+    return;
+  }
+  assert.equal(crossUserRestore.reason, "not_found");
 });

@@ -1148,7 +1148,7 @@ Status: DONE (2026-08-10).
 
 ### QA-001A — Security and tenant-isolation hardening
 
-Status: PENDING.
+Status: DONE (2026-08-10).
 
 - Objective: systematically attempt tenant escape, authentication bypass, unsafe mutation, and private-cache leakage before release.
 - Dependencies: AUTH-002, UI-001, UI-002, UI-003, UI-004, UI-005A, UI-005B, UI-005C, UI-005D, UI-005E, PWA-001.
@@ -1181,6 +1181,31 @@ Status: PENDING.
 - Tests: automated security/isolation suite plus focused manual threat checklist.
 - Risks: an endpoint or background path omitted from the ownership matrix.
 - Parallel safe: review can start per completed slice; final gate is serial.
+- Completion note (2026-08-10): Delivered `docs/QA-001A_SECURITY_MATRIX.md` covering all 24 API route handlers, 5 pages, the repository layer, and the scheduled-refresh background path, with denial-test evidence, Access-token failure matrix, CSRF/header/CSP review, dependency audit, private-cache and redacted-error audits, and the manual threat checklist. Findings: F1 (High, fixed) — 7 mutation routes lacked the AUTH-004 CSRF gate, now gated with functional/order tests in `tests/qa-001a.test.ts`; F2 (informational) — export-job authorization breadth verified non-exploitable via owner-scoped queries; F3 (High, accepted) — 16 `npm audit` high advisories confined to the dev/build toolchain, absent from the Workers bundle, dispositioned via follow-up DEP-001; F4 (High, fixed) — root `/` page served private data with no `cache-control` header, `isPrivateRequest` now covers `/` with a header test. Added a cross-owner restore denial test in `tests/db-001b.test.ts` and `.prettierignore` entries for agent-tooling config. Three review rounds; final independent review PASS; `npm run check` exit 0 (280 tests pass, 2 env-gated skips).
+
+### DEP-001 — Dev/build toolchain dependency upgrades
+
+Status: PENDING.
+
+- Objective: resolve the high-severity `npm audit` advisories accepted during QA-001A by upgrading the dev/build toolchain (`next`, `vite`, `wrangler`/`miniflare`/`undici`/`ws`) with Cloudflare-runtime verification.
+- Dependencies: QA-001A.
+- Requirements: QUAL-002.
+- Files: `package.json`, `package-lock.json`, affected build/worker configuration only if required by the upgrades.
+
+**Context:**
+
+- `docs/QA-001A_SECURITY_MATRIX.md` — §4 dependency audit and finding QA-001A-F3 (risk acceptance and advisory inventory)
+- `AGENTS.md` — dependency rules (documented need, exact version, lockfile update, Cloudflare-runtime verification)
+
+**Verification:**
+
+- `npm audit` after upgrade shows no high-severity advisory, or each remaining advisory is documented with justification.
+- `npm run check` passes; `npm run build` and the preview harness confirm Cloudflare-runtime behavior is unchanged.
+
+- Deliver: upgraded lockfile/toolchain; refreshed audit result; updated risk-acceptance note in `docs/QA-001A_SECURITY_MATRIX.md`.
+- Acceptance: no undispositioned high-severity advisory remains; full quality gate passes on the upgraded toolchain.
+- Risks: build-toolchain majors changing Worker output; verify runtime behavior, not just compile success.
+- Parallel safe: no; touches shared build configuration.
 
 ### QA-001B — Accessibility and responsive hardening
 
