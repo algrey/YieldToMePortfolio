@@ -170,11 +170,13 @@ Provider errors are typed as authentication, entitlement, rate limit, unavailabl
 ### Initial mapping/backfill
 
 1. User/import creates an owner-scoped unresolved portfolio-security candidate; it does not publish or mutate a shared canonical security.
-2. Server searches provider/reference data using exchange, symbol, currency, and name.
-3. User or high-confidence verified rule confirms a canonical mapping.
+2. Server searches provider/reference data using exchange, symbol, currency, and name. Implemented for a brand-new import candidate by IMP-004B: `app/security-verification-service.ts` calls the configured provider's `searchSecurities({ text, exchangeId, currencyCode })` (`domain/market-data/*`) with the candidate's own (never client-trusted) symbol/exchange/currency, re-derived from the server's current preview.
+3. User or high-confidence verified rule confirms a canonical mapping. IMP-004B's rule (`domain/securities/verify-identity.ts`'s `evaluateSecurityIdentityCandidates`) requires exactly one provider candidate whose symbol matches and whose currency agrees (and whose exchange agrees, when the row supplied one); zero, ambiguous, or disagreeing matches are explicit failures (`not_found`/`ambiguous`/`mismatched`) that leave the candidate private and unresolved -- no unverified publish, no silent retry. A confirmed match publishes the canonical `securities`/`security_identifiers` rows and a `verified` `security_provider_mappings` row (status transitions directly to `verified`; there is no separate persisted `candidate` stage in this flow), or links to an already-published mapping for the same provider identity if one exists (creation-only; never mutates an existing canonical row or another user's mapping) -- see `docs/DATA_MODEL.md` §4/§11 for the atomic write and dedupe-on-conflict technique.
 4. Backfill raw/EOD and validated adjusted series from the earliest relevant transaction date, bounded by available provider history.
 5. Backfill required FX pairs/dates and corporate actions.
 6. Normalize/upsert idempotently and invalidate affected portfolio snapshots.
+
+Steps 4-6 (historical backfill) are not part of IMP-004B's scope: verification publishes the canonical identity and links the owner's candidate so the batch can reach `ready`/commit; price/FX/corporate-action backfill for a freshly verified security follows the ordinary refresh lifecycle below once the security is held.
 
 ### Refresh
 

@@ -96,6 +96,19 @@ function statusLabel(status: string): string {
   return status.replaceAll("_", " ");
 }
 
+// Mirrors `normalized()` in domain/imports/reconciliation.ts so the client
+// can recognize which `preview.unresolvedCandidates` entry a pending
+// "security" mapping's `sourceKey` (built the same way, server-side, by
+// `securityKey()`) refers to, without the server needing to expose a
+// separate id for it.
+function normalizedKeyPart(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function isStalePreviewMessage(value: string): boolean {
+  return value.toLowerCase().includes("stale");
+}
+
 function isImportReversalResult(
   value: unknown,
 ): value is ImportReversalActionResult {
@@ -417,6 +430,85 @@ export function ImportReview({
     }
   }
 
+  async function verifySecurityCandidate(
+    candidate: {
+      portfolioId: string;
+      sourceSymbol: string;
+      sourceExchangeAlias: string | null;
+      sourceCurrencyCode: string;
+    },
+    event: React.FormEvent<HTMLFormElement>,
+  ) {
+    event.preventDefault();
+    if (!review) return;
+    setPending(true);
+    setMessage(null);
+    try {
+      const response = await fetch(
+        `/api/import/preview/${review.batch.id}/securities/verify`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            portfolioId: candidate.portfolioId,
+            sourceSymbol: candidate.sourceSymbol,
+            sourceExchangeAlias: candidate.sourceExchangeAlias,
+            sourceCurrencyCode: candidate.sourceCurrencyCode,
+            expectedVersion: review.batch.version,
+            expectedPreviewVersion: review.previewVersion,
+          }),
+        },
+      );
+      const result = (await response.json()) as
+        { ok: true; review: Review } | { ok: false; message: string };
+      if (!response.ok || result.ok === false) {
+        throw new Error(
+          result.ok === false
+            ? result.message
+            : "This security could not be verified.",
+        );
+      }
+      setReview(result.review);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "This security could not be verified.",
+      );
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function refreshPreview() {
+    if (!review) return;
+    setPending(true);
+    try {
+      const response = await fetch(`/api/import/preview/${review.batch.id}`, {
+        cache: "no-store",
+      });
+      const result = (await response.json()) as
+        { ok: true; review: Review } | { ok: false; message: string };
+      if (!response.ok || result.ok === false) {
+        throw new Error(
+          result.ok === false
+            ? result.message
+            : "The preview could not be refreshed.",
+        );
+      }
+      setReview(result.review);
+      setMessage(null);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "The preview could not be refreshed.",
+      );
+    } finally {
+      setPending(false);
+    }
+  }
+
   async function markReady() {
     if (!review || !review.preview.ready) return;
     setReadyPending(true);
@@ -555,13 +647,15 @@ export function ImportReview({
             .filter(
               (issue) =>
                 issue.code === "PORTFOLIO_MAPPING_REQUIRED" ||
+                issue.code === "PORTFOLIO_MAPPING_INVALID" ||
                 issue.code === "SECURITY_MAPPING_REQUIRED" ||
                 issue.code === "SECURITY_MAPPING_AMBIGUOUS" ||
                 issue.code === "FX_DIRECTION_REQUIRED",
             )
             .map((issue) => {
               const kind: PendingMapping["kind"] =
-                issue.code === "PORTFOLIO_MAPPING_REQUIRED"
+                issue.code === "PORTFOLIO_MAPPING_REQUIRED" ||
+                issue.code === "PORTFOLIO_MAPPING_INVALID"
                   ? "portfolio"
                   : issue.code === "FX_DIRECTION_REQUIRED"
                     ? "fx"
@@ -611,7 +705,16 @@ export function ImportReview({
 
       {message ? (
         <p className="action-feedback" role="alert">
-          {message}
+          <span>{message}</span>
+          {review && isStalePreviewMessage(message) ? (
+            <button
+              type="button"
+              onClick={() => void refreshPreview()}
+              disabled={pending}
+            >
+              {pending ? "Refreshing…" : "Refresh preview"}
+            </button>
+          ) : null}
         </p>
       ) : null}
 
@@ -723,22 +826,36 @@ export function ImportReview({
                     </form>
                   );
                 }
-                // Security mapping: only an existing owner-private security
+                // Security mapping: an existing owner-private security
                 // candidate that is already resolved (linked to a verified
-                // security) is a valid target -- committing against an
+                // security) is one valid target -- committing against an
                 // unresolved candidate is never allowed (AGENTS.md: a
-                // ticker is not a durable security ID). A new symbol that
-                // matches no existing resolved candidate cannot be resolved
-                // from this screen: `securities` is a shared master writable
-                // only through a separate, server-verified path (see
-                // docs/DATA_MODEL.md), so no user decision here can create
-                // or change it.
+                // ticker is not a durable security ID). A brand-new symbol
+                // that matches no existing resolved candidate cannot be
+                // published as a canonical security from a user decision
+                // here (`securities` is a shared master writable only
+                // through the server-verified path in
+                // `security-verification-service.ts`); instead this offers
+                // a request for that server-side verification against the
+                // configured market-data provider (IMP-004B).
                 const [portfolioId] = mapping.sourceKey.split("|");
                 const candidates = review.securityCandidates.filter(
                   (candidate) =>
                     candidate.portfolioId === portfolioId &&
                     candidate.securityId !== null,
                 );
+                const unresolvedCandidate =
+                  review.preview.unresolvedCandidates.find(
+                    (candidate) =>
+                      candidate.portfolioId === portfolioId &&
+                      candidate.securityId === null &&
+                      [
+                        candidate.portfolioId,
+                        normalizedKeyPart(candidate.sourceSymbol),
+                        normalizedKeyPart(candidate.sourceExchangeAlias ?? ""),
+                        normalizedKeyPart(candidate.sourceCurrencyCode),
+                      ].join("|") === mapping.sourceKey,
+                  );
                 return (
                   <div className="import-mapping-form" key={mapping.key}>
                     <p>{mapping.message}</p>
@@ -769,14 +886,43 @@ export function ImportReview({
                           Save mapping and refresh preview
                         </button>
                       </form>
-                    ) : (
+                    ) : null}
+                    {unresolvedCandidate ? (
+                      <form
+                        onSubmit={(event) =>
+                          void verifySecurityCandidate(
+                            unresolvedCandidate,
+                            event,
+                          )
+                        }
+                      >
+                        <p>
+                          Request server-side verification of{" "}
+                          <strong>{unresolvedCandidate.sourceSymbol}</strong>
+                          {unresolvedCandidate.sourceExchangeAlias
+                            ? ` on ${unresolvedCandidate.sourceExchangeAlias}`
+                            : ""}{" "}
+                          ({unresolvedCandidate.sourceCurrencyCode}) against the
+                          configured market-data provider. A successful,
+                          currency- and exchange-agreeing match publishes a
+                          verified security record and links this candidate; a
+                          mismatch or unavailable provider leaves it unresolved
+                          and private.
+                        </p>
+                        <button type="submit" disabled={pending}>
+                          {pending
+                            ? "Verifying…"
+                            : "Verify with market-data provider"}
+                        </button>
+                      </form>
+                    ) : null}
+                    {candidates.length === 0 && !unresolvedCandidate ? (
                       <p role="note">
                         No existing resolved security in this portfolio matches
-                        yet. This symbol needs to be linked to a verified
-                        security record before it can be committed; it stays a
-                        blocking issue until that happens.
+                        yet, and this symbol could not be prepared for
+                        verification. Refresh the preview and try again.
                       </p>
-                    )}
+                    ) : null}
                   </div>
                 );
               })}

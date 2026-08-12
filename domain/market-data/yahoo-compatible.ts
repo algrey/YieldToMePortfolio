@@ -698,6 +698,12 @@ export function createYahooCompatibleProvider(
           ? (requiredString(record.exchange) ??
             requiredString(record.exchangeDisplayName))
           : null;
+        const assetType: SecurityCandidate["assetType"] =
+          quoteType === "EQUITY"
+            ? "equity"
+            : quoteType === "ETF"
+              ? "etf"
+              : "fund";
         candidates.push({
           securityId: null,
           mappingId: null,
@@ -706,6 +712,7 @@ export function createYahooCompatibleProvider(
           currencyCode,
           name,
           confidence: "medium",
+          assetType,
         });
       }
       return candidates.length > 0

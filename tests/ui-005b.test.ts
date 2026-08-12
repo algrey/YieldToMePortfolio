@@ -97,3 +97,52 @@ test("import review can resolve pending mappings, reach readiness, and confirm c
   );
   assert.match(component, /markReady/);
 });
+
+// IMP-004B: the brand-new-symbol verify affordance, the PORTFOLIO_MAPPING_INVALID
+// resolve card, and the stale-preview "Refresh preview" affordance.
+test("import review offers server-side security verification, a PORTFOLIO_MAPPING_INVALID card, and a refresh-preview affordance", async () => {
+  const [service, route, verifyRoute, previewRoute, component, styles] =
+    await Promise.all([
+      readFile(
+        new URL("../app/security-verification-service.ts", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../app/security-verification-route.ts", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL(
+          "../app/api/import/preview/[batchId]/securities/verify/route.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+      readFile(
+        new URL(
+          "../app/api/import/preview/[batchId]/route.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+      readFile(
+        new URL("../app/components/import-review.tsx", import.meta.url),
+        "utf8",
+      ),
+      readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    ]);
+
+  assert.match(service, /evaluateSecurityIdentityCandidates/);
+  assert.match(service, /createOwnedSecurityVerificationRepository/);
+  assert.match(service, /market_data_providers/);
+  assert.match(route, /rejectCrossSiteMutation/);
+  assert.match(verifyRoute, /createSecurityVerifyPost/);
+  assert.match(previewRoute, /private, no-store/);
+
+  assert.match(component, /securities\/verify/);
+  assert.match(component, /Verify with market-data provider/);
+  assert.match(component, /PORTFOLIO_MAPPING_INVALID/);
+  assert.match(component, /Refresh preview/);
+  assert.match(component, /isStalePreviewMessage/);
+  assert.match(styles, /\.action-feedback button[\s\S]*min-height: 44px/);
+});

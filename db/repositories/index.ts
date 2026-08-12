@@ -167,6 +167,12 @@ export {
   type RetryMarketDataRefreshResult,
 } from "./market-data-refresh.ts";
 export {
+  createOwnedSecurityVerificationRepository,
+  type SecurityVerificationCandidateInput,
+  type SecurityVerificationLinkResult,
+  type SecurityVerificationRepository,
+} from "./security-verification.ts";
+export {
   createHistoricalSnapshotRepository,
   type HistoricalSeriesPoint,
   type HistoricalSeriesResponse,

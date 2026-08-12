@@ -164,6 +164,7 @@ domain/
   ledger/                   transactions, cash, reversals
   lots/                     FIFO projections and matches
   market-data/              provider interfaces + normalization
+  securities/               provider-identity match rule for the security master's verification write path
   calculations/             pure decimal calculations
   imports/                  versioned parsers and staged workflow
   snapshots/                deterministic daily projections
@@ -269,6 +270,10 @@ Selection is deterministic:
 5. unavailable.
 
 The chosen observation and fallback reason are included in the calculation explanation. Compact views generally suppress timestamps and routine source/fallback labels; the explanation remains available on demand, and inline status is reserved for action-required conditions.
+
+### Security-master verification write path
+
+IMP-004B added the first owner-triggered production write into the shared `securities` master. An owner-facing action (`app/security-verification-service.ts`, gated by the same CSRF/owner-scoping pattern as every other mutation route) re-derives the requested symbol/exchange/currency from the server's own current, database-backed import preview -- never trusting client-supplied fields -- calls the configured `MarketDataProvider`'s `searchSecurities`, and only publishes when exactly one result agrees on currency (and exchange, when supplied). Publication is creation-only and atomic (`db/repositories/security-verification.ts`): it never mutates an existing canonical row, and a concurrent verification of the same provider identity is resolved by re-reading after the attempt rather than by holding a lock. See `docs/MARKET_DATA_STRATEGY.md` §9 for the ingestion-lifecycle steps this fills in and `docs/DATA_MODEL.md` §4/§11 for the schema and atomic-write technique.
 
 ### Home-currency presentation
 

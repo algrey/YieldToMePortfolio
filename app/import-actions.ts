@@ -13,6 +13,11 @@ import {
 } from "./import-preview";
 import { markImportReadyWithContext } from "./import-ready-service.ts";
 import {
+  verifySecurityCandidateWithContext,
+  type SecurityVerifyActionFailure,
+  type SecurityVerifyActionSuccess,
+} from "./security-verification-service.ts";
+import {
   assessCsvImportUploadStart,
   parseStrictVersionedCsvImport,
 } from "../domain/imports";
@@ -309,4 +314,30 @@ export async function markImportReadyAction(
   const context = await getAuthenticatedSqlContext();
   if (!context.ok) return context;
   return markImportReadyWithContext(context, batchId, value);
+}
+
+// The business logic lives in `security-verification-service.ts`'s
+// `verifySecurityCandidateWithContext`, kept free of `next/headers`/D1-binding
+// resolution for the same testability reason as `markImportReadyWithContext`
+// above. This action only resolves the authenticated context and delegates.
+export async function verifySecurityCandidateAction(
+  batchId: string,
+  value: unknown,
+): Promise<SecurityVerifyActionSuccess | SecurityVerifyActionFailure> {
+  const context = await getAuthenticatedSqlContext();
+  if (!context.ok) return context;
+  return verifySecurityCandidateWithContext(context, batchId, value);
+}
+
+// Reloads the current server-issued review for a batch without mutating
+// anything -- the "Refresh preview" affordance the UI offers after a stale
+// (409) mapping/ready/verify response, so the owner can resynchronize the
+// preview version without re-uploading the file.
+export async function loadImportPreviewAction(
+  batchId: string,
+): Promise<ImportActionSuccess | ImportActionFailure> {
+  const context = await getAuthenticatedSqlContext();
+  if (!context.ok) return context;
+  const review = await loadReview(context.client, context.userId, batchId);
+  return "ok" in review ? review : { ok: true, review };
 }

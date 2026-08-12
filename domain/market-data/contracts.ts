@@ -131,6 +131,11 @@ export type SecurityCandidate = {
   currencyCode: string | null;
   name: string;
   confidence: "low" | "medium" | "high";
+  // Populated from the provider's own instrument-type classification (see
+  // `yahoo-compatible.ts`'s `quoteType` filter). Required so a first-ever
+  // verification of a brand-new symbol (IMP-004B) can publish a `securities`
+  // row without guessing `asset_type`, which is NOT NULL in the schema.
+  assetType: "equity" | "etf" | "fund";
 };
 
 export type DividendEventInput = {

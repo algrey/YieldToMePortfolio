@@ -268,6 +268,10 @@ dd {
   z-index: 100;
   right: 16px;
   bottom: calc(16px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
   max-width: min(360px, calc(100vw - 32px));
   padding: 12px 14px;
   border: 1px solid var(--negative);
@@ -275,6 +279,17 @@ dd {
   background: #241513;
   color: var(--cream);
   font-size: 0.82rem;
+}
+
+.action-feedback button {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--cream);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--cream);
+  font: inherit;
+  cursor: pointer;
 }
 
 .connectivity-status,
