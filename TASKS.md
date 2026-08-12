@@ -245,7 +245,7 @@ Status: DONE by owner decision on 2026-07-28.
 
 ### SPK-003 — Future broker-sync contract
 
-Status: DEFERRED; not in the v1 release scope.
+Status: DONE (2026-08-12); promoted from DEFERRED by owner instruction 2026-08-12.
 
 - Objective: validate the documented broker/OAuth adapter boundary before any broker-specific dependency or credential storage is introduced.
 - Dependencies: AUTH-002, LED-001B, MKT-001.
@@ -278,6 +278,83 @@ Status: DEFERRED; not in the v1 release scope.
 - Tests: adapter contract, repeated cursor page, corrected/deleted broker record, cross-user account mapping denial, token redaction/revocation, reconciliation drift.
 - Risks: broker APIs/entitlements vary; OAuth token storage, rate limits, incomplete histories, and broker corrections require provider-specific validation.
 - Parallel safe: future planning can run independently after its dependency contracts stabilize; implementation must not overlap ledger/auth schema changes.
+- Completion note (2026-08-12): delivered a pure `domain/broker-sync/` contract (`contracts.ts`, `reconciliation-plan.ts`, `redaction.ts`, `fixtures.ts` — fixtures deliberately excluded from the barrel export) with `tests/spk-003.test.ts` (26 cases: adapter shape; cursor-replay idempotency order-independent of persisted-row order; numeric `external_version` ordering as the sole staging determinant — corrected records plan reversal-and-replace, stale re-served pages plan `skip_stale_version`, with a mutation-verified pin test for numeric-vs-lexicographic comparison ("9" vs "10" both directions); deletion semantics per the stated persistence invariant (`reverse_only` leaves no active mapping row) — unseen deletions plan `skip_deleted_unseen`, all-reversed history plans `skip_reversed_history` so a re-served pre-deletion page can never resurrect a cancelled trade; cross-user record/mapping denial; token-payload redaction plus connection-revocation denial (`connection_not_active`); position-drift reconciliation via `parseDecimal`/`compareDecimal` with explicit `unresolved_security` and never-throwing `unparseable_quantity` entry statuses). No dependency, network call, credential store, schema migration, or runtime import of `domain/broker-sync` was added. Broker candidate is an explicit assumption (AU CHESS-sponsored OAuth-capable archetype; no routed evidence names a real broker) — see `docs/ARCHITECTURE.md` §8.1. Data-model extension documented (not migrated) in `docs/DATA_MODEL.md` §8.1; 12-threat model in `docs/SPK-003_THREAT_MODEL.md`. Three review rounds: round 1 FAIL (6 blocking planner-semantics defects: unseen-deletion create, order-dependent replay duplication, no version monotonicity, string-equality quantity compare, silent unresolved-security skip, contradictory idempotency-key docs); round 2 FAIL (ghost resurrection from all-reversed history, crash on unparseable adapter-boundary quantity); round 3 all technical findings verified fixed by reviewer-rerun repros. `node --experimental-strip-types --test tests/spk-003.test.ts` 26 pass / 0 fail; `npm run check` exit 0 (337 pass, 10 env-gated skips). Reviewer follow-up recorded for BRK-005: harden the superseded-only-group asymmetry in `selectActiveMapping`'s create path when the real commit path lands. Implementation split below accepted as recorded (BRK-002 PENDING owner decision; BRK-003…BRK-007 BLOCKED per their stated dependencies).
+
+### SPK-003 proposed split
+
+The following follow-up tasks implement what the spike deliberately left
+undone (see `docs/SPK-003_THREAT_MODEL.md` "Deferred to the implementation
+split"). Orchestrator review 2026-08-12: accepted as recorded — IDs verified
+collision-free, dependency order stands (BRK-002 owner decision first, then
+BRK-003…BRK-007 per their stated dependencies). None become `READY` before
+the BRK-002 decision; BRK-005 must also close the superseded-only-group
+asymmetry noted in the SPK-003 completion note.
+
+#### BRK-002 — Broker vendor and OAuth scope selection (decision)
+
+Status: PENDING; blocked on an owner/product decision, not on other tasks.
+
+- Objective: replace SPK-003's assumed AU CHESS-sponsored archetype with an actual approved broker/API, its OAuth scopes, rate limits, and redistribution terms for entitled quotes.
+- Dependencies: SPK-003.
+- Requirements: BRK-001.
+- Deliver: a decision record naming the real broker/API, its documented OAuth flow, rate/entitlement limits, and any legal/ToS constraint on data retention or quote redistribution.
+- Acceptance: the decision is evidence-based (vendor documentation cited), not another assumption; it either confirms or replaces the AU CHESS-sponsored archetype.
+- Risks: vendor API stability, sandbox/test-account availability, cost.
+
+#### BRK-003 — Broker connection/account schema and encrypted token storage
+
+Status: BLOCKED on BRK-002.
+
+- Objective: migrate `broker_connections`, `broker_accounts`, `broker_sync_runs`, and `external_record_mappings` (`docs/DATA_MODEL.md` §8) as reviewed Drizzle migrations, and implement the real encrypted-token-envelope storage `TokenEnvelopeRef` (`domain/broker-sync/contracts.ts`) only references.
+- Dependencies: BRK-002, DB-001A.
+- Requirements: BRK-001.
+- Deliver: migrations; a Worker-secret/KMS-style encryption implementation for token envelopes; owner-scoped repository functions with cross-user denial tests.
+- Acceptance: no plaintext credential ever reaches D1, logs, client bundles, or CSV exports; cross-user access to another owner's connection/account is denied and tested.
+- Risks: key-rotation strategy, migration review overhead.
+
+#### BRK-004 — OAuth authorize/refresh/revoke flow
+
+Status: BLOCKED on BRK-002, BRK-003, AUTH-001.
+
+- Objective: implement the real `authorize`/token-refresh/`revoke` lifecycle against the selected broker's OAuth flow, conforming to the `BrokerAdapter` contract in `domain/broker-sync/contracts.ts`.
+- Dependencies: BRK-002, BRK-003.
+- Requirements: BRK-001.
+- Deliver: redirect/callback handling, token refresh scheduling, and a revoke path that stops sync and invalidates credentials without deleting committed ledger facts (per `docs/DATA_MODEL.md` §8).
+- Acceptance: revocation is verified to actually invalidate provider-side access, not only local state; token material never appears in logs/errors (extend `tests/spk-003.test.ts` redaction coverage against the real adapter).
+- Risks: provider-specific OAuth quirks, refresh-token rotation edge cases.
+
+#### BRK-005 — Broker transaction/cash sync commit path
+
+Status: BLOCKED on BRK-003, BRK-004, LED-001B.
+
+- Objective: wire `planBrokerLedgerSync` (`domain/broker-sync/reconciliation-plan.ts`) into a real staging/commit path that posts `create`/`reverse_and_replace`/`reverse_only` effects through the existing ledger posting/reversal code (`domain/ledger/posting.ts`), matching the CSV import commit pattern rather than duplicating it.
+- Dependencies: BRK-004.
+- Requirements: BRK-001.
+- Deliver: a bounded, resumable sync-run commit path with lease/attempt/status tracking (`broker_sync_runs`), reusing `domain/broker-sync/reconciliation-plan.ts` unmodified where possible.
+- Acceptance: repeat sync of an already-committed cursor page produces zero duplicate ledger effects against the real D1 schema; corrected/deleted broker records produce a real reversal/supersession, not a rewrite.
+- Risks: partial-page failure recovery, provider pagination/rate-limit behavior.
+
+#### BRK-006 — Broker position reconciliation surfacing
+
+Status: BLOCKED on BRK-005.
+
+- Objective: surface `planPositionReconciliation` drift reports in the product UI/API as reconciliation evidence, never as a silent holdings overwrite.
+- Dependencies: BRK-005.
+- Requirements: BRK-001.
+- Deliver: a route/view exposing per-security drift status (`match`/`drift`/`broker_only`/`ledger_only`) for a connected account's portfolio.
+- Acceptance: no code path lets a broker position snapshot mutate `portfolio_securities` or ledger tables directly.
+- Risks: UX for explaining drift without implying an automatic fix.
+
+#### BRK-007 — Entitled broker quotes wiring
+
+Status: BLOCKED on BRK-004, MKT-001.
+
+- Objective: implement `BrokerAdapter.getEntitledQuotes` against the selected broker (if it offers quotes) and enforce connection-scoped entitlement at the route/repository layer through the existing `MarketDataProvider`/`ObservationScope` abstraction.
+- Dependencies: BRK-004.
+- Requirements: BRK-001.
+- Deliver: entitlement-checked quote retrieval that reuses `PriceObservation` (`domain/market-data/contracts.ts`) with no parallel quote type.
+- Acceptance: a quote never reaches a user/session outside its connection's entitlement scope; provenance (source, observation time, ingestion time) is recorded per `AGENTS.md`.
+- Risks: redistribution restrictions in the selected broker's terms (see BRK-002).
 
 ## Identity and core persistence
 
