@@ -356,6 +356,20 @@ Acceptance:
 - Any future return metric declares cash-flow and fee treatment.
 - A portfolio-wide daily percentage remains unavailable until its comparable denominator and cash-flow treatment are defined in the calculation layer; the UI must not derive one from a snapshot row or formatted display value.
 
+### FY-001 — Financial-year windows and labels
+
+The application shall derive "FY" (financial-year-to-date) and "Last FY" (closed prior financial year) windows from a single per-user, configurable start month, resolved in the user's timezone, as the single source of FY truth for every consumer.
+
+Acceptance:
+
+- The FY start month is a per-user setting (`user_settings.financial_year_start_month`, integer 1–12, day always the 1st); there is no per-portfolio override. Default is 7 (July), the Australian financial year.
+- The user's `user_settings.timezone` decides where the FY boundary falls everywhere, including aggregate/portfolio-level views.
+- "FY" is FY-to-date: it runs from the FY start date through today (inclusive), mirroring YTD semantics. "Last FY" is a fully closed historical window: the prior FY's start date through the day before the current FY started.
+- An FY is named by its ending calendar year per Australian convention (1 Jul 2025 – 30 Jun 2026 = "FY26"). A January start month produces plain calendar-year windows, named by that same year (Jan–Dec 2026 = "FY26").
+- Boundary math resolves "now" to a local calendar date via the IANA timezone database, not naive UTC date arithmetic or binary-float time math; the boundary lands correctly across DST/offset transitions and for both positive and negative UTC-offset timezones.
+- An invalid start month (outside 1–12) or invalid timezone is rejected at the domain-function boundary with an explicit typed reason, never silently coerced.
+- Existing users default to start month 7 with no data rewrite when the setting is introduced.
+
 ### DIV-001 — Dividend events and receipts
 
 Declared/paid dividend events and actual portfolio receipts shall be separate records.

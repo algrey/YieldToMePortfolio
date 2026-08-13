@@ -25,6 +25,7 @@ export type OwnedUserSettingsRecord = {
   homeCurrencyCode: string;
   timezone: string;
   defaultHoldingCurrencyView: "native" | "home";
+  financialYearStartMonth: number;
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -149,6 +150,7 @@ function createUserSettingsRecord(
     timezone: String(row.timezone),
     defaultHoldingCurrencyView: String(row.default_holding_currency_view) as
       "native" | "home",
+    financialYearStartMonth: Number(row.financial_year_start_month),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     version: Number(row.version),
@@ -457,7 +459,7 @@ export function createOwnedUserSettingsRepository(
       const row = await client.get<Record<string, unknown>>(
         `
           SELECT user_id, home_currency_code, timezone,
-            default_holding_currency_view, created_at, updated_at, version
+            default_holding_currency_view, financial_year_start_month, created_at, updated_at, version
           FROM user_settings
           WHERE user_id = ?
           LIMIT 1
@@ -487,7 +489,7 @@ export function createOwnedUserSettingsRepository(
           SET home_currency_code = ?, updated_at = ?, version = version + 1
           WHERE user_id = ? AND version = ?
           RETURNING user_id, home_currency_code, timezone,
-            default_holding_currency_view, created_at, updated_at, version
+            default_holding_currency_view, financial_year_start_month, created_at, updated_at, version
         `,
         params: [
           input.homeCurrencyCode,
@@ -550,7 +552,7 @@ export function createOwnedUserSettingsRepository(
           SET default_holding_currency_view = ?, updated_at = ?, version = version + 1
           WHERE user_id = ? AND version = ?
           RETURNING user_id, home_currency_code, timezone,
-            default_holding_currency_view, created_at, updated_at, version
+            default_holding_currency_view, financial_year_start_month, created_at, updated_at, version
         `,
         params: [input.view, updatedAt, userId, input.expectedVersion],
       };

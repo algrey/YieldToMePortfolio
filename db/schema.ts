@@ -60,6 +60,12 @@ export const userSettings = sqliteTable(
     defaultHoldingCurrencyView: text("default_holding_currency_view")
       .notNull()
       .default("native"),
+    // Configurable financial-year start month (1-12, day is always the 1st).
+    // Defaults to 7 (July) for the Australian financial year. This is a
+    // per-user setting only; there is no per-portfolio override.
+    financialYearStartMonth: integer("financial_year_start_month")
+      .notNull()
+      .default(7),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     version: integer("version").notNull().default(1),
@@ -78,6 +84,10 @@ export const userSettings = sqliteTable(
     check(
       "user_settings_default_holding_currency_view_check",
       sql`${table.defaultHoldingCurrencyView} IN ('native', 'home')`,
+    ),
+    check(
+      "user_settings_financial_year_start_month_check",
+      sql`${table.financialYearStartMonth} BETWEEN 1 AND 12`,
     ),
     uniqueIndex("user_settings_user_home_currency_unique").on(
       table.userId,

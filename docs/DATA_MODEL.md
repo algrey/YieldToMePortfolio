@@ -85,6 +85,7 @@ One-to-one with user:
 - required `home_currency_code` FK to currencies;
 - IANA timezone and locale/display defaults;
 - default native/home holding-price view;
+- `financial_year_start_month` (integer, CHECK 1–12, default 7): the configurable financial-year start month (day is always the 1st). Per-user only — there is no per-portfolio override. The same `timezone` column on this row decides where the FY boundary falls everywhere (see `docs/CALCULATIONS.md` and requirement FY-001). Existing rows default to 7 (the Australian financial year) with no data rewrite;
 - timestamps/version.
 
 Home currency is the canonical reporting currency. Changing it is an explicit recalculation event, not a cosmetic database update.
@@ -836,6 +837,8 @@ CREATE TABLE user_settings (
   timezone TEXT NOT NULL,
   default_holding_currency_view TEXT NOT NULL DEFAULT 'native'
     CHECK (default_holding_currency_view IN ('native', 'home')),
+  financial_year_start_month INTEGER NOT NULL DEFAULT 7
+    CHECK (financial_year_start_month BETWEEN 1 AND 12),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   version INTEGER NOT NULL DEFAULT 1,

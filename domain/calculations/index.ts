@@ -37,6 +37,15 @@ export {
   type SingleDateHoldingResult,
 } from "./holding.ts";
 export {
+  currentFyWindow,
+  fyLabel,
+  isValidFinancialYearStartMonth,
+  lastFyWindow,
+  type FyWindow,
+  type FyWindowResult,
+  type FyWindowUnavailableReason,
+} from "./financial-year.ts";
+export {
   calculateCashConversion,
   calculateDailyMovement,
   calculateNativeHomeHolding,

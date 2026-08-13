@@ -364,7 +364,36 @@ is expected and complete by the cutoff but has no matching quote is a
 `missing_session` gap; a date outside the evidence’s validity interval remains
 `unknown`.
 
-## 9. Realised, unrealised, and headline returns
+## 9. Financial-year windows and labels
+
+Requirement FY-001. Single source of truth: `domain/calculations/financial-year.ts` (`currentFyWindow`, `lastFyWindow`, `fyLabel`). Every consumer (history chart periods, per-FY dividend views, and any future FY-scoped report) must derive its window from these functions rather than reimplementing FY date math.
+
+### Configuration
+
+- `user_settings.financial_year_start_month` (integer 1–12, day always the 1st) is the only configurable input. Default is 7 (July), the Australian financial year. It is per-user; there is no per-portfolio override.
+- The same row's `user_settings.timezone` decides where the FY boundary falls everywhere the FY is used, including aggregate/portfolio-level views — not the portfolio's own timezone.
+
+### Windows
+
+- **FY** (current financial year) is FY-to-date, mirroring YTD: `startDate` is the 1st of the start month in the FY that contains today's local date, and `endDate` is today's local date. It is an open, growing window.
+- **Last FY** is the prior FY, fully closed: `startDate` is the 1st of the start month one year before the current FY's start, and `endDate` is the local calendar date immediately before the current FY's `startDate`.
+- Both `startDate` and `endDate` are local calendar-date strings (`YYYY-MM-DD`), never instants.
+
+### Timezone rule
+
+"Today" is resolved by converting the current instant to a local calendar date in the user's IANA timezone via the timezone database (e.g. `Intl.DateTimeFormat` with `timeZone`), the same technique `domain/snapshots/history.ts` uses for portfolio-local cutoffs. This is mandatory: naive UTC-date arithmetic or binary-float time math can shift the FY boundary by a day, especially near a DST transition or for a timezone on the opposite side of UTC from the server. A financial-year boundary instant belongs to whichever FY contains its local calendar date in the user's timezone, not the server's UTC date.
+
+### Naming convention
+
+An FY is named by its ending calendar year, per Australian convention: `FY` + the last two digits of the ending year. For a start month other than January, the ending year is the start year plus one (1 Jul 2025 – 30 Jun 2026 = "FY26"). A January start month produces plain calendar-year windows, so the ending year equals the start year itself (Jan–Dec 2026 = "FY26", not "FY25").
+
+The label is derived from the window's `startDate` alone (its year and month fully determine the FY). It must not be derived from a FY-to-date window's `endDate`, which is today, not the FY's eventual close.
+
+### Validation
+
+An out-of-range start month (outside 1–12) or an unresolvable IANA timezone is rejected at the domain-function boundary with an explicit typed reason (`invalid_start_month`, `invalid_timezone`, `invalid_instant`) rather than silently coerced or defaulted.
+
+## 10. Realised, unrealised, and headline returns
 
 The reference material does not conclusively define all-time return. The conservative v1 split is:
 
@@ -396,7 +425,7 @@ XIRR solves:
 
 Do not implement until transfer/deposit/withdrawal semantics are explicit and a robust solver/date convention is tested. It must be labelled money-weighted, not “gain %”.
 
-## 10. Dividends (deferred)
+## 11. Dividends (deferred)
 
 This section preserves the future calculation contract. None of it is part of the core ledger/valuation release, and no estimate or receipt table should be added before `DB-005`, `MKT-005`, and `DIV-001` are promoted from deferred status.
 
@@ -444,7 +473,7 @@ Show gross by default where country/account rules are unknown. Never imply tax a
 
 No generic “yield” without a method label.
 
-## 11. Missing-data and error behavior
+## 12. Missing-data and error behavior
 
 | Missing input           | Result                                                              |
 | ----------------------- | ------------------------------------------------------------------- |
@@ -459,7 +488,7 @@ No generic “yield” without a method label.
 
 Errors carry stable reason codes and remediation; the UI avoids `0.00` for unknown.
 
-## 12. Deterministic test fixtures
+## 13. Deterministic test fixtures
 
 Minimum fixture families:
 
