@@ -584,6 +584,19 @@ Status: DONE on 2026-08-03.
 - Review finding: The rebuild currently loads the entire owner ledger into memory and emits one unbounded D1 batch containing every delete and projection insert. This conflicts with the architecture’s bounded-chunk, D1-parameter, and Worker-memory limits and cannot resume from a committed projection high-water mark after a partial failure. Add bounded/resumable rebuild chunks, enforce the batch/query limits, and add high-volume and injected-failure resume tests before marking this task DONE.
 - Review resolution: Replaced whole-ledger replacement with run-versioned projection rows, bounded per-security ledger reads, bounded output batches, and an atomic security/output checkpoint. A completed run becomes current only through the owner-scoped publication pointer, so partial and stale runs remain invisible. Added a 150-security volume test that instruments row, statement, and parameter bounds plus an injected-failure test proving the failed chunk leaves no rows/checkpoint advance and resumes to identical output.
 
+### IMP-006 — Dividend-receipt rows in CSV import
+
+Status: BLOCKED on DB-005, DIV-001; owner-requested 2026-08-13 (dividend modelling feature).
+
+- Objective: extend the staged CSV import pipeline with a dividend-receipt row type so broker exports containing dividend transactions land as actual receipts through the existing preview/commit/reverse workflow.
+- Dependencies: DB-005 (receipt schema), DIV-001 (receipt validation/posting rules), IMP-004A (review workflow), IMP-003B (reversal).
+- Requirements: extend the CSV import requirement set and `docs/CSV_IMPORT_SPEC.md` (row type, column mapping, validation, idempotency key) in the same change set.
+- Deliver: dividend-receipt row parsing/mapping (security, payment date, cash amount, franking credits, withholding — decimal strings; missing franking is `unknown`, never zero); staged/previewed/validated like transactions, batch-attributable and reversible; idempotency keyed consistently with existing duplicate detection; receipts post through DIV-001's path on commit, never directly.
+- Acceptance: a CSV containing both trade and dividend rows stages, previews with per-type counts, commits atomically, and reverses cleanly; duplicate dividend rows across re-imports are detected; a dividend row for an unresolved security blocks readiness exactly like trades (SECURITY_UNRESOLVED); franking absent ≠ franking zero.
+- Tests: parse/mapping/enum edge cases, duplicate detection across batches, unresolved-security blocking, commit/reverse round trip including receipts, mixed-type batch atomicity.
+- Risks: broker CSV dividend formats vary (net vs gross, franking present or absent) — mapping must be explicit, never inferred silently.
+- Parallel safe: yes with DIV-003 after its dependencies.
+
 ## Market data and calculations
 
 ### DB-002 — Security master and provider mapping schema
@@ -633,7 +646,7 @@ Status: DONE on 2026-07-30.
 
 ### DB-005 — Corporate-action event and dividend-receipt schema
 
-Status: DEFERRED; not required by the core ledger/valuation release.
+Status: READY; promoted 2026-08-13 by owner decision — dividend modelling feature (see DIV-003 for the recorded owner decisions). Scope extended: in addition to the original deliverables, add (a) a portfolio-scoped dividend-assumptions table — per-security override rows (dividend yield %, franking %, dividend growth %, all nullable decimal strings; null = fall back to provider-derived values) plus portfolio-level rows (portfolio value growth %, portfolio dividend growth %) — owner-scoped, versioned, never affecting ledger facts; and (b) a portfolio-scoped FY dividend actual-override table (financial year key, grossed amount, franking amount as decimal strings) for owner-typed historical corrections, distinct from receipts.
 
 - Objective: add dividend facts only when the actual-receipt workflow and provider capability are scheduled.
 - Dependencies: LED-001A, DB-002, DB-003.
@@ -747,7 +760,7 @@ Status: DONE on 2026-08-03.
 
 ### MKT-005 — Corporate-action and dividend provider capability
 
-Status: DEFERRED; not required by the core ledger/valuation release.
+Status: BLOCKED on DB-005; promoted 2026-08-13 by owner decision (dividend modelling feature). Scope notes: additionally derive per-security trailing-12-month per-share dividends and trailing yield from ingested events (feeding the DIV-003 assumptions grid's provider-prepopulated columns). Franking percentage is explicitly NOT auto-sourced in this task — Yahoo-compatible endpoints do not carry franking data; the contract must leave a typed seam (franking fields present, provider population absent, explicit `unavailable` state) so a future franking source can slot in without schema change. Manual franking entry is DIV-003/UI-006B scope.
 
 - Objective: add adjusted history, splits, and dividend-event ingestion only after source coverage/semantics are independently validated.
 - Dependencies: MKT-002, DB-005.
@@ -869,7 +882,7 @@ Status: DONE (independent calendar/repository review resolved 2026-08-09).
 
 ### DIV-001 — Dividend events, receipts, and forecasts
 
-Status: DEFERRED; actual income and forecasting do not block the core ledger/valuation release.
+Status: BLOCKED on DB-005 and MKT-005; promoted 2026-08-13 by owner decision (dividend modelling feature). Scope notes: actual receipts arrive via manual entry (UI-006B provides the form; this task provides the owner-scoped service/validation/posting path) and via the CSV import extension (IMP-006). The forecast deliverable here stays the declared-then-TTM 12-month baseline; multi-year retirement projection is DIV-003 and consumes this task's outputs. Franking credits on receipts are owner-entered decimal strings recorded alongside cash amounts; grossed-up figures are always labelled as including franking credits.
 
 - Objective: keep provider events, actual cash receipts, and honest future-income estimates distinct and explainable.
 - Dependencies: LED-001B, DB-005, MKT-005, CALC-001B.
@@ -902,6 +915,19 @@ Status: DEFERRED; actual income and forecasting do not block the core ledger/val
 - Tests: declared vs paid, eligibility, special/irregular dividend, withholding, franking info, missing FX/history, corrections.
 - Risks: eligibility/corporate-action completeness; tax implications—keep informational.
 - Parallel safe: yes with CALC-002 after shared contracts.
+
+### DIV-003 — Retirement-income projection engine
+
+Status: BLOCKED on DB-005, MKT-005, DIV-001, FY-001A. Owner decisions recorded 2026-08-13: the feature is a retirement-income modeller, not a dividend calendar. All dividend calculations are per 12-month period; multi-year views are per financial year (FY-001A windows/labels). Projection formula: portfolio value compounds by the portfolio value-growth assumption; effective yield compounds by the dividend-growth assumption; each projected year's dividend = that year's projected value × that year's yield. Assumption precedence per security: owner override (yield %, franking %, dividend growth %) wins when present; blank falls back to provider-derived TTM values extrapolated forward. Past-FY income precedence: owner FY override > sum of actual receipts for that FY > provider-derived estimate, with the winning source labelled on every row. Franking: grossed-up (cash + franking credits) is the headline figure, always labelled "includes franking credits", with the cash/credit split accessible; franking credits are included in predictions via the per-security franking % assumption. Projections run up to 10 years forward; history up to 10 years back. What-if growth adjustments are applied ephemerally and never persisted.
+
+- Objective: pure domain projection engine turning holdings, assumptions, receipts, FY overrides, and provider TTM data into labelled per-FY income projections and single-12-month breakdowns.
+- Dependencies: DB-005 (assumptions/override tables), MKT-005 (TTM yield derivation), DIV-001 (receipts, declared-then-TTM baseline), FY-001A (FY windows/labels), CALC-001A (decimal primitives).
+- Requirements: new — add a `DIV-003` requirement with acceptance criteria to `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md`; document the projection formula, precedence, and franking treatment in `docs/CALCULATIONS.md` in the same change set.
+- Deliver: `domain/dividends/` projection module (pure functions, decimal strings throughout): per-FY projection rows (year label, projected portfolio value, gross dividend, cash/franking split, effective yield %, method/source label per figure); single-12-month breakdown (total gross income, franking amount, cash amount, average per month, average per week, income % of portfolio value); assumption-resolution function implementing the precedence rules; what-if parameter overlay (growth/dividend-growth substitution without persistence); explicit typed states for insufficient history/missing prices — never a silent zero or an over-annualized guess.
+- Acceptance: projection matches the recorded formula exactly on deterministic fixtures; every projected or estimated figure carries its method and assumption provenance; blank owner assumptions fall back to provider TTM and say so; a security with no dividend history and no override contributes `insufficient history`, not zero, and the total discloses partial coverage; past-FY rows resolve precedence correctly and label the winning source; what-if results never write to storage; all arithmetic is exact-decimal.
+- Tests: formula fixtures across multi-year compounding, precedence matrices (override/receipts/provider × present/absent), franking gross-up and split, insufficient-history and partial-coverage states, FY boundary alignment with FY-001A, what-if overlay purity (no persistence side effects).
+- Risks: compounding false precision — mitigated by mandatory method labels; conflating modelled income with ledger facts — the engine must be read-only over ledger data.
+- Parallel safe: yes with IMP-006 once dependencies land; UI-006A/B consume it.
 
 ## Product surfaces
 
@@ -1129,6 +1155,71 @@ Status: DONE on 2026-08-02.
 - Completion note: Added a versioned public-only service-worker allowlist with network-first offline navigation fallback, update activation, connectivity status, offline-disabled mutations, standalone 180/192/512 raster install assets, and manifest/header regression coverage. Physical Safari/iPhone UAT was user-confirmed on 2026-08-02 for Add to Home Screen, standalone launch, app name/icon, safe-area rendering, loaded-session offline state with disabled mutations, safe offline reload, reconnection, and service-worker update activation; exact device and iOS version were not recorded.
 - Review finding: automated implementation and regression checks pass, but the required physical Safari/iPhone UAT has not been completed. Verify installation, offline reload fallback, update activation, safe-area rendering, and disabled mutations on a physical device before marking this task complete.
 - Review resolution: user-confirmed physical Safari/iPhone UAT completed on 2026-08-02; the finding is closed with device and iOS version explicitly unspecified.
+
+### FY-001A — Financial-year domain model and settings schema
+
+Status: READY; owner-requested feature (2026-08-13). Owner decisions recorded: configurable start month only (1–12, day always the 1st), default July (Australian FY); per-user setting in `user_settings` (no per-portfolio override); the user's `user_settings.timezone` decides where the FY boundary falls everywhere, including aggregate views; "FY" means FY-to-date (mirrors YTD), "Last FY" is a closed historical window; an FY is named by its ending year per Australian convention (Jul 2025–Jun 2026 = "FY26").
+
+- Objective: introduce a validated `financial_year_start_month` user setting and pure domain functions that turn (today, start month, timezone) into FY windows and labels, as the single source of FY truth for every consumer.
+- Dependencies: DB-001A (user_settings), UI-002 (overview history exists as first consumer).
+- Requirements: new — add an `FY-001` requirement with acceptance criteria to `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md` in this change set; update `docs/DATA_MODEL.md` (user_settings) and `docs/CALCULATIONS.md` (FY window/label rules).
+- Deliver: `user_settings.financial_year_start_month` integer column (CHECK 1–12, default 7) via a generated Drizzle migration; pure domain module (e.g. `domain/calculations/financial-year.ts`): `currentFyWindow`, `lastFyWindow`, `fyLabel` — all boundary math in the user's IANA timezone with date-string outputs (no binary-float, no Date-arithmetic-across-DST bugs); repository read path exposing the setting alongside the existing settings fields.
+- Acceptance: with default July and timezone Australia/Sydney on 2026-08-13, current FY = 2026-07-01 → today ("FY27"), last FY = 2025-07-01 → 2026-06-30 ("FY26"); a January start month yields calendar years; boundary instants respect the timezone (Jun 30 23:59 Sydney is last FY, Jul 1 00:00 is current); invalid months are rejected at the boundary; existing users default to 7 with no data rewrite.
+- Tests: month boundaries in ±UTC offsets and across DST, January start, label ending-year convention, migration apply + CHECK rejection, settings read path.
+- Risks: naive UTC date math shifting the boundary by a day; migration touching a table every request path reads.
+- Parallel safe: yes; FY-001B and FY-001C both depend only on this.
+
+### FY-001B — Financial-year settings control
+
+Status: BLOCKED on FY-001A.
+
+- Objective: let the owner change the FY start month from the settings surface.
+- Dependencies: FY-001A, UI-005A (settings surface), AUTH-004 (CSRF conventions).
+- Requirements: FY-001 (added in FY-001A); QA-001B accessibility standards; QA-001A matrix row for the new route.
+- Deliver: version-guarded `POST /api/settings/financial-year` mutation following the existing `/api/settings/home-currency` pattern (CSRF-first, owner-scoped, `expectedVersion`); a labelled month select in the settings UI defaulting to July, with helper text naming the resulting window (e.g. "July: FY runs 1 Jul – 30 Jun"); offline-disabled like other settings mutations.
+- Acceptance: changing the month persists, bumps the settings version, and immediately changes FY windows app-wide; stale-version and cross-site mutations are rejected; the control is keyboard-operable and labelled; no client-supplied user ID.
+- Tests: happy path, stale version, CSRF denial, cross-user denial, invalid month, settings-UI render.
+- Risks: none beyond the shared settings-version race already handled by the existing pattern.
+- Parallel safe: yes with FY-001C after FY-001A.
+
+### FY-001C — FY and Last FY chart periods
+
+Status: BLOCKED on FY-001A.
+
+- Objective: add "FY" (FY-to-date) and "Last FY" (closed window) to the chart period selectors, wired to real data where real data exists.
+- Dependencies: FY-001A; FY-001B is NOT required (default July works without the control).
+- Requirements: FY-001; QA-001B (44px targets, flex-wrap at 320px, non-color status); `docs/CALCULATIONS.md` FY rules.
+- Deliver: Overview history chart range set becomes `1M / 3M / 12M / FY / Last FY / All` filtering the real history series by the FY windows from FY-001A; Details prototype period tabs gain `FY` and `Last FY` (after YTD) with the same semantics documented — noting the Details chart remains a static prototype until real details history lands, so the new tabs there change labels/copy only and must not fabricate data; period eyebrow/tooltip shows the resolved window and label ("FY27 · 1 Jul 2026 – today", "FY26 · 1 Jul 2025 – 30 Jun 2026").
+- Acceptance: "FY" filters from the FY start date to the latest point; "Last FY" is bounded on both ends and its gain/loss delta reads as change across that window, not change-to-today; an FY window with no history points shows the explicit empty/missing-data state, never zero; tab labels stay "FY"/"Last FY" with full window in the eyebrow; selectors stay within QA-001B touch-target and 320px-wrap standards; a changed start month re-derives windows without reload artifacts.
+- Tests: window filtering at boundary dates, Last FY closed-window delta, empty-window state, tab accessibility (aria-pressed, labels), 320px wrap regression in `tests/qa-001b.test.ts` if tab count affects it.
+- Risks: implying the prototype Details chart is live; delta semantics for a closed window diverging between charts.
+- Parallel safe: yes with FY-001B.
+
+### UI-006A — Income screen: next-12-months landing and multi-year view
+
+Status: BLOCKED on DIV-003, FY-001A. Owner decisions recorded 2026-08-13 (see DIV-003 for calculation decisions).
+
+- Objective: a dedicated Income tab for the current portfolio, landing on the next-12-months projection with retirement-planning statistics, with navigation to the multi-year FY view.
+- Dependencies: DIV-003, FY-001A, UI-001 (shell/tabs), QA-001B standards.
+- Requirements: DIV-003 requirement; QA-001A matrix rows for any new route; QA-001B accessibility.
+- Deliver: new top-level Income route/tab (owner-scoped, no-store, server-rendered data via DIV-003); landing view = next 12 months: grossed-up total ("includes franking credits" label), franking amount, cash amount, average per month, average per week, income % of portfolio value, coverage/provenance disclosure; multi-year view = one row per FY showing year label, portfolio value (projected years use the value-growth assumption and say so), gross dividend amount, effective %, source/method label; range configurable up to 10 FYs back and 10 forward, default 2 back / 4 forward; past rows use the DIV-003 precedence (override > receipts > provider) with source shown; what-if controls at the bottom of the multi-year view for portfolio growth % and dividend growth % that recompute the table immediately, are clearly marked as unsaved exploration, and never persist; entry point to the assumptions editor (UI-006B).
+- Acceptance: landing is the next-12-months view for the selected portfolio; every projected figure is visually distinguished from actuals and labelled with its assumptions; empty/insufficient states are explicit (a portfolio with no dividend data explains what to add, never shows $0 income as fact); what-if changes survive no navigation and write nothing; keyboard-operable controls, 44px targets, non-color status distinctions, 320px layout without horizontal scroll.
+- Tests: route ownership/CSRF-irrelevance (read-only), rendered landing and multi-year states (populated/partial/empty), what-if non-persistence, range configuration bounds, accessibility assertions in the QA-001B suite pattern.
+- Risks: projected figures being read as promises — labels and visual distinction are load-bearing; table density at 320px (10+ rows × 4 columns needs the established wrap/scroll-container patterns).
+- Parallel safe: yes with UI-006B after DIV-003.
+
+### UI-006B — Dividend assumptions editor and manual receipt entry
+
+Status: BLOCKED on DIV-003, DIV-001, DB-005. Owner decisions recorded 2026-08-13.
+
+- Objective: the editing surfaces for the income modeller: the portfolio-scoped assumptions grid and the manual actual-receipt/FY-override forms.
+- Dependencies: DIV-003 (resolution semantics), DIV-001 (receipt service), DB-005 (tables), AUTH-004 (CSRF), UI-006A (screen to host the entry point).
+- Requirements: DIV-003 requirement; QA-001A matrix rows for each new mutation route; QA-001B accessibility.
+- Deliver: assumptions editor reached from the Income screen (portfolio-scoped, not per-security navigation): a list/grid with one row per held security showing provider-derived dividend yield % and franking % (or explicit `unavailable`) read-only, alongside editable owner columns — dividend yield %, franking %, dividend growth % (blank = use provider value); a portfolio-level row for value growth % and portfolio dividend growth %; version-guarded, CSRF-first save of the whole grid; manual actual-receipt entry form (security, payment date, cash amount, franking credits, withholding — decimal strings, validated) posting through DIV-001's service; past-FY income override entry (FY, grossed amount, franking amount) with clear precedence explanation ("overrides receipts and provider history for this FY's display"); all mutations owner-scoped with `expectedVersion`.
+- Acceptance: provider values are never silently overwritten — owner entries live in separate columns and blanking an owner cell restores the provider fallback; saving the grid changes projections immediately; receipts post real ledger-side records (DIV-001 rules) and are visible in past-FY rows per precedence; invalid percentages/amounts are rejected at the boundary with specific messages; the grid is keyboard-navigable with labelled cells and works at 320px via the established responsive table patterns.
+- Tests: grid save happy path/stale version/CSRF/cross-user denial, blank-cell fallback resolution, receipt entry validation and posting, FY override precedence effect, rendered accessibility assertions.
+- Risks: a wide editable grid on mobile — needs the card-per-security fallback pattern rather than a squeezed table; percentage-entry ambiguity (4 vs 0.04) — pin the unit in labels and validation.
+- Parallel safe: yes with UI-006A after DIV-003.
 
 ## Operations and release
 
