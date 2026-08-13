@@ -1218,12 +1218,13 @@ Status: DONE (2026-08-13); pre-existing pattern defect found by FY-001B review (
 
 ### DB-007 — Portfolio lifecycle audit rows written on rejected mutations
 
-Status: READY; same pattern defect as DB-006, found by DB-006 review (2026-08-13) in `createOwnedPortfolioRepository`.
+Status: DONE (2026-08-13); same pattern defect as DB-006, found by DB-006 review (2026-08-13) in `createOwnedPortfolioRepository`.
 
-- Problem: `portfolio.rename` (~`db/repositories/owned-portfolios.ts:361`), `portfolio.archive` (~:402), `portfolio.restore` (~:443) order the audit INSERT after the UPDATE with post-state guards `conditionParams: [portfolioId, userId, expectedVersion + 1]` — a concurrent writer's bump satisfies the guard, so a stale retry that no-ops with `version_conflict` still records an audit event for a lifecycle change that never happened (e.g. a `portfolio.archive` audit row with no archive).
+- Problem: `portfolio.rename` (`db/repositories/owned-portfolios.ts:361`), `portfolio.archive` (`:402`), `portfolio.restore` (`:443`) order the audit INSERT after the UPDATE with post-state guards `conditionParams: [portfolioId, userId, expectedVersion + 1]` — a concurrent writer's bump satisfies the guard, so a stale retry that no-ops with `version_conflict` still records an audit event for a lifecycle change that never happened (e.g. a `portfolio.archive` audit row with no archive).
 - Fix: apply DB-006's construction identically — audit INSERT first with pre-state guard (`version = expectedVersion`), version-bumping UPDATE ... RETURNING last, result from the last row; preserve the version_conflict/not_found contract; portfolios table analogue of the settings fix.
 - Acceptance: stale retry after a concurrent bump → zero new audit rows for all three lifecycle mutations; applied change → exactly one; contracts unchanged.
 - Tests: concurrent-bump audit-count assertions for rename/archive/restore (extend `tests/db-001b.test.ts` or wherever lifecycle mutations are tested).
+- Completion note (2026-08-13): rename/archive/restore restructured to DB-006's pre-state construction (audit INSERT first guarded on `version = expectedVersion`, UPDATE ... RETURNING last); archive confirmed to have no status precondition today (re-archive at current version still succeeds, tested). `create` verified race-free and untouched. Reviewer independently reproduced the HEAD defect (stale retry audit rows for all three) and ran the new tests against HEAD via an import shim (all 4 fail there — genuinely pinning). 4 new tests in `tests/db-001b.test.ts`. `npm run check` exit 0 (394 pass, 10 gated skips). Review PASS.
 
 ### FY-001C — FY and Last FY chart periods
 

@@ -266,3 +266,245 @@ test("owned portfolio repositories deny cross-user reads, writes, and optimistic
   }
   assert.equal(crossUserRestore.reason, "not_found");
 });
+
+// --- DB-007: portfolio lifecycle audit rows must record only mutations that
+// actually applied --------------------------------------------------------
+//
+// Same defect class as DB-006 (see fy-001b.test.ts): `rename`, `archive`,
+// and `restore` used to guard their audit INSERT by a POST-state predicate
+// (`version = expectedVersion + 1`). After a concurrent bump, a stale
+// retry's UPDATE was a no-op (`version_conflict`) but the guard was
+// satisfied by the CONCURRENT writer's row, so a spurious audit event was
+// recorded for a lifecycle change that never applied. The fix guards the
+// audit INSERT on the batch's PRE-state (`version = expectedVersion`,
+// matching the UPDATE's own WHERE clause) and orders it BEFORE the
+// version-bumping UPDATE in the same `batch()` call.
+
+function countPortfolioAuditEvents(
+  database: DatabaseSync,
+  userId: string,
+  action: string,
+): number {
+  const row = database
+    .prepare(
+      "SELECT COUNT(*) AS n FROM audit_events WHERE target_owner_user_id = ? AND action = ?",
+    )
+    .get(userId, action) as { n: number };
+  return Number(row.n);
+}
+
+function createBatchOrderRecordingSqlClient(database: DatabaseSync) {
+  const baseClient = createSqliteSqlClient(database);
+  const batchStatementOrders: string[][] = [];
+  return {
+    all: baseClient.all.bind(baseClient),
+    get: baseClient.get.bind(baseClient),
+    run: baseClient.run.bind(baseClient),
+    batchStatementOrders,
+    async batch(statements: Parameters<typeof baseClient.batch>[0]) {
+      batchStatementOrders.push(
+        statements.map((statement) =>
+          statement.sql.trim().slice(0, 40).replace(/\s+/g, " "),
+        ),
+      );
+      return await baseClient.batch(statements);
+    },
+  };
+}
+
+test("DB-007: portfolio rename writes exactly one audit row per applied change, none on a stale retry", async () => {
+  const database = createMigratedDatabase(await loadMigrationSql());
+  seedReferenceData(database);
+  const client = createSqliteSqlClient(database);
+  const portfolios = createOwnedPortfolioRepository(
+    client,
+    () => "2026-07-29T12:00:00Z",
+  );
+
+  const created = await portfolios.create("user-a", {
+    id: "portfolio-a",
+    code: "A",
+    name: "Alice Portfolio",
+    timezone: "Australia/Sydney",
+  });
+  assert.ok(created);
+
+  const applied = await portfolios.rename("user-a", "portfolio-a", {
+    expectedVersion: 1,
+    name: "Alice Growth",
+  });
+  assert.equal(applied.ok, true);
+  assert.equal(
+    countPortfolioAuditEvents(database, "user-a", "portfolio.rename"),
+    1,
+    "exactly one audit row for the applied change",
+  );
+
+  // Stale retry: the caller's expectedVersion (1) predates the applied
+  // rename above (now at version 2).
+  const staleRetry = await portfolios.rename("user-a", "portfolio-a", {
+    expectedVersion: 1,
+    name: "Stale rename",
+  });
+  assert.equal(staleRetry.ok, false);
+  if (staleRetry.ok) return;
+  assert.equal(staleRetry.reason, "version_conflict");
+  assert.equal(
+    countPortfolioAuditEvents(database, "user-a", "portfolio.rename"),
+    1,
+    "stale retry must not add a second audit row",
+  );
+});
+
+test("DB-007: portfolio archive writes exactly one audit row per applied change, none on a stale retry, status precondition unchanged", async () => {
+  const database = createMigratedDatabase(await loadMigrationSql());
+  seedReferenceData(database);
+  const client = createSqliteSqlClient(database);
+  const portfolios = createOwnedPortfolioRepository(
+    client,
+    () => "2026-07-29T12:00:00Z",
+  );
+
+  const created = await portfolios.create("user-a", {
+    id: "portfolio-a",
+    code: "A",
+    name: "Alice Portfolio",
+    timezone: "Australia/Sydney",
+  });
+  assert.ok(created);
+
+  const applied = await portfolios.archive("user-a", "portfolio-a", {
+    expectedVersion: 1,
+  });
+  assert.equal(applied.ok, true);
+  if (!applied.ok) return;
+  assert.equal(applied.portfolio.status, "archived");
+  assert.equal(
+    countPortfolioAuditEvents(database, "user-a", "portfolio.archive"),
+    1,
+    "exactly one audit row for the applied change",
+  );
+
+  // Stale retry: the caller's expectedVersion (1) predates the applied
+  // archive above (now at version 2).
+  const staleRetry = await portfolios.archive("user-a", "portfolio-a", {
+    expectedVersion: 1,
+  });
+  assert.equal(staleRetry.ok, false);
+  if (staleRetry.ok) return;
+  assert.equal(staleRetry.reason, "version_conflict");
+  assert.equal(
+    countPortfolioAuditEvents(database, "user-a", "portfolio.archive"),
+    1,
+    "stale retry must not add a second audit row",
+  );
+
+  // Archiving an already-archived portfolio at its current version is
+  // unaffected by this fix -- the UPDATE carries no status='active'
+  // precondition, so this still succeeds exactly as before DB-007.
+  const archiveAgain = await portfolios.archive("user-a", "portfolio-a", {
+    expectedVersion: applied.portfolio.version,
+  });
+  assert.equal(archiveAgain.ok, true);
+  if (!archiveAgain.ok) return;
+  assert.equal(archiveAgain.portfolio.status, "archived");
+  assert.equal(
+    countPortfolioAuditEvents(database, "user-a", "portfolio.archive"),
+    2,
+    "a second applied archive call records a second audit row",
+  );
+});
+
+test("DB-007: portfolio restore writes exactly one audit row per applied change, none on a stale retry", async () => {
+  const database = createMigratedDatabase(await loadMigrationSql());
+  seedReferenceData(database);
+  const client = createSqliteSqlClient(database);
+  const portfolios = createOwnedPortfolioRepository(
+    client,
+    () => "2026-07-29T12:00:00Z",
+  );
+
+  const created = await portfolios.create("user-a", {
+    id: "portfolio-a",
+    code: "A",
+    name: "Alice Portfolio",
+    timezone: "Australia/Sydney",
+  });
+  assert.ok(created);
+
+  const archived = await portfolios.archive("user-a", "portfolio-a", {
+    expectedVersion: 1,
+  });
+  assert.equal(archived.ok, true);
+  if (!archived.ok) return;
+
+  const applied = await portfolios.restore("user-a", "portfolio-a", {
+    expectedVersion: 2,
+  });
+  assert.equal(applied.ok, true);
+  if (!applied.ok) return;
+  assert.equal(applied.portfolio.status, "active");
+  assert.equal(
+    countPortfolioAuditEvents(database, "user-a", "portfolio.restore"),
+    1,
+    "exactly one audit row for the applied change",
+  );
+
+  // Stale retry: the caller's expectedVersion (2) predates the applied
+  // restore above (now at version 3).
+  const staleRetry = await portfolios.restore("user-a", "portfolio-a", {
+    expectedVersion: 2,
+  });
+  assert.equal(staleRetry.ok, false);
+  if (staleRetry.ok) return;
+  assert.equal(staleRetry.reason, "version_conflict");
+  assert.equal(
+    countPortfolioAuditEvents(database, "user-a", "portfolio.restore"),
+    1,
+    "stale retry must not add a second audit row",
+  );
+});
+
+test("DB-007: each portfolio lifecycle mutation's batch orders the audit INSERT (pre-state guarded) before the version-bumping UPDATE", async () => {
+  const database = createMigratedDatabase(await loadMigrationSql());
+  seedReferenceData(database);
+  const client = createBatchOrderRecordingSqlClient(database);
+  const portfolios = createOwnedPortfolioRepository(
+    client,
+    () => "2026-07-29T12:00:00Z",
+  );
+
+  const created = await portfolios.create("user-a", {
+    id: "portfolio-a",
+    code: "A",
+    name: "Alice Portfolio",
+    timezone: "Australia/Sydney",
+  });
+  assert.ok(created);
+
+  await portfolios.rename("user-a", "portfolio-a", {
+    expectedVersion: 1,
+    name: "Alice Growth",
+  });
+  await portfolios.archive("user-a", "portfolio-a", { expectedVersion: 2 });
+  await portfolios.restore("user-a", "portfolio-a", { expectedVersion: 3 });
+
+  // The first batch order recorded is `create`'s (audit after INSERT,
+  // unconditional -- out of DB-007's scope); the remaining three are
+  // rename/archive/restore, in that call order.
+  const lifecycleBatches = client.batchStatementOrders.slice(1);
+  assert.equal(lifecycleBatches.length, 3);
+  for (const statements of lifecycleBatches) {
+    assert.equal(statements.length, 2);
+    assert.match(
+      statements[0] ?? "",
+      /^INSERT INTO audit_events/,
+      "audit INSERT must be the first statement in the batch",
+    );
+    assert.match(
+      statements[1] ?? "",
+      /^UPDATE portfolios/,
+      "the version-bumping UPDATE must be the last statement in the batch",
+    );
+  }
+});
