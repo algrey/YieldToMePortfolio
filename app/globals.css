@@ -3526,6 +3526,153 @@ dd {
   }
 }
 
+/* UI-006B: dividend assumptions editor. Mobile-first -- each security is one
+   block separated by a divider (owner wireframe decision, 2026-08-13: "no
+   filter box, simple scroll"), reflowing into a dense row at the app's
+   established `.desktop-only`/`.mobile-only` 700px breakpoint. */
+.dividend-assumptions-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.dividend-assumptions-actions button {
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--green-bright);
+  font: inherit;
+  cursor: pointer;
+}
+
+.dividend-assumptions-grid {
+  display: grid;
+  border-top: 1px solid var(--divider);
+}
+
+.dividend-assumptions-header-row {
+  display: none;
+}
+
+.dividend-assumptions-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--divider);
+}
+
+.dividend-assumptions-symbol {
+  color: var(--cream);
+  font-weight: 650;
+}
+
+.dividend-assumptions-static {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.dividend-assumptions-static-label {
+  color: var(--muted-dark);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.dividend-assumptions-row label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.dividend-assumptions-row input {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--ink);
+  color: var(--cream);
+  font: inherit;
+}
+
+.dividend-assumptions-portfolio {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--divider);
+}
+
+.dividend-assumptions-save-bar {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 20px 0;
+}
+
+.dividend-assumptions-save-bar button {
+  min-height: 44px;
+  padding: 0 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--green);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.dividend-live-totals {
+  margin-top: 12px;
+}
+
+.dividend-form-note {
+  grid-column: 1 / -1;
+  margin: -4px 0 0;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.dividend-exclude-label {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.dividend-exclude-label input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+}
+
+@media (min-width: 700px) {
+  .dividend-assumptions-header-row {
+    display: grid;
+    grid-template-columns: 14% 15% 13% 16% 16% 16%;
+    gap: 10px;
+    padding: 10px 0;
+    color: var(--muted-dark);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border-bottom: 1px solid var(--divider);
+  }
+
+  .dividend-assumptions-row {
+    grid-template-columns: 14% 15% 13% 16% 16% 16%;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 0;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

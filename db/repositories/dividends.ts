@@ -2365,11 +2365,20 @@ export function createDividendManualRecordRepository(
           result: "success",
           occurredAt: updatedAt,
         },
-        "EXISTS (SELECT 1 FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ? AND version = ?)",
+        "EXISTS (SELECT 1 FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ? AND version = ? AND import_batch_id IS NULL)",
         [id, userId, portfolioId, input.expectedVersion],
         now,
       ),
       {
+        // B1 (UI-006B review fix): an IMPORTED row (`import_batch_id IS NOT
+        // NULL`, created by IMP-006's CSV commit) is never mutable through
+        // this owner-facing update path -- its facts change only by
+        // reversing the import batch that created it (preserving IMP-006's
+        // reversal accounting) and it must never carry an owner-typed edit
+        // while still being labelled the imported tier. This predicate is
+        // defense-in-depth: the action layer
+        // (`app/dividend-assumptions-actions.ts`) already rejects an
+        // imported-row edit explicitly before reaching here.
         sql: `UPDATE dividend_manual_records SET
           payment_date = COALESCE(?, payment_date),
           shares_decimal = COALESCE(?, shares_decimal),
@@ -2377,6 +2386,7 @@ export function createDividendManualRecordRepository(
           ${franking.fragment},
           updated_at = ?, version = version + 1
         WHERE id = ? AND user_id = ? AND portfolio_id = ? AND version = ?
+          AND import_batch_id IS NULL
         RETURNING ${DIVIDEND_MANUAL_RECORD_COLUMNS}`,
         params: [
           input.paymentDate ?? null,
@@ -2396,7 +2406,7 @@ export function createDividendManualRecordRepository(
     if (!row)
       return await resolveOwnerMutationFailure(
         client,
-        "SELECT id FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ?",
+        "SELECT id FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ? AND import_batch_id IS NULL",
         [id, userId, portfolioId],
       );
     return { ok: true, record: mapDividendManualRecord(row) };
@@ -2422,13 +2432,15 @@ export function createDividendManualRecordRepository(
           result: "success",
           occurredAt,
         },
-        "EXISTS (SELECT 1 FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ? AND version = ?)",
+        "EXISTS (SELECT 1 FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ? AND version = ? AND import_batch_id IS NULL)",
         [id, userId, portfolioId, expectedVersion],
         now,
       ),
       {
+        // B1: same imported-row immutability guard as update() above.
         sql: `DELETE FROM dividend_manual_records
               WHERE id = ? AND user_id = ? AND portfolio_id = ? AND version = ?
+                AND import_batch_id IS NULL
               RETURNING id`,
         params: [id, userId, portfolioId, expectedVersion],
       },
@@ -2438,7 +2450,7 @@ export function createDividendManualRecordRepository(
     if (!row)
       return await resolveOwnerMutationFailure(
         client,
-        "SELECT id FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ?",
+        "SELECT id FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ? AND import_batch_id IS NULL",
         [id, userId, portfolioId],
       );
     return { ok: true };

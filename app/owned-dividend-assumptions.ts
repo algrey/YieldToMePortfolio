@@ -1,0 +1,206 @@
+// UI-006B: owner-scoped read service for the dividend assumptions editor
+// (`/portfolio/:id/income/assumptions`). Composes the same DB-005
+// repositories DIV-003's assumption grid consumes, but returns the RAW
+// owner-entered values (not DIV-003's resolved owner-vs-provider merge)
+// plus each row's `version`, because an EDITOR must show the provider value
+// and the owner override side by side and let a blank owner cell fall back
+// to the provider value -- `domain/dividends/projection.ts`'s
+// `YieldAssumptionResolution` intentionally collapses the two into a single
+// applied figure, which is the wrong shape for this screen.
+//
+// Provider TTM yield reuses `domain/market-data/dividend-yield.ts`'s
+// `deriveTrailingDividendYield`, fed by the same `dividend_events` +
+// current-price-from-holdings inputs `app/owned-income-projection.ts` uses
+// for its own provider-yield column -- see that module's header comment
+// ("These feed DIV-003's assumptions grid 'provider yield' column"), which
+// is exactly this screen. Provider franking has no source in this codebase
+// (an honest, always-"unavailable" seam for a future provider, per the
+// owner's 2026-08-13 wireframe decision), so it is a constant, never
+// derived.
+import type { SqlClient } from "../db/repositories/sql-client.ts";
+import { createDividendAssumptionsRepository } from "../db/repositories/dividends.ts";
+import { createOwnedUserSettingsRepository } from "../db/repositories/owned-portfolios.ts";
+import { loadOwnedHoldings } from "./owned-holdings.ts";
+import { currentFyWindow } from "../domain/calculations/financial-year.ts";
+import {
+  deriveTrailingDividendYield,
+  type TrailingDividendEventInput,
+  type TrailingDividendYieldResult,
+} from "../domain/market-data/dividend-yield.ts";
+
+const MAX_SECURITIES = 500;
+const MAX_EVENTS_PER_PORTFOLIO = 20_000;
+
+type Row = Record<string, unknown>;
+
+function inClause(count: number): string {
+  return Array.from({ length: count }, () => "?").join(",");
+}
+
+export type DividendAssumptionsSecurityRow = {
+  portfolioSecurityId: string;
+  symbol: string;
+  currencyCode: string;
+  /** Read-only. `ok: false` (most commonly `insufficient_history`/`price_unavailable`) is an honest "unavailable", never a fabricated 0%. */
+  providerYield: TrailingDividendYieldResult;
+  /** Always `"unavailable"` -- no provider in this codebase reports a franked proportion (owner wireframe decision, 2026-08-13). Kept as an explicit column rather than omitted, as a seam for a future source. */
+  providerFrankingStatus: "unavailable";
+  ownerYieldPercentDecimal: string | null;
+  ownerFrankingPercentDecimal: string | null;
+  ownerGrowthPercentDecimal: string | null;
+  /** `null` when the owner has never saved assumptions for this security -- the grid save must send `expectedVersion: null` (create) for this row. */
+  version: number | null;
+};
+
+export type DividendAssumptionsPortfolioRow = {
+  valueGrowthPercentDecimal: string | null;
+  portfolioDividendGrowthPercentDecimal: string | null;
+  /** `null` when the owner has never saved portfolio-level assumptions -- save must send `expectedVersion: null` (create). */
+  version: number | null;
+};
+
+export type OwnedDividendAssumptions = {
+  today: string;
+  securities: DividendAssumptionsSecurityRow[];
+  portfolio: DividendAssumptionsPortfolioRow;
+};
+
+export async function loadOwnedDividendAssumptions(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  now = new Date(),
+): Promise<OwnedDividendAssumptions> {
+  const portfolio = await client.get<Row>(
+    `SELECT id FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
+    [portfolioId, userId],
+  );
+  if (!portfolio) throw new Error("not_owned");
+
+  const settings = await createOwnedUserSettingsRepository(client).get(userId);
+  if (!settings) throw new Error("missing_user_settings");
+  const currentWindow = currentFyWindow(
+    now.toISOString(),
+    settings.financialYearStartMonth,
+    settings.timezone,
+  );
+  if (!currentWindow.ok)
+    throw new Error(`invalid_fy_window:${currentWindow.reason}`);
+  const today = currentWindow.window.endDate;
+
+  const assumptions = createDividendAssumptionsRepository(client);
+  const portfolioAssumptions = await assumptions.getPortfolioAssumptions(
+    userId,
+    portfolioId,
+  );
+  const portfolioRow: DividendAssumptionsPortfolioRow = {
+    valueGrowthPercentDecimal:
+      portfolioAssumptions?.valueGrowthPercentDecimal ?? null,
+    portfolioDividendGrowthPercentDecimal:
+      portfolioAssumptions?.portfolioDividendGrowthPercentDecimal ?? null,
+    version: portfolioAssumptions?.version ?? null,
+  };
+
+  const identityRows = await client.all<Row>(
+    `SELECT ps.id, ps.security_id, COALESCE(ps.display_symbol, ps.source_symbol) AS symbol,
+            s.primary_currency_code
+     FROM portfolio_securities ps
+     JOIN securities s ON s.id = ps.security_id
+     WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held'
+     ORDER BY ps.id LIMIT ?`,
+    [userId, portfolioId, MAX_SECURITIES + 1],
+  );
+  if (identityRows.length > MAX_SECURITIES)
+    throw new Error("too_many_securities");
+  const identities = identityRows.map((row) => ({
+    id: String(row.id),
+    securityId: String(row.security_id),
+    symbol: String(row.symbol),
+    currencyCode: String(row.primary_currency_code),
+  }));
+
+  if (identities.length === 0) {
+    return { today, securities: [], portfolio: portfolioRow };
+  }
+
+  const securityAssumptionsRecords = await assumptions.listSecurityAssumptions(
+    userId,
+    portfolioId,
+  );
+  const securityAssumptionsById = new Map(
+    securityAssumptionsRecords.map((record) => [
+      record.portfolioSecurityId,
+      record,
+    ]),
+  );
+
+  // Provider yield needs a current price -- read-only, so a holdings-pipeline
+  // failure (e.g. no published calculation yet) degrades every provider
+  // column to `price_unavailable` rather than failing this whole screen.
+  let holdings: Awaited<ReturnType<typeof loadOwnedHoldings>> | null = null;
+  try {
+    holdings = await loadOwnedHoldings(client, userId, portfolioId, now);
+  } catch {
+    holdings = null;
+  }
+  const holdingsByPortfolioSecurityId = new Map(
+    (holdings?.rows ?? []).map((row) => [row.id, row]),
+  );
+
+  const securityIds = [...new Set(identities.map((row) => row.securityId))];
+  const eventsBySecurityId = new Map<string, TrailingDividendEventInput[]>();
+  const eventRows = await client.all<Row>(
+    `SELECT security_id, kind, status, ex_date, currency_code, gross_per_share_decimal
+     FROM dividend_events
+     WHERE security_id IN (${inClause(securityIds.length)})
+     LIMIT ?`,
+    [...securityIds, MAX_EVENTS_PER_PORTFOLIO + 1],
+  );
+  if (eventRows.length > MAX_EVENTS_PER_PORTFOLIO)
+    throw new Error("too_many_dividend_events");
+  for (const row of eventRows) {
+    if (row.gross_per_share_decimal === null || row.ex_date === null) continue;
+    const securityId = String(row.security_id);
+    const list = eventsBySecurityId.get(securityId) ?? [];
+    list.push({
+      exDate: String(row.ex_date),
+      currencyCode: String(row.currency_code),
+      grossPerShareDecimal: String(row.gross_per_share_decimal),
+      kind: String(row.kind) as TrailingDividendEventInput["kind"],
+      status: String(row.status) as TrailingDividendEventInput["status"],
+    });
+    eventsBySecurityId.set(securityId, list);
+  }
+
+  const securities: DividendAssumptionsSecurityRow[] = identities.map(
+    (identity) => {
+      const holdingRow = holdingsByPortfolioSecurityId.get(identity.id);
+      const nativePrice = holdingRow?.nativePrice ?? null;
+      const events = eventsBySecurityId.get(identity.securityId) ?? [];
+      const providerYield = deriveTrailingDividendYield(
+        events,
+        today,
+        nativePrice !== null
+          ? { amountDecimal: nativePrice, currencyCode: identity.currencyCode }
+          : null,
+      );
+      const ownerAssumptions = securityAssumptionsById.get(identity.id);
+      return {
+        portfolioSecurityId: identity.id,
+        symbol: identity.symbol,
+        currencyCode: identity.currencyCode,
+        providerYield,
+        providerFrankingStatus: "unavailable",
+        ownerYieldPercentDecimal:
+          ownerAssumptions?.dividendYieldPercentDecimal ?? null,
+        ownerFrankingPercentDecimal:
+          ownerAssumptions?.frankingPercentDecimal ?? null,
+        ownerGrowthPercentDecimal:
+          ownerAssumptions?.dividendGrowthPercentDecimal ?? null,
+        version: ownerAssumptions?.version ?? null,
+      };
+    },
+  );
+
+  return { today, securities, portfolio: portfolioRow };
+}
