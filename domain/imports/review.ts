@@ -84,6 +84,7 @@ const EMPTY_NORMALIZED_ROW: NormalizedImportRow = {
   tradeAtUtc: null,
   localTradeDate: null,
   cashEvent: null,
+  frankingPerShare: null,
 };
 
 function byId<T extends { id: string }>(left: T, right: T): number {

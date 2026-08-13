@@ -459,7 +459,7 @@ Owner-scoped, per-share model. This is the future ledger-linked capability the "
 - `source` (`manual`, `csv_import`, `broker_sync`);
 - `created_at`, `updated_at`, `version` (optimistic concurrency).
 
-DIV-001's v1 read-derived income model (owner overrides + manual records, no ledger posting) is served by `dividend_event_overrides`/`dividend_manual_records` below instead of this table.
+DIV-001's v1 read-derived income model (owner overrides + manual records, no ledger posting) is served by `dividend_event_overrides`/`dividend_manual_records` below instead of this table. `source = 'csv_import'` is accepted by the CHECK constraint but intentionally unused in v1: the CSV importer (`IMP-006`) lands committed dividend rows as `dividend_manual_records` instead (see that table's note below and `docs/CSV_IMPORT_SPEC.md`'s "Dividend-receipt rows" section for why), so this value stays reserved for a future task that wires this table to an actual, provider-event-linked cash posting.
 
 ### `dividend_security_assumptions` / `dividend_portfolio_assumptions` (DB-005 extension a)
 
@@ -499,16 +499,17 @@ Sparse per-dividend override, keyed to a specific provider event so overriding a
 
 **Override survival through a provider correction (MKT-005 review fix — the real mechanism, corrected here after review found the originally recorded framing backwards).** `dividend_event_id` is a hard reference to one exact event row. Supersession (see `dividend_events` above) mints a NEW event id for a corrected fact and moves the prior row's status to `superseded`; it never rewrites or re-keys an existing override. Consequently, if the provider later corrects an overridden event, the override row survives completely unchanged — but it stays keyed to the now-superseded PRIOR version's id, not the new corrected event's id. A naive lookup that only checks "is there an override for the security's current active dividend event" would therefore MISS it — the opposite of the intended "the override still wins" behaviour recorded for DIV-001. Correctly resolving this requires walking the `supersedes_event_id` chain from the current active event backward through every prior version and checking each id for an override; `collectEventLineageIds` (`domain/market-data/corporate-action-ingestion.ts`) is a small pure helper that returns exactly that ordered lineage. The actual resolution logic (matching lineage ids against `dividend_event_overrides`, deciding which value the detail view shows) is `DIV-001` scope and is a binding requirement for that task, not implemented here.
 
-### `dividend_manual_records` (DB-005 extension d)
+### `dividend_manual_records` (DB-005 extension d; TASKS.md `IMP-006` task / requirement `IMP-007`)
 
 Manual dividend record for a security/payment the provider never surfaced as an event — no `dividend_event_id` link:
 
 - `id`, `user_id`, `portfolio_id`, `portfolio_security_id`;
 - `payment_date`;
 - `shares_decimal`, `dividend_per_share_decimal` (required), `franking_credit_per_share_decimal` (nullable);
+- `import_batch_id`, `source_reference` (both nullable, no FK — IMP-006, migration `0032`, `ALTER TABLE ADD COLUMN` only, no rebuild): set only for a row a CSV import batch created, `NULL` for rows entered directly through the manual dividend-entry UI. `source_reference` reuses `transactions.source_reference`'s `import-fingerprint:<row fingerprint>` scheme (a unique index on `(portfolio_id, source_reference)` gives the same cross-batch/resume idempotency trades get); `import_batch_id` is what a reversal deletes by;
 - `created_at`, `updated_at`, `version`.
 
-DIV-001's double-count guard (manual/override > imported > auto-derived — exactly one row wins for a given security/event window) is domain-layer logic, not a schema constraint.
+DIV-001's double-count guard (manual/override > imported > auto-derived — exactly one row wins for a given security/event window) is domain-layer logic, not a schema constraint; this table's read-time derivation (`domain/dividends/history.ts`) does not distinguish import-created rows from directly-entered ones — both are the `"manual"` source. CSV-imported dividend rows land here rather than in `dividend_receipts` because that table's `dividend_event_id` is a NOT NULL reference to the shared, provider-populated `dividend_events` table, which the importer cannot safely satisfy for an arbitrary broker row (see `docs/CSV_IMPORT_SPEC.md`'s "Dividend-receipt rows (IMP-006 extension)" section for the full reasoning). Reversal deletes the rows a batch created (identified by `import_batch_id`) rather than writing a "reversed" marker — this table has no such status, matching its existing owner-mutable/deletable treatment elsewhere (its repository already exposes a hard `remove()` for the manual-entry UI).
 
 Only actual receipts (`dividend_receipts`, once a later task wires cash posting) affect cash and lifetime-actual income; provider events, assumptions, FY overrides, event overrides, and manual records are all income-reporting facts — nothing in this section posts cash to the ledger in v1. A provider event never creates an actual receipt without a user/imported/broker fact, and estimated income is never storable as a receipt (enforced by the `dividend_receipts_status_check` CHECK constraint).
 

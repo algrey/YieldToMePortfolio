@@ -39,6 +39,9 @@ export type ImportIssueCode =
   | "DUPLICATE_EXACT"
   | "DISPLAY_SYMBOL_OVERRIDE"
   | "CASH_ENCODING_INVALID"
+  | "DIVIDEND_PER_SHARE_INVALID"
+  | "FRANKING_INVALID"
+  | "FRANKING_ON_NON_DIVIDEND"
   | "CSV_IMPORT_DISABLED"
   | "CSV_IMPORT_TOO_LARGE"
   | "ROW_LIMIT_EXCEEDED"
@@ -62,7 +65,8 @@ export type ImportFieldName =
   | "type"
   | "accounting"
   | "accountingExecutionIds"
-  | "notes";
+  | "notes"
+  | "frankingPerShare";
 
 export type ImportIssue = Readonly<{
   code: ImportIssueCode;
@@ -76,7 +80,7 @@ export type ImportRowKind =
   "blank" | "definition" | "transaction" | "unsupported";
 
 export type ImportTransactionKind =
-  "buy" | "sell" | "cash_deposit" | "cash_withdrawal";
+  "buy" | "sell" | "cash_deposit" | "cash_withdrawal" | "dividend";
 
 export type ImportHeaderReport = Readonly<{
   parserVersion: string;
@@ -109,6 +113,11 @@ type MutableNormalizedImportRow = {
   tradeAtUtc: string | null;
   localTradeDate: string | null;
   cashEvent: "cash_deposit" | "cash_withdrawal" | null;
+  // IMP-006: dividend-receipt row support. Populated only from the
+  // 18-column dividend-capable header variant; absent under the original
+  // 17-column header, in which case it is always null (unknown, never a
+  // silent zero -- the column simply cannot report franking).
+  frankingPerShare: string | null;
 };
 
 export type NormalizedImportRow = Readonly<MutableNormalizedImportRow>;
@@ -129,6 +138,7 @@ export type ImportParseSummary = Readonly<{
   transactionRows: number;
   unsupportedRows: number;
   cashTransactionRows: number;
+  dividendRows: number;
   duplicateRows: number;
 }>;
 
@@ -181,13 +191,36 @@ export const SUPPORTED_IMPORT_HEADER = [
   "Notes",
 ] as const satisfies readonly string[];
 
+// IMP-006: a second, backward-compatible header version that adds one
+// trailing column so broker exports can carry a dividend receipt's franking
+// credit per share. `Type` gains a `Dividend` enum value under either
+// header version (see `parseTransactionType`); it is only ever populated
+// when this 18-column header is the one that matched (see `HEADER_TO_FIELD_NAME`).
+// The original 17-column contract in `SUPPORTED_IMPORT_HEADER` above is
+// untouched so existing uploads keep parsing under
+// `SUPPORTED_IMPORT_PARSER_VERSION` exactly as before.
+export const SUPPORTED_IMPORT_PARSER_VERSION_WITH_DIVIDENDS =
+  "strict-18-column-dividends-v1";
+
+export const SUPPORTED_IMPORT_HEADER_WITH_DIVIDENDS = [
+  ...SUPPORTED_IMPORT_HEADER,
+  "Franking Credit Per Share",
+] as const satisfies readonly string[];
+
+// Deliberately typed as `readonly string[]` (not a literal-tuple `as const`)
+// so callers can check membership of a plain `string` (e.g. a
+// `import_batches.parser_version` column value) with `.includes(...)`
+// without a type error.
+export const SUPPORTED_IMPORT_PARSER_VERSIONS: readonly string[] = [
+  SUPPORTED_IMPORT_PARSER_VERSION,
+  SUPPORTED_IMPORT_PARSER_VERSION_WITH_DIVIDENDS,
+];
+
 export const DEFAULT_IMPORT_LIMITS: ImportLimits = {
   maxBytes: 10 * 1024 * 1024,
   maxRows: 100_000,
   maxFieldLength: 1024 * 1024,
 };
-
-const SUPPORTED_HEADER_SET = new Set<string>([...SUPPORTED_IMPORT_HEADER]);
 
 const SUPPORTED_FIELD_SET = new Set<ImportFieldName>([
   "id",
@@ -207,6 +240,7 @@ const SUPPORTED_FIELD_SET = new Set<ImportFieldName>([
   "accounting",
   "accountingExecutionIds",
   "notes",
+  "frankingPerShare",
 ]);
 
 const HEADER_TO_FIELD_NAME: Record<string, ImportFieldName> = {
@@ -227,7 +261,24 @@ const HEADER_TO_FIELD_NAME: Record<string, ImportFieldName> = {
   Accounting: "accounting",
   "Accounting Execution Ids": "accountingExecutionIds",
   Notes: "notes",
+  "Franking Credit Per Share": "frankingPerShare",
 };
+
+type SupportedHeaderDefinition = {
+  parserVersion: string;
+  headers: readonly string[];
+};
+
+const SUPPORTED_HEADER_DEFINITIONS: readonly SupportedHeaderDefinition[] = [
+  {
+    parserVersion: SUPPORTED_IMPORT_PARSER_VERSION,
+    headers: SUPPORTED_IMPORT_HEADER,
+  },
+  {
+    parserVersion: SUPPORTED_IMPORT_PARSER_VERSION_WITH_DIVIDENDS,
+    headers: SUPPORTED_IMPORT_HEADER_WITH_DIVIDENDS,
+  },
+];
 
 type CsvRowsResult =
   | { ok: true; rows: string[][] }
@@ -305,6 +356,7 @@ function normalizeDecimalText(value: string): string | null {
 function normalizeIssueSeverity(code: ImportIssueCode): ImportIssueSeverity {
   switch (code) {
     case "FX_ZERO_TREATED_AS_UNKNOWN":
+    case "FRANKING_ON_NON_DIVIDEND":
       return "warning";
     case "DUPLICATE_EXACT":
     case "DISPLAY_SYMBOL_OVERRIDE":
@@ -335,6 +387,8 @@ function parseTransactionType(value: string): ImportTransactionKind | null {
       return "buy";
     case "sell":
       return "sell";
+    case "dividend":
+      return "dividend";
     default:
       return null;
   }
@@ -597,7 +651,11 @@ async function sha256Hex(value: Uint8Array): Promise<string> {
     .join("");
 }
 
-function validateHeader(rawHeader: string[]): HeaderValidationResult {
+function validateHeaderAgainst(
+  rawHeader: string[],
+  definition: SupportedHeaderDefinition,
+): HeaderValidationResult {
+  const supportedHeaderSet = new Set<string>(definition.headers);
   const normalizedHeaders = rawHeader.map((header) =>
     normalizeHeaderCell(header),
   );
@@ -608,24 +666,24 @@ function validateHeader(rawHeader: string[]): HeaderValidationResult {
 
   for (const header of normalizedHeaders) {
     if (seen.has(header)) {
-      if (SUPPORTED_HEADER_SET.has(header)) {
+      if (supportedHeaderSet.has(header)) {
         duplicates.add(header);
       }
     } else {
       seen.add(header);
     }
 
-    if (!SUPPORTED_HEADER_SET.has(header)) {
+    if (!supportedHeaderSet.has(header)) {
       unknownHeaders.push(header);
     }
   }
 
-  const missingHeaders = SUPPORTED_IMPORT_HEADER.filter(
+  const missingHeaders = definition.headers.filter(
     (header) => !seen.has(header),
   );
 
   const header: ImportHeaderReport = {
-    parserVersion: SUPPORTED_IMPORT_PARSER_VERSION,
+    parserVersion: definition.parserVersion,
     observedHeaders,
     normalizedHeaders,
     missingHeaders,
@@ -635,7 +693,7 @@ function validateHeader(rawHeader: string[]): HeaderValidationResult {
   };
 
   if (
-    normalizedHeaders.length !== SUPPORTED_IMPORT_HEADER.length ||
+    normalizedHeaders.length !== definition.headers.length ||
     missingHeaders.length > 0 ||
     unknownHeaders.length > 0 ||
     duplicates.size > 0
@@ -652,6 +710,21 @@ function validateHeader(rawHeader: string[]): HeaderValidationResult {
   });
 
   return { ok: true, header, headerIndex };
+}
+
+// Tries every supported header version, in order, and returns the first
+// exact match. On total failure, the reported diff (missing/unknown
+// headers) is always relative to the original 17-column contract -- the
+// primary supported shape -- for a stable, familiar error message.
+function validateHeader(rawHeader: string[]): HeaderValidationResult {
+  for (const definition of SUPPORTED_HEADER_DEFINITIONS) {
+    const result = validateHeaderAgainst(rawHeader, definition);
+    if (result.ok) {
+      return result;
+    }
+  }
+
+  return validateHeaderAgainst(rawHeader, SUPPORTED_HEADER_DEFINITIONS[0]!);
 }
 
 function getField(
@@ -705,6 +778,12 @@ function createNormalizedRow(
     tradeAtUtc: null,
     localTradeDate: null,
     cashEvent: null,
+    // Blank -> null (unknown, never a silent zero); "0" is a legitimate
+    // explicit "unfranked" value and is preserved as-is -- unlike
+    // `purchaseExchangeRate`, franking has no zero-means-missing rule.
+    frankingPerShare: normalizeDecimalText(
+      normalizeText(getField(row, headerIndex, "frankingPerShare")) ?? "",
+    ),
   };
 }
 
@@ -732,6 +811,19 @@ function normalizeRowForFingerprint(row: NormalizedImportRow): string {
     row.accounting ?? "",
     row.accountingExecutionIds ?? "",
     row.notes ?? "",
+    // Only a dividend row can carry franking (see classifyRow's
+    // FRANKING_ON_NON_DIVIDEND guard), and only when it's actually present.
+    // Appending unconditionally would change EVERY row's fingerprint --
+    // including every legacy 17-column row, which can never have a
+    // franking value at all -- breaking cross-version idempotency: the
+    // exact same bytes committed under the 17-column parser would no
+    // longer fingerprint-match themselves under a later re-import, and
+    // would double-post. Appending only when non-null keeps a legacy
+    // fingerprint byte-identical, and makes an 18-column row with blank
+    // franking hash exactly like its 17-column equivalent.
+    ...(row.type === "dividend" && row.frankingPerShare !== null
+      ? [row.frankingPerShare]
+      : []),
   ].join("|");
 }
 
@@ -739,6 +831,7 @@ function classifyRow(
   row: string[],
   headerIndex: Map<ImportFieldName, number>,
   rowNumber: number,
+  expectedColumnCount: number,
 ): RowClassification {
   const normalized = createNormalizedRow(row, headerIndex);
   const issues: ImportIssue[] = [];
@@ -747,11 +840,11 @@ function classifyRow(
     return { kind: "blank", issues, normalized };
   }
 
-  if (row.length !== SUPPORTED_IMPORT_HEADER.length) {
+  if (row.length !== expectedColumnCount) {
     issues.push(
       makeIssue(
         "COLUMN_COUNT",
-        "The row does not contain the supported 17-column shape.",
+        `The row does not contain the supported ${expectedColumnCount}-column shape.`,
         rowNumber,
       ),
     );
@@ -869,6 +962,61 @@ function classifyRow(
     );
   } else {
     normalized.commission = normalizeDecimalText(normalized.commission);
+  }
+
+  if (normalized.type === "dividend" && normalized.costPerShare === "0") {
+    issues.push(
+      makeIssue(
+        "DIVIDEND_PER_SHARE_INVALID",
+        "Cost Per Share (dividend per share) must be a positive decimal value for a Dividend row.",
+        rowNumber,
+        "costPerShare",
+      ),
+    );
+  }
+
+  const rawFrankingPerShare = normalizeText(
+    getField(row, headerIndex, "frankingPerShare"),
+  );
+  if (rawFrankingPerShare !== null && normalized.frankingPerShare === null) {
+    // Present but did not normalize to a decimal at all (e.g. "abc") --
+    // distinct from a blank column, which stays null/unknown with no issue.
+    issues.push(
+      makeIssue(
+        "FRANKING_INVALID",
+        "Franking Credit Per Share must be a valid decimal value.",
+        rowNumber,
+        "frankingPerShare",
+      ),
+    );
+  } else if (
+    normalized.frankingPerShare !== null &&
+    normalized.frankingPerShare.startsWith("-")
+  ) {
+    issues.push(
+      makeIssue(
+        "FRANKING_INVALID",
+        "Franking Credit Per Share must be a non-negative decimal value.",
+        rowNumber,
+        "frankingPerShare",
+      ),
+    );
+  }
+
+  if (normalized.type !== "dividend" && normalized.frankingPerShare !== null) {
+    // Only a Dividend row's franking is meaningful/consumed; a stray value
+    // on any other row type is surfaced (not silently dropped) but doesn't
+    // block commit, and never contributes to the row's fingerprint (see
+    // `normalizeRowForFingerprint`) -- only a Dividend row's franking is
+    // part of that row's identity.
+    issues.push(
+      makeIssue(
+        "FRANKING_ON_NON_DIVIDEND",
+        "Franking Credit Per Share is only used on a Dividend row and is ignored here.",
+        rowNumber,
+        "frankingPerShare",
+      ),
+    );
   }
 
   const tradeTimestamp = parseTradeTimestamp(
@@ -1145,6 +1293,7 @@ export async function parseStrictVersionedCsvImport(
   let transactionRows = 0;
   let unsupportedRows = 0;
   let cashTransactionRows = 0;
+  let dividendRows = 0;
   let duplicateRows = 0;
 
   for (let index = bodyStartIndex; index < rowsResult.rows.length; index += 1) {
@@ -1154,6 +1303,7 @@ export async function parseStrictVersionedCsvImport(
       row,
       headerValidation.headerIndex,
       rowNumber,
+      headerValidation.header.normalizedHeaders.length,
     );
     const fingerprintSource = normalizeRowForFingerprint(
       classification.normalized,
@@ -1191,6 +1341,9 @@ export async function parseStrictVersionedCsvImport(
         if (classification.normalized.cashEvent !== null) {
           cashTransactionRows += 1;
         }
+        if (classification.normalized.type === "dividend") {
+          dividendRows += 1;
+        }
         break;
       case "unsupported":
         unsupportedRows += 1;
@@ -1210,7 +1363,7 @@ export async function parseStrictVersionedCsvImport(
 
   return {
     ok: true,
-    parserVersion: SUPPORTED_IMPORT_PARSER_VERSION,
+    parserVersion: headerValidation.header.parserVersion,
     fileFingerprint,
     header: headerValidation.header,
     rows,
@@ -1222,6 +1375,7 @@ export async function parseStrictVersionedCsvImport(
       transactionRows,
       unsupportedRows,
       cashTransactionRows,
+      dividendRows,
       duplicateRows,
     },
   };

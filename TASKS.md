@@ -584,9 +584,18 @@ Status: DONE on 2026-08-03.
 - Review finding: The rebuild currently loads the entire owner ledger into memory and emits one unbounded D1 batch containing every delete and projection insert. This conflicts with the architecture’s bounded-chunk, D1-parameter, and Worker-memory limits and cannot resume from a committed projection high-water mark after a partial failure. Add bounded/resumable rebuild chunks, enforce the batch/query limits, and add high-volume and injected-failure resume tests before marking this task DONE.
 - Review resolution: Replaced whole-ledger replacement with run-versioned projection rows, bounded per-security ledger reads, bounded output batches, and an atomic security/output checkpoint. A completed run becomes current only through the owner-scoped publication pointer, so partial and stale runs remain invisible. Added a 150-security volume test that instruments row, statement, and parameter bounds plus an injected-failure test proving the failed chunk leaves no rows/checkpoint advance and resumes to identical output.
 
+### DIV-004 — Imported-dividend tier separation and entry proximity warnings
+
+Status: READY (IMP-006 done 2026-08-13); required BEFORE UI-006B/UI-006C ship their manual dividend-entry forms (2026-08-13, from IMP-006 review).
+
+- Problem: IMP-006 lands imported CSV dividends as `dividend_manual_records`, so they sit in DIV-001's MANUAL precedence tier. Consequences measured by the IMP-006 reviewer: an imported row outranks an owner-typed receipt for the same event (receipt retained as dominatedReceipt), and an imported row duplicating an owner-typed manual record produces two rows (double count). Currently unreachable — only the importer creates manual records — but UI-006B/C's forms make both cases live.
+- Deliver: (a) distinguish import-created records (import_batch_id already present) as an `imported` source tier ranking BELOW owner-typed facts in `domain/dividends/history.ts` precedence (override > manual > receipt > imported > auto) with proximity dedupe across tiers; (b) a preview-time proximity warning in the import review when an incoming dividend row falls within the matching window of an existing owner-entered manual record or receipt; (c) docs updated (CSV_IMPORT_SPEC precedence sentence restored to the full ordering, CALCULATIONS §11 tier list).
+- Acceptance: owner-typed receipt beats an imported row for the same event; imported row duplicating an owner manual record collapses to one row (owner wins); preview warns before committing a probable duplicate; no regression to provider-event dedupe.
+- Tests: tier matrix (imported × receipt/manual/override/auto), preview warning fixtures, IMP-006 round-trip regression.
+
 ### UI-006C — Per-security dividend history tab
 
-Status: BLOCKED on DIV-001, MKT-005, DB-005. Owner decisions recorded 2026-08-13 (wireframe-approved).
+Status: BLOCKED on DIV-001 (done), MKT-005 (done), DB-005 (done), and DIV-004 (tier separation must precede the manual-entry forms). Owner decisions recorded 2026-08-13 (wireframe-approved).
 
 - Objective: a "Dividends" tab on each security's detail view showing the full auto-populated dividend history, declared-but-unpaid events, per-row editing, and lifetime totals.
 - Dependencies: DIV-001 (derived-history model), MKT-005 (events), DB-005 (override/manual tables), UI-003/UI-005A (security detail surfaces), AUTH-004, QA-001B.
@@ -608,7 +617,7 @@ Status: DEFERRED; owner-flagged 2026-08-13 as likely future work — recorded no
 
 ### IMP-006 — Dividend-receipt rows in CSV import
 
-Status: READY (DB-005, DIV-001 done 2026-08-13); owner-requested 2026-08-13 (dividend modelling feature).
+Status: DONE (2026-08-13); owner-requested 2026-08-13 (dividend modelling feature).
 
 - Objective: extend the staged CSV import pipeline with a dividend-receipt row type so broker exports containing dividend transactions land as actual receipts through the existing preview/commit/reverse workflow.
 - Dependencies: DB-005 (receipt schema), DIV-001 (receipt validation/posting rules), IMP-004A (review workflow), IMP-003B (reversal).
@@ -618,6 +627,7 @@ Status: READY (DB-005, DIV-001 done 2026-08-13); owner-requested 2026-08-13 (div
 - Tests: parse/mapping/enum edge cases, duplicate detection across batches, unresolved-security blocking, commit/reverse round trip including receipts, mixed-type batch atomicity.
 - Risks: broker CSV dividend formats vary (net vs gross, franking present or absent) — mapping must be explicit, never inferred silently.
 - Parallel safe: yes with DIV-003 after its dependencies.
+- Completion note (2026-08-13): Dividend rows flow through the existing staged pipeline via a new exact-signature header version `strict-18-column-dividends-v1` (17 columns + Franking Credit Per Share) alongside the untouched strict-17 contract; Type=Dividend reuses trade columns (payment date/shares/DPS), issue codes DIVIDEND_PER_SHARE_INVALID / FRANKING_INVALID / FRANKING_ON_NON_DIVIDEND (warning). Architecture decision (worker-resolved, reviewer-validated): committed dividend rows create `dividend_manual_records` — NOT `dividend_receipts`, whose NOT NULL dividend_event_id FK would force fabricating shared provider events; records carry new `import_batch_id`/`source_reference` columns (migration 0032, ALTER-ADD only, purge-lock triggers intact) with a (portfolio_id, source_reference) unique index for cross-batch dedupe; commit statements fold into the existing guard-conditional atomic batch; reversal hard-deletes batch-created records with `reversedDividendRecordCount` audit metadata; SECURITY_UNRESOLVED blocks dividend rows like trades; franking absent = NULL never zero. Review round 1 FAIL (fingerprint serialization change broke cross-version idempotency — pre-upgrade imports double-posted on re-import; docs overclaimed a nonexistent imported tier) → fixed (franking contributes to row identity only for dividend rows with a value; legacy fingerprints byte-identical, pinned by sensitivity-verified constant; docs state the real two-tier model and the gap tracked as DIV-004) → round 2 PASS with reviewer-re-executed cross-version repro (re-import dedupes, quantity stays 5). `tests/imp-006.test.ts` 20 tests incl. end-to-end derived-history and real-fingerprint cross-batch coverage. `npm run check` exit 0 (545 pass, 10 gated skips). Non-blocking: CSV_IMPORT_SPEC §10/line-118 wording could state the narrower fingerprint rule; pre-existing parseAccountingMethod dead code noted.
 
 ## Market data and calculations
 
@@ -1260,7 +1270,7 @@ Status: BLOCKED on DIV-003, FY-001A. Owner decisions recorded 2026-08-13 (see DI
 
 ### UI-006B — Dividend assumptions editor and manual receipt entry
 
-Status: BLOCKED on DIV-003, DIV-001, DB-005. Owner decisions recorded 2026-08-13.
+Status: BLOCKED on DIV-004 (tier separation precedes the receipt/manual entry forms); other dependencies (DIV-003, DIV-001, DB-005) done 2026-08-13. Owner decisions recorded 2026-08-13.
 
 - Objective: the editing surfaces for the income modeller: the portfolio-scoped assumptions grid and the manual actual-receipt/FY-override forms.
 - Dependencies: DIV-003 (resolution semantics), DIV-001 (receipt service), DB-005 (tables), AUTH-004 (CSRF), UI-006A (screen to host the entry point).

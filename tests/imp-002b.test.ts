@@ -69,6 +69,7 @@ function row(
       tradeAtUtc: "2026-07-01T00:00:00.000Z",
       localTradeDate: "2026-07-01",
       cashEvent: null,
+      frankingPerShare: null,
       ...overrides,
     },
   };
@@ -125,6 +126,7 @@ test("reconciliation previews deterministic quantities and explicit mappings", (
   assert.deepEqual(preview.projectedQuantities, { "membership-a": "3" });
   assert.deepEqual(preview.counts, {
     transactionCreates: 2,
+    dividendCreates: 0,
     candidateCreates: 0,
     skips: 1,
     unresolved: 0,

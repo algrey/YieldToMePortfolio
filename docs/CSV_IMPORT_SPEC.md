@@ -92,6 +92,35 @@ The supplied file’s `AUD=CASH` rows are a versioned legacy encoding, not a lis
 
 This compatibility rule applies only to this parser version. Native YieldToMe ledger events use explicit cash transaction types.
 
+### Dividend-receipt rows (TASKS.md `IMP-006` task; requirement `IMP-007` -- the requirement id `IMP-006` was already taken by "Alternative CSV variants (deprecated)" above, so this feature's requirement is `IMP-007`, per AGENTS.md's "preserve stable requirement IDs, never reuse")
+
+A second, backward-compatible header version supports dividend-receipt rows in the same staged import pipeline as trades: `strict-18-column-dividends-v1`, which is the exact 17-column header from §2 plus one trailing column, `Franking Credit Per Share`. Both parser versions remain permanently supported and are selected by exact header signature match (§14) -- an ordinary 17-column trade-only export keeps parsing under `strict-17-column-v1` unchanged; a `Type` value of `Dividend` is accepted under either header version, but franking data can only be supplied through the 18-column header (a `Dividend` row under the 17-column header always has unknown franking).
+
+Column mapping for a `Dividend` row reuses the trade columns with dividend-specific meaning, so no other new columns are needed:
+
+| Column                                               | Dividend-row meaning                                                                                                                                                                                                                                            |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Symbol`/`Exchange`/`Currency`                       | Resolves the security exactly like a trade row (same candidate-matching rules, same `SECURITY_UNRESOLVED`-equivalent blocking issue: `SECURITY_MAPPING_REQUIRED`)                                                                                               |
+| `Transaction Date`                                   | The dividend's **payment date** (same offset/timezone parsing as trades; `Transaction Time` is optional and ignored -- payment date is a calendar date, not an instant)                                                                                         |
+| `Shares Owned`                                       | Shares the receipt is calculated against                                                                                                                                                                                                                        |
+| `Cost Per Share`                                     | Dividend per share (native currency); must be a positive decimal -- zero is rejected (`DIVIDEND_PER_SHARE_INVALID`) since a $0 dividend is not a fact worth importing                                                                                           |
+| `Franking Credit Per Share`                          | Franking credit per share (native currency), **optional**. Blank/absent = unknown, never zero (`FRANKING_INVALID` blocks a present-but-malformed or negative value; a genuinely-supplied `0` is preserved as an explicit unfranked fact, distinct from unknown) |
+| `Commission`, `Purchase Exchange Rate`, `Accounting` | Unused/ignored for `Dividend` rows -- dividend rows never resolve FX at import time (see below) and never touch cost basis/lots                                                                                                                                 |
+
+A `Dividend` row is staged/classified/previewed through the identical `transaction`-class pipeline as a trade row (same `import_rows.row_class = 'transaction'`), so no new resolution-card type exists for the reviewer UI: portfolio and security mapping decisions, and the `SECURITY_MAPPING_REQUIRED`/`SECURITY_MAPPING_AMBIGUOUS` blocking issues, all work exactly as they do for trades. The one deliberate difference is FX: because `dividend_manual_records` (see below) stores native per-share amounts only, a `Dividend` row never triggers `FX_DIRECTION_REQUIRED`/`FX_RATE_INCOMPLETE` and never consumes `Purchase Exchange Rate`. The reconciliation preview reports dividend rows in a separate `counts.dividendCreates` figure alongside `counts.transactionCreates`, and the parse summary reports a separate `summary.dividendRows` count alongside `summary.transactionRows`.
+
+**Why `dividend_manual_records`, not `dividend_receipts`, on commit.** `dividend_receipts` (DB-005) requires a NOT NULL `dividend_event_id` foreign key to the shared, provider-populated `dividend_events` table (MKT-005). The importer has no safe way to fabricate or guess that a specific provider corporate-action event exists for an arbitrary broker CSV row, and requiring one to already exist would make dividend import fail whenever the configured provider has not ingested that exact event -- defeating the point of an import path whose purpose is filling gaps the provider missed. `dividend_manual_records` is DIV-001's own table for exactly this case ("a security/payment the provider never surfaced as an event").
+
+**Precedence (correction -- an imported row is NOT a separate "imported" tier).** DIV-001's read-time derivation (`domain/dividends/history.ts`) has exactly two tiers today: manual (`dividend_manual_records`) beats a matched receipt (`resolveOwnerFact`: manual wins the row against a provider event; an outranked receipt is consumed but stays visible via `dominatedReceipt`, never silently dropped), and that manual-or-receipt result beats the provider event's own auto-derived figure. A CSV-imported row is a plain `dividend_manual_records` row -- it occupies the SAME manual tier as a directly owner-entered manual record, with no distinguishing marker at the domain layer beyond `import_batch_id`/`source_reference` (which the derivation does not read). Concretely: an imported row that proximity-matches a provider event still wins over a receipt for that event (receipt retained as `dominatedReceipt`, never double-counted) via the existing manual-vs-receipt precedence -- that part holds. But an imported row that happens to duplicate an owner-entered manual record for the same security/date is NOT deduplicated or ranked against it; both are independent manual rows and both would appear. This is unreachable today only because nothing but this importer currently creates `dividend_manual_records` rows (there is no manual-entry UI yet); separating "owner-typed manual" from "imported manual" into distinct, ranked tiers is tracked as follow-up work (DIV-004) to land before the manual-entry UI ships.
+
+**Schema addition.** `dividend_manual_records` gained two nullable, FK-less columns for this: `import_batch_id` (which batch created the row, for reversal) and `source_reference` (the same `import-fingerprint:<row fingerprint>` idempotency key trades store on `transactions.source_reference`), plus a unique index on `(portfolio_id, source_reference)`. Both are `ALTER TABLE ADD COLUMN`s (no table rebuild), added FK-less to mirror the existing precedent of `import_rows.commit_transaction_id`/`transactions.source_reference` (neither of which carry a formal FK either); ownership and target validity are checked procedurally at commit time before the insert, the same way every other import-commit target is. Rows created by the manual-entry UI (not import) leave both columns `NULL`.
+
+**Idempotency and duplicate detection.** A `Dividend` row's natural key is the same versioned fingerprint scheme trades use (§10 "Row identity"), extended to include the franking column; the resulting `import-fingerprint:<fingerprint>` value is stored as `dividend_manual_records.source_reference` exactly as trades store it on `transactions.source_reference`. A second import (same batch resumed, or a different batch re-exporting the identical source row -- same `Id` and same normalized values) is detected by looking up that value before inserting: an existing match causes the row to be skipped and linked (`import_rows.commit_transaction_id`) to the existing manual record's id, never a duplicate insert.
+
+**Commit atomicity.** The manual-record insert (plus its audit row) is built as `SqlStatement`s only, not executed independently -- `db/repositories/dividends.ts`'s `buildDividendManualRecordImportInsertStatements` mirrors `buildLedgerPostingStatements`'s "prepare, don't execute" shape precisely so `db/repositories/import-commit.ts` folds it into the same atomic chunk `client.batch()` call as the `import_rows` status update. A batch mixing trade and dividend rows in the same chunk commits both, or neither, atomically.
+
+**Reversal semantics.** Dividend rows never post through the ledger, so they have no compensating reversal transaction the way trades do. DIV-001 treats `dividend_manual_records` as an owner-mutable/deletable fact (its own repository already exposes a hard `remove()` for the manual-entry UI), not an immutable ledger entry -- there is no "reversed" status column on this table, and adding one purely for import provenance was rejected as unnecessary schema surface. Reversing a batch therefore **deletes** exactly the `dividend_manual_records` rows it created (`WHERE user_id = ? AND import_batch_id = ?`) and marks the corresponding `import_rows` `commit_status = 'reversed'`, both as idempotent, self-guarded statements folded into the same atomic `finalize()` call trades' compensating-reversal statements already use -- safe to include on every invocation of a resumed/repeated reversal, including a batch containing only dividend rows (no trade transactions to reverse at all).
+
 ## 4. Row grammar
 
 Parsing first preserves every physical row and all original field strings.
@@ -275,33 +304,36 @@ Import history is private, owner-scoped, and non-cacheable. Batch detail returns
 
 ## 9. Issue code baseline
 
-| Code                         | Severity | Meaning                                                  |
-| ---------------------------- | -------- | -------------------------------------------------------- |
-| `HEADER_MISMATCH`            | error    | logical header differs from supported 17-column version  |
-| `COLUMN_COUNT`               | error    | row field count cannot be safely reconciled              |
-| `ROW_UNCLASSIFIED`           | error    | nonblank row matches no grammar                          |
-| `ROW_AMBIGUOUS`              | error    | row matches conflicting grammars                         |
-| `PORTFOLIO_MISSING`          | error    | transaction has no definition/mapping                    |
-| `PORTFOLIO_CONFLICT`         | error    | repeated name/currency/method conflict                   |
-| `CURRENCY_UNKNOWN`           | error    | unsupported currency                                     |
-| `EXCHANGE_UNRESOLVED`        | error    | exchange alias cannot map                                |
-| `SECURITY_UNRESOLVED`        | error    | no confirmed canonical security                          |
-| `SECURITY_AMBIGUOUS`         | error    | multiple candidates                                      |
-| `TRANSACTION_TYPE_UNKNOWN`   | error    | unsupported type                                         |
-| `DATE_INVALID`               | error    | not an enumerated date format                            |
-| `DATE_TIME_CONFLICT`         | error    | embedded/separate times disagree                         |
-| `QUANTITY_INVALID`           | error    | missing/nonpositive buy/sell quantity                    |
-| `PRICE_INVALID`              | error    | missing/invalid price                                    |
-| `FX_ZERO_TREATED_AS_UNKNOWN` | warning  | source zero normalized to missing                        |
-| `FX_DIRECTION_UNCONFIRMED`   | error    | base/native interpretation unresolved                    |
-| `FEE_INVALID`                | error    | negative/invalid cost                                    |
-| `ACCOUNTING_UNSUPPORTED`     | error    | method is not FIFO                                       |
-| `DUPLICATE_EXACT`            | info     | exact normalized row already committed                   |
-| `DUPLICATE_POSSIBLE`         | warning  | close semantic match needs decision                      |
-| `OVERSELL`                   | error    | sells exceed available mapped lots                       |
-| `HISTORY_INCOMPLETE`         | warning  | import lacks opening cash/basis/history                  |
-| `DISPLAY_SYMBOL_OVERRIDE`    | info     | display symbol differs from canonical map                |
-| `CASH_ENCODING_INVALID`      | error    | legacy `=CASH` row violates the exact compatibility rule |
+| Code                         | Severity | Meaning                                                                                                                                |
+| ---------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `HEADER_MISMATCH`            | error    | logical header differs from supported 17-column version                                                                                |
+| `COLUMN_COUNT`               | error    | row field count cannot be safely reconciled                                                                                            |
+| `ROW_UNCLASSIFIED`           | error    | nonblank row matches no grammar                                                                                                        |
+| `ROW_AMBIGUOUS`              | error    | row matches conflicting grammars                                                                                                       |
+| `PORTFOLIO_MISSING`          | error    | transaction has no definition/mapping                                                                                                  |
+| `PORTFOLIO_CONFLICT`         | error    | repeated name/currency/method conflict                                                                                                 |
+| `CURRENCY_UNKNOWN`           | error    | unsupported currency                                                                                                                   |
+| `EXCHANGE_UNRESOLVED`        | error    | exchange alias cannot map                                                                                                              |
+| `SECURITY_UNRESOLVED`        | error    | no confirmed canonical security                                                                                                        |
+| `SECURITY_AMBIGUOUS`         | error    | multiple candidates                                                                                                                    |
+| `TRANSACTION_TYPE_UNKNOWN`   | error    | unsupported type                                                                                                                       |
+| `DATE_INVALID`               | error    | not an enumerated date format                                                                                                          |
+| `DATE_TIME_CONFLICT`         | error    | embedded/separate times disagree                                                                                                       |
+| `QUANTITY_INVALID`           | error    | missing/nonpositive buy/sell quantity                                                                                                  |
+| `PRICE_INVALID`              | error    | missing/invalid price                                                                                                                  |
+| `FX_ZERO_TREATED_AS_UNKNOWN` | warning  | source zero normalized to missing                                                                                                      |
+| `FX_DIRECTION_UNCONFIRMED`   | error    | base/native interpretation unresolved                                                                                                  |
+| `FEE_INVALID`                | error    | negative/invalid cost                                                                                                                  |
+| `ACCOUNTING_UNSUPPORTED`     | error    | method is not FIFO                                                                                                                     |
+| `DUPLICATE_EXACT`            | info     | exact normalized row already committed                                                                                                 |
+| `DUPLICATE_POSSIBLE`         | warning  | close semantic match needs decision                                                                                                    |
+| `OVERSELL`                   | error    | sells exceed available mapped lots                                                                                                     |
+| `HISTORY_INCOMPLETE`         | warning  | import lacks opening cash/basis/history                                                                                                |
+| `DISPLAY_SYMBOL_OVERRIDE`    | info     | display symbol differs from canonical map                                                                                              |
+| `CASH_ENCODING_INVALID`      | error    | legacy `=CASH` row violates the exact compatibility rule                                                                               |
+| `DIVIDEND_PER_SHARE_INVALID` | error    | `Cost Per Share` on a `Dividend` row is zero (IMP-006)                                                                                 |
+| `FRANKING_INVALID`           | error    | `Franking Credit Per Share` present but malformed or negative -- blank stays unknown, not an error (IMP-006)                           |
+| `FRANKING_ON_NON_DIVIDEND`   | warning  | `Franking Credit Per Share` populated on a non-`Dividend` row -- surfaced, ignored, and excluded from that row's fingerprint (IMP-006) |
 
 ## 10. Idempotency and duplicate detection
 
@@ -380,12 +412,12 @@ Imported CSV does not appear to contain deposits, dividend receipts, settlement 
 
 ## 14. Unknown-header policy
 
-If a file does not match the confirmed 17-column signature:
+If a file does not match one of the confirmed header signatures -- the 17-column `strict-17-column-v1` contract (§2) or the 18-column dividend-capable `strict-18-column-dividends-v1` contract (§3a's "Dividend-receipt rows"):
 
 - retain upload metadata;
-- return `HEADER_MISMATCH` with the observed header names/count;
+- return `HEADER_MISMATCH` with the observed header names/count (diffed against the 17-column contract, the primary supported shape);
 - do not discard, reposition, or guess fields;
-- do not pass it into the 17-column parser;
-- require an explicit, separately versioned schema decision before support is added.
+- do not pass it into either supported parser;
+- require an explicit, separately versioned schema decision before support for a further header shape is added.
 
-Parser selection is by exact normalized header signature, not field count alone.
+Parser selection is by exact normalized header signature -- tried in order, first match wins -- not field count alone. A batch's `import_batches.parser_version` records exactly which of the two matched.

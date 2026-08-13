@@ -20,6 +20,7 @@ type Review = {
     ready: boolean;
     counts: {
       transactionCreates: number;
+      dividendCreates: number;
       candidateCreates: number;
       skips: number;
       unresolved: number;
@@ -744,6 +745,7 @@ export function ImportReview({
             <span>
               {review.preview.counts.transactionCreates} transaction rows
             </span>
+            <span>{review.preview.counts.dividendCreates} dividend rows</span>
             <span>{review.preview.counts.candidateCreates} new candidates</span>
             <span>{review.preview.counts.skips} skipped</span>
             <span>{review.preview.counts.unresolved} unresolved</span>

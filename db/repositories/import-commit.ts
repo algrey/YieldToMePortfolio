@@ -7,7 +7,7 @@ import { createAuditInsertStatement } from "./audit.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 import { prepareLedgerPosting } from "../../domain/ledger/posting.ts";
 import {
-  SUPPORTED_IMPORT_PARSER_VERSION,
+  SUPPORTED_IMPORT_PARSER_VERSIONS,
   buildImportReview,
   type ImportPreviewSecurityCandidate,
   type NormalizedImportRow,
@@ -15,6 +15,7 @@ import {
 import { createOwnedImportStagingRepository } from "./import-staging.ts";
 import { createOwnedImportMappingDecisionRepository } from "./import-mapping-decisions.ts";
 import { createOwnedPortfolioRepository } from "./owned-portfolios.ts";
+import { buildDividendManualRecordImportInsertStatements } from "./dividends.ts";
 
 const DEFAULT_CHUNK_SIZE = 2;
 const MAX_CHUNK_SIZE = 2;
@@ -303,7 +304,7 @@ export function createOwnedImportCommitRepository(
     });
     const hasBlockingPersistedState =
       ownedBatch.parserFormat !== "strict-versioned-csv" ||
-      ownedBatch.parserVersion !== SUPPORTED_IMPORT_PARSER_VERSION ||
+      !SUPPORTED_IMPORT_PARSER_VERSIONS.includes(ownedBatch.parserVersion) ||
       issues.some(
         (issue) => issue.severity === "error" && issue.resolvedAt === null,
       ) ||
@@ -396,7 +397,15 @@ export function createOwnedImportCommitRepository(
   ): Promise<
     | {
         ok: true;
+        kind: "ledger";
         input: LedgerPostingPersistenceInput;
+        sourceReference: string;
+      }
+    | {
+        ok: true;
+        kind: "dividend";
+        recordId: string;
+        statements: SqlStatement[];
         sourceReference: string;
       }
     | { ok: false; reason: "mapping_incomplete" }
@@ -428,6 +437,42 @@ export function createOwnedImportCommitRepository(
       );
       if (!membership) return { ok: false, reason: "mapping_incomplete" };
     }
+
+    const sourceReference = `import-fingerprint:${row.normalizedFingerprint ?? row.id}`;
+
+    // Dividend rows never post through the ledger: they create a
+    // `dividend_manual_records` row (see `buildDividendManualRecordImportInsertStatements`
+    // for why not `dividend_receipts`), never touch cost basis/lots/cash,
+    // and skip FX resolution entirely (the row stores native per-share
+    // amounts only). Built as statements, not executed here, so the caller
+    // can fold them into the same atomic chunk as the `import_rows` update.
+    if (normalized.type === "dividend") {
+      if (!target.portfolioSecurityId) {
+        return { ok: false, reason: "mapping_incomplete" };
+      }
+      const built = buildDividendManualRecordImportInsertStatements({
+        userId,
+        portfolioId,
+        portfolioSecurityId: target.portfolioSecurityId,
+        paymentDate: normalized.localTradeDate,
+        sharesDecimal: normalized.sharesOwned ?? "",
+        dividendPerShareDecimal: normalized.costPerShare ?? "",
+        frankingCreditPerShareDecimal: normalized.frankingPerShare ?? null,
+        importBatchId: batch.id,
+        sourceReference,
+        requestId,
+        now: nowIso(now),
+      });
+      if (!built.ok) return { ok: false, reason: "mapping_incomplete" };
+      return {
+        ok: true,
+        kind: "dividend",
+        recordId: built.id,
+        statements: built.statements,
+        sourceReference,
+      };
+    }
+
     let fxRate: string | null = null;
     let fxRateSource: string | null = null;
     if (
@@ -461,9 +506,9 @@ export function createOwnedImportCommitRepository(
     if (normalized.cashEvent !== null && !gross) {
       return { ok: false, reason: "mapping_incomplete" };
     }
-    const sourceReference = `import-fingerprint:${row.normalizedFingerprint ?? row.id}`;
     return {
       ok: true,
+      kind: "ledger",
       sourceReference,
       input: {
         portfolioId,
@@ -764,6 +809,46 @@ export function createOwnedImportCommitRepository(
             continue;
           }
           seenSourceReferences.add(resolved.sourceReference);
+          if (resolved.kind === "dividend") {
+            // Cross-batch/resume idempotency for dividend rows: the same
+            // natural key (`import-fingerprint:<row fingerprint>`, scoped by
+            // portfolio) trades use via `transactions.source_reference`,
+            // looked up against `dividend_manual_records.source_reference`
+            // instead (see `buildDividendManualRecordImportInsertStatements`).
+            const existingRecord = await client.get<{ id: string }>(
+              `SELECT id FROM dividend_manual_records
+               WHERE user_id = ? AND portfolio_id = ? AND source_reference = ? LIMIT 1`,
+              [userId, target.portfolioId, resolved.sourceReference],
+            );
+            if (existingRecord) {
+              statements.push({
+                sql: `UPDATE import_rows SET commit_status = 'skipped', commit_transaction_id = ?, updated_at = ?, version = version + 1
+                  WHERE id = ? AND user_id = ? AND batch_id = ? AND commit_status = 'staged'`,
+                params: [
+                  existingRecord.id,
+                  nowIso(now),
+                  row.id,
+                  userId,
+                  batch.id,
+                ],
+              });
+              continue;
+            }
+            statements.push(...resolved.statements);
+            statements.push({
+              sql: `UPDATE import_rows SET commit_status = 'committed', commit_transaction_id = ?, updated_at = ?, version = version + 1
+                WHERE id = ? AND user_id = ? AND batch_id = ? AND commit_status = 'staged'`,
+              params: [
+                resolved.recordId,
+                nowIso(now),
+                row.id,
+                userId,
+                batch.id,
+              ],
+            });
+            committedRowCount += 1;
+            continue;
+          }
           const existing = await client.get<{
             id: string;
             idempotency_key: string | null;

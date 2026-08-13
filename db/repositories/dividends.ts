@@ -1012,6 +1012,108 @@ export function createDividendReceiptRepository(
 }
 
 // ---------------------------------------------------------------------------
+// IMP-006: CSV-import commit support for dividend_manual_records.
+//
+// A CSV dividend row cannot become a `dividend_receipts` row: that table's
+// `dividend_event_id` is NOT NULL and FKs to the shared, provider-populated
+// `dividend_events` table (DB-005/MKT-005) -- the importer has no safe way
+// to fabricate or guess a provider corporate-action fact, and requiring one
+// to already exist would make CSV dividend import fail whenever the
+// configured provider hasn't ingested that exact event, defeating the
+// point of a gap-filling import. `dividend_manual_records` is DIV-001's own
+// table for exactly this case ("a security/payment the provider never
+// surfaced as an event") and its read-time derivation
+// (`domain/dividends/history.ts`, global nearest-wins `PROXIMITY_WINDOW_DAYS`
+// matching) already folds these rows into the one-row-per-event precedence
+// (manual/override > imported > auto-derived) and double-count guard DIV-001
+// documents -- so an imported dividend that happens to match a provider
+// event still never double-counts, without the importer needing to resolve
+// that match itself at write time.
+//
+// This builds INSERT statements only (unlike `createDividendManualRecordRepository`
+// .create, which executes its own atomic `client.batch()` call) so
+// `db/repositories/import-commit.ts` can fold them into the SAME atomic
+// chunk as the rest of that row's commit effects and the `import_rows`
+// status update, preserving mixed trade+dividend batch atomicity.
+// ---------------------------------------------------------------------------
+
+export type BuildDividendManualRecordImportInsertInput = {
+  id?: string;
+  userId: string;
+  portfolioId: string;
+  portfolioSecurityId: string;
+  paymentDate: string;
+  sharesDecimal: string;
+  dividendPerShareDecimal: string;
+  frankingCreditPerShareDecimal: string | null;
+  importBatchId: string;
+  sourceReference: string;
+  requestId: string;
+  now: string;
+};
+
+export type BuildDividendManualRecordImportInsertResult =
+  | { ok: true; id: string; statements: SqlStatement[] }
+  | { ok: false; reason: "invalid_input" };
+
+export function buildDividendManualRecordImportInsertStatements(
+  input: BuildDividendManualRecordImportInsertInput,
+): BuildDividendManualRecordImportInsertResult {
+  if (
+    !isPositiveDecimalString(input.sharesDecimal) ||
+    !isPositiveDecimalString(input.dividendPerShareDecimal) ||
+    !isNullable(
+      input.frankingCreditPerShareDecimal,
+      isNonNegativeDecimalString,
+    ) ||
+    !isValidDateString(input.paymentDate)
+  ) {
+    return { ok: false, reason: "invalid_input" };
+  }
+  const id = input.id ?? randomUUID();
+  const statements: SqlStatement[] = [
+    {
+      sql: `INSERT INTO dividend_manual_records (
+        id, user_id, portfolio_id, portfolio_security_id, payment_date,
+        shares_decimal, dividend_per_share_decimal,
+        franking_credit_per_share_decimal, import_batch_id, source_reference,
+        created_at, updated_at, version
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      params: [
+        id,
+        input.userId,
+        input.portfolioId,
+        input.portfolioSecurityId,
+        input.paymentDate,
+        input.sharesDecimal,
+        input.dividendPerShareDecimal,
+        input.frankingCreditPerShareDecimal,
+        input.importBatchId,
+        input.sourceReference,
+        input.now,
+        input.now,
+      ],
+    },
+    createConditionalAuditInsertStatement(
+      {
+        actorUserId: input.userId,
+        targetOwnerUserId: input.userId,
+        action: "dividend.manual_record.create",
+        targetType: "dividend_manual_record",
+        targetId: id,
+        requestId: input.requestId,
+        result: "success",
+        occurredAt: input.now,
+      },
+      "EXISTS (SELECT 1 FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ?)",
+      [id, input.userId, input.portfolioId],
+      () => input.now,
+    ),
+  ];
+  return { ok: true, id, statements };
+}
+
+// ---------------------------------------------------------------------------
 // Owner-scoped: dividend assumptions (DB-005 extension a).
 //
 // Every mutation here is a full replace of the sparse fields ("send all
@@ -2045,6 +2147,10 @@ export type DividendManualRecordRecord = {
   sharesDecimal: string;
   dividendPerShareDecimal: string;
   frankingCreditPerShareDecimal: string | null;
+  // IMP-006: set only for rows a CSV import batch created; null for rows
+  // entered directly through the manual dividend-entry UI.
+  importBatchId: string | null;
+  sourceReference: string | null;
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -2072,7 +2178,8 @@ export type UpdateDividendManualRecordInput = {
 const DIVIDEND_MANUAL_RECORD_COLUMNS = `
   id, user_id, portfolio_id, portfolio_security_id, payment_date,
   shares_decimal, dividend_per_share_decimal,
-  franking_credit_per_share_decimal, created_at, updated_at, version
+  franking_credit_per_share_decimal, import_batch_id, source_reference,
+  created_at, updated_at, version
 `;
 
 function mapDividendManualRecord(
@@ -2090,6 +2197,10 @@ function mapDividendManualRecord(
       row.franking_credit_per_share_decimal === null
         ? null
         : String(row.franking_credit_per_share_decimal),
+    importBatchId:
+      row.import_batch_id === null ? null : String(row.import_batch_id),
+    sourceReference:
+      row.source_reference === null ? null : String(row.source_reference),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     version: Number(row.version),

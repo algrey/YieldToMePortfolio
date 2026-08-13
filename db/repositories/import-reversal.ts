@@ -241,6 +241,23 @@ export function createOwnedImportReversalRepository(
     return Number(row?.count ?? 0);
   }
 
+  // IMP-006: how many `dividend_manual_records` rows this batch's reversal
+  // is about to delete in THIS invocation (read before `finalize` builds
+  // and executes the atomic DELETE), so the audit metadata never reports
+  // "0 reversed" for a dividend-only reversal that is actually deleting
+  // income facts.
+  async function pendingDividendRecordCount(
+    userId: string,
+    batchId: string,
+  ): Promise<number> {
+    const row = await client.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM dividend_manual_records
+       WHERE user_id = ? AND import_batch_id = ?`,
+      [userId, batchId],
+    );
+    return Number(row?.count ?? 0);
+  }
+
   async function finalize(
     userId: string,
     batchId: string,
@@ -273,6 +290,35 @@ export function createOwnedImportReversalRepository(
             )
         `,
         params: [at, userId, batchId],
+      },
+      // IMP-006: dividend rows never post through the ledger (see
+      // `db/repositories/dividends.ts`), so they have no compensating
+      // "reversal" transaction for the predicate above to match. DIV-001
+      // treats `dividend_manual_records` as an owner-mutable/deletable fact
+      // rather than an immutable ledger entry (its own repository already
+      // exposes a hard `remove()`), so reversal here deletes exactly the
+      // rows this batch created (via `import_batch_id`) instead of writing
+      // a "reversed" marker row -- there is no such status on this table.
+      // Both statements below are self-guarded and safe to include on every
+      // `finalize()` invocation (including resumed/repeated ones): the
+      // `UPDATE` only matches rows still `committed`, and the `DELETE` only
+      // matches rows that still exist, so a repeat run of either is a no-op.
+      {
+        sql: `
+          UPDATE import_rows
+          SET commit_status = 'reversed', updated_at = ?, version = version + 1
+          WHERE user_id = ? AND batch_id = ? AND commit_status = 'committed'
+            AND row_class = 'transaction'
+            AND json_extract(normalized_fields_json, '$.type') = 'dividend'
+        `,
+        params: [at, userId, batchId],
+      },
+      {
+        sql: `
+          DELETE FROM dividend_manual_records
+          WHERE user_id = ? AND import_batch_id = ?
+        `,
+        params: [userId, batchId],
       },
       createAuditInsertStatement(
         {
@@ -407,6 +453,10 @@ export function createOwnedImportReversalRepository(
       }
 
       const remaining = await remainingCount(userId, batchId);
+      const reversedDividendRecordCount = await pendingDividendRecordCount(
+        userId,
+        batchId,
+      );
       const finalized = await finalize(
         userId,
         batchId,
@@ -416,6 +466,7 @@ export function createOwnedImportReversalRepository(
         {
           reversedTransactionCount: reversedTransactions,
           remainingTransactionCount: remaining,
+          reversedDividendRecordCount,
           rebuildJobIds,
         },
       );

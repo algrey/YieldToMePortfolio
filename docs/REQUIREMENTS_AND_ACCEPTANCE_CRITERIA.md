@@ -476,6 +476,20 @@ Acceptance:
 - Unknown headers return a safe compatibility error and header report.
 - Adding any future schema requires authoritative field definitions, fixtures, and a separately versioned parser.
 
+### IMP-007 — Dividend-receipt rows (owner dividend modelling feature; requirement ID distinct from the TASKS.md `IMP-006` task, which already holds `IMP-006 — Alternative CSV variants` above -- see AGENTS.md's "preserve stable requirement IDs, never reuse")
+
+The staged CSV import pipeline shall additionally support a dividend-receipt row `Type`, through a separately versioned parser contract per IMP-006's own resolution above, without weakening the original 17-column trade contract.
+
+Acceptance:
+
+- A second header version (`strict-18-column-dividends-v1`, the original 17 columns plus one trailing `Franking Credit Per Share` column) is selected by exact header signature, alongside -- never replacing -- the original `strict-17-column-v1` contract; existing trade-only uploads keep parsing unchanged.
+- A `Dividend` row reuses the trade columns' security/date/quantity/price semantics (payment date, shares, dividend per share) and stages/previews/validates through the same `transaction`-class pipeline as a trade row, including the same unresolved-security blocking behaviour; no new reviewer resolution-card type is introduced.
+- Franking credit per share is optional; absent is unknown and never treated as zero, while a malformed or negative value blocks the row.
+- A committed dividend row creates an owner-scoped, batch-attributable, reversible dividend fact (`dividend_manual_records`) rather than a direct ledger posting, atomically with any trade rows committed in the same batch.
+- A committed dividend row is a plain `dividend_manual_records` row and occupies DIV-001's manual tier (there is no separate "imported" tier): it wins over a matched provider event's receipt via DIV-001's existing manual-vs-receipt precedence (an outranked receipt stays visible as `dominatedReceipt`, never double-counted), but is not deduplicated or ranked against an owner-entered manual record for the same security/date -- both would appear as independent rows. Separating owner-typed from imported manual facts into distinct tiers is tracked as follow-up work (DIV-004), scheduled before the manual-entry UI ships (today nothing but this importer creates manual records, so the gap is unreachable in practice).
+- Duplicate dividend rows across re-imports are detected using the same versioned row-fingerprint scheme trades use.
+- Reversing a batch removes the dividend facts it created and leaves trade reversal semantics (IMP-005) unchanged.
+
 ## Future broker synchronization
 
 ### BRK-001 — Broker adapter compatibility

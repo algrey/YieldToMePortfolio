@@ -225,6 +225,13 @@
       "when": 1786602580022,
       "tag": "0031_acoustic_the_fallen",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1786612294146,
+      "tag": "0032_lovely_invaders",
+      "breakpoints": true
     }
   ]
 }

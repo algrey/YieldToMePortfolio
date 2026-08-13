@@ -115,6 +115,7 @@ export type ImportReconciliationPreview = Readonly<{
   ready: boolean;
   counts: Readonly<{
     transactionCreates: number;
+    dividendCreates: number;
     candidateCreates: number;
     skips: number;
     unresolved: number;
@@ -224,6 +225,7 @@ export function createImportReconciliationPreview(
     membershipId: string;
   }> = [];
   let transactionCreates = 0;
+  let dividendCreates = 0;
   let candidateCreates = 0;
   let skips = 0;
   let unresolved = 0;
@@ -364,8 +366,14 @@ export function createImportReconciliationPreview(
       }
     }
 
+    // Dividend rows never resolve FX at import time: `dividend_manual_records`
+    // stores native per-share amounts only and DIV-001's read-time
+    // derivation, not the importer, is responsible for any base-currency
+    // conversion. `Purchase Exchange Rate` is unused/ignored on these rows.
+    const isDividend = row.normalized.type === "dividend";
     let fxDirection: "native_to_home" | "home_to_native" | null = null;
     if (
+      !isDividend &&
       row.normalized.purchaseExchangeRate !== null &&
       row.normalized.currency !== portfolio.homeCurrencyCode
     ) {
@@ -389,6 +397,7 @@ export function createImportReconciliationPreview(
         fxDirection = fxDecision.targetValue;
       }
     } else if (
+      !isDividend &&
       row.normalized.type !== null &&
       row.normalized.currency !== portfolio.homeCurrencyCode &&
       row.normalized.purchaseExchangeRate === null
@@ -421,12 +430,22 @@ export function createImportReconciliationPreview(
       membershipId:
         membershipId ?? `cash:${portfolio.id}:${row.normalized.currency ?? ""}`,
     });
-    if (row.rowClass === "transaction") transactionCreates += 1;
+    if (row.rowClass === "transaction") {
+      if (isDividend) {
+        dividendCreates += 1;
+      } else {
+        transactionCreates += 1;
+      }
+    }
   }
 
   for (const item of resolvedRows) {
     const row = item.row;
-    if (row.rowClass !== "transaction" || row.normalized.cashEvent !== null)
+    if (
+      row.rowClass !== "transaction" ||
+      row.normalized.cashEvent !== null ||
+      row.normalized.type === "dividend"
+    )
       continue;
     const quantity = row.normalized.sharesOwned;
     if (quantity === null || row.normalized.type === null) continue;
@@ -479,7 +498,13 @@ export function createImportReconciliationPreview(
 
   return {
     ready: !issues.some((issue) => issue.severity === "error"),
-    counts: { transactionCreates, candidateCreates, skips, unresolved },
+    counts: {
+      transactionCreates,
+      dividendCreates,
+      candidateCreates,
+      skips,
+      unresolved,
+    },
     projectedQuantities,
     unresolvedCandidates,
     resolvedTargets,

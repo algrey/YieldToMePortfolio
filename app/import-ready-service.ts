@@ -8,7 +8,7 @@ import {
   buildImportReviewPreview,
   type ImportReviewPreview,
 } from "./import-preview.ts";
-import { SUPPORTED_IMPORT_PARSER_VERSION } from "../domain/imports/index.ts";
+import { SUPPORTED_IMPORT_PARSER_VERSIONS } from "../domain/imports/index.ts";
 import type { ImportPreviewSecurityCandidate } from "../domain/imports/reconciliation.ts";
 
 export type ImportReadyActionFailure = {
@@ -160,7 +160,7 @@ export async function markImportReadyWithContext(
   );
   const unsupportedParser =
     batch.parserFormat !== "strict-versioned-csv" ||
-    batch.parserVersion !== SUPPORTED_IMPORT_PARSER_VERSION;
+    !SUPPORTED_IMPORT_PARSER_VERSIONS.includes(batch.parserVersion);
   if (
     !review.preview.ready ||
     hasUnresolvedPersistedIssue ||

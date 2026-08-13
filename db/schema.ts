@@ -2829,6 +2829,18 @@ export const dividendEventOverrides = sqliteTable(
  * provider never surfaced as an event -- no `dividendEventId` link. Covered
  * by DIV-001's double-count guard (manual/override > imported >
  * auto-derived) at the domain layer, not here.
+ *
+ * IMP-006 addition: `importBatchId`/`sourceReference` are nullable,
+ * FK-less text columns (mirroring `import_rows.commit_transaction_id` and
+ * `transactions.source_reference`, neither of which carry a table-level FK
+ * either) so this stays a CREATE-only-safe `ALTER TABLE ADD COLUMN`
+ * migration rather than a SQLite table rebuild (FY-001A hazard). NULL means
+ * "entered directly, not via CSV import" -- the vast majority of existing
+ * and future manual-entry rows. `sourceReference` reuses the same
+ * `import-fingerprint:<row fingerprint>` scheme as `transactions` for
+ * cross-batch duplicate detection (see `db/repositories/import-commit.ts`);
+ * `importBatchId` lets reversal find and remove exactly the rows a batch
+ * created (see `db/repositories/import-reversal.ts`).
  */
 export const dividendManualRecords = sqliteTable(
   "dividend_manual_records",
@@ -2841,6 +2853,8 @@ export const dividendManualRecords = sqliteTable(
     sharesDecimal: text("shares_decimal").notNull(),
     dividendPerShareDecimal: text("dividend_per_share_decimal").notNull(),
     frankingCreditPerShareDecimal: text("franking_credit_per_share_decimal"),
+    importBatchId: text("import_batch_id"),
+    sourceReference: text("source_reference"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     version: integer("version").notNull().default(1),
@@ -2870,6 +2884,14 @@ export const dividendManualRecords = sqliteTable(
       table.portfolioId,
       table.portfolioSecurityId,
       table.paymentDate,
+    ),
+    index("dividend_manual_records_import_batch_idx").on(
+      table.userId,
+      table.importBatchId,
+    ),
+    uniqueIndex("dividend_manual_records_portfolio_source_reference_unique").on(
+      table.portfolioId,
+      table.sourceReference,
     ),
   ],
 );
