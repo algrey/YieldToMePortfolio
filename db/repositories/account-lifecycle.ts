@@ -167,6 +167,11 @@ for (const name of [
   // like `securities` -- not owner data.
   "dividend_events",
   "split_events",
+  // MKT-005 review fix: security-keyed provider OPERATIONAL state (last
+  // corporate-action ingestion attempt), same non-owner-data treatment as
+  // `dividend_events`/`split_events` above -- not a financial fact, not
+  // user data.
+  "corporate_action_refresh_state",
 ])
   classifications[name] = excluded("Shared reference data");
 

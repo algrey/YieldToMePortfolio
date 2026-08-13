@@ -2458,6 +2458,14 @@ export const dividendEvents = sqliteTable(
       table.status,
       table.exDate,
     ),
+    // MKT-005 review fix: prevents two concurrent ingestion attempts (the
+    // IMP-004B verify trigger and the periodic Cron sweep can race) from
+    // both creating an active row for the same security/provider/ex-date.
+    // Superseded rows are exempt so the supersession history itself is
+    // never blocked by this constraint.
+    uniqueIndex("dividend_events_active_natural_key_unique")
+      .on(table.securityId, table.providerId, table.exDate)
+      .where(sql`${table.status} <> 'superseded'`),
   ],
 );
 
@@ -2502,6 +2510,46 @@ export const splitEvents = sqliteTable(
       table.securityId,
       table.status,
       table.exDate,
+    ),
+    // MKT-005 review fix: same concurrent-ingestion protection as
+    // `dividend_events_active_natural_key_unique` above, keyed on
+    // `effective_date` since that is this table's natural key.
+    uniqueIndex("split_events_active_natural_key_unique")
+      .on(table.securityId, table.providerId, table.effectiveDate)
+      .where(sql`${table.status} <> 'superseded'`),
+  ],
+);
+
+/**
+ * MKT-005 review fix: shared provider OPERATIONAL state (not owner data, not
+ * a financial fact) tracking when each security's corporate-action history
+ * was last attempted, so the periodic refresh sweep
+ * (`runDueCorporateActionRefresh`) can rank securities oldest-attempt-first
+ * and rotate through the full set instead of re-selecting the same security
+ * forever (a non-paying/unchanged security never advances `ingested_at` on
+ * its events tables, which is what the original ranking query used). One row
+ * per security, upserted on every ingestion attempt -- success, failure, or
+ * no-op -- by `ingestSecurityCorporateActionHistory`, regardless of which of
+ * the three ingestion triggers invoked it. Classified `excluded` in
+ * `ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS` (account-lifecycle.ts) exactly like
+ * `securities` -- no purge-lock trigger, not user data.
+ */
+export const corporateActionRefreshState = sqliteTable(
+  "corporate_action_refresh_state",
+  {
+    securityId: text("security_id").primaryKey(),
+    lastAttemptedAt: text("last_attempted_at").notNull(),
+    lastStatus: text("last_status"),
+  },
+  (table) => [
+    foreignKey({
+      name: "corporate_action_refresh_state_security_id_securities_id_fk",
+      columns: [table.securityId],
+      foreignColumns: [securities.id],
+    }).onDelete("restrict"),
+    check(
+      "corporate_action_refresh_state_status_check",
+      sql`${table.lastStatus} IS NULL OR ${table.lastStatus} IN ('ok', 'failed')`,
     ),
   ],
 );

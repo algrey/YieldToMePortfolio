@@ -105,3 +105,120 @@ export const australianUsdFxFixture = {
     error: null,
   },
 };
+
+// MKT-005: a chart response requested with `events=div,splits`, carrying one
+// historical cash dividend and one historical split alongside the usual
+// quote/meta shape.
+export const australianDividendSplitChartFixture = {
+  chart: {
+    result: [
+      {
+        meta: {
+          currency: "AUD",
+          exchangeTimezoneName: "Australia/Sydney",
+          exchangeDataDelayedBy: 20,
+          regularMarketPrice: 42.1,
+          regularMarketPreviousClose: 41.9,
+          regularMarketTime: unix("2026-07-29T06:00:00Z"),
+          symbol: "BHP.AX",
+        },
+        timestamp: [unix("2026-07-28T06:00:00Z"), unix("2026-07-29T06:00:00Z")],
+        indicators: { quote: [{ close: [41.5, 42.1] }] },
+        events: {
+          dividends: {
+            [String(unix("2026-03-05T06:00:00Z"))]: {
+              amount: 1.01,
+              date: unix("2026-03-05T06:00:00Z"),
+            },
+          },
+          splits: {
+            [String(unix("2026-05-01T06:00:00Z"))]: {
+              date: unix("2026-05-01T06:00:00Z"),
+              numerator: 2,
+              denominator: 1,
+              splitRatio: "2:1",
+            },
+          },
+        },
+      },
+    ],
+    error: null,
+  },
+};
+
+/** Same shape but with a malformed dividend entry (missing amount). */
+export const malformedDividendChartFixture = {
+  chart: {
+    result: [
+      {
+        meta: {
+          currency: "AUD",
+          exchangeTimezoneName: "Australia/Sydney",
+          symbol: "BHP.AX",
+        },
+        timestamp: [unix("2026-07-28T06:00:00Z")],
+        indicators: { quote: [{ close: [41.5] }] },
+        events: {
+          dividends: {
+            [String(unix("2026-03-05T06:00:00Z"))]: {
+              date: unix("2026-03-05T06:00:00Z"),
+            },
+          },
+        },
+      },
+    ],
+    error: null,
+  },
+};
+
+/** Same shape but with no `events` field at all (no corporate actions). */
+export const noEventsChartFixture = {
+  chart: {
+    result: [
+      {
+        meta: {
+          currency: "AUD",
+          exchangeTimezoneName: "Australia/Sydney",
+          symbol: "BHP.AX",
+        },
+        timestamp: [unix("2026-07-28T06:00:00Z")],
+        indicators: { quote: [{ close: [41.5] }] },
+      },
+    ],
+    error: null,
+  },
+};
+
+// MKT-005 review fix: a non-Australian (America/New_York) events fixture.
+// The dividend timestamp (2026-03-05T02:00:00Z) is still 2026-03-04 local in
+// New York (EST, UTC-5, before the 2026 DST transition on March 8), proving
+// ex-date is computed in the exchange timezone rather than the raw UTC
+// calendar date.
+export const usDividendSplitChartFixture = {
+  chart: {
+    result: [
+      {
+        meta: {
+          currency: "USD",
+          exchangeTimezoneName: "America/New_York",
+          exchangeDataDelayedBy: 15,
+          regularMarketPrice: 188.25,
+          regularMarketPreviousClose: 187.5,
+          regularMarketTime: unix("2026-07-29T20:00:00Z"),
+          symbol: "AAPL",
+        },
+        timestamp: [unix("2026-07-28T20:00:00Z"), unix("2026-07-29T20:00:00Z")],
+        indicators: { quote: [{ close: [187.5, 188.25] }] },
+        events: {
+          dividends: {
+            [String(unix("2026-03-05T02:00:00Z"))]: {
+              amount: 0.25,
+              date: unix("2026-03-05T02:00:00Z"),
+            },
+          },
+        },
+      },
+    ],
+    error: null,
+  },
+};

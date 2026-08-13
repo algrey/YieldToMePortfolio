@@ -382,7 +382,36 @@ export function createDividendEventRepository(
       : { ok: false, reason: "atomic_failure" };
   }
 
-  return { get, listForSecurity, recordEvent };
+  /**
+   * B4 (MKT-005 review fix): `status` is a lifecycle column, not an
+   * immutable provider fact. A pure lifecycle progression (e.g.
+   * `declared` -> `paid` once the ex-date passes) with every other fact
+   * unchanged updates the existing row in place -- explicitly NOT a
+   * correction and NOT a supersession, which stays reserved for actual fact
+   * changes (amount, date, currency). See docs/DATA_MODEL.md's
+   * `dividend_events` status-semantics note. Server/provider-write-only:
+   * see the module header note above.
+   */
+  async function updateStatus(
+    id: string,
+    securityId: string,
+    status: DividendEventStatus,
+    observedAt: string,
+  ): Promise<
+    | { ok: true; event: DividendEventRecord }
+    | { ok: false; reason: "not_found" }
+  > {
+    const result = await client.run(
+      `UPDATE dividend_events SET status = ?, observed_at = ?
+       WHERE id = ? AND security_id = ? AND status <> 'superseded'`,
+      [status, observedAt, id, securityId],
+    );
+    if (result.changes !== 1) return { ok: false, reason: "not_found" };
+    const event = await get(id);
+    return event ? { ok: true, event } : { ok: false, reason: "not_found" };
+  }
+
+  return { get, listForSecurity, recordEvent, updateStatus };
 }
 
 export type SplitEventStatus =
@@ -549,7 +578,114 @@ export function createSplitEventRepository(
       : { ok: false, reason: "atomic_failure" };
   }
 
-  return { get, listForSecurity, recordEvent };
+  /**
+   * B4 (MKT-005 review fix): same lifecycle-vs-supersession distinction as
+   * `createDividendEventRepository.updateStatus` above (e.g. `declared` ->
+   * `effective` once the effective date passes with numerator/denominator
+   * unchanged). Server/provider-write-only: see the module header note.
+   */
+  async function updateStatus(
+    id: string,
+    securityId: string,
+    status: SplitEventStatus,
+    observedAt: string,
+  ): Promise<
+    { ok: true; event: SplitEventRecord } | { ok: false; reason: "not_found" }
+  > {
+    const result = await client.run(
+      `UPDATE split_events SET status = ?, observed_at = ?
+       WHERE id = ? AND security_id = ? AND status <> 'superseded'`,
+      [status, observedAt, id, securityId],
+    );
+    if (result.changes !== 1) return { ok: false, reason: "not_found" };
+    const event = await get(id);
+    return event ? { ok: true, event } : { ok: false, reason: "not_found" };
+  }
+
+  return { get, listForSecurity, recordEvent, updateStatus };
+}
+
+// ---------------------------------------------------------------------------
+// MKT-005: bounded candidate selection for the periodic dividend/split
+// refresh sweep (ingestion trigger (b), "new declarations picked up on the
+// normal market-data refresh path"). This intentionally does NOT extend
+// `market_data_refresh_jobs` -- that table's schema (see
+// `market_data_refresh_jobs_target_kind_check`/`..._target_shape_check` in
+// db/schema.ts) is purpose-built for incremental date-chunked price/FX
+// polling with a persisted high-water mark, whereas dividend/split ingestion
+// always re-pulls and reconciles a security's FULL history in one pass (see
+// `ingestSecurityCorporateActionHistory` in
+// domain/market-data/corporate-action-ingestion.ts). Rather than migrating
+// that job-queue schema to a shape it was not designed for, this ranks
+// verified provider mappings by `corporate_action_refresh_state.last_attempted_at`,
+// oldest-first (a never-attempted security has no row and sorts first via the
+// `COALESCE` fallback).
+//
+// Review fix (B1): the original version of this repository ranked by
+// `MAX(ingested_at)` derived from `dividend_events`/`split_events` directly.
+// That watermark only advances when an ingestion attempt actually WRITES a
+// row, so a non-paying security or one whose fetched data never changes
+// (an "unchanged" reconciliation result) never advances its watermark and
+// sorted first on every single sweep forever, starving every other security.
+// `corporate_action_refresh_state` is written by
+// `ingestSecurityCorporateActionHistory` on every ATTEMPT (success, failure,
+// or no-op change), independent of whether any event row was written, so
+// ranking by it rotates through the full candidate set.
+// ---------------------------------------------------------------------------
+
+export type CorporateActionRefreshCandidate = {
+  securityId: string;
+  mappingId: string;
+};
+
+export type CorporateActionRefreshAttemptStatus = "ok" | "failed";
+
+export function createCorporateActionRefreshRepository(client: SqlClient) {
+  async function listCandidates(
+    providerId: string,
+    limit: number,
+  ): Promise<CorporateActionRefreshCandidate[]> {
+    const boundedLimit = Math.max(1, Math.min(Math.trunc(limit) || 1, 50));
+    const rows = await client.all<Record<string, unknown>>(
+      `SELECT spm.security_id AS security_id, spm.id AS mapping_id
+       FROM security_provider_mappings AS spm
+       LEFT JOIN corporate_action_refresh_state AS refresh_state
+         ON refresh_state.security_id = spm.security_id
+       WHERE spm.provider_id = ? AND spm.status = 'verified' AND spm.valid_to IS NULL
+       ORDER BY COALESCE(refresh_state.last_attempted_at, '0001-01-01T00:00:00.000Z') ASC,
+                spm.security_id ASC
+       LIMIT ?`,
+      [providerId, boundedLimit],
+    );
+    return rows.map((row) => ({
+      securityId: String(row.security_id),
+      mappingId: String(row.mapping_id),
+    }));
+  }
+
+  /**
+   * Upserted by `ingestSecurityCorporateActionHistory` at the end of every
+   * ingestion attempt, regardless of which of the three triggers invoked it
+   * (security-verified, this sweep, or an owner-initiated re-pull) -- a
+   * single shared write point keeps the "last attempted" watermark honest no
+   * matter how ingestion was triggered.
+   */
+  async function recordAttempt(
+    securityId: string,
+    attemptedAt: string,
+    status: CorporateActionRefreshAttemptStatus,
+  ): Promise<void> {
+    await client.run(
+      `INSERT INTO corporate_action_refresh_state (security_id, last_attempted_at, last_status)
+       VALUES (?, ?, ?)
+       ON CONFLICT (security_id) DO UPDATE SET
+         last_attempted_at = excluded.last_attempted_at,
+         last_status = excluded.last_status`,
+      [securityId, attemptedAt, status],
+    );
+  }
+
+  return { listCandidates, recordAttempt };
 }
 
 // ---------------------------------------------------------------------------

@@ -414,6 +414,10 @@ Shared provider facts, security-keyed, not owner data — same "no export/purge 
 
 Corrections never rewrite a published row in place: a corrected/cancelled observation is inserted as a new row with `supersedes_event_id` pointing at the prior row, and the prior row's `status` moves to `superseded` in the same write — the same shape `manual_overrides` uses for owner data. `createDividendEventRepository`/`createSplitEventRepository` (`db/repositories/dividends.ts`) are server/provider-write-only: they take no `userId` and are gated architecturally (not wired to any user-triggered mutation), mirroring how `security-verification.ts` writes the shared `securities` master.
 
+**`status` is a lifecycle column, not an immutable provider fact (MKT-005 review fix).** A pure lifecycle progression — the identical natural key and every other fact (numerator/denominator for splits; amount/currency/payment-date for dividends) unchanged, only `status` advancing because the ex-date/effective-date has now passed (`declared` → `effective` for splits, `declared` → `paid` for dividends) — is applied as an in-place `UPDATE` of `status`/`observed_at` (`updateStatus` in `db/repositories/dividends.ts`), explicitly NOT a correction and NOT a supersession. Supersession (insert-new + move prior row to `superseded`) stays reserved for an actual fact change. Reusing the same event id for a lifecycle transition means no new row and no `supersedes_event_id` link is created for a simple date-crossing.
+
+A partial unique index — `..._active_natural_key_unique` on `(security_id, provider_id, ex_date)` for `dividend_events` and on `(security_id, provider_id, effective_date)` for `split_events`, both `WHERE status <> 'superseded'` — guarantees at most one active row per natural key even under concurrent ingestion attempts (the IMP-004B verify trigger and the periodic MKT-005 refresh sweep can race on the same security); superseded rows are exempt so supersession history is never blocked.
+
 Splits affect quantities and raw/adjusted comparison. An explicit ledger corporate-action record links implementation effect (future work; not part of this task).
 
 ### `dividend_events` (DB-005)
@@ -430,7 +434,17 @@ Shared provider facts, same non-owner-data treatment as `split_events`:
 - `estimate_method`/`estimate_as_of`, both nullable, populated only for `estimated` rows;
 - `supersedes_event_id` (nullable self-reference), same supersession shape as `split_events`.
 
-Declared/paid provider events and calculated estimates remain distinguishable.
+Declared/paid provider events and calculated estimates remain distinguishable. See `split_events`' status-semantics note above (applies identically here): a pure `declared` → `paid` transition with every other fact unchanged is an in-place update, not a supersession.
+
+### `corporate_action_refresh_state` (MKT-005 review fix)
+
+Shared provider OPERATIONAL state — not a financial fact, not owner data; classified `excluded` in `ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS` exactly like `securities`/`dividend_events`/`split_events` (no purge-lock trigger):
+
+- `security_id` (primary key, FK to `securities`);
+- `last_attempted_at` (required) — updated on every corporate-action ingestion ATTEMPT for this security (success, failure, or a no-op reconciliation), regardless of which of MKT-005's three ingestion triggers invoked it;
+- `last_status` (nullable, `ok` or `failed`).
+
+This exists solely so the periodic refresh sweep (`runDueCorporateActionRefresh`) can rank verified securities oldest-attempted-first and rotate through the full candidate set. An earlier version of this ranking derived "last attempted" from `MAX(ingested_at)` on `dividend_events`/`split_events` directly, but that watermark only advances when an ingestion attempt actually WRITES a row — a non-paying security, or one whose fetched data never changes (an "unchanged" result), never advances it and would sort first on every single sweep forever, starving every other security. `corporate_action_refresh_state` is written on every attempt independent of whether any event row changed, which fixes the starvation.
 
 ### `dividend_receipts` (DB-005 original scope)
 
@@ -482,6 +496,8 @@ Sparse per-dividend override, keyed to a specific provider event so overriding a
 - `shares_decimal`, `dividend_per_share_decimal`, `franking_credit_per_share_decimal` — all nullable; a NULL column falls back to the read-time auto-derivation (shares held at ex-date × event gross per share);
 - `exclude` (boolean) removes the event from derived history/totals entirely;
 - `created_at`, `updated_at`, `version`.
+
+**Override survival through a provider correction (MKT-005 review fix — the real mechanism, corrected here after review found the originally recorded framing backwards).** `dividend_event_id` is a hard reference to one exact event row. Supersession (see `dividend_events` above) mints a NEW event id for a corrected fact and moves the prior row's status to `superseded`; it never rewrites or re-keys an existing override. Consequently, if the provider later corrects an overridden event, the override row survives completely unchanged — but it stays keyed to the now-superseded PRIOR version's id, not the new corrected event's id. A naive lookup that only checks "is there an override for the security's current active dividend event" would therefore MISS it — the opposite of the intended "the override still wins" behaviour recorded for DIV-001. Correctly resolving this requires walking the `supersedes_event_id` chain from the current active event backward through every prior version and checking each id for an override; `collectEventLineageIds` (`domain/market-data/corporate-action-ingestion.ts`) is a small pure helper that returns exactly that ordered lineage. The actual resolution logic (matching lineage ids against `dividend_event_overrides`, deciding which value the detail view shows) is `DIV-001` scope and is a binding requirement for that task, not implemented here.
 
 ### `dividend_manual_records` (DB-005 extension d)
 

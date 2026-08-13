@@ -1,10 +1,12 @@
 import type {
+  DividendEventInput,
   FxObservation,
   MarketDataResult,
   NormalizationContext,
   ObservationInterval,
   PriceObservation,
   ProviderDataQuality,
+  SplitEventInput,
 } from "./contracts.ts";
 
 const DECIMAL_PATTERN = /^(0|[1-9]\d*)(\.\d+)?$/;
@@ -260,6 +262,90 @@ export function normalizeFxObservation(
       delayedMinutes,
       ingestedAt: context.ingestedAt,
       payloadSha256: optionalString(record, "payloadSha256"),
+    },
+  };
+}
+
+/**
+ * Validates one provider dividend event as `unknown` at the boundary,
+ * mirroring `normalizePriceObservation`/`normalizeFxObservation` above
+ * (MKT-005). `context.securityId` is required -- there is no per-observation
+ * mapping/security context to fall back on the way price/FX observations
+ * have one already resolved via the request.
+ */
+export function normalizeDividendEventInput(
+  input: unknown,
+  context: NormalizationContext,
+): MarketDataResult<DividendEventInput> {
+  const record = asRecord(input);
+  if (!record || !context.securityId) {
+    return invalid("Dividend event or security context is incomplete.");
+  }
+
+  const exDate = requiredString(record, "exDate");
+  const currencyCode = requiredString(record, "currencyCode");
+  const amountDecimal = requiredString(record, "amountDecimal");
+  const paymentDate = optionalString(record, "paymentDate");
+  if (
+    !exDate ||
+    !isMarketDate(exDate) ||
+    !currencyCode ||
+    !amountDecimal ||
+    !isPositiveDecimal(amountDecimal) ||
+    !optionalStringIsValid(record, "paymentDate") ||
+    (paymentDate !== null && !isMarketDate(paymentDate))
+  ) {
+    return invalid(
+      "Dividend event contains a malformed date, currency, or amount.",
+    );
+  }
+
+  return {
+    ok: true,
+    value: {
+      securityId: context.securityId,
+      exDate,
+      paymentDate,
+      currencyCode,
+      amountDecimal,
+    },
+  };
+}
+
+/**
+ * Validates one provider split event as `unknown` at the boundary; see
+ * `normalizeDividendEventInput` above for the pattern this mirrors.
+ */
+export function normalizeSplitEventInput(
+  input: unknown,
+  context: NormalizationContext,
+): MarketDataResult<SplitEventInput> {
+  const record = asRecord(input);
+  if (!record || !context.securityId) {
+    return invalid("Split event or security context is incomplete.");
+  }
+
+  const effectiveDate = requiredString(record, "effectiveDate");
+  const numeratorDecimal = requiredString(record, "numeratorDecimal");
+  const denominatorDecimal = requiredString(record, "denominatorDecimal");
+  if (
+    !effectiveDate ||
+    !isMarketDate(effectiveDate) ||
+    !numeratorDecimal ||
+    !isPositiveDecimal(numeratorDecimal) ||
+    !denominatorDecimal ||
+    !isPositiveDecimal(denominatorDecimal)
+  ) {
+    return invalid("Split event contains a malformed date or split ratio.");
+  }
+
+  return {
+    ok: true,
+    value: {
+      securityId: context.securityId,
+      effectiveDate,
+      numeratorDecimal,
+      denominatorDecimal,
     },
   };
 }

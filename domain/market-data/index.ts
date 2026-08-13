@@ -18,9 +18,31 @@ export type {
   MarketDataRefreshSummary,
 } from "./ingestion.ts";
 export {
+  normalizeDividendEventInput,
   normalizeFxObservation,
   normalizePriceObservation,
+  normalizeSplitEventInput,
 } from "./normalize.ts";
+export {
+  collectEventLineageIds,
+  ingestSecurityCorporateActionHistory,
+  runDueCorporateActionRefresh,
+  type CorporateActionIngestionOptions,
+  type CorporateActionIngestionResult,
+  type CorporateActionIngestionSummary,
+  type CorporateActionReconciliationSummary,
+  type DueCorporateActionRefreshOptions,
+  type DueCorporateActionRefreshSummary,
+  type EventLineageNode,
+} from "./corporate-action-ingestion.ts";
+export {
+  deriveTrailingDividendYield,
+  deriveTrailingTwelveMonthDividend,
+  type TrailingDividendEventInput,
+  type TrailingDividendYieldResult,
+  type TrailingPriceReference,
+  type TtmDividendResult,
+} from "./dividend-yield.ts";
 export type {
   DailyPriceRequest,
   DividendEventInput,

@@ -104,6 +104,7 @@ export type FxRequest = {
 };
 
 export type DividendRequest = {
+  mappingId: string;
   securityId: string;
   from: string;
   to: string;
@@ -111,6 +112,7 @@ export type DividendRequest = {
 };
 
 export type SplitRequest = {
+  mappingId: string;
   securityId: string;
   from: string;
   to: string;
@@ -141,6 +143,12 @@ export type SecurityCandidate = {
 export type DividendEventInput = {
   securityId: string;
   exDate: string;
+  // Present as a typed seam per MKT-005's decision: the Yahoo-compatible
+  // adapter never supplies a payment date (its chart `events.dividends`
+  // carries only ex-date and amount), so this is always `null` from that
+  // provider today. A future capability-richer provider can populate it
+  // without a contract change.
+  paymentDate: string | null;
   currencyCode: string;
   amountDecimal: string;
 };

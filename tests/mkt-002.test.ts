@@ -307,26 +307,17 @@ test("uses stale latest fallback and fails closed for missing symbols or schema 
   if (!malformed.ok) assert.equal(malformed.error.kind, "invalid_response");
 });
 
-test("deferred capabilities remain typed and provider configuration has no source gate", async () => {
+test("fundamentals remain typed-unavailable and provider configuration has no source gate", async () => {
   const provider = providerFor(async () =>
     jsonResponse(australianChartFixture),
   );
   assert.equal(provider.capabilities().supportsFx, true);
-  const dividends = await provider.getDividendEvents({
+  const fundamentals = await provider.getFundamentals?.({
     securityId: "security-bhp",
-    from: "2026-07-28",
-    to: "2026-07-29",
+    asOf: "2026-07-29",
     scope: { kind: "deployment", userId: null },
   });
-  assert.equal(dividends.ok, false);
-  if (!dividends.ok)
-    assert.equal(dividends.error.kind, "unavailable_capability");
-  const splits = await provider.getSplitEvents({
-    securityId: "security-bhp",
-    from: "2026-07-28",
-    to: "2026-07-29",
-    scope: { kind: "deployment", userId: null },
-  });
-  assert.equal(splits.ok, false);
-  if (!splits.ok) assert.equal(splits.error.kind, "unavailable_capability");
+  assert.equal(fundamentals?.ok, false);
+  if (fundamentals && !fundamentals.ok)
+    assert.equal(fundamentals.error.kind, "unavailable_capability");
 });

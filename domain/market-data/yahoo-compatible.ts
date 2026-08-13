@@ -1,5 +1,7 @@
 import type {
   DailyPriceRequest,
+  DividendEventInput,
+  DividendRequest,
   FxObservation,
   FxRequest,
   LatestRequest,
@@ -11,10 +13,14 @@ import type {
   ProviderCapabilities,
   SecurityCandidate,
   SecurityQuery,
+  SplitEventInput,
+  SplitRequest,
 } from "./contracts.ts";
 import {
+  normalizeDividendEventInput,
   normalizeFxObservation,
   normalizePriceObservation,
+  normalizeSplitEventInput,
 } from "./normalize.ts";
 
 type Fetcher = (input: string | URL, init?: RequestInit) => Promise<Response>;
@@ -51,6 +57,10 @@ type YahooChartResult = {
   indicators: {
     quote: unknown[];
   };
+  // Only present when the request asked for `events=div,splits`; a chart
+  // request without that parameter simply omits the field, so every reader
+  // must treat it as optional/absent rather than malformed.
+  events?: unknown;
 };
 
 type YahooQuote = {
@@ -74,8 +84,8 @@ const CAPABILITIES: ProviderCapabilities = {
   supportsRawPrices: true,
   supportsAdjustedPrices: false,
   supportsFx: true,
-  supportsDividends: false,
-  supportsSplits: false,
+  supportsDividends: true,
+  supportsSplits: true,
   supportsFundamentals: false,
 };
 
@@ -271,6 +281,7 @@ function chartResult(value: unknown): MarketDataResult<YahooChartResult> {
       meta: meta as YahooChartMeta,
       timestamp: resultRecord?.timestamp,
       indicators: { quote: quote as unknown[] },
+      events: resultRecord?.events,
     },
   };
 }
@@ -518,6 +529,62 @@ export function createYahooCompatibleProvider(
     return {
       ok: true,
       value: { currency, timezone, delayedMinutes, symbol },
+    };
+  }
+
+  /**
+   * Shared fetch/parse path for `getDividendEvents`/`getSplitEvents`
+   * (MKT-005): both request the same `events=div,splits` chart shape and
+   * only differ in which `events` sub-object they read, so the resolve
+   * symbol / validate range / fetch / parse-chart / parse-metadata steps are
+   * factored out once rather than duplicated per capability.
+   */
+  async function fetchCorporateActionChart(
+    request: DividendRequest | SplitRequest,
+  ): Promise<
+    MarketDataResult<{
+      chart: YahooChartResult;
+      metadata: {
+        currency: string;
+        timezone: string;
+        delayedMinutes: number | null;
+        symbol: string | null;
+      };
+    }>
+  > {
+    const symbol = await symbolFor(request.mappingId);
+    if (!symbol.ok) return symbol;
+    const from = Date.parse(`${request.from}T00:00:00Z`);
+    const to = Date.parse(`${request.to}T00:00:00Z`);
+    if (
+      !isMarketDate(request.from) ||
+      !isMarketDate(request.to) ||
+      !Number.isFinite(from) ||
+      !Number.isFinite(to) ||
+      to < from
+    ) {
+      return error(
+        "invalid_response",
+        "Corporate-action event date range is invalid.",
+        false,
+      );
+    }
+    const response = await fetchJson(
+      chartUrl(symbol.value, {
+        period1: String(Math.floor(from / 1000)),
+        period2: String(Math.floor(to / 1000) + 86_400),
+        interval: "1d",
+        events: "div,splits",
+      }),
+    );
+    if (!response.ok) return response;
+    const chart = chartResult(response.value);
+    if (!chart.ok) return chart;
+    const metadata = chartContext(chart.value);
+    if (!metadata.ok) return metadata;
+    return {
+      ok: true,
+      value: { chart: chart.value, metadata: metadata.value },
     };
   }
 
@@ -953,8 +1020,137 @@ export function createYahooCompatibleProvider(
       }
       return { ok: true, value: observations };
     },
-    getDividendEvents: async () => unavailable("Dividend events"),
-    getSplitEvents: async () => unavailable("Split events"),
+    async getDividendEvents(
+      request: DividendRequest,
+    ): Promise<MarketDataResult<DividendEventInput[]>> {
+      const fetched = await fetchCorporateActionChart(request);
+      if (!fetched.ok) return fetched;
+      const { chart, metadata } = fetched.value;
+      const eventsRoot = asRecord(chart.events);
+      const dividends = eventsRoot ? eventsRoot.dividends : undefined;
+      if (dividends === undefined || dividends === null) {
+        return { ok: true, value: [] };
+      }
+      const dividendRecord = asRecord(dividends);
+      if (!dividendRecord) {
+        return error(
+          "invalid_response",
+          "Provider dividend events are malformed.",
+          false,
+        );
+      }
+      const context: NormalizationContext = {
+        providerId,
+        securityId: request.securityId,
+        mappingId: request.mappingId,
+        scope: request.scope,
+        ingestedAt: now(),
+      };
+      const observations: DividendEventInput[] = [];
+      for (const entry of Object.values(dividendRecord)) {
+        const entryRecord = asRecord(entry);
+        const amountDecimal = entryRecord
+          ? positiveDecimal(entryRecord.amount)
+          : null;
+        const observedAt = entryRecord
+          ? isoFromUnixSeconds(entryRecord.date)
+          : null;
+        const exDate = observedAt
+          ? marketDateFromInstant(observedAt, metadata.timezone)
+          : null;
+        if (!entryRecord || !amountDecimal || !exDate) {
+          return error(
+            "invalid_response",
+            "Provider dividend event is malformed.",
+            false,
+          );
+        }
+        if (exDate < request.from || exDate > request.to) continue;
+        const normalized = normalizeDividendEventInput(
+          {
+            exDate,
+            // Yahoo's dividend events never carry a payment date -- see the
+            // `paymentDate` field comment on `DividendEventInput`.
+            paymentDate: null,
+            currencyCode: metadata.currency,
+            amountDecimal,
+          },
+          context,
+        );
+        if (!normalized.ok) return normalized;
+        observations.push(normalized.value);
+      }
+      return { ok: true, value: observations };
+    },
+
+    async getSplitEvents(
+      request: SplitRequest,
+    ): Promise<MarketDataResult<SplitEventInput[]>> {
+      const fetched = await fetchCorporateActionChart(request);
+      if (!fetched.ok) return fetched;
+      const { chart, metadata } = fetched.value;
+      const eventsRoot = asRecord(chart.events);
+      const splits = eventsRoot ? eventsRoot.splits : undefined;
+      if (splits === undefined || splits === null) {
+        return { ok: true, value: [] };
+      }
+      const splitRecord = asRecord(splits);
+      if (!splitRecord) {
+        return error(
+          "invalid_response",
+          "Provider split events are malformed.",
+          false,
+        );
+      }
+      const context: NormalizationContext = {
+        providerId,
+        securityId: request.securityId,
+        mappingId: request.mappingId,
+        scope: request.scope,
+        ingestedAt: now(),
+      };
+      const observations: SplitEventInput[] = [];
+      for (const entry of Object.values(splitRecord)) {
+        const entryRecord = asRecord(entry);
+        const numeratorDecimal = entryRecord
+          ? positiveDecimal(entryRecord.numerator)
+          : null;
+        const denominatorDecimal = entryRecord
+          ? positiveDecimal(entryRecord.denominator)
+          : null;
+        const observedAt = entryRecord
+          ? isoFromUnixSeconds(entryRecord.date)
+          : null;
+        // Yahoo's split events carry a single date; MKT-005 uses it for both
+        // the domain `effectiveDate` and (in the ingestion mapper) the
+        // repository's required `ex_date`, since the provider does not
+        // distinguish the two.
+        const effectiveDate = observedAt
+          ? marketDateFromInstant(observedAt, metadata.timezone)
+          : null;
+        if (
+          !entryRecord ||
+          !numeratorDecimal ||
+          !denominatorDecimal ||
+          !effectiveDate
+        ) {
+          return error(
+            "invalid_response",
+            "Provider split event is malformed.",
+            false,
+          );
+        }
+        if (effectiveDate < request.from || effectiveDate > request.to)
+          continue;
+        const normalized = normalizeSplitEventInput(
+          { effectiveDate, numeratorDecimal, denominatorDecimal },
+          context,
+        );
+        if (!normalized.ok) return normalized;
+        observations.push(normalized.value);
+      }
+      return { ok: true, value: observations };
+    },
     getFundamentals: async () => unavailable("Fundamentals"),
   };
 }

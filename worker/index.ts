@@ -17,7 +17,10 @@ import {
   createRequestId,
   emitStructuredLog,
 } from "../domain/observability/index.ts";
-import { runScheduledMarketDataRefresh } from "./scheduled-refresh";
+import {
+  runScheduledCorporateActionRefresh,
+  runScheduledMarketDataRefresh,
+} from "./scheduled-refresh";
 
 const accessJwtVerifier = createAccessJwtVerifier();
 
@@ -137,6 +140,22 @@ const worker: ExportedHandler<Env> = {
             providerRequests: result.providerRequests,
           }
         : { reason: result.reason },
+    });
+
+    const corporateActionResult = await runScheduledCorporateActionRefresh(env);
+    emitStructuredLog({
+      level: corporateActionResult.ok ? "info" : "error",
+      event: "market.refresh",
+      action: "market.refresh.corporate_actions.scheduled",
+      result: corporateActionResult.ok ? "success" : "failure",
+      requestId: "scheduled",
+      metadata: corporateActionResult.ok
+        ? {
+            skipped: corporateActionResult.skipped,
+            securitiesProcessed: corporateActionResult.securitiesProcessed,
+            securitiesFailed: corporateActionResult.securitiesFailed,
+          }
+        : { reason: corporateActionResult.reason },
     });
   },
 };

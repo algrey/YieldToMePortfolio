@@ -14,6 +14,7 @@ import { evaluateSecurityIdentityCandidates } from "../domain/securities/verify-
 import {
   createDisabledMarketDataProvider,
   createYahooCompatibleProvider,
+  ingestSecurityCorporateActionHistory,
   type MarketDataError,
   type MarketDataProvider,
 } from "../domain/market-data/index.ts";
@@ -129,9 +130,12 @@ function providerFailureMessage(error: MarketDataError): string {
 // stub (which fails every call with `unavailable_capability`) rather than a
 // special-cased null, so callers always get a real `MarketDataProvider` and
 // "disabled" flows through the same explicit-failure path as any other
-// provider error.
+// provider error. `boundedRequest`, when set, tightens retry/timeout for a
+// caller that cannot tolerate the adapter's default worst-case latency (see
+// `BOUNDED_CORPORATE_ACTION_PROVIDER_OPTIONS` below).
 async function resolveConfiguredProvider(
   client: SqlClient,
+  boundedRequest?: { maxAttempts: number; timeoutMs: number },
 ): Promise<MarketDataProvider> {
   try {
     const { env } = await import("cloudflare:workers");
@@ -153,11 +157,24 @@ async function resolveConfiguredProvider(
         );
         return mapping?.provider_symbol ?? null;
       },
+      ...boundedRequest,
     });
   } catch {
     return createDisabledMarketDataProvider();
   }
 }
+
+// MKT-005 review fix (B2): the default adapter allows up to 3 attempts at
+// an 8s timeout each plus backoff, i.e. tens of seconds of worst-case
+// latency. That is acceptable for the primary search request this
+// interactive endpoint exists to serve, but NOT for the best-effort
+// corporate-action ingestion that follows a successful verify -- a single
+// attempt with a short timeout bounds this call to a few seconds instead of
+// leaving it merely "eventually catches its own failure".
+const BOUNDED_CORPORATE_ACTION_PROVIDER_OPTIONS = {
+  maxAttempts: 1,
+  timeoutMs: 3_000,
+};
 
 // Implements IMP-004B: an owner requests server-side verification for one
 // brand-new unresolved import security candidate. Verification is
@@ -321,6 +338,49 @@ export async function verifySecurityCandidateWithContext(
       message:
         "This security could not be linked; it may already be linked to another symbol in this portfolio.",
     };
+  }
+
+  // MKT-005 ingestion trigger (a): pull the newly verified security's full
+  // provider dividend/split history now that it is held. This never fails
+  // the verification response (result is discarded, wrapped in try/catch),
+  // and its worst-case latency is bounded rather than merely
+  // failure-tolerant: it runs on a DEDICATED provider instance configured
+  // with a single attempt and a short (3s) timeout
+  // (`BOUNDED_CORPORATE_ACTION_PROVIDER_OPTIONS`), separate from the
+  // `provider` instance used for search above (which keeps the default
+  // multi-attempt/8s-timeout behaviour appropriate for the primary request
+  // this endpoint exists to serve). A transient provider/network failure
+  // here must not prevent the owner's import from proceeding, and the
+  // periodic refresh sweep (`runScheduledCorporateActionRefresh`) and the
+  // owner-initiated re-pull (DIV-001/UI-006C, same underlying function)
+  // both pick up anything missed here later. When a test supplies
+  // `options.provider` directly, that same instance is reused here (its
+  // latency is already test-controlled).
+  const mapping = await context.client.get<{ id: string }>(
+    `SELECT id FROM security_provider_mappings
+     WHERE security_id = ? AND provider_id = ? AND valid_to IS NULL LIMIT 1`,
+    [link.securityId, PROVIDER_ID],
+  );
+  if (mapping) {
+    try {
+      const ingestionProvider =
+        options.provider ??
+        (await resolveConfiguredProvider(
+          context.client,
+          BOUNDED_CORPORATE_ACTION_PROVIDER_OPTIONS,
+        ));
+      await ingestSecurityCorporateActionHistory({
+        client: context.client,
+        provider: ingestionProvider,
+        providerId: PROVIDER_ID,
+        securityId: link.securityId,
+        mappingId: mapping.id,
+        scope: { kind: "deployment", userId: null },
+        now: options.now,
+      });
+    } catch {
+      // Best-effort: see the comment above.
+    }
   }
 
   const refreshed = await loadImportReview(

@@ -97,6 +97,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "calculation_runs",
     "cash_accounts",
     "cash_ledger_entries",
+    "corporate_action_refresh_state",
     "currencies",
     "dividend_event_overrides",
     "dividend_events",

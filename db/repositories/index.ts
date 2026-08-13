@@ -175,6 +175,7 @@ export {
   type SecurityVerificationRepository,
 } from "./security-verification.ts";
 export {
+  createCorporateActionRefreshRepository,
   createDividendAssumptionsRepository,
   createDividendEventOverrideRepository,
   createDividendEventRepository,
@@ -182,6 +183,8 @@ export {
   createDividendManualRecordRepository,
   createDividendReceiptRepository,
   createSplitEventRepository,
+  type CorporateActionRefreshAttemptStatus,
+  type CorporateActionRefreshCandidate,
   type DividendEventKind,
   type DividendEventMutationFailure,
   type DividendEventMutationResult,

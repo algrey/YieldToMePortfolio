@@ -481,6 +481,17 @@ Show gross by default where country/account rules are unknown. Never imply tax a
 
 No generic “yield” without a method label.
 
+### Trailing twelve-month (TTM) derivation (MKT-005)
+
+Implemented ahead of the rest of section 11 to feed `DIV-003`'s assumptions-grid "provider yield" column (`domain/market-data/dividend-yield.ts`; pure functions, decoupled from the repository layer — callers fetch a security's ingested `dividend_events` and a current price and pass them in):
+
+- **Window:** trailing 365 calendar days ending at the caller-supplied `asOfDate`, inclusive of both ends.
+- **Eligible events:** `kind = 'cash'` and `status IN ('declared', 'paid')` only. `'estimated'` rows are forecasts, not a trailing actual; `'cancelled'`/`'superseded'` rows are not current facts. (Caveat: the Yahoo-compatible provider classifies every dividend it reports as `kind = 'cash'` — it has no type distinction — so this filter does not currently exclude anything from that provider; see `docs/MARKET_DATA_STRATEGY.md`'s dividend/split capability section.)
+- **Sum, never annualize:** the TTM per-share figure is the EXACT decimal sum of eligible events' `gross_per_share_decimal` within the window (`formatDecimalExact`, source precision retained, no display rounding). It is never multiplied up from a smaller sample to approximate a full year.
+- **`insufficient_history`:** zero eligible events in the window is the stable typed reason returned instead of zero or a guess — this is the concrete implementation of this section's "if history is irregular or insufficient, show TTM income without extrapolating, or unavailable" rule for the automated provider-yield column specifically.
+- **`mixed_currency`:** eligible events with more than one distinct `currencyCode` in the window is a separate stable typed reason (rather than silently summing across currencies).
+- **Trailing yield:** TTM per-share ÷ a caller-supplied current price (native currency, same holding), expressed as a percentage. This module never fetches a price itself — a missing price is the caller's `price_unavailable` typed reason, and a price whose currency disagrees with the TTM sum's currency is `currency_mismatch`, never a silently wrong ratio.
+
 ## 12. Missing-data and error behavior
 
 | Missing input           | Result                                                              |
