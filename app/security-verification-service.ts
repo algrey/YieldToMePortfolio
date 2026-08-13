@@ -23,7 +23,12 @@ import {
   type RuntimeEnvInput,
 } from "../worker/runtime-config.ts";
 
-const PROVIDER_ID = "yahoo-compatible";
+// Exported (not just module-private) so `app/dividend-history-refresh-actions.ts`
+// (UI-006C's owner-initiated "Refresh historical" re-pull) can reuse the
+// exact same provider-resolution/bounded-timeout logic rather than
+// duplicating it -- both call sites invoke the identical MKT-005
+// `ingestSecurityCorporateActionHistory` function.
+export const PROVIDER_ID = "yahoo-compatible";
 
 export type SecurityVerifyActionFailure = {
   ok: false;
@@ -133,7 +138,7 @@ function providerFailureMessage(error: MarketDataError): string {
 // provider error. `boundedRequest`, when set, tightens retry/timeout for a
 // caller that cannot tolerate the adapter's default worst-case latency (see
 // `BOUNDED_CORPORATE_ACTION_PROVIDER_OPTIONS` below).
-async function resolveConfiguredProvider(
+export async function resolveConfiguredProvider(
   client: SqlClient,
   boundedRequest?: { maxAttempts: number; timeoutMs: number },
 ): Promise<MarketDataProvider> {
@@ -171,7 +176,7 @@ async function resolveConfiguredProvider(
 // corporate-action ingestion that follows a successful verify -- a single
 // attempt with a short timeout bounds this call to a few seconds instead of
 // leaving it merely "eventually catches its own failure".
-const BOUNDED_CORPORATE_ACTION_PROVIDER_OPTIONS = {
+export const BOUNDED_CORPORATE_ACTION_PROVIDER_OPTIONS = {
   maxAttempts: 1,
   timeoutMs: 3_000,
 };

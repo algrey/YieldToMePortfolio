@@ -446,6 +446,7 @@ function OwnedHoldingsScreen({
   state,
   cash,
   coverage,
+  portfolioId,
 }: {
   rows: readonly OwnedHoldingRow[];
   homeCurrencyCode: string;
@@ -453,6 +454,8 @@ function OwnedHoldingsScreen({
   state: "complete" | "partial" | "empty" | "unavailable";
   cash?: OwnedCashSummary;
   coverage?: OwnedHoldingCoverage;
+  /** UI-006C: builds the "Dividends" link in each holding's detail sheet. Optional so preview/prototype callers of this screen (none currently pass owned rows without a real portfolio id, but the type stays defensive) never need a fabricated id. */
+  portfolioId?: string;
 }) {
   const [sortKey, setSortKey] = useState<"ticker" | "value" | "daily" | "gain">(
     "daily",
@@ -822,6 +825,15 @@ function OwnedHoldingsScreen({
             </div>
           </dl>
           <p className="detail-explanation">{selectedHolding.explanation}</p>
+          {portfolioId ? (
+            <p>
+              <Link
+                href={`/portfolio/${portfolioId}/securities/${selectedHolding.id}/dividends`}
+              >
+                Dividends
+              </Link>
+            </p>
+          ) : null}
         </dialog>
       ) : null}
     </div>
@@ -3255,6 +3267,7 @@ export function PortfolioShell({
               state={ownedWorkspace.holdingsViewState ?? "empty"}
               cash={ownedWorkspace.cash}
               coverage={ownedWorkspace.holdingCoverage}
+              portfolioId={ownedWorkspace.activePortfolio.id}
             />
           ) : (
             <OwnedWorkspaceScreen

@@ -3673,6 +3673,101 @@ dd {
   }
 }
 
+/* UI-006C: per-security Dividends tab. The history table reuses
+   `.income-fy-table`/`.income-fy-table-wrap` (income-multi-year.tsx)
+   unchanged for its scrollable-on-mobile `<table>` shell; this block only
+   adds what is new -- the "not paid" row/status styling (QA-001B: colour is
+   never the only signal, so `.dividend-status-not-paid`'s warning colour is
+   always paired with the literal "not paid" text) and the visible franking
+   default control. */
+.dividend-row-not-paid {
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+
+.dividend-status-not-paid {
+  color: var(--warning);
+  font-weight: 650;
+}
+
+.dividend-franking-default {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin: 4px 0 20px;
+}
+
+.dividend-franking-default label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.dividend-franking-default input {
+  width: 120px;
+  min-height: 44px;
+  padding: 0 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--ink);
+  color: var(--cream);
+  font: inherit;
+}
+
+.dividend-franking-default button {
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--green-bright);
+  font: inherit;
+  cursor: pointer;
+}
+
+.dividend-lifetime-summary {
+  margin-top: 20px;
+}
+
+/* Review fix (follow-up 4): a franking-default save that partly committed
+   (this security's row saved, the portfolio row conflicted) is a distinct,
+   non-error outcome -- shares the same warning colour token as "not paid"
+   but a separate class so the two states never conflate. */
+.dividend-status-partial {
+  color: var(--warning);
+  font-weight: 650;
+}
+
+/* Review fix (B2): the provider's own per-share amount shown alongside a
+   winning value that overrode/replaced it -- muted, non-numeric annotation
+   text, matching `.row-tertiary`'s existing small/muted convention. */
+.dividend-provider-note,
+.dividend-imported-note {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+/* Review fix (follow-up 3): the refresh-confirmation dialog's action button
+   had no sizing class at all (unlike every other dialog's buttons, which
+   inherit 44px from `.manual-ledger-form button` or similar). */
+.dividend-refresh-confirm-button {
+  min-height: 44px;
+  margin-top: 14px;
+  padding: 0 14px;
+  border: 1px solid var(--warning);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--cream);
+  font: inherit;
+  cursor: pointer;
+}
+
+.dividend-refresh-confirm-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
