@@ -399,46 +399,102 @@ Normalized price and FX writes use their provider/scope/date uniqueness keys wit
 
 Migration `0018` safely resolves any legacy duplicate active target rows before installing the unique index: the oldest row is queued to replay the union range from the beginning, and superseded active rows become failed with `coalesced_by_migration`. Replaying is intentional and correction-safe because normalized observation keys are idempotent.
 
-### `split_events`
+### `split_events` (DB-005)
 
-Deferred provider capability; this is not part of the core schema:
+**Operational consequence for account deletion:** the six new owner-scoped tables below (`dividend_receipts` through `dividend_manual_records`) are classified `owned` in `ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS` (`db/repositories/account-lifecycle.ts`), so this migration (`0030`) changed the set of tables every OPS-003A export must cover. Deploying it invalidates any already-completed export bound to a pending `deletion_pending` request: `purgeAccount` fails closed with `manifest-corrupt` rather than purging without the new tables, and the owner must submit a fresh deletion request (new idempotency key, new export, new cooling-off) before it can complete — see `docs/OPS-003B_VERIFIED_DELETION_RUNBOOK.md`'s "Operational consequence of a schema-adding migration" note for the full mechanism and the operator checklist. `split_events`/`dividend_events` themselves carry no such consequence — they are shared, not owner data (see below).
 
-- security/provider;
-- ex/effective date;
-- numerator/denominator decimal;
-- status (`declared`, `effective`, `cancelled`, `corrected`);
-- source and revision/supersession.
+Shared provider facts, security-keyed, not owner data — same "no export/purge ownership" treatment as `securities` (excluded from `ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS` and never covered by an `account_purge_lock_*` trigger):
 
-Splits affect quantities and raw/adjusted comparison. An explicit ledger corporate-action record links implementation effect.
+- `security_id`, `provider_id`;
+- `ex_date`, `effective_date` (both required);
+- `numerator_decimal`/`denominator_decimal` (positive decimal strings);
+- `status` (`declared`, `effective`, `cancelled`, `superseded`);
+- `observed_at`, `ingested_at`;
+- `supersedes_event_id` (nullable self-reference).
 
-### `dividend_events`
+Corrections never rewrite a published row in place: a corrected/cancelled observation is inserted as a new row with `supersedes_event_id` pointing at the prior row, and the prior row's `status` moves to `superseded` in the same write — the same shape `manual_overrides` uses for owner data. `createDividendEventRepository`/`createSplitEventRepository` (`db/repositories/dividends.ts`) are server/provider-write-only: they take no `userId` and are gated architecturally (not wired to any user-triggered mutation), mirroring how `security-verification.ts` writes the shared `securities` master.
 
-Deferred capability; this is not part of the core schema:
+Splits affect quantities and raw/adjusted comparison. An explicit ledger corporate-action record links implementation effect (future work; not part of this task).
 
-- security/provider;
-- kind (`cash`, `special`, `capital_return`, other future);
-- status (`estimated`, `declared`, `paid`, `cancelled`, `corrected`);
-- ex, record, payment, declaration dates;
-- currency and gross per-share decimal;
-- franking percentage/credit fields nullable and informational until tax rules exist;
-- source/revision/supersession;
-- estimate method and as-of time for estimated rows.
+### `dividend_events` (DB-005)
+
+Shared provider facts, same non-owner-data treatment as `split_events`:
+
+- `security_id`, `provider_id`;
+- `kind` (`cash`, `special`, `capital_return`);
+- `status` (`estimated`, `declared`, `paid`, `cancelled`, `superseded`);
+- `ex_date`, `record_date`, `payment_date`, `declaration_date` (all nullable);
+- `currency_code` and `gross_per_share_decimal` (required once `status` is `declared`/`paid`, enforced by a CHECK constraint);
+- `franking_percent_decimal`/`franking_credit_per_share_decimal`, both nullable — a typed seam left present-but-unpopulated (NULL = unknown, never a silent zero) until a franking source exists (MKT-005: no current provider supplies franking);
+- `observed_at`, `ingested_at`;
+- `estimate_method`/`estimate_as_of`, both nullable, populated only for `estimated` rows;
+- `supersedes_event_id` (nullable self-reference), same supersession shape as `split_events`.
 
 Declared/paid provider events and calculated estimates remain distinguishable.
 
-### `dividend_receipts`
+### `dividend_receipts` (DB-005 original scope)
 
-Deferred owner-scoped actual income:
+Owner-scoped, per-share model. This is the future ledger-linked capability the "later, posting an actual dividend receipt and its cash entry" bullet in §11 describes:
 
-- owner, portfolio, portfolio-security membership, event, and transaction IDs;
-- eligible quantity;
-- gross, withholding, other tax, net native amounts;
-- native currency;
-- payment-date FX and base values;
-- cash ledger entry;
-- actual status and source.
+- `id`, `user_id`, `portfolio_id`, `portfolio_security_id` (composite-key owned, matching the `portfolio_securities`/`tax_lots` convention);
+- `dividend_event_id` (required — a receipt is always tied to a specific provider event; a repository-level check enforces the event's security matches the holding's security);
+- `transaction_id` (nullable composite FK to `transactions`) — stays NULL until a later task wires actual cash posting (no `dividend` `transactions.type` value exists yet);
+- `shares_decimal`, `dividend_per_share_decimal` (required decimal strings), `franking_per_share_decimal` (nullable — unknown, never zero);
+- `currency_code`, `payment_date`;
+- `status` fixed to `'actual'` by a CHECK constraint, so an estimate can never be persisted as a receipt;
+- `source` (`manual`, `csv_import`, `broker_sync`);
+- `created_at`, `updated_at`, `version` (optimistic concurrency).
 
-Only actual posted receipts affect cash and actual income. A provider event does not create an actual receipt without a user/imported/broker fact. Estimated income never creates a receipt row.
+DIV-001's v1 read-derived income model (owner overrides + manual records, no ledger posting) is served by `dividend_event_overrides`/`dividend_manual_records` below instead of this table.
+
+### `dividend_security_assumptions` / `dividend_portfolio_assumptions` (DB-005 extension a)
+
+Portfolio-scoped dividend/growth assumption overrides, versioned like `user_settings`, never affecting ledger facts. Every field is a nullable decimal string; NULL means "fall back to provider-derived values" (DIV-003), never an implicit zero.
+
+`dividend_security_assumptions` — one row per `portfolio_security_id` (unique):
+
+- `id`, `user_id`, `portfolio_id`, `portfolio_security_id`;
+- `dividend_yield_percent_decimal`, `franking_percent_decimal`, `dividend_growth_percent_decimal`;
+- `created_at`, `updated_at`, `version`.
+
+`franking_percent_decimal` doubles as the holding's "franking if not known" default consumed by DIV-001's per-dividend franking resolution chain (per-dividend override → this default → unknown/flagged).
+
+`dividend_portfolio_assumptions` — one row per portfolio (`portfolio_id` primary key, same single-row-per-owner-key shape as `portfolio_settings`):
+
+- `portfolio_id`, `user_id`;
+- `value_growth_percent_decimal`, `portfolio_dividend_growth_percent_decimal`;
+- `created_at`, `updated_at`, `version`.
+
+### `dividend_fy_overrides` (DB-005 extension b)
+
+Portfolio-scoped financial-year actual-income override, distinct from receipts, for owner-typed historical corrections:
+
+- `id`, `user_id`, `portfolio_id`;
+- `financial_year_ending_year` (integer, keyed by the FY's ending year per FY-001A's "named by its ending year" convention — Jul 2025–Jun 2026 = "FY26" = `2026`); unique per `(portfolio_id, financial_year_ending_year)`;
+- `grossed_amount_decimal` (required), `franking_amount_decimal` (nullable) — amounts are in the portfolio's base currency;
+- `created_at`, `updated_at`, `version`.
+
+### `dividend_event_overrides` (DB-005 extension c)
+
+Sparse per-dividend override, keyed to a specific provider event so overriding an old dividend never blocks new events from flowing through (DIV-001's owner dividend-history decision):
+
+- `id`, `user_id`, `portfolio_id`, `portfolio_security_id`, `dividend_event_id`; unique per `(user_id, portfolio_id, portfolio_security_id, dividend_event_id)` — at most one override row per holding/event;
+- `shares_decimal`, `dividend_per_share_decimal`, `franking_credit_per_share_decimal` — all nullable; a NULL column falls back to the read-time auto-derivation (shares held at ex-date × event gross per share);
+- `exclude` (boolean) removes the event from derived history/totals entirely;
+- `created_at`, `updated_at`, `version`.
+
+### `dividend_manual_records` (DB-005 extension d)
+
+Manual dividend record for a security/payment the provider never surfaced as an event — no `dividend_event_id` link:
+
+- `id`, `user_id`, `portfolio_id`, `portfolio_security_id`;
+- `payment_date`;
+- `shares_decimal`, `dividend_per_share_decimal` (required), `franking_credit_per_share_decimal` (nullable);
+- `created_at`, `updated_at`, `version`.
+
+DIV-001's double-count guard (manual/override > imported > auto-derived — exactly one row wins for a given security/event window) is domain-layer logic, not a schema constraint.
+
+Only actual receipts (`dividend_receipts`, once a later task wires cash posting) affect cash and lifetime-actual income; provider events, assumptions, FY overrides, event overrides, and manual records are all income-reporting facts — nothing in this section posts cash to the ledger in v1. A provider event never creates an actual receipt without a user/imported/broker fact, and estimated income is never storable as a receipt (enforced by the `dividend_receipts_status_check` CHECK constraint).
 
 ### `fundamental_snapshots`
 

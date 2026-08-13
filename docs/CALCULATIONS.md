@@ -435,7 +435,7 @@ Do not implement until transfer/deposit/withdrawal semantics are explicit and a 
 
 ## 11. Dividends (deferred)
 
-This section preserves the future calculation contract. None of it is part of the core ledger/valuation release, and no estimate or receipt table should be added before `DB-005`, `MKT-005`, and `DIV-001` are promoted from deferred status.
+This section preserves the future calculation contract. None of it is implemented yet — `DB-005` (2026-08-13) added the underlying schema (`split_events`, `dividend_events`, `dividend_receipts`, and the DIV-001 owner dividend-history tables: `dividend_security_assumptions`, `dividend_portfolio_assumptions`, `dividend_fy_overrides`, `dividend_event_overrides`, `dividend_manual_records`) so `MKT-005` and `DIV-001` have somewhere to write, but no calculation logic below is wired into any ledger/valuation/UI path until those tasks (and `DIV-003`, which documents the actual read-time-derived projection formula superseding the "actual receipt" model below) are promoted from deferred status.
 
 ### Actual receipt
 

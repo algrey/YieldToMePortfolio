@@ -12,43 +12,7 @@ import {
   createAccountLifecycleRepository,
   createSqliteSqlClient,
 } from "../db/repositories/index.ts";
-
-async function fixture(): Promise<DatabaseSync> {
-  const db = new DatabaseSync(":memory:");
-  db.exec("PRAGMA foreign_keys=ON");
-  const files = (await readdir(new URL("../drizzle", import.meta.url)))
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-  for (const file of files)
-    db.exec(
-      await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8"),
-    );
-  db.exec(`
-    INSERT INTO currencies(code,numeric_code,name,minor_unit_digits) VALUES('AUD',36,'Australian dollar',2);
-    INSERT INTO users(id,status,primary_email,timezone,created_at,updated_at) VALUES
-      ('a','active','a@example.test','Australia/Sydney','2026-08-01T00:00:00Z','2026-08-01T00:00:00Z'),
-      ('b','active','b@example.test','Australia/Sydney','2026-08-01T00:00:00Z','2026-08-01T00:00:00Z');
-    INSERT INTO user_identities(id,user_id,issuer,subject,email_at_link,created_at,updated_at) VALUES
-      ('ia','a','https://access.example','sa','a@example.test','2026-08-01T00:00:00Z','2026-08-01T00:00:00Z'),
-      ('ib','b','https://access.example','sb','b@example.test','2026-08-01T00:00:00Z','2026-08-01T00:00:00Z');
-    INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at) VALUES
-      ('pa','a','A','A portfolio','AUD','Australia/Sydney','fifo','active','2026-08-01','2026-08-01'),
-      ('pb','b','B','B portfolio','AUD','Australia/Sydney','fifo','active','2026-08-01','2026-08-01');
-    INSERT INTO securities(id,asset_type,primary_currency_code,canonical_name,created_at,updated_at) VALUES('s','equity','AUD','Shared','2026-08-01','2026-08-01');
-    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at) VALUES
-      ('psa','a','pa','s','S','AUD','held','2026-08-01','2026-08-01'),
-      ('psb','b','pb','s','S','AUD','held','2026-08-01','2026-08-01');
-    INSERT INTO transactions(id,user_id,portfolio_id,portfolio_security_id,type,status,trade_at,local_trade_date,quantity_decimal,unit_price_decimal,currency_code,gross_amount_decimal,fee_amount_decimal,tax_amount_decimal,source_type,created_by_user_id,calculation_version,created_at) VALUES
-      ('ta','a','pa','psa','buy','posted','2026-08-01T00:00:00Z','2026-08-01','1','1','AUD','1','0','0','manual','a',1,'2026-08-01'),
-      ('tb','b','pb','psb','buy','posted','2026-08-01T00:00:00Z','2026-08-01','2','1','AUD','2','0','0','manual','b',1,'2026-08-01');
-    INSERT INTO market_data_providers(id,code,name,capabilities_json,rate_limit_json) VALUES('p','p','Provider','{}','{}');
-    INSERT INTO security_provider_mappings(id,security_id,provider_id,provider_exchange,provider_symbol,valid_from,status,verified_by_user_id) VALUES('m','s','p','ASX','S','2026-01-01','verified','a');
-    INSERT INTO price_observations(id,provider_id,access_scope,scope_user_id,scope_key,mapping_id,security_id,interval,observation_at,market_date,market_timezone,currency_code,close_decimal,adjustment_state,quality,ingested_at) VALUES
-      ('oa','p','user','a','a','m','s','eod','2026-08-01T00:00:00Z','2026-08-01','Australia/Sydney','AUD','1','raw','observed','2026-08-01'),
-      ('ob','p','user','b','b','m','s','eod','2026-08-01T00:00:00Z','2026-08-01','Australia/Sydney','AUD','2','raw','observed','2026-08-01');
-  `);
-  return db;
-}
+import { completedExport, finishPurge, fixture } from "./fixtures/ops-003.ts";
 
 async function applyMigrationsToD1(database: D1Database): Promise<void> {
   const files = (await readdir(new URL("../drizzle", import.meta.url)))
@@ -77,48 +41,6 @@ async function applyMigrationsToD1(database: D1Database): Promise<void> {
       await database.prepare(statement).run();
     }
   }
-}
-
-async function completedExport(db: DatabaseSync, key = "delete-key") {
-  const repo = createAccountLifecycleRepository(createSqliteSqlClient(db));
-  const request = await repo.request({
-    userId: "a",
-    actorUserId: "a",
-    requestType: "deletion",
-    idempotencyKey: key,
-    includeExport: true,
-    requestId: "request-delete",
-    now: "2026-08-01T00:00:00Z",
-  });
-  assert.ok(request.exportJobId);
-  let job = await repo.getJob("a", request.exportJobId);
-  for (let i = 0; i < 500 && job?.status !== "completed"; i += 1)
-    job = await repo.processExportJob(
-      "a",
-      request.exportJobId,
-      `export-${i}`,
-      "2026-08-01T00:00:00Z",
-    );
-  assert.equal(job?.status, "completed");
-  return { repo, request, job: job! };
-}
-
-async function finishPurge(db: DatabaseSync, key = "delete-key") {
-  const repo = createAccountLifecycleRepository(createSqliteSqlClient(db));
-  let result = await repo.purgeAccount("a", {
-    idempotencyKey: key,
-    confirmation: ACCOUNT_PURGE_CONFIRMATION,
-    requestId: "purge",
-    now: "2026-08-03T00:00:00Z",
-  });
-  for (let i = 0; i < 500 && result.ok && result.status !== "purged"; i += 1)
-    result = await repo.purgeAccount("a", {
-      idempotencyKey: key,
-      confirmation: ACCOUNT_PURGE_CONFIRMATION,
-      requestId: "purge",
-      now: "2026-08-03T00:00:00Z",
-    });
-  return result;
 }
 
 test("requires exact deletion key, cooling-off, final typed confirmation, completed unexpired exact export", async () => {
@@ -150,13 +72,43 @@ test("requires exact deletion key, cooling-off, final typed confirmation, comple
   if (!cooling.ok) assert.equal(cooling.reason, "cooling-off");
 });
 
-test("a completed pre-OPS-003B manifest remains exact and purge-compatible after migration", async () => {
+test("a completed manifest captured on the full current schema remains exact and purge-compatible", async () => {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys=ON");
   const files = (await readdir(new URL("../drizzle", import.meta.url)))
     .filter((name) => name.endsWith(".sql"))
     .sort();
-  for (const file of files.filter((name) => name <= "0024_zzzz.sql"))
+  // This test used to capture the export at the 0024 boundary (the schema
+  // immediately before OPS-003's own migration chain, 0025-0029) and then
+  // apply 0025-0029 afterward, proving OPS-003's own control-table-only
+  // migrations did not break an already-completed manifest.
+  //
+  // DB-005 (migration 0030) makes that specific construction impossible to
+  // restore, for a reason independent of which "after" range is chosen:
+  // `purgeAccount`'s `expectedNames` check (account-lifecycle.ts) is built
+  // from the CURRENT, whole-process `ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS`
+  // constant, not from whatever subset of tables a given in-memory test
+  // database happens to have migrated to. Since that constant now
+  // unconditionally includes the six new dividend_* owned tables, a
+  // manifest captured against ANY database that stops short of 0030 is
+  // missing rows for those six tables and fails `manifest-corrupt`
+  // regardless of how far past that point the "after" migrations go --
+  // confirmed by direct probe: capturing at 0024 and applying only
+  // 0025-0029 (never touching 0030) still fails `manifest-corrupt`, because
+  // the six tables are absent from the DB at capture time either way. So
+  // "retain the 0024 cutoff" cannot be restored as a passing case: the
+  // moment DB-005 landed, that specific historical property became
+  // structurally false, not merely differently-bounded.
+  //
+  // What remains true, and worth guarding, is that a manifest captured on
+  // the FULL current schema (all migrations applied before export) still
+  // purges cleanly -- so this test now captures and purges entirely on
+  // today's schema. The genuinely new "manifest captured before a
+  // schema-adding migration, then that migration lands" case -- which is
+  // the actual "applies migrations after the export" scenario going forward
+  // -- has its own dedicated test directly below, asserting the correct
+  // `manifest-corrupt` fail-closed outcome instead of a silent success.
+  for (const file of files)
     db.exec(
       await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8"),
     );
@@ -192,13 +144,66 @@ test("a completed pre-OPS-003B manifest remains exact and purge-compatible after
     )
     .all(job.id);
   assert.equal(controls.length, 0);
-  for (const file of files.filter((name) => name > "0024_zzzz.sql"))
+  const result = await finishPurge(db);
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.status, "purged");
+});
+
+test("a manifest predating a schema-adding migration (0030) fails closed as manifest-corrupt, never a silent partial purge", async () => {
+  const db = new DatabaseSync(":memory:");
+  db.exec("PRAGMA foreign_keys=ON");
+  const files = (await readdir(new URL("../drizzle", import.meta.url)))
+    .filter((name) => name.endsWith(".sql"))
+    .sort();
+  // Build and complete the export on the schema as it existed immediately
+  // before DB-005 (through 0029) -- this manifest structurally cannot cover
+  // dividend_receipts and friends, since those tables did not exist yet.
+  for (const file of files.filter((name) => name <= "0029_zzzz.sql"))
+    db.exec(
+      await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8"),
+    );
+  db.exec(`
+    INSERT INTO currencies(code,numeric_code,name,minor_unit_digits) VALUES('AUD',36,'Australian dollar',2);
+    INSERT INTO users(id,status,primary_email,timezone,created_at,updated_at) VALUES('a','active','a@example.invalid','Australia/Sydney','2026-08-01','2026-08-01');
+    INSERT INTO user_identities(id,user_id,issuer,subject,email_at_link,created_at,updated_at) VALUES('ia','a','https://access.invalid','sa','a@example.invalid','2026-08-01','2026-08-01');
+    INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at) VALUES('pa','a','A','A','AUD','Australia/Sydney','fifo','active','2026-08-01','2026-08-01');
+    INSERT INTO transactions(id,user_id,portfolio_id,type,status,trade_at,local_trade_date,currency_code,gross_amount_decimal,fee_amount_decimal,tax_amount_decimal,source_type,created_by_user_id,calculation_version,created_at) VALUES('ta','a','pa','cash_deposit','posted','2026-08-01T00:00:00Z','2026-08-01','AUD','1','0','0','manual','a',1,'2026-08-01');
+  `);
+  const repo = createAccountLifecycleRepository(createSqliteSqlClient(db));
+  const request = await repo.request({
+    userId: "a",
+    actorUserId: "a",
+    requestType: "deletion",
+    idempotencyKey: "delete-key",
+    includeExport: true,
+    requestId: "pre-db-005",
+    now: "2026-08-01T00:00:00Z",
+  });
+  let job = await repo.getJob("a", request.exportJobId!);
+  for (let i = 0; i < 500 && job?.status !== "completed"; i += 1)
+    job = await repo.processExportJob(
+      "a",
+      request.exportJobId!,
+      `pre-db-005-${i}`,
+      "2026-08-01T00:00:00Z",
+    );
+  assert.equal(job?.status, "completed");
+  const sourceTransactionCount = db
+    .prepare("SELECT COUNT(*) n FROM transactions WHERE user_id='a'")
+    .get() as { n: number };
+  // Now migrate through 0030 (DB-005's new owned tables).
+  for (const file of files.filter((name) => name > "0029_zzzz.sql"))
     db.exec(
       await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8"),
     );
   const result = await finishPurge(db);
-  assert.equal(result.ok, true);
-  if (result.ok) assert.equal(result.status, "purged");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "manifest-corrupt");
+  // Fail-closed means nothing was deleted -- source rows are untouched.
+  assert.deepEqual(
+    db.prepare("SELECT COUNT(*) n FROM transactions WHERE user_id='a'").get(),
+    sourceTransactionCount,
+  );
 });
 
 test("manifest/source mismatch fails closed before any deletion", async () => {

@@ -47,6 +47,27 @@ UPDATE locks check old and new owners independently. Purge-control tables are
 not retroactively added to OPS-003A manifest expectations; an exact export
 completed before OPS-003B remains eligible when its original manifest verifies.
 
+**Operational consequence of a schema-adding migration (e.g. DB-005, migration
+`0030`):** unlike a purge-control-only migration (which stays excluded from
+manifest expectations, so old exports remain eligible -- see above), a
+migration that adds a new first-class owned/exported table changes
+`ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS`'s expected table set for every purge
+attempt from that point on, regardless of which database a given export was
+captured against. Deploying such a migration invalidates any already-completed
+export bound to a pending deletion request: `purgeAccount` fails closed with
+`manifest-corrupt` (`"The export manifest does not reconcile."` /
+`"...is incomplete."`) rather than silently purging without covering the new
+table. The affected owner is not stuck -- `manifest-corrupt` is not terminal, and the
+original request row is retained immutably as history -- but `request()` is
+keyed by `(userId, requestType, idempotencyKey)`, so completing deletion
+requires a genuinely new deletion request with a fresh idempotency key, which
+mints a fresh `account_export_jobs` export against the post-migration schema
+and its own 24-hour cooling-off. The old request/export pairing simply never
+purges. When deploying a schema-adding migration, check for `deletion_pending`
+accounts with a completed-but-unconsumed export from before the deploy and
+expect their next purge attempt to fail closed until they (or an operator
+acting on their behalf) submit a new deletion request.
+
 ## Synthetic drill
 
 Create a new loopback/local D1 database, apply the migration chain, insert two

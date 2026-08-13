@@ -63,6 +63,12 @@ const OWNED_TABLES = [
   "portfolios",
   "portfolio_settings",
   "portfolio_securities",
+  "dividend_receipts",
+  "dividend_security_assumptions",
+  "dividend_portfolio_assumptions",
+  "dividend_fy_overrides",
+  "dividend_event_overrides",
+  "dividend_manual_records",
   "import_batches",
   "import_commit_chunks",
   "import_rows",
@@ -157,6 +163,10 @@ for (const name of [
   "securities",
   "security_identifiers",
   "market_data_providers",
+  // DB-005: security-keyed provider facts, shared across owners exactly
+  // like `securities` -- not owner data.
+  "dividend_events",
+  "split_events",
 ])
   classifications[name] = excluded("Shared reference data");
 
@@ -286,6 +296,15 @@ const PURGE_TABLES_IN_FK_ORDER = [
   "import_commit_chunks",
   "import_mapping_decisions",
   "import_batches",
+  // DB-005: dividend_receipts may reference transactions, and all six of
+  // these owner tables may reference portfolio_securities/portfolios, so
+  // they are deleted before both.
+  "dividend_receipts",
+  "dividend_event_overrides",
+  "dividend_manual_records",
+  "dividend_security_assumptions",
+  "dividend_fy_overrides",
+  "dividend_portfolio_assumptions",
   "transactions",
   "portfolio_securities",
   "portfolio_settings",

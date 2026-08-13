@@ -2383,3 +2383,445 @@ export const holdingProjections = sqliteTable(
     ),
   ],
 );
+
+/**
+ * DB-005: security-keyed provider facts, shared across owners exactly like
+ * `securities` -- not owner data, so excluded from account export/purge
+ * (`ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS` in `account-lifecycle.ts`) and not
+ * covered by any `account_purge_lock_*` trigger. Corrections never rewrite a
+ * published row in place: a corrected/cancelled observation is inserted as a
+ * new row with `supersedesEventId` pointing at the prior row, and the prior
+ * row's `status` moves to `superseded` in the same write -- the same
+ * supersession shape `manual_overrides` uses for owner data.
+ */
+export const dividendEvents = sqliteTable(
+  "dividend_events",
+  {
+    id: text("id").primaryKey(),
+    securityId: text("security_id").notNull(),
+    providerId: text("provider_id").notNull(),
+    kind: text("kind").notNull(),
+    status: text("status").notNull(),
+    exDate: text("ex_date"),
+    recordDate: text("record_date"),
+    paymentDate: text("payment_date"),
+    declarationDate: text("declaration_date"),
+    currencyCode: text("currency_code").notNull(),
+    grossPerShareDecimal: text("gross_per_share_decimal"),
+    // Franking is not auto-sourced by any current provider (MKT-005): these
+    // columns are a typed seam left present-but-unpopulated (NULL = unknown,
+    // never a silent zero) until a franking source exists.
+    frankingPercentDecimal: text("franking_percent_decimal"),
+    frankingCreditPerShareDecimal: text("franking_credit_per_share_decimal"),
+    observedAt: text("observed_at").notNull(),
+    ingestedAt: text("ingested_at").notNull(),
+    estimateMethod: text("estimate_method"),
+    estimateAsOf: text("estimate_as_of"),
+    supersedesEventId: text("supersedes_event_id"),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "dividend_events_security_id_securities_id_fk",
+      columns: [table.securityId],
+      foreignColumns: [securities.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "dividend_events_provider_id_market_data_providers_id_fk",
+      columns: [table.providerId],
+      foreignColumns: [marketDataProviders.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "dividend_events_currency_code_currencies_code_fk",
+      columns: [table.currencyCode],
+      foreignColumns: [currencies.code],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "dividend_events_supersedes_event_id_fk",
+      columns: [table.supersedesEventId],
+      foreignColumns: [table.id],
+    }).onDelete("restrict"),
+    check(
+      "dividend_events_kind_check",
+      sql`${table.kind} IN ('cash', 'special', 'capital_return')`,
+    ),
+    check(
+      "dividend_events_status_check",
+      sql`${table.status} IN ('estimated', 'declared', 'paid', 'cancelled', 'superseded')`,
+    ),
+    check(
+      "dividend_events_amount_check",
+      sql`${table.status} NOT IN ('declared', 'paid') OR ${table.grossPerShareDecimal} IS NOT NULL`,
+    ),
+    index("dividend_events_security_status_idx").on(
+      table.securityId,
+      table.status,
+      table.exDate,
+    ),
+  ],
+);
+
+/** DB-005: shared provider facts, same non-owner-data treatment as above. */
+export const splitEvents = sqliteTable(
+  "split_events",
+  {
+    id: text("id").primaryKey(),
+    securityId: text("security_id").notNull(),
+    providerId: text("provider_id").notNull(),
+    exDate: text("ex_date").notNull(),
+    effectiveDate: text("effective_date").notNull(),
+    numeratorDecimal: text("numerator_decimal").notNull(),
+    denominatorDecimal: text("denominator_decimal").notNull(),
+    status: text("status").notNull(),
+    observedAt: text("observed_at").notNull(),
+    ingestedAt: text("ingested_at").notNull(),
+    supersedesEventId: text("supersedes_event_id"),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "split_events_security_id_securities_id_fk",
+      columns: [table.securityId],
+      foreignColumns: [securities.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "split_events_provider_id_market_data_providers_id_fk",
+      columns: [table.providerId],
+      foreignColumns: [marketDataProviders.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "split_events_supersedes_event_id_fk",
+      columns: [table.supersedesEventId],
+      foreignColumns: [table.id],
+    }).onDelete("restrict"),
+    check(
+      "split_events_status_check",
+      sql`${table.status} IN ('declared', 'effective', 'cancelled', 'superseded')`,
+    ),
+    index("split_events_security_status_idx").on(
+      table.securityId,
+      table.status,
+      table.exDate,
+    ),
+  ],
+);
+
+/**
+ * DB-005 original scope: owner-scoped actual receipts, per-share model.
+ * `dividendEventId` is required -- this table is the future ledger-linked
+ * capability the "later, posting an actual dividend receipt and its cash
+ * entry" bullet in `docs/DATA_MODEL.md` §11 describes; `transactionId` stays
+ * NULL until a later task wires actual cash posting. DIV-001's v1
+ * read-derived income model (owner overrides + manual records, no ledger
+ * posting) is served by `dividendEventOverrides`/`dividendManualRecords`
+ * below instead. `status` is fixed to `'actual'` so an estimate can never be
+ * persisted as a receipt.
+ */
+export const dividendReceipts = sqliteTable(
+  "dividend_receipts",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    portfolioSecurityId: text("portfolio_security_id").notNull(),
+    dividendEventId: text("dividend_event_id").notNull(),
+    transactionId: text("transaction_id"),
+    sharesDecimal: text("shares_decimal").notNull(),
+    dividendPerShareDecimal: text("dividend_per_share_decimal").notNull(),
+    frankingPerShareDecimal: text("franking_per_share_decimal"),
+    currencyCode: text("currency_code").notNull(),
+    paymentDate: text("payment_date").notNull(),
+    status: text("status").notNull().default("actual"),
+    source: text("source").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    foreignKey({
+      name: "dividend_receipts_portfolio_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "dividend_receipts_security_id_user_id_portfolio_id_fk",
+      columns: [table.portfolioSecurityId, table.userId, table.portfolioId],
+      foreignColumns: [
+        portfolioSecurities.id,
+        portfolioSecurities.userId,
+        portfolioSecurities.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "dividend_receipts_dividend_event_id_fk",
+      columns: [table.dividendEventId],
+      foreignColumns: [dividendEvents.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "dividend_receipts_transaction_id_user_id_portfolio_id_fk",
+      columns: [table.transactionId, table.userId, table.portfolioId],
+      foreignColumns: [
+        transactions.id,
+        transactions.userId,
+        transactions.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "dividend_receipts_currency_code_currencies_code_fk",
+      columns: [table.currencyCode],
+      foreignColumns: [currencies.code],
+    }).onDelete("restrict"),
+    check("dividend_receipts_status_check", sql`${table.status} = 'actual'`),
+    check(
+      "dividend_receipts_source_check",
+      sql`${table.source} IN ('manual', 'csv_import', 'broker_sync')`,
+    ),
+    uniqueIndex("dividend_receipts_id_user_portfolio_unique").on(
+      table.id,
+      table.userId,
+      table.portfolioId,
+    ),
+    index("dividend_receipts_owner_portfolio_security_idx").on(
+      table.userId,
+      table.portfolioId,
+      table.portfolioSecurityId,
+    ),
+  ],
+);
+
+/**
+ * DB-005 extension (a): portfolio-scoped per-security dividend assumption
+ * overrides. NULL means "fall back to provider-derived values" (DIV-003),
+ * never an implicit zero. `frankingPercentDecimal` doubles as the holding's
+ * "franking if not known" default consumed by DIV-001's per-dividend
+ * franking resolution chain. Versioned like `user_settings` for optimistic
+ * concurrency; never affects ledger facts.
+ */
+export const dividendSecurityAssumptions = sqliteTable(
+  "dividend_security_assumptions",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    portfolioSecurityId: text("portfolio_security_id").notNull(),
+    dividendYieldPercentDecimal: text("dividend_yield_percent_decimal"),
+    frankingPercentDecimal: text("franking_percent_decimal"),
+    dividendGrowthPercentDecimal: text("dividend_growth_percent_decimal"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    foreignKey({
+      name: "dividend_security_assumptions_portfolio_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "dividend_security_assumptions_security_id_user_id_portfolio_id_fk",
+      columns: [table.portfolioSecurityId, table.userId, table.portfolioId],
+      foreignColumns: [
+        portfolioSecurities.id,
+        portfolioSecurities.userId,
+        portfolioSecurities.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    uniqueIndex("dividend_security_assumptions_id_user_portfolio_unique").on(
+      table.id,
+      table.userId,
+      table.portfolioId,
+    ),
+    uniqueIndex("dividend_security_assumptions_portfolio_security_unique").on(
+      table.portfolioSecurityId,
+    ),
+    index("dividend_security_assumptions_owner_portfolio_idx").on(
+      table.userId,
+      table.portfolioId,
+    ),
+  ],
+);
+
+/**
+ * DB-005 extension (a): portfolio-level dividend/value growth assumptions,
+ * one row per portfolio -- same single-row-per-owner-key shape as
+ * `portfolio_settings`. Versioned; never affects ledger facts.
+ */
+export const dividendPortfolioAssumptions = sqliteTable(
+  "dividend_portfolio_assumptions",
+  {
+    portfolioId: text("portfolio_id").primaryKey(),
+    userId: text("user_id").notNull(),
+    valueGrowthPercentDecimal: text("value_growth_percent_decimal"),
+    portfolioDividendGrowthPercentDecimal: text(
+      "portfolio_dividend_growth_percent_decimal",
+    ),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    foreignKey({
+      name: "dividend_portfolio_assumptions_portfolio_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    uniqueIndex("dividend_portfolio_assumptions_portfolio_user_unique").on(
+      table.portfolioId,
+      table.userId,
+    ),
+  ],
+);
+
+/**
+ * DB-005 extension (b): portfolio-scoped financial-year actual-income
+ * override, distinct from receipts. Financial years are keyed by their
+ * ending year, matching FY-001A's "named by its ending year" convention
+ * (Jul 2025-Jun 2026 = "FY26" = 2026). Amounts are in the portfolio's base
+ * currency. Versioned.
+ */
+export const dividendFyOverrides = sqliteTable(
+  "dividend_fy_overrides",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    financialYearEndingYear: integer("financial_year_ending_year").notNull(),
+    grossedAmountDecimal: text("grossed_amount_decimal").notNull(),
+    frankingAmountDecimal: text("franking_amount_decimal"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    foreignKey({
+      name: "dividend_fy_overrides_portfolio_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    check(
+      "dividend_fy_overrides_year_check",
+      sql`${table.financialYearEndingYear} BETWEEN 1900 AND 2999`,
+    ),
+    uniqueIndex("dividend_fy_overrides_id_user_portfolio_unique").on(
+      table.id,
+      table.userId,
+      table.portfolioId,
+    ),
+    uniqueIndex("dividend_fy_overrides_portfolio_year_unique").on(
+      table.portfolioId,
+      table.financialYearEndingYear,
+    ),
+  ],
+);
+
+/**
+ * DB-005 extension (c): sparse per-dividend override, keyed to a specific
+ * provider event so overriding an old dividend never blocks new events from
+ * flowing through (DIV-001). Every field is nullable -- a NULL column falls
+ * back to the read-time auto-derivation; `exclude` removes the event from
+ * derived history/totals entirely. At most one override row per
+ * owner/portfolio/holding/event.
+ */
+export const dividendEventOverrides = sqliteTable(
+  "dividend_event_overrides",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    portfolioSecurityId: text("portfolio_security_id").notNull(),
+    dividendEventId: text("dividend_event_id").notNull(),
+    sharesDecimal: text("shares_decimal"),
+    dividendPerShareDecimal: text("dividend_per_share_decimal"),
+    frankingCreditPerShareDecimal: text("franking_credit_per_share_decimal"),
+    exclude: integer("exclude", { mode: "boolean" }).notNull().default(false),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    foreignKey({
+      name: "dividend_event_overrides_portfolio_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "dividend_event_overrides_security_id_user_id_portfolio_id_fk",
+      columns: [table.portfolioSecurityId, table.userId, table.portfolioId],
+      foreignColumns: [
+        portfolioSecurities.id,
+        portfolioSecurities.userId,
+        portfolioSecurities.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "dividend_event_overrides_dividend_event_id_fk",
+      columns: [table.dividendEventId],
+      foreignColumns: [dividendEvents.id],
+    }).onDelete("restrict"),
+    check(
+      "dividend_event_overrides_exclude_check",
+      sql`${table.exclude} IN (0, 1)`,
+    ),
+    uniqueIndex("dividend_event_overrides_id_user_portfolio_unique").on(
+      table.id,
+      table.userId,
+      table.portfolioId,
+    ),
+    uniqueIndex("dividend_event_overrides_target_unique").on(
+      table.userId,
+      table.portfolioId,
+      table.portfolioSecurityId,
+      table.dividendEventId,
+    ),
+  ],
+);
+
+/**
+ * DB-005 extension (d): manual dividend record for a security/payment the
+ * provider never surfaced as an event -- no `dividendEventId` link. Covered
+ * by DIV-001's double-count guard (manual/override > imported >
+ * auto-derived) at the domain layer, not here.
+ */
+export const dividendManualRecords = sqliteTable(
+  "dividend_manual_records",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    portfolioSecurityId: text("portfolio_security_id").notNull(),
+    paymentDate: text("payment_date").notNull(),
+    sharesDecimal: text("shares_decimal").notNull(),
+    dividendPerShareDecimal: text("dividend_per_share_decimal").notNull(),
+    frankingCreditPerShareDecimal: text("franking_credit_per_share_decimal"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    foreignKey({
+      name: "dividend_manual_records_portfolio_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "dividend_manual_records_security_id_user_id_portfolio_id_fk",
+      columns: [table.portfolioSecurityId, table.userId, table.portfolioId],
+      foreignColumns: [
+        portfolioSecurities.id,
+        portfolioSecurities.userId,
+        portfolioSecurities.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    uniqueIndex("dividend_manual_records_id_user_portfolio_unique").on(
+      table.id,
+      table.userId,
+      table.portfolioId,
+    ),
+    index("dividend_manual_records_owner_portfolio_security_idx").on(
+      table.userId,
+      table.portfolioId,
+      table.portfolioSecurityId,
+      table.paymentDate,
+    ),
+  ],
+);
