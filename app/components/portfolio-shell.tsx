@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   historyBars,
@@ -2564,6 +2564,7 @@ export function PortfolioShell({
   ownedDetails?: PortfolioInspection | null;
 }) {
   const router = useRouter();
+  const pathname = usePathname();
   const portfolios = portfolioPrototypesOverride ?? portfolioPrototypes;
   const ownedMode = ownedWorkspace !== undefined;
   const selectorItems: Array<{
@@ -3173,6 +3174,26 @@ export function PortfolioShell({
             {section}
           </Link>
         ))}
+        {/* UI-006A: Income has no preview/fixture equivalent (DIV-003 is an
+            owner-scoped read service with no prototype-data seam), so this
+            tab only appears in owned mode, and links directly to the
+            standalone `/portfolio/:id/income` route tree rather than through
+            `primaryPortfolioSections`/`[section]/page.tsx`'s preview-aware
+            dispatch. */}
+        {ownedMode && ownedWorkspace.activePortfolio ? (
+          <Link
+            href={`/portfolio/${ownedWorkspace.activePortfolio.id}/income`}
+            aria-current={
+              pathname?.startsWith(
+                `/portfolio/${ownedWorkspace.activePortfolio.id}/income`,
+              )
+                ? "page"
+                : undefined
+            }
+          >
+            income
+          </Link>
+        ) : null}
       </nav>
 
       <StatusBanner
