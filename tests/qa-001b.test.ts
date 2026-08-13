@@ -385,7 +385,7 @@ test("QA-001B: interactive controls meet the 44×44 CSS-pixel touch-target minim
   }
 });
 
-test("QA-001B: .period-tabs wraps instead of overflowing at 320px (7 buttons × 44px min-width + gaps > 296px content box)", async () => {
+test("QA-001B: .period-tabs wraps instead of overflowing at 320px (9 buttons × 44px min-width + gaps > 296px content box, FY-001C)", async () => {
   const styles = await readFile(
     new URL("../app/globals.css", import.meta.url),
     "utf8",

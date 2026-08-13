@@ -26,6 +26,12 @@ import { subtractCalendarMonths } from "../overview-range";
 import { sampleOverviewChartPoints } from "../overview-chart";
 import { overviewFormulaTotal, overviewStateCopy } from "../overview-copy";
 import {
+  filterToClosedFyWindow,
+  filterToFyToDateWindow,
+  fyRangeEyebrow,
+  windowChangeAmount,
+} from "../overview-fy-range";
+import {
   sortOwnedHoldings,
   type OwnedCashSummary,
   type OwnedHoldingCoverage,
@@ -36,7 +42,11 @@ import {
   formatDecimalTrimmed,
   groupThousands,
 } from "../preview-decimal";
-import { parseDecimalResult } from "../../domain/calculations/index.ts";
+import {
+  currentFyWindow,
+  lastFyWindow,
+  parseDecimalResult,
+} from "../../domain/calculations/index.ts";
 
 export const portfolioSections = [
   "overview",
@@ -99,6 +109,16 @@ export type OwnedWorkspace = {
   homeCurrencyCode?: string | null;
   holdingCurrencyView?: "native" | "home";
   financialYearStartMonth?: number;
+  // The user's settings-level IANA timezone (user_settings.timezone). FY
+  // window math (FY-001C) must key off this, not `activePortfolio.timezone`
+  // -- see AGENTS.md and domain/calculations/financial-year.ts.
+  timezone?: string;
+  // The server's "now" at the moment this workspace was assembled
+  // (`loadAuthenticatedWorkspace`), as a full ISO-8601 instant. FY window
+  // math anchors on this, never on a history point's date (stale data must
+  // not rename the FY) and never recomputed client-side (see
+  // docs/CALCULATIONS.md §9).
+  nowInstant?: string;
   settingsVersion?: number;
   message?: string;
   lifecycle?: "disabled" | "deletion_pending" | "purged";
@@ -933,14 +953,45 @@ function OwnedOverviewScreen({
   data,
   portfolioId,
   portfolioName,
+  financialYearStartMonth,
+  timezone,
+  nowInstant,
 }: {
   data: OwnedOverviewData;
   portfolioId: string;
   portfolioName: string;
+  financialYearStartMonth: number;
+  timezone: string;
+  // A full ISO-8601 instant resolved server-side when the workspace was
+  // assembled (see OwnedWorkspace.nowInstant). FY is an ABSOLUTE named
+  // period -- unlike the relative 1M/3M/12M cutoffs, which are safe to
+  // anchor on the latest published point, "FY"/"Last FY" must anchor on
+  // the real current instant. Anchoring on a history point instead would
+  // mislabel the window (stale data reads as a false "current FY") and,
+  // because that point's date is a bare local calendar date rather than an
+  // instant, would also misclassify boundary dates in negative-offset
+  // timezones (FY-001C review B1/B2). This must never be computed with
+  // `new Date()`/`Date.now()` inside this client component -- it is always
+  // threaded in as a prop from the server render.
+  nowInstant: string;
 }) {
-  const [range, setRange] = useState<"1M" | "3M" | "12M" | "All">("12M");
+  const [range, setRange] = useState<
+    "1M" | "3M" | "12M" | "FY" | "Last FY" | "All"
+  >("12M");
+  const currentFyResult = useMemo(
+    () => currentFyWindow(nowInstant, financialYearStartMonth, timezone),
+    [nowInstant, financialYearStartMonth, timezone],
+  );
+  const lastFyResult = useMemo(
+    () => lastFyWindow(nowInstant, financialYearStartMonth, timezone),
+    [nowInstant, financialYearStartMonth, timezone],
+  );
   const history = useMemo(() => {
     if (range === "All") return data.history;
+    if (range === "FY")
+      return filterToFyToDateWindow(data.history, currentFyResult);
+    if (range === "Last FY")
+      return filterToClosedFyWindow(data.history, lastFyResult);
     const latest = data.history[data.history.length - 1];
     if (!latest) return [];
     const cutoffDate = subtractCalendarMonths(
@@ -948,7 +999,28 @@ function OwnedOverviewScreen({
       range === "1M" ? 1 : range === "3M" ? 3 : 12,
     );
     return data.history.filter((point) => point.date >= cutoffDate);
-  }, [data.history, range]);
+  }, [data.history, range, currentFyResult, lastFyResult]);
+  // The FY ranges are the only ones with a computed period change today
+  // (1M/3M/12M/All show no delta of their own -- see the hero's `daily`
+  // movement, which is independent of the selected range). "Last FY" is a
+  // closed window, so its delta must read as change ACROSS that window,
+  // never change-to-today; computing first-point-to-last-point of the
+  // filtered window satisfies that for both FY ranges.
+  const fyWindowChange =
+    range === "FY" || range === "Last FY"
+      ? windowChangeAmount(history, data.currencyCode)
+      : null;
+  // A genuine 0.00 change (a flat window) is a known fact, not missing
+  // data -- it must render, but neutrally, not as a false "gain" (green).
+  // Mirrors OverviewFact's own zero handling below.
+  const fyWindowChangeIsZero =
+    fyWindowChange !== null && /(?:^| )0\.00$/.test(fyWindowChange);
+  const historyEyebrow =
+    (range === "FY"
+      ? fyRangeEyebrow("FY", currentFyResult, FY_MONTH_ABBREVIATIONS)
+      : range === "Last FY"
+        ? fyRangeEyebrow("Last FY", lastFyResult, FY_MONTH_ABBREVIATIONS)
+        : null) ?? "Portfolio history";
   const chartHistory = useMemo(
     () => sampleOverviewChartPoints(history),
     [history],
@@ -1039,20 +1111,43 @@ function OwnedOverviewScreen({
       <section className="history-panel" aria-labelledby="owned-history-title">
         <div className="section-heading compact">
           <div>
-            <p className="eyebrow">Portfolio history</p>
+            <p className="eyebrow">{historyEyebrow}</p>
             <h2 id="owned-history-title">Published value</h2>
+            {range === "FY" || range === "Last FY" ? (
+              <p className="overview-movement">
+                <span
+                  className={
+                    fyWindowChange === null
+                      ? "muted-copy"
+                      : fyWindowChangeIsZero
+                        ? ""
+                        : fyWindowChange.startsWith("−")
+                          ? "tone-negative"
+                          : "tone-positive"
+                  }
+                >
+                  {fyWindowChange === null
+                    ? "Change unavailable"
+                    : `${fyWindowChange} ${
+                        range === "Last FY" ? "across the window" : "this FY"
+                      } · Percentage unavailable`}
+                </span>
+              </p>
+            ) : null}
           </div>
           <div className="range-controls" aria-label="History range">
-            {(["1M", "3M", "12M", "All"] as const).map((option) => (
-              <button
-                key={option}
-                type="button"
-                aria-pressed={range === option}
-                onClick={() => setRange(option)}
-              >
-                {option}
-              </button>
-            ))}
+            {(["1M", "3M", "12M", "FY", "Last FY", "All"] as const).map(
+              (option) => (
+                <button
+                  key={option}
+                  type="button"
+                  aria-pressed={range === option}
+                  onClick={() => setRange(option)}
+                >
+                  {option}
+                </button>
+              ),
+            )}
           </div>
         </div>
         <div
@@ -2215,7 +2310,11 @@ function DetailsScreen({
   portfolio: PortfolioPrototype;
   viewState: ViewState;
 }) {
-  const periods = ["1W", "1M", "3M", "6M", "YTD", "1Y", "Max"];
+  // FY/Last FY are inserted here as static labels only (FY-001C item 2):
+  // like every other period tab in this prototype, selecting one only
+  // changes the interpolated `{period}` eyebrow copy below -- it never
+  // recomputes the fixed prototype figures or implies real filtering.
+  const periods = ["1W", "1M", "3M", "6M", "YTD", "FY", "Last FY", "1Y", "Max"];
   const [period, setPeriod] = useState("1Y");
 
   if (viewState === "empty") {
@@ -2990,9 +3089,12 @@ export function PortfolioShell({
                         <option value="home">Home currency</option>
                       </select>
                     </label>
-                    <label className="menu-field">
-                      <span>Financial year start</span>
+                    <div className="menu-field">
+                      <label htmlFor="fy-start-month-select">
+                        Financial year start
+                      </label>
                       <select
+                        id="fy-start-month-select"
                         value={ownedWorkspace.financialYearStartMonth ?? 7}
                         onChange={(event) =>
                           void changeFinancialYearStartMonth(
@@ -3008,12 +3110,19 @@ export function PortfolioShell({
                           </option>
                         ))}
                       </select>
+                      {/* Outside the label (FY-001B review fold-in): the
+                          helper span used to sit inside the label, so its
+                          text became part of the select's accessible name
+                          AND was re-announced via aria-describedby -- a
+                          double announcement. htmlFor/id association keeps
+                          the label-select link explicit without wrapping
+                          the note text into the name. */}
                       <span className="menu-note" id="fy-start-month-helper">
                         {financialYearWindowHelperText(
                           ownedWorkspace.financialYearStartMonth ?? 7,
                         )}
                       </span>
-                    </label>
+                    </div>
                   </>
                 ) : null}
                 {!ownedMode ? <p>Preview a state</p> : null}
@@ -3101,6 +3210,18 @@ export function PortfolioShell({
               }
               portfolioId={ownedWorkspace.activePortfolio.id}
               portfolioName={ownedWorkspace.activePortfolio.name}
+              financialYearStartMonth={
+                ownedWorkspace.financialYearStartMonth ?? 7
+              }
+              timezone={
+                ownedWorkspace.timezone ??
+                ownedWorkspace.activePortfolio.timezone ??
+                "Australia/Sydney"
+              }
+              // Server-resolved "now" (see OwnedWorkspace.nowInstant). No
+              // client-side Date() fallback: an absent instant must fail
+              // FY window resolution closed (empty state), never guess.
+              nowInstant={ownedWorkspace.nowInstant ?? ""}
             />
           ) : activeSection === "holdings" && ownedWorkspace.activePortfolio ? (
             <OwnedHoldingsScreen

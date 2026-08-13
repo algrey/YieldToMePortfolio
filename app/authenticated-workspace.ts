@@ -87,14 +87,23 @@ export async function loadAuthenticatedWorkspace(
     const settings = await createOwnedUserSettingsRepository(client).get(
       result.context.user.id,
     );
+    // Resolved once, server-side, per request -- this is the single "now"
+    // FY window math anchors on (see domain/calculations/financial-year.ts
+    // and docs/CALCULATIONS.md §9). It must never be re-derived from a
+    // history point's date (stale data would then falsely rename/mislabel
+    // the FY) or recomputed client-side (non-deterministic across
+    // server/client render, and drifts from the request's real "now").
+    const nowInstant = new Date().toISOString();
     const configuredWorkspace = settings
       ? {
           ...workspace,
           holdingCurrencyView: settings.defaultHoldingCurrencyView,
           financialYearStartMonth: settings.financialYearStartMonth,
+          timezone: settings.timezone,
           settingsVersion: settings.version,
+          nowInstant,
         }
-      : workspace;
+      : { ...workspace, nowInstant };
     if (configuredWorkspace.activePortfolio === null)
       return configuredWorkspace;
     if (

@@ -1217,7 +1217,7 @@ Status: READY; pre-existing pattern defect found by FY-001B review (2026-08-13),
 
 ### FY-001C — FY and Last FY chart periods
 
-Status: BLOCKED on FY-001A.
+Status: DONE (2026-08-13).
 
 - Objective: add "FY" (FY-to-date) and "Last FY" (closed window) to the chart period selectors, wired to real data where real data exists.
 - Dependencies: FY-001A; FY-001B is NOT required (default July works without the control).
@@ -1227,6 +1227,7 @@ Status: BLOCKED on FY-001A.
 - Tests: window filtering at boundary dates, Last FY closed-window delta, empty-window state, tab accessibility (aria-pressed, labels), 320px wrap regression in `tests/qa-001b.test.ts` if tab count affects it.
 - Risks: implying the prototype Details chart is live; delta semantics for a closed window diverging between charts.
 - Parallel safe: yes with FY-001B.
+- Completion note (2026-08-13): Overview chart ranges now `1M/3M/12M/FY/Last FY/All` via new pure helpers in `app/overview-fy-range.ts`; FY windows anchored on a per-request server-resolved `nowInstant` threaded through `loadAuthenticatedWorkspace` → props (never the latest history point, never a client clock — empty instant fails closed to the empty-range state); FY/Last FY eyebrows show resolved labels/windows; Last FY delta = change across the closed window with decimal-string arithmetic, single-point windows show "Change unavailable" (never 0.00), zero renders neutral; Details prototype tabs gained FY/Last FY labels only; fy-start-month-helper double-announcement fixed (htmlFor/id). Review round 1 FAIL (B1 stale-history mislabelled the FY and made real Last FY unreachable; B2 bare-date anchor broke negative-offset timezones; B3 single-point windows fabricated AUD 0.00) — all fixed and reviewer-reproduced in round 2 PASS, including America/New_York boundary instants both sides of the FY flip. `tests/fy-001c.test.ts` 26 tests incl. stale-history end-to-end and B2 regression; CALCULATIONS §9 "What resolves 'today'" paragraph. `npm run check` exit 0 (386 pass, 10 gated skips). Non-blocking follow-ups noted: reword the `filterToFyToDateWindow` doc comment that still echoes the B1 rationale; timezone-skew note if per-portfolio FY consumers are added; pin the empty-instant path with a behavioural test.
 
 ### UI-006A — Income screen: next-12-months landing and multi-year view
 

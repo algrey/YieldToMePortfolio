@@ -393,6 +393,14 @@ The label is derived from the window's `startDate` alone (its year and month ful
 
 An out-of-range start month (outside 1–12) or an unresolvable IANA timezone is rejected at the domain-function boundary with an explicit typed reason (`invalid_start_month`, `invalid_timezone`, `invalid_instant`) rather than silently coerced or defaulted.
 
+### Chart consumption (FY-001C)
+
+The overview history chart filters its published points against an already-resolved `FyWindow` rather than reimplementing the boundary comparison: **FY** keeps every point whose date is `>= startDate` (an open window, since `endDate` is "today" and is not itself necessarily a published point); **Last FY** keeps points with `startDate <= date <= endDate` (a closed window, bounded on both ends).
+
+Because Last FY is closed, its displayed gain/loss delta must read as the change **across that window** — the filtered window's first point's value subtracted from its last point's value — never a change-to-today figure. A window with no points in range shows the chart's existing empty-range state; it must never render a fabricated `0.00`. A window with exactly one point is likewise "no change knowable," not a flat `0.00`: `windowChangeAmount` requires at least two points before it will compare anything. A genuinely flat window of two or more points, by contrast, is a known fact and does render `0.00` — styled neutrally, not as a positive/green movement.
+
+**What resolves "today".** FY is an absolute named period (its label is a specific fiscal year, e.g. "FY27"), unlike the relative 1M/3M/12M cutoffs, which stay correct however they're anchored. So FY window resolution must anchor on the real current instant, not on the chart's own data: `loadAuthenticatedWorkspace` (`app/authenticated-workspace.ts`) resolves `new Date().toISOString()` exactly once per request, server-side, as `OwnedWorkspace.nowInstant`, and that is threaded down as a prop to the chart component. Two failure modes this rules out: anchoring on the latest published history point instead would silently mislabel the window whenever data is stale (a portfolio last published in FY26 would have its "current FY" tab wrongly read "FY26" even after the real calendar has moved into FY27, and "Last FY" would become unreachable); and anchoring on a bare local calendar date (`YYYY-MM-DD`, as a history point's `date` field is) rather than a real ISO instant is ambiguous under `localDateAt`'s UTC-midnight interpretation, shifting the resolved local date by a day for negative-offset timezones. The chart component itself must never call `new Date()`/`Date.now()` — doing so there would be non-deterministic across the server and client render (hydration risk) and would defeat the point of resolving "now" once, server-side, per request.
+
 ## 10. Realised, unrealised, and headline returns
 
 The reference material does not conclusively define all-time return. The conservative v1 split is:
