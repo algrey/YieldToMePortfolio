@@ -1,4 +1,5 @@
 import type {
+  ImportPreviewExistingDividendEntry,
   ImportPreviewPortfolio,
   ImportPreviewSecurityCandidate,
   ImportReconciliationPreview,
@@ -34,6 +35,7 @@ export function buildImportReviewPreview(input: {
   mappings: ImportReviewMapping[];
   portfolios: ImportPreviewPortfolio[];
   securityCandidates: ImportPreviewSecurityCandidate[];
+  existingDividendEntries?: ImportPreviewExistingDividendEntry[];
 }): ImportReviewPreview {
   const built = buildImportReview({
     batch: input.batch,
@@ -42,6 +44,7 @@ export function buildImportReviewPreview(input: {
     mappings: input.mappings,
     portfolios: input.portfolios,
     securityCandidates: input.securityCandidates,
+    existingDividendEntries: input.existingDividendEntries,
   });
   return {
     batch: {

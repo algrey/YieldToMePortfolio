@@ -227,6 +227,9 @@ export async function loadOwnedDividendHistory(
       sharesDecimal: record.sharesDecimal,
       dividendPerShareDecimal: record.dividendPerShareDecimal,
       frankingCreditPerShareDecimal: record.frankingCreditPerShareDecimal,
+      // DIV-004: carried through so the derivation can separate the
+      // owner-typed and imported tiers -- see domain/dividends/history.ts.
+      importBatchId: record.importBatchId,
     });
     manualBySecurity.set(record.portfolioSecurityId, list);
   }

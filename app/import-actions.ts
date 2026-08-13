@@ -22,6 +22,7 @@ import {
   parseStrictVersionedCsvImport,
 } from "../domain/imports";
 import type {
+  ImportPreviewExistingDividendEntry,
   ImportPreviewPortfolio,
   ImportPreviewSecurityCandidate,
 } from "../domain/imports/reconciliation";
@@ -43,22 +44,41 @@ async function loadReview(
   const batch = await staging.get(userId, batchId);
   if (!batch)
     return { ok: false, status: 404, message: "Import batch not found." };
-  const [rows, issues, mappings, portfolios, candidateRows] = await Promise.all(
-    [
-      staging.listRows(userId, batchId),
-      staging.listIssues(userId, batchId),
-      createOwnedImportMappingDecisionRepository(client).list(userId, batchId),
-      createOwnedPortfolioRepository(client).list(userId),
-      client.all<Record<string, unknown>>(
-        `SELECT id, portfolio_id, source_symbol, source_exchange_alias,
+  const [
+    rows,
+    issues,
+    mappings,
+    portfolios,
+    candidateRows,
+    existingManualRows,
+    existingReceiptRows,
+  ] = await Promise.all([
+    staging.listRows(userId, batchId),
+    staging.listIssues(userId, batchId),
+    createOwnedImportMappingDecisionRepository(client).list(userId, batchId),
+    createOwnedPortfolioRepository(client).list(userId),
+    client.all<Record<string, unknown>>(
+      `SELECT id, portfolio_id, source_symbol, source_exchange_alias,
         source_currency_code, security_id
        FROM portfolio_securities
        WHERE user_id = ?
        ORDER BY source_symbol ASC, id ASC`,
-        [userId],
-      ),
-    ],
-  );
+      [userId],
+    ),
+    // DIV-004: existing OWNER-typed manual records only (import_batch_id
+    // IS NULL) -- an imported-vs-imported near match is cross-batch
+    // dedupe's job (source_reference idempotency), not this warning's.
+    client.all<Record<string, unknown>>(
+      `SELECT portfolio_security_id, payment_date FROM dividend_manual_records
+       WHERE user_id = ? AND import_batch_id IS NULL`,
+      [userId],
+    ),
+    client.all<Record<string, unknown>>(
+      `SELECT portfolio_security_id, payment_date FROM dividend_receipts
+       WHERE user_id = ?`,
+      [userId],
+    ),
+  ]);
   const previewPortfolios: ImportPreviewPortfolio[] = portfolios.map(
     (item) => ({
       id: item.id,
@@ -79,6 +99,13 @@ async function loadReview(
       sourceCurrencyCode: String(row.source_currency_code),
       securityId: row.security_id === null ? null : String(row.security_id),
     }));
+  const existingDividendEntries: ImportPreviewExistingDividendEntry[] = [
+    ...existingManualRows,
+    ...existingReceiptRows,
+  ].map((row) => ({
+    portfolioSecurityId: String(row.portfolio_security_id),
+    paymentDate: String(row.payment_date),
+  }));
   return buildImportReviewPreview({
     batch,
     rows,
@@ -86,6 +113,7 @@ async function loadReview(
     mappings,
     portfolios: previewPortfolios,
     securityCandidates,
+    existingDividendEntries,
   });
 }
 

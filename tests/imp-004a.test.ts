@@ -4,7 +4,10 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { createImportReadyPost } from "../app/import-ready-route.ts";
 import { markImportReadyWithContext } from "../app/import-ready-service.ts";
-import { buildImportReviewPreview } from "../app/import-preview.ts";
+import {
+  buildImportReviewPreview,
+  type ImportReviewPreview,
+} from "../app/import-preview.ts";
 import {
   createOwnedImportCommitRepository,
   createOwnedImportMappingDecisionRepository,
@@ -16,6 +19,7 @@ import {
   type SqlClient,
 } from "../db/repositories/index.ts";
 import { SUPPORTED_IMPORT_PARSER_VERSION } from "../domain/imports/index.ts";
+import type { ImportPreviewExistingDividendEntry } from "../domain/imports/reconciliation.ts";
 
 async function migratedDatabase(): Promise<DatabaseSync> {
   const database = new DatabaseSync(":memory:");
@@ -158,6 +162,92 @@ async function currentPreviewVersion(
     })),
   });
   return review.previewVersion;
+}
+
+// DIV-004 (B2 regression, review round 1): mirrors `currentPreviewVersion`
+// exactly, EXCEPT it also loads existing owner-typed dividend facts and
+// supplies them as `existingDividendEntries` -- replicating the real
+// page/refresh preview path (`app/import-actions.ts`'s `loadReview`), the
+// ONLY caller that populates this field. Every other caller in this test
+// file (`currentPreviewVersion`, used by the ready-service and commit-
+// revalidation call sites under test) omits it, exactly like the real
+// `import-ready-service.ts`/`import-commit.ts`. Before the B1 fix (DIV-004
+// review round 1 BLOCKING), the two helpers' `previewVersion` values
+// diverged whenever a DIVIDEND_NEAR_EXISTING_ENTRY warning fired, because
+// the hash included the full, unfiltered preview; after the fix, the
+// warning is excluded from the hash by construction, so the two helpers
+// must always agree.
+async function pagePreview(
+  client: SqlClient,
+  userId: string,
+  batchId: string,
+): Promise<ImportReviewPreview> {
+  const staging = createOwnedImportStagingRepository(client);
+  const batch = await staging.get(userId, batchId);
+  if (!batch) throw new Error("expected batch to exist");
+  const [
+    rows,
+    issues,
+    mappings,
+    portfolios,
+    candidateRows,
+    existingManualRows,
+    existingReceiptRows,
+  ] = await Promise.all([
+    staging.listRows(userId, batchId),
+    staging.listIssues(userId, batchId),
+    createOwnedImportMappingDecisionRepository(client).list(userId, batchId),
+    createOwnedPortfolioRepository(client).list(userId),
+    client.all<Record<string, unknown>>(
+      `SELECT id, portfolio_id, source_symbol, source_exchange_alias,
+                source_currency_code, security_id
+           FROM portfolio_securities WHERE user_id = ?
+          ORDER BY source_symbol ASC, id ASC`,
+      [userId],
+    ),
+    client.all<Record<string, unknown>>(
+      `SELECT portfolio_security_id, payment_date FROM dividend_manual_records
+       WHERE user_id = ? AND import_batch_id IS NULL`,
+      [userId],
+    ),
+    client.all<Record<string, unknown>>(
+      `SELECT portfolio_security_id, payment_date FROM dividend_receipts
+       WHERE user_id = ?`,
+      [userId],
+    ),
+  ]);
+  const existingDividendEntries: ImportPreviewExistingDividendEntry[] = [
+    ...existingManualRows,
+    ...existingReceiptRows,
+  ].map((row) => ({
+    portfolioSecurityId: String(row.portfolio_security_id),
+    paymentDate: String(row.payment_date),
+  }));
+  const review = buildImportReviewPreview({
+    batch,
+    rows,
+    issues,
+    mappings,
+    portfolios: portfolios.map((portfolio) => ({
+      id: portfolio.id,
+      name: portfolio.name,
+      homeCurrencyCode: portfolio.homeCurrencyCode,
+      historyCompleteFrom: portfolio.historyCompleteFrom,
+    })),
+    securityCandidates: candidateRows.map((row) => ({
+      id: String(row.id),
+      portfolioId: String(row.portfolio_id),
+      sourceSymbol: String(row.source_symbol),
+      sourceExchangeAlias:
+        row.source_exchange_alias === null
+          ? null
+          : String(row.source_exchange_alias),
+      sourceCurrencyCode: String(row.source_currency_code),
+      securityId: row.security_id === null ? null : String(row.security_id),
+    })),
+    existingDividendEntries,
+  });
+  return review;
 }
 
 test("readiness blocks on an unresolved FX direction, then transitions to ready once it is resolved", async () => {
@@ -464,4 +554,143 @@ test("full round trip: an owner-resolved import reaches ready, commits into hold
     "batch-a",
   );
   assert.equal(reversedBatch?.status, "reversed");
+});
+
+function dividendNormalizedRow(paymentDate: string, dividendPerShare: string) {
+  const base = normalizedRow();
+  return {
+    ...base,
+    id: "source-div-1",
+    sharesOwned: "5",
+    costPerShare: dividendPerShare,
+    commission: "0",
+    transactionDate: `${paymentDate} GMT+1000`,
+    purchaseExchangeRate: null,
+    type: "dividend",
+    tradeAtUtc: `${paymentDate}T00:00:00.000Z`,
+    localTradeDate: paymentDate,
+  };
+}
+
+// DIV-004 B2 (review round 1 blocking regression): before the B1 fix, this
+// test fails at the `pageReviewBeforeReady.previewVersion` equality
+// assertion below -- the page path's hash included the
+// DIVIDEND_NEAR_EXISTING_ENTRY warning issue while the ready-service/
+// commit-revalidation paths' hash (computed without
+// `existingDividendEntries`) did not, so the two previewVersions diverged
+// and `markImportReadyWithContext` (which recomputes independently and
+// compares against the caller-supplied version) rejected the page's version
+// with a 409 forever -- no combination of resupplied versions could recover,
+// since EVERY non-page path always recomputes without the warning. After the
+// fix, `DIVIDEND_NEAR_EXISTING_ENTRY` is excluded from the hash input by
+// construction, so every path's previewVersion agrees regardless of whether
+// the warning fires.
+test("DIV-004 B2: a dividend row near an existing owner-typed manual record warns in the page preview, never blocks readiness, and BOTH markImportReadyWithContext and commit succeed using the page's previewVersion", async () => {
+  const database = await migratedDatabase();
+  // Pre-existing OWNER-typed manual record (import_batch_id IS NULL) for
+  // membership-a, 4 days before the incoming dividend row's payment date --
+  // inside DIV-001's PROXIMITY_WINDOW_DAYS (7).
+  database.exec(`
+    INSERT INTO dividend_manual_records (
+      id, user_id, portfolio_id, portfolio_security_id, payment_date,
+      shares_decimal, dividend_per_share_decimal, franking_credit_per_share_decimal,
+      import_batch_id, source_reference, created_at, updated_at, version
+    ) VALUES ('existing-manual-1', 'user-a', 'portfolio-a', 'membership-a', '2026-08-01',
+      '5', '0.50', NULL, NULL, NULL, '2026-08-01', '2026-08-01', 1);
+  `);
+  stageRow(
+    database,
+    "batch-a",
+    "row-div",
+    dividendNormalizedRow("2026-08-05", "0.50"),
+  );
+  const client = createSqliteSqlClient(database);
+  const context = { client, userId: "user-a" };
+
+  // Page path (WITH existingDividendEntries): the warning must be present
+  // and readiness must be unaffected by it.
+  const pageReviewBeforeReady = await pagePreview(client, "user-a", "batch-a");
+  const warning = pageReviewBeforeReady.preview.issues.find(
+    (issue) => issue.code === "DIVIDEND_NEAR_EXISTING_ENTRY",
+  );
+  assert.ok(
+    warning,
+    "expected a near-existing-entry warning on the page preview",
+  );
+  assert.equal(warning!.severity, "warning");
+  assert.equal(pageReviewBeforeReady.preview.ready, true);
+
+  // "Other path" (no existingDividendEntries, matching
+  // import-ready-service.ts/import-commit.ts exactly): must still agree on
+  // previewVersion even though its own computed preview has no warning
+  // issue at all.
+  const otherPathVersionBeforeReady = await currentPreviewVersion(
+    client,
+    "user-a",
+    "batch-a",
+  );
+  assert.equal(
+    pageReviewBeforeReady.previewVersion,
+    otherPathVersionBeforeReady,
+    "the page's previewVersion (warning included pre-hash) must match the ready-service's (warning never computed) -- the B1 regression guard",
+  );
+
+  // markImportReadyWithContext internally recomputes WITHOUT
+  // existingDividendEntries and compares against whatever the caller
+  // supplied. Using the PAGE's version here is the exact scenario that
+  // 409'd forever before the B1 fix.
+  const ready = await markImportReadyWithContext(context, "batch-a", {
+    expectedVersion: 1,
+    expectedPreviewVersion: pageReviewBeforeReady.previewVersion,
+  });
+  assert.equal(ready.ok, true);
+  if (!ready.ok) return;
+  assert.equal(ready.review.batch.status, "ready");
+  const readyVersion = ready.review.batch.version;
+
+  // Re-derive the page's preview AFTER the ready transition (the batch
+  // version -- embedded as the previewVersion prefix -- changed) and confirm
+  // it still matches commit's own independent revalidation before using it
+  // to commit.
+  const pageReviewAfterReady = await pagePreview(client, "user-a", "batch-a");
+  const commitRepo = createOwnedImportCommitRepository(client);
+  const validated = await commitRepo.validate("user-a", "batch-a");
+  assert.equal(validated.ok, true);
+  if (!validated.ok) return;
+  assert.equal(
+    pageReviewAfterReady.previewVersion,
+    validated.previewVersion,
+    "the page's previewVersion must still match commit's own revalidation after the ready transition",
+  );
+
+  const commitInput: ImportCommitInput = {
+    expectedVersion: readyVersion,
+    expectedPreviewVersion: pageReviewAfterReady.previewVersion,
+    idempotencyKey: "imp-004a-div-004-commit",
+    confirmation: true,
+    requestId: "imp-004a-div-004-commit-request",
+  };
+  let commitResult = await commitRepo.commit("user-a", "batch-a", commitInput);
+  for (
+    let attempt = 0;
+    attempt < 10 && (!commitResult.ok || commitResult.status !== "committed");
+    attempt += 1
+  ) {
+    assert.equal(commitResult.ok, true);
+    commitResult = await commitRepo.commit("user-a", "batch-a", commitInput);
+  }
+  assert.equal(commitResult.ok, true);
+  if (commitResult.ok) assert.equal(commitResult.status, "committed");
+
+  const manualRecordCount = database
+    .prepare(
+      `SELECT COUNT(*) as count FROM dividend_manual_records
+       WHERE user_id = 'user-a' AND portfolio_security_id = 'membership-a'`,
+    )
+    .get() as { count: number };
+  assert.equal(
+    manualRecordCount.count,
+    2,
+    "the pre-existing owner-typed record and the newly imported one both persist -- the warning never blocked or deduplicated anything at commit time",
+  );
 });

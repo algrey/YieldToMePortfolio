@@ -1,4 +1,7 @@
 import type { NormalizedImportRow } from "./strict-versioned-parser.ts";
+// DIV-004: reuse DIV-001's documented proximity window rather than
+// re-deriving a second "how close counts as a duplicate" constant.
+import { PROXIMITY_WINDOW_DAYS } from "../dividends/history.ts";
 
 type Decimal = { coefficient: bigint; scale: number };
 
@@ -57,6 +60,18 @@ function normalized(value: string): string {
   return value.trim().toLowerCase();
 }
 
+// Plain calendar-day difference, matching `domain/dividends/history.ts`'s
+// private `daysBetween` exactly (kept local rather than exported/shared,
+// since it is a two-line date-math primitive, not shared business logic --
+// only the proximity WINDOW constant is reused, per DIV-004's instruction
+// not to re-derive that).
+function daysBetweenDates(a: string, b: string): number {
+  const msPerDay = 86_400_000;
+  return Math.round(
+    (Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / msPerDay,
+  );
+}
+
 export type ImportReconciliationRow = Readonly<{
   id: string;
   physicalRowNumber: number;
@@ -103,12 +118,26 @@ export type ImportReconciliationIssue = Readonly<{
     | "DUPLICATE_ROW"
     | "OVERSELL"
     | "INCOMPLETE_HISTORY"
-    | "ROW_UNSUPPORTED";
+    | "ROW_UNSUPPORTED"
+    | "DIVIDEND_NEAR_EXISTING_ENTRY";
   severity: "error" | "warning" | "info";
   rowId?: string;
   physicalRowNumber?: number;
   sourceKey?: string;
   message: string;
+}>;
+
+// DIV-004: an existing (already-persisted, pre-this-batch) owner-entered
+// dividend fact used to warn the reviewer that an incoming CSV dividend row
+// looks like a probable duplicate BEFORE they commit it -- never a hard
+// block, since it is only a proximity heuristic, not a certain duplicate
+// (matching the FRANKING_ON_NON_DIVIDEND precedent for a non-blocking
+// dividend-row warning). Deliberately excludes previously IMPORTED rows: an
+// imported-vs-imported near-match is cross-batch dedupe's job (the
+// `source_reference` idempotency key at commit time), not this warning's.
+export type ImportPreviewExistingDividendEntry = Readonly<{
+  portfolioSecurityId: string;
+  paymentDate: string;
 }>;
 
 export type ImportReconciliationPreview = Readonly<{
@@ -142,6 +171,11 @@ export type ImportReconciliationInput = Readonly<{
   decisions?: readonly ImportPreviewMappingDecision[];
   existingFingerprints?: ReadonlySet<string>;
   existingQuantities?: Readonly<Record<string, string>>;
+  // DIV-004: existing owner-entered manual records (no `import_batch_id`)
+  // and receipts, loaded by the caller, used to warn on a probable
+  // near-duplicate dividend row before commit -- see
+  // `ImportPreviewExistingDividendEntry`'s doc comment for scope.
+  existingDividendEntries?: readonly ImportPreviewExistingDividendEntry[];
 }>;
 
 function decisionFor(
@@ -371,6 +405,39 @@ export function createImportReconciliationPreview(
     // derivation, not the importer, is responsible for any base-currency
     // conversion. `Purchase Exchange Rate` is unused/ignored on these rows.
     const isDividend = row.normalized.type === "dividend";
+
+    // DIV-004: a NON-BLOCKING proximity warning (mirrors FRANKING_ON_NON_
+    // DIVIDEND -- readiness/commit are unaffected) when an incoming dividend
+    // row falls within DIV-001's matching window of an EXISTING owner-typed
+    // manual record or receipt for the SAME resolved security. By this
+    // point `membershipId` (when non-null) is always a genuine, already-
+    // resolved portfolio-security id -- every unresolved-security path above
+    // already issued an error and `continue`d -- so this never fires for a
+    // row still awaiting security resolution.
+    if (
+      isDividend &&
+      membershipId !== null &&
+      row.normalized.localTradeDate !== null
+    ) {
+      const paymentDate = row.normalized.localTradeDate;
+      const nearExisting = (input.existingDividendEntries ?? []).some(
+        (entry) =>
+          entry.portfolioSecurityId === membershipId &&
+          Math.abs(daysBetweenDates(entry.paymentDate, paymentDate)) <=
+            PROXIMITY_WINDOW_DAYS,
+      );
+      if (nearExisting) {
+        issues.push({
+          code: "DIVIDEND_NEAR_EXISTING_ENTRY",
+          severity: "warning",
+          rowId: row.id,
+          physicalRowNumber: row.physicalRowNumber,
+          sourceKey: membershipId,
+          message: `This dividend is within ${PROXIMITY_WINDOW_DAYS} days of an existing entry already recorded for this security -- check it is not a duplicate before committing.`,
+        });
+      }
+    }
+
     let fxDirection: "native_to_home" | "home_to_native" | null = null;
     if (
       !isDividend &&

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { NormalizedImportRow } from "./strict-versioned-parser.ts";
 import {
   createImportReconciliationPreview,
+  type ImportPreviewExistingDividendEntry,
   type ImportPreviewMappingDecision,
   type ImportPreviewPortfolio,
   type ImportPreviewSecurityCandidate,
@@ -56,6 +57,10 @@ export type ImportReviewEvidence = Readonly<{
   mappings: readonly ImportReviewMapping[];
   portfolios: readonly ImportPreviewPortfolio[];
   securityCandidates: readonly ImportPreviewSecurityCandidate[];
+  // DIV-004: existing owner-typed dividend facts, for the preview-time
+  // near-duplicate warning. Optional/defaulted to empty so every existing
+  // caller/test keeps working unchanged.
+  existingDividendEntries?: readonly ImportPreviewExistingDividendEntry[];
 }>;
 
 export type BuiltImportReview = Readonly<{
@@ -109,7 +114,33 @@ export function buildImportReview(
     portfolios: evidence.portfolios,
     securityCandidates: evidence.securityCandidates,
     decisions: evidence.mappings,
+    existingDividendEntries: evidence.existingDividendEntries,
   });
+  // DIV-004 (Orchestrator ruling, review round 1 BLOCKING B1 fix):
+  // `DIVIDEND_NEAR_EXISTING_ENTRY` is advisory DISPLAY evidence only -- it
+  // depends on `evidence.existingDividendEntries`, which only the page/
+  // refresh preview path (`app/import-actions.ts`'s `loadReview`) supplies
+  // today; the ready-service, security-verification-service, and
+  // import-commit revalidation paths call `buildImportReview` without it
+  // (the warning never gates readiness or commit, so they have no reason
+  // to supply it). If the warning's presence/absence changed
+  // `previewVersion`, those paths would compute a DIFFERENT hash than the
+  // one the page rendered and sent back as `expectedPreviewVersion`,
+  // permanently 409ing an affected batch's ready/commit with no recovery
+  // path (reviewer repro, round 1). Excluded from the hash input by
+  // construction -- via the `hashedPreview` filter below -- so
+  // `previewVersion` is IDENTICAL whether or not this warning is present;
+  // the full, un-filtered `preview` (including the warning) is still what
+  // callers get back for rendering. A manual record added in another tab
+  // therefore does not invalidate an already-open preview's version --
+  // intended, since the warning is advisory, not a fact that changes what
+  // would actually commit.
+  const hashedPreview: ImportReconciliationPreview = {
+    ...preview,
+    issues: preview.issues.filter(
+      (issue) => issue.code !== "DIVIDEND_NEAR_EXISTING_ENTRY",
+    ),
+  };
   const canonicalEvidence = {
     batch: evidence.batch,
     rows: [...evidence.rows].sort(byId),
@@ -121,7 +152,7 @@ export function buildImportReview(
     ),
     portfolios: [...evidence.portfolios].sort(byId),
     securityCandidates: [...evidence.securityCandidates].sort(byId),
-    preview,
+    preview: hashedPreview,
   };
   const digest = createHash("sha256")
     .update(JSON.stringify(canonicalEvidence))

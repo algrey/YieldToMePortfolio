@@ -413,6 +413,7 @@ test("B3: excluding a duplicate provider event does not destroy the owner's manu
       sharesDecimal: "10",
       dividendPerShareDecimal: "50",
       frankingCreditPerShareDecimal: null,
+      importBatchId: null,
     },
   ];
   const rows = deriveDividendHistoryForSecurity({
@@ -522,6 +523,7 @@ test("BLOCKING (round 3): an excluded event with BOTH a receipt and a manual rec
       sharesDecimal: "1000",
       dividendPerShareDecimal: "0.50",
       frankingCreditPerShareDecimal: null,
+      importBatchId: null,
     },
   ];
   const rows = deriveDividendHistoryForSecurity({
@@ -627,6 +629,7 @@ test("B4: global nearest-wins proximity matching (interim + special 3 days apart
       sharesDecimal: "10",
       dividendPerShareDecimal: "90", // the manual's own (correct) amount
       frankingCreditPerShareDecimal: null,
+      importBatchId: null,
     },
   ];
   const rows = deriveDividendHistoryForSecurity({
@@ -761,6 +764,7 @@ test("follow-up: mixed-currency rows return an explicit mixed_currency state ins
       sharesDecimal: "5",
       dividendPerShareDecimal: "1.00",
       frankingCreditPerShareDecimal: null,
+      importBatchId: null,
     },
   ];
   const rows = deriveDividendHistoryForSecurity({
@@ -824,6 +828,7 @@ test("manual/receipt vs event proximity dedupe: inside the window wins, one row 
       sharesDecimal: "10",
       dividendPerShareDecimal: "1.00",
       frankingCreditPerShareDecimal: null,
+      importBatchId: null,
     },
   ];
   const rows = deriveDividendHistoryForSecurity({
@@ -853,6 +858,7 @@ test("manual/receipt vs event proximity dedupe: outside the window becomes its o
       sharesDecimal: "10",
       dividendPerShareDecimal: "1.00",
       frankingCreditPerShareDecimal: null,
+      importBatchId: null,
     },
   ];
   const rows = deriveDividendHistoryForSecurity({
@@ -897,6 +903,7 @@ test("B5 (Orchestrator ruling): a manual record duplicating a RECEIPT-covered ev
       sharesDecimal: "10",
       dividendPerShareDecimal: "1.00",
       frankingCreditPerShareDecimal: null,
+      importBatchId: null,
     },
   ];
   const rows = deriveDividendHistoryForSecurity({

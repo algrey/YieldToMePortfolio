@@ -586,16 +586,25 @@ Status: DONE on 2026-08-03.
 
 ### DIV-004 — Imported-dividend tier separation and entry proximity warnings
 
-Status: READY (IMP-006 done 2026-08-13); required BEFORE UI-006B/UI-006C ship their manual dividend-entry forms (2026-08-13, from IMP-006 review).
+Status: DONE (2026-08-13); required BEFORE UI-006B/UI-006C ship their manual dividend-entry forms (2026-08-13, from IMP-006 review).
 
 - Problem: IMP-006 lands imported CSV dividends as `dividend_manual_records`, so they sit in DIV-001's MANUAL precedence tier. Consequences measured by the IMP-006 reviewer: an imported row outranks an owner-typed receipt for the same event (receipt retained as dominatedReceipt), and an imported row duplicating an owner-typed manual record produces two rows (double count). Currently unreachable — only the importer creates manual records — but UI-006B/C's forms make both cases live.
 - Deliver: (a) distinguish import-created records (import_batch_id already present) as an `imported` source tier ranking BELOW owner-typed facts in `domain/dividends/history.ts` precedence (override > manual > receipt > imported > auto) with proximity dedupe across tiers; (b) a preview-time proximity warning in the import review when an incoming dividend row falls within the matching window of an existing owner-entered manual record or receipt; (c) docs updated (CSV_IMPORT_SPEC precedence sentence restored to the full ordering, CALCULATIONS §11 tier list).
 - Acceptance: owner-typed receipt beats an imported row for the same event; imported row duplicating an owner manual record collapses to one row (owner wins); preview warns before committing a probable duplicate; no regression to provider-event dedupe.
 - Tests: tier matrix (imported × receipt/manual/override/auto), preview warning fixtures, IMP-006 round-trip regression.
+- Completion note (2026-08-13): Five distinct tiers in `domain/dividends/history.ts` — override > manual (owner-typed, import_batch_id NULL) > receipt > imported (batch-attributed) > auto — with cross-tier proximity collapse (winner exposes dominatedReceipt/dominatedImported), standalone imported-vs-owner collapse, excluded-event resurfacing extended, and the `imported` source label for UI-006C. Preview warning `DIVIDEND_NEAR_EXISTING_ENTRY` (warning severity, PROXIMITY_WINDOW_DAYS single-sourced and interpolated) raised at reconciliation when an incoming dividend row falls within the window of an existing owner-typed record/receipt, loaded owner-scoped in `app/import-actions.ts`. Review round 1 FAIL: the warning entered the hashed previewVersion on only the page path, making affected imports permanently uncommittable (409 on ready AND commit, no recovery) → Orchestrator ruling: advisory evidence excluded from the canonical hash by construction (`hashedPreview` filters exactly that code; error-severity issues still drive the version — sensitivity-verified both by worker revert-test and reviewer probes); DB-level round-trip regression added; round 2 PASS with reviewer-re-executed end-to-end repro (warning shown, ready and commit succeed with the page version, all four computation paths agree). Recorded consequence: the warning is best-effort at render time — a manual record typed in another tab after a preview renders won't invalidate that preview (identical to pre-DIV-004 behaviour). `npm run check` exit 0 (562 pass, 10 gated skips). Known limitation split out as DIV-005.
+
+### DIV-005 — Transitive proximity chaining in dividend dedupe
+
+Status: DEFERRED (2026-08-13); narrow band, recorded from DIV-004 review — the code comment at `domain/dividends/history.ts` (standalone-collapse site) references this entry.
+
+- Problem: proximity collapse links facts pairwise to events, not transitively. An owner fact anchored to event E (within E's ±7-day window) does not collapse with an imported row that is within the owner fact's window but OUTSIDE E's (reviewer repro: event pay 03-20, owner manual 03-27, imported 03-31 → two rows, 240 counted vs 120 real). Pre-existing DIV-001 band behaviour (same shape existed manual-vs-manual); reachable only in the 1–7-day skew band between an event date and its owner fact's payment date.
+- Fix direction: cluster facts transitively (union-find over the proximity graph per security) before precedence resolution, or widen matching to compare against the anchored fact's own payment date, with determinism preserved.
+- Dependencies: DIV-004. No urgency signal; promote if real imports surface double counts in this band.
 
 ### UI-006C — Per-security dividend history tab
 
-Status: BLOCKED on DIV-001 (done), MKT-005 (done), DB-005 (done), and DIV-004 (tier separation must precede the manual-entry forms). Owner decisions recorded 2026-08-13 (wireframe-approved).
+Status: READY (all dependencies incl. DIV-004 done 2026-08-13). Owner decisions recorded 2026-08-13 (wireframe-approved).
 
 - Objective: a "Dividends" tab on each security's detail view showing the full auto-populated dividend history, declared-but-unpaid events, per-row editing, and lifetime totals.
 - Dependencies: DIV-001 (derived-history model), MKT-005 (events), DB-005 (override/manual tables), UI-003/UI-005A (security detail surfaces), AUTH-004, QA-001B.
@@ -1256,7 +1265,7 @@ Status: DONE (2026-08-13).
 
 ### UI-006A — Income screen: next-12-months landing and multi-year view
 
-Status: BLOCKED on DIV-003, FY-001A. Owner decisions recorded 2026-08-13 (see DIV-003 for calculation decisions).
+Status: READY (DIV-003, FY-001A done 2026-08-13). Owner decisions recorded 2026-08-13 (see DIV-003 for calculation decisions).
 
 - Objective: a dedicated Income tab for the current portfolio, landing on the next-12-months projection with retirement-planning statistics, with navigation to the multi-year FY view.
 - Dependencies: DIV-003, FY-001A, UI-001 (shell/tabs), QA-001B standards.
@@ -1270,7 +1279,7 @@ Status: BLOCKED on DIV-003, FY-001A. Owner decisions recorded 2026-08-13 (see DI
 
 ### UI-006B — Dividend assumptions editor and manual receipt entry
 
-Status: BLOCKED on DIV-004 (tier separation precedes the receipt/manual entry forms); other dependencies (DIV-003, DIV-001, DB-005) done 2026-08-13. Owner decisions recorded 2026-08-13.
+Status: READY (all dependencies incl. DIV-004 done 2026-08-13). Owner decisions recorded 2026-08-13.
 
 - Objective: the editing surfaces for the income modeller: the portfolio-scoped assumptions grid and the manual actual-receipt/FY-override forms.
 - Dependencies: DIV-003 (resolution semantics), DIV-001 (receipt service), DB-005 (tables), AUTH-004 (CSRF), UI-006A (screen to host the entry point).

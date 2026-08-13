@@ -612,10 +612,10 @@ test("a mixed trade+dividend batch commits atomically, and reversal removes the 
   assert.equal(dividendRowRecord?.commitStatus, "committed");
   assert.equal(dividendRowRecord?.commitTransactionId, record.id);
 
-  // DIV-001's derived history surfaces the imported manual record with
-  // source "manual" (dividend_manual_records has no separate "imported"
-  // provenance at the domain layer -- see db/repositories/dividends.ts's
-  // IMP-006 commentary for why not dividend_receipts).
+  // DIV-004: DIV-001's derived history surfaces an imported manual record
+  // (non-null `importBatchId`) with source "imported" -- a distinct,
+  // below-owner-manual/receipt tier -- rather than the pre-DIV-004 "manual"
+  // label, so it never silently outranks an owner-typed fact.
   const derived = deriveDividendHistoryForSecurity({
     portfolioSecurityId: "membership-a",
     securityCurrencyCode: "AUD",
@@ -629,6 +629,7 @@ test("a mixed trade+dividend batch commits atomically, and reversal removes the 
         sharesDecimal: record.sharesDecimal,
         dividendPerShareDecimal: record.dividendPerShareDecimal,
         frankingCreditPerShareDecimal: record.frankingCreditPerShareDecimal,
+        importBatchId: record.importBatchId,
       },
     ],
     transactions: [],
@@ -636,7 +637,7 @@ test("a mixed trade+dividend batch commits atomically, and reversal removes the 
     today: "2026-08-13",
   });
   assert.equal(derived.length, 1);
-  assert.equal(derived[0]?.source, "manual");
+  assert.equal(derived[0]?.source, "imported");
   assert.equal(derived[0]?.sharesDecimal, "5");
   assert.equal(derived[0]?.dividendPerShareDecimal, "0.5");
 
@@ -849,7 +850,7 @@ test("cross-batch duplicate dividend rows are detected using REAL parser fingerp
   );
 });
 
-test("a committed dividend record surfaces end-to-end in DIV-001 derived history with source 'manual' and franking honestly unknown (not zero) (follow-up 3)", async () => {
+test("a committed dividend record surfaces end-to-end in DIV-001 derived history with source 'imported' (DIV-004) and franking honestly unknown (not zero) (follow-up 3)", async () => {
   const database = await migratedDatabase();
   const client = createSqliteSqlClient(database);
   const staging = createOwnedImportStagingRepository(client);
@@ -912,6 +913,7 @@ test("a committed dividend record surfaces end-to-end in DIV-001 derived history
         sharesDecimal: record.sharesDecimal,
         dividendPerShareDecimal: record.dividendPerShareDecimal,
         frankingCreditPerShareDecimal: record.frankingCreditPerShareDecimal,
+        importBatchId: record.importBatchId,
       },
     ],
     transactions: [],
@@ -921,7 +923,9 @@ test("a committed dividend record surfaces end-to-end in DIV-001 derived history
     today: "2026-08-13",
   });
   assert.equal(derived.length, 1);
-  assert.equal(derived[0]?.source, "manual");
+  // DIV-004: an imported row (non-null `importBatchId`) derives with source
+  // "imported", not "manual".
+  assert.equal(derived[0]?.source, "imported");
   assert.equal(derived[0]?.sharesDecimal, "5");
   assert.equal(derived[0]?.dividendPerShareDecimal, "0.75");
   assert.equal(derived[0]?.franking.source, "unknown");
