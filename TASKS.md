@@ -1208,12 +1208,22 @@ Status: DONE (2026-08-13).
 
 ### DB-006 — Settings audit rows written on rejected mutations
 
-Status: READY; pre-existing pattern defect found by FY-001B review (2026-08-13), affects all three `user_settings` mutations in `db/repositories/owned-portfolios.ts`.
+Status: DONE (2026-08-13); pre-existing pattern defect found by FY-001B review (2026-08-13), affected all three `user_settings` mutations in `db/repositories/owned-portfolios.ts`.
 
 - Problem: each settings mutation batches its audit INSERT guarded by `EXISTS (... version = expectedVersion + 1)`. After a concurrent bump, a stale retry's UPDATE changes nothing (`version_conflict`) but the guard is satisfied by the concurrent writer's row, so a spurious audit event is recorded (reproduced: two audit rows for one applied change). Affects home-currency, holding-currency-view, and financial-year mutations.
 - Fix direction: tie the audit insert to the actual row change (e.g. guard on the UPDATE's own effect via `changes()`-equivalent D1-compatible predicate, or insert the audit row conditioned on the pre-state `version = expectedVersion` like the QA-003 guard pattern) — audit rows must record only mutations that occurred.
 - Acceptance: stale-version retry produces zero new audit rows; applied change produces exactly one; behavior covered for all three settings mutations; D1-compatible (no BEGIN/COMMIT).
 - Tests: extend `tests/fy-001b.test.ts`/existing settings tests with concurrent-bump audit-count assertions for all three mutations.
+- Completion note (2026-08-13): All three settings mutations restructured to the sound pre-state pattern — audit INSERT first guarded by `EXISTS (... user_id=? AND version = expectedVersion)`, version-bumping UPDATE ... RETURNING last in the same batch, result read from the last row. Reviewer independently reproduced the old spurious-audit bug against the new assertions (sensitivity check: reconstructing the old composition fails the new tests) and verified version_conflict/not_found discrimination is preserved. 4 new tests in `tests/fy-001b.test.ts`. `npm run check` exit 0 (390 pass, 10 gated skips). Review PASS; the same unsound guard was found in portfolio rename/archive/restore → split out as DB-007.
+
+### DB-007 — Portfolio lifecycle audit rows written on rejected mutations
+
+Status: READY; same pattern defect as DB-006, found by DB-006 review (2026-08-13) in `createOwnedPortfolioRepository`.
+
+- Problem: `portfolio.rename` (~`db/repositories/owned-portfolios.ts:361`), `portfolio.archive` (~:402), `portfolio.restore` (~:443) order the audit INSERT after the UPDATE with post-state guards `conditionParams: [portfolioId, userId, expectedVersion + 1]` — a concurrent writer's bump satisfies the guard, so a stale retry that no-ops with `version_conflict` still records an audit event for a lifecycle change that never happened (e.g. a `portfolio.archive` audit row with no archive).
+- Fix: apply DB-006's construction identically — audit INSERT first with pre-state guard (`version = expectedVersion`), version-bumping UPDATE ... RETURNING last, result from the last row; preserve the version_conflict/not_found contract; portfolios table analogue of the settings fix.
+- Acceptance: stale retry after a concurrent bump → zero new audit rows for all three lifecycle mutations; applied change → exactly one; contracts unchanged.
+- Tests: concurrent-bump audit-count assertions for rename/archive/restore (extend `tests/db-001b.test.ts` or wherever lifecycle mutations are tested).
 
 ### FY-001C — FY and Last FY chart periods
 

@@ -506,8 +506,15 @@ export function createOwnedUserSettingsRepository(
           input.expectedVersion,
         ],
       };
+      // The audit INSERT runs FIRST, guarded on the batch's PRE-state
+      // (version = expectedVersion, matching the UPDATE's own WHERE), with
+      // the version-bumping UPDATE LAST — see the QA-003 pattern in
+      // `import-staging.ts` (`runAtomicPersist`). A POST-state guard
+      // (version = expectedVersion + 1) is unsound: a concurrent writer's
+      // own bump can independently produce that value while THIS call's
+      // UPDATE no-ops against its now-stale expectedVersion, producing a
+      // spurious audit row for a mutation that never applied.
       const rows = await client.batch([
-        updateStatement,
         auditMutationStatement({
           actorUserId: userId,
           action: "settings.home_currency_change",
@@ -517,10 +524,11 @@ export function createOwnedUserSettingsRepository(
           occurredAt: updatedAt,
           condition:
             "EXISTS (SELECT 1 FROM user_settings WHERE user_id = ? AND version = ?)",
-          conditionParams: [userId, input.expectedVersion + 1],
+          conditionParams: [userId, input.expectedVersion],
         }),
+        updateStatement,
       ]);
-      const row = rows[0]?.results[0];
+      const row = rows[rows.length - 1]?.results[0];
       if (!row) {
         return await resolveMutationFailure(
           client,
@@ -564,8 +572,10 @@ export function createOwnedUserSettingsRepository(
         `,
         params: [input.view, updatedAt, userId, input.expectedVersion],
       };
+      // See the pre-state-guard note in `requestHomeCurrencyRebase` above:
+      // the audit INSERT runs first, guarded on the batch's PRE-state
+      // (version = expectedVersion), with the version-bumping UPDATE last.
       const rows = await client.batch([
-        updateStatement,
         auditMutationStatement({
           actorUserId: userId,
           action: "settings.holding_currency_view_change",
@@ -575,10 +585,11 @@ export function createOwnedUserSettingsRepository(
           occurredAt: updatedAt,
           condition:
             "EXISTS (SELECT 1 FROM user_settings WHERE user_id = ? AND version = ?)",
-          conditionParams: [userId, input.expectedVersion + 1],
+          conditionParams: [userId, input.expectedVersion],
         }),
+        updateStatement,
       ]);
-      const row = rows[0]?.results[0];
+      const row = rows[rows.length - 1]?.results[0];
       return row
         ? { ok: true, settings: createUserSettingsRecord(row) }
         : await resolveMutationFailure(client, "user_settings", userId, userId);
@@ -604,8 +615,10 @@ export function createOwnedUserSettingsRepository(
           input.expectedVersion,
         ],
       };
+      // See the pre-state-guard note in `requestHomeCurrencyRebase` above:
+      // the audit INSERT runs first, guarded on the batch's PRE-state
+      // (version = expectedVersion), with the version-bumping UPDATE last.
       const rows = await client.batch([
-        updateStatement,
         auditMutationStatement({
           actorUserId: userId,
           action: "settings.financial_year_start_month_change",
@@ -615,10 +628,11 @@ export function createOwnedUserSettingsRepository(
           occurredAt: updatedAt,
           condition:
             "EXISTS (SELECT 1 FROM user_settings WHERE user_id = ? AND version = ?)",
-          conditionParams: [userId, input.expectedVersion + 1],
+          conditionParams: [userId, input.expectedVersion],
         }),
+        updateStatement,
       ]);
-      const row = rows[0]?.results[0];
+      const row = rows[rows.length - 1]?.results[0];
       return row
         ? { ok: true, settings: createUserSettingsRecord(row) }
         : await resolveMutationFailure(client, "user_settings", userId, userId);
