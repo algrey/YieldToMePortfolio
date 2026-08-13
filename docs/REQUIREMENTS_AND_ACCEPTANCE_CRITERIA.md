@@ -390,6 +390,25 @@ Acceptance:
 - Otherwise use supported regular payment history/TTM rules.
 - Estimate timestamp, method, assumptions, and coverage are exposed in the explanation; the compact forecast view generally suppresses the timestamp.
 
+### DIV-003 — Retirement-income projection engine
+
+A pure projection engine shall turn holdings value, owner assumptions, receipts/FY overrides, and provider TTM yield into labelled multi-year and single-12-month income projections, with growth what-if adjustments applied ephemerally.
+
+Acceptance:
+
+- All dividend calculations are per 12-month period; multi-year views are per financial year (FY-001A windows/labels), up to 10 years forward and 10 years back.
+- "Yield" means the TOTAL yield including franking credits; the grossed-up figure is the forecasting basis, and cash/franking splits are derived from it, never the reverse.
+- Per-security assumption precedence (yield, franking, dividend growth) is owner override first, then the next documented fallback tier, then an explicit "none"/0% with a method label — never a fabricated number; every resolved value discloses its source.
+- The provider trailing (cash) yield is grossed up into the total forecasting yield using the same ATO franking-credit formula the dividend-history franking chain already uses.
+- The multi-year table's portfolio effective yield is the value-weighted average of covered securities' resolved yields; a security with no resolved yield, OR no known current value, is excluded from the weighting and named — never treated as 0% yield and never silently collapsed into a real zero value.
+- Multi-year compounding applies the portfolio value-growth and dividend-growth assumptions by repeated year-over-year multiplication with one documented rounding per step, and matches the recorded formula exactly on deterministic decimal fixtures. Years forward outside 1-10 (including an explicit 0) is a typed rejection, never silently forced to a minimum of 1.
+- A degraded current portfolio value or degraded yield coverage surfaces a typed multi-year failure reason (distinct from ordinary input-validation failures) and a `null` baseline input — never a fabricated all-zero input a what-if override could turn into a confident zero-dollar projection.
+- Past-FY rows resolve owner-FY-override-vs-derived-total precedence correctly, label the winning source, and show portfolio value as unavailable (never a fabricated zero) for a year with no historical snapshot. A year with no dividend evidence at all for any eligible security is labelled as such (not asserted as a confirmed zero), and the current, still-open FY has its own FY-to-date row distinct from a closed year's total.
+- The single-12-month breakdown discloses insufficient-history and foreign-currency securities by name as excluded/partial coverage, never silently zeroed or folded in; its income-percent-of-value figure discloses when its portfolio-value denominator is itself only a partial (understated) known total.
+- The current portfolio value distinguishes a complete known total, a partial (real but understated) known total with coverage, and fully unavailable — mirroring the holdings valuation contract rather than collapsing partial into complete.
+- A what-if growth substitution never writes to storage — it is a pure function of the baseline projection and the override, structurally incapable of persistence.
+- All arithmetic uses the shared exact-decimal primitives; no calculation path uses binary floating point.
+
 ## CSV import
 
 ### IMP-001 — Supported format
