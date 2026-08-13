@@ -46,12 +46,59 @@ export const portfolioSections = [
   "news",
 ] as const;
 
+// Financial-year start month options for the settings control (FY-001B).
+// Full names label the select; abbreviations compose the helper text's
+// window description. This is display-only -- the authoritative FY window
+// math lives in domain/calculations/financial-year.ts.
+const FY_MONTH_NAMES = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+] as const;
+const FY_MONTH_ABBREVIATIONS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+] as const;
+// Non-leap day counts, used only to describe the window's closing date in
+// the helper text (e.g. "30 Jun"); the real window math handles leap years
+// via domain/calculations/financial-year.ts.
+const FY_MONTH_DAY_COUNTS = [
+  31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+] as const;
+
+/** "July: FY runs 1 Jul – 30 Jun" for a given 1-12 start month. */
+function financialYearWindowHelperText(startMonth: number): string {
+  const startIndex = startMonth - 1;
+  const endIndex = (startIndex + 11) % 12;
+  return `${FY_MONTH_NAMES[startIndex]}: FY runs 1 ${FY_MONTH_ABBREVIATIONS[startIndex]} – ${FY_MONTH_DAY_COUNTS[endIndex]} ${FY_MONTH_ABBREVIATIONS[endIndex]}`;
+}
+
 export type PortfolioSection = (typeof portfolioSections)[number];
 export type OwnedWorkspace = {
   status: "ready" | "empty" | "unavailable";
   userDisplayName?: string | null;
   homeCurrencyCode?: string | null;
   holdingCurrencyView?: "native" | "home";
+  financialYearStartMonth?: number;
   settingsVersion?: number;
   message?: string;
   lifecycle?: "disabled" | "deletion_pending" | "purged";
@@ -2627,6 +2674,40 @@ export function PortfolioShell({
     }
   }
 
+  async function changeFinancialYearStartMonth(value: number) {
+    if (!ownedWorkspace?.settingsVersion || !isOnline) return;
+    setActionPending(true);
+    setActionMessage(null);
+    try {
+      const response = await fetch("/api/settings/financial-year", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          financialYearStartMonth: value,
+          expectedVersion: ownedWorkspace.settingsVersion,
+        }),
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(
+          result.message ?? "Financial-year start month could not be changed.",
+        );
+      setOpenMenu(null);
+      router.refresh();
+    } catch (error) {
+      setActionMessage(
+        error instanceof Error
+          ? error.message
+          : "Financial-year start month could not be changed.",
+      );
+    } finally {
+      setActionPending(false);
+    }
+  }
+
   async function archiveActivePortfolio() {
     const active = ownedWorkspace?.activePortfolio;
     if (!active || !isOnline) return;
@@ -2908,6 +2989,30 @@ export function PortfolioShell({
                         <option value="native">Native currency</option>
                         <option value="home">Home currency</option>
                       </select>
+                    </label>
+                    <label className="menu-field">
+                      <span>Financial year start</span>
+                      <select
+                        value={ownedWorkspace.financialYearStartMonth ?? 7}
+                        onChange={(event) =>
+                          void changeFinancialYearStartMonth(
+                            Number(event.target.value),
+                          )
+                        }
+                        disabled={actionPending || !isOnline}
+                        aria-describedby="fy-start-month-helper"
+                      >
+                        {FY_MONTH_NAMES.map((name, index) => (
+                          <option key={name} value={index + 1}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="menu-note" id="fy-start-month-helper">
+                        {financialYearWindowHelperText(
+                          ownedWorkspace.financialYearStartMonth ?? 7,
+                        )}
+                      </span>
                     </label>
                   </>
                 ) : null}

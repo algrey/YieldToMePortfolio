@@ -36,6 +36,12 @@ export type FyWindowResult =
   | { ok: false; reason: FyWindowUnavailableReason };
 
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+// A full ISO-8601 instant: date, time, and a mandatory offset (Z or
+// ±HH:MM). Offset-less datetimes (e.g. "2026-08-13T00:00:00") are
+// deliberately rejected -- their instant is ambiguous without a UTC
+// reference, and this module's whole point is not guessing at that.
+const ISO_INSTANT_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 
 /** Validates a financial-year start month: an integer between 1 and 12. */
 export function isValidFinancialYearStartMonth(
@@ -55,16 +61,50 @@ function isValidTimezone(value: string): boolean {
   }
 }
 
+/** Rejects impossible calendar dates (e.g. 2026-02-30) that `Date.parse`
+ * would otherwise silently roll over into the following month. */
+function isValidCalendarDate(
+  year: number,
+  month: number,
+  day: number,
+): boolean {
+  return (
+    Number.isInteger(year) &&
+    Number.isInteger(month) &&
+    Number.isInteger(day) &&
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= daysInMonth(year, month)
+  );
+}
+
 /**
- * Resolves an instant (full ISO datetime, or a bare YYYY-MM-DD date treated
- * as UTC midnight) to the local calendar date (YYYY-MM-DD) it falls on in
- * the given IANA timezone. Uses `Intl.DateTimeFormat` so DST/offset
+ * Resolves an instant to the local calendar date (YYYY-MM-DD) it falls on
+ * in the given IANA timezone. Uses `Intl.DateTimeFormat` so DST/offset
  * transitions are resolved by the timezone database, not approximated.
+ *
+ * Explicit ISO-instant contract: accepts only a bare YYYY-MM-DD date
+ * (treated as UTC midnight) or a full ISO-8601 datetime carrying a
+ * mandatory `Z`/`±HH:MM` offset. Non-ISO strings (e.g. "13 Aug 2026"),
+ * offset-less datetimes, and impossible calendar dates (e.g. 2026-02-30)
+ * are all rejected as `invalid_instant` rather than silently coerced by
+ * `Date.parse`'s lenient/rollover behaviour.
  */
 function localDateAt(nowInstant: string, timezone: string): string | null {
-  const normalized = DATE_ONLY_PATTERN.test(nowInstant)
-    ? `${nowInstant}T00:00:00Z`
-    : nowInstant;
+  const isBareDate = DATE_ONLY_PATTERN.test(nowInstant);
+  const isIsoInstant = ISO_INSTANT_PATTERN.test(nowInstant);
+  if (!isBareDate && !isIsoInstant) return null;
+
+  const [datePartYear, datePartMonth, datePartDay] = nowInstant
+    .slice(0, 10)
+    .split("-")
+    .map(Number);
+  if (!isValidCalendarDate(datePartYear, datePartMonth, datePartDay)) {
+    return null;
+  }
+
+  const normalized = isBareDate ? `${nowInstant}T00:00:00Z` : nowInstant;
   const parsedMs = Date.parse(normalized);
   if (!Number.isFinite(parsedMs)) return null;
   try {

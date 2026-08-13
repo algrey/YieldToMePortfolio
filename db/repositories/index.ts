@@ -56,6 +56,8 @@ export {
   createOwnedUserSettingsRepository,
   type ArchiveRestorePortfolioInput,
   type CreatePortfolioInput,
+  type FinancialYearStartMonthChangeInput,
+  type FinancialYearStartMonthChangeResult,
   type HomeCurrencyChangeInput,
   type HomeCurrencyChangeResult,
   type HomeCurrencyRebaseRequest,

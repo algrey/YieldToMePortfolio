@@ -1,3 +1,5 @@
+import { isValidFinancialYearStartMonth } from "../domain/calculations/financial-year.ts";
+
 export type PortfolioActionInput = {
   code: string;
   name: string;
@@ -62,4 +64,10 @@ export function validateHoldingCurrencyView(
   value: unknown,
 ): "native" | "home" | null {
   return value === "native" || value === "home" ? value : null;
+}
+
+/** Validates a financial-year start month at the request boundary: an
+ * integer 1-12, never a silent default when the input is malformed. */
+export function validateFinancialYearStartMonth(value: unknown): number | null {
+  return isValidFinancialYearStartMonth(value) ? value : null;
 }

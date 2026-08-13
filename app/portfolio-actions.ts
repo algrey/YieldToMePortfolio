@@ -11,6 +11,7 @@ import {
 } from "../db/repositories/owned-portfolios";
 import { VERIFIED_PRINCIPAL_HEADER } from "../domain/auth/verified-principal-header";
 import {
+  validateFinancialYearStartMonth,
   validateHomeCurrency,
   validateHoldingCurrencyView,
   validatePortfolioActionInput,
@@ -329,6 +330,54 @@ export async function changeHoldingCurrencyViewAction(value: unknown) {
       ok: false as const,
       status: 409 as const,
       message: "Display view could not be changed.",
+    };
+  }
+}
+
+export async function changeFinancialYearStartMonthAction(value: unknown) {
+  const input = value as Record<string, unknown>;
+  const financialYearStartMonth = validateFinancialYearStartMonth(
+    input?.financialYearStartMonth,
+  );
+  const expectedVersion = input?.expectedVersion;
+  if (
+    financialYearStartMonth === null ||
+    typeof expectedVersion !== "number" ||
+    !Number.isInteger(expectedVersion)
+  ) {
+    return {
+      ok: false as const,
+      status: 400 as const,
+      message:
+        "A financial-year start month between 1 and 12, and a valid settings version, are required.",
+    };
+  }
+  const context = await getAuthenticatedSqlContext();
+  if (!context.ok) return context;
+  try {
+    const result = await createOwnedUserSettingsRepository(
+      context.client,
+      undefined,
+      { requestId: context.requestId },
+    ).setFinancialYearStartMonth(context.userId, {
+      financialYearStartMonth,
+      expectedVersion,
+    });
+    return result.ok
+      ? result
+      : {
+          ...result,
+          status:
+            result.reason === "version_conflict"
+              ? (409 as const)
+              : (404 as const),
+          message: "Financial-year start month could not be changed.",
+        };
+  } catch {
+    return {
+      ok: false as const,
+      status: 409 as const,
+      message: "Financial-year start month could not be changed.",
     };
   }
 }

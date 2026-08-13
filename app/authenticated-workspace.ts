@@ -91,6 +91,7 @@ export async function loadAuthenticatedWorkspace(
       ? {
           ...workspace,
           holdingCurrencyView: settings.defaultHoldingCurrencyView,
+          financialYearStartMonth: settings.financialYearStartMonth,
           settingsVersion: settings.version,
         }
       : workspace;

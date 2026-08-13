@@ -60,6 +60,11 @@ export type HoldingCurrencyViewChangeInput = {
   view: "native" | "home";
 };
 
+export type FinancialYearStartMonthChangeInput = {
+  expectedVersion: number;
+  financialYearStartMonth: number;
+};
+
 export type PortfolioMutationFailure =
   | { ok: false; reason: "not_found" }
   | { ok: false; reason: "version_conflict" };
@@ -86,6 +91,9 @@ export type HomeCurrencyChangeResult =
   | PortfolioMutationFailure;
 
 export type HoldingCurrencyViewChangeResult =
+  { ok: true; settings: OwnedUserSettingsRecord } | PortfolioMutationFailure;
+
+export type FinancialYearStartMonthChangeResult =
   { ok: true; settings: OwnedUserSettingsRecord } | PortfolioMutationFailure;
 
 export type PortfolioListOptions = {
@@ -561,6 +569,46 @@ export function createOwnedUserSettingsRepository(
         auditMutationStatement({
           actorUserId: userId,
           action: "settings.holding_currency_view_change",
+          targetType: "user_settings",
+          targetId: userId,
+          requestId,
+          occurredAt: updatedAt,
+          condition:
+            "EXISTS (SELECT 1 FROM user_settings WHERE user_id = ? AND version = ?)",
+          conditionParams: [userId, input.expectedVersion + 1],
+        }),
+      ]);
+      const row = rows[0]?.results[0];
+      return row
+        ? { ok: true, settings: createUserSettingsRecord(row) }
+        : await resolveMutationFailure(client, "user_settings", userId, userId);
+    },
+
+    async setFinancialYearStartMonth(
+      userId: string,
+      input: FinancialYearStartMonthChangeInput,
+    ): Promise<FinancialYearStartMonthChangeResult> {
+      const updatedAt = nowIso(now);
+      const updateStatement: SqlStatement = {
+        sql: `
+          UPDATE user_settings
+          SET financial_year_start_month = ?, updated_at = ?, version = version + 1
+          WHERE user_id = ? AND version = ?
+          RETURNING user_id, home_currency_code, timezone,
+            default_holding_currency_view, financial_year_start_month, created_at, updated_at, version
+        `,
+        params: [
+          input.financialYearStartMonth,
+          updatedAt,
+          userId,
+          input.expectedVersion,
+        ],
+      };
+      const rows = await client.batch([
+        updateStatement,
+        auditMutationStatement({
+          actorUserId: userId,
+          action: "settings.financial_year_start_month_change",
           targetType: "user_settings",
           targetId: userId,
           requestId,

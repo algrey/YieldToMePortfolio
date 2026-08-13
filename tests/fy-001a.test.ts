@@ -189,6 +189,44 @@ test("FY-001A: invalid start months, timezones, and instants are rejected at the
   assert.deepEqual(invalidInstant, { ok: false, reason: "invalid_instant" });
 });
 
+// --- FY-001B follow-up: explicit ISO-instant contract on localDateAt -----
+// (tightened because user-influenced values -- the settings mutation's
+// server clock aside, a future caller could pass an owner-supplied instant
+// -- now reach this domain module; see TASKS.md FY-001A completion note).
+
+test("FY-001B: a non-ISO instant string is rejected as invalid_instant, not lenient-parsed", () => {
+  const result = currentFyWindow("13 Aug 2026", 7, "Australia/Sydney");
+  assert.deepEqual(result, { ok: false, reason: "invalid_instant" });
+});
+
+test("FY-001B: an impossible calendar date does not roll over into the following month", () => {
+  const bareDate = currentFyWindow("2026-02-30", 7, "Australia/Sydney");
+  assert.deepEqual(bareDate, { ok: false, reason: "invalid_instant" });
+
+  const fullInstant = lastFyWindow(
+    "2026-02-30T00:00:00Z",
+    7,
+    "Australia/Sydney",
+  );
+  assert.deepEqual(fullInstant, { ok: false, reason: "invalid_instant" });
+});
+
+test("FY-001B: an offset-less datetime (no Z, no ±HH:MM) is rejected rather than treated as local server time", () => {
+  const result = currentFyWindow("2026-08-13T00:00:00", 7, "Australia/Sydney");
+  assert.deepEqual(result, { ok: false, reason: "invalid_instant" });
+});
+
+test("FY-001B: a full ISO instant with a non-Z numeric offset is still accepted", () => {
+  const result = currentFyWindow(
+    "2026-08-13T10:00:00+10:00",
+    7,
+    "Australia/Sydney",
+  );
+  assert.ok(result.ok);
+  if (!result.ok) return;
+  assert.equal(result.window.endDate, "2026-08-13");
+});
+
 // --- migration: schema apply + CHECK constraint ---------------------------
 
 async function loadMigrationSql(): Promise<string> {

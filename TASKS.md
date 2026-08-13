@@ -1194,7 +1194,7 @@ Status: DONE (2026-08-13); owner-requested feature (2026-08-13). Owner decisions
 
 ### FY-001B — Financial-year settings control
 
-Status: BLOCKED on FY-001A.
+Status: DONE (2026-08-13).
 
 - Objective: let the owner change the FY start month from the settings surface.
 - Dependencies: FY-001A, UI-005A (settings surface), AUTH-004 (CSRF conventions).
@@ -1204,6 +1204,16 @@ Status: BLOCKED on FY-001A.
 - Tests: happy path, stale version, CSRF denial, cross-user denial, invalid month, settings-UI render.
 - Risks: none beyond the shared settings-version race already handled by the existing pattern.
 - Parallel safe: yes with FY-001C after FY-001A.
+- Completion note (2026-08-13): Delivered `POST /api/settings/financial-year` (CSRF literally first, owner-scoped, expectedVersion) → `changeFinancialYearStartMonthAction` → `setFinancialYearStartMonth` (version-guarded UPDATE + audit in one batch, mirroring `setHoldingCurrencyView`); labelled month select in the settings popover with helper text, aria-describedby, offline/pending-disabled, 44px target; QA-001A matrix row (28 handlers, reviewer-recounted). Folded-in FY-001A follow-up: `localDateAt` tightened to a strict ISO contract (rejects rollover dates, non-ISO formats, offset-less datetimes). No coercion on input validation (numeric strings rejected). `tests/fy-001b.test.ts` + 4 new fy-001a tests; review PASS with independent D1-equivalent probes (concurrent-bump conflict, forced CHECK, audit atomicity). `npm run check` exit 0 (360 pass, 10 gated skips). Follow-ups: audit-row-on-rejected-mutation pattern defect recorded as DB-006 (pre-existing, replicated across all three settings mutations); helper-span-inside-label double announcement folded into FY-001C's touch of the shell.
+
+### DB-006 — Settings audit rows written on rejected mutations
+
+Status: READY; pre-existing pattern defect found by FY-001B review (2026-08-13), affects all three `user_settings` mutations in `db/repositories/owned-portfolios.ts`.
+
+- Problem: each settings mutation batches its audit INSERT guarded by `EXISTS (... version = expectedVersion + 1)`. After a concurrent bump, a stale retry's UPDATE changes nothing (`version_conflict`) but the guard is satisfied by the concurrent writer's row, so a spurious audit event is recorded (reproduced: two audit rows for one applied change). Affects home-currency, holding-currency-view, and financial-year mutations.
+- Fix direction: tie the audit insert to the actual row change (e.g. guard on the UPDATE's own effect via `changes()`-equivalent D1-compatible predicate, or insert the audit row conditioned on the pre-state `version = expectedVersion` like the QA-003 guard pattern) — audit rows must record only mutations that occurred.
+- Acceptance: stale-version retry produces zero new audit rows; applied change produces exactly one; behavior covered for all three settings mutations; D1-compatible (no BEGIN/COMMIT).
+- Tests: extend `tests/fy-001b.test.ts`/existing settings tests with concurrent-bump audit-count assertions for all three mutations.
 
 ### FY-001C — FY and Last FY chart periods
 
@@ -1212,7 +1222,7 @@ Status: BLOCKED on FY-001A.
 - Objective: add "FY" (FY-to-date) and "Last FY" (closed window) to the chart period selectors, wired to real data where real data exists.
 - Dependencies: FY-001A; FY-001B is NOT required (default July works without the control).
 - Requirements: FY-001; QA-001B (44px targets, flex-wrap at 320px, non-color status); `docs/CALCULATIONS.md` FY rules.
-- Deliver: Overview history chart range set becomes `1M / 3M / 12M / FY / Last FY / All` filtering the real history series by the FY windows from FY-001A; Details prototype period tabs gain `FY` and `Last FY` (after YTD) with the same semantics documented — noting the Details chart remains a static prototype until real details history lands, so the new tabs there change labels/copy only and must not fabricate data; period eyebrow/tooltip shows the resolved window and label ("FY27 · 1 Jul 2026 – today", "FY26 · 1 Jul 2025 – 30 Jun 2026").
+- Deliver (also fold in from FY-001B review: move the `fy-start-month-helper` span outside its wrapping label in `portfolio-shell.tsx` to stop the double screen-reader announcement); Overview history chart range set becomes `1M / 3M / 12M / FY / Last FY / All` filtering the real history series by the FY windows from FY-001A; Details prototype period tabs gain `FY` and `Last FY` (after YTD) with the same semantics documented — noting the Details chart remains a static prototype until real details history lands, so the new tabs there change labels/copy only and must not fabricate data; period eyebrow/tooltip shows the resolved window and label ("FY27 · 1 Jul 2026 – today", "FY26 · 1 Jul 2025 – 30 Jun 2026").
 - Acceptance: "FY" filters from the FY start date to the latest point; "Last FY" is bounded on both ends and its gain/loss delta reads as change across that window, not change-to-today; an FY window with no history points shows the explicit empty/missing-data state, never zero; tab labels stay "FY"/"Last FY" with full window in the eyebrow; selectors stay within QA-001B touch-target and 320px-wrap standards; a changed start month re-derives windows without reload artifacts.
 - Tests: window filtering at boundary dates, Last FY closed-window delta, empty-window state, tab accessibility (aria-pressed, labels), 320px wrap regression in `tests/qa-001b.test.ts` if tab count affects it.
 - Risks: implying the prototype Details chart is live; delta semantics for a closed window diverging between charts.
