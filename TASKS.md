@@ -292,18 +292,21 @@ asymmetry noted in the SPK-003 completion note.
 
 #### BRK-002 — Broker vendor and OAuth scope selection (decision)
 
-Status: PENDING; blocked on an owner/product decision, not on other tasks.
+Status: DONE (2026-08-14) — owner decision: **Sharesight** (User API v3), replacing SPK-003's AU CHESS-sponsored archetype. Binding constraints recorded by the owner:
 
-- Objective: replace SPK-003's assumed AU CHESS-sponsored archetype with an actual approved broker/API, its OAuth scopes, rate limits, and redistribution terms for entitled quotes.
-- Dependencies: SPK-003.
-- Requirements: BRK-001.
-- Deliver: a decision record naming the real broker/API, its documented OAuth flow, rate/entitlement limits, and any legal/ToS constraint on data retention or quote redistribution.
-- Acceptance: the decision is evidence-based (vendor documentation cited), not another assumption; it either confirms or replaces the AU CHESS-sponsored archetype.
-- Risks: vendor API stability, sandbox/test-account availability, cost.
+- Sharesight holds the owner's TAX data and its API is read-write with NO granular OAuth scopes (auth yields a token valid for both read and write endpoints), so read-only MUST be enforced at the application layer — now a non-negotiable rule in `AGENTS.md`: GET-only, dedicated client whose transport rejects every non-GET method, tests that fail on any non-GET Sharesight request, credentials server-side only, Sharesight → app direction only.
+- Access path: the owner has shared their portfolio READ-ONLY to a separate free Sharesight account; the app authenticates as that guest account (defense in depth: even a write would hit a read-only share). Whether guest/free accounts expose full API access is UNVERIFIED — BRK-008 tests it live before any sync work proceeds.
+- Auth: OAuth 2.0 client-credentials flow (correct for an app talking solely to its own linked account; credentials from Sharesight Settings → API tab); access tokens expire after 30 minutes → refresh handling required. Sources: portfolio.sharesight.com/api/3/authentication_flow, /api/3/configuring_oauth, /api/3/overview.
+- Sharesight is a portfolio tracker, not a broker — SPK-003's contract still fits (external system of record, cursor/idempotency, reconcile-only positions), and Sharesight payouts are a candidate source for dividend actuals (feeds the DIV feature; evaluate in BRK-005).
 
-#### BRK-003 — Broker connection/account schema and encrypted token storage
+#### BRK-003 — Sharesight GET-only client foundation (safety layer)
 
-Status: BLOCKED on BRK-002.
+Status: READY (2026-08-14); owner instruction: implement the safety features regardless of the live-access outcome. Replaces the generic schema-first task — schema moves to BRK-004.
+
+- Objective: the dedicated Sharesight client module enforcing the AGENTS.md read-only rule structurally: a server-only HTTP client whose transport rejects every method except GET before any request is built (throwing a typed error, never sending); typed GET helpers for the v3 endpoints the spike needs (portfolios, holdings, trades/payouts lists); client-credentials token acquisition + 30-minute refresh (POST to the OAuth TOKEN endpoint is the SOLE documented exception — the token endpoint is auth infrastructure, not Sharesight data; isolate it in the auth path so the data client remains GET-only, and record this exception in AGENTS.md-adjacent docs); credentials via Worker env/secrets only; no payload dumps or tokens in logs/errors (hash/metadata evidence per MKT-002 conventions).
+- Tests: transport-level rejection of POST/PUT/PATCH/DELETE (attempting one fails the suite); no credential leakage in serialized errors; token refresh behavior with a mocked clock; fixture-based endpoint parsing with explicit unavailable states. No live network in tests.
+- Dependencies: BRK-002 (done). No schema needed (tokens held in-memory per invocation for the spike; durable storage is BRK-004).
+- Acceptance: it is structurally impossible to issue a non-GET Sharesight data request through the module; a test proves it; secrets never reach client bundles.
 
 - Objective: migrate `broker_connections`, `broker_accounts`, `broker_sync_runs`, and `external_record_mappings` (`docs/DATA_MODEL.md` §8) as reviewed Drizzle migrations, and implement the real encrypted-token-envelope storage `TokenEnvelopeRef` (`domain/broker-sync/contracts.ts`) only references.
 - Dependencies: BRK-002, DB-001A.
@@ -312,9 +315,17 @@ Status: BLOCKED on BRK-002.
 - Acceptance: no plaintext credential ever reaches D1, logs, client bundles, or CSV exports; cross-user access to another owner's connection/account is denied and tested.
 - Risks: key-rotation strategy, migration review overhead.
 
-#### BRK-004 — OAuth authorize/refresh/revoke flow
+#### BRK-008 — Sharesight live read spike (owner-assisted)
 
-Status: BLOCKED on BRK-002, BRK-003, AUTH-001.
+Status: BLOCKED on BRK-003; REQUIRES OWNER RUN — needs the guest account's API credentials (Sharesight Settings → API tab in the free account holding the read-only share; if no API tab exists on the free plan, that finding decides the fallback: credentials from the main account, still guarded by the GET-only layer).
+
+- Objective: prove the read-only-shared portfolio is readable via the User API v3 using BRK-003's client: authenticate (client credentials), list portfolios, fetch holdings/trades/payouts for the shared portfolio; record which endpoints work for a guest account, rate limits observed, and payout data shape (dividend-actuals candidate).
+- Deliver: a spike evidence doc (endpoints × guest-access outcome, hash-only payload evidence, no dumps); go/no-go for BRK-004/005 scoping.
+- Credentials handling: local `.dev.vars`-style secret or Worker secret, never committed, never in fixtures.
+
+#### BRK-004 — Sharesight connection schema and token handling
+
+Status: BLOCKED on BRK-008 (guest-access outcome shapes what is stored).
 
 - Objective: implement the real `authorize`/token-refresh/`revoke` lifecycle against the selected broker's OAuth flow, conforming to the `BrokerAdapter` contract in `domain/broker-sync/contracts.ts`.
 - Dependencies: BRK-002, BRK-003.
@@ -323,9 +334,9 @@ Status: BLOCKED on BRK-002, BRK-003, AUTH-001.
 - Acceptance: revocation is verified to actually invalidate provider-side access, not only local state; token material never appears in logs/errors (extend `tests/spk-003.test.ts` redaction coverage against the real adapter).
 - Risks: provider-specific OAuth quirks, refresh-token rotation edge cases.
 
-#### BRK-005 — Broker transaction/cash sync commit path
+#### BRK-005 — Sharesight read-sync into staged imports
 
-Status: BLOCKED on BRK-003, BRK-004, LED-001B.
+Status: BLOCKED on BRK-004, LED-001B. Scope note (2026-08-14): ingestion consumes Sharesight trades/payouts via the GET-only client into the STAGED import pipeline (preview/idempotent/reversible, SPK-003 contract semantics: version-ordered, reconcile-only positions); payouts evaluated as a dividend-actuals source feeding the DIV-001 manual/receipt tiers with provenance. Direction Sharesight → app only.
 
 - Objective: wire `planBrokerLedgerSync` (`domain/broker-sync/reconciliation-plan.ts`) into a real staging/commit path that posts `create`/`reverse_and_replace`/`reverse_only` effects through the existing ledger posting/reversal code (`domain/ledger/posting.ts`), matching the CSV import commit pattern rather than duplicating it.
 - Dependencies: BRK-004.
@@ -347,7 +358,7 @@ Status: BLOCKED on BRK-005.
 
 #### BRK-007 — Entitled broker quotes wiring
 
-Status: BLOCKED on BRK-004, MKT-001.
+Status: DEFERRED (2026-08-14); Sharesight is not a quote provider under our contract — revisit only if a real entitlement need appears.
 
 - Objective: implement `BrokerAdapter.getEntitledQuotes` against the selected broker (if it offers quotes) and enforce connection-scoped entitlement at the route/repository layer through the existing `MarketDataProvider`/`ObservationScope` abstraction.
 - Dependencies: BRK-004.

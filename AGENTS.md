@@ -150,6 +150,7 @@ Treat each completed repository-changing user prompt and each completed ready `T
 - CSV imports must be staged, previewed, validated, idempotent, batch-attributable, and reversible before affecting totals.
 - Service workers must not cache authenticated HTML, API responses, portfolio data, or uploads in v1.
 - Keep secrets out of source, logs, client bundles, fixtures, screenshots, and error payloads.
+- Sharesight is a read-only external system of record holding the owner's tax data. Code must never create, update, or delete data in Sharesight. Only HTTP GET requests to the Sharesight API are permitted; all Sharesight traffic goes through the dedicated GET-only client module, whose transport rejects every other method, and Sharesight credentials live only in Worker/server configuration. Direction is always Sharesight → app, never app → Sharesight.
 
 ## Scope and token discipline
 
