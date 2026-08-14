@@ -17,27 +17,26 @@
   "permissions": {
     "deny": ["Read(./.env)", "Read(./.env.*)", "Read(./secrets/**)"],
     "ask": [
-      "Bash(git push *)",
-      "Bash(git reset *)",
-      "Bash(git clean *)",
-      "Bash(git checkout *)",
-      "Bash(git restore *)",
-      "Bash(rm *)",
       "Bash(npm install *)",
-      "Bash(npm uninstall *)"
+      "Bash(npm uninstall *)",
+      "Bash(git clean *)",
+      "Bash(git restore *)",
+      "Bash(git rm *)",
+      "Bash(git reset *)",
+      "Bash(git push *)"
     ],
     "allow": [
-      "Bash(npm run test*)",
-      "Bash(npm run lint*)",
-      "Bash(npm run build*)",
-      "Bash(npm run format:check)",
+      "Bash(git checkout *)",
+      "Bash(rm *)",
+      "Bash(node *)", 
+      "Bash(npm *)",  
       "Bash(git status *)",
       "Bash(git diff *)",
       "Bash(git status *)",
+      "Bash(git mv *)",
       "Bash(awk -F/ 'NF==1')",
       "Bash(awk -F/ '{print $1}')",
-      "Bash(mkdir -p docs/source-evidence)",
-      "Bash(git mv *)"
+      "Bash(mkdir -p docs/source-evidence)"
     ]
   }
 }
