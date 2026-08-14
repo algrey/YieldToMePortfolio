@@ -2,39 +2,86 @@
 //
 // WHAT THIS IS FOR
 //   Proves the owner's Sharesight User API v3 account is readable via
-//   BRK-003's GET-only client: acquire a client-credentials token, list
-//   portfolios, then fetch holdings/trades/payouts for each portfolio.
-//   Records which endpoints work, the response shape (field NAMES only),
-//   and the two BRK-003 TODOs the client's `parse.ts` flagged as needing a
-//   live response to confirm (id numeric-vs-string shape; decimal
-//   exponential-notation magnitude). Go/no-go evidence for BRK-004/005.
+//   BRK-003's GET-only client: acquire a token, list portfolios, then fetch
+//   holdings/trades/payouts for each portfolio. Records which endpoints
+//   work, the response shape (field NAMES only), and the two BRK-003 TODOs
+//   the client's `parse.ts` flagged as needing a live response to confirm
+//   (id numeric-vs-string shape; decimal exponential-notation magnitude).
+//   Go/no-go evidence for BRK-004/005.
+//
+// TOKEN ACQUISITION STRATEGY (BRK-008)
+//   The owner's Sharesight app registration uses the authorization-code
+//   flow with an out-of-band redirect (Sharesight shows a one-time code in
+//   the browser rather than redirecting a callback URL); whether
+//   client_credentials is ALSO enabled for this app is exactly what this
+//   spike is finding out, so it tries client_credentials first and falls
+//   back:
+//     1. If `SHARESIGHT_REFRESH_TOKEN` is set (from a prior run -- see
+//        below), use the `refresh_token` grant. This is the cheapest,
+//        most-durable path and never spends a one-time code.
+//     2. Otherwise, attempt `client_credentials`. If the token endpoint
+//        rejects the GRANT ITSELF (a typed, non-retryable `authentication`
+//        result -- never a network/timeout/rate-limit error, which must
+//        never trigger a fallback) AND `SHARESIGHT_AUTH_CODE` +
+//        `SHARESIGHT_REDIRECT_URI` are set, retry via `authorization_code`.
+//   The grant that actually succeeded is printed. See
+//   `domain/sharesight/token-strategy.ts` for the pure fallback-decision
+//   logic (unit-tested independently of this script in
+//   `tests/brk-003.test.ts`).
 //
 // HOW TO RUN
 //   node --experimental-strip-types scripts/sharesight-read-spike.mjs
 //
 //   Requires SHARESIGHT_CLIENT_ID / SHARESIGHT_CLIENT_SECRET (Sharesight
-//   Settings -> API tab, the owner's MAIN PAID account -- BRK-008). Reads
-//   them from a gitignored `.dev.vars` file at the repo root (KEY=VALUE per
-//   line, `#`-prefixed comments and blank lines ignored -- same shape
-//   `wrangler`/`vinext dev` read, though this script parses it itself since
-//   it runs outside that toolchain) or from `process.env`, which takes
-//   precedence over `.dev.vars` when both are set. `.dev.vars`'s path can
-//   be overridden with `SHARESIGHT_DEV_VARS_PATH` (used by this script's
-//   own missing-credentials test so it never depends on the ambient
-//   repo-root file).
+//   Settings -> API tab, the owner's MAIN PAID account -- BRK-008), always.
+//   Optionally, depending on which grant(s) are available for this app
+//   registration:
+//     - SHARESIGHT_REFRESH_TOKEN -- a previously issued refresh token; when
+//       set, this alone determines the grant used (see strategy above).
+//     - SHARESIGHT_AUTH_CODE -- the one-time code Sharesight displayed in
+//       the browser for the authorization-code flow (short-lived; request a
+//       fresh one right before running this script).
+//     - SHARESIGHT_REDIRECT_URI -- must be EXACTLY the redirect URI
+//       configured on the app registration; for this OOB registration
+//       that's the literal `urn:ietf:wg:oauth:2.0:oob`
+//       (`SHARESIGHT_OOB_REDIRECT_URI`).
+//   All of the above are read from a gitignored `.dev.vars` file at the
+//   repo root (KEY=VALUE per line, `#`-prefixed comments and blank lines
+//   ignored -- same shape `wrangler`/`vinext dev` read, though this script
+//   parses it itself since it runs outside that toolchain) or from
+//   `process.env`, which takes precedence over `.dev.vars` when both are
+//   set. `.dev.vars`'s path can be overridden with
+//   `SHARESIGHT_DEV_VARS_PATH` (used by this script's own
+//   missing-credentials test so it never depends on the ambient repo-root
+//   file).
 //
-// THE NO-VALUES RULE
+//   THE ONE PERMITTED SECRET OUTPUT: if a successful exchange returns a
+//   refresh token, this script prints an instruction to add
+//   `SHARESIGHT_REFRESH_TOKEN=<value>` to `.dev.vars`, on its own clearly
+//   marked line, and NOWHERE else. This is deliberate, not an oversight of
+//   the no-values rule below -- an authorization code is one-time and
+//   short-lived, so without persisting the refresh token it returns, every
+//   future run would need the owner to fetch a brand new code from
+//   Sharesight by hand. The owner runs this script locally and is the sole
+//   intended reader of its output; `.dev.vars` is gitignored and is exactly
+//   where this repo's other local secrets already live (see
+//   `domain/sharesight/token.ts`'s `onRefreshTokenRotated` option, which is
+//   this script's only source for the value).
+//
+// THE NO-VALUES RULE (otherwise, without exception)
 //   This script reads the owner's real portfolio/holdings/trade/payout
 //   data -- tax data (AGENTS.md non-negotiable: secrets/PII never in logs).
-//   It NEVER prints a field VALUE from a Sharesight response, only: typed
-//   outcome kinds, item counts, `payloadSha256` hash evidence (already a
-//   one-way digest, not a value -- see `SharesightFetchEvidence`), the
-//   `typeof` of the first item's `id` field (never its value), a boolean
-//   "does this decimal string look exponential" flag (never the decimal
-//   itself), and a recursive field-NAME-only shape dump (`Object.keys`,
-//   never the corresponding values) of the first item in each list. Do not
-//   add a `console.log` anywhere in this file that could print an actual
-//   Sharesight field value, a token, or a client secret.
+//   Other than the one permitted refresh-token line above, it NEVER prints
+//   a field VALUE from a Sharesight response, only: typed outcome kinds,
+//   item counts, `payloadSha256` hash evidence (already a one-way digest,
+//   not a value -- see `SharesightFetchEvidence`), the `typeof` of the
+//   first item's `id` field (never its value), a boolean "does this decimal
+//   string look exponential" flag (never the decimal itself), and a
+//   recursive field-NAME-only shape dump (`Object.keys`, never the
+//   corresponding values) of the first item in each list. Do not add a
+//   `console.log` anywhere in this file that could print an actual
+//   Sharesight field value, an access token, an authorization code, or a
+//   client secret.
 //
 // This script only ever reaches Sharesight through `domain/sharesight`'s
 // public barrel (`createSharesightTokenProvider` + `createSharesightClient`)
@@ -42,7 +89,10 @@
 // the barrel deliberately does not re-export and an ESLint rule bars
 // importing outside the package (BRK-004 review). The barrel's client is
 // GET-only by construction (BRK-003): this script cannot issue a write to
-// Sharesight even if it tried.
+// Sharesight even if it tried. `token-strategy.ts` (imported below) is a
+// pure grant-selection helper that never itself reaches Sharesight, so it
+// is imported directly rather than through the barrel (mirroring
+// `dev-vars.mjs`'s `parseDevVars`, also imported directly).
 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,6 +100,7 @@ import {
   createSharesightClient,
   createSharesightTokenProvider,
 } from "../domain/sharesight/index.ts";
+import { shouldFallBackToAuthorizationCode } from "../domain/sharesight/token-strategy.ts";
 import { parseDevVars } from "./dev-vars.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -64,6 +115,13 @@ const clientId =
   process.env.SHARESIGHT_CLIENT_ID || devVars.SHARESIGHT_CLIENT_ID;
 const clientSecret =
   process.env.SHARESIGHT_CLIENT_SECRET || devVars.SHARESIGHT_CLIENT_SECRET;
+// BRK-008: all three optional -- see the strategy comment above.
+const authCode =
+  process.env.SHARESIGHT_AUTH_CODE || devVars.SHARESIGHT_AUTH_CODE;
+const redirectUri =
+  process.env.SHARESIGHT_REDIRECT_URI || devVars.SHARESIGHT_REDIRECT_URI;
+const refreshToken =
+  process.env.SHARESIGHT_REFRESH_TOKEN || devVars.SHARESIGHT_REFRESH_TOKEN;
 
 if (!clientId || !clientSecret) {
   console.error(
@@ -78,9 +136,32 @@ if (!clientId || !clientSecret) {
       "These come from the owner's Sharesight Settings -> API tab on the",
       "MAIN PAID account (see TASKS.md BRK-008). Never commit .dev.vars,",
       "paste these values into a shared shell, or add them to a fixture.",
+      "",
+      "Optionally, also set (see this file's header comment):",
+      "  SHARESIGHT_REFRESH_TOKEN, or SHARESIGHT_AUTH_CODE +",
+      "  SHARESIGHT_REDIRECT_URI, depending on which grant(s) this app",
+      "  registration supports.",
     ].join("\n"),
   );
   process.exit(1);
+}
+
+/** BRK-008: prints a newly issued refresh token, once, on its own clearly
+ * marked line -- the ONE permitted secret output in this script (see the
+ * header comment). Never called except as `onRefreshTokenRotated`, which
+ * `domain/sharesight/token.ts` only invokes with a value it just validated
+ * out of a real token-endpoint response; this function itself never
+ * inspects, transforms, or logs it anywhere else. */
+function printRotatedRefreshToken(token) {
+  console.log("");
+  console.log(
+    "=== SHARESIGHT REFRESH TOKEN ISSUED -- SAVE THIS NOW, IT WILL NOT BE SHOWN AGAIN ===",
+  );
+  console.log(`SHARESIGHT_REFRESH_TOKEN=${token}`);
+  console.log(
+    "=== add the line above to your local .dev.vars (gitignored) -- never commit it, paste it into a shared shell, or log it anywhere else ===",
+  );
+  console.log("");
 }
 
 // ---------------------------------------------------------------------------
@@ -176,11 +257,102 @@ function printOutcome(label, result) {
   }
 }
 
-async function main() {
-  const tokenProvider = createSharesightTokenProvider({
+/**
+ * BRK-008: implements the token-acquisition strategy documented in this
+ * file's header comment. Returns `{ provider, grantUsed, result }` -- the
+ * caller (`main`) is responsible for the exit-on-failure/success logging,
+ * this function only decides WHICH grant to use and drives the fallback.
+ */
+async function acquireSharesightToken() {
+  if (refreshToken) {
+    console.log(
+      "token strategy: SHARESIGHT_REFRESH_TOKEN is set -- using the refresh_token grant.",
+    );
+    const provider = createSharesightTokenProvider({
+      clientId,
+      clientSecret,
+      grantType: "refresh_token",
+      refreshToken,
+      onRefreshTokenRotated: printRotatedRefreshToken,
+    });
+    return {
+      provider,
+      grantUsed: "refresh_token",
+      result: await provider.getAccessToken(),
+    };
+  }
+
+  console.log(
+    "token strategy: no refresh token configured -- trying client_credentials first.",
+  );
+  const clientCredentialsProvider = createSharesightTokenProvider({
     clientId,
     clientSecret,
+    grantType: "client_credentials",
+    onRefreshTokenRotated: printRotatedRefreshToken,
   });
+  const clientCredentialsResult =
+    await clientCredentialsProvider.getAccessToken();
+  if (clientCredentialsResult.ok) {
+    return {
+      provider: clientCredentialsProvider,
+      grantUsed: "client_credentials",
+      result: clientCredentialsResult,
+    };
+  }
+
+  // Never retries via a different grant on a network/timeout/rate-limit
+  // error -- only a genuine, typed rejection of the client_credentials
+  // GRANT itself (see token-strategy.ts's isGrantRejection).
+  if (
+    !shouldFallBackToAuthorizationCode(
+      clientCredentialsResult.error,
+      Boolean(authCode),
+    )
+  ) {
+    return {
+      provider: clientCredentialsProvider,
+      grantUsed: "client_credentials",
+      result: clientCredentialsResult,
+    };
+  }
+
+  if (!redirectUri) {
+    console.log(
+      "token strategy: client_credentials was rejected and SHARESIGHT_AUTH_CODE is set, but SHARESIGHT_REDIRECT_URI is missing -- cannot fall back to authorization_code.",
+    );
+    return {
+      provider: clientCredentialsProvider,
+      grantUsed: "client_credentials",
+      result: clientCredentialsResult,
+    };
+  }
+
+  console.log(
+    `token strategy: client_credentials was rejected (${clientCredentialsResult.error.kind}) -- falling back to authorization_code.`,
+  );
+  const authCodeProvider = createSharesightTokenProvider({
+    clientId,
+    clientSecret,
+    grantType: "authorization_code",
+    code: authCode,
+    redirectUri,
+    onRefreshTokenRotated: printRotatedRefreshToken,
+  });
+  return {
+    provider: authCodeProvider,
+    grantUsed: "authorization_code",
+    result: await authCodeProvider.getAccessToken(),
+  };
+}
+
+async function main() {
+  console.log("acquire token: attempting...");
+  const {
+    provider: tokenProvider,
+    grantUsed,
+    result: tokenResult,
+  } = await acquireSharesightToken();
 
   // Correlates onFetchEvidence callbacks (fired once per successful GET)
   // back to the endpoint that triggered them. Safe because every call below
@@ -204,19 +376,17 @@ async function main() {
     }
   }
 
-  console.log("acquire token: attempting...");
-  const tokenResult = await tokenProvider.getAccessToken();
   if (!tokenResult.ok) {
     const hint = KIND_HINTS[tokenResult.error.kind] ?? tokenResult.error.kind;
     console.log(
-      `acquire token: unavailable (${tokenResult.error.kind} -- ${hint}${
+      `acquire token: unavailable via ${grantUsed} (${tokenResult.error.kind} -- ${hint}${
         tokenResult.error.retryable ? ", retryable" : ", not retryable"
       })`,
     );
     console.error("Cannot proceed without a token; stopping.");
     process.exit(1);
   }
-  console.log("acquire token: ok");
+  console.log(`acquire token: ok via ${grantUsed} grant.`);
 
   const portfoliosResult = await call("portfolios", () =>
     client.listPortfolios(),

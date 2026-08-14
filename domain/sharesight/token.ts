@@ -1,4 +1,17 @@
-// BRK-003: OAuth 2.0 client-credentials token acquisition for Sharesight.
+// BRK-003: OAuth 2.0 token acquisition for Sharesight. BRK-008 extended the
+// original client-credentials-only design to three grants, since the
+// owner's Sharesight app registration uses the authorization-code flow with
+// an out-of-band redirect (client-credentials may or may not be enabled for
+// this app -- the live spike tries it first and falls back):
+//   - `client_credentials` -- the original BRK-003 grant.
+//   - `authorization_code` -- exchanges a short-lived, ONE-TIME code
+//     (`SharesightTokenClientOptions.code`) Sharesight displayed to the
+//     owner, plus the exact configured `redirectUri`, for the first token.
+//   - `refresh_token` -- renews using a refresh token (either supplied
+//     directly, or one a prior `authorization_code`/`refresh_token`
+//     exchange returned and this module has held in memory since).
+// Grant selection is always the caller's EXPLICIT `grantType` option, never
+// inferred. See `SharesightGrantType` and `GrantState` below.
 //
 // This is the SOLE non-GET request this package ever issues (AGENTS.md /
 // BRK-002 decision): a POST to Sharesight's OAuth TOKEN endpoint, which is
@@ -54,14 +67,35 @@ import type { SharesightFetcher } from "./transport.ts";
 export const DEFAULT_SHARESIGHT_TOKEN_URL =
   "https://api.sharesight.com/oauth2/token";
 
+/**
+ * BRK-008: the owner's Sharesight app registration uses the authorization-
+ * code flow with an out-of-band redirect -- Sharesight shows a short-lived,
+ * one-time code in the browser rather than redirecting to a callback URL.
+ * This is the standard OAuth 2.0 literal for that ("no redirect, display the
+ * code"), not a URL, so it is handled as an allowed literal constant
+ * throughout this module rather than being run through URL parsing.
+ */
+export const SHARESIGHT_OOB_REDIRECT_URI = "urn:ietf:wg:oauth:2.0:oob";
+
 const DEFAULT_TIMEOUT_MS = 8_000;
 /** Refresh this many ms before actual expiry, so a data call never races a
  * token that expires mid-request. */
 const DEFAULT_REFRESH_LEEWAY_MS = 60_000;
 
+/**
+ * BRK-008: which OAuth grant a provider uses. Always an EXPLICIT option,
+ * never inferred/guessed from which other options happen to be set --
+ * defaults to `client_credentials` (the only grant BRK-003 originally
+ * supported) so existing callers are unaffected.
+ */
+export type SharesightGrantType =
+  "client_credentials" | "authorization_code" | "refresh_token";
+
 export type SharesightTokenClientOptions = Readonly<{
   /** Sharesight Settings -> API tab client credentials. Constructor-only;
-   * never read from a client-supplied value. */
+   * never read from a client-supplied value. Required for every grant --
+   * Sharesight's token endpoint authenticates the CLIENT regardless of
+   * which grant is used to authenticate the resource owner. */
   clientId: string;
   clientSecret: string;
   /** Defaults to `DEFAULT_SHARESIGHT_TOKEN_URL`; see module doc for why this
@@ -81,6 +115,46 @@ export type SharesightTokenClientOptions = Readonly<{
   now?: () => number;
   timeoutMs?: number;
   refreshLeewayMs?: number;
+  /** Defaults to `"client_credentials"`. See `SharesightGrantType`. */
+  grantType?: SharesightGrantType;
+  /** `authorization_code` grant only: the short-lived, ONE-TIME code
+   * Sharesight displayed to the owner. Consumed for exactly the first
+   * exchange; a provider never resends it (see `GrantState`'s
+   * `"exhausted"` state below). */
+  code?: string;
+  /** `authorization_code` grant only: must be EXACTLY the redirect URI
+   * configured on the Sharesight app registration -- either
+   * `SHARESIGHT_OOB_REDIRECT_URI` or a validated `https:` URL
+   * (`validateSharesightRedirectUri`). Trimmed of surrounding whitespace,
+   * then sent exactly as configured -- never otherwise
+   * reconstructed/renormalized (e.g. never round-tripped through `URL`,
+   * which can rewrite it, adding a trailing slash). */
+  redirectUri?: string;
+  /** `refresh_token` grant only: an existing refresh token (e.g. one the
+   * owner persisted to `.dev.vars` from a prior run's
+   * `onRefreshTokenRotated` callback). */
+  refreshToken?: string;
+  /**
+   * Fired whenever a token exchange response includes a `refresh_token`,
+   * so the CALLER may persist it (this module never persists it itself --
+   * it is held only in memory for the lifetime of this provider). Never
+   * logged or otherwise surfaced by this module itself; the caller is
+   * responsible for treating the value as a secret.
+   *
+   * NOT fired for the `client_credentials` grant even if the response
+   * happens to include a `refresh_token` -- a `client_credentials` provider
+   * never transitions to using it (BRK-008 review B1: grant state must stay
+   * exactly what the caller configured, never silently drift to a
+   * different grant based on response shape alone), so surfacing a token
+   * this module will never itself use would just be handing the caller a
+   * secret to look after for no benefit. See `GrantState`.
+   *
+   * Any exception this callback throws is caught and discarded (BRK-008
+   * review F1): a caller-side persistence failure must never fail the
+   * `getAccessToken()` call it's merely reacting to, nor discard the
+   * access token the same exchange just issued.
+   */
+  onRefreshTokenRotated?: (refreshToken: string) => void;
 }>;
 
 export type SharesightAccessToken = Readonly<{
@@ -101,6 +175,70 @@ export class SharesightTokenUrlRejectedError extends Error {
   ) {
     super(message);
     this.name = "SharesightTokenUrlRejectedError";
+  }
+}
+
+/**
+ * BRK-008: thrown synchronously at provider creation when the options for
+ * the selected `grantType` are missing/empty -- e.g. `authorization_code`
+ * with no `code`, or `refresh_token` with no `refreshToken`. Mirrors
+ * `SharesightTokenUrlRejectedError`'s synchronous-at-creation contract: an
+ * incompletely configured grant can never result in a request being sent.
+ */
+export class SharesightTokenGrantConfigError extends Error {
+  readonly kind = "invalid_response" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "SharesightTokenGrantConfigError";
+  }
+}
+
+/**
+ * BRK-008: thrown synchronously when a configured `redirectUri` is neither
+ * the OOB literal (`SHARESIGHT_OOB_REDIRECT_URI`) nor a validated `https:`
+ * URL. The message is static and never echoes the candidate value, matching
+ * this module's existing URL-rejection convention (no candidate URL is ever
+ * echoed back in a thrown/returned value).
+ */
+export class SharesightRedirectUriRejectedError extends Error {
+  readonly kind = "invalid_response" as const;
+
+  constructor(
+    message = `Sharesight redirect_uri must be the OOB literal ("${SHARESIGHT_OOB_REDIRECT_URI}") or a valid absolute https URL with no userinfo.`,
+  ) {
+    super(message);
+    this.name = "SharesightRedirectUriRejectedError";
+  }
+}
+
+/**
+ * BRK-008: validates a configured `redirectUri` is either the documented OOB
+ * literal (the urn is not a URL, so it is checked as an exact-match allowed
+ * constant rather than parsed) or an `https:` URL carrying no userinfo
+ * (mirroring `validateSharesightTokenUrlShape`'s userinfo/protocol rules,
+ * minus the Sharesight-host/token-path pins, which do not apply here -- a
+ * redirect URI is the APP's own registered callback, not a Sharesight
+ * endpoint). Throws `SharesightRedirectUriRejectedError` synchronously on
+ * any violation.
+ */
+export function validateSharesightRedirectUri(value: string): void {
+  if (value === SHARESIGHT_OOB_REDIRECT_URI) return;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new SharesightRedirectUriRejectedError();
+  }
+  if (url.protocol !== "https:") {
+    throw new SharesightRedirectUriRejectedError(
+      "Sharesight redirect_uri must use https, except the documented OOB literal.",
+    );
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new SharesightRedirectUriRejectedError(
+      "Sharesight redirect_uri must not contain userinfo (username/password) components.",
+    );
   }
 }
 
@@ -309,27 +447,156 @@ function nonEmptyString(value: unknown): string | null {
 }
 
 /**
- * Requests a fresh token from the configured token endpoint. This is the
- * only function in this module (and therefore the only path in the entire
- * `domain/sharesight/` package) that constructs a non-GET request. It never
- * logs or returns the request body, the client secret, or the raw response
- * body -- only a typed success/error result.
+ * BRK-008: the provider's internal, mutable grant state -- distinct from the
+ * caller-facing `SharesightGrantType` option, because `authorization_code`
+ * TRANSITIONS over the provider's lifetime (this is a forced protocol
+ * necessity, not guessing: an authorization code is single-use by
+ * definition, so once consumed the provider must either move to
+ * `refresh_token` -- if the exchange returned one -- or become
+ * `"exhausted"`, never resend the same code):
+ *  - `client_credentials` stays `client_credentials` for every refresh --
+ *    UNCONDITIONALLY, even if a response happens to carry a `refresh_token`
+ *    (BRK-008 review B1: response shape alone must never drift the grant a
+ *    caller explicitly configured).
+ *  - `authorization_code` is used for exactly the FIRST exchange, then:
+ *     - if the response included a `refresh_token`, state moves to
+ *       `refresh_token` for all subsequent refreshes;
+ *     - otherwise state moves to `"exhausted"` -- there is nothing left to
+ *       refresh with, and a caller must supply a fresh code/redirectUri (a
+ *       new provider) to continue.
+ *  - `refresh_token` stays `refresh_token`, using whichever token is
+ *    currently held (rotated on each response that includes a new one; if a
+ *    response omits it, the previously held token is reused, matching a
+ *    non-rotating authorization server).
+ */
+type GrantState =
+  | { kind: "client_credentials" }
+  | { kind: "authorization_code"; code: string; redirectUri: string }
+  | { kind: "refresh_token"; refreshToken: string }
+  | { kind: "exhausted" };
+
+/** The subset of `GrantState` that can actually be sent in a token request
+ * -- `"exhausted"` is intercepted before `requestNewToken` is ever called. */
+type RequestableGrantState = Exclude<GrantState, { kind: "exhausted" }>;
+
+/**
+ * Resolves and validates the provider's INITIAL grant state from options,
+ * once, at `createSharesightTokenProvider` creation -- mirroring
+ * `resolveAndValidateTokenUrl`'s synchronous-at-creation contract. Grant
+ * selection is always the caller's EXPLICIT `grantType` option (defaulting
+ * to `"client_credentials"` for backward compatibility), never inferred from
+ * which other options happen to be set.
+ */
+function resolveInitialGrantState(
+  options: SharesightTokenClientOptions,
+): GrantState {
+  const grantType = options.grantType ?? "client_credentials";
+  switch (grantType) {
+    case "client_credentials":
+      return { kind: "client_credentials" };
+    case "authorization_code": {
+      const code = nonEmptyString(options.code);
+      if (!code) {
+        throw new SharesightTokenGrantConfigError(
+          "authorization_code grant requires a non-empty code.",
+        );
+      }
+      const redirectUri = nonEmptyString(options.redirectUri);
+      if (!redirectUri) {
+        throw new SharesightTokenGrantConfigError(
+          "authorization_code grant requires a non-empty redirectUri.",
+        );
+      }
+      validateSharesightRedirectUri(redirectUri);
+      return { kind: "authorization_code", code, redirectUri };
+    }
+    case "refresh_token": {
+      const refreshToken = nonEmptyString(options.refreshToken);
+      if (!refreshToken) {
+        throw new SharesightTokenGrantConfigError(
+          "refresh_token grant requires a non-empty refreshToken.",
+        );
+      }
+      return { kind: "refresh_token", refreshToken };
+    }
+    default:
+      // BRK-008 review (F2): unreachable for a TypeScript caller -- the
+      // switch above is exhaustive over `SharesightGrantType` -- but a
+      // plain-JS caller (e.g. this repo's own `.mjs` scripts, which have no
+      // type backstop) can pass an arbitrary string. Reject it
+      // synchronously at creation, exactly like every other malformed-grant
+      // case above, rather than silently falling through to an `undefined`
+      // grant state that would only fail later, confusingly, inside
+      // `requestNewToken`.
+      throw new SharesightTokenGrantConfigError(
+        `Unknown Sharesight grantType: "${String(grantType)}".`,
+      );
+  }
+}
+
+/** Builds the token-request body for the given grant. `client_id` /
+ * `client_secret` are sent for every grant (Sharesight's token endpoint
+ * authenticates the client regardless of which grant authenticates the
+ * resource owner). `redirect_uri` was already trimmed of surrounding
+ * whitespace by `resolveInitialGrantState`, then is sent exactly as
+ * configured from there -- never otherwise reconstructed via `URL` (which
+ * can renormalize, e.g. add a trailing slash) -- so it matches the app
+ * registration. */
+function buildGrantRequestBody(
+  clientId: string,
+  clientSecret: string,
+  grantState: RequestableGrantState,
+): URLSearchParams {
+  const body = new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+  });
+  switch (grantState.kind) {
+    case "client_credentials":
+      body.set("grant_type", "client_credentials");
+      break;
+    case "authorization_code":
+      body.set("grant_type", "authorization_code");
+      body.set("code", grantState.code);
+      body.set("redirect_uri", grantState.redirectUri);
+      break;
+    case "refresh_token":
+      body.set("grant_type", "refresh_token");
+      body.set("refresh_token", grantState.refreshToken);
+      break;
+  }
+  return body;
+}
+
+/**
+ * Requests a fresh token from the configured token endpoint, for whichever
+ * grant `grantState` describes. This is the only function in this module
+ * (and therefore the only path in the entire `domain/sharesight/` package)
+ * that constructs a non-GET request. It never logs or returns the request
+ * body, the client secret, the authorization code, the refresh token, or the
+ * raw response body -- only a typed success/error result. On success, also
+ * reports whether the response included a `refresh_token` (validated as a
+ * non-empty string like every other token field), so the caller
+ * (`createSharesightTokenProvider`) can rotate its grant state and notify
+ * `onRefreshTokenRotated` -- this function itself never persists or logs it.
  */
 async function requestNewToken(
   fetcher: SharesightFetcher,
   configuredTokenUrl: URL,
   clientId: string,
   clientSecret: string,
+  grantState: RequestableGrantState,
   now: () => number,
   timeoutMs: number,
-): Promise<SharesightResult<SharesightAccessToken>> {
+): Promise<
+  SharesightResult<{
+    accessToken: SharesightAccessToken;
+    refreshToken: string | null;
+  }>
+> {
   assertSharesightTokenUrl(configuredTokenUrl, configuredTokenUrl);
 
-  const body = new URLSearchParams({
-    grant_type: "client_credentials",
-    client_id: clientId,
-    client_secret: clientSecret,
-  });
+  const body = buildGrantRequestBody(clientId, clientSecret, grantState);
 
   const controller = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -412,23 +679,30 @@ async function requestNewToken(
       false,
     );
   }
+  // Optional on every grant response; validated the same way as every other
+  // token field (non-empty string), never trusted unvalidated.
+  const refreshToken = record ? nonEmptyString(record.refresh_token) : null;
 
   return {
     ok: true,
     value: {
-      accessToken,
-      tokenType,
-      expiresAtMs: now() + expiresIn * 1000,
+      accessToken: {
+        accessToken,
+        tokenType,
+        expiresAtMs: now() + expiresIn * 1000,
+      },
+      refreshToken,
     },
   };
 }
 
 /**
- * Creates a token provider that acquires and refreshes a Sharesight
- * client-credentials token, refreshing before expiry using the injected
- * clock. The returned provider exposes only `getAccessToken()`; it never
- * exposes the underlying fetcher or POST capability to a consumer, so a
- * data client that only holds a `SharesightTokenProvider` structurally
+ * Creates a token provider that acquires and refreshes a Sharesight access
+ * token for the configured grant (`client_credentials`, `authorization_code`,
+ * or `refresh_token` -- BRK-008), refreshing before expiry using the
+ * injected clock. The returned provider exposes only `getAccessToken()`; it
+ * never exposes the underlying fetcher or POST capability to a consumer, so
+ * a data client that only holds a `SharesightTokenProvider` structurally
  * cannot issue a token request itself.
  */
 export function createSharesightTokenProvider(
@@ -443,30 +717,99 @@ export function createSharesightTokenProvider(
     options.tokenUrl,
     options.unsafeAllowOtherHost,
   );
+  // BRK-008: likewise validated ONCE, synchronously, at creation -- an
+  // incompletely configured grant (missing code/redirectUri/refreshToken)
+  // can never result in a request being sent.
+  let grantState: GrantState = resolveInitialGrantState(options);
   const fetcher = options.fetcher ?? fetch.bind(globalThis);
   const now = options.now ?? (() => Date.now());
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const refreshLeewayMs = options.refreshLeewayMs ?? DEFAULT_REFRESH_LEEWAY_MS;
 
   let cached: SharesightAccessToken | null = null;
-  let inFlight: Promise<SharesightResult<SharesightAccessToken>> | null = null;
+  let inFlight: Promise<
+    SharesightResult<{
+      accessToken: SharesightAccessToken;
+      refreshToken: string | null;
+    }>
+  > | null = null;
 
   async function refresh(): Promise<SharesightResult<SharesightAccessToken>> {
     // configuredTokenUrl is always valid here -- it was already validated
     // once at creation, above.
+    if (grantState.kind === "exhausted") {
+      // The one-time authorization_code exchange already happened and
+      // returned no refresh_token -- there is nothing left to refresh with.
+      // Fails closed rather than resending the (now certainly invalid)
+      // code.
+      return tokenError(
+        "authentication",
+        "Sharesight authorization code was already used and no refresh token was issued; a new authorization code is required.",
+        false,
+      );
+    }
     if (!inFlight) {
+      // Captured so the state-transition logic below always reflects the
+      // grant that THIS specific request actually used, even if `grantState`
+      // is reassigned by the time concurrent callers observe the settled
+      // promise. The transition itself runs inside this async block -- run
+      // exactly once per network exchange -- rather than after each
+      // caller's `await`, so a rotated refresh token is never reported to
+      // `onRefreshTokenRotated` more than once for the same exchange when
+      // multiple `getAccessToken()` calls race the same in-flight request.
+      const requestGrantState = grantState;
       inFlight = requestNewToken(
         fetcher,
         configuredTokenUrl,
         options.clientId,
         options.clientSecret,
+        requestGrantState,
         now,
         timeoutMs,
-      ).finally(() => {
-        inFlight = null;
-      });
+      )
+        .then((result) => {
+          // BRK-008 review B1: `client_credentials` NEVER transitions, even
+          // if a response happens to carry a `refresh_token` -- a
+          // `client_credentials` provider must keep sending
+          // `grant_type=client_credentials` on every subsequent request,
+          // not silently drift to `refresh_token` based on response shape
+          // alone (that would corrupt the live spike's grant evidence: the
+          // SECOND request would use a different grant than the one
+          // actually being tested, with no caller-visible signal that
+          // happened). `onRefreshTokenRotated` is correspondingly not fired
+          // either -- see that option's doc comment for why surfacing a
+          // token this provider will never itself use is not a service to
+          // the caller.
+          if (result.ok && requestGrantState.kind !== "client_credentials") {
+            if (result.value.refreshToken) {
+              grantState = {
+                kind: "refresh_token",
+                refreshToken: result.value.refreshToken,
+              };
+              try {
+                // BRK-008 review F1: a caller-supplied persistence callback
+                // must never fail the token acquisition it's merely
+                // reacting to, nor discard the access token this same
+                // exchange just issued. Swallowed, not rethrown or logged
+                // (logging could echo whatever the callback's own error
+                // carries, which callers are free to construct however
+                // they like -- including embedding the token itself).
+                options.onRefreshTokenRotated?.(result.value.refreshToken);
+              } catch {
+                // Deliberately ignored -- see comment above.
+              }
+            } else if (requestGrantState.kind === "authorization_code") {
+              grantState = { kind: "exhausted" };
+            }
+          }
+          return result;
+        })
+        .finally(() => {
+          inFlight = null;
+        });
     }
-    return inFlight;
+    const result = await inFlight;
+    return result.ok ? { ok: true, value: result.value.accessToken } : result;
   }
 
   return {

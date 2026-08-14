@@ -13,8 +13,12 @@ import {
   createSharesightClient,
   createSharesightTokenProvider,
   DEFAULT_SHARESIGHT_TOKEN_URL,
+  SHARESIGHT_OOB_REDIRECT_URI,
   SharesightBaseUrlRejectedError,
+  SharesightRedirectUriRejectedError,
+  SharesightTokenGrantConfigError,
   SharesightTokenUrlRejectedError,
+  validateSharesightRedirectUri,
   validateSharesightTokenUrlShape,
   type SharesightFetcher,
   type SharesightResult,
@@ -36,12 +40,24 @@ import {
   parseSharesightPortfolios,
   parseSharesightTrades,
 } from "../domain/sharesight/parse.ts";
+// BRK-008: the grant-selection/fallback strategy is a pure module,
+// deliberately NOT re-exported from the barrel (see its own header comment)
+// -- it never reaches Sharesight itself. Importing it directly here mirrors
+// how the spike script itself imports it.
+import {
+  decideInitialGrant,
+  isGrantRejection,
+  shouldFallBackToAuthorizationCode,
+} from "../domain/sharesight/token-strategy.ts";
 
 // Obviously-fake placeholder strings, never a real secret shape (mirrors
 // domain/broker-sync/fixtures.ts's convention).
 const FIXTURE_CLIENT_ID = "fixture-client-id-1";
 const FIXTURE_CLIENT_SECRET = "fixture-client-secret-DO-NOT-USE-xyz789";
 const FIXTURE_ACCESS_TOKEN = "fixture-access-token-abc123";
+// BRK-008 fixtures for the authorization_code / refresh_token grants.
+const FIXTURE_AUTH_CODE = "fixture-one-time-code-DO-NOT-USE";
+const FIXTURE_REFRESH_TOKEN = "fixture-refresh-token-DO-NOT-USE-qrs456";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -55,6 +71,20 @@ function tokenFixtureResponse(accessToken = FIXTURE_ACCESS_TOKEN): Response {
     access_token: accessToken,
     token_type: "Bearer",
     expires_in: 1800,
+  });
+}
+
+/** BRK-008: like `tokenFixtureResponse`, but optionally including a
+ * `refresh_token` field, since that's the whole point of these grants. */
+function tokenFixtureResponseWithRefresh(
+  accessToken: string,
+  refreshToken: string | null,
+): Response {
+  return jsonResponse(200, {
+    access_token: accessToken,
+    token_type: "Bearer",
+    expires_in: 1800,
+    ...(refreshToken ? { refresh_token: refreshToken } : {}),
   });
 }
 
@@ -123,7 +153,10 @@ test("BRK-003 headline: sharesightGet has no method knob and rejects a smuggled 
 // only barrel exports that can actually send a Sharesight request.
 const EXPECTED_BARREL_EXPORT_NAMES = [
   "DEFAULT_SHARESIGHT_TOKEN_URL",
+  "SHARESIGHT_OOB_REDIRECT_URI",
   "SharesightBaseUrlRejectedError",
+  "SharesightRedirectUriRejectedError",
+  "SharesightTokenGrantConfigError",
   "SharesightTokenUrlRejectedError",
   "assertSharesightTokenUrl",
   "createSharesightClient",
@@ -132,6 +165,7 @@ const EXPECTED_BARREL_EXPORT_NAMES = [
   "parseSharesightPayouts",
   "parseSharesightPortfolios",
   "parseSharesightTrades",
+  "validateSharesightRedirectUri",
   "validateSharesightTokenUrlShape",
 ].sort();
 
@@ -182,6 +216,7 @@ test("BRK-003 F4: no export in any domain/sharesight module has a non-GET-shaped
       "../domain/sharesight/contracts.ts",
       "../domain/sharesight/transport.ts",
       "../domain/sharesight/token.ts",
+      "../domain/sharesight/token-strategy.ts",
       "../domain/sharesight/parse.ts",
       "../domain/sharesight/client.ts",
       "../domain/sharesight/index.ts",
@@ -596,6 +631,580 @@ test("BRK-003 token: a 3xx redirect response from the token endpoint is treated 
   const result = await provider.getAccessToken();
   assert.equal(result.ok, false);
   assert.equal(calledCount, 1); // never retried to a second, redirected URL
+});
+
+// --- 2b. BRK-008: authorization_code / refresh_token grants --------------
+
+test("BRK-008: authorization_code grant sends exactly the expected form fields to the validated token URL, and nowhere else", async () => {
+  let calledUrl: string | null = null;
+  let calledInit: RequestInit | undefined;
+  const fetcher: SharesightFetcher = async (url, init) => {
+    calledUrl = String(url);
+    calledInit = init;
+    return tokenFixtureResponseWithRefresh(
+      FIXTURE_ACCESS_TOKEN,
+      FIXTURE_REFRESH_TOKEN,
+    );
+  };
+  const provider = createSharesightTokenProvider({
+    clientId: FIXTURE_CLIENT_ID,
+    clientSecret: FIXTURE_CLIENT_SECRET,
+    grantType: "authorization_code",
+    code: FIXTURE_AUTH_CODE,
+    redirectUri: SHARESIGHT_OOB_REDIRECT_URI,
+    fetcher,
+    now: () => 0,
+  });
+
+  const result = await provider.getAccessToken();
+  assert.equal(result.ok, true);
+  // Same pinned token URL as every other grant -- BRK-003's shape/host
+  // validation applies unconditionally, regardless of grant.
+  assert.equal(calledUrl, DEFAULT_SHARESIGHT_TOKEN_URL);
+  assert.equal(calledInit?.method, "POST");
+  const sentParams = new URLSearchParams(String(calledInit?.body));
+  assert.deepEqual([...sentParams.keys()].sort(), [
+    "client_id",
+    "client_secret",
+    "code",
+    "grant_type",
+    "redirect_uri",
+  ]);
+  assert.equal(sentParams.get("grant_type"), "authorization_code");
+  assert.equal(sentParams.get("code"), FIXTURE_AUTH_CODE);
+  assert.equal(sentParams.get("redirect_uri"), SHARESIGHT_OOB_REDIRECT_URI);
+  assert.equal(sentParams.get("client_id"), FIXTURE_CLIENT_ID);
+  assert.equal(sentParams.get("client_secret"), FIXTURE_CLIENT_SECRET);
+});
+
+test("BRK-008: refresh_token grant sends exactly the expected form fields, and rotates the refresh token via onRefreshTokenRotated", async () => {
+  let clock = 0;
+  let callCount = 0;
+  const sentBodies: string[] = [];
+  const fetcher: SharesightFetcher = async (_url, init) => {
+    callCount += 1;
+    sentBodies.push(String(init?.body));
+    return tokenFixtureResponseWithRefresh(
+      `fixture-access-token-${callCount}`,
+      `fixture-refresh-token-${callCount}`,
+    );
+  };
+  const rotated: string[] = [];
+  const provider = createSharesightTokenProvider({
+    clientId: FIXTURE_CLIENT_ID,
+    clientSecret: FIXTURE_CLIENT_SECRET,
+    grantType: "refresh_token",
+    refreshToken: "fixture-initial-refresh-token",
+    onRefreshTokenRotated: (token) => rotated.push(token),
+    fetcher,
+    now: () => clock,
+  });
+
+  const first = await provider.getAccessToken();
+  assert.equal(first.ok, true);
+  assert.equal(callCount, 1);
+  const firstParams = new URLSearchParams(sentBodies[0]);
+  assert.deepEqual([...firstParams.keys()].sort(), [
+    "client_id",
+    "client_secret",
+    "grant_type",
+    "refresh_token",
+  ]);
+  assert.equal(firstParams.get("grant_type"), "refresh_token");
+  assert.equal(
+    firstParams.get("refresh_token"),
+    "fixture-initial-refresh-token",
+  );
+  assert.deepEqual(rotated, ["fixture-refresh-token-1"]);
+
+  clock += 1800 * 1000; // past expiry -> refreshes again
+  const second = await provider.getAccessToken();
+  assert.equal(second.ok, true);
+  assert.equal(callCount, 2);
+  const secondParams = new URLSearchParams(sentBodies[1]);
+  // The SECOND request uses the ROTATED refresh token from the first
+  // response, never the original one supplied at construction.
+  assert.equal(secondParams.get("refresh_token"), "fixture-refresh-token-1");
+  assert.deepEqual(rotated, [
+    "fixture-refresh-token-1",
+    "fixture-refresh-token-2",
+  ]);
+});
+
+test("BRK-008: authorization_code is used for exactly the first exchange, then transitions to refresh_token", async () => {
+  let clock = 0;
+  let callCount = 0;
+  const sentBodies: string[] = [];
+  const fetcher: SharesightFetcher = async (_url, init) => {
+    callCount += 1;
+    sentBodies.push(String(init?.body));
+    return tokenFixtureResponseWithRefresh(
+      `fixture-access-token-${callCount}`,
+      FIXTURE_REFRESH_TOKEN,
+    );
+  };
+  const rotated: string[] = [];
+  const provider = createSharesightTokenProvider({
+    clientId: FIXTURE_CLIENT_ID,
+    clientSecret: FIXTURE_CLIENT_SECRET,
+    grantType: "authorization_code",
+    code: FIXTURE_AUTH_CODE,
+    redirectUri: SHARESIGHT_OOB_REDIRECT_URI,
+    onRefreshTokenRotated: (token) => rotated.push(token),
+    fetcher,
+    now: () => clock,
+  });
+
+  await provider.getAccessToken();
+  assert.equal(callCount, 1);
+  assert.equal(
+    new URLSearchParams(sentBodies[0]).get("grant_type"),
+    "authorization_code",
+  );
+  assert.deepEqual(rotated, [FIXTURE_REFRESH_TOKEN]);
+
+  clock += 1800 * 1000;
+  await provider.getAccessToken();
+  assert.equal(callCount, 2);
+  const secondParams = new URLSearchParams(sentBodies[1]);
+  assert.equal(secondParams.get("grant_type"), "refresh_token");
+  assert.equal(secondParams.get("refresh_token"), FIXTURE_REFRESH_TOKEN);
+  // The one-time code must never be resent.
+  assert.equal(secondParams.has("code"), false);
+});
+
+test("BRK-008: an authorization_code exchange that returns no refresh_token leaves the provider unable to refresh again, without resending the code", async () => {
+  let clock = 0;
+  let callCount = 0;
+  const fetcher: SharesightFetcher = async () => {
+    callCount += 1;
+    return tokenFixtureResponseWithRefresh(FIXTURE_ACCESS_TOKEN, null);
+  };
+  const provider = createSharesightTokenProvider({
+    clientId: FIXTURE_CLIENT_ID,
+    clientSecret: FIXTURE_CLIENT_SECRET,
+    grantType: "authorization_code",
+    code: FIXTURE_AUTH_CODE,
+    redirectUri: SHARESIGHT_OOB_REDIRECT_URI,
+    fetcher,
+    now: () => clock,
+  });
+
+  const first = await provider.getAccessToken();
+  assert.equal(first.ok, true);
+  assert.equal(callCount, 1);
+
+  clock += 1800 * 1000; // past expiry -> a second call attempts a refresh
+  const second = await provider.getAccessToken();
+  assert.equal(second.ok, false);
+  if (!second.ok) {
+    assert.equal(second.error.kind, "authentication");
+    assert.equal(second.error.retryable, false);
+  }
+  assert.equal(callCount, 1); // never resent the already-consumed code
+});
+
+test("BRK-008: concurrent getAccessToken() calls racing a refresh_token rotation invoke onRefreshTokenRotated exactly once", async () => {
+  let callCount = 0;
+  const fetcher: SharesightFetcher = async () => {
+    callCount += 1;
+    return tokenFixtureResponseWithRefresh(
+      FIXTURE_ACCESS_TOKEN,
+      "fixture-rotated-once",
+    );
+  };
+  const rotated: string[] = [];
+  const provider = createSharesightTokenProvider({
+    clientId: FIXTURE_CLIENT_ID,
+    clientSecret: FIXTURE_CLIENT_SECRET,
+    grantType: "refresh_token",
+    refreshToken: "fixture-initial-refresh-token",
+    onRefreshTokenRotated: (token) => rotated.push(token),
+    fetcher,
+    now: () => 0,
+  });
+
+  const [a, b, c] = await Promise.all([
+    provider.getAccessToken(),
+    provider.getAccessToken(),
+    provider.getAccessToken(),
+  ]);
+  assert.equal(a.ok, true);
+  assert.equal(b.ok, true);
+  assert.equal(c.ok, true);
+  assert.equal(callCount, 1); // deduped into one in-flight request
+  assert.deepEqual(rotated, ["fixture-rotated-once"]);
+});
+
+test("BRK-008 B1 regression: client_credentials never transitions grants even when a response carries a refresh_token, and onRefreshTokenRotated is never fired", async () => {
+  let clock = 0;
+  let callCount = 0;
+  const sentBodies: string[] = [];
+  const fetcher: SharesightFetcher = async (_url, init) => {
+    callCount += 1;
+    sentBodies.push(String(init?.body));
+    // Response includes a refresh_token even though this is a
+    // client_credentials exchange -- an unusual but not impossible shape,
+    // and the exact case the review's B1 finding probed.
+    return tokenFixtureResponseWithRefresh(
+      `fixture-access-token-${callCount}`,
+      FIXTURE_REFRESH_TOKEN,
+    );
+  };
+  let callbackFired = false;
+  const provider = createSharesightTokenProvider({
+    clientId: FIXTURE_CLIENT_ID,
+    clientSecret: FIXTURE_CLIENT_SECRET,
+    grantType: "client_credentials",
+    onRefreshTokenRotated: () => {
+      callbackFired = true;
+    },
+    fetcher,
+    now: () => clock,
+  });
+
+  const first = await provider.getAccessToken();
+  assert.equal(first.ok, true);
+  assert.equal(callCount, 1);
+  assert.equal(
+    new URLSearchParams(sentBodies[0]).get("grant_type"),
+    "client_credentials",
+  );
+
+  clock += 1800 * 1000; // past expiry -> a second request
+  const second = await provider.getAccessToken();
+  assert.equal(second.ok, true);
+  assert.equal(callCount, 2);
+  // The SECOND request must still use client_credentials -- it must never
+  // have silently drifted to refresh_token merely because the FIRST
+  // response happened to carry one.
+  const secondParams = new URLSearchParams(sentBodies[1]);
+  assert.equal(secondParams.get("grant_type"), "client_credentials");
+  assert.equal(secondParams.has("refresh_token"), false);
+  assert.equal(
+    callbackFired,
+    false,
+    "onRefreshTokenRotated must never fire for client_credentials",
+  );
+});
+
+test("BRK-008 F1: a throwing onRefreshTokenRotated callback never fails getAccessToken() or discards the just-issued token", async () => {
+  const fetcher: SharesightFetcher = async () =>
+    tokenFixtureResponseWithRefresh(
+      FIXTURE_ACCESS_TOKEN,
+      FIXTURE_REFRESH_TOKEN,
+    );
+  const provider = createSharesightTokenProvider({
+    clientId: FIXTURE_CLIENT_ID,
+    clientSecret: FIXTURE_CLIENT_SECRET,
+    grantType: "refresh_token",
+    refreshToken: "fixture-initial-refresh-token",
+    onRefreshTokenRotated: () => {
+      throw new Error("simulated persistence failure");
+    },
+    fetcher,
+    now: () => 0,
+  });
+
+  const result = await provider.getAccessToken();
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.value, FIXTURE_ACCESS_TOKEN);
+  }
+});
+
+test("BRK-008 F2: an unknown grantType string is rejected at provider creation, with zero fetch calls", () => {
+  let fetchCalled = false;
+  assert.throws(
+    () =>
+      createSharesightTokenProvider({
+        clientId: FIXTURE_CLIENT_ID,
+        clientSecret: FIXTURE_CLIENT_SECRET,
+        // Bypasses the type system -- simulates a plain-JS caller (e.g. one
+        // of this repo's own .mjs scripts, which have no type backstop)
+        // passing a typo'd or unsupported grant string.
+        grantType: "device_code" as unknown as "client_credentials",
+        fetcher: async () => {
+          fetchCalled = true;
+          return tokenFixtureResponse();
+        },
+        now: () => 0,
+      }),
+    SharesightTokenGrantConfigError,
+  );
+  assert.equal(fetchCalled, false);
+});
+
+test("BRK-008: redirect_uri validation accepts the OOB literal and https URLs; rejects other strings, non-https, and userinfo", () => {
+  assert.doesNotThrow(() =>
+    validateSharesightRedirectUri(SHARESIGHT_OOB_REDIRECT_URI),
+  );
+  assert.doesNotThrow(() =>
+    validateSharesightRedirectUri("https://example.com/callback"),
+  );
+
+  assert.throws(
+    () => validateSharesightRedirectUri("not-a-url-and-not-the-oob-literal"),
+    SharesightRedirectUriRejectedError,
+  );
+  assert.throws(
+    // A near-miss of the OOB literal is not accepted -- exact match only.
+    () => validateSharesightRedirectUri("urn:ietf:wg:oauth:2.0:oobx"),
+    SharesightRedirectUriRejectedError,
+  );
+  assert.throws(
+    () => validateSharesightRedirectUri("http://example.com/callback"),
+    SharesightRedirectUriRejectedError,
+  );
+  assert.throws(
+    () =>
+      validateSharesightRedirectUri("https://user:pass@example.com/callback"),
+    SharesightRedirectUriRejectedError,
+  );
+
+  let fetchCalled = false;
+  assert.throws(
+    () =>
+      createSharesightTokenProvider({
+        clientId: FIXTURE_CLIENT_ID,
+        clientSecret: FIXTURE_CLIENT_SECRET,
+        grantType: "authorization_code",
+        code: FIXTURE_AUTH_CODE,
+        redirectUri: "not-a-url-and-not-the-oob-literal",
+        fetcher: async () => {
+          fetchCalled = true;
+          return tokenFixtureResponse();
+        },
+        now: () => 0,
+      }),
+    SharesightRedirectUriRejectedError,
+  );
+  assert.equal(fetchCalled, false);
+});
+
+test("BRK-008: each grant's missing required option is rejected at provider creation, with zero fetch calls", () => {
+  const cases: Array<[string, () => unknown]> = [
+    [
+      "authorization_code missing code",
+      () =>
+        createSharesightTokenProvider({
+          clientId: FIXTURE_CLIENT_ID,
+          clientSecret: FIXTURE_CLIENT_SECRET,
+          grantType: "authorization_code",
+          redirectUri: SHARESIGHT_OOB_REDIRECT_URI,
+          fetcher: async () => tokenFixtureResponse(),
+          now: () => 0,
+        }),
+    ],
+    [
+      "authorization_code missing redirectUri",
+      () =>
+        createSharesightTokenProvider({
+          clientId: FIXTURE_CLIENT_ID,
+          clientSecret: FIXTURE_CLIENT_SECRET,
+          grantType: "authorization_code",
+          code: FIXTURE_AUTH_CODE,
+          fetcher: async () => tokenFixtureResponse(),
+          now: () => 0,
+        }),
+    ],
+    [
+      "authorization_code empty (whitespace-only) code",
+      () =>
+        createSharesightTokenProvider({
+          clientId: FIXTURE_CLIENT_ID,
+          clientSecret: FIXTURE_CLIENT_SECRET,
+          grantType: "authorization_code",
+          code: "   ",
+          redirectUri: SHARESIGHT_OOB_REDIRECT_URI,
+          fetcher: async () => tokenFixtureResponse(),
+          now: () => 0,
+        }),
+    ],
+    [
+      "refresh_token missing refreshToken",
+      () =>
+        createSharesightTokenProvider({
+          clientId: FIXTURE_CLIENT_ID,
+          clientSecret: FIXTURE_CLIENT_SECRET,
+          grantType: "refresh_token",
+          fetcher: async () => tokenFixtureResponse(),
+          now: () => 0,
+        }),
+    ],
+  ];
+
+  for (const [label, run] of cases) {
+    assert.throws(run, SharesightTokenGrantConfigError, label);
+  }
+
+  // client_credentials needs none of the above -- unaffected.
+  assert.doesNotThrow(() =>
+    createSharesightTokenProvider({
+      clientId: FIXTURE_CLIENT_ID,
+      clientSecret: FIXTURE_CLIENT_SECRET,
+      grantType: "client_credentials",
+      fetcher: async () => tokenFixtureResponse(),
+      now: () => 0,
+    }),
+  );
+});
+
+test("BRK-008: decideInitialGrant / isGrantRejection / shouldFallBackToAuthorizationCode strategy", () => {
+  assert.equal(
+    decideInitialGrant({ hasRefreshToken: true, hasAuthCode: false }),
+    "refresh_token",
+  );
+  assert.equal(
+    decideInitialGrant({ hasRefreshToken: false, hasAuthCode: true }),
+    "client_credentials",
+  );
+  assert.equal(
+    decideInitialGrant({ hasRefreshToken: false, hasAuthCode: false }),
+    "client_credentials",
+  );
+
+  assert.equal(
+    isGrantRejection({
+      kind: "authentication",
+      message: "x",
+      retryable: false,
+    }),
+    true,
+  );
+  // A retryable variant is a network/availability problem, never a grant
+  // rejection, even sharing the same "authentication" kind.
+  assert.equal(
+    isGrantRejection({ kind: "authentication", message: "x", retryable: true }),
+    false,
+  );
+  const otherKinds = [
+    "timeout",
+    "rate_limit",
+    "transient_upstream",
+    "invalid_response",
+    "entitlement",
+    "non_get_rejected",
+  ] as const;
+  for (const kind of otherKinds) {
+    assert.equal(
+      isGrantRejection({ kind, message: "x", retryable: false }),
+      false,
+      kind,
+    );
+  }
+
+  const rejection = {
+    kind: "authentication",
+    message: "x",
+    retryable: false,
+  } as const;
+  assert.equal(shouldFallBackToAuthorizationCode(rejection, true), true);
+  // No code configured -- nothing to fall back TO.
+  assert.equal(shouldFallBackToAuthorizationCode(rejection, false), false);
+  // A retryable/network error must never trigger a fallback, even with a
+  // code configured -- retrying the SAME grant (or surfacing the error) is
+  // correct there, not spending a one-time code on a flaky connection.
+  const timeoutError = {
+    kind: "timeout",
+    message: "x",
+    retryable: true,
+  } as const;
+  assert.equal(shouldFallBackToAuthorizationCode(timeoutError, true), false);
+});
+
+test("BRK-008 secrets discipline: authorization code, redirect_uri, and refresh tokens never appear in any thrown/returned value", async () => {
+  const serialized: string[] = [];
+  function capture(value: unknown): void {
+    serialized.push(
+      JSON.stringify(value, (_key, v) =>
+        v instanceof Error ? { name: v.name, message: v.message } : v,
+      ),
+    );
+  }
+
+  // A redirect_uri validation failure must not echo the candidate value
+  // (which, here, happens to also be the fixture auth code) in its message.
+  try {
+    createSharesightTokenProvider({
+      clientId: FIXTURE_CLIENT_ID,
+      clientSecret: FIXTURE_CLIENT_SECRET,
+      grantType: "authorization_code",
+      code: FIXTURE_AUTH_CODE,
+      redirectUri: FIXTURE_AUTH_CODE, // not a URL, not the OOB literal
+      fetcher: async () => tokenFixtureResponse(),
+      now: () => 0,
+    });
+  } catch (caught) {
+    capture(caught);
+  }
+
+  // A token endpoint that (unexpectedly) echoes the auth code back in an
+  // error body must not leak it through this module's typed result -- only
+  // the HTTP status is ever consulted for a non-ok response.
+  const authCodeFailureProvider = createSharesightTokenProvider({
+    clientId: FIXTURE_CLIENT_ID,
+    clientSecret: FIXTURE_CLIENT_SECRET,
+    grantType: "authorization_code",
+    code: FIXTURE_AUTH_CODE,
+    redirectUri: SHARESIGHT_OOB_REDIRECT_URI,
+    fetcher: async () =>
+      jsonResponse(400, {
+        error: "invalid_grant",
+        error_description: `code ${FIXTURE_AUTH_CODE} already used`,
+      }),
+    now: () => 0,
+  });
+  capture(await authCodeFailureProvider.getAccessToken());
+
+  // Same for a refresh_token failure echoing the refresh token itself.
+  const refreshFailureProvider = createSharesightTokenProvider({
+    clientId: FIXTURE_CLIENT_ID,
+    clientSecret: FIXTURE_CLIENT_SECRET,
+    grantType: "refresh_token",
+    refreshToken: FIXTURE_REFRESH_TOKEN,
+    fetcher: async () =>
+      jsonResponse(401, {
+        error: "invalid_grant",
+        error_description: FIXTURE_REFRESH_TOKEN,
+      }),
+    now: () => 0,
+  });
+  capture(await refreshFailureProvider.getAccessToken());
+
+  // A rotated refresh token is intentionally handed to
+  // `onRefreshTokenRotated` -- the ONE documented channel for the caller to
+  // persist it; that is not a leak. It must never additionally appear in
+  // the getAccessToken() result itself, though.
+  let rotatedViaCallback: string | null = null;
+  const rotatingProvider = createSharesightTokenProvider({
+    clientId: FIXTURE_CLIENT_ID,
+    clientSecret: FIXTURE_CLIENT_SECRET,
+    grantType: "refresh_token",
+    refreshToken: "fixture-starting-refresh-token",
+    onRefreshTokenRotated: (token) => {
+      rotatedViaCallback = token;
+    },
+    fetcher: async () =>
+      tokenFixtureResponseWithRefresh(
+        FIXTURE_ACCESS_TOKEN,
+        FIXTURE_REFRESH_TOKEN,
+      ),
+    now: () => 0,
+  });
+  capture(await rotatingProvider.getAccessToken());
+  assert.equal(rotatedViaCallback, FIXTURE_REFRESH_TOKEN);
+
+  assert.ok(serialized.length > 0);
+  for (const value of serialized) {
+    assert.equal(value.includes(FIXTURE_AUTH_CODE), false, value);
+    assert.equal(value.includes(FIXTURE_REFRESH_TOKEN), false, value);
+    assert.equal(
+      value.includes("fixture-starting-refresh-token"),
+      false,
+      value,
+    );
+  }
 });
 
 // --- 3. Token refresh with the injected clock ---------------------------
