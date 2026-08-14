@@ -469,6 +469,143 @@ test("QA-001B: a failed portfolio create/rename shows its error INSIDE the modal
   );
 });
 
+test("UI-007: the quote correction dialog is a true modal (ref + showModal, not a bare `open` attribute) and restores opener focus to a surviving control", async () => {
+  const source = await readFile(
+    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    "utf8",
+  );
+  // The old bug: a bare `<dialog open>` with no ref/showModal renders as
+  // inert, non-modal content in normal document flow (below the fold, no
+  // ::backdrop) -- the same defect the portfolio dialog had. Scoped to the
+  // quote dialog's own opening tag (matched by its className, order-
+  // independent) so a same-line attribute reordering, or the unrelated
+  // portfolio <dialog> elsewhere in the file, can't hide or falsely trip
+  // the guard.
+  const quoteDialogTag = source.match(
+    /<dialog\b[^>]*className="quote-dialog"[^>]*>/,
+  );
+  assert.ok(
+    quoteDialogTag,
+    "expected to find the quote dialog's opening <dialog> tag",
+  );
+  assert.doesNotMatch(quoteDialogTag![0], /\bopen\b/);
+  assert.match(quoteDialogTag![0], /ref=\{dialogRef\}/);
+  assert.match(
+    source,
+    /const dialogRef = useRef<HTMLDialogElement>\(null\);\s*\n\s*const \[type, setType\]/,
+  );
+  // showModal() fires on mount (this component only exists in the tree
+  // while `correctionOpen` is true, so mount doubles as open), and focus
+  // moves into the dialog.
+  assert.match(
+    source,
+    /if \(dialog && !dialog\.open\) \{\s*dialog\.showModal\(\);\s*[\s\S]*?dialog\.querySelector<HTMLElement>\("select"\)\?\.focus\(\);/,
+  );
+  // Defensive close: if this component is ever unmounted without routing
+  // through onClose/close() first, the captured dialog element is still
+  // closed on the way out (mirrors the portfolio dialog's defensive branch).
+  assert.match(
+    source,
+    /return \(\) => \{\s*if \(dialog\?\.open\) dialog\.close\(\);\s*\};/,
+  );
+  // Escape (the native `cancel` event) and the Cancel button both route
+  // through dialog.close(), and the native `close` event is the single
+  // source of truth that tells the parent to drop `correctionOpen`.
+  // F1 review fix: a save in flight (`pending`) must block the close --
+  // Escape closing (and unmounting) the dialog mid-request would leave the
+  // eventual success/failure landing on an unmounted component, telling the
+  // user nothing. This is the same rule the disabled Cancel button follows.
+  assert.match(
+    source,
+    /onCancel=\{\(event\) => \{\s*event\.preventDefault\(\);\s*[\s\S]*?if \(pending\) return;\s*dialogRef\.current\?\.close\(\);\s*\}\}/,
+  );
+  assert.match(source, /onClose=\{\(\) => onClose\(\)\}/);
+  assert.match(
+    source,
+    /onClick=\{\(\) => dialogRef\.current\?\.close\(\)\}\s*disabled=\{pending\}\s*>\s*Cancel/,
+  );
+  // Opener-survival: the "Correct a quote" button is a static control (not
+  // inside a popover that unmounts), and its ref is only captured into
+  // `correctionOpenerRef` at the moment it opens the dialog -- so the
+  // restore effect can't steal focus on initial render.
+  assert.match(
+    source,
+    /const correctionButtonRef = useRef<HTMLButtonElement>\(null\);/,
+  );
+  assert.match(
+    source,
+    /const correctionOpenerRef = useRef<HTMLButtonElement \| null>\(null\);/,
+  );
+  assert.match(
+    source,
+    /if \(!correctionOpen && correctionOpenerRef\.current\) \{\s*correctionOpenerRef\.current\.focus\(\);\s*correctionOpenerRef\.current = null;\s*\}/,
+  );
+  assert.match(
+    source,
+    /ref=\{correctionButtonRef\}\s*\n\s*type="button"\s*\n\s*onClick=\{\(\) => \{\s*correctionOpenerRef\.current = correctionButtonRef\.current;\s*\n\s*setCorrectionOpen\(true\);/,
+  );
+});
+
+test("UI-007: a failed quote correction renders its error INSIDE the modal dialog, not the inert outside toast; a success message still uses the toast once closed", async () => {
+  const source = await readFile(
+    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    "utf8",
+  );
+  // The outside quote-action-status toast is suppressed while the
+  // correction dialog is open (inert/unannounced behind the top-layer
+  // <dialog>), mirroring the portfolio-dialog B2 fix.
+  assert.match(
+    source,
+    /\{actionMessage && !correctionOpen \? \(\s*<p className="quote-action-status" role="alert">/,
+  );
+  // Read-only and thrown-error paths both set local dialog state, so their
+  // failure text itself never lands in the (suppressed) parent toast.
+  const dialogFnStart = source.indexOf("function QuoteCorrectionDialog");
+  const dialogFnEnd = source.indexOf("\nfunction DetailsScreen", dialogFnStart);
+  const dialogFnSource = source.slice(dialogFnStart, dialogFnEnd);
+  assert.match(
+    dialogFnSource,
+    /const \[dialogError, setDialogError\] = useState<string \| null>\(null\);/,
+  );
+  // B1 review fix: both paths that now report in-dialog also clear the
+  // parent's `actionMessage` (onMessage(null)) -- otherwise a stale
+  // "Correction saved..." toast from an earlier successful save in this
+  // same dialog mount survives a subsequent failure (success-toast ->
+  // reopen -> failing submit -> Escape/Cancel), a persistent false
+  // confirmation of a versioned financial write.
+  assert.match(
+    dialogFnSource,
+    /if \(readOnly\) \{\s*setDialogError\(\s*"Preview data is read-only; no financial write was attempted\."\s*,?\s*\);\s*[\s\S]*?onMessage\(null\);\s*return;\s*\}/,
+  );
+  assert.match(
+    dialogFnSource,
+    /setPending\(true\);\s*setDialogError\(null\);\s*[\s\S]*?onMessage\(null\);\s*try \{/,
+  );
+  assert.match(
+    dialogFnSource,
+    /\} catch \(error\) \{\s*setDialogError\(\s*error instanceof Error\s*\? error\.message\s*: "The correction could not be saved\."\s*,?\s*\);\s*\}/,
+  );
+  // The dialog's own <form> renders that local error using the app's
+  // established in-dialog error pattern (dividend-assumptions-editor.tsx).
+  const quoteDialogStart = source.indexOf('className="quote-dialog"');
+  const dialogSection = source.slice(
+    quoteDialogStart,
+    source.indexOf("</dialog>", quoteDialogStart),
+  );
+  assert.match(
+    dialogSection,
+    /\{dialogError \? \(\s*<p role="alert" className="unavailable">\s*\{dialogError\}\s*<\/p>\s*\) : null\}/,
+  );
+  // A successful save still calls the parent's onMessage -- it is only
+  // shown in the toast once the dialog has already closed, which is the
+  // honest split: not every onMessage call is dialog-suppressed, only the
+  // ones that fire while the dialog stays open.
+  assert.match(
+    dialogFnSource,
+    /onMessage\("Correction saved with a reason and effective date\."\);\s*\n\s*dialogRef\.current\?\.close\(\);/,
+  );
+});
+
 test("QA-001B: interactive controls meet the 44×44 CSS-pixel touch-target minimum", async () => {
   const styles = await readFile(
     new URL("../app/globals.css", import.meta.url),

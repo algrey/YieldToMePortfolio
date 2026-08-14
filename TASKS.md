@@ -618,11 +618,19 @@ Status: DONE (2026-08-13). Owner decisions recorded 2026-08-13 (wireframe-approv
 
 ### UI-007 — Quote correction dialog modality
 
-Status: READY; same defect class as the owner-reported portfolio-dialog bug (2026-08-14), confirmed by review.
+Status: DONE (2026-08-14); same defect class as the owner-reported portfolio-dialog bug (2026-08-14), confirmed by review.
 
 - Problem: `QuoteCorrectionDialog` (`app/components/portfolio-shell.tsx` ~:2221) renders as bare non-modal `<dialog open>` — no showModal(), no focus management, dead `::backdrop` CSS — so the manual price/FX correction dialog (a versioned financial override write path) renders below the fold: the same "clicking does nothing" experience, on a more consequential action.
 - Fix: convert to the established ref+showModal pattern (surviving-opener focus restore, onCancel/onClose state path, defensive close); AND relocate its error reporting — it currently reports through `onMessage` into the QuotesScreen toast, which becomes invisible/inert behind the modal backdrop once modal (the exact Blocking-2 finding from the portfolio-dialog fix); render failures inside the dialog per the dividend-assumptions-editor pattern.
 - Tests: pattern assertions consistent with the hardened qa-001b guard; in-dialog error rendering; opener focus restore to a surviving node.
+- Completion note (2026-08-14): QuoteCorrectionDialog converted to ref+showModal (mount = open; first-field focus with a documented ambient-type workaround for worker-configuration.d.ts's Element merge; opener capture at click so no initial-mount focus steal; Escape preventDefaults first then pending-guard then manual close — reviewer mutation-probed the order guard); errors relocated in-dialog (role=alert) with the parent toast gated off while open; review round 1 caught a stale "Correction saved" false-confirmation surviving a later failed submit — fixed by clearing the parent toast on the in-dialog paths, plus the Escape-while-pending unmount hole. Round 2 PASS with mutation-probed test sensitivity. `npm run check` exit 0 (658 pass, 10 gated skips). Follow-up recorded as UI-008.
+
+### UI-008 — Modal correction dialogs: in-flight fetch has no abort/timeout
+
+Status: DEFERRED (2026-08-14); shared pattern gap noted by UI-007 review.
+
+- Problem: now that the quote-correction and portfolio dialogs are true modals with Escape blocked while pending and Cancel disabled, a stalled fetch leaves the modal with no user exit until the browser's own timeout — a temporary keyboard trap that didn't exist while the dialogs were non-modal. Same shape in both dialogs.
+- Fix direction: AbortController with a bounded timeout surfacing an in-dialog failure (or an enabled "Stop waiting" affordance), applied consistently to both dialogs (and the dividend-assumptions dialogs if they share the gap — audit).
 
 ### CGT-001 — Capital gains reporting (placeholder)
 

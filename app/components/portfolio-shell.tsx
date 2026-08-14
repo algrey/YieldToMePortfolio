@@ -1770,6 +1770,8 @@ function QuotesScreen({
     "idle" | "pending" | "queued" | "failed"
   >("idle");
   const [correctionOpen, setCorrectionOpen] = useState(false);
+  const correctionButtonRef = useRef<HTMLButtonElement>(null);
+  const correctionOpenerRef = useRef<HTMLButtonElement | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyPending, setHistoryPending] = useState(false);
   const [history, setHistory] = useState<
@@ -1784,6 +1786,19 @@ function QuotesScreen({
     }>
   >([]);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+
+  // UI-007: mirrors the portfolio-dialog / drawer opener-restore pattern.
+  // `correctionOpenerRef` only holds a value once the dialog has actually
+  // been opened (set in the button's onClick below), so this effect can't
+  // steal focus on initial mount. The "Correct a quote" button is a static,
+  // always-rendered control (not inside a popover that unmounts), so it is
+  // guaranteed to still be in the DOM when the dialog closes.
+  useEffect(() => {
+    if (!correctionOpen && correctionOpenerRef.current) {
+      correctionOpenerRef.current.focus();
+      correctionOpenerRef.current = null;
+    }
+  }, [correctionOpen]);
 
   const quoteRows = useMemo<QuoteRow[]>(() => {
     if (ownedQuotes) return ownedQuotes;
@@ -1964,7 +1979,14 @@ function QuotesScreen({
           >
             {refreshState === "pending" ? "Queueing…" : "Refresh quotes"}
           </button>
-          <button type="button" onClick={() => setCorrectionOpen(true)}>
+          <button
+            ref={correctionButtonRef}
+            type="button"
+            onClick={() => {
+              correctionOpenerRef.current = correctionButtonRef.current;
+              setCorrectionOpen(true);
+            }}
+          >
             Correct a quote
           </button>
           <button type="button" onClick={() => void loadHistory()}>
@@ -1977,7 +1999,13 @@ function QuotesScreen({
             completes.
           </p>
         ) : null}
-        {actionMessage ? (
+        {/* UI-007: while the correction dialog is open, everything outside it
+            is inert behind the native top-layer backdrop, so this outside
+            status line would be neither visible nor announced -- mirrors the
+            portfolio-dialog B2 fix. The dialog renders its own failures
+            in-dialog; this toast still carries non-dialog messages (refresh,
+            history) and success messages that land after the dialog closes. */}
+        {actionMessage && !correctionOpen ? (
           <p className="quote-action-status" role="alert">
             {actionMessage}
           </p>
@@ -2144,8 +2172,16 @@ function QuoteCorrectionDialog({
   onClose: () => void;
   onMessage: (message: string | null) => void;
 }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
   const [type, setType] = useState<"price" | "fx_rate">("price");
   const [pending, setPending] = useState(false);
+  // UI-007: failures must render INSIDE the dialog (dividend-assumptions-
+  // editor pattern) -- once the dialog is a real showModal() top-layer
+  // modal, the QuotesScreen's outside toast is inert/unannounced behind it
+  // (the exact Blocking-2 finding from the portfolio-dialog fix). A success
+  // message still goes through `onMessage` into that outside toast, because
+  // it is only shown once the dialog has already closed.
+  const [dialogError, setDialogError] = useState<string | null>(null);
   const fxTargetKeys = [
     ...new Set(quoteTargets.map((quote) => quote.currencyCode)),
   ]
@@ -2157,11 +2193,43 @@ function QuoteCorrectionDialog({
   const [selectedFxBase = "", selectedFxQuote = ""] =
     selectedTargetKey.split("/");
 
+  // UI-007: mirrors the portfolio-dialog ref + showModal() pattern (the old
+  // bug: a bare `<dialog open>` renders as inert, non-modal content below
+  // the fold, with no ::backdrop). This component only exists in the tree
+  // while QuotesScreen's `correctionOpen` is true, so "mount" doubles as
+  // "open": showModal() the first time the node exists, and defensively
+  // close() the captured element on unmount if it is somehow still open
+  // (e.g. a future caller unmounts this without routing through onClose).
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.open) {
+      dialog.showModal();
+      // HTMLElement, not HTMLSelectElement: worker-configuration.d.ts's
+      // ambient global `Element` (Cloudflare's HTMLRewriter type, whose
+      // `remove()` returns `Element`) merges with lib.dom's `Element` and
+      // breaks HTMLSelectElement's constraint check specifically (its own
+      // two-overload `remove()` no longer structurally satisfies the
+      // polluted constraint); HTMLElement is unaffected and still exposes
+      // .focus().
+      dialog.querySelector<HTMLElement>("select")?.focus();
+    }
+    return () => {
+      if (dialog?.open) dialog.close();
+    };
+  }, []);
+
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     if (readOnly) {
-      onMessage("Preview data is read-only; no financial write was attempted.");
+      setDialogError(
+        "Preview data is read-only; no financial write was attempted.",
+      );
+      // B1 review fix: clear any stale parent toast (e.g. a prior "Correction
+      // saved" from an earlier successful save in this same dialog mount) so
+      // it can't keep showing a false confirmation once this in-dialog error
+      // replaces it.
+      onMessage(null);
       return;
     }
     const targetKey = String(form.get("targetKey") ?? "").trim();
@@ -2183,6 +2251,11 @@ function QuoteCorrectionDialog({
             quoteCurrencyCode: fxQuoteCurrency,
           });
     setPending(true);
+    setDialogError(null);
+    // B1 review fix: clear a stale parent toast from a previous save in this
+    // same dialog mount (success-toast -> reopen -> failing submit ->
+    // Escape/Cancel must not leave "Correction saved..." visible after a
+    // subsequent failure).
     onMessage(null);
     try {
       const response = await fetch("/api/market-data/overrides", {
@@ -2204,10 +2277,12 @@ function QuoteCorrectionDialog({
       };
       if (!response.ok || !result.ok)
         throw new Error(result.message ?? "The correction could not be saved.");
+      // Success is announced once the dialog has closed, so the outside
+      // toast (still live at that point) is the right place for it.
       onMessage("Correction saved with a reason and effective date.");
-      onClose();
+      dialogRef.current?.close();
     } catch (error) {
-      onMessage(
+      setDialogError(
         error instanceof Error
           ? error.message
           : "The correction could not be saved.",
@@ -2218,7 +2293,22 @@ function QuoteCorrectionDialog({
   }
 
   return (
-    <dialog className="quote-dialog" open aria-labelledby="quote-dialog-title">
+    <dialog
+      ref={dialogRef}
+      className="quote-dialog"
+      aria-labelledby="quote-dialog-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        // F1 review fix: Escape while a save is in flight must not close
+        // (and unmount) the dialog out from under the pending request --
+        // the eventual success/failure would land on an unmounted
+        // component and the user would be told nothing. Consistent with
+        // the Cancel button, which is also disabled while pending.
+        if (pending) return;
+        dialogRef.current?.close();
+      }}
+      onClose={() => onClose()}
+    >
       <form onSubmit={submit}>
         <p className="eyebrow">Manual correction</p>
         <h2 id="quote-dialog-title">Correct a market value</h2>
@@ -2303,13 +2393,22 @@ function QuoteCorrectionDialog({
           <textarea name="reason" required maxLength={500} />
         </label>
         <div className="dialog-actions">
-          <button type="button" onClick={onClose} disabled={pending}>
+          <button
+            type="button"
+            onClick={() => dialogRef.current?.close()}
+            disabled={pending}
+          >
             Cancel
           </button>
           <button type="submit" disabled={pending}>
             {pending ? "Saving…" : "Save correction"}
           </button>
         </div>
+        {dialogError ? (
+          <p role="alert" className="unavailable">
+            {dialogError}
+          </p>
+        ) : null}
       </form>
     </dialog>
   );
