@@ -232,6 +232,13 @@
       "when": 1786612294146,
       "tag": "0032_lovely_invaders",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1786702875862,
+      "tag": "0033_brief_mandarin",
+      "breakpoints": true
     }
   ]
 }

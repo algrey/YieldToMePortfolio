@@ -75,7 +75,16 @@ type SecurityDraft = {
 // AbortController so pending state always resolves and the dialog stays
 // open and operable.
 const DIALOG_FETCH_TIMEOUT_MS = 15_000;
-const DIALOG_TIMEOUT_MESSAGE = "The request timed out — try again.";
+// UI-009: every dialog this message can fire from is a mutation submit, so
+// "try again" would invite a retry the client can't know is safe -- a
+// slow-but-successful save followed by a retry could double the effect.
+// The manual dividend CREATE below additionally carries a server-side
+// idempotency-key guard (idempotencyKey, generated once per dialog open)
+// so a retry-after-timeout on THAT specific path is actually safe; this
+// message stays honestly uncertain regardless, since the other two submits
+// here (delete, FY override) are version-guarded, not idempotency-keyed.
+const DIALOG_TIMEOUT_MESSAGE =
+  "The request timed out. It may still have gone through — check before retrying.";
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
@@ -632,6 +641,16 @@ export function RecordDividendDialog({
   // this same save (routes to `dividend_event_overrides.exclude`, which
   // keeps the row retrievable/excluded rather than deleting anything).
   const [excludeChecked, setExcludeChecked] = useState(initialExclude);
+  // UI-009: a client-generated idempotency key for the standalone manual
+  // dividend CREATE path, generated ONCE per dialog mount (this component
+  // is conditionally rendered -- `{recordDialogOpen ? <RecordDividendDialog
+  // .../> : null}` in both callers -- so a fresh open always gets a fresh
+  // key, while every retry within THIS open reuses the same one). Sent on
+  // every submit; the server only consumes it for the manual-record CREATE
+  // branch (dividend-assumptions-actions.ts) so a slow-but-successful save
+  // followed by a timeout-triggered retry dedupes into the SAME record
+  // instead of creating a second one.
+  const [dialogIdempotencyKey] = useState(() => crypto.randomUUID());
   // F1 (UI-006B review fix): tracks the persisted identity/version so a
   // SECOND submit (e.g. the owner edits and saves again without closing)
   // UPDATES the row this dialog already created instead of silently
@@ -648,7 +667,19 @@ export function RecordDividendDialog({
     | { status: "idle" }
     | { status: "saving" }
     | { status: "error"; message: string }
-    | { status: "saved"; proximityWarning: string | null }
+    | {
+        status: "saved";
+        proximityWarning: string | null;
+        // UI-009 finishing item 1: set only when this save was an
+        // idempotency-key retry that matched an EXISTING manual record.
+        // `storedDiffers` true means the payload just submitted was NOT
+        // what got persisted -- the form has already been resynced to the
+        // actually-stored values below, and this must render as a distinct
+        // message from a plain "Saved." (silently claiming the just-typed
+        // values were saved would misrepresent what's on record).
+        deduped?: boolean;
+        storedDiffers?: boolean;
+      }
   >({ status: "idle" });
   const [deleteState, setDeleteState] = useState<
     | { status: "idle" }
@@ -744,6 +775,7 @@ export function RecordDividendDialog({
             manualRecordId: isEventLinked ? null : savedManualRecordId,
             expectedVersion: savedVersion,
             exclude: excludeChecked,
+            idempotencyKey: dialogIdempotencyKey,
           }),
           signal: controller.signal,
         },
@@ -755,6 +787,14 @@ export function RecordDividendDialog({
             id: string;
             version: number;
             proximityWarning: string | null;
+            deduped?: boolean;
+            storedDiffers?: boolean;
+            storedRecord?: {
+              paymentDate: string;
+              sharesDecimal: string;
+              dividendPerShareDecimal: string;
+              frankingCreditPerShareDecimal: string | null;
+            };
           }
         | { ok: false; message: string };
       if (!result.ok) {
@@ -766,9 +806,26 @@ export function RecordDividendDialog({
       if (result.target === "manual_record") {
         setSavedManualRecordId(result.id);
       }
+      // UI-009 finishing item 1: an idempotency-key retry that matched an
+      // existing record whose stored fields differ from what was just
+      // submitted (e.g. the owner edited the form, the first save actually
+      // committed, then a client-visible timeout triggered a resubmit with
+      // the NEW values) -- resync the form to the ACTUALLY-STORED values
+      // rather than leaving the just-typed ones displayed as if they saved.
+      if (result.storedDiffers && result.storedRecord) {
+        setPaymentDate(result.storedRecord.paymentDate);
+        setShares(result.storedRecord.sharesDecimal);
+        setSharesTouched(true);
+        setDividendPerShare(result.storedRecord.dividendPerShareDecimal);
+        setFrankingPerShare(
+          result.storedRecord.frankingCreditPerShareDecimal ?? "",
+        );
+      }
       setSubmitState({
         status: "saved",
         proximityWarning: result.proximityWarning,
+        deduped: result.deduped,
+        storedDiffers: result.storedDiffers,
       });
       router.refresh(); // F4
     } catch (error) {
@@ -993,7 +1050,13 @@ export function RecordDividendDialog({
             ) : null}
             {submitState.status === "saved" ? (
               <>
-                <p>Saved.</p>
+                {submitState.storedDiffers ? (
+                  <p role="status">
+                    This matched an earlier save — the stored values are shown.
+                  </p>
+                ) : (
+                  <p>Saved.</p>
+                )}
                 {submitState.proximityWarning ? (
                   <p role="status" className="unavailable">
                     {submitState.proximityWarning}

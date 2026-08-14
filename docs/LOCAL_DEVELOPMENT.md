@@ -49,6 +49,8 @@ anything that reads or writes real data.
 
 Rebuild (`npm run build`) and restart the harness to pick up code changes.
 
+The harness fails closed at startup if `dist/server` and `dist/client` come from different builds (e.g. an interrupted or partial `npm run build`) — rerun `npm run build` and restart if you see that message.
+
 ---
 
 ## Option 2 — Real DB-backed dev server

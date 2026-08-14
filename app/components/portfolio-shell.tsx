@@ -65,7 +65,14 @@ export const portfolioSections = [
 // always resolves, the dialog stays open and operable, and the owner gets an
 // explicit in-dialog message instead of a silent hang.
 const DIALOG_FETCH_TIMEOUT_MS = 15_000;
-const DIALOG_TIMEOUT_MESSAGE = "The request timed out — try again.";
+// UI-009: every dialog this message can fire from is a mutation submit, so
+// "try again" would invite a retry the client can't know is safe -- a
+// slow-but-successful save followed by a retry could double the effect
+// (see the manual-dividend-create idempotency guard in
+// dividend-assumptions-actions.ts for the one path where that mattered
+// concretely). Reworded to convey the genuine uncertainty instead.
+const DIALOG_TIMEOUT_MESSAGE =
+  "The request timed out. It may still have gone through — check before retrying.";
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";

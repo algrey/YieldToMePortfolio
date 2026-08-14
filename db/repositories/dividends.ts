@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import {
+  compareDecimal,
+  parseDecimalResult,
+} from "../../domain/calculations/decimal.ts";
 import { createConditionalAuditInsertStatement } from "./audit.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 
@@ -2151,6 +2155,12 @@ export type DividendManualRecordRecord = {
   // entered directly through the manual dividend-entry UI.
   importBatchId: string | null;
   sourceReference: string | null;
+  // UI-009: client-generated key (crypto.randomUUID at dialog-open time,
+  // stable across retries within one dialog session) used to dedupe a
+  // retry-after-timeout on the standalone manual-create path. Null for
+  // every row created without one (all pre-UI-009 rows, and any future
+  // caller that doesn't supply one).
+  idempotencyKey: string | null;
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -2163,6 +2173,12 @@ export type SaveDividendManualRecordInput = {
   sharesDecimal: string;
   dividendPerShareDecimal: string;
   frankingCreditPerShareDecimal?: string | null;
+  // UI-009: when supplied (non-empty), `create()` dedupes on
+  // (portfolioSecurityId, idempotencyKey) -- a retry with the same key
+  // after a client-visible timeout returns the ALREADY-CREATED record as a
+  // success, never a second row. Absent/undefined preserves the pre-UI-009
+  // behaviour (no dedupe).
+  idempotencyKey?: string | null;
   requestId: string;
 };
 
@@ -2179,7 +2195,7 @@ const DIVIDEND_MANUAL_RECORD_COLUMNS = `
   id, user_id, portfolio_id, portfolio_security_id, payment_date,
   shares_decimal, dividend_per_share_decimal,
   franking_credit_per_share_decimal, import_batch_id, source_reference,
-  created_at, updated_at, version
+  idempotency_key, created_at, updated_at, version
 `;
 
 function mapDividendManualRecord(
@@ -2199,12 +2215,71 @@ function mapDividendManualRecord(
         : String(row.franking_credit_per_share_decimal),
     importBatchId:
       row.import_batch_id === null ? null : String(row.import_batch_id),
+    idempotencyKey:
+      row.idempotency_key === null ? null : String(row.idempotency_key),
     sourceReference:
       row.source_reference === null ? null : String(row.source_reference),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     version: Number(row.version),
   };
+}
+
+/** Numeric decimal-string equality (mirrors
+ * `app/dividend-history-prefill.ts`'s `decimalsEqual`, duplicated locally
+ * rather than imported so this server-only repository layer never depends
+ * on `app/`): two decimal STRINGS at different textual scale ("0.50" vs
+ * "0.5") represent the same value and must not read as a material
+ * difference. Falls back to raw string comparison on a malformed string
+ * (never expected from already-validated input) rather than throwing. */
+function manualRecordDecimalsEqual(left: string, right: string): boolean {
+  if (left === right) return true;
+  try {
+    return (
+      compareDecimal(parseDecimalResult(left), parseDecimalResult(right)) === 0
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * UI-009 finishing item 1: whether an idempotency-key retry's incoming
+ * payload actually matches what is stored, or whether the owner changed
+ * the form's material fields between the original (successfully committed)
+ * save and a client-visible-timeout retry -- e.g. edited the amount after
+ * the first submit appeared to hang, then resubmitted. Comparing ONLY the
+ * fields that determine the dividend's financial meaning (payment date,
+ * shares, dividend per share, franking); `id`/`version`/timestamps are
+ * never part of this comparison. A `true` result means the caller must
+ * disclose that the STORED values (not the just-submitted ones) are what
+ * actually persisted, never silently claim the new payload was saved.
+ */
+function manualRecordMaterialFieldsDiffer(
+  existing: DividendManualRecordRecord,
+  input: SaveDividendManualRecordInput,
+): boolean {
+  if (existing.paymentDate !== input.paymentDate) return true;
+  if (!manualRecordDecimalsEqual(existing.sharesDecimal, input.sharesDecimal))
+    return true;
+  if (
+    !manualRecordDecimalsEqual(
+      existing.dividendPerShareDecimal,
+      input.dividendPerShareDecimal,
+    )
+  )
+    return true;
+  const inputFranking = input.frankingCreditPerShareDecimal ?? null;
+  if (
+    existing.frankingCreditPerShareDecimal === null ||
+    inputFranking === null
+  ) {
+    return existing.frankingCreditPerShareDecimal !== inputFranking;
+  }
+  return !manualRecordDecimalsEqual(
+    existing.frankingCreditPerShareDecimal,
+    inputFranking,
+  );
 }
 
 export function createDividendManualRecordRepository(
@@ -2244,12 +2319,42 @@ export function createDividendManualRecordRepository(
     return rows.map(mapDividendManualRecord);
   }
 
+  // UI-009: looks up a manual record by its client-generated idempotency
+  // key, scoped to the owner/portfolio/security (defense-in-depth beyond
+  // the unique index, which is scoped to portfolioSecurityId alone -- see
+  // the schema comment for why that's already ownership-safe).
+  async function getByIdempotencyKey(
+    userId: string,
+    portfolioId: string,
+    portfolioSecurityId: string,
+    idempotencyKey: string,
+  ): Promise<DividendManualRecordRecord | null> {
+    const row = await client.get<Record<string, unknown>>(
+      `SELECT ${DIVIDEND_MANUAL_RECORD_COLUMNS} FROM dividend_manual_records
+       WHERE user_id = ? AND portfolio_id = ? AND portfolio_security_id = ?
+         AND idempotency_key = ? LIMIT 1`,
+      [userId, portfolioId, portfolioSecurityId, idempotencyKey],
+    );
+    return row ? mapDividendManualRecord(row) : null;
+  }
+
   async function create(
     userId: string,
     portfolioId: string,
     input: SaveDividendManualRecordInput,
   ): Promise<
-    | { ok: true; record: DividendManualRecordRecord }
+    | {
+        ok: true;
+        record: DividendManualRecordRecord;
+        // UI-009 finishing item 1: `deduped` true means this response is
+        // an EXISTING record matched by idempotency key, not a fresh
+        // create; `storedDiffers` true additionally means the incoming
+        // payload's material fields differ from what is actually stored
+        // (`record` always reflects the STORED truth either way -- the
+        // caller must never substitute the just-submitted values).
+        deduped: boolean;
+        storedDiffers: boolean;
+      }
     | DividendOwnerMutationFailure
   > {
     if (
@@ -2262,6 +2367,30 @@ export function createDividendManualRecordRepository(
       !isValidDateString(input.paymentDate)
     )
       return { ok: false, reason: "invalid_input" };
+    const idempotencyKey =
+      input.idempotencyKey && input.idempotencyKey.length > 0
+        ? input.idempotencyKey
+        : null;
+    // UI-009: dedupe a retry-after-timeout BEFORE touching ownership/ledger
+    // state -- a matching key means this exact dialog session already
+    // succeeded, so the retry must read as success (the same record), never
+    // create a second row.
+    if (idempotencyKey !== null) {
+      const existing = await getByIdempotencyKey(
+        userId,
+        portfolioId,
+        input.portfolioSecurityId,
+        idempotencyKey,
+      );
+      if (existing) {
+        return {
+          ok: true,
+          record: existing,
+          deduped: true,
+          storedDiffers: manualRecordMaterialFieldsDiffer(existing, input),
+        };
+      }
+    }
     if (
       !(await ownedHoldingWithOptionalEvent(
         client,
@@ -2279,8 +2408,9 @@ export function createDividendManualRecordRepository(
         sql: `INSERT INTO dividend_manual_records (
           id, user_id, portfolio_id, portfolio_security_id, payment_date,
           shares_decimal, dividend_per_share_decimal,
-          franking_credit_per_share_decimal, created_at, updated_at, version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+          franking_credit_per_share_decimal, idempotency_key, created_at,
+          updated_at, version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         params: [
           id,
           userId,
@@ -2290,6 +2420,7 @@ export function createDividendManualRecordRepository(
           input.sharesDecimal,
           input.dividendPerShareDecimal,
           input.frankingCreditPerShareDecimal ?? null,
+          idempotencyKey,
           createdAt,
           createdAt,
         ],
@@ -2313,11 +2444,32 @@ export function createDividendManualRecordRepository(
     try {
       await client.batch(statements);
     } catch {
+      // UI-009: a concurrent retry (same idempotency key racing the first
+      // request) can hit the unique index here instead of the pre-check
+      // above finding it in time -- re-check before failing closed,
+      // mirroring db/repositories/ledger.ts's persist()/getByIdempotency
+      // race handling.
+      if (idempotencyKey !== null) {
+        const existing = await getByIdempotencyKey(
+          userId,
+          portfolioId,
+          input.portfolioSecurityId,
+          idempotencyKey,
+        );
+        if (existing) {
+          return {
+            ok: true,
+            record: existing,
+            deduped: true,
+            storedDiffers: manualRecordMaterialFieldsDiffer(existing, input),
+          };
+        }
+      }
       return { ok: false, reason: "atomic_failure" };
     }
     const record = await get(userId, portfolioId, id);
     return record
-      ? { ok: true, record }
+      ? { ok: true, record, deduped: false, storedDiffers: false }
       : { ok: false, reason: "atomic_failure" };
   }
 

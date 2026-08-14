@@ -1,0 +1,2 @@
+ALTER TABLE `dividend_manual_records` ADD `idempotency_key` text;--> statement-breakpoint
+CREATE UNIQUE INDEX `dividend_manual_records_security_idempotency_unique` ON `dividend_manual_records` (`portfolio_security_id`,`idempotency_key`);

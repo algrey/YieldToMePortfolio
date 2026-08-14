@@ -749,7 +749,7 @@ test("UI-008: portfolio-shell.tsx's dialog submits (portfolio create/rename, quo
   assert.match(source, /const DIALOG_FETCH_TIMEOUT_MS = 15_000;/);
   assert.match(
     source,
-    /const DIALOG_TIMEOUT_MESSAGE = "The request timed out — try again\.";/,
+    /const DIALOG_TIMEOUT_MESSAGE =\s*"The request timed out\. It may still have gone through — check before retrying\.";/,
   );
   assert.match(
     source,
@@ -812,7 +812,7 @@ test("UI-008: dividend-assumptions-editor.tsx's dialog submits (record dividend,
   assert.match(source, /const DIALOG_FETCH_TIMEOUT_MS = 15_000;/);
   assert.match(
     source,
-    /const DIALOG_TIMEOUT_MESSAGE = "The request timed out — try again\.";/,
+    /const DIALOG_TIMEOUT_MESSAGE =\s*"The request timed out\. It may still have gone through — check before retrying\.";/,
   );
   assert.match(
     source,
@@ -842,7 +842,7 @@ test("UI-008: security-dividends-tab.tsx's refresh-confirmation dialog submit (r
   assert.match(source, /const DIALOG_FETCH_TIMEOUT_MS = 15_000;/);
   assert.match(
     source,
-    /const DIALOG_TIMEOUT_MESSAGE = "The request timed out — try again\.";/,
+    /const DIALOG_TIMEOUT_MESSAGE =\s*"The request timed out\. It may still have gone through — check before retrying\.";/,
   );
   const runRefreshStart = source.indexOf("async function runRefresh");
   const runRefreshEnd = source.indexOf(

@@ -36,7 +36,12 @@ import { RecordDividendDialog } from "./dividend-assumptions-editor.tsx";
 // timeout via AbortController so pending state always resolves and the
 // dialog stays open and operable.
 const DIALOG_FETCH_TIMEOUT_MS = 15_000;
-const DIALOG_TIMEOUT_MESSAGE = "The request timed out — try again.";
+// UI-009: this fires from a mutation submit (runRefresh), so "try again"
+// would invite a retry the client can't know is safe -- reworded to convey
+// the genuine uncertainty instead (see portfolio-shell.tsx's identical
+// constant for the fuller rationale).
+const DIALOG_TIMEOUT_MESSAGE =
+  "The request timed out. It may still have gone through — check before retrying.";
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";

@@ -605,6 +605,425 @@ test("UI-006B: a manual dividend record (no linked event) persists to dividend_m
   assert.equal(rows[0]!.source, "manual");
 });
 
+// ---------------------------------------------------------------------------
+// UI-009: idempotency guard on the standalone manual dividend CREATE.
+// ---------------------------------------------------------------------------
+
+test("UI-009: retrying a manual dividend create with the SAME idempotency key (a timed-out-but-committed save followed by a client retry) dedupes to exactly ONE record", async () => {
+  const db = await fixture();
+  const client = createSqliteSqlClient(db);
+  const ctx = contextFor(client, "a");
+
+  const input = {
+    portfolioSecurityId: "psa1",
+    paymentDate: "2026-05-15",
+    sharesDecimal: "100",
+    dividendPerShareDecimal: "0.5",
+    frankingCreditPerShareDecimal: "0.2",
+    dividendEventId: null,
+    manualRecordId: null,
+    expectedVersion: null,
+    idempotencyKey: "dialog-session-1",
+  };
+
+  const first = await saveDividendEntryWithContext(ctx, "pa", input);
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+
+  // Simulates the client seeing a timeout (or any client-visible failure)
+  // for a save that actually committed server-side, then retrying with the
+  // SAME dialog-session key -- the exact scenario UI-009 exists for.
+  const retry = await saveDividendEntryWithContext(ctx, "pa", input);
+  assert.equal(retry.ok, true);
+  if (!retry.ok) return;
+
+  // The retry must report the SAME record identity/version as the original
+  // success, not a fresh one.
+  assert.equal(retry.id, first.id);
+  assert.equal(retry.version, first.version);
+
+  const records = await createDividendManualRecordRepository(client).list(
+    "a",
+    "pa",
+  );
+  assert.equal(
+    records.length,
+    1,
+    "a retry with the same idempotency key must never create a second row",
+  );
+});
+
+test("UI-009: two DISTINCT dialog sessions (different idempotency keys) for the same security/date create two distinct records", async () => {
+  const db = await fixture();
+  const client = createSqliteSqlClient(db);
+  const ctx = contextFor(client, "a");
+
+  const base = {
+    portfolioSecurityId: "psa1",
+    paymentDate: "2026-05-15",
+    sharesDecimal: "100",
+    dividendPerShareDecimal: "0.5",
+    frankingCreditPerShareDecimal: "0.2",
+    dividendEventId: null,
+    manualRecordId: null,
+    expectedVersion: null,
+  };
+
+  const sessionOne = await saveDividendEntryWithContext(ctx, "pa", {
+    ...base,
+    idempotencyKey: "dialog-session-1",
+  });
+  assert.equal(sessionOne.ok, true);
+
+  const sessionTwo = await saveDividendEntryWithContext(ctx, "pa", {
+    ...base,
+    idempotencyKey: "dialog-session-2",
+  });
+  assert.equal(sessionTwo.ok, true);
+  if (!sessionOne.ok || !sessionTwo.ok) return;
+
+  assert.notEqual(
+    sessionOne.id,
+    sessionTwo.id,
+    "a fresh dialog session (a new idempotency key) is a genuinely new record, not a dedupe",
+  );
+
+  const records = await createDividendManualRecordRepository(client).list(
+    "a",
+    "pa",
+  );
+  assert.equal(records.length, 2);
+});
+
+test("UI-009: a manual dividend create with NO idempotency key behaves exactly as before (no dedupe applied)", async () => {
+  const db = await fixture();
+  const client = createSqliteSqlClient(db);
+  const ctx = contextFor(client, "a");
+
+  const input = {
+    portfolioSecurityId: "psa1",
+    paymentDate: "2026-05-15",
+    sharesDecimal: "100",
+    dividendPerShareDecimal: "0.5",
+    frankingCreditPerShareDecimal: "0.2",
+    dividendEventId: null,
+    manualRecordId: null,
+    expectedVersion: null,
+  };
+
+  const first = await saveDividendEntryWithContext(ctx, "pa", input);
+  assert.equal(first.ok, true);
+  const second = await saveDividendEntryWithContext(ctx, "pa", input);
+  assert.equal(second.ok, true);
+  if (!first.ok || !second.ok) return;
+  assert.notEqual(
+    first.id,
+    second.id,
+    "with no idempotency key, two submits are two genuinely separate records (pre-UI-009 behaviour preserved)",
+  );
+
+  const records = await createDividendManualRecordRepository(client).list(
+    "a",
+    "pa",
+  );
+  assert.equal(records.length, 2);
+});
+
+test("UI-009: an idempotency-key retry for a DIFFERENT security never returns another security's record (repository-level scoping)", async () => {
+  const db = await fixture();
+  db.exec(`
+    INSERT INTO securities(id,asset_type,primary_currency_code,canonical_name,created_at,updated_at) VALUES
+      ('s2','equity','AUD','Beta Co','2026-08-01','2026-08-01');
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at) VALUES
+      ('psa2','a','pa','s2','BETA','AUD','held','2026-08-01','2026-08-01');
+  `);
+  const client = createSqliteSqlClient(db);
+  const repository = createDividendManualRecordRepository(client);
+
+  const first = await repository.create("a", "pa", {
+    portfolioSecurityId: "psa1",
+    paymentDate: "2026-05-15",
+    sharesDecimal: "100",
+    dividendPerShareDecimal: "0.5",
+    frankingCreditPerShareDecimal: null,
+    idempotencyKey: "shared-key",
+    requestId: "req-1",
+  });
+  assert.equal(first.ok, true);
+
+  const second = await repository.create("a", "pa", {
+    portfolioSecurityId: "psa2",
+    paymentDate: "2026-05-15",
+    sharesDecimal: "100",
+    dividendPerShareDecimal: "0.5",
+    frankingCreditPerShareDecimal: null,
+    idempotencyKey: "shared-key",
+    requestId: "req-1",
+  });
+  assert.equal(second.ok, true);
+  if (!first.ok || !second.ok) return;
+  assert.notEqual(
+    first.record.id,
+    second.record.id,
+    "the same idempotency key for a DIFFERENT security is not a dedupe match -- the unique index is scoped per portfolio_security_id",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// UI-009 finishing item 1: edited-payload retry honesty. A retry with the
+// SAME idempotency key but DIFFERENT material fields (the owner edited the
+// form between the original save and a retry) must never silently report
+// the just-submitted values as saved -- it must disclose that the STORED
+// values are what actually persisted.
+// ---------------------------------------------------------------------------
+
+test("UI-009 finishing item 1: a retry with the SAME idempotency key but DIFFERENT material fields dedupes to one record, reports storedDiffers, and returns the STORED (not the retried) values", async () => {
+  const db = await fixture();
+  const client = createSqliteSqlClient(db);
+  const repository = createDividendManualRecordRepository(client);
+  const idempotencyKey = "dialog-session-edited";
+
+  const original = await repository.create("a", "pa", {
+    portfolioSecurityId: "psa1",
+    paymentDate: "2026-05-15",
+    sharesDecimal: "100",
+    dividendPerShareDecimal: "0.5",
+    frankingCreditPerShareDecimal: null,
+    idempotencyKey,
+    requestId: "req-1",
+  });
+  assert.equal(original.ok, true);
+  if (!original.ok) return;
+  assert.equal(original.deduped, false);
+  assert.equal(original.storedDiffers, false);
+
+  // Reviewer's exact repro: the owner edited the form after the (actually
+  // successful) first save appeared to hang, then a retry fired with NEW
+  // values but the SAME dialog-session idempotency key.
+  const retryWithEditedPayload = await repository.create("a", "pa", {
+    portfolioSecurityId: "psa1",
+    paymentDate: "2026-09-30",
+    sharesDecimal: "100",
+    dividendPerShareDecimal: "9.99",
+    frankingCreditPerShareDecimal: null,
+    idempotencyKey,
+    requestId: "req-2",
+  });
+  assert.equal(retryWithEditedPayload.ok, true);
+  if (!retryWithEditedPayload.ok) return;
+  assert.equal(
+    retryWithEditedPayload.deduped,
+    true,
+    "still a dedupe match on the idempotency key -- never a second row",
+  );
+  assert.equal(
+    retryWithEditedPayload.storedDiffers,
+    true,
+    "the retried payload's material fields differ from what is stored",
+  );
+  // The returned record must be the STORED truth (0.5 / 2026-05-15), never
+  // the just-submitted 9.99 / 2026-09-30 masquerading as saved.
+  assert.equal(retryWithEditedPayload.record.id, original.record.id);
+  assert.equal(retryWithEditedPayload.record.paymentDate, "2026-05-15");
+  assert.equal(retryWithEditedPayload.record.dividendPerShareDecimal, "0.5");
+
+  const records = await repository.list("a", "pa");
+  assert.equal(
+    records.length,
+    1,
+    "an edited-payload retry must still dedupe to exactly ONE record",
+  );
+  assert.equal(records[0]!.dividendPerShareDecimal, "0.5");
+});
+
+test("UI-009 finishing item 1: a retry with the SAME idempotency key and the SAME material fields (differently-scaled decimal strings) reports storedDiffers false", async () => {
+  const db = await fixture();
+  const client = createSqliteSqlClient(db);
+  const repository = createDividendManualRecordRepository(client);
+  const idempotencyKey = "dialog-session-same-value-different-scale";
+
+  const original = await repository.create("a", "pa", {
+    portfolioSecurityId: "psa1",
+    paymentDate: "2026-05-15",
+    sharesDecimal: "100",
+    dividendPerShareDecimal: "0.50",
+    frankingCreditPerShareDecimal: null,
+    idempotencyKey,
+    requestId: "req-1",
+  });
+  assert.equal(original.ok, true);
+
+  // "0.5" and "0.50" are the SAME value at a different textual scale -- a
+  // raw string comparison would wrongly flag this as an edited payload.
+  const retry = await repository.create("a", "pa", {
+    portfolioSecurityId: "psa1",
+    paymentDate: "2026-05-15",
+    sharesDecimal: "100",
+    dividendPerShareDecimal: "0.5",
+    frankingCreditPerShareDecimal: null,
+    idempotencyKey,
+    requestId: "req-2",
+  });
+  assert.equal(retry.ok, true);
+  if (!retry.ok) return;
+  assert.equal(retry.deduped, true);
+  assert.equal(retry.storedDiffers, false);
+});
+
+// ---------------------------------------------------------------------------
+// UI-009 finishing item 2: the blinded pre-check race (catch-branch
+// re-check) and cross-user key isolation.
+// ---------------------------------------------------------------------------
+
+test("UI-009 finishing item 2: a race where a concurrent request commits between the pre-check and this request's own INSERT is caught by the catch-branch re-check, never a duplicate row", async () => {
+  const db = await fixture();
+  const realClient = createSqliteSqlClient(db);
+  const idempotencyKey = "race-key";
+  const competingId = "competing-record-id";
+  let triggered = false;
+
+  // Wraps the real client so the FIRST idempotency-key lookup (the
+  // pre-check inside create()) behaves exactly as a genuine race would:
+  // it legitimately sees nothing (the result below is computed BEFORE the
+  // competing insert), but by the time this request's own INSERT runs, a
+  // competing row -- from a request that supposedly ran concurrently and
+  // committed first -- already exists with the same
+  // (portfolio_security_id, idempotency_key). This forces create()'s
+  // catch-branch (the one at the "concurrent retry" comment), not the
+  // pre-check branch.
+  const racingClient = {
+    ...realClient,
+    async get<T extends Record<string, unknown>>(
+      sql: string,
+      params?: readonly unknown[],
+    ): Promise<T | undefined> {
+      const result = await realClient.get<T>(sql, params);
+      if (!triggered && sql.includes("idempotency_key = ?")) {
+        triggered = true;
+        db.exec(`
+          INSERT INTO dividend_manual_records (
+            id, user_id, portfolio_id, portfolio_security_id, payment_date,
+            shares_decimal, dividend_per_share_decimal,
+            franking_credit_per_share_decimal, idempotency_key, created_at,
+            updated_at, version
+          ) VALUES (
+            '${competingId}', 'a', 'pa', 'psa1', '2026-05-15',
+            '100', '0.5', NULL, '${idempotencyKey}', '2026-05-15T00:00:00Z',
+            '2026-05-15T00:00:00Z', 1
+          )
+        `);
+      }
+      return result;
+    },
+  };
+
+  const repository = createDividendManualRecordRepository(racingClient);
+  const result = await repository.create("a", "pa", {
+    portfolioSecurityId: "psa1",
+    paymentDate: "2026-05-15",
+    sharesDecimal: "100",
+    dividendPerShareDecimal: "0.5",
+    frankingCreditPerShareDecimal: null,
+    idempotencyKey,
+    requestId: "req-1",
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.deduped, true);
+  assert.equal(
+    result.record.id,
+    competingId,
+    "the catch-branch re-check must surface the record that actually won the race, not fabricate a new identity",
+  );
+
+  const rows = await createDividendManualRecordRepository(realClient).list(
+    "a",
+    "pa",
+  );
+  assert.equal(
+    rows.length,
+    1,
+    "this request's own losing INSERT must not have left a second row -- the unique index rejected it and the catch-branch found the winner",
+  );
+});
+
+test("UI-009 finishing item 2: a cross-user attempt reusing another owner's idempotency key AND security id is denied, never dedupes into (or leaks) that owner's record", async () => {
+  const db = await fixture();
+  const client = createSqliteSqlClient(db);
+  const repository = createDividendManualRecordRepository(client);
+  const idempotencyKey = "guessed-or-replayed-key";
+
+  const ownerCreate = await repository.create("a", "pa", {
+    portfolioSecurityId: "psa1",
+    paymentDate: "2026-05-15",
+    sharesDecimal: "100",
+    dividendPerShareDecimal: "0.5",
+    frankingCreditPerShareDecimal: null,
+    idempotencyKey,
+    requestId: "req-1",
+  });
+  assert.equal(ownerCreate.ok, true);
+
+  // A different user attempts a create carrying the SAME idempotency key
+  // value AND user "a"'s exact portfolioSecurityId (e.g. a guessed or
+  // replayed request) -- the repository-level ownership check must deny
+  // this outright; the idempotency-key lookup must never be scoped loosely
+  // enough to leak or dedupe into another owner's record.
+  const crossUserAttempt = await repository.create("b", "pb", {
+    portfolioSecurityId: "psa1",
+    paymentDate: "2026-05-15",
+    sharesDecimal: "100",
+    dividendPerShareDecimal: "0.5",
+    frankingCreditPerShareDecimal: null,
+    idempotencyKey,
+    requestId: "req-1",
+  });
+  assert.equal(crossUserAttempt.ok, false);
+  if (crossUserAttempt.ok) return;
+  assert.equal(crossUserAttempt.reason, "not_found");
+
+  const ownerRecords = await repository.list("a", "pa");
+  assert.equal(ownerRecords.length, 1);
+});
+
+test("UI-009 finishing item 2: two different owners using the SAME idempotency key against their OWN distinct securities both succeed as two independent records", async () => {
+  const db = await fixture();
+  db.exec(`
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at) VALUES
+      ('psb1','b','pb','s1','ALPHA','AUD','held','2026-08-01','2026-08-01');
+  `);
+  const client = createSqliteSqlClient(db);
+  const repository = createDividendManualRecordRepository(client);
+  const idempotencyKey = "same-literal-key-different-owners";
+
+  const forOwnerA = await repository.create("a", "pa", {
+    portfolioSecurityId: "psa1",
+    paymentDate: "2026-05-15",
+    sharesDecimal: "100",
+    dividendPerShareDecimal: "0.5",
+    frankingCreditPerShareDecimal: null,
+    idempotencyKey,
+    requestId: "req-1",
+  });
+  const forOwnerB = await repository.create("b", "pb", {
+    portfolioSecurityId: "psb1",
+    paymentDate: "2026-05-15",
+    sharesDecimal: "100",
+    dividendPerShareDecimal: "0.5",
+    frankingCreditPerShareDecimal: null,
+    idempotencyKey,
+    requestId: "req-1",
+  });
+
+  assert.equal(forOwnerA.ok, true);
+  assert.equal(forOwnerB.ok, true);
+  if (!forOwnerA.ok || !forOwnerB.ok) return;
+  assert.notEqual(forOwnerA.record.id, forOwnerB.record.id);
+  assert.equal(forOwnerA.deduped, false);
+  assert.equal(forOwnerB.deduped, false);
+});
+
 test("UI-006B: an event-linked save persists to dividend_event_overrides, shows as edited, and Exclude marks it excluded without deleting it", async () => {
   const db = await fixture();
   const client = createSqliteSqlClient(db);

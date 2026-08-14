@@ -2841,6 +2841,29 @@ export const dividendEventOverrides = sqliteTable(
  * cross-batch duplicate detection (see `db/repositories/import-commit.ts`);
  * `importBatchId` lets reversal find and remove exactly the rows a batch
  * created (see `db/repositories/import-reversal.ts`).
+ *
+ * UI-009 addition: `idempotencyKey` guards the standalone owner-facing
+ * CREATE path (`app/dividend-assumptions-actions.ts`) against a
+ * slow-but-successful save followed by a client retry after a timeout
+ * (which otherwise reads as a genuine failure client-side and would
+ * double-post the same dividend). It is a SEPARATE mechanism from
+ * `sourceReference` above deliberately: `sourceReference` is IMP-006's own
+ * CSV-import fingerprinting scheme, read/written by
+ * `db/repositories/import-commit.ts` and `import-reversal.ts`'s
+ * batch-scoped reversal accounting -- reusing it for an unrelated
+ * client-generated dialog-session key would conflate two independent
+ * dedupe concerns and risk import reversal counting an owner-typed row as
+ * import-owned (or vice versa). `idempotencyKey` is nullable and, like
+ * `sourceReference`, this stays a CREATE-only-safe `ALTER TABLE ADD COLUMN`
+ * migration (FY-001A hazard) rather than a table rebuild. NULL means "no
+ * client-supplied idempotency key" -- every pre-UI-009 row and any future
+ * caller that doesn't supply one. The uniqueness below only needs
+ * (portfolioSecurityId, idempotencyKey), not a full owner scope, because
+ * `portfolioSecurityId` already uniquely identifies a single user+portfolio
+ * (see the FK below) and SQLite's default UNIQUE semantics already treat
+ * NULL as never equal to another NULL, so unkeyed rows never collide --
+ * the same property `dividend_manual_records_portfolio_source_reference_unique`
+ * above already relies on without a partial index.
  */
 export const dividendManualRecords = sqliteTable(
   "dividend_manual_records",
@@ -2855,6 +2878,7 @@ export const dividendManualRecords = sqliteTable(
     frankingCreditPerShareDecimal: text("franking_credit_per_share_decimal"),
     importBatchId: text("import_batch_id"),
     sourceReference: text("source_reference"),
+    idempotencyKey: text("idempotency_key"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     version: integer("version").notNull().default(1),
@@ -2892,6 +2916,10 @@ export const dividendManualRecords = sqliteTable(
     uniqueIndex("dividend_manual_records_portfolio_source_reference_unique").on(
       table.portfolioId,
       table.sourceReference,
+    ),
+    uniqueIndex("dividend_manual_records_security_idempotency_unique").on(
+      table.portfolioSecurityId,
+      table.idempotencyKey,
     ),
   ],
 );

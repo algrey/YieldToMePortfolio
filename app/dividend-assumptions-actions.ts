@@ -342,6 +342,23 @@ export type DividendEntryActionResult =
       version: number;
       /** DIV-004: a non-blocking proximity warning when this payment date lands within `PROXIMITY_WINDOW_DAYS` days of another existing owner-typed entry for the same security. */
       proximityWarning: string | null;
+      /** UI-009 finishing item 1: set only on the manual-record CREATE
+       * path. `deduped` true means an idempotency-key retry matched an
+       * EXISTING record rather than creating a new one; `storedDiffers`
+       * true additionally means the incoming payload's material fields
+       * (payment date, shares, DPS, franking) differ from what is actually
+       * stored (e.g. the owner edited the form between the original save
+       * and a client-visible-timeout retry) -- `storedRecord` then carries
+       * the real persisted values so the caller can resync its form
+       * instead of silently claiming the just-submitted values were saved. */
+      deduped?: boolean;
+      storedDiffers?: boolean;
+      storedRecord?: {
+        paymentDate: string;
+        sharesDecimal: string;
+        dividendPerShareDecimal: string;
+        frankingCreditPerShareDecimal: string | null;
+      };
     }
   | ActionFailure;
 
@@ -398,6 +415,15 @@ export async function saveDividendEntryWithContext(
   const manualRecordId =
     typeof input.manualRecordId === "string" && input.manualRecordId.length > 0
       ? input.manualRecordId
+      : null;
+  // UI-009: best-effort dedupe key for the standalone manual-record CREATE
+  // below (client-generated, stable across retries within one dialog
+  // session -- see RecordDividendDialog). Absent/malformed is never a
+  // client error here: it only disables the idempotency guard for this
+  // particular request, it never blocks the save itself.
+  const idempotencyKey =
+    typeof input.idempotencyKey === "string" && input.idempotencyKey.length > 0
+      ? input.idempotencyKey
       : null;
   if (!portfolioSecurityId) {
     return { ok: false, status: 400, message: "A security is required." };
@@ -612,6 +638,7 @@ export async function saveDividendEntryWithContext(
     sharesDecimal,
     dividendPerShareDecimal,
     frankingCreditPerShareDecimal,
+    idempotencyKey,
     requestId: context.requestId,
   });
   if (!result.ok) {
@@ -635,6 +662,17 @@ export async function saveDividendEntryWithContext(
     id: result.record.id,
     version: result.record.version,
     proximityWarning,
+    deduped: result.deduped,
+    storedDiffers: result.storedDiffers,
+    storedRecord: result.storedDiffers
+      ? {
+          paymentDate: result.record.paymentDate,
+          sharesDecimal: result.record.sharesDecimal,
+          dividendPerShareDecimal: result.record.dividendPerShareDecimal,
+          frankingCreditPerShareDecimal:
+            result.record.frankingCreditPerShareDecimal,
+        }
+      : undefined,
   };
 }
 

@@ -319,7 +319,7 @@ Status: DONE (2026-08-14); owner instruction: implement the safety features rega
 
 #### BRK-008 — Sharesight live read spike (owner-assisted)
 
-Status: BLOCKED on the BRK-003 hardening addendum (F8/F9/F10 — mandatory now that main-account credentials are used); REQUIRES OWNER — API credentials from the owner's MAIN PAID account (Sharesight Settings → API tab), supplied via gitignored `.dev.vars` (`SHARESIGHT_CLIENT_ID`/`SHARESIGHT_CLIENT_SECRET`), never committed, never in fixtures.
+Status: READY TO RUN — hardening done (2026-08-14) and the spike script exists (`scripts/sharesight-read-spike.mjs`, sealed-client-only, prints no tax-data values); waiting ONLY on owner credentials. REQUIRES OWNER — API credentials from the owner's MAIN PAID account (Sharesight Settings → API tab), supplied via gitignored `.dev.vars` (`SHARESIGHT_CLIENT_ID`/`SHARESIGHT_CLIENT_SECRET`), never committed, never in fixtures.
 
 - Objective: prove the read-only-shared portfolio is readable via the User API v3 using BRK-003's client: authenticate (client credentials), list portfolios, fetch holdings/trades/payouts for the shared portfolio; record which endpoints work for a guest account, rate limits observed, and payout data shape (dividend-actuals candidate).
 - Deliver: a spike evidence doc (endpoints × guest-access outcome, hash-only payload evidence, no dumps); go/no-go for BRK-004/005 scoping.
@@ -644,10 +644,11 @@ Status: DONE (2026-08-14) in the hardening batch: shared 15s AbortController tim
 
 ### UI-009 — Timeout-retry honesty on non-idempotent dialog submits
 
-Status: READY (promoted 2026-08-14 by owner instruction).
+Status: DONE (2026-08-14).
 
 - Problem: the shared timeout message ("The request timed out — try again.") invites a retry the client can't know is safe: the standalone manual dividend CREATE has no idempotency key, so a slow-but-successful save + retry produces two records and inflated income (mitigated today by the DIV-004 proximity warning and deletability; rename/FY-override/archive are version-guarded, portfolio create is unique-code-guarded).
 - Fix direction: (a) reword the timeout message on mutation submits to convey uncertainty ("the request may have gone through — check before retrying" style); (b) add an idempotency guard to manual dividend creates (client-generated key or a short-window natural-key dedupe at the repository).
+- Completion note (2026-08-14): timeout message reworded to convey uncertainty (shared constant, three files); `dividend_manual_records.idempotency_key` added via migration 0033 (ADD COLUMN + unique index (portfolio_security_id, idempotency_key) only — no rebuild, purge-lock triggers verified surviving; NULL-distinct semantics leave IMP-006 import creates unaffected; dedicated column chosen over source_reference to avoid conflating with import fingerprinting, documented in DATA_MODEL); dialog generates a per-mount randomUUID so a timed-out-but-committed save retried returns the ONE existing record; edited-payload retries return a distinguishable storedDiffers result and the dialog resyncs to stored values with an explicit note (never silent old-values-as-saved); race branch (blinded pre-check → unique-index collision → re-check) and cross-user key isolation reviewer-probed AND test-pinned. Review PASS + finishing pass. Also in this batch: `scripts/sharesight-read-spike.mjs` (BRK-008 prep — sealed-barrel-only, field-NAMES/typeof-only output, no tax-data values, missing-credentials dry path tested) and the preview-harness fail-closed startup guard (mismatched dist halves refuse to start with a clean message; pure comparison unit-tested; documented in LOCAL_DEVELOPMENT). `npm run check` exit 0 (776 pass, 10 gated skips).
 
 - Problem: now that the quote-correction and portfolio dialogs are true modals with Escape blocked while pending and Cancel disabled, a stalled fetch leaves the modal with no user exit until the browser's own timeout — a temporary keyboard trap that didn't exist while the dialogs were non-modal. Same shape in both dialogs.
 - Fix direction: AbortController with a bounded timeout surfacing an in-dialog failure (or an enabled "Stop waiting" affordance), applied consistently to both dialogs (and the dividend-assumptions dialogs if they share the gap — audit).
