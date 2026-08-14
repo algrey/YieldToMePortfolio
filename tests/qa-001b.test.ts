@@ -357,6 +357,118 @@ test("QA-001B: the mobile navigation drawer restores focus, traps Tab, and close
   assert.match(source, /if \(event\.key !== "Tab"\) return;/);
 });
 
+test("QA-001B: the create/rename portfolio dialog is a true modal (ref + showModal, not a bare `open` attribute), closes its menu, and restores opener focus to a node that survives the popover unmounting", async () => {
+  const source = await readFile(
+    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    "utf8",
+  );
+  // The old bug: a bare `<dialog open>` with no ref/showModal renders as
+  // inert, non-modal content in normal document flow (below the fold, no
+  // ::backdrop). The dialog must use the app's ref + showModal() pattern
+  // instead (mirrors income-multi-year.tsx / dividend-assumptions-editor.tsx).
+  // Scoped to the portfolio dialog's own opening tag (matched by its
+  // className, order-independent) so a same-line reordering of its
+  // attributes, or an unrelated `<dialog>` elsewhere in the file (e.g. the
+  // quote-correction dialog), can't hide or falsely trip the guard.
+  const portfolioDialogTag = source.match(
+    /<dialog\b[^>]*className="portfolio-dialog"[^>]*>/,
+  );
+  assert.ok(
+    portfolioDialogTag,
+    "expected to find the portfolio dialog's opening <dialog> tag",
+  );
+  assert.doesNotMatch(portfolioDialogTag![0], /\bopen\b/);
+  assert.match(
+    source,
+    /const portfolioDialogRef = useRef<HTMLDialogElement>\(null\);/,
+  );
+  assert.match(
+    source,
+    /const portfolioDialogOpenerRef = useRef<HTMLButtonElement \| null>\(null\);/,
+  );
+  // B1 review fix: the opener must be a node that survives the popover
+  // menu unmounting (setOpenMenu(null) removes the clicked menu item from
+  // the DOM in the same render pass), so the `.portfolio-button` toggle --
+  // not the menu item -- is captured as the ref target.
+  assert.match(
+    source,
+    /const portfolioButtonRef = useRef<HTMLButtonElement>\(null\);/,
+  );
+  assert.match(
+    source,
+    /ref=\{portfolioButtonRef\}\s*\n\s*className="portfolio-button"/,
+  );
+  assert.match(source, /ref=\{portfolioDialogRef\}/);
+  assert.match(
+    source,
+    /if \(portfolioDialog && dialog && !dialog\.open\) \{\s*dialog\.showModal\(\);/,
+  );
+  // Focus moves into the dialog on open.
+  assert.match(
+    source,
+    /dialog\.querySelector<HTMLInputElement>\("input"\)\?\.focus\(\);/,
+  );
+  // Follow-up 2: symmetry with dividend-assumptions-editor's effect -- close
+  // the dialog element if state goes false while the DOM still thinks it's open.
+  assert.match(
+    source,
+    /if \(!portfolioDialog && dialog\?\.open\) dialog\.close\(\);/,
+  );
+  // Opener focus is captured from the surviving toggle by both the Create
+  // and Rename menu items, and the dropdown menu closes so it doesn't stay
+  // open behind the dialog.
+  assert.match(
+    source,
+    /portfolioDialogOpenerRef\.current =\s*portfolioButtonRef\.current;\s*setOpenMenu\(null\);\s*setPortfolioDialog\("create"\);/,
+  );
+  assert.match(
+    source,
+    /portfolioDialogOpenerRef\.current =\s*portfolioButtonRef\.current;\s*setOpenMenu\(null\);\s*setPortfolioDialog\("rename"\);/,
+  );
+  // Opener focus is restored once the dialog closes.
+  assert.match(
+    source,
+    /if \(!portfolioDialog && portfolioDialogOpenerRef\.current\) \{\s*portfolioDialogOpenerRef\.current\.focus\(\);/,
+  );
+  // Escape (the native `cancel` event) is routed through the same close
+  // path as every other control, not left to uncontrolled default behavior.
+  assert.match(
+    source,
+    /onCancel=\{\(event\) => \{\s*event\.preventDefault\(\);\s*portfolioDialogRef\.current\?\.close\(\);\s*setPortfolioDialog\(null\);\s*\}\}/,
+  );
+  assert.match(source, /onClose=\{\(\) => setPortfolioDialog\(null\)\}/);
+  // A visible, labelled close control exists beyond Escape.
+  assert.match(
+    source,
+    /onClick=\{\(\) => portfolioDialogRef\.current\?\.close\(\)\}\s*disabled=\{actionPending \|\| !isOnline\}\s*>\s*Cancel/,
+  );
+});
+
+test("QA-001B: a failed portfolio create/rename shows its error INSIDE the modal dialog (B2) -- not in the inert outside toast", async () => {
+  const source = await readFile(
+    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    "utf8",
+  );
+  // The outside "toast" is suppressed while the dialog is open (it would be
+  // inert/unannounced behind an open top-layer <dialog>), but still renders
+  // for non-dialog actions (archive/restore).
+  assert.match(
+    source,
+    /\{actionMessage && !portfolioDialog \? \(\s*<p className="action-feedback" role="alert">/,
+  );
+  // The dialog's own <form> renders the same actionMessage using the app's
+  // established in-dialog error pattern (dividend-assumptions-editor.tsx).
+  const portfolioDialogStart = source.indexOf('className="portfolio-dialog"');
+  const dialogSection = source.slice(
+    portfolioDialogStart,
+    source.indexOf("</dialog>", portfolioDialogStart),
+  );
+  assert.match(
+    dialogSection,
+    /\{actionMessage \? \(\s*<p role="alert" className="unavailable">\s*\{actionMessage\}\s*<\/p>\s*\) : null\}/,
+  );
+});
+
 test("QA-001B: interactive controls meet the 44×44 CSS-pixel touch-target minimum", async () => {
   const styles = await readFile(
     new URL("../app/globals.css", import.meta.url),

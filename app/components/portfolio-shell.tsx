@@ -2622,6 +2622,15 @@ export function PortfolioShell({
   const [portfolioDialog, setPortfolioDialog] = useState<
     "create" | "rename" | null
   >(null);
+  const portfolioDialogRef = useRef<HTMLDialogElement>(null);
+  const portfolioDialogOpenerRef = useRef<HTMLButtonElement | null>(null);
+  // B1 review fix: the Create/Rename buttons live INSIDE the popover, which
+  // unmounts the instant setOpenMenu(null) runs (same render pass that opens
+  // the dialog). Capturing `event.currentTarget` there would point focus
+  // restoration at an already-detached node -- a silent no-op that drops
+  // focus to <body>. The `.portfolio-button` toggle survives the popover
+  // closing, so it is the opener for both dialog modes.
+  const portfolioButtonRef = useRef<HTMLButtonElement>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
@@ -2661,6 +2670,28 @@ export function PortfolioShell({
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [drawerOpen]);
+
+  // Mirrors the income-multi-year / dividend-assumptions-editor dialog
+  // pattern (QA-001B): showModal() on open (so the native ::backdrop and
+  // centering apply and the dialog is a real modal, not inert content at
+  // the bottom of the page), focus the first field, and restore focus to
+  // the surviving `.portfolio-button` toggle on close (B1 review fix: the
+  // popover menu item that was clicked is already unmounted by the time
+  // this effect runs, since setOpenMenu(null) and setPortfolioDialog(...)
+  // land in the same render pass -- the toggle button is the nearest node
+  // guaranteed to still be in the DOM).
+  useEffect(() => {
+    const dialog = portfolioDialogRef.current;
+    if (portfolioDialog && dialog && !dialog.open) {
+      dialog.showModal();
+      dialog.querySelector<HTMLInputElement>("input")?.focus();
+    }
+    if (!portfolioDialog && dialog?.open) dialog.close();
+    if (!portfolioDialog && portfolioDialogOpenerRef.current) {
+      portfolioDialogOpenerRef.current.focus();
+      portfolioDialogOpenerRef.current = null;
+    }
+  }, [portfolioDialog]);
 
   const portfolio =
     portfolios.find((item) => item.id === portfolioId) ?? portfolios[0];
@@ -2707,7 +2738,7 @@ export function PortfolioShell({
       };
       if (!response.ok || !result.ok)
         throw new Error(result.message ?? "Portfolio action failed.");
-      setPortfolioDialog(null);
+      portfolioDialogRef.current?.close();
       router.refresh();
       if (!isRename && result.portfolio)
         router.push(`/portfolio/${result.portfolio.id}/overview`);
@@ -2907,6 +2938,7 @@ export function PortfolioShell({
 
         <div className="menu-anchor portfolio-anchor">
           <button
+            ref={portfolioButtonRef}
             className="portfolio-button"
             type="button"
             aria-expanded={openMenu === "portfolio"}
@@ -2957,7 +2989,12 @@ export function PortfolioShell({
                 <>
                   <button
                     type="button"
-                    onClick={() => setPortfolioDialog("create")}
+                    onClick={() => {
+                      portfolioDialogOpenerRef.current =
+                        portfolioButtonRef.current;
+                      setOpenMenu(null);
+                      setPortfolioDialog("create");
+                    }}
                     disabled={actionPending || !isOnline}
                   >
                     <span>Create portfolio</span>
@@ -2967,7 +3004,12 @@ export function PortfolioShell({
                     <>
                       <button
                         type="button"
-                        onClick={() => setPortfolioDialog("rename")}
+                        onClick={() => {
+                          portfolioDialogOpenerRef.current =
+                            portfolioButtonRef.current;
+                          setOpenMenu(null);
+                          setPortfolioDialog("rename");
+                        }}
                         disabled={actionPending || !isOnline}
                       >
                         <span>Rename portfolio</span>
@@ -3328,7 +3370,13 @@ export function PortfolioShell({
         {!ownedMode && activeSection === "news" ? <NewsScreen /> : null}
       </main>
 
-      {actionMessage ? (
+      {/* B2 review fix: while the portfolio dialog is open, a failure (e.g.
+          the prefilled "NEW" code colliding with portfolios_user_id_code_unique
+          on a second create) must render INSIDE the dialog -- everything
+          outside an open top-layer <dialog> is inert, so this outside toast
+          would be neither visible nor announced. Non-dialog actions (archive,
+          restore) still use this outside toast. */}
+      {actionMessage && !portfolioDialog ? (
         <p className="action-feedback" role="alert">
           {actionMessage}
         </p>
@@ -3336,11 +3384,17 @@ export function PortfolioShell({
 
       {ownedMode && portfolioDialog ? (
         <dialog
-          open
+          ref={portfolioDialogRef}
           className="portfolio-dialog"
           aria-labelledby="portfolio-dialog-title"
+          onCancel={(event) => {
+            event.preventDefault();
+            portfolioDialogRef.current?.close();
+            setPortfolioDialog(null);
+          }}
+          onClose={() => setPortfolioDialog(null)}
         >
-          <form method="dialog" onSubmit={submitPortfolioAction}>
+          <form onSubmit={submitPortfolioAction}>
             <p className="eyebrow">Portfolio settings</p>
             <h2 id="portfolio-dialog-title">
               {portfolioDialog === "create"
@@ -3380,7 +3434,7 @@ export function PortfolioShell({
             <div className="dialog-actions">
               <button
                 type="button"
-                onClick={() => setPortfolioDialog(null)}
+                onClick={() => portfolioDialogRef.current?.close()}
                 disabled={actionPending || !isOnline}
               >
                 Cancel
@@ -3389,6 +3443,11 @@ export function PortfolioShell({
                 {actionPending ? "Working…" : "Save portfolio"}
               </button>
             </div>
+            {actionMessage ? (
+              <p role="alert" className="unavailable">
+                {actionMessage}
+              </p>
+            ) : null}
           </form>
         </dialog>
       ) : null}
