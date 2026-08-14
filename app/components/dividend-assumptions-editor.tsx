@@ -68,6 +68,19 @@ type SecurityDraft = {
   version: number | null;
 };
 
+// UI-008 review (carried from portfolio-shell.tsx's dialogs): both dialogs
+// below disable their submit button while a save is pending, so a fetch that
+// never settles would leave the owner stuck with no way to retry. Their
+// submit paths race the fetch against this bounded timeout via
+// AbortController so pending state always resolves and the dialog stays
+// open and operable.
+const DIALOG_FETCH_TIMEOUT_MS = 15_000;
+const DIALOG_TIMEOUT_MESSAGE = "The request timed out — try again.";
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
 function blankToNull(value: string): string | null {
   const trimmed = value.trim();
   return trimmed.length === 0 ? null : trimmed;
@@ -708,6 +721,13 @@ export function RecordDividendDialog({
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubmitState({ status: "saving" });
+    // UI-008: "Save dividend" is disabled while saving -- bound the fetch so
+    // a stalled request can't leave the owner stuck with no way to retry.
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      DIALOG_FETCH_TIMEOUT_MS,
+    );
     try {
       const response = await fetch(
         `/api/portfolios/${portfolioId}/dividend-entries`,
@@ -725,6 +745,7 @@ export function RecordDividendDialog({
             expectedVersion: savedVersion,
             exclude: excludeChecked,
           }),
+          signal: controller.signal,
         },
       );
       const result = (await response.json()) as
@@ -750,18 +771,28 @@ export function RecordDividendDialog({
         proximityWarning: result.proximityWarning,
       });
       router.refresh(); // F4
-    } catch {
+    } catch (error) {
       setSubmitState({
         status: "error",
-        message:
-          "The dividend could not be saved. Check your connection and retry.",
+        message: isAbortError(error)
+          ? DIALOG_TIMEOUT_MESSAGE
+          : "The dividend could not be saved. Check your connection and retry.",
       });
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
   async function deleteRecord() {
     if (savedManualRecordId === null || savedVersion === null) return;
     setDeleteState({ status: "deleting" });
+    // UI-008: "Exclude this dividend" is disabled while deleting -- bound
+    // the fetch so a stalled request can't leave the owner stuck.
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      DIALOG_FETCH_TIMEOUT_MS,
+    );
     try {
       const response = await fetch(
         `/api/portfolios/${portfolioId}/dividend-entries`,
@@ -772,6 +803,7 @@ export function RecordDividendDialog({
             manualRecordId: savedManualRecordId,
             expectedVersion: savedVersion,
           }),
+          signal: controller.signal,
         },
       );
       const result = (await response.json()) as
@@ -784,12 +816,15 @@ export function RecordDividendDialog({
       router.refresh(); // F4
       dialogRef.current?.close();
       onClose();
-    } catch {
+    } catch (error) {
       setDeleteState({
         status: "error",
-        message:
-          "The dividend record could not be removed. Check your connection and retry.",
+        message: isAbortError(error)
+          ? DIALOG_TIMEOUT_MESSAGE
+          : "The dividend record could not be removed. Check your connection and retry.",
       });
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -1022,6 +1057,13 @@ function OverrideFyDialog({
     event.preventDefault();
     const financialYearEndingYear = Number(year);
     setSubmitState({ status: "saving" });
+    // UI-008: "Save override" is disabled while saving -- bound the fetch so
+    // a stalled request can't leave the owner stuck.
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      DIALOG_FETCH_TIMEOUT_MS,
+    );
     try {
       const response = await fetch(
         `/api/portfolios/${portfolioId}/dividend-fy-overrides`,
@@ -1034,6 +1076,7 @@ function OverrideFyDialog({
             frankingAmountDecimal: blankToNull(franking),
             expectedVersion: savedVersion,
           }),
+          signal: controller.signal,
         },
       );
       const result = (await response.json()) as
@@ -1045,12 +1088,15 @@ function OverrideFyDialog({
       setSavedVersion(result.version); // F1: switch to update mode
       setSubmitState({ status: "saved" });
       router.refresh(); // F4
-    } catch {
+    } catch (error) {
       setSubmitState({
         status: "error",
-        message:
-          "The override could not be saved. Check your connection and retry.",
+        message: isAbortError(error)
+          ? DIALOG_TIMEOUT_MESSAGE
+          : "The override could not be saved. Check your connection and retry.",
       });
+    } finally {
+      clearTimeout(timeout);
     }
   }
 

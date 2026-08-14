@@ -56,6 +56,21 @@ export const portfolioSections = [
   "news",
 ] as const;
 
+// UI-008 review: the portfolio create/rename dialog and QuoteCorrectionDialog
+// both disable their Cancel button while a save is pending, and
+// QuoteCorrectionDialog also blocks Escape while pending -- so a fetch that
+// never settles (dropped connection, stalled proxy) turns into a temporary
+// keyboard trap with no way out. Every dialog submit in this file races its
+// fetch against this bounded timeout via AbortController so pending state
+// always resolves, the dialog stays open and operable, and the owner gets an
+// explicit in-dialog message instead of a silent hang.
+const DIALOG_FETCH_TIMEOUT_MS = 15_000;
+const DIALOG_TIMEOUT_MESSAGE = "The request timed out — try again.";
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
 // Financial-year start month options for the settings control (FY-001B).
 // Full names label the select; abbreviations compose the helper text's
 // window description. This is display-only -- the authoritative FY window
@@ -2257,6 +2272,14 @@ function QuoteCorrectionDialog({
     // Escape/Cancel must not leave "Correction saved..." visible after a
     // subsequent failure).
     onMessage(null);
+    // UI-008: Escape is blocked and Cancel is disabled while `pending` (see
+    // onCancel below), so a request that never settles would trap the owner
+    // in the dialog -- bound the fetch and abort it if it stalls.
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      DIALOG_FETCH_TIMEOUT_MS,
+    );
     try {
       const response = await fetch("/api/market-data/overrides", {
         method: "POST",
@@ -2270,6 +2293,7 @@ function QuoteCorrectionDialog({
           valueJson,
           reason,
         }),
+        signal: controller.signal,
       });
       const result = (await response.json()) as {
         ok: boolean;
@@ -2283,11 +2307,14 @@ function QuoteCorrectionDialog({
       dialogRef.current?.close();
     } catch (error) {
       setDialogError(
-        error instanceof Error
-          ? error.message
-          : "The correction could not be saved.",
+        isAbortError(error)
+          ? DIALOG_TIMEOUT_MESSAGE
+          : error instanceof Error
+            ? error.message
+            : "The correction could not be saved.",
       );
     } finally {
+      clearTimeout(timeout);
       setPending(false);
     }
   }
@@ -2819,6 +2846,13 @@ export function PortfolioShell({
       : "/api/portfolios";
     setActionPending(true);
     setActionMessage(null);
+    // UI-008: a stalled request must not leave the dialog's Cancel button
+    // disabled forever -- bound this fetch and abort it if it never settles.
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      DIALOG_FETCH_TIMEOUT_MS,
+    );
     try {
       const response = await fetch(endpoint, {
         method: isRename ? "PATCH" : "POST",
@@ -2829,6 +2863,7 @@ export function PortfolioShell({
           timezone: String(form.get("timezone") ?? ""),
           expectedVersion: ownedWorkspace.activePortfolio?.version,
         }),
+        signal: controller.signal,
       });
       const result = (await response.json()) as {
         ok: boolean;
@@ -2843,9 +2878,14 @@ export function PortfolioShell({
         router.push(`/portfolio/${result.portfolio.id}/overview`);
     } catch (error) {
       setActionMessage(
-        error instanceof Error ? error.message : "Portfolio action failed.",
+        isAbortError(error)
+          ? DIALOG_TIMEOUT_MESSAGE
+          : error instanceof Error
+            ? error.message
+            : "Portfolio action failed.",
       );
     } finally {
+      clearTimeout(timeout);
       setActionPending(false);
     }
   }

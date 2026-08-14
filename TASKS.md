@@ -327,7 +327,7 @@ Status: BLOCKED on the BRK-003 hardening addendum (F8/F9/F10 — mandatory now t
 
 #### BRK-004 — Sharesight connection schema and token handling
 
-Status: BLOCKED on BRK-008 (live-read outcome shapes what is stored). Carry-over requirements from the BRK-003 hardening review (2026-08-14): (a) `unsafeAllowOtherHost` (present on both the token and data modules for spike/mock use) must NEVER be plumbed from env/config in the real Worker wiring — add an explicit assertion or lint-style test when wiring lands; (b) close the empty-leading-label host edge (`https://.sharesight.com/` passes the endsWith pin; unresolvable in practice, one-line rejection makes it airtight); (c) add the deliberate-single-decode comment in `canonicalizePathname`; (d) enforce the barrel seal structurally with an ESLint `no-restricted-imports` rule barring `domain/sharesight/transport.ts` imports outside the package and its tests (today the seal is a convention — deep imports still resolve).
+Status: BLOCKED on BRK-008 (live-read outcome shapes what is stored). Carry-over requirements from the BRK-003 hardening review (2026-08-14, updated after the 2026-08-14 hardening batch): (a) `unsafeAllowOtherHost` (present on both the token and data modules for spike/mock use) must NEVER be plumbed from env/config in the real Worker wiring — add an explicit assertion or lint-style test when wiring lands; (b) DONE — empty-label hosts rejected; (c) DONE — single-decode comment added; (d) DONE for static imports — ESLint `no-restricted-imports` bars `domain/sharesight/transport` outside the package/test (probe-verified incl. alias and re-export forms, exemption glob not over-broad); REMAINING: dynamic `import()` is not covered by that rule (reviewer-probed reachable) — close with `no-restricted-syntax` or an equivalent guard when wiring lands.
 
 - Objective: implement the real `authorize`/token-refresh/`revoke` lifecycle against the selected broker's OAuth flow, conforming to the `BrokerAdapter` contract in `domain/broker-sync/contracts.ts`.
 - Dependencies: BRK-002, BRK-003.
@@ -640,7 +640,14 @@ Status: DONE (2026-08-14); same defect class as the owner-reported portfolio-dia
 
 ### UI-008 — Modal correction dialogs: in-flight fetch has no abort/timeout
 
-Status: DEFERRED (2026-08-14); shared pattern gap noted by UI-007 review.
+Status: DONE (2026-08-14) in the hardening batch: shared 15s AbortController timeout on all six dialog-scoped submits (portfolio create/rename, quote correction, dividend record/delete, FY override, refresh-historical), in-dialog timeout message, pending reset keeps dialogs operable — reviewer traced all six paths, confirmed the QuoteCorrectionDialog keyboard trap is gone, and verified DOMException-typed abort detection can't mislabel fetch TypeErrors. Follow-up split out as UI-009.
+
+### UI-009 — Timeout-retry honesty on non-idempotent dialog submits
+
+Status: DEFERRED (2026-08-14); from the hardening-batch review.
+
+- Problem: the shared timeout message ("The request timed out — try again.") invites a retry the client can't know is safe: the standalone manual dividend CREATE has no idempotency key, so a slow-but-successful save + retry produces two records and inflated income (mitigated today by the DIV-004 proximity warning and deletability; rename/FY-override/archive are version-guarded, portfolio create is unique-code-guarded).
+- Fix direction: (a) reword the timeout message on mutation submits to convey uncertainty ("the request may have gone through — check before retrying" style); (b) add an idempotency guard to manual dividend creates (client-generated key or a short-window natural-key dedupe at the repository).
 
 - Problem: now that the quote-correction and portfolio dialogs are true modals with Escape blocked while pending and Cancel disabled, a stalled fetch leaves the modal with no user exit until the browser's own timeout — a temporary keyboard trap that didn't exist while the dialogs were non-modal. Same shape in both dialogs.
 - Fix direction: AbortController with a bounded timeout surfacing an in-dialog failure (or an enabled "Stop waiting" affordance), applied consistently to both dialogs (and the dividend-assumptions dialogs if they share the gap — audit).

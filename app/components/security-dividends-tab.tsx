@@ -29,6 +29,19 @@ import {
 import { formatIncomeMoney } from "../income-format.ts";
 import { RecordDividendDialog } from "./dividend-assumptions-editor.tsx";
 
+// UI-008 review (carried from portfolio-shell.tsx's dialogs): the refresh
+// confirmation dialog disables its confirm button while a refresh is
+// pending, so a fetch that never settles would leave the owner stuck with
+// no way to retry. `runRefresh` races the fetch against this bounded
+// timeout via AbortController so pending state always resolves and the
+// dialog stays open and operable.
+const DIALOG_FETCH_TIMEOUT_MS = 15_000;
+const DIALOG_TIMEOUT_MESSAGE = "The request timed out — try again.";
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
 export function SecurityDividendsTab({
   portfolioId,
   portfolioSecurityId,
@@ -152,10 +165,17 @@ export function SecurityDividendsTab({
 
   async function runRefresh() {
     setRefreshState({ status: "pending" });
+    // UI-008: "Refresh historical" is disabled while pending -- bound the
+    // fetch so a stalled request can't leave the owner stuck.
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      DIALOG_FETCH_TIMEOUT_MS,
+    );
     try {
       const response = await fetch(
         `/api/portfolios/${portfolioId}/securities/${portfolioSecurityId}/dividends/refresh`,
-        { method: "POST" },
+        { method: "POST", signal: controller.signal },
       );
       const result = (await response.json()) as
         | {
@@ -182,12 +202,15 @@ export function SecurityDividendsTab({
       });
       setRefreshConfirmed(false);
       router.refresh();
-    } catch {
+    } catch (error) {
       setRefreshState({
         status: "error",
-        message:
-          "The refresh could not be started. Check your connection and retry.",
+        message: isAbortError(error)
+          ? DIALOG_TIMEOUT_MESSAGE
+          : "The refresh could not be started. Check your connection and retry.",
       });
+    } finally {
+      clearTimeout(timeout);
     }
   }
 

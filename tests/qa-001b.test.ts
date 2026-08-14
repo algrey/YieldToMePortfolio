@@ -579,11 +579,13 @@ test("UI-007: a failed quote correction renders its error INSIDE the modal dialo
   );
   assert.match(
     dialogFnSource,
-    /setPending\(true\);\s*setDialogError\(null\);\s*[\s\S]*?onMessage\(null\);\s*try \{/,
+    /setPending\(true\);\s*setDialogError\(null\);\s*[\s\S]*?onMessage\(null\);\s*[\s\S]*?try \{/,
   );
+  // UI-008: a timed-out (aborted) request gets its own dedicated message
+  // ahead of the pre-existing error-shape fallback chain.
   assert.match(
     dialogFnSource,
-    /\} catch \(error\) \{\s*setDialogError\(\s*error instanceof Error\s*\? error\.message\s*: "The correction could not be saved\."\s*,?\s*\);\s*\}/,
+    /\} catch \(error\) \{\s*setDialogError\(\s*isAbortError\(error\)\s*\? DIALOG_TIMEOUT_MESSAGE\s*: error instanceof Error\s*\? error\.message\s*: "The correction could not be saved\."\s*,?\s*\);\s*\}/,
   );
   // The dialog's own <form> renders that local error using the app's
   // established in-dialog error pattern (dividend-assumptions-editor.tsx).
@@ -731,4 +733,131 @@ test("QA-001B: owned add menu wires 'Add holding' and 'Add transaction' into the
     source,
     /<button type="button">\s*\n\s*<span>Add holding<\/span>\s*\n\s*<small>UI only<\/small>\s*\n\s*<\/button>\s*\n\s*<button type="button">\s*\n\s*<span>Add transaction<\/span>\s*\n\s*<small>UI only<\/small>\s*\n\s*<\/button>/,
   );
+});
+
+// UI-008: with Escape blocked and Cancel disabled while a dialog save is
+// pending (portfolio-shell.tsx's QuoteCorrectionDialog) or Cancel/Save
+// disabled (every other dialog below), a fetch that never settles is a
+// temporary keyboard trap -- every dialog submit must bound its fetch with
+// an AbortController-driven timeout and surface a dedicated in-dialog
+// message when it fires.
+test("UI-008: portfolio-shell.tsx's dialog submits (portfolio create/rename, quote correction) are bounded by an AbortController timeout with an in-dialog timeout message", async () => {
+  const source = await readFile(
+    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /const DIALOG_FETCH_TIMEOUT_MS = 15_000;/);
+  assert.match(
+    source,
+    /const DIALOG_TIMEOUT_MESSAGE = "The request timed out — try again\.";/,
+  );
+  assert.match(
+    source,
+    /function isAbortError\(error: unknown\): boolean \{\s*return error instanceof DOMException && error\.name === "AbortError";/,
+  );
+
+  const submitPortfolioActionStart = source.indexOf(
+    "async function submitPortfolioAction",
+  );
+  const submitPortfolioActionEnd = source.indexOf(
+    "\n  async function changeHomeCurrency",
+    submitPortfolioActionStart,
+  );
+  const submitPortfolioActionSource = source.slice(
+    submitPortfolioActionStart,
+    submitPortfolioActionEnd,
+  );
+  assert.match(
+    submitPortfolioActionSource,
+    /const controller = new AbortController\(\);/,
+  );
+  assert.match(submitPortfolioActionSource, /signal: controller\.signal,/);
+  assert.match(
+    submitPortfolioActionSource,
+    /isAbortError\(error\)\s*\? DIALOG_TIMEOUT_MESSAGE/,
+  );
+  assert.match(submitPortfolioActionSource, /clearTimeout\(timeout\);/);
+
+  const quoteDialogSubmitStart = source.indexOf(
+    "async function submit(event: React.FormEvent<HTMLFormElement>) {",
+  );
+  const quoteDialogSubmitEnd = source.indexOf(
+    "\n  return (",
+    quoteDialogSubmitStart,
+  );
+  const quoteDialogSubmitSource = source.slice(
+    quoteDialogSubmitStart,
+    quoteDialogSubmitEnd,
+  );
+  assert.match(
+    quoteDialogSubmitSource,
+    /const controller = new AbortController\(\);/,
+  );
+  assert.match(quoteDialogSubmitSource, /signal: controller\.signal,/);
+  assert.match(
+    quoteDialogSubmitSource,
+    /isAbortError\(error\)\s*\? DIALOG_TIMEOUT_MESSAGE/,
+  );
+  assert.match(quoteDialogSubmitSource, /clearTimeout\(timeout\);/);
+});
+
+test("UI-008: dividend-assumptions-editor.tsx's dialog submits (record dividend, delete dividend, FY override) are bounded by an AbortController timeout with an in-dialog timeout message", async () => {
+  const source = await readFile(
+    new URL(
+      "../app/components/dividend-assumptions-editor.tsx",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(source, /const DIALOG_FETCH_TIMEOUT_MS = 15_000;/);
+  assert.match(
+    source,
+    /const DIALOG_TIMEOUT_MESSAGE = "The request timed out — try again\.";/,
+  );
+  assert.match(
+    source,
+    /function isAbortError\(error: unknown\): boolean \{\s*return error instanceof DOMException && error\.name === "AbortError";/,
+  );
+  // Three dialog-scoped async fetches (record submit, delete, FY override
+  // submit) each get their own AbortController + timeout.
+  const controllerCount = (
+    source.match(/const controller = new AbortController\(\);/g) ?? []
+  ).length;
+  assert.equal(controllerCount, 3);
+  const signalCount = (source.match(/signal: controller\.signal,/g) ?? [])
+    .length;
+  assert.equal(signalCount, 3);
+  const timeoutMessageUsageCount = (
+    source.match(/isAbortError\(error\)\s*\? DIALOG_TIMEOUT_MESSAGE/g) ?? []
+  ).length;
+  assert.equal(timeoutMessageUsageCount, 3);
+  assert.equal((source.match(/clearTimeout\(timeout\);/g) ?? []).length, 3);
+});
+
+test("UI-008: security-dividends-tab.tsx's refresh-confirmation dialog submit (runRefresh) is bounded by an AbortController timeout with an in-dialog timeout message", async () => {
+  const source = await readFile(
+    new URL("../app/components/security-dividends-tab.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /const DIALOG_FETCH_TIMEOUT_MS = 15_000;/);
+  assert.match(
+    source,
+    /const DIALOG_TIMEOUT_MESSAGE = "The request timed out — try again\.";/,
+  );
+  const runRefreshStart = source.indexOf("async function runRefresh");
+  const runRefreshEnd = source.indexOf(
+    "\n  async function saveFrankingDefault",
+    runRefreshStart,
+  );
+  const runRefreshSource = source.slice(runRefreshStart, runRefreshEnd);
+  assert.match(runRefreshSource, /const controller = new AbortController\(\);/);
+  assert.match(runRefreshSource, /signal: controller\.signal/);
+  assert.match(
+    runRefreshSource,
+    /isAbortError\(error\)\s*\? DIALOG_TIMEOUT_MESSAGE/,
+  );
+  assert.match(runRefreshSource, /clearTimeout\(timeout\);/);
+  // saveFrankingDefault is an inline page action, not a modal <dialog>
+  // submit -- Escape/Cancel keyboard-trap concerns don't apply there, so it
+  // is intentionally out of this task's scope and unmodified.
 });

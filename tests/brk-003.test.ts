@@ -463,6 +463,42 @@ test("BRK-003 F8: a tokenUrl on a host that is not sharesight.com (or a subdomai
   );
 });
 
+// BRK-004 review: a leading/doubled/trailing dot produces an empty hostname
+// label (e.g. `.sharesight.com`). The string still ENDS WITH
+// `.sharesight.com`, so a bare `endsWith` check (F8's fix) wrongly accepted
+// it -- these must be rejected outright.
+test("BRK-004: a tokenUrl host with an empty label (leading/doubled/trailing dot) is rejected even though it ends with .sharesight.com", () => {
+  const rejectedUrls = [
+    "https://.sharesight.com/oauth2/token",
+    "https://api..sharesight.com/oauth2/token",
+    "https://sharesight.com./oauth2/token",
+  ];
+  for (const url of rejectedUrls) {
+    assert.throws(
+      () => validateSharesightTokenUrlShape(new URL(url)),
+      SharesightTokenUrlRejectedError,
+      url,
+    );
+    let fetchCalled = false;
+    assert.throws(
+      () =>
+        createSharesightTokenProvider({
+          clientId: FIXTURE_CLIENT_ID,
+          clientSecret: FIXTURE_CLIENT_SECRET,
+          tokenUrl: url,
+          fetcher: async () => {
+            fetchCalled = true;
+            return tokenFixtureResponse();
+          },
+          now: () => 0,
+        }),
+      SharesightTokenUrlRejectedError,
+      url,
+    );
+    assert.equal(fetchCalled, false, url);
+  }
+});
+
 // F9: canonicalize (lowercase + percent-decode) the path before EITHER
 // path-shape check reads it, so an uppercase or percent-encoded variant of
 // the data-API path can't evade the `/api/` rejection.

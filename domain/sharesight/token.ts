@@ -147,6 +147,11 @@ const SHARESIGHT_REGISTRABLE_DOMAIN = "sharesight.com";
 
 function isSharesightHost(hostname: string): boolean {
   const lower = hostname.toLowerCase();
+  // BRK-004 review: a leading/doubled/trailing dot produces an empty label
+  // (e.g. `.sharesight.com`, `api..sharesight.com`) whose string still ends
+  // with `.sharesight.com` and would otherwise slip past the suffix check
+  // below untouched. Reject any hostname containing an empty label outright.
+  if (lower.split(".").some((label) => label.length === 0)) return false;
   return (
     lower === SHARESIGHT_REGISTRABLE_DOMAIN ||
     lower.endsWith(`.${SHARESIGHT_REGISTRABLE_DOMAIN}`)
@@ -160,7 +165,16 @@ function isSharesightHost(hostname: string): boolean {
  * to the same place server-side. A malformed percent-escape (e.g. a
  * trailing lone `%`) makes `decodeURIComponent` throw; that must become a
  * typed rejection here, never an uncaught exception -- returns `null` on
- * decode failure so the caller can reject cleanly. */
+ * decode failure so the caller can reject cleanly.
+ *
+ * BRK-004 review: decoding exactly ONCE (not to a fixed point / repeatedly)
+ * is deliberate, not an oversight -- it matches the server's own decoding
+ * depth for a single path segment. Decoding to a fixed point would
+ * over-reject a legitimate literal `%2F` in a path segment (which decodes
+ * once to `/` and would then wrongly look like an extra path separator on a
+ * second pass), and would let a DOUBLY-encoded payload (`%252F`) masquerade
+ * as this function's job to detect -- that class of attack is a
+ * transport-layer concern, not this shape check's. */
 function canonicalizePathname(pathname: string): string | null {
   let decoded: string;
   try {
