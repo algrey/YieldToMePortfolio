@@ -609,7 +609,7 @@ Status: DONE (2026-08-13); required BEFORE UI-006B/UI-006C ship their manual div
 
 ### DIV-005 — Transitive proximity chaining in dividend dedupe
 
-Status: DEFERRED (2026-08-13); narrow band, recorded from DIV-004 review — the code comment at `domain/dividends/history.ts` (standalone-collapse site) references this entry.
+Status: READY (promoted 2026-08-14 by owner instruction, ahead of Sharesight payout ingestion which will exercise exactly this band).
 
 - Problem: proximity collapse links facts pairwise to events, not transitively. An owner fact anchored to event E (within E's ±7-day window) does not collapse with an imported row that is within the owner fact's window but OUTSIDE E's (reviewer repro: event pay 03-20, owner manual 03-27, imported 03-31 → two rows, 240 counted vs 120 real). Pre-existing DIV-001 band behaviour (same shape existed manual-vs-manual); reachable only in the 1–7-day skew band between an event date and its owner fact's payment date.
 - Fix direction: cluster facts transitively (union-find over the proximity graph per security) before precedence resolution, or widen matching to compare against the anchored fact's own payment date, with determinism preserved.
@@ -644,7 +644,7 @@ Status: DONE (2026-08-14) in the hardening batch: shared 15s AbortController tim
 
 ### UI-009 — Timeout-retry honesty on non-idempotent dialog submits
 
-Status: DEFERRED (2026-08-14); from the hardening-batch review.
+Status: READY (promoted 2026-08-14 by owner instruction).
 
 - Problem: the shared timeout message ("The request timed out — try again.") invites a retry the client can't know is safe: the standalone manual dividend CREATE has no idempotency key, so a slow-but-successful save + retry produces two records and inflated income (mitigated today by the DIV-004 proximity warning and deletability; rename/FY-override/archive are version-guarded, portfolio create is unique-code-guarded).
 - Fix direction: (a) reword the timeout message on mutation submits to convey uncertainty ("the request may have gone through — check before retrying" style); (b) add an idempotency guard to manual dividend creates (client-generated key or a short-window natural-key dedupe at the repository).
@@ -655,6 +655,16 @@ Status: DEFERRED (2026-08-14); from the hardening-batch review.
 ### CGT-001 — Capital gains reporting (placeholder)
 
 Status: PROMOTED 2026-08-14 by owner instruction — split into CGT-001A/B below; retention-guarantee constraint remains standing.
+
+### CGT-002 — Capital loss carry-forward across financial years
+
+Status: READY (2026-08-14, owner instruction). Orchestrator rulings (BINDING, informational-not-tax-advice):
+
+- Chain from the EARLIEST disposal FY forward: each FY's unabsorbed net capital loss carries into the next FY as "losses brought forward", applied AFTER that FY's current-year losses, with the same ordering preference (against non-discountable gains first, then discountable, before the 50% discount) — the standard individual method.
+- History honesty: if `portfolios.history_complete_from` indicates ledger history may not reach the earliest disposal (or is null/later than the first disposal FY), the carried chain is flagged "may be incomplete — prior losses before <date> unknown" on every affected row and the whole-period net; never present a possibly-truncated chain as complete.
+- Screen: extend the existing gains table with carried columns (brought forward, applied this FY, carried out) and update the lifetime line to the TRUE whole-period net (replacing the "(sum of each year, standalone)" caveat with the carried semantics); per-FY standalone figures remain visible/derivable in the detail dialog so the old reading isn't lost; method labels updated; CALCULATIONS section extended with the chain rules and the incompleteness flag.
+- Domain: pure chained aggregation consuming the existing per-FY component outputs (no schema change; read-only); typed states preserved; decimal exactness with the established rounding conventions.
+- Tests: multi-FY chains (loss→gain→loss shapes), ordering fixtures where carry-in changes the answer vs standalone, incompleteness flag from history_complete_from, boundary FY with no prior data, decimal exactness, screen render assertions incl. the relabelled lifetime line and dialog fallback to standalone figures.
 
 - Objective: realized (and possibly unrealized) capital-gains reporting per FY, including AU CGT discount eligibility, built on existing ledger data.
 - Foundation already in place (verified 2026-08-13): `lot_allocations` stores per-sale matched quantity, allocated base basis, net proceeds, fees, tax, and `baseRealisedGainDecimal`; tax lots persist as `closed` with acquisition dates and original quantities; transactions are immutable. Realized gains are therefore derivable without new ledger machinery.
