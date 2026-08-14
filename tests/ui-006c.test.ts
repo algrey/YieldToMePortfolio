@@ -874,6 +874,7 @@ function row(overrides: Partial<DerivedDividendRow>): DerivedDividendRow {
     dominatedReceipt: null,
     dominatedImported: null,
     additionalReceiptsCount: 0,
+    additionalImportedCount: 0,
     ...overrides,
   };
 }

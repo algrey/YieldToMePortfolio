@@ -60,23 +60,26 @@
 //      `grossDecimal` are `null` and `amountUnknown` is `true` instead.
 // An owner manual record or receipt left unmatched after every event is
 // processed becomes its own standalone row (no `dividendEventId`) -- the
-// "covers securities/events the provider misses" case. DIV-004 cross-tier
-// rule: an imported row similarly left unmatched by any event is NOT
-// automatically its own standalone row -- it is first proximity-matched
-// (same window, same nearest-wins global assignment) directly against every
-// standalone owner-manual record and standalone/orphan receipt for the
-// security (there is no common event to anchor the comparison to in this
-// case), and collapses into whichever one it is nearest to within the
-// window (owner wins, imported value kept as `dominatedImported` on that
-// row). Only an imported row that matches neither an event nor a standalone
-// owner fact becomes its own standalone `source: "imported"` row. A receipt
-// that no ACTIVE event's lineage claims at all (its event is cancelled,
-// missing an ex-date, or otherwise never reached `activeEvents`) resurfaces
-// the same way, as its own standalone row (`receipt:<id>`) built from the
-// receipt's own dates -- this case silently drops owner/imported data
-// otherwise (the matching cancelled/null-ex-date follow-up). A receipt
-// dominated by a non-excluded override remains intentionally not shown (the
-// owner's edit supersedes it).
+// "covers securities/events the provider misses" case, UNLESS it transitively
+// chains into another fact or event-winning fact (DIV-005, below). An
+// imported row similarly left unmatched by any event does NOT automatically
+// become its own standalone row: DIV-005 (2026-08-14, extending DIV-004's
+// single-hop version of this rule) first proximity-chains it -- see the
+// "DIV-005" comments further down for the two-round union-find/nearest-wins
+// design -- against every event whose winning fact is itself close enough
+// (Round A, single hop, event-anchored) and, failing that, transitively
+// against every standalone owner-manual record and orphan receipt for the
+// security, INCLUDING chains longer than one hop (Round B, eventless
+// clusters only; there is no common event to anchor the comparison to in
+// this case). Only an imported row that matches neither an event, a chain
+// anchor, nor any eventless chain becomes its own standalone `source:
+// "imported"` row. A receipt that no ACTIVE event's lineage claims at all
+// (its event is cancelled, missing an ex-date, or otherwise never reached
+// `activeEvents`) resurfaces the same way, as its own standalone row
+// (`receipt:<id>`) built from the receipt's own dates -- this case silently
+// drops owner/imported data otherwise (the matching cancelled/null-ex-date
+// follow-up). A receipt dominated by a non-excluded override remains
+// intentionally not shown (the owner's edit supersedes it).
 //
 // EXCLUDED events (review round 3, fixing a blocking double-count the round-2
 // B3 fix introduced): a manual record and a receipt BOTH attached to the
@@ -217,6 +220,8 @@ export type DerivedDividendRow = {
   dominatedImported: DominatedImported | null;
   /** Receipts attached to this event's lineage beyond the single one used (as the row itself, or as `dominatedReceipt`) -- not silently discarded, counted here. */
   additionalReceiptsCount: number;
+  /** DIV-005: imported rows transitively chained into this row (Round B, eventless clusters only) beyond the single one shown via `dominatedImported` -- not silently discarded, counted here, mirroring `additionalReceiptsCount`'s convention. Always 0 for event-anchored rows (Round A only ever attaches one). */
+  additionalImportedCount: number;
 };
 
 export type DeriveDividendHistoryInput = {
@@ -637,6 +642,79 @@ export function deriveDividendHistoryForSecurity(
     return null;
   }
 
+  // DIV-005: transitive proximity chaining. The precedence resolution above
+  // (`resolveOwnerFact`) only ever compares a fact against an EVENT's own
+  // reference date -- an owner-manual/receipt fact anchored to event E (tier
+  // 2/3, within E's own window) and an imported row within THAT FACT's own
+  // window but outside E's window never collapsed together (reviewer repro,
+  // TASKS.md DIV-005: event pay 03-20, owner manual 03-27 (7 days, attaches
+  // to E), imported 03-31 (4 days from the manual, 11 from E) -- produced two
+  // rows, 240 counted vs 120 real). Fixed in two rounds below (ROUND A here;
+  // ROUND B, the eventless multi-hop case, is below the main per-event
+  // loop):
+  //
+  // ROUND A (single-hop, event-anchored): every event whose row is won by a
+  // manual or receipt fact (main-loop and excluded-resurfacing alike, but
+  // NEVER an event fully suppressed by a winning non-excluded override --
+  // that fact's data is intentionally not shown at all per the existing
+  // "override wins outright" tier-matrix test, so there is nothing to chain
+  // from) becomes a "chain anchor" dated at the WINNING fact's own payment
+  // date instead of the event's. Leftover imported rows (not already
+  // directly matched to any event) compete for these anchors using the exact
+  // same proven global nearest-wins, one-to-one algorithm as the standalone
+  // pass below (`matchStandaloneOwnerFactsToImported`). Reusing a 1-1
+  // algorithm here is what PREVENTS the multi-event over-merge case required
+  // by DIV-005: two events can never be pulled into one row because a given
+  // imported row can only ever win ONE anchor, never bridge two, and anchors
+  // never compete with or connect to each other.
+  //
+  // Review round 1 BLOCKING fix (B1): an event that ALREADY has its own
+  // DIRECT imported match (`importedEventMatches`, tier 4, whether it won the
+  // row or was itself dominated by the winning manual/receipt) must NOT also
+  // become a chain anchor. `chainAnchorDominatedImported` is a 1-1 map keyed
+  // by event id -- a SECOND, more-distant imported row chaining onto the same
+  // event would be silently swallowed by the `dominatedImported === null`
+  // guard at the row-construction site below (the slot is already taken by
+  // the direct match) rather than falling through to Round B/standalone,
+  // deleting real money with no disclosure (reviewer repro: event with a
+  // direct import AND a manual-bridged second import -- HEAD's 2 rows/$250
+  // silently became 1 row/$120, the second import's $130 vanishing
+  // entirely). Excluding such events from the anchor pool restores the
+  // correct HEAD behaviour for the leftover imported row: it falls through
+  // to Round B exactly as it did before this event ever had anything to
+  // chain from.
+  const chainAnchors: { key: string; referenceDate: string }[] = [];
+  for (const event of activeEvents) {
+    const override = overrideByEvent.get(event.id) ?? null;
+    if (override && !override.exclude) continue; // fully suppressed by a winning override -- nothing to chain from
+    if (importedEventMatches.get(event.id)) continue; // already has a direct imported match -- its dominatedImported slot is taken; nothing more to chain onto it
+    const anchorOwnerFact = resolveOwnerFact(
+      manualMatches.get(event.id) ?? null,
+      resolveReceipts(event.id),
+      importedEventMatches.get(event.id) ?? null,
+    );
+    if (
+      anchorOwnerFact &&
+      (anchorOwnerFact.source === "manual" ||
+        anchorOwnerFact.source === "receipt")
+    ) {
+      chainAnchors.push({
+        key: event.id,
+        referenceDate: anchorOwnerFact.paymentDate,
+      });
+    }
+  }
+  const importedNotDirectlyMatched = importedRecords.filter(
+    (record) => !consumedImportedEventIds.has(record.id),
+  );
+  const chainAnchorDominatedImported = matchStandaloneOwnerFactsToImported(
+    chainAnchors,
+    importedNotDirectlyMatched,
+  );
+  const consumedByChainAnchors = new Set(
+    [...chainAnchorDominatedImported.values()].map((record) => record.id),
+  );
+
   const rows: DerivedDividendRow[] = [];
   for (const event of activeEvents) {
     const override = overrideByEvent.get(event.id) ?? null;
@@ -684,6 +762,16 @@ export function deriveDividendHistoryForSecurity(
       dominatedReceipt = ownerFact.dominatedReceipt;
       dominatedImported = ownerFact.dominatedImported;
       additionalReceiptsCount = ownerFact.additionalReceiptsCount;
+      // DIV-005 Round A: an imported row that missed this event's own
+      // window but is within window of the WINNING manual/receipt fact's
+      // own date chains in here instead of surfacing as a second row.
+      if (
+        dominatedImported === null &&
+        (ownerFact.source === "manual" || ownerFact.source === "receipt")
+      ) {
+        const chained = chainAnchorDominatedImported.get(event.id);
+        if (chained) dominatedImported = toDominatedImported(chained);
+      }
     } else {
       source = "auto";
       sharesDecimal = deriveSharesHeldAtDate(input.transactions, event.exDate!);
@@ -727,73 +815,192 @@ export function deriveDividendHistoryForSecurity(
       dominatedReceipt,
       dominatedImported,
       additionalReceiptsCount,
+      additionalImportedCount: 0, // Round A only ever attaches one imported row per event
     });
   }
 
-  // DIV-004: standalone cross-tier dedupe. `unconsumedOwnerManual` and
-  // `resurfacedReceipts` are the owner-manual records and receipts that did
-  // NOT attach to any event above (they become their own standalone rows
-  // below); `unconsumedImported` is the imported rows that likewise did not
-  // attach to any event. Before any of them become standalone rows, match
-  // the imported leftovers directly against the owner-manual/receipt
-  // leftovers by payment-date proximity (see
-  // `matchStandaloneOwnerFactsToImported`'s doc comment for why this needs
-  // its own direct match rather than reusing the event-anchored one) so an
-  // imported row that duplicates a standalone owner fact collapses into it
-  // instead of producing a second, duplicate standalone row.
+  // DIV-005 ROUND B: eventless transitive collapse. `unconsumedOwnerManual`
+  // and `resurfacedReceipts` are the owner-manual records and receipts that
+  // did NOT attach to any event above; `unconsumedImportedAfterChaining` is
+  // the imported rows that matched neither an event directly (per-event loop
+  // above) nor a chain anchor (Round A above). These three pools are
+  // clustered by union-find over proximity edges -- manual<->imported and
+  // receipt<->imported, each tested against the OTHER fact's own payment
+  // date, within `PROXIMITY_WINDOW_DAYS` -- so a chain of facts spanning MORE
+  // than one window end-to-end (e.g. manual -> imported -> receipt ->
+  // imported, each adjacent pair within window but the two ends far apart)
+  // still collapses to exactly ONE row: the honest reading of "the same
+  // dividend recorded multiple ways" (TASKS.md DIV-005 "long chains"
+  // direction -- an eventless chain is never capped, it always collapses
+  // fully). Deliberately excluded: imported<->imported edges (cross-batch
+  // import dedupe is IMP-004B's job at ingestion time, not this module's --
+  // see the existing "does NOT warn -- that is cross-batch dedupe's job"
+  // preview-warning boundary) and manual<->receipt edges (no pairing ever
+  // compared those two directly; they still collapse together when bridged
+  // by a shared imported record, exactly like the base repro).
   //
-  // KNOWN LIMITATION (reviewer finding, review round 1, follow-up -- tracked
-  // in TASKS.md, not fixed here): this pool only ever contains OWNER FACTS
-  // THAT ARE THEMSELVES UNCONSUMED (i.e. not already event-anchored). A
-  // transitive case falls through both this pass and the per-event pass: an
-  // event E, an owner-manual/receipt B within `PROXIMITY_WINDOW_DAYS` of E
-  // (so B attaches to E's row, tier 2/3, and is REMOVED from this standalone
-  // pool), and an imported row C within `PROXIMITY_WINDOW_DAYS` of B but
-  // OUTSIDE that window of E itself. C is compared against E (event-anchored
-  // matching) and against every UNCONSUMED owner fact (this pass) -- never
-  // against B directly, since B is no longer in either pool once it attaches
-  // to E. C therefore either matches a different event or surfaces as its
-  // own standalone `imported` row, producing two rows for what may be one
-  // real dividend. This is a narrow proximity-chaining gap already latent in
-  // DIV-001's pre-existing manual/receipt matching (an owner-manual record
-  // and a receipt that are each independently within the window of the same
-  // event but more than `PROXIMITY_WINDOW_DAYS` apart from EACH OTHER
-  // already collapse via the event, not a direct A-to-B distance check);
-  // DIV-004 inherits the same band behaviour for the imported tier rather
-  // than introducing a new, more permissive transitive-matching algorithm
-  // for imported records only.
+  // Since chain anchors (Round A) are never members of this pool, an
+  // eventless cluster can, by construction, never contain more than one
+  // event's evidence -- there is nothing here for it to over-merge into.
+  //
+  // Determinism: cluster membership depends only on the (order-independent)
+  // pairwise distance test between every candidate pair, never on input
+  // array order -- union-find always converges on the lexicographically
+  // smallest node key as a cluster's root regardless of union order.
+  //
+  // Review round 1 BLOCKING fix (B2): a cluster can contain MORE THAN ONE
+  // owner-typed fact of the SAME tier (two-plus manuals, or two-plus orphan
+  // receipts) purely because each is independently within window of a
+  // shared imported bridge -- e.g. manual A and manual B, each within window
+  // of one imported record C, but A and B more than `PROXIMITY_WINDOW_DAYS`
+  // apart from EACH OTHER. The original version picked the LATEST of the
+  // two as an outright winner and silently dropped the other with zero
+  // disclosure (reviewer repro: two independent manual records bridged by
+  // one imported row -- correct output 2 rows/$110 became 1 row/$60). A
+  // cluster with at most one manual and at most one receipt (any number of
+  // imported records) still collapses to exactly ONE row via the
+  // highest-precedence tier present (manual > receipt > imported, matching
+  // the module's established precedence) with extra same-tier imported
+  // records disclosed via `additionalImportedCount` (mirroring the existing
+  // multi-receipt "latest wins, the rest disclosed via a count"
+  // convention). A cluster with two-plus manuals OR two-plus receipts
+  // instead falls back to a LOCAL DIV-004 1-1 nearest-wins assignment
+  // scoped to that cluster (`pushEventlessRow` called once per owner fact
+  // below): every owner fact keeps its own row, and only the cluster's
+  // imported records are distributed among them by proximity -- two owner
+  // facts are never merged into one row unless they are within window of
+  // EACH OTHER (which no pairing in this module ever tests for manual<->
+  // manual or receipt<->receipt, so that case cannot arise here at all).
   const unconsumedOwnerManual = ownerManualRecords.filter(
     (record) => !consumedOwnerManualIds.has(record.id),
   );
-  const unconsumedImported = importedRecords.filter(
-    (record) => !consumedImportedEventIds.has(record.id),
-  );
-  const standaloneOwnerFactCandidates: {
-    key: string;
-    referenceDate: string;
-  }[] = [
-    ...unconsumedOwnerManual.map((record) => ({
-      key: `manual:${record.id}`,
-      referenceDate: record.paymentDate,
-    })),
-    ...resurfacedReceipts.map((receipt) => ({
-      key: `receipt:${receipt.id}`,
-      referenceDate: receipt.paymentDate,
-    })),
-  ];
-  const standaloneDominatedImported = matchStandaloneOwnerFactsToImported(
-    standaloneOwnerFactCandidates,
-    unconsumedImported,
-  );
-  const consumedStandaloneImportedIds = new Set(
-    [...standaloneDominatedImported.values()].map((record) => record.id),
+  const unconsumedImportedAfterChaining = importedNotDirectlyMatched.filter(
+    (record) => !consumedByChainAnchors.has(record.id),
   );
 
+  const chainParent = new Map<string, string>();
+  function chainFind(key: string): string {
+    if (!chainParent.has(key)) chainParent.set(key, key);
+    let root = key;
+    while (chainParent.get(root) !== root) root = chainParent.get(root)!;
+    let cursor = key;
+    while (chainParent.get(cursor) !== root) {
+      const next = chainParent.get(cursor)!;
+      chainParent.set(cursor, root);
+      cursor = next;
+    }
+    return root;
+  }
+  function chainMerge(a: string, b: string): void {
+    const rootA = chainFind(a);
+    const rootB = chainFind(b);
+    if (rootA === rootB) return;
+    // Deterministic regardless of union order: the lexicographically
+    // smaller key always ends up as the eventual root of the merged
+    // component (provable by induction over any sequence of merges).
+    if (rootA < rootB) chainParent.set(rootB, rootA);
+    else chainParent.set(rootA, rootB);
+  }
+
+  const chainNodeKeys: string[] = [];
   for (const record of unconsumedOwnerManual) {
+    const key = `manual:${record.id}`;
+    chainFind(key);
+    chainNodeKeys.push(key);
+  }
+  for (const receiptFact of resurfacedReceipts) {
+    const key = `receipt:${receiptFact.id}`;
+    chainFind(key);
+    chainNodeKeys.push(key);
+  }
+  for (const record of unconsumedImportedAfterChaining) {
+    const key = `imported:${record.id}`;
+    chainFind(key);
+    chainNodeKeys.push(key);
+  }
+  for (const manualRecord of unconsumedOwnerManual) {
+    for (const importedRecord of unconsumedImportedAfterChaining) {
+      if (
+        Math.abs(
+          daysBetween(manualRecord.paymentDate, importedRecord.paymentDate),
+        ) <= PROXIMITY_WINDOW_DAYS
+      ) {
+        chainMerge(
+          `manual:${manualRecord.id}`,
+          `imported:${importedRecord.id}`,
+        );
+      }
+    }
+  }
+  for (const receiptFact of resurfacedReceipts) {
+    for (const importedRecord of unconsumedImportedAfterChaining) {
+      if (
+        Math.abs(
+          daysBetween(receiptFact.paymentDate, importedRecord.paymentDate),
+        ) <= PROXIMITY_WINDOW_DAYS
+      ) {
+        chainMerge(
+          `receipt:${receiptFact.id}`,
+          `imported:${importedRecord.id}`,
+        );
+      }
+    }
+  }
+
+  const chainClusters = new Map<string, string[]>();
+  for (const key of chainNodeKeys) {
+    const root = chainFind(key);
+    const members = chainClusters.get(root) ?? [];
+    members.push(key);
+    chainClusters.set(root, members);
+  }
+
+  const unconsumedManualById = new Map(
+    unconsumedOwnerManual.map((record) => [record.id, record] as const),
+  );
+  const resurfacedReceiptById = new Map(
+    resurfacedReceipts.map(
+      (receiptFact) => [receiptFact.id, receiptFact] as const,
+    ),
+  );
+  const unconsumedImportedById = new Map(
+    unconsumedImportedAfterChaining.map(
+      (record) => [record.id, record] as const,
+    ),
+  );
+
+  function latestWins<T extends { paymentDate: string; id: string }>(
+    items: readonly T[],
+  ): { winner: T; additionalCount: number } {
+    const sorted = [...items].sort(
+      (left, right) =>
+        right.paymentDate.localeCompare(left.paymentDate) ||
+        right.id.localeCompare(left.id),
+    );
+    return { winner: sorted[0]!, additionalCount: sorted.length - 1 };
+  }
+
+  function pushEventlessRow(fields: {
+    source: DerivedDividendRowSource;
+    rowId: string;
+    dividendEventId?: string | null;
+    kind?: "cash" | "special" | "capital_return" | "manual";
+    currencyCode?: string;
+    exDate?: string | null;
+    providerGrossPerShareDecimal?: string | null;
+    sharesDecimal: string;
+    dividendPerShareDecimal: string;
+    overrideFrankingPerShare: string | null;
+    paymentDate: string;
+    dominatedReceipt?: DominatedReceipt | null;
+    dominatedImported?: DominatedImported | null;
+    additionalReceiptsCount?: number;
+    additionalImportedCount?: number;
+  }): void {
     const franking = resolveFrankingPerShare(
-      record.frankingCreditPerShareDecimal,
+      fields.overrideFrankingPerShare,
       input.defaultFrankingPercentDecimal,
-      record.dividendPerShareDecimal,
+      fields.dividendPerShareDecimal,
     );
     const {
       cashDecimal,
@@ -801,142 +1008,203 @@ export function deriveDividendHistoryForSecurity(
       grossDecimal,
       grossIncludesFranking,
     } = computeCashGross(
-      record.sharesDecimal,
-      record.dividendPerShareDecimal,
+      fields.sharesDecimal,
+      fields.dividendPerShareDecimal,
       franking,
     );
-    const dominatingImport = standaloneDominatedImported.get(
-      `manual:${record.id}`,
-    );
     rows.push({
-      id: `manual:${record.id}`,
+      id: fields.rowId,
       portfolioSecurityId: input.portfolioSecurityId,
-      dividendEventId: null,
-      kind: "manual",
-      currencyCode: input.securityCurrencyCode,
-      exDate: null,
-      paymentDate: record.paymentDate,
-      sharesDecimal: record.sharesDecimal,
-      dividendPerShareDecimal: record.dividendPerShareDecimal,
+      dividendEventId: fields.dividendEventId ?? null,
+      kind: fields.kind ?? "manual",
+      currencyCode: fields.currencyCode ?? input.securityCurrencyCode,
+      exDate: fields.exDate ?? null,
+      paymentDate: fields.paymentDate,
+      sharesDecimal: fields.sharesDecimal,
+      dividendPerShareDecimal: fields.dividendPerShareDecimal,
       cashDecimal,
       franking,
       frankingTotalDecimal,
       grossDecimal,
       grossIncludesFranking,
-      // A manual record is the owner asserting a dividend was actually
-      // paid -- there is no "declared but not yet paid" manual concept.
+      // Owner-typed/receipt/imported evidence -- always treated as paid,
+      // same convention as every other owner-fact row in this module.
       status: "ex_date_passed",
-      source: "manual",
+      source: fields.source,
       excluded: false,
       amountUnknown: false,
-      providerGrossPerShareDecimal: null,
-      dominatedReceipt: null,
-      dominatedImported: dominatingImport
-        ? toDominatedImported(dominatingImport)
-        : null,
-      additionalReceiptsCount: 0,
+      providerGrossPerShareDecimal: fields.providerGrossPerShareDecimal ?? null,
+      dominatedReceipt: fields.dominatedReceipt ?? null,
+      dominatedImported: fields.dominatedImported ?? null,
+      additionalReceiptsCount: fields.additionalReceiptsCount ?? 0,
+      additionalImportedCount: fields.additionalImportedCount ?? 0,
     });
   }
 
-  for (const receipt of resurfacedReceipts) {
-    const rawEvent = eventById.get(receipt.dividendEventId) ?? null;
-    const franking = resolveFrankingPerShare(
-      receipt.frankingPerShareDecimal,
-      input.defaultFrankingPercentDecimal,
-      receipt.dividendPerShareDecimal,
-    );
-    const {
-      cashDecimal,
-      frankingTotalDecimal,
-      grossDecimal,
-      grossIncludesFranking,
-    } = computeCashGross(
-      receipt.sharesDecimal,
-      receipt.dividendPerShareDecimal,
-      franking,
-    );
-    const dominatingImport = standaloneDominatedImported.get(
-      `receipt:${receipt.id}`,
-    );
-    rows.push({
-      id: `receipt:${receipt.id}`,
-      portfolioSecurityId: input.portfolioSecurityId,
-      dividendEventId: receipt.dividendEventId,
-      kind: rawEvent?.kind ?? "cash",
-      currencyCode: receipt.currencyCode,
-      exDate: rawEvent?.exDate ?? null,
-      paymentDate: receipt.paymentDate,
-      sharesDecimal: receipt.sharesDecimal,
-      dividendPerShareDecimal: receipt.dividendPerShareDecimal,
-      cashDecimal,
-      franking,
-      frankingTotalDecimal,
-      grossDecimal,
-      grossIncludesFranking,
-      // A receipt is actual receipt evidence -- always treated as paid.
-      status: "ex_date_passed",
-      source: "receipt",
-      excluded: false,
-      amountUnknown: false,
-      providerGrossPerShareDecimal: rawEvent?.grossPerShareDecimal ?? null,
-      dominatedReceipt: null,
-      dominatedImported: dominatingImport
-        ? toDominatedImported(dominatingImport)
-        : null,
-      additionalReceiptsCount: 0,
-    });
-  }
+  // Sorted cluster-root order gives a stable, order-independent row
+  // emission SEQUENCE (cluster membership itself is already
+  // order-independent per the comment above; this only fixes the array
+  // order of the resulting rows for reproducible output/tests).
+  for (const root of [...chainClusters.keys()].sort()) {
+    const members = chainClusters.get(root)!;
+    const clusterManuals: DividendManualRecordFact[] = [];
+    const clusterReceipts: DividendReceiptFact[] = [];
+    const clusterImported: DividendManualRecordFact[] = [];
+    for (const key of members) {
+      const separatorIndex = key.indexOf(":");
+      const type = key.slice(0, separatorIndex);
+      const id = key.slice(separatorIndex + 1);
+      if (type === "manual") {
+        clusterManuals.push(unconsumedManualById.get(id)!);
+      } else if (type === "receipt") {
+        clusterReceipts.push(resurfacedReceiptById.get(id)!);
+      } else {
+        clusterImported.push(unconsumedImportedById.get(id)!);
+      }
+    }
 
-  // DIV-004: an imported row survives to here only when it matched neither
-  // an event (per-event loop above) nor a standalone owner-manual
-  // record/receipt (the cross-tier match just above) -- i.e. it is
-  // genuinely the sole evidence for its real-world dividend. It becomes its
-  // own standalone row, mirroring the owner-manual standalone loop above
-  // but labelled `source: "imported"` so the distinction stays visible to
-  // consumers (UI-006C's wireframe vocabulary: auto/edited/manual/imported).
-  for (const record of unconsumedImported) {
-    if (consumedStandaloneImportedIds.has(record.id)) continue;
-    const franking = resolveFrankingPerShare(
-      record.frankingCreditPerShareDecimal,
-      input.defaultFrankingPercentDecimal,
-      record.dividendPerShareDecimal,
-    );
-    const {
-      cashDecimal,
-      frankingTotalDecimal,
-      grossDecimal,
-      grossIncludesFranking,
-    } = computeCashGross(
-      record.sharesDecimal,
-      record.dividendPerShareDecimal,
-      franking,
-    );
-    rows.push({
-      id: `imported:${record.id}`,
-      portfolioSecurityId: input.portfolioSecurityId,
-      dividendEventId: null,
-      kind: "manual",
-      currencyCode: input.securityCurrencyCode,
-      exDate: null,
-      paymentDate: record.paymentDate,
-      sharesDecimal: record.sharesDecimal,
-      dividendPerShareDecimal: record.dividendPerShareDecimal,
-      cashDecimal,
-      franking,
-      frankingTotalDecimal,
-      grossDecimal,
-      grossIncludesFranking,
-      // An imported row came from an actual broker CSV row -- treated as
-      // paid, same convention as a standalone manual record.
-      status: "ex_date_passed",
-      source: "imported",
-      excluded: false,
-      amountUnknown: false,
-      providerGrossPerShareDecimal: null,
-      dominatedReceipt: null,
-      dominatedImported: null,
-      additionalReceiptsCount: 0,
-    });
+    if (clusterManuals.length > 1 || clusterReceipts.length > 1) {
+      // Review round 1 BLOCKING fix (B2): more than one SAME-TIER owner-typed
+      // fact (two-plus manuals, or two-plus orphan receipts) ended up in one
+      // cluster only because each is independently within window of a
+      // shared imported bridge -- they are not within window of EACH OTHER.
+      // Collapsing them into one row (the original `latestWins`-picks-one
+      // approach) silently erased the losing owner fact with zero disclosure
+      // (reviewer repro: two independent manual records bridged by one
+      // imported row -- HEAD's 2 rows/$110 became 1 row/$60). Fall back to
+      // the DIV-004 1-1 nearest-wins assignment SCOPED TO THIS CLUSTER:
+      // every owner fact (manual or receipt) keeps its own row; only the
+      // cluster's imported records are distributed among them by proximity,
+      // never merging two owner facts together.
+      const partitionCandidates: { key: string; referenceDate: string }[] = [
+        ...clusterManuals.map((record) => ({
+          key: `manual:${record.id}`,
+          referenceDate: record.paymentDate,
+        })),
+        ...clusterReceipts.map((receiptFact) => ({
+          key: `receipt:${receiptFact.id}`,
+          referenceDate: receiptFact.paymentDate,
+        })),
+      ];
+      const partitionMatches = matchStandaloneOwnerFactsToImported(
+        partitionCandidates,
+        clusterImported,
+      );
+      const partitionConsumedImportedIds = new Set(
+        [...partitionMatches.values()].map((record) => record.id),
+      );
+
+      for (const record of clusterManuals) {
+        const matchedImported =
+          partitionMatches.get(`manual:${record.id}`) ?? null;
+        pushEventlessRow({
+          source: "manual",
+          rowId: `manual:${record.id}`,
+          sharesDecimal: record.sharesDecimal,
+          dividendPerShareDecimal: record.dividendPerShareDecimal,
+          overrideFrankingPerShare: record.frankingCreditPerShareDecimal,
+          paymentDate: record.paymentDate,
+          dominatedImported: matchedImported
+            ? toDominatedImported(matchedImported)
+            : null,
+        });
+      }
+      for (const receiptFact of clusterReceipts) {
+        const matchedImported =
+          partitionMatches.get(`receipt:${receiptFact.id}`) ?? null;
+        const rawEvent = eventById.get(receiptFact.dividendEventId) ?? null;
+        pushEventlessRow({
+          source: "receipt",
+          rowId: `receipt:${receiptFact.id}`,
+          dividendEventId: receiptFact.dividendEventId,
+          kind: rawEvent?.kind ?? "cash",
+          currencyCode: receiptFact.currencyCode,
+          exDate: rawEvent?.exDate ?? null,
+          providerGrossPerShareDecimal: rawEvent?.grossPerShareDecimal ?? null,
+          sharesDecimal: receiptFact.sharesDecimal,
+          dividendPerShareDecimal: receiptFact.dividendPerShareDecimal,
+          overrideFrankingPerShare: receiptFact.frankingPerShareDecimal,
+          paymentDate: receiptFact.paymentDate,
+          dominatedImported: matchedImported
+            ? toDominatedImported(matchedImported)
+            : null,
+        });
+      }
+      for (const record of clusterImported) {
+        if (partitionConsumedImportedIds.has(record.id)) continue;
+        pushEventlessRow({
+          source: "imported",
+          rowId: `imported:${record.id}`,
+          sharesDecimal: record.sharesDecimal,
+          dividendPerShareDecimal: record.dividendPerShareDecimal,
+          overrideFrankingPerShare: record.frankingCreditPerShareDecimal,
+          paymentDate: record.paymentDate,
+        });
+      }
+      continue;
+    }
+
+    // At most one manual and at most one receipt reach here -- the normal,
+    // established tier-precedence collapse (manual > receipt > imported).
+    const manualPick = clusterManuals.length
+      ? latestWins(clusterManuals)
+      : null;
+    const receiptPick = clusterReceipts.length
+      ? latestWins(clusterReceipts)
+      : null;
+    const importedPick = clusterImported.length
+      ? latestWins(clusterImported)
+      : null;
+
+    if (manualPick) {
+      pushEventlessRow({
+        source: "manual",
+        rowId: `manual:${manualPick.winner.id}`,
+        sharesDecimal: manualPick.winner.sharesDecimal,
+        dividendPerShareDecimal: manualPick.winner.dividendPerShareDecimal,
+        overrideFrankingPerShare:
+          manualPick.winner.frankingCreditPerShareDecimal,
+        paymentDate: manualPick.winner.paymentDate,
+        dominatedReceipt: receiptPick
+          ? toDominatedReceipt(receiptPick.winner)
+          : null,
+        dominatedImported: importedPick
+          ? toDominatedImported(importedPick.winner)
+          : null,
+        additionalImportedCount: importedPick?.additionalCount ?? 0,
+      });
+    } else if (receiptPick) {
+      const rawEvent =
+        eventById.get(receiptPick.winner.dividendEventId) ?? null;
+      pushEventlessRow({
+        source: "receipt",
+        rowId: `receipt:${receiptPick.winner.id}`,
+        dividendEventId: receiptPick.winner.dividendEventId,
+        kind: rawEvent?.kind ?? "cash",
+        currencyCode: receiptPick.winner.currencyCode,
+        exDate: rawEvent?.exDate ?? null,
+        providerGrossPerShareDecimal: rawEvent?.grossPerShareDecimal ?? null,
+        sharesDecimal: receiptPick.winner.sharesDecimal,
+        dividendPerShareDecimal: receiptPick.winner.dividendPerShareDecimal,
+        overrideFrankingPerShare: receiptPick.winner.frankingPerShareDecimal,
+        paymentDate: receiptPick.winner.paymentDate,
+        dominatedImported: importedPick
+          ? toDominatedImported(importedPick.winner)
+          : null,
+        additionalImportedCount: importedPick?.additionalCount ?? 0,
+      });
+    } else if (importedPick) {
+      pushEventlessRow({
+        source: "imported",
+        rowId: `imported:${importedPick.winner.id}`,
+        sharesDecimal: importedPick.winner.sharesDecimal,
+        dividendPerShareDecimal: importedPick.winner.dividendPerShareDecimal,
+        overrideFrankingPerShare:
+          importedPick.winner.frankingCreditPerShareDecimal,
+        paymentDate: importedPick.winner.paymentDate,
+        additionalImportedCount: importedPick.additionalCount,
+      });
+    }
   }
 
   // Excluded-event resurfacing (B3, fixed for the round-3 double-count;
@@ -955,6 +1223,17 @@ export function deriveDividendHistoryForSecurity(
       importedEventMatches.get(event.id) ?? null,
     );
     if (!ownerFact) continue;
+    // DIV-005 Round A: an imported row that missed this excluded event's own
+    // window but is within window of the WINNING manual/receipt fact's own
+    // date chains in here too, identically to the non-excluded main loop.
+    let dominatedImported = ownerFact.dominatedImported;
+    if (
+      dominatedImported === null &&
+      (ownerFact.source === "manual" || ownerFact.source === "receipt")
+    ) {
+      const chained = chainAnchorDominatedImported.get(event.id);
+      if (chained) dominatedImported = toDominatedImported(chained);
+    }
     const franking = resolveFrankingPerShare(
       ownerFact.overrideFrankingPerShare,
       input.defaultFrankingPercentDecimal,
@@ -999,8 +1278,9 @@ export function deriveDividendHistoryForSecurity(
       amountUnknown: false,
       providerGrossPerShareDecimal: event.grossPerShareDecimal,
       dominatedReceipt: ownerFact.dominatedReceipt,
-      dominatedImported: ownerFact.dominatedImported,
+      dominatedImported,
       additionalReceiptsCount: ownerFact.additionalReceiptsCount,
+      additionalImportedCount: 0, // Round A only ever attaches one imported row per event
     });
   }
 

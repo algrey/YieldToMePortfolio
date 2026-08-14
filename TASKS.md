@@ -609,11 +609,12 @@ Status: DONE (2026-08-13); required BEFORE UI-006B/UI-006C ship their manual div
 
 ### DIV-005 — Transitive proximity chaining in dividend dedupe
 
-Status: READY (promoted 2026-08-14 by owner instruction, ahead of Sharesight payout ingestion which will exercise exactly this band).
+Status: DONE (2026-08-14; promoted ahead of Sharesight payout ingestion which will exercise exactly this band).
 
 - Problem: proximity collapse links facts pairwise to events, not transitively. An owner fact anchored to event E (within E's ±7-day window) does not collapse with an imported row that is within the owner fact's window but OUTSIDE E's (reviewer repro: event pay 03-20, owner manual 03-27, imported 03-31 → two rows, 240 counted vs 120 real). Pre-existing DIV-001 band behaviour (same shape existed manual-vs-manual); reachable only in the 1–7-day skew band between an event date and its owner fact's payment date.
 - Fix direction: cluster facts transitively (union-find over the proximity graph per security) before precedence resolution, or widen matching to compare against the anchored fact's own payment date, with determinism preserved.
 - Dependencies: DIV-004. No urgency signal; promote if real imports surface double counts in this band.
+- Completion note (2026-08-14): two-round design in `domain/dividends/history.ts` — Round A: events won by manual/receipt facts become chain anchors dated at the winning fact's payment date (events with ANY direct imported match excluded from the anchor pool so nothing is matched-then-dropped; anchors never link to each other so two events provably cannot merge); Round B: eventless leftovers union-find over manual↔imported and receipt↔imported edges only (no imported↔imported — cross-batch dedupe owns identity; no direct manual↔receipt), unbounded chains collapse, clusters holding ≥2 same-tier owner facts PARTITION via cluster-scoped 1-1 nearest-wins instead of collapsing (owner assertions never merge through a single bridge), extras disclosed via additionalImportedCount. Review round 1 FAIL — two silent-money-deletion paths (chained import vanishing behind a direct match: $130 erased; two manuals merged by one bridge: $50 erased) — fixed per Orchestrator rulings preserving HEAD semantics; round 2 PASS with reviewer HEAD-diffed re-execution of every probe (mixed clusters stable across all 24 permutations; over-supplied clusters emit unmatched imports as own rows). The recorded band (event 03-20 + manual 03-27 + imported 03-31) now yields one row/$120. 12 tests in `tests/div-005.test.ts`; CALCULATIONS §11 updated; KNOWN LIMITATION comment replaced. `npm run check` exit 0 (788 pass, 10 gated skips). UI-010 records the disclosure-rendering gap.
 
 ### UI-006C — Per-security dividend history tab
 
@@ -656,6 +657,10 @@ Status: DONE (2026-08-14).
 ### CGT-001 — Capital gains reporting (placeholder)
 
 Status: PROMOTED 2026-08-14 by owner instruction — split into CGT-001A/B below; retention-guarantee constraint remains standing.
+
+### UI-010 — Render dominated-evidence counts in the dividends tab
+
+Status: DEFERRED (2026-08-14); from DIV-005 review — `additionalReceiptsCount`/`additionalImportedCount` (and dominated evidence generally) are type-level disclosures with no UI consumer, so the "disclosed, not silently dropped" guarantee is invisible to the owner. Surface them on UI-006C's rows/detail (e.g. "+1 additional receipt folded in") when non-zero.
 
 ### CGT-002 — Capital loss carry-forward across financial years
 
