@@ -13,7 +13,6 @@ export {
   type CapitalGainRowResult,
 } from "./disposal-rows.ts";
 export {
-  CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE,
   CGT_METHOD_LABELS,
   computeFyCapitalGainsTotals,
   type ComputeFyCapitalGainsTotalsResult,
@@ -23,3 +22,9 @@ export {
   computeLifetimeCapitalGainsTotal,
   type LifetimeCapitalGainsTotal,
 } from "./lifetime-totals.ts";
+export {
+  CGT_CARRY_FORWARD_NOTE,
+  computeCapitalGainsCarryChain,
+  type CapitalGainsCarryChainResult,
+  type FyCarriedCapitalGains,
+} from "./carry-forward.ts";

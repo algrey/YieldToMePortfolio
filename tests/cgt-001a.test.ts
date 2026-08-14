@@ -27,10 +27,8 @@ import {
   type CapitalGainAllocationFact,
   type CapitalGainDisposalRow,
 } from "../domain/gains/disposal-rows.ts";
-import {
-  CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE,
-  computeFyCapitalGainsTotals,
-} from "../domain/gains/fy-aggregation.ts";
+import { computeFyCapitalGainsTotals } from "../domain/gains/fy-aggregation.ts";
+import { CGT_CARRY_FORWARD_NOTE } from "../domain/gains/carry-forward.ts";
 
 // ===========================================================================
 // Part 1a: discount eligibility boundaries (domain/gains/eligibility.ts)
@@ -338,7 +336,7 @@ test("CGT-001A FY ordering: losses exceeding total gains fully absorb both bucke
   assert.equal(total.discountAppliedDecimal, "0");
   assert.equal(total.netCapitalGainEstimateDecimal, "0");
   assert.equal(total.unabsorbedLossDecimal, "350");
-  assert.ok(CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE.length > 0);
+  assert.ok(CGT_CARRY_FORWARD_NOTE.length > 0);
 });
 
 test("CGT-001A FY ordering: decimal exactness through sum/offset/discount with many fractional digits", () => {

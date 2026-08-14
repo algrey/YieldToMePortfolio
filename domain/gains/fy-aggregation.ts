@@ -26,11 +26,17 @@
 // absorbed (both "remaining after loss" amounts are 0, so the net capital
 // gain estimate is 0 -- there is no such thing as a negative taxable
 // capital gain) and the excess is surfaced separately as
-// `unabsorbedLossDecimal`. LOSS CARRY-FORWARD ACROSS FINANCIAL YEARS IS
-// OUT OF SCOPE for v1: `unabsorbedLossDecimal` is disclosed per FY,
-// standalone, with no prior/future-year application -- see
-// `CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE` below, which callers should surface
-// verbatim wherever this total is displayed.
+// `unabsorbedLossDecimal`. This module reports each FY STANDALONE, with no
+// prior/future-year application of its own -- as of CGT-002,
+// `domain/gains/carry-forward.ts`'s `computeCapitalGainsCarryChain` consumes
+// this FY-by-FY output to chain `unabsorbedLossDecimal` forward across
+// financial years. The two figures
+// serve different, both-honest purposes: THIS module's
+// `netCapitalGainEstimateDecimal`/`unabsorbedLossDecimal` are what this FY
+// looked like entirely on its own; the carry module's figures are the TRUE
+// carried totals once prior-year losses are applied. See
+// `CGT_CARRY_FORWARD_NOTE` (`carry-forward.ts`) for the standing disclosure
+// callers surface verbatim wherever a carried figure is displayed.
 //
 // Incomplete-basis disclosure: a row whose `basisStatus` is not
 // `'complete'`, OR whose `gainDecimal` is `null` for any reason (so its
@@ -59,17 +65,6 @@ import { CGT_INDIVIDUAL_DISCOUNT_RATE } from "./eligibility.ts";
 import type { CapitalGainDisposalRow } from "./disposal-rows.ts";
 
 const ZERO = fromInteger(0n);
-
-/**
- * Standing disclosure: loss carry-forward across financial years is out of
- * scope for v1 -- every FY total below is computed standalone. Exported so
- * callers (CGT-001B's screen) can surface the exact same wording rather
- * than paraphrasing it differently in more than one place.
- */
-export const CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE =
-  "Prior-year capital losses are not carried forward into this estimate. " +
-  "Each financial year is reported standalone; if you have unapplied " +
-  "losses from an earlier year, they are not reflected here.";
 
 /** Per-figure method labels, echoed alongside the totals so a consumer never has to infer the ordering rule from the numbers alone. */
 export const CGT_METHOD_LABELS = {
@@ -140,7 +135,7 @@ export type FyCapitalGainsTotal = {
   discountAppliedDecimal: string;
   /** Always >= 0 -- there is no negative taxable capital gain; see `unabsorbedLossDecimal` when losses exceed gains. */
   netCapitalGainEstimateDecimal: string;
-  /** > 0 only when this FY's losses exceed its gains; carry-forward is out of scope, see `CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE`. */
+  /** > 0 only when this FY's losses exceed its gains, standalone; see `domain/gains/carry-forward.ts` for the chained (carried-forward) figure this feeds into. */
   unabsorbedLossDecimal: string;
 };
 

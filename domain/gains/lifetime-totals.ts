@@ -3,13 +3,18 @@
 // Capital gains screen's lifetime summary section.
 //
 // This is a purely ADDITIVE disclosure across independently-derived FY
-// totals -- NOT a recomputation and explicitly NOT loss carry-forward. Each
-// FY's own `netCapitalGainEstimateDecimal`/`unabsorbedLossDecimal` stays
-// exactly what that FY already reported, standalone (see
-// `CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE`). Summing that sequence of
-// already-final per-FY figures for a lifetime total never implies an
-// unabsorbed loss from one FY offset a gain in another -- it is arithmetic
-// over the disclosed history, not a different tax outcome.
+// totals -- NOT a recomputation and NOT itself loss carry-forward. Each FY's
+// own `netCapitalGainEstimateDecimal`/`unabsorbedLossDecimal` stays exactly
+// what that FY already reported, standalone. Summing that sequence of
+// already-final per-FY figures never implies an unabsorbed loss from one FY
+// offset a gain in another -- it is arithmetic over the disclosed history,
+// not a different tax outcome. As of CGT-002, `domain/gains/carry-forward.ts`
+// (`computeCapitalGainsCarryChain`) is the module that DOES chain losses
+// forward into the TRUE whole-period net the Capital gains screen actually
+// labels "Lifetime net capital gain estimate" -- this module's own
+// `netCapitalGainEstimateDecimal` output remains the pre-carry, standalone
+// sum, still useful as a decomposition check but no longer what the screen's
+// headline lifetime line shows.
 //
 // Informational estimate only -- NOT tax advice. See
 // `docs/CALCULATIONS.md` section 14.

@@ -57,6 +57,16 @@ export type OwnedCapitalGainsHistory = {
   disposalCount: number;
   /** Sorted newest-FY-first, mirroring `app/owned-dividend-history.ts`. Empty when there have been no disposals at all. */
   fyTotals: FyCapitalGainsTotal[];
+  /**
+   * `portfolios.history_complete_from` verbatim (a `YYYY-MM-DD` local
+   * calendar date, or `null` when never declared) -- CGT-002's carry-forward
+   * chain (`domain/gains/carry-forward.ts`) needs this to decide whether the
+   * chain can be trusted back to the earliest disposal FY. Passed through
+   * raw rather than pre-computed here so the screen composes the same pure
+   * `computeCapitalGainsCarryChain` function it already composes
+   * `computeLifetimeCapitalGainsTotal` with.
+   */
+  historyCompleteFrom: string | null;
 };
 
 function field(row: Row, key: string): unknown {
@@ -124,11 +134,16 @@ export async function loadOwnedCapitalGains(
   now = new Date(),
 ): Promise<OwnedCapitalGainsHistory> {
   const portfolio = await client.get<Row>(
-    `SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
+    `SELECT base_currency_code, history_complete_from FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
     [portfolioId, userId],
   );
   if (!portfolio) throw new Error("not_owned");
   const baseCurrencyCode = requiredText(portfolio, "base_currency_code");
+  const historyCompleteFrom = optionalText(
+    portfolio,
+    "history_complete_from",
+    DATE,
+  );
 
   const settings = await createOwnedUserSettingsRepository(client).get(userId);
   if (!settings) throw new Error("missing_user_settings");
@@ -160,6 +175,7 @@ export async function loadOwnedCapitalGains(
       baseCurrencyCode,
       disposalCount: 0,
       fyTotals: [],
+      historyCompleteFrom,
     };
   }
 
@@ -287,5 +303,6 @@ export async function loadOwnedCapitalGains(
     baseCurrencyCode,
     disposalCount: rows.length,
     fyTotals: fyResult.totals,
+    historyCompleteFrom,
   };
 }

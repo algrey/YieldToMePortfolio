@@ -35,16 +35,30 @@
 // `x.xx5` boundary) rounds to the same even digit every other money
 // figure in this app already rounds to, silently and consistently -- not
 // a CGT-specific concern.
+//
+// CGT-002 (loss carry-forward): this component now ALSO computes
+// `computeCapitalGainsCarryChain` (pure, over already-loaded props, exactly
+// like `computeLifetimeCapitalGainsTotal` above it) and uses its output for
+// the FY table's "Net estimate" column and the lifetime summary's headline
+// net line -- both are now the TRUE, carried figure, not the standalone
+// per-FY total `domain/gains/fy-aggregation.ts` alone would produce. The
+// old standalone figures are NOT lost: they remain the FY table's
+// Discountable/Non-discountable/Losses columns (unaffected by carry-in, by
+// design -- see `fy-aggregation.ts`'s header) and are shown again,
+// explicitly labelled "standalone", in the per-FY detail dialog alongside
+// the new carried breakdown for that year.
 import Link from "next/link";
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { OwnedCapitalGainsHistory } from "../owned-capital-gains.ts";
 import {
-  CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE,
+  CGT_CARRY_FORWARD_NOTE,
   CGT_METHOD_LABELS,
+  computeCapitalGainsCarryChain,
   computeLifetimeCapitalGainsTotal,
   type CapitalGainDisposalRow,
   type CapitalGainEligibilityLabel,
   type FyCapitalGainsTotal,
+  type FyCarriedCapitalGains,
 } from "../../domain/gains/index.ts";
 import { formatIncomeMoney, formatQuantity } from "../income-format.ts";
 
@@ -158,11 +172,19 @@ export function FyDetailDialog({
   currencyCode,
   dialogRef,
   onClose,
+  carried,
 }: {
   fy: FyCapitalGainsTotal;
   currencyCode: string;
   dialogRef: RefObject<HTMLDialogElement | null>;
   onClose: () => void;
+  /**
+   * This FY's carried (chain-adjusted) totals from
+   * `computeCapitalGainsCarryChain` -- optional so the presentational
+   * component stays renderable from a bare `fy` fixture (as several
+   * existing tests already do); the real screen always supplies it.
+   */
+  carried?: FyCarriedCapitalGains | null;
 }) {
   const hasUnabsorbedLoss = fy.unabsorbedLossDecimal !== "0";
   return (
@@ -187,6 +209,7 @@ export function FyDetailDialog({
       <p className="eyebrow" id="gains-fy-title">
         {fy.label}
       </p>
+      <p className="eyebrow">Standalone (before prior-year carry-forward)</p>
       <dl className="detail-facts">
         <div>
           <dt>Discountable gains (gross)</dt>
@@ -233,7 +256,7 @@ export function FyDetailDialog({
           <dd>{formatIncomeMoney(currencyCode, fy.discountAppliedDecimal)}</dd>
         </div>
         <div>
-          <dt>Net capital gain estimate</dt>
+          <dt>Net capital gain estimate (standalone)</dt>
           <dd>
             {formatIncomeMoney(currencyCode, fy.netCapitalGainEstimateDecimal)}
           </dd>
@@ -247,10 +270,55 @@ export function FyDetailDialog({
 
       {hasUnabsorbedLoss ? (
         <p className="unavailable" role="status">
-          Unabsorbed loss this year:{" "}
-          {formatIncomeMoney(currencyCode, fy.unabsorbedLossDecimal)}.{" "}
-          {CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE}
+          Unabsorbed loss this year (standalone):{" "}
+          {formatIncomeMoney(currencyCode, fy.unabsorbedLossDecimal)}.
         </p>
+      ) : null}
+
+      <p className="eyebrow">Carried (with prior-year losses applied)</p>
+      <p>{CGT_CARRY_FORWARD_NOTE}</p>
+      {carried ? (
+        <>
+          <dl className="detail-facts">
+            <div>
+              <dt>Brought forward</dt>
+              <dd>
+                {formatIncomeMoney(currencyCode, carried.carryInLossDecimal)}
+              </dd>
+            </div>
+            <div>
+              <dt>Applied this FY</dt>
+              <dd>
+                {formatIncomeMoney(currencyCode, carried.carryInAppliedDecimal)}
+              </dd>
+            </div>
+            <div>
+              <dt>Net capital gain estimate (carried, true)</dt>
+              <dd>
+                {formatIncomeMoney(
+                  currencyCode,
+                  carried.netCapitalGainEstimateDecimal,
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>Carried out to next FY</dt>
+              <dd>
+                {formatIncomeMoney(currencyCode, carried.carryOutLossDecimal)}
+              </dd>
+            </div>
+          </dl>
+          {carried.carriedFiguresPartial ? (
+            <p className="unavailable" role="status">
+              These carried figures may be understated or overstated: either
+              this portfolio&apos;s declared history-completeness date does not
+              reach back far enough (see the disclosure above the lifetime
+              summary, when shown), or an earlier financial year in this chain
+              excluded incomplete-cost-basis allocations (see that year&apos;s
+              coverage disclosure).
+            </p>
+          ) : null}
+        </>
       ) : null}
 
       {fy.partialCoverage ? (
@@ -401,7 +469,24 @@ export function CapitalGainsScreen({
   }
 
   const lifetime = computeLifetimeCapitalGainsTotal(history.fyTotals);
-  const hasLifetimeUnabsorbedLoss = lifetime.totalUnabsorbedLossDecimal !== "0";
+
+  // CGT-002: the carry-forward chain, pure over already-loaded props --
+  // see this file's header comment. `carriedByYear` joins each FY row back
+  // onto its carried totals; `history.fyTotals` and `carryChain.perFy` are
+  // guaranteed to be the same set of FYs in the same order (both are
+  // derived from the same `history.fyTotals` input), so every lookup below
+  // is expected to hit.
+  const carryChain = computeCapitalGainsCarryChain(
+    history.fyTotals,
+    history.historyCompleteFrom,
+  );
+  const carriedByYear = new Map(
+    carryChain.perFy.map((entry) => [entry.endingYear, entry]),
+  );
+  const selectedCarried = selectedFy
+    ? (carriedByYear.get(selectedFy.endingYear) ?? null)
+    : null;
+  const hasFinalCarryOut = carryChain.finalCarryOutLossDecimal !== "0";
 
   return (
     <main className="income-screen">
@@ -410,7 +495,12 @@ export function CapitalGainsScreen({
 
       <div className="income-fy-table-wrap">
         <table className="income-fy-table">
-          <caption>Realised capital gains by financial year</caption>
+          <caption>
+            Realised capital gains by financial year -- Net estimate below is
+            the TRUE, carried figure (that year&apos;s own losses, then any loss
+            carried in from an earlier year, before the 50% discount);
+            standalone per-year figures are in each row&apos;s detail view.
+          </caption>
           <thead>
             <tr>
               <th scope="col">Year</th>
@@ -428,11 +518,22 @@ export function CapitalGainsScreen({
               </th>
               <th scope="col">Method</th>
               <th scope="col">Coverage</th>
+              <th scope="col" className="numeric">
+                Brought forward
+              </th>
+              <th scope="col" className="numeric">
+                Applied this FY
+              </th>
+              <th scope="col" className="numeric">
+                Carried out
+              </th>
             </tr>
           </thead>
           <tbody>
             {history.fyTotals.map((fy) => {
               const fyHasUnabsorbedLoss = fy.unabsorbedLossDecimal !== "0";
+              const carried = carriedByYear.get(fy.endingYear) ?? null;
+              const tainted = carried?.carriedFiguresPartial ?? false;
               return (
                 <tr key={fy.endingYear}>
                   <th scope="row">
@@ -473,7 +574,7 @@ export function CapitalGainsScreen({
                             history.baseCurrencyCode,
                             fy.unabsorbedLossDecimal,
                           )}{" "}
-                          unabsorbed
+                          unabsorbed (standalone)
                         </span>
                       </>
                     ) : null}
@@ -481,12 +582,14 @@ export function CapitalGainsScreen({
                   <td className="numeric">
                     {formatIncomeMoney(
                       history.baseCurrencyCode,
-                      fy.netCapitalGainEstimateDecimal,
+                      carried?.netCapitalGainEstimateDecimal ??
+                        fy.netCapitalGainEstimateDecimal,
                     )}
+                    {tainted ? <span className="unavailable"> *</span> : null}
                   </td>
                   <td>
                     <span className="income-source">
-                      losses first, then 50% discount
+                      current-year losses, then carry-in, then 50% discount
                     </span>
                   </td>
                   <td>
@@ -498,6 +601,27 @@ export function CapitalGainsScreen({
                       "Full"
                     )}
                   </td>
+                  <td className="numeric">
+                    {formatIncomeMoney(
+                      history.baseCurrencyCode,
+                      carried?.carryInLossDecimal ?? "0",
+                    )}
+                    {tainted ? <span className="unavailable"> *</span> : null}
+                  </td>
+                  <td className="numeric">
+                    {formatIncomeMoney(
+                      history.baseCurrencyCode,
+                      carried?.carryInAppliedDecimal ?? "0",
+                    )}
+                    {tainted ? <span className="unavailable"> *</span> : null}
+                  </td>
+                  <td className="numeric">
+                    {formatIncomeMoney(
+                      history.baseCurrencyCode,
+                      carried?.carryOutLossDecimal ?? "0",
+                    )}
+                    {tainted ? <span className="unavailable"> *</span> : null}
+                  </td>
                 </tr>
               );
             })}
@@ -505,9 +629,13 @@ export function CapitalGainsScreen({
         </table>
       </div>
 
-      <p className="income-assumption-summary">
-        {CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE}
-      </p>
+      <p className="income-assumption-summary">{CGT_CARRY_FORWARD_NOTE}</p>
+
+      {!carryChain.historyComplete ? (
+        <p className="unavailable" role="status">
+          {carryChain.historyIncompleteMessage}
+        </p>
+      ) : null}
 
       <dl className="income-metric-list" aria-label="Lifetime capital gains">
         <div className="income-metric-row">
@@ -535,28 +663,43 @@ export function CapitalGainsScreen({
               history.baseCurrencyCode,
               lifetime.totalLossesDecimal,
             )}
-            {hasLifetimeUnabsorbedLoss ? (
+            {/*
+              Reviewer fix (round 1 BLOCKING): this used to show the
+              STANDALONE per-FY unabsorbed sum (`lifetime.totalUnabsorbedLossDecimal`),
+              which can be nonzero even when the carry chain has fully
+              absorbed those losses into a later FY's gain (finalCarryOut
+              "0") -- directly contradicting the carried net capital gain
+              line below it. The suffix here is now driven by
+              `carryChain.finalCarryOutLossDecimal` (the TRUE amount still
+              unabsorbed after the whole chain, not any single FY's own
+              standalone figure) so this row can never say "unabsorbed"
+              while the chain below says otherwise: zero carry-out renders
+              no suffix at all.
+            */}
+            {hasFinalCarryOut ? (
               <span className="unavailable">
                 {" "}
                 ·{" "}
                 {formatIncomeMoney(
                   history.baseCurrencyCode,
-                  lifetime.totalUnabsorbedLossDecimal,
+                  carryChain.finalCarryOutLossDecimal,
                 )}{" "}
-                unabsorbed
+                still carrying forward
+                {carryChain.lifetimeNetPartial ? " *" : ""}
               </span>
             ) : null}
           </dd>
         </div>
         <div className="income-metric-row">
-          <dt>
-            Lifetime net capital gain estimate (sum of each year, standalone)
-          </dt>
+          <dt>Lifetime net capital gain estimate (true, carried)</dt>
           <dd>
             {formatIncomeMoney(
               history.baseCurrencyCode,
-              lifetime.netCapitalGainEstimateDecimal,
+              carryChain.lifetimeNetCapitalGainEstimateDecimal,
             )}
+            {carryChain.lifetimeNetPartial ? (
+              <span className="unavailable"> *</span>
+            ) : null}
           </dd>
         </div>
         <div className="income-metric-row">
@@ -575,6 +718,15 @@ export function CapitalGainsScreen({
           {lifetime.excludedIncompleteSecurityNames.join(", ")}
         </p>
       ) : null}
+      {carryChain.perFy.some((entry) => entry.carriedFiguresPartial) ? (
+        <p className="unavailable">
+          * marks a carried figure that may be understated or overstated: either
+          this portfolio&apos;s declared history-completeness date does not
+          reach back far enough (see the disclosure above, when shown), or an
+          earlier financial year in this chain excluded incomplete-cost-basis
+          allocations (see that year&apos;s Coverage column / detail view).
+        </p>
+      ) : null}
 
       <GainsDisclaimer />
 
@@ -584,6 +736,7 @@ export function CapitalGainsScreen({
           currencyCode={history.baseCurrencyCode}
           dialogRef={dialogRef}
           onClose={() => setSelectedFy(null)}
+          carried={selectedCarried}
         />
       ) : null}
     </main>

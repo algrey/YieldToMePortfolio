@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
-  CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE,
+  CGT_CARRY_FORWARD_NOTE,
   CGT_METHOD_LABELS,
   computeLifetimeCapitalGainsTotal,
   type CapitalGainDisposalRow,
@@ -173,6 +173,14 @@ const populatedHistory = {
   baseCurrencyCode: "AUD",
   disposalCount: 4,
   fyTotals: [fy2026, fy2025],
+  // CGT-002: equal to fy2025's (the earliest FY's) window.startDate, so the
+  // carry chain's history-completeness predicate is satisfied on its own --
+  // this fixture's carried figures are still tainted, but via fy2025's OWN
+  // `partialCoverage: true` (the Gamma allocation), not via a
+  // history-completeness gap. That keeps the two taint sources
+  // independently testable (history-incompleteness is covered by
+  // `tests/cgt-002.test.ts` instead).
+  historyCompleteFrom: "2024-07-01",
 };
 
 const screenProps = {
@@ -254,37 +262,42 @@ test("CGT-001B: the FY table renders columns in order (year, discountable, non-d
   assert.match(html, /FY26/);
   assert.match(html, /FY25/);
   assert.match(html, /AUD 1,000\.00/); // FY26 discountable gross
-  assert.match(html, /AUD 500\.00/); // FY26 net estimate
+  // CGT-002: the "Net estimate" column is now the carried (true) figure --
+  // FY26's own standalone net was 500.00, but FY25's $150 unabsorbed loss
+  // carries in first (non-discountable gains, then discountable, before
+  // the discount): 1000.00 - 150.00 = 850.00 discountable remaining,
+  // 50% discount = 425.00.
+  assert.match(html, /AUD 425\.00/); // FY26 net estimate (carried, true)
   assert.match(html, /AUD 200\.00/); // FY25 non-discountable gross
   assert.match(html, /AUD 350\.00/); // FY25 losses
 });
 
-test("CGT-001B: an unabsorbed loss is disclosed on its FY row, and the per-FY detail dialog echoes the carry-forward-out-of-scope note when it applies (source-verified)", async () => {
+test("CGT-001B: an unabsorbed loss is disclosed on its FY row, and the per-FY detail dialog echoes the carry-forward note (source-verified)", async () => {
   const html = renderScreen();
   assert.match(html, /AUD 150\.00.*unabsorbed/);
   const source = await readFile(
     new URL("../app/components/capital-gains-screen.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE/);
+  assert.match(source, /CGT_CARRY_FORWARD_NOTE/);
 });
 
 // Reviewer finding (B2): the standing carry-forward note is the ONE thing
-// that keeps "Lifetime net capital gain estimate" from misreading as a
-// true whole-period net (losses are never carried between FYs -- see
-// `domain/gains/fy-aggregation.ts`'s header). A source-only assertion
+// that explains why "Lifetime net capital gain estimate" is a carried,
+// chained figure rather than a plain per-FY sum (CGT-002:
+// `domain/gains/carry-forward.ts`'s header). A source-only assertion
 // cannot catch its `<p>` being deleted; this asserts the note's REAL text
 // is present in the populated render AND appears before the lifetime net
 // line, so it reads as a caveat over that figure rather than an unrelated
 // aside below it.
-test("CGT-001B: the standing carry-forward-out-of-scope note is rendered on the populated screen, before the lifetime net capital gain estimate line", () => {
+test("CGT-001B: the standing carry-forward note is rendered on the populated screen, before the lifetime net capital gain estimate line", () => {
   const html = renderScreen();
-  const noteIndex = html.indexOf(CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE);
+  const noteIndex = html.indexOf(CGT_CARRY_FORWARD_NOTE);
   const lifetimeNetIndex = html.indexOf("Lifetime net capital gain estimate");
   assert.notEqual(
     noteIndex,
     -1,
-    "expected CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE's exact text in the rendered HTML",
+    "expected CGT_CARRY_FORWARD_NOTE's exact text in the rendered HTML",
   );
   assert.notEqual(
     lifetimeNetIndex,
@@ -308,7 +321,15 @@ test("CGT-001B: the lifetime summary sums the fixture's two FYs and names the ex
   assert.match(html, /Lifetime non-discountable gains/);
   assert.match(html, /Lifetime losses/);
   assert.match(html, /Lifetime net capital gain estimate/);
-  assert.match(html, /AUD 500\.00<\/dd>/); // lifetime net estimate row
+  // CGT-002: the lifetime net line is now the TRUE, carried whole-period
+  // net (sum of each FY's own carried net -- fy2025's carried net is 0,
+  // fy2026's is 425.00, see the FY-table test above), not the old
+  // standalone sum of 500.00. fy2025's partial coverage taints the whole
+  // chain from that point forward, so this figure MUST carry the "*"
+  // marker -- reviewer fix (follow-up 2): the marker was previously
+  // optional in this regex, which would have silently passed even if the
+  // taint propagation broke (regression-blind).
+  assert.match(html, /AUD 425\.00<span[^>]*> \*<\/span><\/dd>/); // lifetime net estimate row, tainted
   assert.match(html, /4 across 2 financial years/);
   assert.match(html, /Gamma Pty Ltd/);
 });
@@ -469,14 +490,16 @@ test("CGT-001B: the FY detail dialog actually RENDERS honest eligibility labels,
   assert.match(html, />20</); // Delta's 20-share allocation
   assert.match(html, />10</); // Gamma's 10-share allocation
 
-  // The in-dialog unabsorbed-loss note, echoing the same standing
-  // carry-forward text the screen level shows for fy2025's $150 unabsorbed
-  // loss.
-  assert.match(html, /Unabsorbed loss this year:/);
+  // The in-dialog unabsorbed-loss note (now explicitly "standalone" -- the
+  // carried figure lives in the dialog's separate "Carried" section) and
+  // the same standing carry-forward note the screen level shows (CGT-002:
+  // renamed from `CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE`, since carry-forward
+  // is no longer out of scope).
+  assert.match(html, /Unabsorbed loss this year \(standalone\):/);
   assert.match(html, /AUD 150\.00/);
   assert.ok(
-    html.includes(CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE),
-    "expected the exact carry-forward-out-of-scope note text inside the dialog",
+    html.includes(CGT_CARRY_FORWARD_NOTE),
+    "expected the exact carry-forward note text inside the dialog",
   );
 });
 
