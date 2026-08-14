@@ -654,12 +654,31 @@ Status: DEFERRED (2026-08-14); from the hardening-batch review.
 
 ### CGT-001 — Capital gains reporting (placeholder)
 
-Status: DEFERRED; owner-flagged 2026-08-13 as likely future work — recorded now so retention guarantees have a named consumer.
+Status: PROMOTED 2026-08-14 by owner instruction — split into CGT-001A/B below; retention-guarantee constraint remains standing.
 
 - Objective: realized (and possibly unrealized) capital-gains reporting per FY, including AU CGT discount eligibility, built on existing ledger data.
 - Foundation already in place (verified 2026-08-13): `lot_allocations` stores per-sale matched quantity, allocated base basis, net proceeds, fees, tax, and `baseRealisedGainDecimal`; tax lots persist as `closed` with acquisition dates and original quantities; transactions are immutable. Realized gains are therefore derivable without new ledger machinery.
 - Standing constraint on ALL other tasks: never delete or irreversibly hide closed lots, allocations, sold-security links, or their history — CGT-001 and the dividend history (DIV-001/UI-006C) both depend on full retention of sold-share data.
 - Dependencies: FY-001A (FY windows); scope/design decisions when promoted.
+
+### CGT-001A — Realized capital gains domain and read service
+
+Status: READY (2026-08-14). Orchestrator calculation rulings (BINDING, informational-not-tax-advice throughout per the DIV precedent):
+
+- Source of truth: `lot_allocations` (matched quantity, allocated base basis, net proceeds, fees, tax, `baseRealisedGainDecimal`) joined to `tax_lots` (acquisition date) and the sell transaction (disposal `local_trade_date`) — READ-ONLY over ledger data, no new ledger machinery, decimal strings throughout.
+- FY attribution: disposal `local_trade_date` into FY-001A windows (user start month + settings timezone).
+- Discount eligibility per allocation: acquisition date STRICTLY more than 12 months before disposal date (ATO rule: 12 months + at least 1 day; same-day-of-month one year later is NOT eligible — pin boundary tests both sides, incl. leap-year Feb 29 acquisitions).
+- Per-FY method (documented in CALCULATIONS in the same change set): capital losses offset gains BEFORE the discount; losses applied against non-discountable gains first (standard optimal default), remainder against discountable gains; 50% discount (individual rate, documented constant like AU_COMPANY_TAX_RATE) applied to the remaining discountable amount; outputs: total discountable gains, non-discountable gains, losses, net capital gain estimate with per-figure method labels. Loss carry-forward across FYs is OUT of v1 scope — each FY reported standalone with an explicit note where prior-year losses would apply.
+- Incomplete basis: allocations with `basisStatus` incomplete produce explicit typed states (never zero, never silently excluded — the FY's totals disclose partial coverage and name affected securities).
+- Deliver: `domain/gains/` pure functions (per-allocation eligibility, per-FY aggregation with the ordering above, per-disposal rows: security, acquired/disposed dates, quantity, proceeds, basis, fees, gain/loss, eligibility label) + `app/owned-capital-gains.ts` owner-scoped read service (batched, follows owned-dividend-history composition); add a CGT-001 requirement to `docs/REQUIREMENTS_AND_ACCEPTANCE_CRITERIA.md`; CALCULATIONS section.
+- Tests: eligibility boundaries (364/365/366 days, leap years), ordering fixtures (losses vs non-discountable first — exact expected decimals), incomplete-basis disclosure, FY boundary disposals, non-July start month, cross-user isolation, decimal exactness.
+
+### CGT-001B — Capital gains screen
+
+Status: BLOCKED on CGT-001A.
+
+- Deliver: standalone owned route `/portfolio/:id/gains` following the income-route pattern, reachable as a third entry in the income screens' tab row ("Capital gains" alongside Next 12 months / Multi-year); per-FY table (FY label, discountable, non-discountable, losses, net estimate, source/method label, partial-coverage flag) with rows opening a per-disposal detail dialog (established modal pattern incl. UI-008 timeout); lifetime summary; a visible standing "informational — not tax advice" note consistent with the app's honesty conventions; explicit empty state (no disposals yet); QA-001A matrix rows (settled methodology), QA-001B accessibility, app visual language (no rounded corners etc.).
+- Tests: rendered states (populated/partial/empty), eligibility/method labels visible, dialog pattern assertions, route ownership/no-store, matrix citations grep-verified.
 
 ### IMP-006 — Dividend-receipt rows in CSV import
 
