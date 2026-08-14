@@ -409,6 +409,21 @@ Acceptance:
 - A what-if growth substitution never writes to storage — it is a pure function of the baseline projection and the override, structurally incapable of persistence.
 - All arithmetic uses the shared exact-decimal primitives; no calculation path uses binary floating point.
 
+### CGT-001 — Realised capital gains discount and per-FY aggregation
+
+An informational-only (not tax advice) read layer shall derive per-disposal capital gain rows and per-financial-year discount/loss-offset totals from the ledger's already-computed matched-lot allocations, without introducing new ledger machinery.
+
+Acceptance:
+
+- Every per-disposal figure (matched quantity, allocated basis, net proceeds, fees, tax, realised gain) is read from the current PUBLISHED calculation run only; a stale or unpublished run's allocations are invisible, never blended in.
+- An allocation's acquisition date is its tax lot's opening transaction's local trade date; its disposal date is the sell transaction's own local trade date — never the tax lot's raw acquisition instant compared against a local date.
+- Discount eligibility requires the disposal date be STRICTLY more than 12 months after the acquisition date (12 months plus at least one day); a disposal on the exact same day-of-month one year later is not eligible. Eligibility uses calendar-month arithmetic, with a documented date-rolling convention for a 29 February acquisition landing on a non-leap destination year.
+- Per financial year, losses offset non-discountable gains before discountable gains, before the 50% individual discount rate (a documented, exported constant) is applied to the remaining discountable amount; the net capital gain estimate is never negative — an excess of losses over gains is disclosed as an unabsorbed loss, not as a negative gain.
+- Loss carry-forward across financial years is out of scope; every FY total is standalone and discloses that limitation wherever an unabsorbed loss appears.
+- An allocation with incomplete cost basis never contributes a fabricated zero gain to a total; it is excluded, counted, and its security named so the FY total discloses partial coverage.
+- A multi-lot disposal (one sale matched across several tax lots) scores eligibility per allocation, not per sale — lots with different acquisition dates can land in different discount buckets from the same disposal.
+- Every portfolio-scoped query is owner-scoped; cross-user data never appears in another owner's totals.
+
 ## CSV import
 
 ### IMP-001 — Supported format
