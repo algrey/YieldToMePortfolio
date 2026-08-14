@@ -688,3 +688,47 @@ test("QA-001B: the viewport never disables pinch/keyboard zoom, and the shell ha
   assert.match(extractBlock(styles, "html"), /min-width:\s*320px/);
   assert.match(extractBlock(styles, "body"), /min-width:\s*320px/);
 });
+
+// UI-005E follow-up: the "+" add menu's "Add holding" and "Add transaction"
+// items used to be prototype-era `<button>`s with no onClick and a literal
+// "UI only" note -- dead controls even in owned mode. They must now route
+// into the real manual-ledger-entry flow (UI-005E) in owned mode, while
+// preview/prototype mode keeps its honest non-functional buttons unchanged.
+test("QA-001B: owned add menu wires 'Add holding' and 'Add transaction' into the manual ledger entry route instead of leaving them as dead UI-only buttons", async () => {
+  const source = await readFile(
+    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    "utf8",
+  );
+
+  // Owned mode, active portfolio present: both items are real Links into
+  // the manual-ledger route, and close the menu on click -- the same
+  // pattern the working "Import CSV" item beside them already uses.
+  assert.match(source, /ownedWorkspace\.activePortfolio \? \(/);
+  assert.match(
+    source,
+    /href=\{`\/portfolio\/\$\{ownedWorkspace\.activePortfolio\.id\}\/ledger\/new\?type=buy`\}\s*\n\s*onClick=\{\(\) => setOpenMenu\(null\)\}/,
+  );
+  assert.match(
+    source,
+    /href=\{`\/portfolio\/\$\{ownedWorkspace\.activePortfolio\.id\}\/ledger\/new`\}\s*\n\s*onClick=\{\(\) => setOpenMenu\(null\)\}/,
+  );
+  assert.match(source, /<span>Add holding<\/span>/);
+  assert.match(source, /<span>Add transaction<\/span>/);
+
+  // Empty workspace (no active portfolio yet): the items must not render a
+  // link to a portfolio id that doesn't exist. They are hidden, matching
+  // the same-file convention already used for "Rename portfolio"/"Archive"
+  // (`ownedWorkspace.activePortfolio ? (...) : null`).
+  assert.match(
+    source,
+    /href=\{`\/portfolio\/\$\{ownedWorkspace\.activePortfolio\.id\}\/ledger\/new`\}\s*\n\s*onClick=\{\(\) => setOpenMenu\(null\)\}\s*\n\s*>\s*\n\s*<span>Add transaction<\/span>\s*\n\s*<small>Manual ledger entry<\/small>\s*\n\s*<\/Link>\s*\n\s*<\/>\s*\n\s*\) : null\s*\n\s*\) : \(/,
+  );
+
+  // Preview/prototype mode is intentionally unchanged: it keeps the honest
+  // non-functional "UI only" markers rather than pointing at a route that
+  // has no real backing portfolio.
+  assert.match(
+    source,
+    /<button type="button">\s*\n\s*<span>Add holding<\/span>\s*\n\s*<small>UI only<\/small>\s*\n\s*<\/button>\s*\n\s*<button type="button">\s*\n\s*<span>Add transaction<\/span>\s*\n\s*<small>UI only<\/small>\s*\n\s*<\/button>/,
+  );
+});

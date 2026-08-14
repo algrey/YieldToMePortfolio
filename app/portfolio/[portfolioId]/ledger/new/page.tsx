@@ -8,15 +8,34 @@ import {
   type ManualLedgerOptions,
 } from "../../../../../db/repositories/manual-ledger-options";
 import { getAuthenticatedSqlContext } from "../../../../portfolio-actions";
+import {
+  MANUAL_LEDGER_TYPES,
+  type ManualLedgerType,
+} from "../../../../manual-ledger-contract";
 
 type ManualLedgerEntryPageProps = {
   params: Promise<{ portfolioId: string }>;
+  searchParams: Promise<{ type?: string }>;
 };
+
+// UI-005E follow-up: the shell's "Add holding" shortcut prefills the entry
+// type via a query param; anything unrecognised (or absent) falls back to
+// the form's existing "buy" default rather than trusting the raw string.
+function initialEntryType(
+  raw: string | undefined,
+): ManualLedgerType | undefined {
+  return (MANUAL_LEDGER_TYPES as readonly string[]).includes(raw ?? "")
+    ? (raw as ManualLedgerType)
+    : undefined;
+}
 
 export default async function ManualLedgerEntryPage({
   params,
+  searchParams,
 }: ManualLedgerEntryPageProps) {
   const { portfolioId } = await params;
+  const query = await searchParams;
+  const initialType = initialEntryType(query.type);
   const workspace = await loadAuthenticatedWorkspace(portfolioId);
 
   if (workspace.status === "unavailable") {
@@ -96,6 +115,7 @@ export default async function ManualLedgerEntryPage({
       baseCurrencyCode={workspace.activePortfolio.baseCurrencyCode}
       options={options}
       initialIdempotencyKey={initialIdempotencyKey}
+      initialType={initialType}
     />
   );
 }

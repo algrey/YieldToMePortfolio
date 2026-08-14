@@ -332,3 +332,36 @@ test("details UI is read-only, provenance-explicit, and linked to separate entry
     /\.manual-workflow-placeholder\s*{[^}]*width: min\(calc\(100% - 32px\), 760px\)/s,
   );
 });
+
+// UI-005E follow-up: the shell's "Add holding" shortcut links to this route
+// with a `?type=buy` query param. The route must validate that param
+// against the approved ledger types before trusting it (never pass an
+// arbitrary client string straight into form state), and fall back to no
+// prefill (the form's existing "buy" default) when the param is absent or
+// unrecognised.
+test("manual ledger route validates an optional `type` query param before prefilling the form, and the form accepts a validated initial type", async () => {
+  const [manualRoute, component] = await Promise.all([
+    readFile(
+      new URL(
+        "../app/portfolio/[portfolioId]/ledger/new/page.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    readFile(
+      new URL("../app/components/manual-ledger-entry.tsx", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  assert.match(manualRoute, /searchParams: Promise<\{ type\?: string \}>/);
+  assert.match(
+    manualRoute,
+    /\(MANUAL_LEDGER_TYPES as readonly string\[\]\)\.includes\(raw \?\? ""\)/,
+  );
+  assert.match(manualRoute, /initialType=\{initialType\}/);
+  assert.match(component, /initialType\?: ManualLedgerType/);
+  assert.match(
+    component,
+    /useState<\(typeof MANUAL_LEDGER_TYPES\)\[number\]>\(\s*\n\s*initialType \?\? "buy",\s*\n\s*\);/,
+  );
+});

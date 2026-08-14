@@ -6,6 +6,7 @@ import type { ManualLedgerOptions } from "../../db/repositories/manual-ledger-op
 import {
   MANUAL_LEDGER_TYPES,
   type ManualLedgerFormValue,
+  type ManualLedgerType,
 } from "../manual-ledger-contract.ts";
 
 type ManualLedgerEntryProps = Readonly<{
@@ -13,6 +14,10 @@ type ManualLedgerEntryProps = Readonly<{
   baseCurrencyCode: string;
   options: ManualLedgerOptions;
   initialIdempotencyKey: string;
+  // UI-005E follow-up: an optional server-validated initial entry type, used
+  // by the shell's "Add holding" shortcut to open the form pre-set to "buy"
+  // rather than adding a second, divergent entry flow.
+  initialType?: ManualLedgerType;
 }>;
 
 type Result = Readonly<{
@@ -152,8 +157,11 @@ export function ManualLedgerEntry({
   baseCurrencyCode,
   options,
   initialIdempotencyKey,
+  initialType,
 }: ManualLedgerEntryProps) {
-  const [type, setType] = useState<(typeof MANUAL_LEDGER_TYPES)[number]>("buy");
+  const [type, setType] = useState<(typeof MANUAL_LEDGER_TYPES)[number]>(
+    initialType ?? "buy",
+  );
   const [currency, setCurrency] = useState(baseCurrencyCode);
   const [pending, setPending] = useState(false);
   const [result, setResult] = useState<Result | null>(null);

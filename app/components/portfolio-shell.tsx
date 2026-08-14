@@ -3165,14 +3165,37 @@ export function PortfolioShell({
             {openMenu === "add" ? (
               <div className="popover action-popover">
                 <p>{ownedMode ? "Workspace actions" : "Prototype actions"}</p>
-                <button type="button">
-                  <span>Add holding</span>
-                  <small>UI only</small>
-                </button>
-                <button type="button">
-                  <span>Add transaction</span>
-                  <small>UI only</small>
-                </button>
+                {ownedMode ? (
+                  ownedWorkspace.activePortfolio ? (
+                    <>
+                      <Link
+                        href={`/portfolio/${ownedWorkspace.activePortfolio.id}/ledger/new?type=buy`}
+                        onClick={() => setOpenMenu(null)}
+                      >
+                        <span>Add holding</span>
+                        <small>Buy a new security · manual ledger entry</small>
+                      </Link>
+                      <Link
+                        href={`/portfolio/${ownedWorkspace.activePortfolio.id}/ledger/new`}
+                        onClick={() => setOpenMenu(null)}
+                      >
+                        <span>Add transaction</span>
+                        <small>Manual ledger entry</small>
+                      </Link>
+                    </>
+                  ) : null
+                ) : (
+                  <>
+                    <button type="button">
+                      <span>Add holding</span>
+                      <small>UI only</small>
+                    </button>
+                    <button type="button">
+                      <span>Add transaction</span>
+                      <small>UI only</small>
+                    </button>
+                  </>
+                )}
                 {ownedMode ? (
                   <Link href="/import" onClick={() => setOpenMenu(null)}>
                     <span>Import CSV</span>
