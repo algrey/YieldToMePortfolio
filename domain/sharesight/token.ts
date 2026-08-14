@@ -30,6 +30,18 @@
 // than one reconstructed on the fly -- it is not itself a shape check, and
 // must not be read as one.
 //
+// SECURITY CONTEXT UPDATE: the owner now authenticates via their MAIN PAID
+// Sharesight account -- there is no longer an account-level write barrier
+// (previously a read-only-shared guest account made a client-credentials
+// grant with write scope moot even if this module were compromised). With
+// full-account credentials, this module's GET-only/host/shape enforcement
+// is the SOLE protection for the owner's tax data. The BRK-003 review's
+// remaining follow-ups (F8/F9/F10 below) close the gaps that mattered once
+// that changed: a misconfigured or attacker-influenced `tokenUrl` pointing
+// at a host that merely LOOKS like Sharesight (F8), evading the `/api/`
+// data-shape rejection via case or percent-encoding (F9), or smuggling
+// credentials via URL userinfo (F10).
+//
 // Access tokens expire after 30 minutes (BRK-002). This module refreshes
 // before expiry using an injected clock (`now`, epoch milliseconds -- the
 // repo's injectable-clock convention, see `yahoo-compatible.ts`'s `now`
@@ -55,6 +67,15 @@ export type SharesightTokenClientOptions = Readonly<{
   /** Defaults to `DEFAULT_SHARESIGHT_TOKEN_URL`; see module doc for why this
    * is configurable rather than hard-coded. */
   tokenUrl?: string;
+  /** Permits `tokenUrl` to target a host other than `sharesight.com` (or a
+   * subdomain of it). Default `false` (rejected). Intended ONLY for
+   * BRK-008 spike tooling (e.g. a local mock server) -- never set for a
+   * real deployment, mirroring the data client's `unsafeAllowOtherHost`
+   * (BRK-003 review finding F6, extended to the token endpoint by F8).
+   * Loopback hosts remain permitted for `http:` regardless of this flag
+   * (see `LOOPBACK_HOSTS`); this flag only widens the HOST allowed, not the
+   * protocol exception. */
+  unsafeAllowOtherHost?: boolean;
   fetcher?: SharesightFetcher;
   /** Injected clock returning epoch milliseconds. Defaults to `Date.now`. */
   now?: () => number;
@@ -107,41 +128,115 @@ export function assertSharesightTokenUrl(
 /** Loopback-only hosts permitted to use `http:` for the token endpoint --
  * reserved for a future local mock server in BRK-008 spike tooling. Any
  * other host must use `https:`; sending client credentials over plaintext
- * HTTP to a real host is never permitted (BRK-003 finding B2). */
+ * HTTP to a real host is never permitted (BRK-003 finding B2). These hosts
+ * are also exempt from the `sharesight.com` host pin below (F8) -- they are
+ * the documented local-mock-only exception, not a live Sharesight host, and
+ * must keep working without the separate `unsafeAllowOtherHost` flag. */
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+/** Sharesight's registrable domain for the OAuth token endpoint (BRK-003
+ * review finding F8). Matched by EXACT LABEL suffix only: the hostname
+ * must equal this string outright, or end with `.` + this string. A bare
+ * `endsWith("sharesight.com")` substring check would be fooled by a
+ * same-suffix-but-different-domain host like `evilsharesight.com`; a check
+ * that only inspects the hostname's PREFIX would be fooled by
+ * `api.sharesight.com.evil.com` (a real subdomain of `evil.com` that merely
+ * starts with Sharesight's domain). Requiring the full `sharesight.com`
+ * label pair as either the whole hostname or preceded by a dot closes both. */
+const SHARESIGHT_REGISTRABLE_DOMAIN = "sharesight.com";
+
+function isSharesightHost(hostname: string): boolean {
+  const lower = hostname.toLowerCase();
+  return (
+    lower === SHARESIGHT_REGISTRABLE_DOMAIN ||
+    lower.endsWith(`.${SHARESIGHT_REGISTRABLE_DOMAIN}`)
+  );
+}
+
+/** Lowercases and percent-decodes `pathname` ONCE, before either path-shape
+ * check below reads it (BRK-003 review finding F9). Without this, an
+ * uppercase (`/API/v3/...`) or percent-encoded (`/api%2Fv3/...`) variant of
+ * the data-API path would evade the `/api/` rejection while still routing
+ * to the same place server-side. A malformed percent-escape (e.g. a
+ * trailing lone `%`) makes `decodeURIComponent` throw; that must become a
+ * typed rejection here, never an uncaught exception -- returns `null` on
+ * decode failure so the caller can reject cleanly. */
+function canonicalizePathname(pathname: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  return decoded.toLowerCase();
+}
+
+export type SharesightTokenUrlValidationOptions = Readonly<{
+  /** See `SharesightTokenClientOptions.unsafeAllowOtherHost`. */
+  unsafeAllowOtherHost?: boolean;
+}>;
 
 /**
  * The real safety control for the token endpoint URL (BRK-003 findings
- * B1/B2): validates that a candidate URL is actually SHAPED like
- * Sharesight's OAuth token endpoint, not the data API surface. A bare
- * URL-equality "pin" (`assertSharesightTokenUrl` above) cannot stop a
- * misconfigured `tokenUrl` from pointing straight at a data endpoint (e.g.
- * `https://api.sharesight.com/api/v3/portfolios/1`) with client credentials
- * in the POST body -- this function is what actually rejects that. Throws
- * `SharesightTokenUrlRejectedError` synchronously on any violation:
+ * B1/B2/F8/F9/F10): validates that a candidate URL is actually SHAPED like
+ * Sharesight's OAuth token endpoint, not the data API surface, and actually
+ * TARGETS Sharesight. A bare URL-equality "pin" (`assertSharesightTokenUrl`
+ * above) cannot stop a misconfigured `tokenUrl` from pointing straight at a
+ * data endpoint (e.g. `https://api.sharesight.com/api/v3/portfolios/1`)
+ * with client credentials in the POST body -- this function is what
+ * actually rejects that. Throws `SharesightTokenUrlRejectedError`
+ * synchronously on any violation:
  *  - protocol must be `https:`, EXCEPT `http:` is permitted to a loopback
  *    host only (`LOOPBACK_HOSTS`) -- never to a real host, where `http:`
  *    would send client credentials in cleartext.
- *  - the path must NOT contain `/api/` (the data-API shape).
- *  - the path must end with `/oauth2/token` or contain `/oauth` (the
- *    token-endpoint shape).
+ *  - the URL must not carry userinfo (username/password) components (F10)
+ *    -- never permitted, even to a loopback host: credentials belong solely
+ *    in the client-credentials POST body, never embedded in the URL.
+ *  - the hostname must be `sharesight.com` or a subdomain of it (F8),
+ *    unless the host is loopback (the documented http exception above) or
+ *    `options.unsafeAllowOtherHost` was explicitly set (BRK-008 spike
+ *    tooling only).
+ *  - the (canonicalized -- F9) path must NOT contain `/api/` (the data-API
+ *    shape).
+ *  - the (canonicalized) path must end with `/oauth2/token` or contain
+ *    `/oauth` (the token-endpoint shape).
  */
-export function validateSharesightTokenUrlShape(url: URL): void {
+export function validateSharesightTokenUrlShape(
+  url: URL,
+  options?: SharesightTokenUrlValidationOptions,
+): void {
   const isLoopback = LOOPBACK_HOSTS.has(url.hostname);
   if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback)) {
     throw new SharesightTokenUrlRejectedError(
       "Sharesight token URL must use https (http is only permitted to a loopback host for local mock tooling).",
     );
   }
-  if (url.pathname.includes("/api/")) {
+  if (url.username !== "" || url.password !== "") {
+    throw new SharesightTokenUrlRejectedError(
+      "Sharesight token URL must not contain userinfo (username/password) components.",
+    );
+  }
+  if (
+    !isLoopback &&
+    !options?.unsafeAllowOtherHost &&
+    !isSharesightHost(url.hostname)
+  ) {
+    throw new SharesightTokenUrlRejectedError(
+      "Sharesight token URL host is not sharesight.com or a subdomain of it; set unsafeAllowOtherHost explicitly (BRK-008 local-mock-only) to override.",
+    );
+  }
+  const pathname = canonicalizePathname(url.pathname);
+  if (pathname === null) {
+    throw new SharesightTokenUrlRejectedError(
+      "Sharesight token URL path contains a malformed percent-encoding.",
+    );
+  }
+  if (pathname.includes("/api/")) {
     throw new SharesightTokenUrlRejectedError(
       "Sharesight token URL must not target the data API surface.",
     );
   }
-  if (
-    !url.pathname.endsWith("/oauth2/token") &&
-    !url.pathname.includes("/oauth")
-  ) {
+  if (!pathname.endsWith("/oauth2/token") && !pathname.includes("/oauth")) {
     throw new SharesightTokenUrlRejectedError(
       "Sharesight token URL is not shaped like an OAuth token endpoint.",
     );
@@ -155,7 +250,10 @@ export function validateSharesightTokenUrlShape(url: URL): void {
  * an unparseable URL or a shape violation, so an invalid configuration can
  * never result in a request being sent.
  */
-function resolveAndValidateTokenUrl(tokenUrl: string | undefined): URL {
+function resolveAndValidateTokenUrl(
+  tokenUrl: string | undefined,
+  unsafeAllowOtherHost: boolean | undefined,
+): URL {
   let url: URL;
   try {
     url = new URL(tokenUrl ?? DEFAULT_SHARESIGHT_TOKEN_URL);
@@ -164,7 +262,7 @@ function resolveAndValidateTokenUrl(tokenUrl: string | undefined): URL {
       "Sharesight token URL is not a valid absolute URL.",
     );
   }
-  validateSharesightTokenUrlShape(url);
+  validateSharesightTokenUrlShape(url, { unsafeAllowOtherHost });
   return url;
 }
 
@@ -327,7 +425,10 @@ export function createSharesightTokenProvider(
   // data-API-shaped token URL throws synchronously, before this provider
   // object (and therefore its fetcher) even exists, so no request can ever
   // be sent against a misconfigured endpoint.
-  const configuredTokenUrl = resolveAndValidateTokenUrl(options.tokenUrl);
+  const configuredTokenUrl = resolveAndValidateTokenUrl(
+    options.tokenUrl,
+    options.unsafeAllowOtherHost,
+  );
   const fetcher = options.fetcher ?? fetch.bind(globalThis);
   const now = options.now ?? (() => Date.now());
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;

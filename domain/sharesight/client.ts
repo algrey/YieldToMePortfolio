@@ -88,6 +88,17 @@ function resolveBaseUrl(
       "Sharesight client baseUrl is not a valid absolute URL.",
     );
   }
+  // F10: a baseUrl carrying userinfo (username/password) is never a
+  // legitimate Sharesight API host and is rejected unconditionally -- even
+  // with `unsafeAllowOtherHost` set, since embedding credentials in the URL
+  // is a distinct hazard from host targeting and has no legitimate use
+  // here (the Bearer token is sent via the Authorization header, never the
+  // URL).
+  if (parsed.username !== "" || parsed.password !== "") {
+    throw new SharesightBaseUrlRejectedError(
+      "Sharesight client baseUrl must not contain userinfo (username/password) components.",
+    );
+  }
   if (parsed.hostname !== EXPECTED_BASE_URL_HOST && !unsafeAllowOtherHost) {
     throw new SharesightBaseUrlRejectedError();
   }

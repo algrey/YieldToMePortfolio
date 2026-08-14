@@ -34,6 +34,7 @@ export {
   type SharesightAccessToken,
   type SharesightTokenClientOptions,
   type SharesightTokenProvider,
+  type SharesightTokenUrlValidationOptions,
 } from "./token.ts";
 
 export {

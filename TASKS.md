@@ -295,7 +295,7 @@ asymmetry noted in the SPK-003 completion note.
 Status: DONE (2026-08-14) — owner decision: **Sharesight** (User API v3), replacing SPK-003's AU CHESS-sponsored archetype. Binding constraints recorded by the owner:
 
 - Sharesight holds the owner's TAX data and its API is read-write with NO granular OAuth scopes (auth yields a token valid for both read and write endpoints), so read-only MUST be enforced at the application layer — now a non-negotiable rule in `AGENTS.md`: GET-only, dedicated client whose transport rejects every non-GET method, tests that fail on any non-GET Sharesight request, credentials server-side only, Sharesight → app direction only.
-- Access path: the owner has shared their portfolio READ-ONLY to a separate free Sharesight account; the app authenticates as that guest account (defense in depth: even a write would hit a read-only share). Whether guest/free accounts expose full API access is UNVERIFIED — BRK-008 tests it live before any sync work proceeds.
+- Access path (REVISED 2026-08-14 by owner): the app authenticates with the owner's MAIN PAID Sharesight account credentials — the free-guest-account route was dropped (owner decision after the read-only-share experiment). Consequence: there is NO account-level write barrier; the application-layer GET-only enforcement (BRK-003) is the SOLE protection for the owner's tax data, so its hardening set (token-host pin, canonicalized path checks, userinfo rejection) is mandatory before live credentials are used, and any future change to `domain/sharesight/` transport/token/client code is a security-critical review surface.
 - Auth: OAuth 2.0 client-credentials flow (correct for an app talking solely to its own linked account; credentials from Sharesight Settings → API tab); access tokens expire after 30 minutes → refresh handling required. Sources: portfolio.sharesight.com/api/3/authentication_flow, /api/3/configuring_oauth, /api/3/overview.
 - Sharesight is a portfolio tracker, not a broker — SPK-003's contract still fits (external system of record, cursor/idempotency, reconcile-only positions), and Sharesight payouts are a candidate source for dividend actuals (feeds the DIV feature; evaluate in BRK-005).
 
@@ -319,7 +319,7 @@ Status: DONE (2026-08-14); owner instruction: implement the safety features rega
 
 #### BRK-008 — Sharesight live read spike (owner-assisted)
 
-Status: BLOCKED on BRK-003; REQUIRES OWNER RUN — needs the guest account's API credentials (Sharesight Settings → API tab in the free account holding the read-only share; if no API tab exists on the free plan, that finding decides the fallback: credentials from the main account, still guarded by the GET-only layer).
+Status: BLOCKED on the BRK-003 hardening addendum (F8/F9/F10 — mandatory now that main-account credentials are used); REQUIRES OWNER — API credentials from the owner's MAIN PAID account (Sharesight Settings → API tab), supplied via gitignored `.dev.vars` (`SHARESIGHT_CLIENT_ID`/`SHARESIGHT_CLIENT_SECRET`), never committed, never in fixtures.
 
 - Objective: prove the read-only-shared portfolio is readable via the User API v3 using BRK-003's client: authenticate (client credentials), list portfolios, fetch holdings/trades/payouts for the shared portfolio; record which endpoints work for a guest account, rate limits observed, and payout data shape (dividend-actuals candidate).
 - Deliver: a spike evidence doc (endpoints × guest-access outcome, hash-only payload evidence, no dumps); go/no-go for BRK-004/005 scoping.
@@ -327,7 +327,7 @@ Status: BLOCKED on BRK-003; REQUIRES OWNER RUN — needs the guest account's API
 
 #### BRK-004 — Sharesight connection schema and token handling
 
-Status: BLOCKED on BRK-008 (guest-access outcome shapes what is stored).
+Status: BLOCKED on BRK-008 (live-read outcome shapes what is stored). Carry-over requirements from the BRK-003 hardening review (2026-08-14): (a) `unsafeAllowOtherHost` (present on both the token and data modules for spike/mock use) must NEVER be plumbed from env/config in the real Worker wiring — add an explicit assertion or lint-style test when wiring lands; (b) close the empty-leading-label host edge (`https://.sharesight.com/` passes the endsWith pin; unresolvable in practice, one-line rejection makes it airtight); (c) add the deliberate-single-decode comment in `canonicalizePathname`.
 
 - Objective: implement the real `authorize`/token-refresh/`revoke` lifecycle against the selected broker's OAuth flow, conforming to the `BrokerAdapter` contract in `domain/broker-sync/contracts.ts`.
 - Dependencies: BRK-002, BRK-003.

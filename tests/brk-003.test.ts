@@ -335,6 +335,161 @@ test("BRK-003 B2: a non-loopback http tokenUrl is rejected at provider creation,
   );
 });
 
+// F8: pin the token endpoint's host to sharesight.com (or a subdomain).
+// The owner's Sharesight access path now uses their MAIN PAID account
+// credentials (no account-level write barrier), so this app-layer host pin
+// is one of the few remaining defenses against a misconfigured or
+// attacker-influenced tokenUrl exfiltrating client credentials.
+test("BRK-003 F8: a tokenUrl on a host that is not sharesight.com (or a subdomain) is rejected, including confusable hosts", () => {
+  const rejectedUrls = [
+    // Unrelated host entirely.
+    "https://evil.example.com/oauth2/token",
+    // Same suffix as a SUBSTRING but not a real subdomain -- a naive
+    // `endsWith("sharesight.com")` check would wrongly accept this.
+    "https://xsharesight.com/oauth2/token",
+    // Starts with Sharesight's domain but is actually a subdomain of
+    // evil.com -- a naive prefix check would wrongly accept this.
+    "https://api.sharesight.com.evil.com/oauth2/token",
+  ];
+  for (const url of rejectedUrls) {
+    assert.throws(
+      () => validateSharesightTokenUrlShape(new URL(url)),
+      SharesightTokenUrlRejectedError,
+      url,
+    );
+    let fetchCalled = false;
+    assert.throws(
+      () =>
+        createSharesightTokenProvider({
+          clientId: FIXTURE_CLIENT_ID,
+          clientSecret: FIXTURE_CLIENT_SECRET,
+          tokenUrl: url,
+          fetcher: async () => {
+            fetchCalled = true;
+            return tokenFixtureResponse();
+          },
+          now: () => 0,
+        }),
+      SharesightTokenUrlRejectedError,
+      url,
+    );
+    assert.equal(fetchCalled, false, url);
+  }
+
+  // A real Sharesight subdomain passes.
+  assert.doesNotThrow(() =>
+    validateSharesightTokenUrlShape(
+      new URL("https://portfolio.sharesight.com/oauth2/token"),
+    ),
+  );
+
+  // Loopback still needs no override flag (unaffected by the host pin --
+  // it's the documented local-mock-only exception).
+  assert.doesNotThrow(() =>
+    validateSharesightTokenUrlShape(
+      new URL("http://127.0.0.1:4010/oauth2/token"),
+    ),
+  );
+
+  // The explicit opt-in, mirroring the data client's unsafeAllowOtherHost,
+  // permits an otherwise-rejected host.
+  assert.doesNotThrow(() =>
+    validateSharesightTokenUrlShape(
+      new URL("https://mock.example.test/oauth2/token"),
+      { unsafeAllowOtherHost: true },
+    ),
+  );
+  assert.doesNotThrow(() =>
+    createSharesightTokenProvider({
+      clientId: FIXTURE_CLIENT_ID,
+      clientSecret: FIXTURE_CLIENT_SECRET,
+      tokenUrl: "https://mock.example.test/oauth2/token",
+      unsafeAllowOtherHost: true,
+      fetcher: async () => tokenFixtureResponse(),
+      now: () => 0,
+    }),
+  );
+});
+
+// F9: canonicalize (lowercase + percent-decode) the path before EITHER
+// path-shape check reads it, so an uppercase or percent-encoded variant of
+// the data-API path can't evade the `/api/` rejection.
+test("BRK-003 F9: uppercase and percent-encoded /api/ path variants are rejected; a malformed escape rejects cleanly", () => {
+  assert.throws(
+    () =>
+      validateSharesightTokenUrlShape(
+        new URL("https://api.sharesight.com/API/v3/portfolios/1"),
+      ),
+    SharesightTokenUrlRejectedError,
+  );
+  assert.throws(
+    () =>
+      validateSharesightTokenUrlShape(
+        new URL("https://api.sharesight.com/api%2Fv3/portfolios/1"),
+      ),
+    SharesightTokenUrlRejectedError,
+  );
+  // A malformed percent-escape must reject (typed error), never throw an
+  // uncaught decode exception.
+  assert.throws(
+    () =>
+      validateSharesightTokenUrlShape(
+        new URL("https://api.sharesight.com/oauth2/token%"),
+      ),
+    SharesightTokenUrlRejectedError,
+  );
+  // An uppercase-but-otherwise-fine oauth path still passes.
+  assert.doesNotThrow(() =>
+    validateSharesightTokenUrlShape(
+      new URL("https://api.sharesight.com/OAuth2/Token"),
+    ),
+  );
+});
+
+// F10: a URL carrying userinfo (username/password) is rejected at
+// creation, in both the token module and the data client.
+test("BRK-003 F10: a tokenUrl or baseUrl carrying userinfo is rejected at creation in both modules", async () => {
+  assert.throws(
+    () =>
+      validateSharesightTokenUrlShape(
+        new URL("https://user:pass@api.sharesight.com/oauth2/token"),
+      ),
+    SharesightTokenUrlRejectedError,
+  );
+  let tokenFetchCalled = false;
+  assert.throws(
+    () =>
+      createSharesightTokenProvider({
+        clientId: FIXTURE_CLIENT_ID,
+        clientSecret: FIXTURE_CLIENT_SECRET,
+        tokenUrl: "https://user:pass@api.sharesight.com/oauth2/token",
+        fetcher: async () => {
+          tokenFetchCalled = true;
+          return tokenFixtureResponse();
+        },
+        now: () => 0,
+      }),
+    SharesightTokenUrlRejectedError,
+  );
+  assert.equal(tokenFetchCalled, false);
+
+  let dataFetchCalled = false;
+  const tokenProvider = await alwaysValidTokenProvider();
+  assert.throws(
+    () =>
+      createSharesightClient({
+        baseUrl: "https://user:pass@api.sharesight.com/api/v3",
+        tokenProvider,
+        fetcher: async () => {
+          dataFetchCalled = true;
+          return jsonResponse(200, { portfolios: [] });
+        },
+      }),
+    SharesightBaseUrlRejectedError,
+  );
+  assert.equal(dataFetchCalled, false);
+});
+
 test("BRK-003 token: a 3xx redirect response from the token endpoint is treated as invalid, not followed", async () => {
   let calledCount = 0;
   const fetcher: SharesightFetcher = async () => {
