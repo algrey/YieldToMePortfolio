@@ -105,6 +105,8 @@ const landingProps = {
   portfolioId: "portfolio-a",
   multiYearHref: "/portfolio/portfolio-a/income/multi-year",
   assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
+  // CGT-001B: the third tab's target, added alongside the existing two.
+  gainsHref: "/portfolio/portfolio-a/gains",
 };
 
 function renderLanding(overrides: Record<string, unknown> = {}) {
@@ -212,6 +214,8 @@ const baselineMultiYear = {
 const populatedMultiYearProps = {
   landingHref: "/portfolio/portfolio-a/income",
   assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
+  // CGT-001B: the third tab's target, added alongside the existing two.
+  gainsHref: "/portfolio/portfolio-a/gains",
   baseCurrencyCode: "AUD",
   pastFinancialYears: { ok: true, rows: pastFinancialYearRows },
   currentFinancialYear: { ok: true, row: currentFinancialYearRow },

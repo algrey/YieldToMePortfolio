@@ -166,6 +166,7 @@ function ValueCell({
 export function IncomeMultiYear({
   landingHref,
   assumptionsHref,
+  gainsHref,
   baseCurrencyCode,
   pastFinancialYears,
   currentFinancialYear,
@@ -178,6 +179,7 @@ export function IncomeMultiYear({
 }: {
   landingHref: string;
   assumptionsHref: string;
+  gainsHref: string;
   baseCurrencyCode: string;
   pastFinancialYears: ComputePastFinancialYearRowsResult;
   currentFinancialYear: ComputeCurrentFinancialYearRowResult;
@@ -319,6 +321,7 @@ export function IncomeMultiYear({
       <nav className="income-view-tabs" aria-label="Income views">
         <Link href={landingHref}>Next 12 months</Link>
         <span aria-current="page">Multi-year</span>
+        <Link href={gainsHref}>Capital gains</Link>
       </nav>
 
       {!multiYear.ok ? (

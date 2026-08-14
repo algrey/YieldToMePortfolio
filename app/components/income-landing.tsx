@@ -24,11 +24,13 @@ export function IncomeLanding({
   portfolioId,
   multiYearHref,
   assumptionsHref,
+  gainsHref,
 }: {
   projection: OwnedIncomeProjection;
   portfolioId: string;
   multiYearHref: string;
   assumptionsHref: string;
+  gainsHref: string;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const explainOpenerRef = useRef<HTMLButtonElement | null>(null);
@@ -77,6 +79,7 @@ export function IncomeLanding({
       <nav className="income-view-tabs" aria-label="Income views">
         <span aria-current="page">Next 12 months</span>
         <Link href={multiYearHref}>Multi-year</Link>
+        <Link href={gainsHref}>Capital gains</Link>
       </nav>
 
       {breakdown.status === "no_coverage" ? (

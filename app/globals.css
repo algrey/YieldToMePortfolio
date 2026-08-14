@@ -3526,6 +3526,40 @@ dd {
   }
 }
 
+/* CGT-001B: Capital gains screen -- deliberately reuses the Income tab's
+   dark-token table/dialog/tab-row/empty-state classes
+   (`.income-fy-table*`, `.income-dialog`, `.income-view-tabs`,
+   `.empty-state`, `.income-row-trigger`, `.sheet-close`, `.unavailable`,
+   `.numeric`, `.tone-positive`/`.tone-negative`) so the screen reads as the
+   same visual system rather than a bespoke one; only what's genuinely new
+   gets its own selector below. No rounded corners, matching the rest of
+   the app's visual language. */
+.gains-disclaimer {
+  padding: 12px 14px;
+  border: 1px solid var(--divider);
+  border-radius: 0;
+  background: var(--forest);
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.gains-disclaimer strong {
+  color: var(--cream);
+}
+
+/* Wider than the base `.income-dialog` (480px) -- the per-FY detail dialog
+   also lists every allocation row (security, dates, quantity, proceeds,
+   basis, fees, gain/loss, eligibility), which needs more room than the
+   income dialogs' single-topic explanations. */
+.gains-dialog {
+  width: min(760px, calc(100vw - 32px));
+}
+
+.gains-allocation-table {
+  min-width: 760px;
+}
+
 /* UI-006B: dividend assumptions editor. Mobile-first -- each security is one
    block separated by a divider (owner wireframe decision, 2026-08-13: "no
    filter box, simple scroll"), reflowing into a dense row at the app's

@@ -19,3 +19,7 @@ export {
   type ComputeFyCapitalGainsTotalsResult,
   type FyCapitalGainsTotal,
 } from "./fy-aggregation.ts";
+export {
+  computeLifetimeCapitalGainsTotal,
+  type LifetimeCapitalGainsTotal,
+} from "./lifetime-totals.ts";

@@ -676,10 +676,11 @@ Status: DONE (2026-08-14). Orchestrator calculation rulings (BINDING, informatio
 
 ### CGT-001B — Capital gains screen
 
-Status: BLOCKED on CGT-001A.
+Status: DONE (2026-08-14).
 
 - Deliver: standalone owned route `/portfolio/:id/gains` following the income-route pattern, reachable as a third entry in the income screens' tab row ("Capital gains" alongside Next 12 months / Multi-year); per-FY table (FY label, discountable, non-discountable, losses, net estimate, source/method label, partial-coverage flag) with rows opening a per-disposal detail dialog (established modal pattern incl. UI-008 timeout); lifetime summary; a visible standing "informational — not tax advice" note consistent with the app's honesty conventions; explicit empty state (no disposals yet); QA-001A matrix rows (settled methodology), QA-001B accessibility, app visual language (no rounded corners etc.).
 - Tests: rendered states (populated/partial/empty), eligibility/method labels visible, dialog pattern assertions, route ownership/no-store, matrix citations grep-verified.
+- Completion note (2026-08-14): `/portfolio/:id/gains` as the third income-area tab on all three pages; per-FY table (discountable/non-discountable/losses with unabsorbed disclosure/net estimate at 2dp half-even over exact decimals, method labels, partial-coverage naming excluded securities, allocation counts labelled "Lot matches" never "disposals"); exported presentational FyDetailDialog (established modal pattern, no fetch — UI-008 timeout deliberately N/A, documented) with per-allocation rows rendering Unknown (never $0) for incomplete-basis figures; lifetime rollup labelled "(sum of each year, standalone)" with the carry-forward-out-of-scope note rendered immediately above it (index-asserted); four distinct typed degraded states; standing not-tax-advice note. Review round 1 FAIL (paraphrased matrix citation — the recurring class, now self-checked by a grep -F test for this file too; the carry-forward note had zero rendered coverage) → round 2 PASS with reviewer-re-rendered fixtures incl. a loss-heavy two-FY case confirming the lifetime line can no longer read as a whole-period net. Matrix 10 pages / 30 paths / 34 handlers. 27 tests. `npm run check` exit 0 (758 pass, 10 gated skips).
 
 ### IMP-006 — Dividend-receipt rows in CSV import
 

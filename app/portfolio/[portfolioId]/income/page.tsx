@@ -78,6 +78,7 @@ export default async function IncomePage({ params }: IncomePageProps) {
       portfolioId={portfolioId}
       multiYearHref={`/portfolio/${portfolioId}/income/multi-year`}
       assumptionsHref={`/portfolio/${portfolioId}/income/assumptions`}
+      gainsHref={`/portfolio/${portfolioId}/gains`}
     />
   );
 }

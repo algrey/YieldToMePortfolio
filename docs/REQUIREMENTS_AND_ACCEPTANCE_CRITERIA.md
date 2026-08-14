@@ -423,6 +423,7 @@ Acceptance:
 - An allocation with incomplete cost basis never contributes a fabricated zero gain to a total; it is excluded, counted, and its security named so the FY total discloses partial coverage.
 - A multi-lot disposal (one sale matched across several tax lots) scores eligibility per allocation, not per sale — lots with different acquisition dates can land in different discount buckets from the same disposal.
 - Every portfolio-scoped query is owner-scoped; cross-user data never appears in another owner's totals.
+- A rendered screen (CGT-001B) discloses per-FY totals, a per-disposal detail view labelled by allocation (never "disposals" unqualified, since one sale can span several tax lots), and a lifetime summary that purely sums each FY's own already-standalone figures rather than applying carry-forward across years; every degraded read-service state (unpublished calculation, unresolvable allocation dates, no disposals yet) is disclosed with distinct copy, never a fabricated zero; a standing "informational only — not tax advice" note is always visible.
 
 ## CSV import
 

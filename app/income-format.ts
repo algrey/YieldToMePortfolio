@@ -60,3 +60,26 @@ export function formatIncomePercent(
 export function formatCoverage(included: number, total: number): string {
   return `${included} of ${total}`;
 }
+
+/**
+ * CGT-001B: a share/unit quantity, e.g. "1,234.5" -- trimmed to 6dp (mirrors
+ * `app/components/portfolio-shell.tsx`'s `ownedHoldingTrimmed` convention
+ * for holding quantities) rather than fixed at 2dp like money, since a
+ * fractional-share quantity can carry more than two meaningful decimal
+ * places. Never a fabricated "0" -- `null` renders the explicit label.
+ */
+export function formatQuantity(
+  valueDecimal: string | null,
+  unavailableLabel = "Unavailable",
+): string {
+  if (valueDecimal === null) return unavailableLabel;
+  try {
+    return groupThousands(
+      formatDecimalTrimmed(parseDecimalResult(valueDecimal), 6, {
+        trimTrailingZeros: true,
+      }),
+    );
+  } catch {
+    return unavailableLabel;
+  }
+}
