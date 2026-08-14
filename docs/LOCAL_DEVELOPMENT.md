@@ -114,7 +114,10 @@ Then open **http://127.0.0.1:8799**.
 **Always use the gateway port `8799`, not `3000`.** Port 3000 is the raw Worker
 and returns `401` (no token). The gateway (`scripts/dev-auth-gateway.mjs`) serves
 the JWKS the Worker fetches and adds a freshly signed `cf-access-jwt-assertion`
-to every proxied request.
+to every proxied request. The gateway can be stopped and restarted independently
+of `npm run dev`: its signing key IDs are unique per process, so a restart
+forces the Worker to refetch the JWKS instead of verifying against a stale
+cached key.
 
 On first load the app just-in-time provisions an active user
 (`local-dev@example.com`, home currency AUD) in the local D1, then shows the

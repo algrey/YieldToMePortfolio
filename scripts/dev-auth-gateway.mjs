@@ -18,6 +18,21 @@
 // The signing key + JWKS come from the existing test fixture. Values here MUST
 // match `.dev.vars` (CLOUDFLARE_ACCESS_ISSUER / CLOUDFLARE_ACCESS_AUDIENCE).
 // Loopback-only, no production credentials; never expose publicly.
+//
+// The fixture's key IDs are suffixed with this process's PID plus its start
+// time. Without that, every gateway process would sign with kids
+// "current-kid"/"previous-kid", but each restart generates a brand-new RSA
+// keypair under the SAME kid. The Worker's JWKS key cache
+// (domain/auth/access-jwt.ts) caches public keys by kid for up to 7 days
+// (DEFAULT_CACHE_TTL_MS), so a `vinext dev` process that already cached the
+// pre-restart key would keep verifying against the stale public key and fail
+// closed on every request for up to a week, with no way to self-heal short of
+// restarting `vinext dev` too. Suffixing the kid per process guarantees a
+// restarted gateway mints kids the Worker has never cached, forcing a fresh
+// JWKS fetch that returns the new keys. The PID alone is not enough: PIDs
+// recycle, and a reused PID within the 7-day TTL would re-arm the same trap
+// against a still-running `vinext dev`, so the suffix also folds in the
+// process start time.
 
 import { createServer, request as httpRequest } from "node:http";
 import { connect as netConnect } from "node:net";
@@ -30,7 +45,9 @@ const issuerOrigin =
   process.env.DEV_ACCESS_ISSUER ?? `http://127.0.0.1:${gatewayPort}`;
 const audience = process.env.DEV_ACCESS_AUDIENCE ?? "yieldtome-local-dev";
 
-const fixture = createAccessJwtFixture();
+const fixture = createAccessJwtFixture({
+  keyIdSuffix: `${process.pid}-${Date.now()}`,
+});
 const jwksBody = await fixture.createJwks().text();
 
 function signPrincipalToken() {

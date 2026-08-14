@@ -224,3 +224,52 @@ test("caches current and rotated Access signing keys without trusting arbitrary 
   assert.match(requestLog[0] ?? "", /\/cdn-cgi\/access\/certs$/);
   assert.match(requestLog[1] ?? "", /\/cdn-cgi\/access\/certs$/);
 });
+
+test("fixture key IDs default to current-kid/previous-kid and stay stable with no suffix argument", () => {
+  const fixture = createAccessJwtFixture();
+
+  assert.equal(fixture.currentKey.kid, "current-kid");
+  assert.equal(fixture.previousKey.kid, "previous-kid");
+});
+
+test("keyIdSuffix isolates fixtures so a stale gateway process cannot poison the Worker's JWKS cache", async () => {
+  // Regression test for the dev-auth-gateway restart trap: two fixtures with
+  // different suffixes simulate two gateway process instances (e.g. before
+  // and after a restart). Their kids must never collide, and a verifier
+  // whose cache only knows one suffix's keys must fail closed (unknown key,
+  // not a signature error) on a token signed by the other suffix.
+  const fixtureA = createAccessJwtFixture({ keyIdSuffix: "A" });
+  const fixtureB = createAccessJwtFixture({ keyIdSuffix: "B" });
+
+  assert.equal(fixtureA.currentKey.kid, "current-kid-A");
+  assert.equal(fixtureA.previousKey.kid, "previous-kid-A");
+  assert.equal(fixtureB.currentKey.kid, "current-kid-B");
+  assert.equal(fixtureB.previousKey.kid, "previous-kid-B");
+
+  const verifierForA = createAccessJwtVerifier({
+    fetch: async () => fixtureA.createJwks().clone(),
+    now: () => Date.now(),
+  });
+
+  const crossSuffixResult = await verifierForA.verify(
+    createRequest(fixtureB.signToken()),
+    {
+      issuer: fixtureB.issuer,
+      audience: fixtureB.audience,
+    },
+  );
+  assert.equal(crossSuffixResult.ok, false);
+  if (!crossSuffixResult.ok) {
+    assert.equal(crossSuffixResult.code, "unknown-access-key");
+    assert.equal(crossSuffixResult.status, 403);
+  }
+
+  const sameSuffixResult = await verifierForA.verify(
+    createRequest(fixtureA.signToken()),
+    {
+      issuer: fixtureA.issuer,
+      audience: fixtureA.audience,
+    },
+  );
+  assert.equal(sameSuffixResult.ok, true);
+});

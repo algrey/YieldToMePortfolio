@@ -76,11 +76,16 @@ function signJwt(
   )}`;
 }
 
-export function createAccessJwtFixture(): AccessJwtFixture {
+export function createAccessJwtFixture(options?: {
+  keyIdSuffix?: string;
+}): AccessJwtFixture {
+  const suffix = options?.keyIdSuffix;
+  const currentKid = suffix ? `current-kid-${suffix}` : "current-kid";
+  const previousKid = suffix ? `previous-kid-${suffix}` : "previous-kid";
   const issuer = "https://example.cloudflareaccess.com";
   const audience = "test-audience";
-  const currentKey = createKeyPair("current-kid");
-  const previousKey = createKeyPair("previous-kid");
+  const currentKey = createKeyPair(currentKid);
+  const previousKey = createKeyPair(previousKid);
 
   return {
     issuer,
