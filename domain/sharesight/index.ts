@@ -1,9 +1,14 @@
-// BRK-003: barrel for the Sharesight GET-only client foundation. Nothing
-// exported here can send a non-GET Sharesight data request; the sole
-// non-GET capability (`token.ts`'s internal POST to the OAuth token
-// endpoint) is never re-exported -- only its `SharesightTokenProvider`
-// result type/factory are, so a consumer of this barrel only ever receives
-// an already-negotiated access token, never the POST capability itself.
+// BRK-003: barrel for the Sharesight GET-only client foundation.
+// `createSharesightClient` (and `createSharesightTokenProvider`, which only
+// ever hands back an already-negotiated access token) are the ONLY public
+// ways to reach Sharesight through this barrel. `transport.ts`'s raw
+// `sharesightGet` primitive is deliberately NOT re-exported here: it takes a
+// caller-controlled URL with no host pin of its own (that pin lives in
+// `client.ts`), so a direct caller with a hand-built Authorization header
+// could otherwise aim it anywhere and leak a token. `sharesightGet` and
+// `SharesightNonGetAttemptError` remain importable from `./transport.ts`
+// directly for internal/test use, but are package-internal, not part of
+// this barrel's public surface. See docs/ARCHITECTURE.md §8.2.
 
 export type {
   SharesightError,
@@ -18,12 +23,10 @@ export type {
   SharesightTradeType,
 } from "./contracts.ts";
 
-export {
-  SharesightNonGetAttemptError,
-  sharesightGet,
-  type SharesightFetcher,
-  type SharesightGetInit,
-} from "./transport.ts";
+// `SharesightFetcher` is re-exported type-only because it's part of the
+// public shape of `SharesightClientOptions.fetcher` below; it carries no
+// runtime capability of its own.
+export type { SharesightFetcher } from "./transport.ts";
 
 export {
   assertSharesightTokenUrl,

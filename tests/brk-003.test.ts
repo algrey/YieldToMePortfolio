@@ -14,14 +14,22 @@ import {
   createSharesightTokenProvider,
   DEFAULT_SHARESIGHT_TOKEN_URL,
   SharesightBaseUrlRejectedError,
-  SharesightNonGetAttemptError,
   SharesightTokenUrlRejectedError,
-  sharesightGet,
   validateSharesightTokenUrlShape,
   type SharesightFetcher,
   type SharesightResult,
   type SharesightTokenProvider,
 } from "../domain/sharesight/index.ts";
+// `sharesightGet` and `SharesightNonGetAttemptError` are the raw,
+// package-internal transport primitive (BRK-003 follow-up: sealed out of
+// `domain/sharesight/index.ts`'s barrel so the typed client is the only
+// public way to reach Sharesight). Tests are not the public surface, so
+// importing them directly from `transport.ts` here is fine and is how these
+// smuggling tests exercise the primitive itself.
+import {
+  SharesightNonGetAttemptError,
+  sharesightGet,
+} from "../domain/sharesight/transport.ts";
 import {
   parseSharesightHoldings,
   parseSharesightPayouts,
@@ -96,6 +104,50 @@ test("BRK-003 headline: sharesightGet has no method knob and rejects a smuggled 
   >[2];
   assert.throws(() => sharesightGet(fetcher, url, undefinedMethod));
   assert.equal(called, false);
+});
+
+// BRK-003 follow-up: the barrel (`domain/sharesight/index.ts`) must expose
+// no way to reach Sharesight except through the typed client. Previously
+// the barrel re-exported `sharesightGet` itself -- the raw GET-only
+// transport primitive, which takes a caller-controlled `URL` with no host
+// pin of its own (the host pin lives in `client.ts`, not `transport.ts`) --
+// so a direct caller with a hand-built Authorization header could aim it at
+// an arbitrary host and leak a token. That export has been removed; this
+// pins the barrel's ENTIRE export-name set exactly, so any future addition
+// (re-adding `sharesightGet`, or adding some new URL-accepting primitive)
+// must edit this assertion as a conscious, reviewed decision rather than
+// slipping through silently. Of the names below, `assertSharesightTokenUrl`
+// and `validateSharesightTokenUrlShape` do accept a `URL` argument, but
+// both are pure shape/equality validators that never call `fetch` --
+// `createSharesightClient` and `createSharesightTokenProvider` remain the
+// only barrel exports that can actually send a Sharesight request.
+const EXPECTED_BARREL_EXPORT_NAMES = [
+  "DEFAULT_SHARESIGHT_TOKEN_URL",
+  "SharesightBaseUrlRejectedError",
+  "SharesightTokenUrlRejectedError",
+  "assertSharesightTokenUrl",
+  "createSharesightClient",
+  "createSharesightTokenProvider",
+  "parseSharesightHoldings",
+  "parseSharesightPayouts",
+  "parseSharesightPortfolios",
+  "parseSharesightTrades",
+  "validateSharesightTokenUrlShape",
+].sort();
+
+test("BRK-003 follow-up: the barrel's export-name set is pinned exactly, and sharesightGet is not among them", async () => {
+  const barrel = await import("../domain/sharesight/index.ts");
+  assert.deepEqual(Object.keys(barrel).sort(), EXPECTED_BARREL_EXPORT_NAMES);
+  assert.equal(
+    (barrel as Record<string, unknown>).sharesightGet,
+    undefined,
+    "sharesightGet must not be reachable through the barrel",
+  );
+  assert.equal(
+    (barrel as Record<string, unknown>).SharesightNonGetAttemptError,
+    undefined,
+    "SharesightNonGetAttemptError is package-internal, not part of the barrel's public surface",
+  );
 });
 
 test("BRK-003 headline: the module surface exposes no generic request(method, ...) function", async () => {
