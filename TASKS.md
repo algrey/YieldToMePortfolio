@@ -355,9 +355,21 @@ Status: DEFERRED (2026-08-15); pre-existing display-only defect confirmed by BRK
 - Acceptance: repeat sync of an already-committed cursor page produces zero duplicate ledger effects against the real D1 schema; corrected/deleted broker records produce a real reversal/supersession, not a rewrite.
 - Risks: partial-page failure recovery, provider pagination/rate-limit behavior.
 
-#### BRK-005D — Per-row quarantine for Sharesight payout-key collisions
+### IMP-008 — Owner row-exclusion (skip) for blocked import rows
 
-Status: DEFERRED (2026-08-16); from BRK-005C review. Today a single same-holding/same-paid-date payout pair (legitimate interim+special, or a Sharesight-side duplicate) fails the WHOLE batch closed and blocks the entire sync integration until resolved inside Sharesight — correct and honest, but coarse. If it occurs in the owner's real data, implement per-row quarantine: stage and allow committing the non-colliding rows while holding only the ambiguous pair behind the error issue. Requires an import-pipeline change (row-level readiness gating), so it is its own task, not a BRK-005C patch.
+Status: READY (2026-08-16, owner-requested: "Since the import is locked until each error is resolved, we should add a skip button on each error"). Orchestrator rulings (BINDING):
+
+- Skip EXCLUDES rows from the commit; it never relaxes verification — no financial row ever commits against an unresolved security (the ticker-is-not-an-ID non-negotiable stands untouched).
+- Granularity: per unresolved-security candidate (one action skips ALL of that security's rows in the batch — the 19-candidates case) and per error-issue where the issue is row-linked (e.g. SHARESIGHT_PAYOUT_KEY_COLLISION — this task SUPERSEDES BRK-005D). Owner-initiated only, batch-scoped, reversible until commit (un-skip toggle).
+- Persistence: explicit owner-excluded state on the affected import_rows (schema change if the existing commit_status enum can't carry it — check first; CREATE-only-safe/ADD COLUMN migration, trigger-hazard check per the standing rule) + an audit event per skip/unskip (owner-attributed, batch+rows identified).
+- Readiness: requires zero error-severity issues on NON-excluded rows; excluded rows never commit, are recorded in commit metadata counts, and survive visibly in batch history ("N rows excluded by owner"); reversal of the batch unaffected.
+- Preview honesty: the skip affordance carries loud consequence copy — skipped rows are ABSENT from holdings/gains/income; the preview and post-commit history disclose excluded counts prominently; skipping a security that also has rows in FUTURE syncs re-raises fresh issues then (no sticky suppression — each batch decides).
+- UI: secondary action on the resolution card ("Skip N rows referencing SYMBOL — they will not be committed") and on row-linked error issues; established patterns (44px, text-not-color, dialog only if confirmation is warranted — a consequence-stating confirm is warranted here).
+- Tests: skip → readiness unblocks with remaining rows; commit excludes exactly the skipped rows (holdings/income prove absence); unskip restores; audit rows; cross-user denial; collision-issue skip path; future-sync re-raise; reversal round trip.
+
+#### BRK-005D — Per-row quarantine for Sharesight payout-key collisions (SUPERSEDED by IMP-008)
+
+Status: SUPERSEDED (2026-08-16) — folded into IMP-008's per-issue skip. Original note retained: from BRK-005C review. Today a single same-holding/same-paid-date payout pair (legitimate interim+special, or a Sharesight-side duplicate) fails the WHOLE batch closed and blocks the entire sync integration until resolved inside Sharesight — correct and honest, but coarse. If it occurs in the owner's real data, implement per-row quarantine: stage and allow committing the non-colliding rows while holding only the ambiguous pair behind the error issue. Requires an import-pipeline change (row-level readiness gating), so it is its own task, not a BRK-005C patch.
 
 #### BRK-006 — Broker position reconciliation surfacing
 
