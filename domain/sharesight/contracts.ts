@@ -73,6 +73,25 @@ export type SharesightFetchEvidence = Readonly<{
   ingestedAt: string;
 }>;
 
+/**
+ * BRK-008 diagnostic: metadata-only evidence for the failure class where
+ * `getJson` reads a response body but `JSON.parse` itself throws (e.g. an
+ * endpoint that silently returns an HTML page instead of JSON -- the
+ * observed 2026-08-15 `listPayouts` symptom before its endpoint path was
+ * corrected). This is a DIFFERENT failure class from a parsed-but-invalid
+ * domain shape (`SharesightFetchEvidence`'s sibling `onShapeEvidence`
+ * diagnostic covers that one) -- there is no parsed JSON to derive a field
+ * shape from here, only transport-level metadata. Never the body itself,
+ * never a byte of its content: only content-type, HTTP status, the fixed
+ * `bodyParseable: false` marker, and a byte count.
+ */
+export type SharesightBodyParseDiagnostic = Readonly<{
+  contentType: string | null;
+  httpStatus: number;
+  bodyParseable: false;
+  bodyBytes: number;
+}>;
+
 // --- v3 endpoint shapes (BRK-008 spike scope) -------------------------
 //
 // Money/quantity fields are decimal STRINGS (AGENTS.md non-negotiable),
@@ -109,29 +128,71 @@ export type SharesightPortfolio = Readonly<{
   taxEntityType: string | null;
 }>;
 
+/**
+ * Live-confirmed shape (2026-08-15, owner's real account -- see
+ * `docs/ARCHITECTURE.md` §8.2): `id`, `symbol`, and the instrument
+ * resolution keys (`instrument.code`/`instrument.market_code`/
+ * `instrument.currency_code`) are REQUIRED. `quantityDecimal` is OPTIONAL
+ * (`string | null`), NOT required as BRK-003 originally assumed -- the
+ * confirmed v3 `HoldingPortfolioList` response carries no quantity/value
+ * field at all on this endpoint; `averageCostDecimal`/`marketValueDecimal`
+ * remain optional for the same reason, kept in case a different
+ * params/endpoint combination ever returns them.
+ */
 export type SharesightHolding = Readonly<{
+  id: string;
   portfolioId: string;
+  symbol: string;
   instrumentCode: string;
-  marketCode: string | null;
+  marketCode: string;
   currencyCode: string;
-  quantityDecimal: string;
+  quantityDecimal: string | null;
   averageCostDecimal: string | null;
   marketValueDecimal: string | null;
 }>;
 
 export type SharesightTradeType = "buy" | "sell" | "other";
 
+/**
+ * Live-confirmed shape (2026-08-15, owner's real account -- see
+ * `docs/ARCHITECTURE.md` §8.2). REQUIRED: `id` (numeric, like
+ * portfolios/holdings), `transactionDate`, `quantityDecimal`,
+ * `priceDecimal`, `holdingId`, and the instrument resolution keys. The
+ * trade item's OWN `portfolio_id` field is validated for presence, shape,
+ * AND equality against the caller-supplied `portfolioId` this fetch was
+ * scoped to -- a mismatch fails the whole item closed (never silently
+ * re-attributed to the queried portfolio), so `portfolioId` here is always
+ * both the trusted context AND independently confirmed by the record
+ * itself. `valueDecimal` is nullable-tolerant (evidence shows
+ * other trade fields can be null; treated the same as an optional decimal
+ * rather than failing the whole item closed on a null `value`).
+ * `transactionType` is OPTIONAL -- the live response's first item did not
+ * carry this field at all, so an absent value is an honest `null`, not a
+ * parse failure; a PRESENT value outside the modelled `buy`/`sell`/`other`
+ * enum still fails the item closed (absent-vs-malformed discipline, BRK-003
+ * review finding F1). The remaining fields are optional per evidence.
+ */
 export type SharesightTrade = Readonly<{
   id: string;
   portfolioId: string;
+  holdingId: string;
   instrumentCode: string;
-  marketCode: string | null;
-  transactionType: SharesightTradeType;
+  marketCode: string;
+  transactionType: SharesightTradeType | null;
   transactionDate: string;
   currencyCode: string;
   quantityDecimal: string;
   priceDecimal: string;
+  valueDecimal: string | null;
   brokerageDecimal: string | null;
+  brokerageCurrencyCode: string | null;
+  exchangeRateDecimal: string | null;
+  exchangeRatePair: string | null;
+  state: string | null;
+  uniqueIdentifier: string | null;
+  paidOnDate: string | null;
+  descriptionCode: string | null;
+  sourceCategory: string | null;
 }>;
 
 export type SharesightPayout = Readonly<{

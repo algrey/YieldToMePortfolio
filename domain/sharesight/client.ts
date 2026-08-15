@@ -12,6 +12,7 @@
 // this module, and it has no browser-only API surface to tempt one to.
 
 import type {
+  SharesightBodyParseDiagnostic,
   SharesightError,
   SharesightFetchEvidence,
   SharesightHolding,
@@ -79,6 +80,26 @@ export type SharesightClientOptions = Readonly<{
    * reacting to.
    */
   onShapeEvidence?: (endpoint: string, shape: unknown) => void;
+  /**
+   * BRK-008 diagnostic (sibling of `onShapeEvidence` above, for a different
+   * failure class): invoked ONLY when `getJson` reads a response body
+   * successfully but `JSON.parse` itself throws -- e.g. an endpoint that
+   * silently returns an HTML page instead of JSON (the observed 2026-08-15
+   * `listPayouts` symptom before its endpoint path was corrected). There is
+   * no parsed JSON to derive a field shape from in this case, so this
+   * callback carries transport-level metadata only: content-type, HTTP
+   * status, the fixed `bodyParseable: false` marker, and a byte count --
+   * never the body itself, matching `onShapeEvidence`'s no-values
+   * discipline. Never fired for a non-2xx response (that path never reads a
+   * body) or for a timeout. `endpoint` is the same static per-method label
+   * `onShapeEvidence` uses, never a caller-supplied value. Any exception
+   * this callback throws is caught and discarded, same as
+   * `onShapeEvidence`.
+   */
+  onBodyParseDiagnostic?: (
+    endpoint: string,
+    diagnostic: SharesightBodyParseDiagnostic,
+  ) => void;
 }>;
 
 export class SharesightBaseUrlRejectedError extends Error {
@@ -182,6 +203,7 @@ export function createSharesightClient(
   const now = options.now ?? (() => new Date().toISOString());
 
   async function getJson(
+    endpoint: string,
     path: string,
     searchParams?: Record<string, string>,
   ): Promise<SharesightResult<unknown>> {
@@ -276,6 +298,23 @@ export function createSharesightClient(
     try {
       parsed = JSON.parse(bodyText);
     } catch {
+      // BRK-008: this is the failure class `onBodyParseDiagnostic` exists
+      // for -- a body was read successfully but did not parse as JSON at
+      // all (e.g. an HTML page from a misrouted endpoint), so there is no
+      // parsed JSON for `onShapeEvidence` to derive a field shape from.
+      // Metadata only, never the body itself.
+      if (options.onBodyParseDiagnostic) {
+        try {
+          options.onBodyParseDiagnostic(endpoint, {
+            contentType: response.headers.get("content-type"),
+            httpStatus: response.status,
+            bodyParseable: false,
+            bodyBytes: new TextEncoder().encode(bodyText).length,
+          });
+        } catch {
+          // Deliberately ignored -- see the option's doc comment.
+        }
+      }
       return requestError(
         "invalid_response",
         "Sharesight response was not valid JSON.",
@@ -319,7 +358,7 @@ export function createSharesightClient(
 
   return {
     async listPortfolios() {
-      const result = await getJson("/portfolios");
+      const result = await getJson("listPortfolios", "/portfolios");
       if (!result.ok) return result;
       return reportShapeEvidenceIfInvalid(
         "listPortfolios",
@@ -329,6 +368,7 @@ export function createSharesightClient(
     },
     async getPortfolioHoldings(portfolioId) {
       const result = await getJson(
+        "getPortfolioHoldings",
         `/portfolios/${encodeURIComponent(portfolioId)}/holdings`,
       );
       if (!result.ok) return result;
@@ -340,6 +380,7 @@ export function createSharesightClient(
     },
     async listTrades(portfolioId, params) {
       const result = await getJson(
+        "listTrades",
         `/portfolios/${encodeURIComponent(portfolioId)}/trades`,
         toSearchParams(params),
       );
@@ -351,8 +392,15 @@ export function createSharesightClient(
       );
     },
     async listPayouts(portfolioId, params) {
+      // BRK-008 (2026-08-15): the account's live listPayouts response was
+      // not valid JSON at the un-suffixed path -- Sharesight's v3 API
+      // documents this endpoint's path as `/portfolios/:id/payouts.json`
+      // (confirmed against the provider's published Swagger-derived
+      // client), unlike `holdings`/`trades`, which are v3-native routes
+      // that don't take a format suffix. See docs/ARCHITECTURE.md §8.2.
       const result = await getJson(
-        `/portfolios/${encodeURIComponent(portfolioId)}/payouts`,
+        "listPayouts",
+        `/portfolios/${encodeURIComponent(portfolioId)}/payouts.json`,
         toSearchParams(params),
       );
       if (!result.ok) return result;

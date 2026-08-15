@@ -48,10 +48,13 @@
 //       it look like `-123.45`? does its string form contain an `e`/`E`?),
 //       never from its content. This is the one narrow exception to "no
 //       values": a format class is not the value itself (nothing here could
-//       reconstruct the original string/number from the annotation alone),
-//       and it is exactly the TODO(BRK-008) evidence `parse.ts`'s
-//       `decimalString` needs confirmed against a live response (does a
-//       real money/quantity field ever arrive in exponential notation?);
+//       reconstruct the original string/number from the annotation alone).
+//       This annotation is what let BRK-008's live spike confirm whether a
+//       real money/quantity field could ever arrive in exponential
+//       notation -- resolved (see `parse.ts`'s `decimalString`: such a
+//       value is now REJECTED, fail-closed, rather than reformatted) --
+//       and it remains live diagnostic value for any FUTURE shape-evidence
+//       failure, not a pending question anymore;
 //     - array LENGTH, as the literal string `"length:N"` (a count, not a
 //       value);
 //     - the literal marker `"…truncated"`, when depth or the field-shaped
@@ -137,9 +140,11 @@ const DECIMAL_LIKE_PATTERN = /^-?\d+\.\d+$/;
  * check would misfire on an ordinary word containing the letter "e" (e.g.
  * "hello", "Delaware") and falsely flag it as exponent-notation. Anchored
  * end-to-end so only a string actually SHAPED like a full exponential
- * number matches -- this is exactly the TODO(BRK-008) signal
- * `parse.ts`'s `decimalString` needs confirmed, without over-triggering on
- * unrelated text. */
+ * number matches -- this is the same exponent-notation signal that let
+ * BRK-008's live spike confirm `parse.ts`'s `decimalString` question
+ * (resolved: exponential notation is now rejected, fail-closed, rather
+ * than reformatted), without over-triggering on unrelated text. Still live
+ * diagnostic value for any future shape-evidence failure. */
 const EXPONENT_PATTERN = /^-?\d+(\.\d+)?e[+-]?\d+$/i;
 
 /**

@@ -11,6 +11,7 @@
 // this barrel's public surface. See docs/ARCHITECTURE.md §8.2.
 
 export type {
+  SharesightBodyParseDiagnostic,
   SharesightError,
   SharesightErrorKind,
   SharesightFetchEvidence,

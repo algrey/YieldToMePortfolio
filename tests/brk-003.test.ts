@@ -1555,10 +1555,18 @@ const PORTFOLIOS_FIXTURE = {
   ],
 };
 
+// Matches live shape evidence 2026-08-15 (owner's real account, see
+// docs/ARCHITECTURE.md §8.2): `instrument.market_code`/`instrument.
+// currency_code` (not `market`/`currency`), a numeric holding `id`, and a
+// top-level `symbol` field. `quantity` is included here only to prove the
+// OPTIONAL-when-present path still works -- the confirmed live
+// HoldingPortfolioList response carries no quantity/value field at all.
 const HOLDINGS_FIXTURE = {
   holdings: [
     {
-      instrument: { code: "IXJ", market: "ASX", currency: "AUD" },
+      id: 9001,
+      symbol: "IXJ",
+      instrument: { code: "IXJ", market_code: "ASX", currency_code: "AUD" },
       quantity: 100,
       average_cost: "12.34",
       market_value: 1500.5,
@@ -1566,16 +1574,33 @@ const HOLDINGS_FIXTURE = {
   ],
 };
 
+// Matches live shape evidence 2026-08-15: numeric trade `id`, `holding_id`/
+// `portfolio_id` (numeric, integrity-checked but never trusted over the
+// caller-supplied portfolioId), `unique_identifier`, `value`,
+// `brokerage_currency_code`, `exchange_rate`(_pair), `state`, `paid_on`,
+// `description_code`, `source_category` -- and `transaction_type`, which is
+// OPTIONAL per that same evidence (a live item can omit it entirely).
 const TRADES_FIXTURE = {
   trades: [
     {
-      id: "trade_1",
-      instrument: { code: "WHC", market: "ASX", currency: "AUD" },
+      id: 5001,
+      unique_identifier: "abc-123",
+      instrument: { code: "WHC", market_code: "ASX", currency_code: "AUD" },
       transaction_type: "BUY",
       transaction_date: "2026-01-15",
       quantity: 50,
       price: "5.20",
+      value: 260,
       brokerage: 9.95,
+      brokerage_currency_code: "AUD",
+      exchange_rate: 1,
+      exchange_rate_pair: "AUD/AUD",
+      holding_id: 4001,
+      portfolio_id: 3001,
+      state: "confirmed",
+      paid_on: null,
+      description_code: "buy",
+      source_category: "trade",
     },
   ],
 };
@@ -1584,7 +1609,7 @@ const PAYOUTS_FIXTURE = {
   payouts: [
     {
       id: "payout_1",
-      instrument: { code: "IXJ", market: "ASX", currency: "AUD" },
+      instrument: { code: "IXJ", market_code: "ASX", currency_code: "AUD" },
       paid_on: "2026-02-01",
       amount: "120.00",
       franked_amount: "84.00",
@@ -1630,22 +1655,43 @@ test("BRK-003 parsing: valid fixtures parse into typed results with exact decima
   assert.equal(holdings.ok, true);
   if (holdings.ok) {
     const holding = holdings.value[0];
+    assert.equal(holding?.id, "9001");
+    assert.equal(holding?.symbol, "IXJ");
     assert.equal(holding?.quantityDecimal, "100");
     assert.equal(holding?.averageCostDecimal, "12.34");
     assert.equal(holding?.marketValueDecimal, "1500.5");
     assert.equal(holding?.instrumentCode, "IXJ");
+    assert.equal(holding?.marketCode, "ASX");
+    assert.equal(holding?.currencyCode, "AUD");
     assert.equal(holding?.portfolioId, "port_1");
   }
 
-  const trades =
-    await clientWithFixtureBody(TRADES_FIXTURE).listTrades("port_1");
+  const trades = await clientWithFixtureBody(TRADES_FIXTURE).listTrades("3001");
   assert.equal(trades.ok, true);
   if (trades.ok) {
     const trade = trades.value[0];
+    assert.equal(trade?.id, "5001");
+    assert.equal(trade?.uniqueIdentifier, "abc-123");
+    assert.equal(trade?.holdingId, "4001");
+    // The trade's OWN portfolio_id (3001) is cross-checked against the
+    // caller-supplied portfolioId this fetch was scoped to ("3001") -- they
+    // must agree or the item fails closed (mismatch case tested below).
+    assert.equal(trade?.portfolioId, "3001");
     assert.equal(trade?.transactionType, "buy");
     assert.equal(trade?.quantityDecimal, "50");
     assert.equal(trade?.priceDecimal, "5.20");
+    assert.equal(trade?.valueDecimal, "260");
     assert.equal(trade?.brokerageDecimal, "9.95");
+    assert.equal(trade?.brokerageCurrencyCode, "AUD");
+    assert.equal(trade?.exchangeRateDecimal, "1");
+    assert.equal(trade?.exchangeRatePair, "AUD/AUD");
+    assert.equal(trade?.state, "confirmed");
+    assert.equal(trade?.paidOnDate, null);
+    assert.equal(trade?.descriptionCode, "buy");
+    assert.equal(trade?.sourceCategory, "trade");
+    assert.equal(trade?.instrumentCode, "WHC");
+    assert.equal(trade?.marketCode, "ASX");
+    assert.equal(trade?.currencyCode, "AUD");
   }
 
   const payouts =
@@ -1670,7 +1716,9 @@ test("BRK-003 F1: an absent optional decimal is an honest null; a present-but-ma
   const holdingsAbsentOptional = {
     holdings: [
       {
-        instrument: { code: "IXJ", market: "ASX", currency: "AUD" },
+        id: 9002,
+        symbol: "IXJ",
+        instrument: { code: "IXJ", market_code: "ASX", currency_code: "AUD" },
         quantity: 100,
         // average_cost / market_value genuinely absent.
       },
@@ -1685,10 +1733,32 @@ test("BRK-003 F1: an absent optional decimal is an honest null; a present-but-ma
     assert.equal(absentResult.value[0]?.marketValueDecimal, null);
   }
 
+  // Live-confirmed 2026-08-15: quantity itself is genuinely absent from the
+  // real HoldingPortfolioList response -- an honest null, not a failure.
+  const holdingsQuantityAbsent = {
+    holdings: [
+      {
+        id: 9004,
+        symbol: "IXJ",
+        instrument: { code: "IXJ", market_code: "ASX", currency_code: "AUD" },
+        // quantity genuinely absent.
+      },
+    ],
+  };
+  const quantityAbsentResult = await clientWithFixtureBody(
+    holdingsQuantityAbsent,
+  ).getPortfolioHoldings("port_1");
+  assert.equal(quantityAbsentResult.ok, true);
+  if (quantityAbsentResult.ok) {
+    assert.equal(quantityAbsentResult.value[0]?.quantityDecimal, null);
+  }
+
   const holdingsMalformedOptional = {
     holdings: [
       {
-        instrument: { code: "IXJ", market: "ASX", currency: "AUD" },
+        id: 9003,
+        symbol: "IXJ",
+        instrument: { code: "IXJ", market_code: "ASX", currency_code: "AUD" },
         quantity: 100,
         average_cost: "N/A", // present, but not a decimal
       },
@@ -1707,7 +1777,7 @@ test("BRK-003 F1: an absent optional decimal is an honest null; a present-but-ma
     payouts: [
       {
         id: "payout_2",
-        instrument: { code: "IXJ", market: "ASX", currency: "AUD" },
+        instrument: { code: "IXJ", market_code: "ASX", currency_code: "AUD" },
         paid_on: "2026-02-01",
         amount: "50.00",
         franked_amount: "not-a-number", // present, corrupt -- must not silently become "unknown"
@@ -1726,7 +1796,7 @@ test("BRK-003 F1: an absent optional decimal is an honest null; a present-but-ma
     payouts: [
       {
         id: "payout_3",
-        instrument: { code: "IXJ", market: "ASX", currency: "AUD" },
+        instrument: { code: "IXJ", market_code: "ASX", currency_code: "AUD" },
         paid_on: "2026-02-01",
         amount: "50.00",
         // franked_amount / unfranked_amount / resident_withholding_tax
@@ -1741,6 +1811,67 @@ test("BRK-003 F1: an absent optional decimal is an honest null; a present-but-ma
     assert.equal(payoutsAbsentResult.value[0]?.frankedAmountDecimal, null);
     assert.equal(payoutsAbsentResult.value[0]?.unfrankedAmountDecimal, null);
     assert.equal(payoutsAbsentResult.value[0]?.taxWithheldDecimal, null);
+  }
+});
+
+// BRK-008 decision (2026-08-15, docs/ARCHITECTURE.md §8.2): money/quantity
+// numbers are converted via an exact double round-trip; exponential
+// notation (a magnitude too large/small for `String()` to render as a
+// plain decimal) is REJECTED, fail-closed, rather than reformatted --
+// reformatting would fabricate a representation Sharesight never sent.
+test("BRK-008: a money/quantity field whose numeric magnitude would render in exponential notation fails the item closed", async () => {
+  const priceExponential = await clientWithFixtureBody({
+    trades: [
+      {
+        id: 1,
+        instrument: { code: "WHC", market_code: "ASX", currency_code: "AUD" },
+        transaction_date: "2026-01-15",
+        quantity: 1,
+        price: 1e21, // renders as "1e+21" -- not a valid decimal string
+        holding_id: 1,
+        portfolio_id: 1,
+      },
+    ],
+  }).listTrades("1");
+  assert.equal(priceExponential.ok, false);
+  if (!priceExponential.ok) {
+    assert.equal(priceExponential.error.kind, "invalid_response");
+  }
+
+  // The same rejection applies to an OPTIONAL decimal field, never silently
+  // collapsing to "unknown" (absent-vs-malformed discipline).
+  const averageCostExponential = await clientWithFixtureBody({
+    holdings: [
+      {
+        id: 1,
+        symbol: "IXJ",
+        instrument: { code: "IXJ", market_code: "ASX", currency_code: "AUD" },
+        average_cost: 1e-21,
+      },
+    ],
+  }).getPortfolioHoldings("p1");
+  assert.equal(averageCostExponential.ok, false);
+  if (!averageCostExponential.ok) {
+    assert.equal(averageCostExponential.error.kind, "invalid_response");
+  }
+
+  // An ordinary, non-exponential large/small magnitude still parses exactly.
+  const ordinaryMagnitude = await clientWithFixtureBody({
+    trades: [
+      {
+        id: 1,
+        instrument: { code: "WHC", market_code: "ASX", currency_code: "AUD" },
+        transaction_date: "2026-01-15",
+        quantity: 1,
+        price: 0.0001,
+        holding_id: 1,
+        portfolio_id: 1,
+      },
+    ],
+  }).listTrades("1");
+  assert.equal(ordinaryMagnitude.ok, true);
+  if (ordinaryMagnitude.ok) {
+    assert.equal(ordinaryMagnitude.value[0]?.priceDecimal, "0.0001");
   }
 });
 
@@ -1809,7 +1940,52 @@ test("BRK-003 parsing: missing/malformed envelopes and fields produce a typed in
       "holdings missing instrument",
       () =>
         clientWithFixtureBody({
-          holdings: [{ quantity: 1 }],
+          holdings: [{ id: 1, symbol: "IXJ", quantity: 1 }],
+        }).getPortfolioHoldings("p1"),
+    ],
+    [
+      "holdings missing id",
+      () =>
+        clientWithFixtureBody({
+          holdings: [
+            {
+              symbol: "IXJ",
+              instrument: {
+                code: "IXJ",
+                market_code: "ASX",
+                currency_code: "AUD",
+              },
+            },
+          ],
+        }).getPortfolioHoldings("p1"),
+    ],
+    [
+      "holdings missing symbol",
+      () =>
+        clientWithFixtureBody({
+          holdings: [
+            {
+              id: 1,
+              instrument: {
+                code: "IXJ",
+                market_code: "ASX",
+                currency_code: "AUD",
+              },
+            },
+          ],
+        }).getPortfolioHoldings("p1"),
+    ],
+    [
+      "holdings instrument missing market_code",
+      () =>
+        clientWithFixtureBody({
+          holdings: [
+            {
+              id: 1,
+              symbol: "IXJ",
+              instrument: { code: "IXJ", currency_code: "AUD" },
+            },
+          ],
         }).getPortfolioHoldings("p1"),
     ],
     [
@@ -1818,11 +1994,119 @@ test("BRK-003 parsing: missing/malformed envelopes and fields produce a typed in
         clientWithFixtureBody({
           holdings: [
             {
-              instrument: { code: "IXJ", currency: "AUD" },
+              id: 1,
+              symbol: "IXJ",
+              instrument: {
+                code: "IXJ",
+                market_code: "ASX",
+                currency_code: "AUD",
+              },
               quantity: "not-a-number",
             },
           ],
         }).getPortfolioHoldings("p1"),
+    ],
+    [
+      "trades missing id",
+      () =>
+        clientWithFixtureBody({
+          trades: [
+            {
+              instrument: {
+                code: "WHC",
+                market_code: "ASX",
+                currency_code: "AUD",
+              },
+              transaction_date: "2026-01-15",
+              quantity: 1,
+              price: 1,
+              holding_id: 1,
+              portfolio_id: 1,
+            },
+          ],
+        }).listTrades("1"),
+    ],
+    [
+      "trades string id (rejected -- id must be a numeric integer)",
+      () =>
+        clientWithFixtureBody({
+          trades: [
+            {
+              id: "t1",
+              instrument: {
+                code: "WHC",
+                market_code: "ASX",
+                currency_code: "AUD",
+              },
+              transaction_date: "2026-01-15",
+              quantity: 1,
+              price: 1,
+              holding_id: 1,
+              portfolio_id: 1,
+            },
+          ],
+        }).listTrades("1"),
+    ],
+    [
+      "trades missing holding_id",
+      () =>
+        clientWithFixtureBody({
+          trades: [
+            {
+              id: 1,
+              instrument: {
+                code: "WHC",
+                market_code: "ASX",
+                currency_code: "AUD",
+              },
+              transaction_date: "2026-01-15",
+              quantity: 1,
+              price: 1,
+              portfolio_id: 1,
+            },
+          ],
+        }).listTrades("1"),
+    ],
+    [
+      "trades missing portfolio_id",
+      () =>
+        clientWithFixtureBody({
+          trades: [
+            {
+              id: 1,
+              instrument: {
+                code: "WHC",
+                market_code: "ASX",
+                currency_code: "AUD",
+              },
+              transaction_date: "2026-01-15",
+              quantity: 1,
+              price: 1,
+              holding_id: 1,
+            },
+          ],
+        }).listTrades("1"),
+    ],
+    [
+      "trades portfolio_id present and well-shaped, but NOT EQUAL to the caller-supplied portfolioId (real cross-check, not shape-only)",
+      () =>
+        clientWithFixtureBody({
+          trades: [
+            {
+              id: 1,
+              instrument: {
+                code: "WHC",
+                market_code: "ASX",
+                currency_code: "AUD",
+              },
+              transaction_date: "2026-01-15",
+              quantity: 1,
+              price: 1,
+              holding_id: 1,
+              portfolio_id: 999, // well-shaped, but does not match "1" below
+            },
+          ],
+        }).listTrades("1"),
     ],
     [
       "trades invalid transaction_type",
@@ -1830,15 +2114,43 @@ test("BRK-003 parsing: missing/malformed envelopes and fields produce a typed in
         clientWithFixtureBody({
           trades: [
             {
-              id: "t1",
-              instrument: { code: "WHC", currency: "AUD" },
+              id: 1,
+              instrument: {
+                code: "WHC",
+                market_code: "ASX",
+                currency_code: "AUD",
+              },
               transaction_type: "TRANSFER",
               transaction_date: "2026-01-15",
               quantity: 1,
               price: 1,
+              holding_id: 1,
+              portfolio_id: 1,
             },
           ],
-        }).listTrades("p1"),
+        }).listTrades("1"),
+    ],
+    [
+      "trades malformed value (present, not a decimal)",
+      () =>
+        clientWithFixtureBody({
+          trades: [
+            {
+              id: 1,
+              instrument: {
+                code: "WHC",
+                market_code: "ASX",
+                currency_code: "AUD",
+              },
+              transaction_date: "2026-01-15",
+              quantity: 1,
+              price: 1,
+              value: "not-a-number",
+              holding_id: 1,
+              portfolio_id: 1,
+            },
+          ],
+        }).listTrades("1"),
     ],
     [
       "payouts missing amount",
@@ -1847,7 +2159,11 @@ test("BRK-003 parsing: missing/malformed envelopes and fields produce a typed in
           payouts: [
             {
               id: "pay1",
-              instrument: { code: "IXJ", currency: "AUD" },
+              instrument: {
+                code: "IXJ",
+                market_code: "ASX",
+                currency_code: "AUD",
+              },
               paid_on: "2026-02-01",
             },
           ],
@@ -1861,6 +2177,31 @@ test("BRK-003 parsing: missing/malformed envelopes and fields produce a typed in
     if (!result.ok) {
       assert.equal(result.error.kind, "invalid_response", label);
     }
+  }
+});
+
+// BRK-008: `transaction_type` is OPTIONAL (live evidence: the first item did
+// not carry it at all) -- an absent value is a success with `null`, not a
+// parse failure. `value` is nullable-tolerant the same way.
+test("BRK-008 trades: an absent transaction_type/value parses successfully as null, not a failure", async () => {
+  const result = await clientWithFixtureBody({
+    trades: [
+      {
+        id: 1,
+        instrument: { code: "WHC", market_code: "ASX", currency_code: "AUD" },
+        transaction_date: "2026-01-15",
+        quantity: 1,
+        price: 1,
+        holding_id: 1,
+        portfolio_id: 1,
+        // transaction_type / value genuinely absent.
+      },
+    ],
+  }).listTrades("1");
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.value[0]?.transactionType, null);
+    assert.equal(result.value[0]?.valueDecimal, null);
   }
 });
 
@@ -2030,6 +2371,133 @@ test("BRK-003 transport errors: 401 arriving after a cached token was believed v
     assert.equal(result.error.kind, "authentication");
     assert.equal(result.error.retryable, false);
   }
+});
+
+// --- BRK-008: payouts endpoint path fix + onBodyParseDiagnostic -----------
+
+test("BRK-008: listPayouts requests the .json-suffixed endpoint path (Sharesight v3 payouts convention)", async () => {
+  let calledUrl: string | null = null;
+  const provider = await alwaysValidTokenProvider();
+  const client = createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async (url) => {
+      calledUrl = String(url);
+      return jsonResponse(200, { payouts: [] });
+    },
+  });
+  const result = await client.listPayouts("port_1");
+  assert.equal(result.ok, true);
+  assert.equal(
+    calledUrl,
+    "https://api.sharesight.com/api/v3/portfolios/port_1/payouts.json",
+  );
+});
+
+test("BRK-008: getPortfolioHoldings/listTrades request their un-suffixed v3-native paths, unchanged by the payouts fix", async () => {
+  const provider = await alwaysValidTokenProvider();
+  const calledUrls: string[] = [];
+  const client = createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async (url) => {
+      calledUrls.push(String(url));
+      return jsonResponse(200, { holdings: [], trades: [] });
+    },
+  });
+  await client.getPortfolioHoldings("port_1");
+  await client.listTrades("port_1");
+  assert.deepEqual(calledUrls, [
+    "https://api.sharesight.com/api/v3/portfolios/port_1/holdings",
+    "https://api.sharesight.com/api/v3/portfolios/port_1/trades",
+  ]);
+});
+
+test("BRK-008 onBodyParseDiagnostic: fires with metadata only when a response body is read but does not parse as JSON at all", async () => {
+  const provider = await alwaysValidTokenProvider();
+  const calls: Array<{
+    endpoint: string;
+    diagnostic: {
+      contentType: string | null;
+      httpStatus: number;
+      bodyParseable: false;
+      bodyBytes: number;
+    };
+  }> = [];
+  const client = createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () =>
+      new Response("<html>not json, an SPA fallback page</html>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      }),
+    onBodyParseDiagnostic: (endpoint, diagnostic) => {
+      calls.push({ endpoint, diagnostic });
+    },
+  });
+  const result = await client.listPayouts("port_1");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.kind, "invalid_response");
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].endpoint, "listPayouts");
+  assert.equal(calls[0].diagnostic.contentType, "text/html; charset=utf-8");
+  assert.equal(calls[0].diagnostic.httpStatus, 200);
+  assert.equal(calls[0].diagnostic.bodyParseable, false);
+  assert.equal(
+    calls[0].diagnostic.bodyBytes,
+    "<html>not json, an SPA fallback page</html>".length,
+  );
+});
+
+test("BRK-008 onBodyParseDiagnostic: never fires when JSON parses (even into an invalid domain shape), on a non-2xx response, or on a timeout", async () => {
+  const provider = await alwaysValidTokenProvider();
+  let called = false;
+  const onBodyParseDiagnostic = () => {
+    called = true;
+  };
+
+  const validJson = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => jsonResponse(200, { portfolios: "not-an-array" }),
+    onBodyParseDiagnostic,
+  }).listPortfolios();
+  assert.equal(validJson.ok, false);
+  if (!validJson.ok) assert.equal(validJson.error.kind, "invalid_response");
+
+  const non2xx = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => new Response("<html>404</html>", { status: 404 }),
+    onBodyParseDiagnostic,
+  }).listPortfolios();
+  assert.equal(non2xx.ok, false);
+  if (!non2xx.ok) assert.equal(non2xx.error.kind, "invalid_response");
+
+  const timeoutResult = await createSharesightClient({
+    tokenProvider: provider,
+    timeoutMs: 15,
+    fetcher: () =>
+      new Promise<Response>((resolve) => {
+        setTimeout(() => resolve(jsonResponse(200, { portfolios: [] })), 250);
+      }),
+    onBodyParseDiagnostic,
+  }).listPortfolios();
+  assert.equal(timeoutResult.ok, false);
+  if (!timeoutResult.ok) assert.equal(timeoutResult.error.kind, "timeout");
+
+  assert.equal(called, false);
+});
+
+test("BRK-008 onBodyParseDiagnostic: a throwing callback is caught and discarded, never failing the parse result it reacted to", async () => {
+  const provider = await alwaysValidTokenProvider();
+  const client = createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => new Response("<not json>", { status: 200 }),
+    onBodyParseDiagnostic: () => {
+      throw new Error("boom -- caller-side diagnostic failure");
+    },
+  });
+  const result = await client.listPayouts("port_1");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.kind, "invalid_response");
 });
 
 // --- Nothing reaches client bundles ---------------------------------------

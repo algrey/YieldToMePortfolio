@@ -43,36 +43,43 @@ function requiredString(record: RecordValue, field: string): string | null {
     : null;
 }
 
-function optionalString(record: RecordValue, field: string): string | null {
-  const value = record[field];
-  if (value === undefined || value === null) {
-    return null;
-  }
-  return typeof value === "string" && value.trim().length > 0
-    ? value.trim()
-    : null;
-}
-
-/** `String(value)` for a finite number, mirroring
- * `yahoo-compatible.ts`'s `positiveDecimal` conversion. Money/quantity
- * fields on Sharesight endpoints may arrive as either a JSON number or a
- * decimal string; both are normalized to a canonical decimal string here. */
+/**
+ * `String(value)` for a finite number, mirroring `yahoo-compatible.ts`'s
+ * `positiveDecimal` conversion. Money/quantity fields on Sharesight
+ * endpoints may arrive as either a JSON number or a decimal string; both are
+ * normalized to a canonical decimal string here.
+ *
+ * BRK-008 decision (2026-08-15, resolves the former exponent TODO --
+ * see `docs/ARCHITECTURE.md` §8.2): Sharesight emits money/quantity fields
+ * as JSON floats, so conversion is an EXACT double round-trip --
+ * `String(value)` on any finite JS number is guaranteed by ECMA-262 to
+ * produce the shortest string that parses back to the exact same value, so
+ * this never fabricates precision the wire didn't carry. The one thing
+ * `String()` can produce that is NOT a valid decimal string is exponential
+ * notation for a very large/small magnitude (e.g. `"1e+21"`); that is
+ * REJECTED (returns `null`, fail-closed) rather than reformatted, since
+ * reformatting would itself be inventing a representation Sharesight never
+ * sent. `NaN`/`Infinity` are rejected the same way via `Number.isFinite`.
+ * Net effect: our precision is bounded by exactly what Sharesight's own
+ * float emission carries on the wire -- we preserve it exactly, we never
+ * extend or reformat it.
+ */
 function decimalString(
   value: unknown,
   { allowNegative }: { allowNegative: boolean },
 ): string | null {
   if (typeof value === "number") {
     if (!Number.isFinite(value)) {
-      return null;
+      return null; // rejects NaN/Infinity, fail-closed
     }
     if (!allowNegative && value < 0) {
       return null;
     }
-    // TODO(BRK-008): String(value) can render a very large/small finite
-    // number in exponential notation (e.g. 1e21); confirm real Sharesight
-    // money/quantity magnitudes against a live response before assuming
-    // this can't happen for a live field.
-    return String(value);
+    const rendered = String(value);
+    if (/e/i.test(rendered)) {
+      return null; // exponential notation is not a valid decimal string
+    }
+    return rendered;
   }
   if (typeof value !== "string") {
     return null;
@@ -119,10 +126,10 @@ function optionalDecimal(
  * review finding F1) for optional STRING fields: callers MUST check for this
  * sentinel and fail the whole item closed -- never treat it the same as
  * `null`. Used by `parsePortfolioItem`'s optional fields (e.g. `tz_name`,
- * `cg_discount`); the pre-existing `optionalString` helper above is left
- * untouched since holdings/trades/payouts parsing (unchanged this round)
- * already depends on its current absent-and-wrong-type-both-collapse-to-null
- * behavior. */
+ * `cg_discount`) and, as of the BRK-008 live pass, `parseTradeItem`'s
+ * optional string fields too (e.g. `state`, `unique_identifier`,
+ * `description_code`, `source_category`, `brokerage_currency_code`,
+ * `exchange_rate_pair`, `paid_on`). */
 const MALFORMED_OPTIONAL_STRING = Symbol(
   "sharesight-malformed-optional-string",
 );
@@ -275,17 +282,29 @@ export function parseSharesightPortfolios(
   return parseItemList(root, "portfolios", parsePortfolioItem, "portfolios");
 }
 
+/**
+ * Live-confirmed shape (2026-08-15, owner's real account -- see
+ * `docs/ARCHITECTURE.md` §8.2): the nested `instrument` object's resolution
+ * keys are `code`, `market_code`, and `currency_code` -- NOT `market`/
+ * `currency` as BRK-003 originally assumed. All three are REQUIRED: they
+ * are the exact keys BRK-005's security resolution needs (ticker +
+ * exchange/MIC + currency), so a holding/trade/payout item missing any of
+ * them fails closed rather than resolving against an incomplete key.
+ * Validated shallowly -- only these three fields are read; every other key
+ * on the live `instrument` object (`country_id`, `crypto`, `expired`,
+ * `logo`, `classifications`, etc.) is ignored, not validated or retained.
+ */
 function instrumentFields(record: RecordValue): {
   instrumentCode: string;
-  marketCode: string | null;
+  marketCode: string;
   currencyCode: string;
 } | null {
   const instrument = asRecord(record.instrument);
   if (!instrument) return null;
   const instrumentCode = requiredString(instrument, "code");
-  const currencyCode = requiredString(instrument, "currency");
-  if (!instrumentCode || !currencyCode) return null;
-  const marketCode = optionalString(instrument, "market");
+  const marketCode = requiredString(instrument, "market_code");
+  const currencyCode = requiredString(instrument, "currency_code");
+  if (!instrumentCode || !marketCode || !currencyCode) return null;
   return { instrumentCode, marketCode, currencyCode };
 }
 
@@ -295,18 +314,27 @@ function parseHoldingItem(
 ): SharesightHolding | null {
   const record = asRecord(item);
   if (!record) return null;
+  // Live-confirmed 2026-08-15: `id` is a numeric integer (portfolios
+  // technique) and a top-level `symbol` field is present alongside
+  // `instrument.code`.
+  const id = requiredIntegerIdDecimalString(record, "id");
+  const symbol = requiredString(record, "symbol");
   const instrument = instrumentFields(record);
-  if (!instrument) return null;
-  const quantityDecimal = requiredDecimal(record, "quantity", {
-    allowNegative: false,
-  });
-  if (!quantityDecimal) return null;
+  if (!id || !symbol || !instrument) return null;
+  // OPTIONAL, not required -- the confirmed live `HoldingPortfolioList`
+  // response carries no quantity/value field at all on this endpoint (see
+  // `SharesightHolding`'s doc comment); a present-but-unparseable value
+  // still fails the item closed (absent-vs-malformed discipline).
+  const quantityDecimal = optionalDecimal(record, "quantity");
+  if (quantityDecimal === MALFORMED_OPTIONAL_DECIMAL) return null;
   const averageCostDecimal = optionalDecimal(record, "average_cost");
   if (averageCostDecimal === MALFORMED_OPTIONAL_DECIMAL) return null;
   const marketValueDecimal = optionalDecimal(record, "market_value");
   if (marketValueDecimal === MALFORMED_OPTIONAL_DECIMAL) return null;
   return {
+    id,
     portfolioId,
+    symbol,
     instrumentCode: instrument.instrumentCode,
     marketCode: instrument.marketCode,
     currencyCode: instrument.currencyCode,
@@ -330,12 +358,29 @@ export function parseSharesightHoldings(
 
 const TRADE_TYPES = new Set(["buy", "sell", "other"]);
 
-function parseTradeType(value: unknown): SharesightTradeType | null {
-  if (typeof value !== "string") return null;
+/** Sentinel distinguishing "transaction_type present but not one of the
+ * modelled enum values" from a genuinely absent/null field -- see
+ * `SharesightTrade`'s doc comment. Mirrors this module's other
+ * `MALFORMED_OPTIONAL_*` sentinels. */
+const MALFORMED_TRADE_TYPE = Symbol("sharesight-malformed-trade-type");
+
+/**
+ * Live-confirmed 2026-08-15: `transaction_type` is OPTIONAL -- the live
+ * response's first item did not carry this field at all. Absent/null is an
+ * honest "unknown"; a present value outside `buy`/`sell`/`other` fails the
+ * item closed rather than being silently treated the same as "unknown"
+ * (absent-vs-malformed discipline, BRK-003 review finding F1).
+ */
+function optionalTradeType(
+  record: RecordValue,
+): SharesightTradeType | null | typeof MALFORMED_TRADE_TYPE {
+  const value = record.transaction_type;
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") return MALFORMED_TRADE_TYPE;
   const normalized = value.trim().toLowerCase();
   return TRADE_TYPES.has(normalized)
     ? (normalized as SharesightTradeType)
-    : null;
+    : MALFORMED_TRADE_TYPE;
 }
 
 function parseTradeItem(
@@ -344,9 +389,12 @@ function parseTradeItem(
 ): SharesightTrade | null {
   const record = asRecord(item);
   if (!record) return null;
-  const id = requiredString(record, "id");
+  // Live-confirmed 2026-08-15: trade `id` is a numeric integer, like
+  // portfolios/holdings -- not a string as BRK-003 originally assumed.
+  const id = requiredIntegerIdDecimalString(record, "id");
   const instrument = instrumentFields(record);
-  const transactionType = parseTradeType(record.transaction_type);
+  const transactionType = optionalTradeType(record);
+  if (transactionType === MALFORMED_TRADE_TYPE) return null;
   const transactionDate = requiredString(record, "transaction_date");
   const quantityDecimal = requiredDecimal(record, "quantity", {
     allowNegative: false,
@@ -354,22 +402,65 @@ function parseTradeItem(
   const priceDecimal = requiredDecimal(record, "price", {
     allowNegative: false,
   });
+  const holdingId = requiredIntegerIdDecimalString(record, "holding_id");
+  // Real cross-check, not a reworded no-op (Orchestrator ruling): the trade
+  // item's OWN `portfolio_id` must be present, well-shaped, AND EQUAL to the
+  // caller-supplied `portfolioId` this fetch was scoped to. A mismatch fails
+  // the item closed via the envelope's whole-item fail-close convention
+  // (never silently re-attributed to the queried portfolio) -- a
+  // mis-scoped record silently accepted here would be a provenance lie
+  // downstream (AGENTS.md: never trust a self-reported owner/scope over the
+  // authenticated context it was fetched under).
+  const recordPortfolioId = requiredIntegerIdDecimalString(
+    record,
+    "portfolio_id",
+  );
   if (
     !id ||
     !instrument ||
-    !transactionType ||
     !transactionDate ||
     !isMarketDate(transactionDate) ||
     !quantityDecimal ||
-    !priceDecimal
+    !priceDecimal ||
+    !holdingId ||
+    !recordPortfolioId ||
+    recordPortfolioId !== portfolioId
   ) {
     return null;
   }
+  const valueDecimal = optionalDecimal(record, "value");
+  if (valueDecimal === MALFORMED_OPTIONAL_DECIMAL) return null;
   const brokerageDecimal = optionalDecimal(record, "brokerage");
   if (brokerageDecimal === MALFORMED_OPTIONAL_DECIMAL) return null;
+  const exchangeRateDecimal = optionalDecimal(record, "exchange_rate");
+  if (exchangeRateDecimal === MALFORMED_OPTIONAL_DECIMAL) return null;
+
+  const brokerageCurrencyCode = optionalStringField(
+    record,
+    "brokerage_currency_code",
+  );
+  const exchangeRatePair = optionalStringField(record, "exchange_rate_pair");
+  const state = optionalStringField(record, "state");
+  const uniqueIdentifier = optionalStringField(record, "unique_identifier");
+  const paidOnDate = optionalStringField(record, "paid_on");
+  const descriptionCode = optionalStringField(record, "description_code");
+  const sourceCategory = optionalStringField(record, "source_category");
+  if (
+    brokerageCurrencyCode === MALFORMED_OPTIONAL_STRING ||
+    exchangeRatePair === MALFORMED_OPTIONAL_STRING ||
+    state === MALFORMED_OPTIONAL_STRING ||
+    uniqueIdentifier === MALFORMED_OPTIONAL_STRING ||
+    paidOnDate === MALFORMED_OPTIONAL_STRING ||
+    descriptionCode === MALFORMED_OPTIONAL_STRING ||
+    sourceCategory === MALFORMED_OPTIONAL_STRING
+  ) {
+    return null;
+  }
+
   return {
     id,
     portfolioId,
+    holdingId,
     instrumentCode: instrument.instrumentCode,
     marketCode: instrument.marketCode,
     transactionType,
@@ -377,7 +468,16 @@ function parseTradeItem(
     currencyCode: instrument.currencyCode,
     quantityDecimal,
     priceDecimal,
+    valueDecimal,
     brokerageDecimal,
+    brokerageCurrencyCode,
+    exchangeRateDecimal,
+    exchangeRatePair,
+    state,
+    uniqueIdentifier,
+    paidOnDate,
+    descriptionCode,
+    sourceCategory,
   };
 }
 

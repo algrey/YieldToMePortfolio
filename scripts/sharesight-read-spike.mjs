@@ -248,15 +248,21 @@ function printOutcome(label, result) {
     );
   }
 
-  // TODO(BRK-008) confirmation 2: decimal exponential-notation magnitude
-  // (domain/sharesight/parse.ts's decimalString). Reports only whether the
-  // parsed decimal STRING contains an "e"/"E" -- never the string itself.
+  // Regression evidence for the resolved BRK-008 exponent-notation decision
+  // (domain/sharesight/parse.ts's decimalString, docs/ARCHITECTURE.md
+  // §8.2): a successfully parsed decimal STRING can never contain "e"/"E"
+  // any more -- decimalString now rejects exponential-notation output
+  // up front rather than reformatting it, so this always reports `false`
+  // for anything that reached this point. Kept as a live tripwire (not a
+  // TODO -- the question itself is closed) in case that guarantee is ever
+  // broken by a future change; reports only whether the parsed decimal
+  // STRING contains an "e"/"E" -- never the string itself.
   for (const [field, sample] of Object.entries(first)) {
     if (typeof sample === "string" && /decimal$/i.test(field)) {
       console.log(
         `${label}: ${field} exponential-notation observed = ${looksExponential(
           sample,
-        )} (TODO(BRK-008) exponent-decimal confirmation; see parse.ts)`,
+        )} (should always be false -- see parse.ts's decimalString)`,
       );
     }
   }
@@ -405,6 +411,16 @@ async function main() {
       console.log(JSON.stringify(shape, null, 2));
       console.log("=== end shape diagnostic ===");
       console.log("");
+    },
+    // BRK-008: fired ONLY when a response body was read but did NOT parse
+    // as JSON at all (e.g. an HTML page from a misrouted endpoint -- the
+    // 2026-08-15 listPayouts symptom this diagnostic exists to catch next
+    // time it happens). Metadata only -- content-type, HTTP status, byte
+    // count -- never the body itself.
+    onBodyParseDiagnostic: (endpoint, diagnostic) => {
+      console.log(
+        `${evidenceLabel} / ${endpoint}: response body was not valid JSON -- contentType=${diagnostic.contentType} httpStatus=${diagnostic.httpStatus} bodyBytes=${diagnostic.bodyBytes}`,
+      );
     },
   });
 
