@@ -30,6 +30,7 @@ import {
   parseSharesightPortfolios,
   parseSharesightTrades,
 } from "./parse.ts";
+import { deriveShapeEvidence } from "./shape-evidence.ts";
 
 const DEFAULT_BASE_URL = "https://api.sharesight.com/api/v3";
 const DEFAULT_TIMEOUT_MS = 8_000;
@@ -56,6 +57,28 @@ export type SharesightClientOptions = Readonly<{
    * itself. Durable evidence persistence is out of scope for this
    * foundation layer (BRK-004+). */
   onFetchEvidence?: (evidence: SharesightFetchEvidence) => void;
+  /**
+   * BRK-008 live-spike diagnostic: invoked ONLY when a `parse.ts` parser
+   * returns a typed `invalid_response` result for an endpoint's raw parsed
+   * JSON -- never on success, and never for a transport-level failure
+   * (timeout, non-2xx status, unparseable JSON) that returns
+   * `invalid_response` before any domain parsing is attempted, since there
+   * is no parsed JSON to derive a shape from in that case. `shape` is
+   * produced INSIDE this module by `deriveShapeEvidence` (see
+   * `shape-evidence.ts` for its privacy contract): key names, `typeof`
+   * leaves, and format-class annotations only -- the raw parsed JSON this
+   * shape was derived from is never itself exposed to a caller of this
+   * client, matching `onFetchEvidence`'s hash-only discipline above.
+   * `endpoint` is a static label (e.g. `"listPortfolios"`), never an
+   * instance value (never a portfolio id or other caller-supplied
+   * argument), so this callback can never leak request data either.
+   *
+   * Any exception this callback throws is caught and discarded -- same
+   * discipline as `token.ts`'s `onRefreshTokenRotated`: a caller-side
+   * diagnostic callback must never fail the parse result it's merely
+   * reacting to.
+   */
+  onShapeEvidence?: (endpoint: string, shape: unknown) => void;
 }>;
 
 export class SharesightBaseUrlRejectedError extends Error {
@@ -270,18 +293,50 @@ export function createSharesightClient(
     return { ok: true, value: parsed };
   }
 
+  // BRK-008: reports `onShapeEvidence` for a domain parse failure only --
+  // `endpoint` is always the static label below, never a caller-supplied
+  // value (see the option's doc comment). `raw` is the already-parsed JSON
+  // `getJson` produced; this function itself never re-reads or re-parses
+  // anything.
+  function reportShapeEvidenceIfInvalid<T>(
+    endpoint: string,
+    raw: unknown,
+    parsed: SharesightResult<T>,
+  ): SharesightResult<T> {
+    if (
+      !parsed.ok &&
+      parsed.error.kind === "invalid_response" &&
+      options.onShapeEvidence
+    ) {
+      try {
+        options.onShapeEvidence(endpoint, deriveShapeEvidence(raw));
+      } catch {
+        // Deliberately ignored -- see the option's doc comment above.
+      }
+    }
+    return parsed;
+  }
+
   return {
     async listPortfolios() {
       const result = await getJson("/portfolios");
       if (!result.ok) return result;
-      return parseSharesightPortfolios(result.value);
+      return reportShapeEvidenceIfInvalid(
+        "listPortfolios",
+        result.value,
+        parseSharesightPortfolios(result.value),
+      );
     },
     async getPortfolioHoldings(portfolioId) {
       const result = await getJson(
         `/portfolios/${encodeURIComponent(portfolioId)}/holdings`,
       );
       if (!result.ok) return result;
-      return parseSharesightHoldings(result.value, portfolioId);
+      return reportShapeEvidenceIfInvalid(
+        "getPortfolioHoldings",
+        result.value,
+        parseSharesightHoldings(result.value, portfolioId),
+      );
     },
     async listTrades(portfolioId, params) {
       const result = await getJson(
@@ -289,7 +344,11 @@ export function createSharesightClient(
         toSearchParams(params),
       );
       if (!result.ok) return result;
-      return parseSharesightTrades(result.value, portfolioId);
+      return reportShapeEvidenceIfInvalid(
+        "listTrades",
+        result.value,
+        parseSharesightTrades(result.value, portfolioId),
+      );
     },
     async listPayouts(portfolioId, params) {
       const result = await getJson(
@@ -297,7 +356,11 @@ export function createSharesightClient(
         toSearchParams(params),
       );
       if (!result.ok) return result;
-      return parseSharesightPayouts(result.value, portfolioId);
+      return reportShapeEvidenceIfInvalid(
+        "listPayouts",
+        result.value,
+        parseSharesightPayouts(result.value, portfolioId),
+      );
     },
   };
 }

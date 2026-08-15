@@ -58,3 +58,11 @@ export {
   parseSharesightPortfolios,
   parseSharesightTrades,
 } from "./parse.ts";
+
+// `deriveShapeEvidence` is pure and side-effect free (no fetch, no I/O --
+// see shape-evidence.ts's header for its privacy contract), so it is safe
+// to export from this barrel unlike transport.ts's raw sharesightGet.
+export {
+  deriveShapeEvidence,
+  type DeriveShapeEvidenceOptions,
+} from "./shape-evidence.ts";

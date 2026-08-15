@@ -78,7 +78,12 @@
 //   first item's `id` field (never its value), a boolean "does this decimal
 //   string look exponential" flag (never the decimal itself), and a
 //   recursive field-NAME-only shape dump (`Object.keys`, never the
-//   corresponding values) of the first item in each list. Do not add a
+//   corresponding values) of the first item in each list, and -- for an
+//   endpoint whose parser fails closed with `invalid_response` -- the
+//   `onShapeEvidence`-supplied shape (key names, `typeof` leaves, and
+//   format-class-only decimal/exponent annotations; see
+//   `domain/sharesight/shape-evidence.ts`'s privacy contract), which this
+//   script only ever prints, never derives itself. Do not add a
 //   `console.log` anywhere in this file that could print an actual
 //   Sharesight field value, an access token, an authorization code, or a
 //   client secret.
@@ -375,9 +380,10 @@ async function main() {
     result: tokenResult,
   } = await acquireSharesightToken();
 
-  // Correlates onFetchEvidence callbacks (fired once per successful GET)
-  // back to the endpoint that triggered them. Safe because every call below
-  // is sequentially awaited -- never concurrent.
+  // Correlates onFetchEvidence/onShapeEvidence callbacks (fired at most once
+  // per call, synchronously within it) back to the endpoint that triggered
+  // them. Safe because every call below is sequentially awaited -- never
+  // concurrent.
   let evidenceLabel = "unknown";
   const client = createSharesightClient({
     tokenProvider,
@@ -385,6 +391,20 @@ async function main() {
       console.log(
         `${evidenceLabel}: evidence payloadSha256=${evidence.payloadSha256} ingestedAt=${evidence.ingestedAt}`,
       );
+    },
+    // BRK-008: fired ONLY when a parser fails closed with invalid_response
+    // -- prints the REAL shape (key names + typeof leaves only, no values;
+    // see domain/sharesight/shape-evidence.ts's privacy contract) so a
+    // parser built on invented fixtures can be corrected against the actual
+    // live response shape.
+    onShapeEvidence: (endpoint, shape) => {
+      console.log("");
+      console.log(
+        `=== BRK-008 SHAPE DIAGNOSTIC (${evidenceLabel} / ${endpoint}) -- key names and types only, no values ===`,
+      );
+      console.log(JSON.stringify(shape, null, 2));
+      console.log("=== end shape diagnostic ===");
+      console.log("");
     },
   });
 

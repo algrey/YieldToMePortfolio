@@ -161,6 +161,7 @@ const EXPECTED_BARREL_EXPORT_NAMES = [
   "assertSharesightTokenUrl",
   "createSharesightClient",
   "createSharesightTokenProvider",
+  "deriveShapeEvidence",
   "parseSharesightHoldings",
   "parseSharesightPayouts",
   "parseSharesightPortfolios",
@@ -219,6 +220,7 @@ test("BRK-003 F4: no export in any domain/sharesight module has a non-GET-shaped
       "../domain/sharesight/token-strategy.ts",
       "../domain/sharesight/parse.ts",
       "../domain/sharesight/client.ts",
+      "../domain/sharesight/shape-evidence.ts",
       "../domain/sharesight/index.ts",
     ].map((path) => import(path)),
   );
