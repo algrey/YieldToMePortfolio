@@ -321,16 +321,84 @@ export type SharesightTrade = Readonly<{
   comments: string | null;
 }>;
 
+/**
+ * Live-confirmed shape (2026-08-15, owner's real account, v2 payouts route,
+ * 118 items -- see `docs/ARCHITECTURE.md` §8.2). REQUIRED: `id`, `holdingId`,
+ * `portfolioId` (all numeric on the wire, normalized to decimal strings via
+ * `requiredIntegerIdDecimalString`, the same technique portfolios/holdings/
+ * trades already use); `paidOnDate`; `symbol`/`marketCode`/`currencyCode`
+ * (FLAT top-level `symbol`/`market`/`currency` fields -- NOT a nested
+ * `instrument` object like holdings/trades. This was an open, unconfirmed
+ * follow-up as of the previous §8.2 entry, resting only on a third-party
+ * client's documented example; it is now directly, live-confirmed observed);
+ * and `amountDecimal`/`grossAmountDecimal`. The item's own `portfolio_id` is
+ * validated for presence, shape, AND equality against the caller-supplied
+ * `portfolioId` this fetch was scoped to -- a mismatch fails the item closed,
+ * the same cross-check `parseTradeItem` performs (never silently
+ * re-attributing a mis-scoped record to the queried portfolio).
+ *
+ * `amountDecimal`/`grossAmountDecimal` are parsed UNSIGNED
+ * (`allowNegative: false`) -- no live payout item was observed carrying a
+ * negative amount; unlike trades' `valueDecimal` (item #46/107,
+ * LIVE-CONFIRMED signed), there is no equivalent evidence here that a payout
+ * can be negative (e.g. a reversal/correction). Treat this as an open
+ * question, not a closed one: if a future live pass surfaces a negative
+ * payout amount, this must be revisited the same way trades' `value` was,
+ * not silently loosened without evidence.
+ *
+ * OPTIONAL, present-vs-absent-vs-malformed per this module's established
+ * discipline (present-but-null and genuinely-absent both parse as `null`;
+ * present-but-wrong-type/unparseable fails the item closed):
+ * `frankedAmountDecimal`, `unfrankedAmountDecimal`, `frankingCreditsDecimal`,
+ * `residentWithholdingTaxDecimal`, `nonResidentWithholdingTaxDecimal`
+ * (decimals -- tax-relevant, so a present-but-corrupt value must never
+ * silently collapse to "unknown"); `goesExOnDate`, `state`, `comments`
+ * (strings); `confirmed`, `trust`, `nonTaxable` (booleans, via the new
+ * `optionalBooleanField`); `exchangeRateDecimal` (decimal, unsigned).
+ *
+ * `frankingCreditsDecimal` is the significant new field this live pass
+ * surfaces: Sharesight payouts carry REAL per-payout franking credits --
+ * `docs/MARKET_DATA_STRATEGY.md`'s "franking is never populated" seam
+ * (MKT-005: `dividend_events.franking_percent_decimal`/
+ * `franking_credit_per_share_decimal` are always written `null`, since no
+ * current quote provider supplies franking data) names exactly the kind of
+ * source that could close that gap -- a `DIV-001` receipts-ingestion
+ * decision, not made here, but the data is now confirmed available.
+ *
+ * IGNORED, forward-compatibility (present on the live item, deliberately not
+ * modelled or validated here): `instrument_id`, `company_event_id`, `links`
+ * (envelope/item navigation, not domain data), and the tax-component fields
+ * `interest_payment`, `deferred_income`, `foreign_source_income`,
+ * `other_net_fsi`, `cgt_concession_amount`, `discounted_capital_gains`,
+ * `non_discounted_capital_gains`, `lic_capital_gain`, `amit_increase_amount`,
+ * `amit_decrease_amount` -- available on the wire but out of scope for this
+ * contract; a future `BRK-005`/`DIV` integration that needs full tax-return
+ * fidelity (interest income, foreign-source income, CGT concessions, AMIT
+ * cost-base adjustments) will need to model these explicitly, not assume
+ * they were silently captured here.
+ */
 export type SharesightPayout = Readonly<{
   id: string;
   portfolioId: string;
-  instrumentCode: string;
-  paidOnDate: string;
+  holdingId: string;
+  symbol: string;
+  marketCode: string;
   currencyCode: string;
+  paidOnDate: string;
   amountDecimal: string;
+  grossAmountDecimal: string;
   frankedAmountDecimal: string | null;
   unfrankedAmountDecimal: string | null;
-  taxWithheldDecimal: string | null;
+  frankingCreditsDecimal: string | null;
+  residentWithholdingTaxDecimal: string | null;
+  nonResidentWithholdingTaxDecimal: string | null;
+  goesExOnDate: string | null;
+  state: string | null;
+  confirmed: boolean | null;
+  trust: boolean | null;
+  nonTaxable: boolean | null;
+  comments: string | null;
+  exchangeRateDecimal: string | null;
 }>;
 
 export type SharesightListParams = Readonly<{

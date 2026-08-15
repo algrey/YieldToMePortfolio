@@ -1642,16 +1642,51 @@ const TRADES_FIXTURE = {
   ],
 };
 
+// Live-confirmed shape (BRK-008, 2026-08-15, v2 payouts route, 118 items --
+// see docs/ARCHITECTURE.md §8.2): FLAT symbol/market/currency (no nested
+// instrument object), numeric id/holding_id/portfolio_id, and gross_amount/
+// franking_credits/non_resident_withholding_tax/goes_ex_on/state/confirmed/
+// trust/non_taxable/exchange_rate alongside the previously-modelled fields.
 const PAYOUTS_FIXTURE = {
   payouts: [
     {
-      id: "payout_1",
-      instrument: { code: "IXJ", market_code: "ASX", currency_code: "AUD" },
+      id: 6001,
+      holding_id: 4001,
+      instrument_id: 1234, // unmodelled, ignored for forward-compatibility
+      portfolio_id: 3001,
+      company_event_id: 5678, // unmodelled, ignored for forward-compatibility
       paid_on: "2026-02-01",
-      amount: "120.00",
-      franked_amount: "84.00",
-      unfranked_amount: "36.00",
-      resident_withholding_tax: "0.00",
+      goes_ex_on: "2026-01-15",
+      symbol: "IXJ",
+      market: "ASX",
+      currency: "AUD",
+      state: "confirmed",
+      confirmed: true,
+      trust: false,
+      non_taxable: false,
+      comments: "Franked dividend",
+      amount: 120.0,
+      gross_amount: 171.43,
+      franked_amount: 84.0,
+      unfranked_amount: 36.0,
+      franking_credits: 51.43,
+      exchange_rate: 1,
+      resident_withholding_tax: 0,
+      non_resident_withholding_tax: 0,
+      // Unmodelled tax-component fields (BRK-005/DIV integration may want
+      // these later -- see SharesightPayout's doc comment) -- proves extras
+      // are ignored for forward-compatibility, not rejected.
+      interest_payment: 0,
+      deferred_income: 0,
+      foreign_source_income: 0,
+      other_net_fsi: 0,
+      cgt_concession_amount: 0,
+      discounted_capital_gains: 0,
+      non_discounted_capital_gains: 0,
+      lic_capital_gain: 0,
+      amit_increase_amount: 0,
+      amit_decrease_amount: 0,
+      links: { portfolio: "https://api.sharesight.com/api/v2/portfolios/3001" },
     },
   ],
 };
@@ -1746,14 +1781,34 @@ test("BRK-003 parsing: valid fixtures parse into typed results with exact decima
   }
 
   const payouts =
-    await clientWithFixtureBody(PAYOUTS_FIXTURE).listPayouts("port_1");
+    await clientWithFixtureBody(PAYOUTS_FIXTURE).listPayouts("3001");
   assert.equal(payouts.ok, true);
   if (payouts.ok) {
     const payout = payouts.value[0];
-    assert.equal(payout?.amountDecimal, "120.00");
-    assert.equal(payout?.frankedAmountDecimal, "84.00");
-    assert.equal(payout?.unfrankedAmountDecimal, "36.00");
-    assert.equal(payout?.taxWithheldDecimal, "0.00");
+    assert.equal(payout?.id, "6001");
+    assert.equal(payout?.holdingId, "4001");
+    // The payout's OWN portfolio_id (3001) is cross-checked against the
+    // caller-supplied portfolioId this fetch was scoped to ("3001") -- they
+    // must agree or the item fails closed (mismatch case tested below).
+    assert.equal(payout?.portfolioId, "3001");
+    assert.equal(payout?.symbol, "IXJ");
+    assert.equal(payout?.marketCode, "ASX");
+    assert.equal(payout?.currencyCode, "AUD");
+    assert.equal(payout?.paidOnDate, "2026-02-01");
+    assert.equal(payout?.goesExOnDate, "2026-01-15");
+    assert.equal(payout?.amountDecimal, "120");
+    assert.equal(payout?.grossAmountDecimal, "171.43");
+    assert.equal(payout?.frankedAmountDecimal, "84");
+    assert.equal(payout?.unfrankedAmountDecimal, "36");
+    assert.equal(payout?.frankingCreditsDecimal, "51.43");
+    assert.equal(payout?.exchangeRateDecimal, "1");
+    assert.equal(payout?.residentWithholdingTaxDecimal, "0");
+    assert.equal(payout?.nonResidentWithholdingTaxDecimal, "0");
+    assert.equal(payout?.state, "confirmed");
+    assert.equal(payout?.confirmed, true);
+    assert.equal(payout?.trust, false);
+    assert.equal(payout?.nonTaxable, false);
+    assert.equal(payout?.comments, "Franked dividend");
   }
 });
 
@@ -1827,17 +1882,22 @@ test("BRK-003 F1: an absent optional decimal is an honest null; a present-but-ma
   const payoutsMalformedFranked = {
     payouts: [
       {
-        id: "payout_2",
-        instrument: { code: "IXJ", market_code: "ASX", currency_code: "AUD" },
+        id: 6002,
+        holding_id: 4001,
+        portfolio_id: 3001,
+        symbol: "IXJ",
+        market: "ASX",
+        currency: "AUD",
         paid_on: "2026-02-01",
-        amount: "50.00",
+        amount: 50.0,
+        gross_amount: 50.0,
         franked_amount: "not-a-number", // present, corrupt -- must not silently become "unknown"
       },
     ],
   };
   const payoutsMalformedResult = await clientWithFixtureBody(
     payoutsMalformedFranked,
-  ).listPayouts("port_1");
+  ).listPayouts("3001");
   assert.equal(payoutsMalformedResult.ok, false);
   if (!payoutsMalformedResult.ok) {
     assert.equal(payoutsMalformedResult.error.kind, "invalid_response");
@@ -1846,22 +1906,39 @@ test("BRK-003 F1: an absent optional decimal is an honest null; a present-but-ma
   const payoutsAbsentFranked = {
     payouts: [
       {
-        id: "payout_3",
-        instrument: { code: "IXJ", market_code: "ASX", currency_code: "AUD" },
+        id: 6003,
+        holding_id: 4001,
+        portfolio_id: 3001,
+        symbol: "IXJ",
+        market: "ASX",
+        currency: "AUD",
         paid_on: "2026-02-01",
-        amount: "50.00",
-        // franked_amount / unfranked_amount / resident_withholding_tax
-        // genuinely absent.
+        amount: 50.0,
+        gross_amount: 50.0,
+        // franked_amount / unfranked_amount / franking_credits /
+        // resident_withholding_tax / non_resident_withholding_tax /
+        // goes_ex_on / state / confirmed / trust / non_taxable / comments /
+        // exchange_rate genuinely absent.
       },
     ],
   };
   const payoutsAbsentResult =
-    await clientWithFixtureBody(payoutsAbsentFranked).listPayouts("port_1");
+    await clientWithFixtureBody(payoutsAbsentFranked).listPayouts("3001");
   assert.equal(payoutsAbsentResult.ok, true);
   if (payoutsAbsentResult.ok) {
-    assert.equal(payoutsAbsentResult.value[0]?.frankedAmountDecimal, null);
-    assert.equal(payoutsAbsentResult.value[0]?.unfrankedAmountDecimal, null);
-    assert.equal(payoutsAbsentResult.value[0]?.taxWithheldDecimal, null);
+    const payout = payoutsAbsentResult.value[0];
+    assert.equal(payout?.frankedAmountDecimal, null);
+    assert.equal(payout?.unfrankedAmountDecimal, null);
+    assert.equal(payout?.frankingCreditsDecimal, null);
+    assert.equal(payout?.residentWithholdingTaxDecimal, null);
+    assert.equal(payout?.nonResidentWithholdingTaxDecimal, null);
+    assert.equal(payout?.goesExOnDate, null);
+    assert.equal(payout?.state, null);
+    assert.equal(payout?.confirmed, null);
+    assert.equal(payout?.trust, null);
+    assert.equal(payout?.nonTaxable, null);
+    assert.equal(payout?.comments, null);
+    assert.equal(payout?.exchangeRateDecimal, null);
   }
 });
 
@@ -2333,16 +2410,247 @@ test("BRK-003 parsing: missing/malformed envelopes and fields produce a typed in
         clientWithFixtureBody({
           payouts: [
             {
-              id: "pay1",
-              instrument: {
-                code: "IXJ",
-                market_code: "ASX",
-                currency_code: "AUD",
-              },
+              id: 1,
+              holding_id: 1,
+              portfolio_id: 1,
+              symbol: "IXJ",
+              market: "ASX",
+              currency: "AUD",
               paid_on: "2026-02-01",
+              gross_amount: 50.0,
+              // amount genuinely missing.
             },
           ],
-        }).listPayouts("p1"),
+        }).listPayouts("1"),
+    ],
+    [
+      "payouts missing gross_amount",
+      () =>
+        clientWithFixtureBody({
+          payouts: [
+            {
+              id: 1,
+              holding_id: 1,
+              portfolio_id: 1,
+              symbol: "IXJ",
+              market: "ASX",
+              currency: "AUD",
+              paid_on: "2026-02-01",
+              amount: 50.0,
+              // gross_amount genuinely missing.
+            },
+          ],
+        }).listPayouts("1"),
+    ],
+    [
+      "payouts id is a string, not the live-confirmed numeric shape",
+      () =>
+        clientWithFixtureBody({
+          payouts: [
+            {
+              id: "pay1", // wrong type -- live-confirmed shape is numeric
+              holding_id: 1,
+              portfolio_id: 1,
+              symbol: "IXJ",
+              market: "ASX",
+              currency: "AUD",
+              paid_on: "2026-02-01",
+              amount: 50.0,
+              gross_amount: 50.0,
+            },
+          ],
+        }).listPayouts("1"),
+    ],
+    [
+      "payouts non-integer id",
+      () =>
+        clientWithFixtureBody({
+          payouts: [
+            {
+              id: 1.5,
+              holding_id: 1,
+              portfolio_id: 1,
+              symbol: "IXJ",
+              market: "ASX",
+              currency: "AUD",
+              paid_on: "2026-02-01",
+              amount: 50.0,
+              gross_amount: 50.0,
+            },
+          ],
+        }).listPayouts("1"),
+    ],
+    [
+      "payouts id beyond Number.MAX_SAFE_INTEGER",
+      () =>
+        clientWithFixtureBody({
+          payouts: [
+            {
+              id: Number.MAX_SAFE_INTEGER + 2,
+              holding_id: 1,
+              portfolio_id: 1,
+              symbol: "IXJ",
+              market: "ASX",
+              currency: "AUD",
+              paid_on: "2026-02-01",
+              amount: 50.0,
+              gross_amount: 50.0,
+            },
+          ],
+        }).listPayouts("1"),
+    ],
+    [
+      "payouts missing holding_id",
+      () =>
+        clientWithFixtureBody({
+          payouts: [
+            {
+              id: 1,
+              portfolio_id: 1,
+              symbol: "IXJ",
+              market: "ASX",
+              currency: "AUD",
+              paid_on: "2026-02-01",
+              amount: 50.0,
+              gross_amount: 50.0,
+              // holding_id genuinely missing.
+            },
+          ],
+        }).listPayouts("1"),
+    ],
+    [
+      "payouts missing portfolio_id",
+      () =>
+        clientWithFixtureBody({
+          payouts: [
+            {
+              id: 1,
+              holding_id: 1,
+              symbol: "IXJ",
+              market: "ASX",
+              currency: "AUD",
+              paid_on: "2026-02-01",
+              amount: 50.0,
+              gross_amount: 50.0,
+              // portfolio_id genuinely missing.
+            },
+          ],
+        }).listPayouts("1"),
+    ],
+    [
+      "payouts portfolio_id present and well-shaped, but NOT EQUAL to the caller-supplied portfolioId (real cross-check, not shape-only)",
+      () =>
+        clientWithFixtureBody({
+          payouts: [
+            {
+              id: 1,
+              holding_id: 1,
+              portfolio_id: 999, // well-shaped, but does not match "1" below
+              symbol: "IXJ",
+              market: "ASX",
+              currency: "AUD",
+              paid_on: "2026-02-01",
+              amount: 50.0,
+              gross_amount: 50.0,
+            },
+          ],
+        }).listPayouts("1"),
+    ],
+    [
+      "payouts missing symbol",
+      () =>
+        clientWithFixtureBody({
+          payouts: [
+            {
+              id: 1,
+              holding_id: 1,
+              portfolio_id: 1,
+              market: "ASX",
+              currency: "AUD",
+              paid_on: "2026-02-01",
+              amount: 50.0,
+              gross_amount: 50.0,
+              // symbol genuinely missing.
+            },
+          ],
+        }).listPayouts("1"),
+    ],
+    [
+      "payouts missing market",
+      () =>
+        clientWithFixtureBody({
+          payouts: [
+            {
+              id: 1,
+              holding_id: 1,
+              portfolio_id: 1,
+              symbol: "IXJ",
+              currency: "AUD",
+              paid_on: "2026-02-01",
+              amount: 50.0,
+              gross_amount: 50.0,
+              // market genuinely missing.
+            },
+          ],
+        }).listPayouts("1"),
+    ],
+    [
+      "payouts currency not 3 uppercase letters",
+      () =>
+        clientWithFixtureBody({
+          payouts: [
+            {
+              id: 1,
+              holding_id: 1,
+              portfolio_id: 1,
+              symbol: "IXJ",
+              market: "ASX",
+              currency: "aud", // wrong case -- ISO 4217-shaped check
+              paid_on: "2026-02-01",
+              amount: 50.0,
+              gross_amount: 50.0,
+            },
+          ],
+        }).listPayouts("1"),
+    ],
+    [
+      "payouts malformed gross_amount (present, not a decimal)",
+      () =>
+        clientWithFixtureBody({
+          payouts: [
+            {
+              id: 1,
+              holding_id: 1,
+              portfolio_id: 1,
+              symbol: "IXJ",
+              market: "ASX",
+              currency: "AUD",
+              paid_on: "2026-02-01",
+              amount: 50.0,
+              gross_amount: "not-a-number",
+            },
+          ],
+        }).listPayouts("1"),
+    ],
+    [
+      "payouts malformed confirmed (present, not a boolean)",
+      () =>
+        clientWithFixtureBody({
+          payouts: [
+            {
+              id: 1,
+              holding_id: 1,
+              portfolio_id: 1,
+              symbol: "IXJ",
+              market: "ASX",
+              currency: "AUD",
+              paid_on: "2026-02-01",
+              amount: 50.0,
+              gross_amount: 50.0,
+              confirmed: "yes", // present, not a boolean
+            },
+          ],
+        }).listPayouts("1"),
     ],
   ];
 

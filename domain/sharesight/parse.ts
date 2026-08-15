@@ -151,6 +151,27 @@ function optionalStringField(
   return trimmed.length > 0 ? trimmed : null;
 }
 
+/** Sentinel distinguishing "field present but not a boolean" from a
+ * genuinely absent/null field -- mirrors `MALFORMED_OPTIONAL_STRING`/
+ * `MALFORMED_OPTIONAL_DECIMAL`'s absent-vs-malformed discipline for optional
+ * BOOLEAN fields. Introduced for the live-confirmed payout fields
+ * `confirmed`/`trust`/`non_taxable` (BRK-008, 2026-08-15 v2 payouts pass). */
+const MALFORMED_OPTIONAL_BOOLEAN = Symbol(
+  "sharesight-malformed-optional-boolean",
+);
+
+function optionalBooleanField(
+  record: RecordValue,
+  field: string,
+): boolean | null | typeof MALFORMED_OPTIONAL_BOOLEAN {
+  const value = record[field];
+  if (value === undefined || value === null) {
+    return null; // genuinely absent/null -- an honest "unknown"
+  }
+  if (typeof value !== "boolean") return MALFORMED_OPTIONAL_BOOLEAN;
+  return value;
+}
+
 /** ISO 4217-shaped currency code: exactly 3 uppercase letters, matching this
  * module's `currencyCode` convention elsewhere (`SharesightHolding`,
  * `SharesightTrade`, `SharesightPayout`). */
@@ -421,11 +442,16 @@ export function parseSharesightPortfolios(
  * keys are `code`, `market_code`, and `currency_code` -- NOT `market`/
  * `currency` as BRK-003 originally assumed. All three are REQUIRED: they
  * are the exact keys BRK-005's security resolution needs (ticker +
- * exchange/MIC + currency), so a holding/trade/payout item missing any of
- * them fails closed rather than resolving against an incomplete key.
- * Validated shallowly -- only these three fields are read; every other key
- * on the live `instrument` object (`country_id`, `crypto`, `expired`,
- * `logo`, `classifications`, etc.) is ignored, not validated or retained.
+ * exchange/MIC + currency), so a holding/trade item missing any of them
+ * fails closed rather than resolving against an incomplete key. Validated
+ * shallowly -- only these three fields are read; every other key on the
+ * live `instrument` object (`country_id`, `crypto`, `expired`, `logo`,
+ * `classifications`, etc.) is ignored, not validated or retained.
+ *
+ * NOT used by `parsePayoutItem` -- BRK-008's 2026-08-15 v2 payouts pass
+ * live-confirmed payout items carry FLAT top-level `symbol`/`market`/
+ * `currency` fields instead of a nested `instrument` object (see
+ * `SharesightPayout`'s doc comment).
  */
 function instrumentFields(record: RecordValue): {
   instrumentCode: string;
@@ -705,28 +731,83 @@ export function parseSharesightTrades(
   );
 }
 
+/**
+ * Live-confirmed 2026-08-15 (v2 payouts route, 118 items -- see
+ * `docs/ARCHITECTURE.md` §8.2 and `SharesightPayout`'s doc comment). Unlike
+ * holdings/trades, payout items carry FLAT top-level `symbol`/`market`/
+ * `currency` fields, not a nested `instrument` object -- `instrumentFields`
+ * does not apply here.
+ */
 function parsePayoutItem(item: unknown, portfolioId: string): SharesightPayout {
   const record = asRecord(item);
   if (!record) fail("<item>", "wrong_type");
-  const id = requiredString(record, "id");
-  if (!id) fail("id", requiredFailureReason(record, "id", "string"));
-  const instrument = instrumentFields(record);
-  if (!instrument) {
-    const detail = instrumentFailureDetail(record);
-    fail(detail.fieldName, detail.reason);
+
+  // `id`/`holding_id`/`portfolio_id` are numeric on the wire -- the same
+  // technique portfolios/holdings/trades already use.
+  const id = requiredIntegerIdDecimalString(record, "id");
+  if (!id) fail("id", requiredFailureReason(record, "id", "number"));
+  const holdingId = requiredIntegerIdDecimalString(record, "holding_id");
+  if (!holdingId) {
+    fail("holding_id", requiredFailureReason(record, "holding_id", "number"));
   }
+  // Real cross-check, not a reworded no-op -- mirrors `parseTradeItem`'s own
+  // `portfolio_id` check: the payout item's OWN `portfolio_id` must be
+  // present, well-shaped, AND EQUAL to the caller-supplied `portfolioId`
+  // this fetch was scoped to. A mismatch fails the item closed rather than
+  // silently re-attributing a mis-scoped record to the queried portfolio.
+  const recordPortfolioId = requiredIntegerIdDecimalString(
+    record,
+    "portfolio_id",
+  );
+  if (!recordPortfolioId) {
+    fail(
+      "portfolio_id",
+      requiredFailureReason(record, "portfolio_id", "number"),
+    );
+  }
+  if (recordPortfolioId !== portfolioId) fail("portfolio_id", "mismatch");
+
+  // FLAT top-level fields -- see this function's doc comment.
+  const symbol = requiredString(record, "symbol");
+  if (!symbol)
+    fail("symbol", requiredFailureReason(record, "symbol", "string"));
+  const marketCode = requiredString(record, "market");
+  if (!marketCode)
+    fail("market", requiredFailureReason(record, "market", "string"));
+  const currencyCodeRaw = requiredString(record, "currency");
+  if (!currencyCodeRaw) {
+    fail("currency", requiredFailureReason(record, "currency", "string"));
+  }
+  if (!isCurrencyCode(currencyCodeRaw)) fail("currency", "invalid_format");
+  const currencyCode = currencyCodeRaw;
+
   const paidOnDate = requiredString(record, "paid_on");
   if (!paidOnDate)
     fail("paid_on", requiredFailureReason(record, "paid_on", "string"));
   if (!isMarketDate(paidOnDate)) fail("paid_on", "invalid_format");
+
+  // Unsigned -- no live payout item was observed carrying a negative
+  // amount, unlike trades' `value` (item #46/107, LIVE-CONFIRMED signed).
+  // Sign tolerance here is a future call, not assumed without evidence --
+  // see `SharesightPayout`'s doc comment.
   const amountDecimal = requiredDecimal(record, "amount", {
     allowNegative: false,
   });
   if (!amountDecimal)
     fail("amount", requiredDecimalFailureReason(record, "amount"));
+  const grossAmountDecimal = requiredDecimal(record, "gross_amount", {
+    allowNegative: false,
+  });
+  if (!grossAmountDecimal) {
+    fail("gross_amount", requiredDecimalFailureReason(record, "gross_amount"));
+  }
+
   // Franking/withholding figures feed downstream tax assumptions -- a
   // present-but-corrupt value must fail the item closed, never silently
-  // become an honest "unknown" (BRK-003 review finding F1).
+  // become an honest "unknown" (BRK-003 review finding F1). `franking_credits`
+  // is new in this live pass -- see `SharesightPayout`'s doc comment on why
+  // this closes the MKT-005 franking-unavailable seam as a future DIV-001
+  // decision.
   const frankedAmountDecimal = optionalDecimal(record, "franked_amount");
   if (frankedAmountDecimal === MALFORMED_OPTIONAL_DECIMAL) {
     fail("franked_amount", "invalid_decimal");
@@ -735,23 +816,71 @@ function parsePayoutItem(item: unknown, portfolioId: string): SharesightPayout {
   if (unfrankedAmountDecimal === MALFORMED_OPTIONAL_DECIMAL) {
     fail("unfranked_amount", "invalid_decimal");
   }
-  const taxWithheldDecimal = optionalDecimal(
+  const frankingCreditsDecimal = optionalDecimal(record, "franking_credits");
+  if (frankingCreditsDecimal === MALFORMED_OPTIONAL_DECIMAL) {
+    fail("franking_credits", "invalid_decimal");
+  }
+  const residentWithholdingTaxDecimal = optionalDecimal(
     record,
     "resident_withholding_tax",
   );
-  if (taxWithheldDecimal === MALFORMED_OPTIONAL_DECIMAL) {
+  if (residentWithholdingTaxDecimal === MALFORMED_OPTIONAL_DECIMAL) {
     fail("resident_withholding_tax", "invalid_decimal");
   }
+  const nonResidentWithholdingTaxDecimal = optionalDecimal(
+    record,
+    "non_resident_withholding_tax",
+  );
+  if (nonResidentWithholdingTaxDecimal === MALFORMED_OPTIONAL_DECIMAL) {
+    fail("non_resident_withholding_tax", "invalid_decimal");
+  }
+  const exchangeRateDecimal = optionalDecimal(record, "exchange_rate");
+  if (exchangeRateDecimal === MALFORMED_OPTIONAL_DECIMAL) {
+    fail("exchange_rate", "invalid_decimal");
+  }
+
+  const goesExOnDate = optionalStringField(record, "goes_ex_on");
+  if (goesExOnDate === MALFORMED_OPTIONAL_STRING) {
+    fail("goes_ex_on", "wrong_type");
+  }
+  const state = optionalStringField(record, "state");
+  if (state === MALFORMED_OPTIONAL_STRING) fail("state", "wrong_type");
+  const comments = optionalStringField(record, "comments");
+  if (comments === MALFORMED_OPTIONAL_STRING) fail("comments", "wrong_type");
+
+  const confirmed = optionalBooleanField(record, "confirmed");
+  if (confirmed === MALFORMED_OPTIONAL_BOOLEAN) {
+    fail("confirmed", "wrong_type");
+  }
+  const trust = optionalBooleanField(record, "trust");
+  if (trust === MALFORMED_OPTIONAL_BOOLEAN) fail("trust", "wrong_type");
+  const nonTaxable = optionalBooleanField(record, "non_taxable");
+  if (nonTaxable === MALFORMED_OPTIONAL_BOOLEAN) {
+    fail("non_taxable", "wrong_type");
+  }
+
   return {
     id,
     portfolioId,
-    instrumentCode: instrument.instrumentCode,
+    holdingId,
+    symbol,
+    marketCode,
+    currencyCode,
     paidOnDate,
-    currencyCode: instrument.currencyCode,
     amountDecimal,
+    grossAmountDecimal,
     frankedAmountDecimal,
     unfrankedAmountDecimal,
-    taxWithheldDecimal,
+    frankingCreditsDecimal,
+    residentWithholdingTaxDecimal,
+    nonResidentWithholdingTaxDecimal,
+    goesExOnDate,
+    state,
+    confirmed,
+    trust,
+    nonTaxable,
+    comments,
+    exchangeRateDecimal,
   };
 }
 
