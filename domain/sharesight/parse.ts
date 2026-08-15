@@ -113,6 +113,63 @@ function optionalDecimal(
   return parsed === null ? MALFORMED_OPTIONAL_DECIMAL : parsed;
 }
 
+/** Sentinel distinguishing "field present but not a (non-empty) string" from
+ * a genuinely absent/null field (`null`, an honest "unknown"). Mirrors
+ * `MALFORMED_OPTIONAL_DECIMAL`'s absent-vs-malformed discipline (BRK-003
+ * review finding F1) for optional STRING fields: callers MUST check for this
+ * sentinel and fail the whole item closed -- never treat it the same as
+ * `null`. Used by `parsePortfolioItem`'s optional fields (e.g. `tz_name`,
+ * `cg_discount`); the pre-existing `optionalString` helper above is left
+ * untouched since holdings/trades/payouts parsing (unchanged this round)
+ * already depends on its current absent-and-wrong-type-both-collapse-to-null
+ * behavior. */
+const MALFORMED_OPTIONAL_STRING = Symbol(
+  "sharesight-malformed-optional-string",
+);
+
+function optionalStringField(
+  record: RecordValue,
+  field: string,
+): string | null | typeof MALFORMED_OPTIONAL_STRING {
+  const value = record[field];
+  if (value === undefined || value === null) {
+    return null; // genuinely absent/null -- an honest "unknown"
+  }
+  if (typeof value !== "string") {
+    return MALFORMED_OPTIONAL_STRING; // present, wrong type -- fails item closed
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/** ISO 4217-shaped currency code: exactly 3 uppercase letters, matching this
+ * module's `currencyCode` convention elsewhere (`SharesightHolding`,
+ * `SharesightTrade`, `SharesightPayout`). */
+function isCurrencyCode(value: string): boolean {
+  return /^[A-Z]{3}$/.test(value);
+}
+
+/** Normalizes a REQUIRED numeric Sharesight v3 id (confirmed live shape,
+ * 2026-08-15 -- see docs/ARCHITECTURE.md §8.2) to a canonical decimal
+ * string: `String(value)` renders any integer up to
+ * `Number.MAX_SAFE_INTEGER` exactly, with no exponential notation or
+ * precision loss, so a non-negative safe integer is the only value accepted.
+ * A non-integer, negative, non-finite, or unsafe (beyond
+ * `Number.MAX_SAFE_INTEGER`) value returns `null` and fails the item closed
+ * -- this resolves the former TODO(BRK-008) numeric-vs-string id assumption
+ * for portfolios. */
+function requiredIntegerIdDecimalString(
+  record: RecordValue,
+  field: string,
+): string | null {
+  const value = record[field];
+  if (typeof value !== "number") return null;
+  if (!Number.isInteger(value)) return null; // also rejects NaN/Infinity
+  if (!Number.isSafeInteger(value)) return null;
+  if (value < 0) return null;
+  return String(value);
+}
+
 function isMarketDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return false;
@@ -159,14 +216,57 @@ function parseItemList<T>(
 function parsePortfolioItem(item: unknown): SharesightPortfolio | null {
   const record = asRecord(item);
   if (!record) return null;
-  // TODO(BRK-008): "id" is assumed to be a string here, and for trade/payout
-  // ids below; confirm the real numeric-vs-string Sharesight v3 ID shape
-  // against a live response before this assumption ships past the spike.
-  const id = requiredString(record, "id");
+  // Live-confirmed 2026-08-15 (docs/ARCHITECTURE.md §8.2): portfolio ids are
+  // numeric integers, not strings. `requiredIntegerIdDecimalString`
+  // normalizes to a decimal string, rejecting non-integer/unsafe values.
+  const id = requiredIntegerIdDecimalString(record, "id");
   const name = requiredString(record, "name");
-  const currencyCode = requiredString(record, "currency");
+  const currencyCodeRaw = requiredString(record, "currency_code");
+  const currencyCode =
+    currencyCodeRaw && isCurrencyCode(currencyCodeRaw) ? currencyCodeRaw : null;
   if (!id || !name || !currencyCode) return null;
-  return { id, name, currencyCode };
+
+  // OPTIONAL fields: present-but-null and genuinely-absent are both an
+  // honest "unknown" (`null`); a present-but-wrong-type value fails the
+  // whole item closed rather than silently collapsing to "unknown" (mirrors
+  // this module's absent-vs-malformed discipline for optional decimals,
+  // BRK-003 review finding F1). `cg_discount` is intentionally left as an
+  // OPAQUE string here -- never parsed/interpreted as a number or
+  // percentage.
+  const inceptionDate = optionalStringField(record, "inception_date");
+  const tzName = optionalStringField(record, "tz_name");
+  const accessLevel = optionalStringField(record, "access_level");
+  const financialYearEnd = optionalStringField(record, "financial_year_end");
+  const cgDiscount = optionalStringField(record, "cg_discount");
+  const countryCode = optionalStringField(record, "country_code");
+  const ownerName = optionalStringField(record, "owner_name");
+  const taxEntityType = optionalStringField(record, "tax_entity_type");
+  if (
+    inceptionDate === MALFORMED_OPTIONAL_STRING ||
+    tzName === MALFORMED_OPTIONAL_STRING ||
+    accessLevel === MALFORMED_OPTIONAL_STRING ||
+    financialYearEnd === MALFORMED_OPTIONAL_STRING ||
+    cgDiscount === MALFORMED_OPTIONAL_STRING ||
+    countryCode === MALFORMED_OPTIONAL_STRING ||
+    ownerName === MALFORMED_OPTIONAL_STRING ||
+    taxEntityType === MALFORMED_OPTIONAL_STRING
+  ) {
+    return null;
+  }
+
+  return {
+    id,
+    name,
+    currencyCode,
+    inceptionDate,
+    tzName,
+    accessLevel,
+    financialYearEnd,
+    cgDiscount,
+    countryCode,
+    ownerName,
+    taxEntityType,
+  };
 }
 
 export function parseSharesightPortfolios(

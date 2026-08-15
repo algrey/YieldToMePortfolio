@@ -401,7 +401,8 @@ test("BRK-008 onShapeEvidence: does not fire on a successful parse", async () =>
     tokenProvider: provider,
     fetcher: async () =>
       jsonResponse(200, {
-        portfolios: [{ id: "1", name: "P1", currency: "USD" }],
+        // Matches live shape evidence 2026-08-15: numeric id, currency_code.
+        portfolios: [{ id: 1, name: "P1", currency_code: "USD" }],
       }),
     onShapeEvidence: () => {
       called = true;

@@ -81,10 +81,32 @@ export type SharesightFetchEvidence = Readonly<{
 // the fields the BRK-008 spike needs. Extend when a real spike/response
 // shows a field is actually required, not speculatively.
 
+/**
+ * Live-confirmed shape (2026-08-15, owner's real account -- see
+ * `docs/ARCHITECTURE.md` §8.2): the `portfolios` list envelope item.
+ * `id`/`name`/`currency_code` are REQUIRED; `id` is a numeric integer,
+ * normalized to a decimal STRING by `parse.ts`'s
+ * `requiredIntegerIdDecimalString` (AGENTS.md decimal-string discipline).
+ * The remaining fields are OPTIONAL (present-but-null and genuinely-absent
+ * both parse as `null`; a present-but-wrong-type value fails the whole item
+ * closed -- see `parse.ts`'s `optionalStringField`). `cgDiscount` is
+ * deliberately an OPAQUE string: this contract never interprets it as a
+ * number or percentage. Fields the live response carries but this contract
+ * does not model (e.g. `consolidated`, `trader`, `user_id`) are ignored for
+ * forward-compatibility, not validated or retained.
+ */
 export type SharesightPortfolio = Readonly<{
   id: string;
   name: string;
   currencyCode: string;
+  inceptionDate: string | null;
+  tzName: string | null;
+  accessLevel: string | null;
+  financialYearEnd: string | null;
+  cgDiscount: string | null;
+  countryCode: string | null;
+  ownerName: string | null;
+  taxEntityType: string | null;
 }>;
 
 export type SharesightHolding = Readonly<{

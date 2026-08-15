@@ -1520,9 +1520,38 @@ test("BRK-003 F7: a SharesightNonGetAttemptError reaching the client's request p
 // this suite, not captured real Sharesight responses (BRK-008 will confirm
 // live shapes).
 
+// Matches live shape evidence 2026-08-15 (owner's real account, see
+// docs/ARCHITECTURE.md §8.2): a `listPortfolios` envelope item -- numeric
+// `id`, `currency_code` (not `currency`), plus the optional fields this
+// contract models. Extra live fields this contract does not model
+// (`consolidated`, `trader`, `user_id`, etc.) are included to prove they are
+// ignored for forward-compatibility rather than rejected.
 const PORTFOLIOS_FIXTURE = {
   portfolios: [
-    { id: "port_1", name: "Guest Share (Synthetic)", currency: "AUD" },
+    {
+      id: 4213579,
+      name: "Guest Share (Synthetic)",
+      currency_code: "AUD",
+      access_level: "owner",
+      consolidated: false,
+      country_code: "AU",
+      cg_discount: "0.5",
+      default_sale_allocation_method: "average_cost",
+      disable_automatic_transactions: false,
+      external_identifier: null,
+      financial_year_end: "30/06",
+      holding_id: null,
+      inception_date: "2020-01-01",
+      interest_method: "simple",
+      owner_name: "Test Owner (Synthetic)",
+      payout_sync_cash_account_id: null,
+      rwtr_rate: 0,
+      tax_entity_type: "individual",
+      trader: false,
+      trade_sync_cash_account_id: null,
+      tz_name: "Australia/Sydney",
+      user_id: 998877,
+    },
   ],
 };
 
@@ -1580,8 +1609,18 @@ test("BRK-003 parsing: valid fixtures parse into typed results with exact decima
   assert.equal(portfolios.ok, true);
   if (portfolios.ok) {
     assert.equal(portfolios.value.length, 1);
-    assert.equal(portfolios.value[0]?.id, "port_1");
+    // Numeric 4213579 stringifies exactly -- the resolved BRK-008 id shape.
+    assert.equal(portfolios.value[0]?.id, "4213579");
     assert.equal(portfolios.value[0]?.currencyCode, "AUD");
+    assert.equal(portfolios.value[0]?.name, "Guest Share (Synthetic)");
+    assert.equal(portfolios.value[0]?.tzName, "Australia/Sydney");
+    assert.equal(portfolios.value[0]?.cgDiscount, "0.5");
+    assert.equal(portfolios.value[0]?.inceptionDate, "2020-01-01");
+    assert.equal(portfolios.value[0]?.accessLevel, "owner");
+    assert.equal(portfolios.value[0]?.financialYearEnd, "30/06");
+    assert.equal(portfolios.value[0]?.countryCode, "AU");
+    assert.equal(portfolios.value[0]?.ownerName, "Test Owner (Synthetic)");
+    assert.equal(portfolios.value[0]?.taxEntityType, "individual");
   }
 
   const holdings =
@@ -1712,10 +1751,58 @@ test("BRK-003 parsing: missing/malformed envelopes and fields produce a typed in
       () => clientWithFixtureBody({}).listPortfolios(),
     ],
     [
-      "portfolio missing currency",
+      "portfolio missing currency_code",
       () =>
         clientWithFixtureBody({
-          portfolios: [{ id: "p1", name: "X" }],
+          portfolios: [{ id: 1, name: "X" }],
+        }).listPortfolios(),
+    ],
+    [
+      "portfolio string id (rejected -- id must be a numeric integer)",
+      () =>
+        clientWithFixtureBody({
+          portfolios: [{ id: "1", name: "X", currency_code: "AUD" }],
+        }).listPortfolios(),
+    ],
+    [
+      "portfolio non-integer id",
+      () =>
+        clientWithFixtureBody({
+          portfolios: [{ id: 1.5, name: "X", currency_code: "AUD" }],
+        }).listPortfolios(),
+    ],
+    [
+      "portfolio negative id",
+      () =>
+        clientWithFixtureBody({
+          portfolios: [{ id: -1, name: "X", currency_code: "AUD" }],
+        }).listPortfolios(),
+    ],
+    [
+      "portfolio id beyond Number.MAX_SAFE_INTEGER",
+      () =>
+        clientWithFixtureBody({
+          portfolios: [
+            {
+              id: Number.MAX_SAFE_INTEGER + 2,
+              name: "X",
+              currency_code: "AUD",
+            },
+          ],
+        }).listPortfolios(),
+    ],
+    [
+      "portfolio lowercase currency_code (not ISO 4217-shaped)",
+      () =>
+        clientWithFixtureBody({
+          portfolios: [{ id: 1, name: "X", currency_code: "aud" }],
+        }).listPortfolios(),
+    ],
+    [
+      "portfolio wrong-type optional field (tz_name) fails the item closed",
+      () =>
+        clientWithFixtureBody({
+          portfolios: [{ id: 1, name: "X", currency_code: "AUD", tz_name: 42 }],
         }).listPortfolios(),
     ],
     [
