@@ -2923,3 +2923,71 @@ export const dividendManualRecords = sqliteTable(
     ),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// BRK-004: Sharesight sync-cursor schema.
+//
+// The BRK-003/BRK-008 Sharesight client uses OAuth `client_credentials` only
+// in the real Worker wiring (no `authorization_code`/`refresh_token`
+// custody -- BRK-008's other two grants remain spike-only) -- there is
+// therefore no token table: client id/secret live as Worker secrets (see
+// `worker/sharesight-config.ts`) and the negotiated access token is held
+// in-memory for the lifetime of a single `SharesightTokenProvider`, never
+// persisted. The only durable state this task adds is a per-connection SYNC
+// CURSOR, one row per (user, portfolio, sharesight_portfolio_id) --
+// `BRK-005` (blocked on this task) reads/extends `last_synced_at`/
+// `last_trade_watermark` to drive its resumable ingest; this task only
+// reserves the shape and keeps it minimal. `sharesight_portfolio_id` is
+// Sharesight's OWN portfolio identifier (an opaque broker-side id, not a
+// foreign key into any local table -- mirrors `external_record_mappings`'
+// deferred design in docs/DATA_MODEL.md §8), stored as a decimal string per
+// this repo's numeric-id normalization convention
+// (`domain/sharesight/parse.ts`'s `requiredIntegerIdDecimalString`).
+// `enabled` is the field a user action mutates directly
+// (connect/disconnect); `last_synced_at`/`last_trade_watermark` are
+// sync-process bookkeeping BRK-005 writes. The whole row is still
+// version-guarded uniformly, matching every other owner-scoped
+// single-row-per-key table in this schema (e.g.
+// `dividend_portfolio_assumptions`) rather than special-casing which field
+// changed.
+// ---------------------------------------------------------------------------
+export const sharesightSyncState = sqliteTable(
+  "sharesight_sync_state",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    sharesightPortfolioId: text("sharesight_portfolio_id").notNull(),
+    enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+    lastSyncedAt: text("last_synced_at"),
+    lastTradeWatermark: text("last_trade_watermark"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    foreignKey({
+      name: "sharesight_sync_state_portfolio_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    check(
+      "sharesight_sync_state_enabled_check",
+      sql`${table.enabled} IN (0, 1)`,
+    ),
+    uniqueIndex("sharesight_sync_state_id_user_portfolio_unique").on(
+      table.id,
+      table.userId,
+      table.portfolioId,
+    ),
+    uniqueIndex("sharesight_sync_state_target_unique").on(
+      table.userId,
+      table.portfolioId,
+      table.sharesightPortfolioId,
+    ),
+    index("sharesight_sync_state_owner_portfolio_idx").on(
+      table.userId,
+      table.portfolioId,
+    ),
+  ],
+);

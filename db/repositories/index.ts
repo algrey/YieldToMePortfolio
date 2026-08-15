@@ -217,6 +217,12 @@ export {
   type UpdateDividendReceiptInput,
 } from "./dividends.ts";
 export {
+  createSharesightSyncStateRepository,
+  type SharesightSyncStateMutationFailure,
+  type SharesightSyncStateRecord,
+  type UpsertSharesightSyncStateInput,
+} from "./sharesight-sync-state.ts";
+export {
   createHistoricalSnapshotRepository,
   type HistoricalSeriesPoint,
   type HistoricalSeriesResponse,

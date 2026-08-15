@@ -69,6 +69,9 @@ const OWNED_TABLES = [
   "dividend_fy_overrides",
   "dividend_event_overrides",
   "dividend_manual_records",
+  // BRK-004: owner-scoped Sharesight sync cursor (no token material -- see
+  // db/schema.ts's header comment on `sharesightSyncState`).
+  "sharesight_sync_state",
   "import_batches",
   "import_commit_chunks",
   "import_rows",
@@ -310,6 +313,9 @@ const PURGE_TABLES_IN_FK_ORDER = [
   "dividend_security_assumptions",
   "dividend_fy_overrides",
   "dividend_portfolio_assumptions",
+  // BRK-004: sync cursor references only portfolios (no other table
+  // references it), so any position before `portfolios` is FK-safe.
+  "sharesight_sync_state",
   "transactions",
   "portfolio_securities",
   "portfolio_settings",

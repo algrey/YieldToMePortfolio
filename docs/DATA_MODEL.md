@@ -640,6 +640,17 @@ Broker-provided prices use the existing price-observation/provider mapping shape
 
 If a future implementation task's schema differs from §8 above (for example, additional indexing or a different envelope-key shape driven by the eventually-selected broker's real token lifecycle), that task documents the change here rather than the spike silently assuming it.
 
+### 8.2 `sharesight_sync_state` (BRK-004; implemented, narrower than §8's deferred shape)
+
+`BRK-004` selected Sharesight, real OAuth `client_credentials` only (BRK-008 simplified this materially — no `authorization_code`/`refresh_token` custody in the real Worker wiring), so `broker_connections`' "encrypted access/refresh token envelope" column above does not apply: client id/secret live as Worker secrets (`worker/sharesight-config.ts`), and the negotiated access token is held in-memory for the lifetime of a single `SharesightTokenProvider`, never persisted. `broker_connections`, `broker_accounts`, `broker_sync_runs`, and `external_record_mappings` above therefore REMAIN deferred as designed — this task implements only the one piece of durable state a `client_credentials`-only integration actually needs: a sync cursor.
+
+- `id`, `user_id`, `portfolio_id`, `sharesight_portfolio_id` (Sharesight's OWN portfolio identifier — an opaque broker-side id, not a foreign key into any local table, stored as a decimal string per `domain/sharesight/parse.ts`'s `requiredIntegerIdDecimalString` normalization);
+- `enabled` (boolean; the field a user action mutates directly — connect/disconnect);
+- `last_synced_at`, `last_trade_watermark` (nullable text; `BRK-005`, which is blocked on this task, decides the watermark's actual semantics — this task only reserves the column);
+- `created_at`, `updated_at`, `version` (optimistic concurrency, uniform across the whole row rather than special-cased per field, matching every other owner-scoped single-row-per-key table in this schema, e.g. `dividend_portfolio_assumptions`).
+
+Unique `(id, user_id, portfolio_id)` and `(user_id, portfolio_id, sharesight_portfolio_id)` — at most one cursor row per connected Sharesight portfolio per owned portfolio. Owner-scoped index on `(user_id, portfolio_id)`. FK `(portfolio_id, user_id) → portfolios(id, user_id)`, `ON DELETE RESTRICT`. CREATE-only migration (`drizzle/0034_fast_moon_knight.sql`) with hand-appended `account_purge_lock_*` triggers in the SAME migration (the established pattern — see `drizzle/0030_ambitious_wiccan.sql`); classified `owned` for export/purge (`ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS`/`PURGE_TABLES_IN_FK_ORDER` in `db/repositories/account-lifecycle.ts`). `db/repositories/sharesight-sync-state.ts` provides a deliberately minimal owner-scoped `get`/`list`/`upsert` repository, version-guarded on the whole row; `BRK-005` extends this with the actual bounded/resumable sync-run machinery rather than this task guessing at that shape.
+
 ## 9. Snapshots, overrides, jobs, and audit
 
 ### `portfolio_daily_snapshots`

@@ -41,12 +41,46 @@ const eslintConfig = defineConfig([
           ],
         },
       ],
+      // BRK-004: closes the carry-over gap the BRK-003/BRK-004 hardening
+      // review recorded -- `no-restricted-imports` above only inspects
+      // static `import`/`export … from` specifiers, not a dynamic
+      // `import("...")` call, which is a second, reachable way to obtain
+      // the same package-internal raw fetch primitive. This rule matches an
+      // `ImportExpression` whose source argument is a STRING LITERAL ending
+      // in `sharesight/transport` (optionally `.ts`), the same path shape
+      // the specifier patterns above bar.
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector:
+            "ImportExpression[source.type='Literal'][source.value=/sharesight\\/transport(\\.ts)?$/]",
+          message:
+            "domain/sharesight/transport is package-internal; import the typed client from domain/sharesight/index.ts instead (dynamic import() is covered by this rule too, not only static imports).",
+        },
+        {
+          // Review follow-up: a plain (no-substitution) template-literal
+          // specifier -- `import(\`../domain/sharesight/transport.ts\`)` --
+          // is a DIFFERENT AST node shape (`TemplateLiteral`, not
+          // `Literal`) and escaped the selector above. A no-substitution
+          // template literal has exactly one quasi and zero expressions;
+          // its single quasi's cooked text is checked the same way the
+          // string-literal selector checks `source.value`. A template
+          // literal WITH an interpolated expression is not statically
+          // determinable and is intentionally out of scope here, same as
+          // any other computed specifier.
+          selector:
+            "ImportExpression[source.type='TemplateLiteral'][source.expressions.length=0][source.quasis.length=1][source.quasis.0.value.cooked=/sharesight\\/transport(\\.ts)?$/]",
+          message:
+            "domain/sharesight/transport is package-internal; import the typed client from domain/sharesight/index.ts instead (dynamic import() with a template-literal specifier is covered by this rule too).",
+        },
+      ],
     },
   },
   {
     files: ["domain/sharesight/**/*.ts", "tests/brk-003.test.ts"],
     rules: {
       "no-restricted-imports": "off",
+      "no-restricted-syntax": "off",
     },
   },
 ]);

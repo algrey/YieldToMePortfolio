@@ -73,6 +73,11 @@ export async function fixture(): Promise<DatabaseSync> {
     INSERT INTO dividend_manual_records(id,user_id,portfolio_id,portfolio_security_id,payment_date,shares_decimal,dividend_per_share_decimal,created_at,updated_at,version) VALUES
       ('dmra','a','pa','psa','2026-05-01','1','1','2026-05-01','2026-05-01',1),
       ('dmrb','b','pb','psb','2026-05-01','2','1','2026-05-01','2026-05-01',1);
+    -- BRK-004: one owner row per owner in the new sync-cursor table, same
+    -- purpose as the DB-005 rows above.
+    INSERT INTO sharesight_sync_state(id,user_id,portfolio_id,sharesight_portfolio_id,enabled,last_synced_at,last_trade_watermark,created_at,updated_at,version) VALUES
+      ('ssa','a','pa','101',1,NULL,NULL,'2026-07-01','2026-07-01',1),
+      ('ssb','b','pb','202',1,NULL,NULL,'2026-07-01','2026-07-01',1);
   `);
   return db;
 }

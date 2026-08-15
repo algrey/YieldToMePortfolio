@@ -93,6 +93,77 @@ const MAX_NON_2XX_DIAGNOSTIC_BODY_BYTES = 4_096;
  * gets `bodyBytes: 0`, never a hang. */
 const NON_2XX_DIAGNOSTIC_READ_TIMEOUT_MS = 1_000;
 
+/**
+ * BRK-004 (closes the BRK-008 review follow-up recorded in `client.ts`'s
+ * former inline comment and `docs/ARCHITECTURE.md` §8.2): the 2xx
+ * success-path body IS the actual response data, so unlike the two bounded
+ * diagnostic reads above it can never be truncated at a byte cap -- the fix
+ * here is a TIMEOUT, not a byte bound. Reuses `getJson`'s own configured
+ * `timeoutMs` (the same duration already budgeted for receiving the
+ * response) as this read's OWN, independent timer -- separate from the
+ * outer per-request `AbortController`, whose timer is already cleared by
+ * the time this read starts (that timer only bounds the time to receive the
+ * initial response, not a body read performed afterward on a response
+ * already received).
+ */
+type BoundedTextReadResult =
+  { kind: "ok"; text: string } | { kind: "timeout" } | { kind: "error" };
+
+async function readResponseTextWithTimeout(
+  response: Response,
+  timeoutMs: number,
+): Promise<BoundedTextReadResult> {
+  const body = response.body;
+  if (!body) {
+    // No stream to race a timer against -- `response.text()` on a bodyless
+    // response resolves immediately.
+    try {
+      return { kind: "ok", text: await response.text() };
+    } catch {
+      return { kind: "error" };
+    }
+  }
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  let text = "";
+  let outcome: "timeout" | "error" | null = null;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<void>((resolve) => {
+    timeoutHandle = setTimeout(() => {
+      outcome = "timeout";
+      resolve();
+    }, timeoutMs);
+  });
+  const readLoopPromise = (async (): Promise<void> => {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value && value.byteLength > 0) {
+          text += decoder.decode(value, { stream: true });
+        }
+      }
+    } catch {
+      outcome = "error";
+    }
+  })();
+  try {
+    await Promise.race([readLoopPromise, timeoutPromise]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    try {
+      await reader.cancel();
+    } catch {
+      // Deliberately ignored -- cancellation failure must never surface.
+    }
+  }
+  if (outcome === "timeout") return { kind: "timeout" };
+  if (outcome === "error") return { kind: "error" };
+  text += decoder.decode();
+  return { kind: "ok", text };
+}
+
 export type SharesightClientOptions = Readonly<{
   baseUrl?: string;
   /** Permits `baseUrl` to target a host other than `api.sharesight.com`.
@@ -497,25 +568,30 @@ export function createSharesightClient(
       );
     }
 
-    // Follow-up (recorded by review, 2026-08-15, B1) -- NOT fixed this
-    // round: unlike the non-2xx diagnostic read above, this 2xx success-path
+    // BRK-004 (closes the BRK-008 review follow-up): this 2xx success-path
     // body read is unconditional (this IS the actual response data, not a
-    // diagnostic, so it can't be skipped) and has no byte cap or dedicated
-    // timeout of its own beyond the outer per-request `timeoutMs` (which
-    // only bounds the time to receive the INITIAL response, not this read
-    // performed afterward). The Orchestrator is recording this shape as a
-    // tracked follow-up rather than fixing it here, to keep this change
-    // scoped to the diagnostic-only paths B1 was actually raised against.
-    let bodyText: string;
-    try {
-      bodyText = await response.text();
-    } catch {
+    // diagnostic, so it can't be skipped like the non-2xx diagnostic reads
+    // above) but is now bounded by its OWN timer, independent of the outer
+    // per-request `timeoutMs` (which only bounds the time to receive the
+    // INITIAL response, not this read performed afterward) -- see
+    // `readResponseTextWithTimeout`'s doc comment. A stalled body yields a
+    // typed, retryable `timeout` result, never a hang.
+    const bodyRead = await readResponseTextWithTimeout(response, timeoutMs);
+    if (bodyRead.kind === "timeout") {
+      return requestError(
+        "timeout",
+        "Sharesight response body read timed out.",
+        true,
+      );
+    }
+    if (bodyRead.kind === "error") {
       return requestError(
         "invalid_response",
         "Sharesight response body could not be read.",
         false,
       );
     }
+    const bodyText = bodyRead.text;
 
     let parsed: unknown;
     try {
