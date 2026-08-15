@@ -656,6 +656,28 @@ export async function saveDividendEntryWithContext(
           : "The dividend record could not be saved.",
     };
   }
+  // BRK-005 note: `sharesDecimal`/`dividendPerShareDecimal` are nullable on
+  // `DividendManualRecordRecord` in general (a totals-mode Sharesight
+  // payout row has neither), but this repository's `create()` -- the only
+  // path that can reach here -- is the standalone owner-typed manual-entry
+  // form, which always supplies both; a totals-mode row is only ever
+  // created by the import-commit path, never this one. Narrowed with a
+  // typed check (never a `!` assertion) so a hypothetical totals-mode
+  // record reaching this branch degrades to `storedRecord: undefined`
+  // (the caller already tolerates that, per its own optional field) instead
+  // of a runtime type lie.
+  const storedRecord =
+    result.storedDiffers &&
+    result.record.sharesDecimal !== null &&
+    result.record.dividendPerShareDecimal !== null
+      ? {
+          paymentDate: result.record.paymentDate,
+          sharesDecimal: result.record.sharesDecimal,
+          dividendPerShareDecimal: result.record.dividendPerShareDecimal,
+          frankingCreditPerShareDecimal:
+            result.record.frankingCreditPerShareDecimal,
+        }
+      : undefined;
   return {
     ok: true,
     target: "manual_record",
@@ -664,15 +686,7 @@ export async function saveDividendEntryWithContext(
     proximityWarning,
     deduped: result.deduped,
     storedDiffers: result.storedDiffers,
-    storedRecord: result.storedDiffers
-      ? {
-          paymentDate: result.record.paymentDate,
-          sharesDecimal: result.record.sharesDecimal,
-          dividendPerShareDecimal: result.record.dividendPerShareDecimal,
-          frankingCreditPerShareDecimal:
-            result.record.frankingCreditPerShareDecimal,
-        }
-      : undefined,
+    storedRecord,
   };
 }
 

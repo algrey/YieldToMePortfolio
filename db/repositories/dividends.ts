@@ -1047,9 +1047,24 @@ export type BuildDividendManualRecordImportInsertInput = {
   portfolioId: string;
   portfolioSecurityId: string;
   paymentDate: string;
-  sharesDecimal: string;
-  dividendPerShareDecimal: string;
-  frankingCreditPerShareDecimal: string | null;
+  // Exactly one of the two modes below must be supplied (mirrors the
+  // `dividend_manual_records_amount_mode_check` DB invariant, re-validated
+  // here since D1 does not enforce that CHECK the same way SQLite's local
+  // shim does -- see db/schema.ts's header note): PER-SHARE (IMP-006 CSV
+  // rows and any future per-share importer) supplies
+  // `sharesDecimal`/`dividendPerShareDecimal` (and optionally
+  // `frankingCreditPerShareDecimal`), leaving both `total*` fields
+  // undefined/null; TOTALS (BRK-005 Sharesight payouts, which report only a
+  // total cash amount and total franking credits, never a share count)
+  // supplies `totalCashDecimal` (and optionally `totalFrankingDecimal`),
+  // leaving `sharesDecimal`/`dividendPerShareDecimal`/
+  // `frankingCreditPerShareDecimal` undefined/null -- never fabricating a
+  // share count or per-share amount from a total.
+  sharesDecimal?: string | null;
+  dividendPerShareDecimal?: string | null;
+  frankingCreditPerShareDecimal?: string | null;
+  totalCashDecimal?: string | null;
+  totalFrankingDecimal?: string | null;
   importBatchId: string;
   sourceReference: string;
   requestId: string;
@@ -1063,17 +1078,55 @@ export type BuildDividendManualRecordImportInsertResult =
 export function buildDividendManualRecordImportInsertStatements(
   input: BuildDividendManualRecordImportInsertInput,
 ): BuildDividendManualRecordImportInsertResult {
-  if (
-    !isPositiveDecimalString(input.sharesDecimal) ||
-    !isPositiveDecimalString(input.dividendPerShareDecimal) ||
-    !isNullable(
-      input.frankingCreditPerShareDecimal,
-      isNonNegativeDecimalString,
-    ) ||
-    !isValidDateString(input.paymentDate)
-  ) {
+  if (!isValidDateString(input.paymentDate)) {
     return { ok: false, reason: "invalid_input" };
   }
+  const totalsMode =
+    input.totalCashDecimal !== undefined && input.totalCashDecimal !== null;
+  const perShareMode =
+    (input.sharesDecimal !== undefined && input.sharesDecimal !== null) ||
+    (input.dividendPerShareDecimal !== undefined &&
+      input.dividendPerShareDecimal !== null);
+  if (totalsMode === perShareMode) {
+    // Neither mode supplied, or both were -- either is invalid, matching
+    // the DB CHECK invariant's exact disjunction.
+    return { ok: false, reason: "invalid_input" };
+  }
+
+  let sharesDecimal: string | null = null;
+  let dividendPerShareDecimal: string | null = null;
+  let frankingCreditPerShareDecimal: string | null = null;
+  let totalCashDecimal: string | null = null;
+  let totalFrankingDecimal: string | null = null;
+
+  if (perShareMode) {
+    if (
+      !isPositiveDecimalString(input.sharesDecimal) ||
+      !isPositiveDecimalString(input.dividendPerShareDecimal) ||
+      !isNullable(
+        input.frankingCreditPerShareDecimal ?? null,
+        isNonNegativeDecimalString,
+      )
+    ) {
+      return { ok: false, reason: "invalid_input" };
+    }
+    sharesDecimal = input.sharesDecimal;
+    dividendPerShareDecimal = input.dividendPerShareDecimal;
+    frankingCreditPerShareDecimal = input.frankingCreditPerShareDecimal ?? null;
+  } else {
+    if (
+      !isPositiveDecimalString(input.totalCashDecimal) ||
+      !isNullable(
+        input.totalFrankingDecimal ?? null,
+        isNonNegativeDecimalString,
+      )
+    ) {
+      return { ok: false, reason: "invalid_input" };
+    }
+    totalCashDecimal = input.totalCashDecimal;
+    totalFrankingDecimal = input.totalFrankingDecimal ?? null;
+  }
+
   const id = input.id ?? randomUUID();
   const statements: SqlStatement[] = [
     {
@@ -1081,19 +1134,22 @@ export function buildDividendManualRecordImportInsertStatements(
         id, user_id, portfolio_id, portfolio_security_id, payment_date,
         shares_decimal, dividend_per_share_decimal,
         franking_credit_per_share_decimal, import_batch_id, source_reference,
+        total_cash_decimal, total_franking_decimal,
         created_at, updated_at, version
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       params: [
         id,
         input.userId,
         input.portfolioId,
         input.portfolioSecurityId,
         input.paymentDate,
-        input.sharesDecimal,
-        input.dividendPerShareDecimal,
-        input.frankingCreditPerShareDecimal,
+        sharesDecimal,
+        dividendPerShareDecimal,
+        frankingCreditPerShareDecimal,
         input.importBatchId,
         input.sourceReference,
+        totalCashDecimal,
+        totalFrankingDecimal,
         input.now,
         input.now,
       ],
@@ -2148,8 +2204,12 @@ export type DividendManualRecordRecord = {
   portfolioId: string;
   portfolioSecurityId: string;
   paymentDate: string;
-  sharesDecimal: string;
-  dividendPerShareDecimal: string;
+  // BRK-005: nullable -- a Sharesight payout row (totals mode, see
+  // `BuildDividendManualRecordImportInsertInput`'s header note) genuinely
+  // has no per-share fact, so these are `null` on that row alone. Every
+  // pre-BRK-005 row (owner-typed or CSV-imported) still has both set.
+  sharesDecimal: string | null;
+  dividendPerShareDecimal: string | null;
   frankingCreditPerShareDecimal: string | null;
   // IMP-006: set only for rows a CSV import batch created; null for rows
   // entered directly through the manual dividend-entry UI.
@@ -2161,6 +2221,10 @@ export type DividendManualRecordRecord = {
   // every row created without one (all pre-UI-009 rows, and any future
   // caller that doesn't supply one).
   idempotencyKey: string | null;
+  // BRK-005: set only for a totals-mode Sharesight payout row; null for
+  // every per-share row (owner-typed or CSV-imported).
+  totalCashDecimal: string | null;
+  totalFrankingDecimal: string | null;
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -2195,7 +2259,8 @@ const DIVIDEND_MANUAL_RECORD_COLUMNS = `
   id, user_id, portfolio_id, portfolio_security_id, payment_date,
   shares_decimal, dividend_per_share_decimal,
   franking_credit_per_share_decimal, import_batch_id, source_reference,
-  idempotency_key, created_at, updated_at, version
+  idempotency_key, total_cash_decimal, total_franking_decimal,
+  created_at, updated_at, version
 `;
 
 function mapDividendManualRecord(
@@ -2207,8 +2272,12 @@ function mapDividendManualRecord(
     portfolioId: String(row.portfolio_id),
     portfolioSecurityId: String(row.portfolio_security_id),
     paymentDate: String(row.payment_date),
-    sharesDecimal: String(row.shares_decimal),
-    dividendPerShareDecimal: String(row.dividend_per_share_decimal),
+    sharesDecimal:
+      row.shares_decimal === null ? null : String(row.shares_decimal),
+    dividendPerShareDecimal:
+      row.dividend_per_share_decimal === null
+        ? null
+        : String(row.dividend_per_share_decimal),
     frankingCreditPerShareDecimal:
       row.franking_credit_per_share_decimal === null
         ? null
@@ -2219,6 +2288,12 @@ function mapDividendManualRecord(
       row.idempotency_key === null ? null : String(row.idempotency_key),
     sourceReference:
       row.source_reference === null ? null : String(row.source_reference),
+    totalCashDecimal:
+      row.total_cash_decimal === null ? null : String(row.total_cash_decimal),
+    totalFrankingDecimal:
+      row.total_franking_decimal === null
+        ? null
+        : String(row.total_franking_decimal),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     version: Number(row.version),
@@ -2260,6 +2335,21 @@ function manualRecordMaterialFieldsDiffer(
   input: SaveDividendManualRecordInput,
 ): boolean {
   if (existing.paymentDate !== input.paymentDate) return true;
+  // BRK-005 defensive guard: the standalone manual-entry idempotency-key
+  // retry path this function serves never creates a totals-mode row (only
+  // the Sharesight import commit path does, and that path never supplies an
+  // idempotency key), so `existing.sharesDecimal`/`dividendPerShareDecimal`
+  // are never actually null here -- but the DB-level type is nullable now
+  // (see `DividendManualRecordRecord`'s header note), so a genuinely
+  // totals-mode row reaching this comparison (which should be impossible)
+  // reads as "differs" rather than crashing on a non-nullable decimal
+  // comparison.
+  if (
+    existing.sharesDecimal === null ||
+    existing.dividendPerShareDecimal === null
+  ) {
+    return true;
+  }
   if (!manualRecordDecimalsEqual(existing.sharesDecimal, input.sharesDecimal))
     return true;
   if (

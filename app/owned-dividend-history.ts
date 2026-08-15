@@ -227,6 +227,11 @@ export async function loadOwnedDividendHistory(
       sharesDecimal: record.sharesDecimal,
       dividendPerShareDecimal: record.dividendPerShareDecimal,
       frankingCreditPerShareDecimal: record.frankingCreditPerShareDecimal,
+      // BRK-005: totals-mode Sharesight payout fields (null on every
+      // per-share row) -- see domain/dividends/history.ts's
+      // `computeCashGrossOrTotals`.
+      totalCashDecimal: record.totalCashDecimal,
+      totalFrankingDecimal: record.totalFrankingDecimal,
       // DIV-004: carried through so the derivation can separate the
       // owner-typed and imported tiers -- see domain/dividends/history.ts.
       importBatchId: record.importBatchId,

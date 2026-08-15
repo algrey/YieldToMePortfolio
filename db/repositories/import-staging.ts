@@ -551,7 +551,37 @@ function buildBatchIssueStatements(
   return { statements, issuesInserted: statements.length };
 }
 
-/** Builds guarded insert statements for every parsed row and its issues. */
+/** Builds guarded insert statements for every parsed row and its issues,
+ * PLUS every genuinely batch-level issue on `parseResult.issues` (BRK-005
+ * review round 2 fix).
+ *
+ * `ImportParseSuccess.issues` (top-level) is not a uniformly independent
+ * list across parser sources: `parseStrictVersionedCsvImport`
+ * (`strict-versioned-parser.ts`) pushes each row's own issue objects into
+ * BOTH `row.issues` AND the top-level `issues` array (`issues.push(
+ * ...classification.issues)`) -- a pure, same-object-reference MIRROR of
+ * every row-level issue, never a distinct batch-level fact for the CSV
+ * path. `domain/sharesight-sync/transform.ts`, by contrast, pushes a
+ * genuinely row-less issue (`SHARESIGHT_PAYOUT_UNCONFIRMED`, a null-id
+ * payout that was never staged as a row at all) directly and ONLY into its
+ * top-level `issues` array -- there is no row for it to also live on.
+ *
+ * Before this fix, only row-attached issues were ever persisted (this
+ * function's per-row loop below), so a genuinely row-less batch issue was
+ * silently dropped from `import_issues` even though `summarizeParseSuccess`
+ * (which reads `parseResult.issues` directly) had already counted it into
+ * the batch's own `warning_count` -- `import_issues` empty, `warning_count`
+ * says 1, and the omission's own detail (which symbol/date was skipped)
+ * never reached preview at all. Naively persisting the WHOLE top-level
+ * `issues` array unconditionally would instead double-insert every CSV
+ * issue (the same object already inserted once via the per-row loop, a
+ * second time here). The fix distinguishes the two cases by OBJECT
+ * IDENTITY, not by parser source: any `parseResult.issues` entry that is
+ * not also present (by reference) in some row's own `issues` array is a
+ * genuine batch-level fact and gets inserted here exactly once; every
+ * CSV-mirrored entry IS present in a row's `issues` array (the same object
+ * reference) and is therefore filtered out here, leaving the CSV path's
+ * insert count byte-identical to before this fix. */
 function buildParsedRowStatements(
   userId: string,
   batchId: string,
@@ -568,6 +598,7 @@ function buildParsedRowStatements(
   let rowsInserted = 0;
   let issuesInserted = 0;
   let hasError = false;
+  const rowIssueRefs = new Set<ParsedImportIssue>();
 
   for (const row of parseResult.rows) {
     const validationStatus = rowValidationStatus(row.issues);
@@ -603,6 +634,7 @@ function buildParsedRowStatements(
     rowsInserted += 1;
 
     for (const issue of row.issues) {
+      rowIssueRefs.add(issue);
       statements.push(
         issueInsertStatement(
           userId,
@@ -621,6 +653,19 @@ function buildParsedRowStatements(
   if (parseResult.issues.some((issue) => issue.severity === "error")) {
     hasError = true;
   }
+
+  const batchOnlyIssues = parseResult.issues.filter(
+    (issue) => !rowIssueRefs.has(issue),
+  );
+  const batchIssueStatements = buildBatchIssueStatements(
+    userId,
+    batchId,
+    batchOnlyIssues,
+    createdAt,
+    expectedVersion,
+  );
+  statements.push(...batchIssueStatements.statements);
+  issuesInserted += batchIssueStatements.issuesInserted;
 
   return { statements, rowsInserted, issuesInserted, hasError };
 }

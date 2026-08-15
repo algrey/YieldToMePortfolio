@@ -10,6 +10,30 @@ import {
 } from "./import-preview.ts";
 import { SUPPORTED_IMPORT_PARSER_VERSIONS } from "../domain/imports/index.ts";
 import type { ImportPreviewSecurityCandidate } from "../domain/imports/reconciliation.ts";
+import {
+  SHARESIGHT_SYNC_PARSER_FORMAT,
+  SHARESIGHT_SYNC_PARSER_VERSION,
+} from "../domain/sharesight-sync/index.ts";
+
+// BRK-005: the CSV parser's own `(parserFormat, parserVersion)` allowlist,
+// widened by exactly one additional pair for Sharesight-sourced batches.
+// This is the ONE necessary extension to the readiness gate -- everything
+// else in this function (issue/mapping revalidation, preview-version
+// staleness check) is untouched and applies identically to a Sharesight
+// batch, per the Orchestrator ruling that preview/ready/commit/reverse are
+// reused, not reimplemented.
+function isSupportedImportBatchFormat(
+  parserFormat: string,
+  parserVersion: string,
+): boolean {
+  if (parserFormat === "strict-versioned-csv") {
+    return SUPPORTED_IMPORT_PARSER_VERSIONS.includes(parserVersion);
+  }
+  if (parserFormat === SHARESIGHT_SYNC_PARSER_FORMAT) {
+    return parserVersion === SHARESIGHT_SYNC_PARSER_VERSION;
+  }
+  return false;
+}
 
 export type ImportReadyActionFailure = {
   ok: false;
@@ -158,9 +182,10 @@ export async function markImportReadyWithContext(
   const hasUnresolvedPersistedIssue = review.issues.some(
     (issue) => issue.severity === "error" && issue.resolvedAt === null,
   );
-  const unsupportedParser =
-    batch.parserFormat !== "strict-versioned-csv" ||
-    !SUPPORTED_IMPORT_PARSER_VERSIONS.includes(batch.parserVersion);
+  const unsupportedParser = !isSupportedImportBatchFormat(
+    batch.parserFormat,
+    batch.parserVersion,
+  );
   if (
     !review.preview.ready ||
     hasUnresolvedPersistedIssue ||

@@ -16,6 +16,28 @@ import { createOwnedImportStagingRepository } from "./import-staging.ts";
 import { createOwnedImportMappingDecisionRepository } from "./import-mapping-decisions.ts";
 import { createOwnedPortfolioRepository } from "./owned-portfolios.ts";
 import { buildDividendManualRecordImportInsertStatements } from "./dividends.ts";
+import {
+  SHARESIGHT_SYNC_PARSER_FORMAT,
+  SHARESIGHT_SYNC_PARSER_VERSION,
+} from "../../domain/sharesight-sync/index.ts";
+
+// BRK-005: mirrors `app/import-ready-service.ts`'s identical widening of the
+// CSV parser's `(parserFormat, parserVersion)` allowlist by exactly one
+// additional pair -- see that module's `isSupportedImportBatchFormat` for
+// the full rationale. Everything else in commit's own revalidation
+// (persisted issue/row/mapping state) is untouched and applies identically.
+function isSupportedImportBatchFormat(
+  parserFormat: string,
+  parserVersion: string,
+): boolean {
+  if (parserFormat === "strict-versioned-csv") {
+    return SUPPORTED_IMPORT_PARSER_VERSIONS.includes(parserVersion);
+  }
+  if (parserFormat === SHARESIGHT_SYNC_PARSER_FORMAT) {
+    return parserVersion === SHARESIGHT_SYNC_PARSER_VERSION;
+  }
+  return false;
+}
 
 const DEFAULT_CHUNK_SIZE = 2;
 const MAX_CHUNK_SIZE = 2;
@@ -303,8 +325,10 @@ export function createOwnedImportCommitRepository(
       securityCandidates,
     });
     const hasBlockingPersistedState =
-      ownedBatch.parserFormat !== "strict-versioned-csv" ||
-      !SUPPORTED_IMPORT_PARSER_VERSIONS.includes(ownedBatch.parserVersion) ||
+      !isSupportedImportBatchFormat(
+        ownedBatch.parserFormat,
+        ownedBatch.parserVersion,
+      ) ||
       issues.some(
         (issue) => issue.severity === "error" && issue.resolvedAt === null,
       ) ||
@@ -443,26 +467,50 @@ export function createOwnedImportCommitRepository(
     // Dividend rows never post through the ledger: they create a
     // `dividend_manual_records` row (see `buildDividendManualRecordImportInsertStatements`
     // for why not `dividend_receipts`), never touch cost basis/lots/cash,
-    // and skip FX resolution entirely (the row stores native per-share
-    // amounts only). Built as statements, not executed here, so the caller
-    // can fold them into the same atomic chunk as the `import_rows` update.
+    // and skip FX resolution entirely (the row stores native per-share OR
+    // native totals amounts only). Built as statements, not executed here,
+    // so the caller can fold them into the same atomic chunk as the
+    // `import_rows` update.
     if (normalized.type === "dividend") {
       if (!target.portfolioSecurityId) {
         return { ok: false, reason: "mapping_incomplete" };
       }
-      const built = buildDividendManualRecordImportInsertStatements({
-        userId,
-        portfolioId,
-        portfolioSecurityId: target.portfolioSecurityId,
-        paymentDate: normalized.localTradeDate,
-        sharesDecimal: normalized.sharesOwned ?? "",
-        dividendPerShareDecimal: normalized.costPerShare ?? "",
-        frankingCreditPerShareDecimal: normalized.frankingPerShare ?? null,
-        importBatchId: batch.id,
-        sourceReference,
-        requestId,
-        now: nowIso(now),
-      });
+      // BRK-005: a totals-only Sharesight payout row carries
+      // `normalized.totalCashDecimal` and never a per-share amount (see
+      // `NormalizedImportRow`'s header note); every CSV-imported dividend
+      // row is the reverse. The two modes are mutually exclusive by
+      // construction (the transform/parser that built this row's
+      // `normalized` fields never sets both), so this signal alone decides
+      // which insert shape to build -- never guessing/deriving one from the
+      // other.
+      const built =
+        (normalized.totalCashDecimal ?? null) !== null
+          ? buildDividendManualRecordImportInsertStatements({
+              userId,
+              portfolioId,
+              portfolioSecurityId: target.portfolioSecurityId,
+              paymentDate: normalized.localTradeDate,
+              totalCashDecimal: normalized.totalCashDecimal ?? null,
+              totalFrankingDecimal: normalized.totalFrankingDecimal ?? null,
+              importBatchId: batch.id,
+              sourceReference,
+              requestId,
+              now: nowIso(now),
+            })
+          : buildDividendManualRecordImportInsertStatements({
+              userId,
+              portfolioId,
+              portfolioSecurityId: target.portfolioSecurityId,
+              paymentDate: normalized.localTradeDate,
+              sharesDecimal: normalized.sharesOwned ?? "",
+              dividendPerShareDecimal: normalized.costPerShare ?? "",
+              frankingCreditPerShareDecimal:
+                normalized.frankingPerShare ?? null,
+              importBatchId: batch.id,
+              sourceReference,
+              requestId,
+              now: nowIso(now),
+            });
       if (!built.ok) return { ok: false, reason: "mapping_incomplete" };
       return {
         ok: true,

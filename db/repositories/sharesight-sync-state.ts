@@ -287,5 +287,161 @@ export function createSharesightSyncStateRepository(
     return { ok: true, state: mapSharesightSyncState(row) };
   }
 
-  return { get, list, upsert };
+  /**
+   * BRK-005 review finding B4: `upsert` alone lets an owner end up with
+   * MORE THAN ONE `enabled = true` row for the same local portfolio (e.g.
+   * re-linking to a different Sharesight portfolio without ever disabling
+   * the old link) -- `runSharesightSyncWithContext`'s
+   * `links.find((candidate) => candidate.enabled)` then silently picks
+   * whichever enabled row happens to come first in `list()`'s return order,
+   * so a re-link can keep importing from the OLD Sharesight portfolio with
+   * no visible error (reviewer repro). `linkExclusive` enforces a
+   * single-active-link invariant: in the SAME atomic `client.batch()` call
+   * as the target row's create/update, it disables every OTHER enabled row
+   * for `(userId, portfolioId)`. Structurally near-identical to `upsert`
+   * (duplicated rather than refactored to share code, so `upsert` itself --
+   * used elsewhere for a non-exclusive touch, e.g. the sync watermark
+   * update on an already-exclusive link -- stays exactly as tested).
+   */
+  async function linkExclusive(
+    userId: string,
+    portfolioId: string,
+    sharesightPortfolioId: string,
+    input: UpsertSharesightSyncStateInput,
+  ): Promise<
+    | { ok: true; state: SharesightSyncStateRecord }
+    | SharesightSyncStateMutationFailure
+  > {
+    if (!nonEmptyString(sharesightPortfolioId))
+      return { ok: false, reason: "invalid_input" };
+    if (
+      !isNullableNonEmptyString(input.lastSyncedAt) ||
+      !isNullableNonEmptyString(input.lastTradeWatermark)
+    )
+      return { ok: false, reason: "invalid_input" };
+    if (!(await ownedPortfolio(client, userId, portfolioId)))
+      return { ok: false, reason: "not_found" };
+
+    const updatedAt = now();
+    const disableOthers: SqlStatement = {
+      sql: `UPDATE sharesight_sync_state
+        SET enabled = 0, updated_at = ?, version = version + 1
+        WHERE user_id = ? AND portfolio_id = ? AND sharesight_portfolio_id != ?
+          AND enabled = 1`,
+      params: [updatedAt, userId, portfolioId, sharesightPortfolioId],
+    };
+
+    if (input.expectedVersion === null) {
+      const id = randomUUID();
+      const statements: SqlStatement[] = [
+        disableOthers,
+        {
+          sql: `INSERT INTO sharesight_sync_state (
+            id, user_id, portfolio_id, sharesight_portfolio_id, enabled,
+            last_synced_at, last_trade_watermark, created_at, updated_at,
+            version
+          )
+          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 1
+          WHERE NOT EXISTS (
+            SELECT 1 FROM sharesight_sync_state
+            WHERE user_id = ? AND portfolio_id = ? AND sharesight_portfolio_id = ?
+          )`,
+          params: [
+            id,
+            userId,
+            portfolioId,
+            sharesightPortfolioId,
+            input.enabled ? 1 : 0,
+            input.lastSyncedAt,
+            input.lastTradeWatermark,
+            updatedAt,
+            updatedAt,
+            userId,
+            portfolioId,
+            sharesightPortfolioId,
+          ],
+        },
+        createConditionalAuditInsertStatement(
+          {
+            actorUserId: userId,
+            targetOwnerUserId: userId,
+            action: "broker_sync.sharesight.state.create",
+            targetType: "sharesight_sync_state",
+            targetId: id,
+            requestId: input.requestId,
+            result: "success",
+            occurredAt: updatedAt,
+          },
+          "EXISTS (SELECT 1 FROM sharesight_sync_state WHERE id = ?)",
+          [id],
+          now,
+        ),
+      ];
+      try {
+        await client.batch(statements);
+      } catch {
+        return { ok: false, reason: "atomic_failure" };
+      }
+      const state = await get(userId, portfolioId, sharesightPortfolioId);
+      return state && state.id === id
+        ? { ok: true, state }
+        : { ok: false, reason: "version_conflict" };
+    }
+
+    const existing = await client.get<{ id: string }>(
+      `SELECT id FROM sharesight_sync_state
+       WHERE user_id = ? AND portfolio_id = ? AND sharesight_portfolio_id = ?
+       LIMIT 1`,
+      [userId, portfolioId, sharesightPortfolioId],
+    );
+    if (!existing) return { ok: false, reason: "not_found" };
+
+    const statements: SqlStatement[] = [
+      disableOthers,
+      createConditionalAuditInsertStatement(
+        {
+          actorUserId: userId,
+          targetOwnerUserId: userId,
+          action: "broker_sync.sharesight.state.update",
+          targetType: "sharesight_sync_state",
+          targetId: existing.id,
+          requestId: input.requestId,
+          result: "success",
+          occurredAt: updatedAt,
+        },
+        "EXISTS (SELECT 1 FROM sharesight_sync_state WHERE user_id = ? AND portfolio_id = ? AND sharesight_portfolio_id = ? AND version = ?)",
+        [userId, portfolioId, sharesightPortfolioId, input.expectedVersion],
+        now,
+      ),
+      {
+        sql: `UPDATE sharesight_sync_state SET
+          enabled = ?, last_synced_at = ?, last_trade_watermark = ?,
+          updated_at = ?, version = version + 1
+        WHERE user_id = ? AND portfolio_id = ? AND sharesight_portfolio_id = ?
+          AND version = ?
+        RETURNING ${SHARESIGHT_SYNC_STATE_COLUMNS}`,
+        params: [
+          input.enabled ? 1 : 0,
+          input.lastSyncedAt,
+          input.lastTradeWatermark,
+          updatedAt,
+          userId,
+          portfolioId,
+          sharesightPortfolioId,
+          input.expectedVersion,
+        ],
+      },
+    ];
+    const rows = await client.batch(statements);
+    const row = rows[rows.length - 1]?.results[0];
+    if (!row)
+      return await resolveMutationFailure(
+        client,
+        "SELECT id FROM sharesight_sync_state WHERE user_id = ? AND portfolio_id = ? AND sharesight_portfolio_id = ?",
+        [userId, portfolioId, sharesightPortfolioId],
+      );
+    return { ok: true, state: mapSharesightSyncState(row) };
+  }
+
+  return { get, list, upsert, linkExclusive };
 }

@@ -46,7 +46,11 @@ export type ImportIssueCode =
   | "CSV_IMPORT_TOO_LARGE"
   | "ROW_LIMIT_EXCEEDED"
   | "FIELD_LIMIT_EXCEEDED"
-  | "CSV_DECODE_FAILED";
+  | "CSV_DECODE_FAILED"
+  // BRK-005: a Sharesight payout with no confirmed id (an unconfirmed/
+  // declared distribution) was skipped rather than staged -- see
+  // `domain/sharesight-sync/transform.ts`.
+  | "SHARESIGHT_PAYOUT_UNCONFIRMED";
 
 export type ImportFieldName =
   | "id"
@@ -118,6 +122,20 @@ type MutableNormalizedImportRow = {
   // 17-column header, in which case it is always null (unknown, never a
   // silent zero -- the column simply cannot report franking).
   frankingPerShare: string | null;
+  // BRK-005: totals-only dividend shape for a source (Sharesight payouts)
+  // that reports a TOTAL cash amount and total franking credits with no
+  // share count at all -- never fabricated from `sharesOwned`/`costPerShare`.
+  // Always `null` for a CSV-parsed row (no CSV column ever populates these);
+  // set only by `domain/sharesight-sync/transform.ts` on a `type: "dividend"`
+  // row built from a Sharesight payout, in which case `sharesOwned`/
+  // `costPerShare`/`frankingPerShare` above are themselves always `null` on
+  // that same row (see `db/repositories/import-commit.ts`'s dividend branch,
+  // which reads exactly this signal to choose the totals-mode insert path).
+  // Optional (not just nullable) so every pre-BRK-005 fixture/caller that
+  // never mentions these two fields keeps compiling unchanged; read as
+  // `?? null` wherever consumed.
+  totalCashDecimal?: string | null;
+  totalFrankingDecimal?: string | null;
 };
 
 export type NormalizedImportRow = Readonly<MutableNormalizedImportRow>;
@@ -784,6 +802,9 @@ function createNormalizedRow(
     frankingPerShare: normalizeDecimalText(
       normalizeText(getField(row, headerIndex, "frankingPerShare")) ?? "",
     ),
+    // BRK-005: never populated by CSV parsing -- see the type's header note.
+    totalCashDecimal: null,
+    totalFrankingDecimal: null,
   };
 }
 

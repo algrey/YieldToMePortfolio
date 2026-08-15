@@ -2864,6 +2864,35 @@ export const dividendEventOverrides = sqliteTable(
  * NULL as never equal to another NULL, so unkeyed rows never collide --
  * the same property `dividend_manual_records_portfolio_source_reference_unique`
  * above already relies on without a partial index.
+ *
+ * BRK-005 addition: Sharesight payouts report TOTAL cash/franking amounts
+ * for a distribution, never a share count or a per-share amount -- fields
+ * `docs/CSV_IMPORT_SPEC.md`'s per-share `Dividend` row shape has no
+ * equivalent for. Fabricating a per-share figure by guessing/deriving a
+ * share count would violate AGENTS.md's "never fabricated" rule, so
+ * `sharesDecimal`/`dividendPerShareDecimal` become NULLABLE (a genuine
+ * SQLite table rebuild, not an `ADD COLUMN` -- the trigger/index hazard
+ * this rebuild carries is handled by hand-recreating the three
+ * `account_purge_lock_dividend_manual_records_*` triggers and every index
+ * byte-identically in the same migration; `tests/db-schema.test.ts` and
+ * `tests/brk-005.test.ts` both re-probe purge-lock enforcement after this
+ * migration) and two new nullable columns, `totalCashDecimal`/
+ * `totalFrankingDecimal`, carry the totals-only shape instead. A row is
+ * either PER-SHARE (`sharesDecimal`+`dividendPerShareDecimal` set,
+ * `totalCashDecimal`+`totalFrankingDecimal` both NULL -- every pre-BRK-005
+ * row, and every future owner-typed/CSV-imported per-share row) or TOTALS
+ * (`sharesDecimal`+`dividendPerShareDecimal`+`frankingCreditPerShareDecimal`
+ * all NULL, `totalCashDecimal` set -- a Sharesight payout row only); never
+ * both, never neither. `dividend_manual_records_amount_mode_check` enforces
+ * this invariant at the database layer as well as in
+ * `db/repositories/dividends.ts`'s `buildDividendManualRecordImportInsertStatements`.
+ * `domain/dividends/history.ts`'s derivation reads a NULL
+ * `dividendPerShareDecimal` fact as "shares/per-share genuinely unknown"
+ * (rendered as such, matching the pre-existing convention the row-level
+ * `DerivedDividendRow.dividendPerShareDecimal`/`amountUnknown` fields
+ * already used for a provider event with no known amount) while still
+ * using the real `totalCashDecimal`/`totalFrankingDecimal` for the row's
+ * cash/franking totals -- see that module's `computeCashGrossOrTotals`.
  */
 export const dividendManualRecords = sqliteTable(
   "dividend_manual_records",
@@ -2873,12 +2902,15 @@ export const dividendManualRecords = sqliteTable(
     portfolioId: text("portfolio_id").notNull(),
     portfolioSecurityId: text("portfolio_security_id").notNull(),
     paymentDate: text("payment_date").notNull(),
-    sharesDecimal: text("shares_decimal").notNull(),
-    dividendPerShareDecimal: text("dividend_per_share_decimal").notNull(),
+    sharesDecimal: text("shares_decimal"),
+    dividendPerShareDecimal: text("dividend_per_share_decimal"),
     frankingCreditPerShareDecimal: text("franking_credit_per_share_decimal"),
     importBatchId: text("import_batch_id"),
     sourceReference: text("source_reference"),
     idempotencyKey: text("idempotency_key"),
+    // BRK-005: totals-only Sharesight payout shape -- see the header note.
+    totalCashDecimal: text("total_cash_decimal"),
+    totalFrankingDecimal: text("total_franking_decimal"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     version: integer("version").notNull().default(1),
@@ -2920,6 +2952,24 @@ export const dividendManualRecords = sqliteTable(
     uniqueIndex("dividend_manual_records_security_idempotency_unique").on(
       table.portfolioSecurityId,
       table.idempotencyKey,
+    ),
+    check(
+      "dividend_manual_records_amount_mode_check",
+      sql`
+        (
+          ${table.sharesDecimal} IS NOT NULL
+          AND ${table.dividendPerShareDecimal} IS NOT NULL
+          AND ${table.totalCashDecimal} IS NULL
+          AND ${table.totalFrankingDecimal} IS NULL
+        )
+        OR
+        (
+          ${table.sharesDecimal} IS NULL
+          AND ${table.dividendPerShareDecimal} IS NULL
+          AND ${table.frankingCreditPerShareDecimal} IS NULL
+          AND ${table.totalCashDecimal} IS NOT NULL
+        )
+      `,
     ),
   ],
 );

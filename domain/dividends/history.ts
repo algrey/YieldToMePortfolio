@@ -158,9 +158,22 @@ export type DividendReceiptFact = {
 export type DividendManualRecordFact = {
   id: string;
   paymentDate: string;
-  sharesDecimal: string;
-  dividendPerShareDecimal: string;
+  // BRK-005: nullable -- a totals-mode Sharesight payout row (see
+  // `db/schema.ts`'s `dividendManualRecords` header note) has no per-share
+  // fact at all. `sharesDecimal`/`dividendPerShareDecimal` are null on that
+  // row alone, and `totalCashDecimal` is set instead; every owner-typed or
+  // CSV-imported per-share row still has both non-null and both `total*`
+  // fields null. Structurally, only the "imported" tier can ever carry a
+  // totals-mode fact (the manual-entry UI and `dividend_receipts` both only
+  // ever supply per-share facts).
+  sharesDecimal: string | null;
+  dividendPerShareDecimal: string | null;
   frankingCreditPerShareDecimal: string | null;
+  // Optional (not just nullable) so every pre-BRK-005 fixture/caller that
+  // never mentions these two fields keeps compiling unchanged; read as
+  // `?? null` everywhere this module consumes them.
+  totalCashDecimal?: string | null;
+  totalFrankingDecimal?: string | null;
   // DIV-004: present exactly for rows a CSV import batch created (IMP-006);
   // `null` for rows the owner entered directly through the manual-entry UI.
   // This is the sole signal this module uses to place a record in the
@@ -183,11 +196,16 @@ export type DominatedReceipt = {
 
 /** Mirrors `DominatedReceipt` for an imported row consumed by a higher tier
  * (owner manual record or receipt) winning the same row -- its values stay
- * visible here rather than being silently dropped. */
+ * visible here rather than being silently dropped. BRK-005: nullable
+ * per-share fields plus `totalCashDecimal`/`totalFrankingDecimal`, mirroring
+ * `DividendManualRecordFact` -- a dominated totals-mode payout keeps its
+ * real total visible rather than reading as "Unknown". */
 export type DominatedImported = {
-  sharesDecimal: string;
-  dividendPerShareDecimal: string;
+  sharesDecimal: string | null;
+  dividendPerShareDecimal: string | null;
   frankingCreditPerShareDecimal: string | null;
+  totalCashDecimal: string | null;
+  totalFrankingDecimal: string | null;
   paymentDate: string;
 };
 
@@ -199,8 +217,9 @@ export type DerivedDividendRow = {
   currencyCode: string;
   exDate: string | null;
   paymentDate: string | null;
-  sharesDecimal: string;
-  /** `null` only when the per-share amount is genuinely unknown (no override/receipt/manual value AND the provider event's own amount is null) -- never fabricated as "0". */
+  /** `null` only for a BRK-005 totals-mode imported row (a Sharesight payout, which reports no share count at all) -- rendered as "Unknown", never fabricated by deriving a share count from unrelated ledger holdings. Non-null for every other tier/source. */
+  sharesDecimal: string | null;
+  /** `null` when the per-share amount is genuinely unknown -- no override/receipt/manual value AND the provider event's own amount is null, OR a BRK-005 totals-mode imported row (which has no per-share fact at all, only a total) -- never fabricated as "0". */
   dividendPerShareDecimal: string | null;
   cashDecimal: string | null;
   franking: FrankingResolution;
@@ -210,7 +229,7 @@ export type DerivedDividendRow = {
   status: DerivedDividendRowLifecycleStatus;
   source: DerivedDividendRowSource;
   excluded: boolean;
-  /** True exactly when `dividendPerShareDecimal` is `null`. */
+  /** True exactly when `cashDecimal` is `null` -- equivalent to `dividendPerShareDecimal === null` for every row EXCEPT a BRK-005 totals-mode imported row, whose per-share amount is unknown but whose cash total is known (so it is never counted as amount-unknown and its real total still contributes to lifetime sums). */
   amountUnknown: boolean;
   /** The provider event's own, unedited per-share amount (present whenever an event backs the row, regardless of source), so a detail view can show "provider says X, you overrode to Y" (UI-006C). */
   providerGrossPerShareDecimal: string | null;
@@ -296,6 +315,65 @@ function computeCashGross(
 }
 
 /**
+ * BRK-005: additive wrapper around `computeCashGross` that also handles a
+ * totals-mode fact (a Sharesight payout, which reports a total cash amount
+ * and total franking credits with no share count/per-share amount at all --
+ * see `DividendManualRecordFact`'s header note). When `dividendPerShareDecimal`
+ * is non-null this delegates to `computeCashGross` UNCHANGED (byte-identical
+ * for every pre-BRK-005 row, verified by the existing DIV-001/004/005 test
+ * suites); when it is null AND a `totalCashDecimal` is supplied, the total
+ * IS the cash fact (never derived from shares x per-share, since neither is
+ * known) and franking is the supplied total directly rather than run through
+ * `resolveFrankingPerShare`'s per-share gross-up math (there is no per-share
+ * base to gross up). When neither is available this falls through to the
+ * same "genuinely unknown" null result `computeCashGross` already returns.
+ */
+function computeCashGrossOrTotals(
+  dividendPerShareDecimal: string | null,
+  sharesDecimal: string | null,
+  totalCashDecimal: string | null,
+  totalFrankingDecimal: string | null,
+  franking: FrankingResolution,
+): {
+  cashDecimal: string | null;
+  frankingTotalDecimal: string | null;
+  grossDecimal: string | null;
+  grossIncludesFranking: boolean;
+} {
+  if (dividendPerShareDecimal !== null && sharesDecimal !== null) {
+    return computeCashGross(sharesDecimal, dividendPerShareDecimal, franking);
+  }
+  if (totalCashDecimal !== null) {
+    if (totalFrankingDecimal === null) {
+      return {
+        cashDecimal: totalCashDecimal,
+        frankingTotalDecimal: null,
+        grossDecimal: totalCashDecimal,
+        grossIncludesFranking: false,
+      };
+    }
+    const gross = formatDecimalExact(
+      addDecimal(
+        parseDecimal(totalCashDecimal),
+        parseDecimal(totalFrankingDecimal),
+      ),
+    );
+    return {
+      cashDecimal: totalCashDecimal,
+      frankingTotalDecimal: totalFrankingDecimal,
+      grossDecimal: gross,
+      grossIncludesFranking: true,
+    };
+  }
+  return {
+    cashDecimal: null,
+    frankingTotalDecimal: null,
+    grossDecimal: null,
+    grossIncludesFranking: false,
+  };
+}
+
+/**
  * GLOBAL nearest-wins proximity matching (B4 fix, replacing an earlier
  * per-event-greedy pass that could mis-assign a manual record to a nearby
  * but not-actually-closest event when two events compete for it -- e.g. an
@@ -375,6 +453,8 @@ function toDominatedImported(
     sharesDecimal: record.sharesDecimal,
     dividendPerShareDecimal: record.dividendPerShareDecimal,
     frankingCreditPerShareDecimal: record.frankingCreditPerShareDecimal,
+    totalCashDecimal: record.totalCashDecimal ?? null,
+    totalFrankingDecimal: record.totalFrankingDecimal ?? null,
     paymentDate: record.paymentDate,
   };
 }
@@ -591,9 +671,14 @@ export function deriveDividendHistoryForSecurity(
     imported: DividendManualRecordFact | null,
   ): {
     source: "manual" | "receipt" | "imported";
-    sharesDecimal: string;
-    dividendPerShareDecimal: string;
+    sharesDecimal: string | null;
+    dividendPerShareDecimal: string | null;
     overrideFrankingPerShare: string | null;
+    // BRK-005: non-null only when `source === "imported"` AND the winning
+    // fact is a Sharesight payout's totals-mode row -- manual/receipt facts
+    // never carry totals (see `DividendManualRecordFact`'s header note).
+    totalCashDecimal: string | null;
+    totalFrankingDecimal: string | null;
     paymentDate: string;
     dominatedReceipt: DominatedReceipt | null;
     dominatedImported: DominatedImported | null;
@@ -605,6 +690,8 @@ export function deriveDividendHistoryForSecurity(
         sharesDecimal: manual.sharesDecimal,
         dividendPerShareDecimal: manual.dividendPerShareDecimal,
         overrideFrankingPerShare: manual.frankingCreditPerShareDecimal,
+        totalCashDecimal: null,
+        totalFrankingDecimal: null,
         paymentDate: manual.paymentDate,
         dominatedReceipt: receiptResolution
           ? toDominatedReceipt(receiptResolution.latest)
@@ -621,6 +708,8 @@ export function deriveDividendHistoryForSecurity(
           receiptResolution.latest.dividendPerShareDecimal,
         overrideFrankingPerShare:
           receiptResolution.latest.frankingPerShareDecimal,
+        totalCashDecimal: null,
+        totalFrankingDecimal: null,
         paymentDate: receiptResolution.latest.paymentDate,
         dominatedReceipt: null,
         dominatedImported: imported ? toDominatedImported(imported) : null,
@@ -633,6 +722,8 @@ export function deriveDividendHistoryForSecurity(
         sharesDecimal: imported.sharesDecimal,
         dividendPerShareDecimal: imported.dividendPerShareDecimal,
         overrideFrankingPerShare: imported.frankingCreditPerShareDecimal,
+        totalCashDecimal: imported.totalCashDecimal ?? null,
+        totalFrankingDecimal: imported.totalFrankingDecimal ?? null,
         paymentDate: imported.paymentDate,
         dominatedReceipt: null,
         dominatedImported: null,
@@ -733,9 +824,11 @@ export function deriveDividendHistoryForSecurity(
         );
     const status = lifecycleStatus(event.exDate!, input.today);
 
-    let sharesDecimal: string;
+    let sharesDecimal: string | null;
     let dividendPerShareDecimal: string | null;
     let overrideFrankingPerShare: string | null;
+    let totalCashDecimal: string | null = null;
+    let totalFrankingDecimal: string | null = null;
     let source: DerivedDividendRowSource;
     let excluded = false;
     let dominatedReceipt: DominatedReceipt | null = null;
@@ -758,6 +851,8 @@ export function deriveDividendHistoryForSecurity(
       sharesDecimal = ownerFact.sharesDecimal;
       dividendPerShareDecimal = ownerFact.dividendPerShareDecimal;
       overrideFrankingPerShare = ownerFact.overrideFrankingPerShare;
+      totalCashDecimal = ownerFact.totalCashDecimal;
+      totalFrankingDecimal = ownerFact.totalFrankingDecimal;
       paymentDate = ownerFact.paymentDate;
       dominatedReceipt = ownerFact.dominatedReceipt;
       dominatedImported = ownerFact.dominatedImported;
@@ -790,7 +885,13 @@ export function deriveDividendHistoryForSecurity(
       frankingTotalDecimal,
       grossDecimal,
       grossIncludesFranking,
-    } = computeCashGross(sharesDecimal, dividendPerShareDecimal, franking);
+    } = computeCashGrossOrTotals(
+      dividendPerShareDecimal,
+      sharesDecimal,
+      totalCashDecimal,
+      totalFrankingDecimal,
+      franking,
+    );
 
     rows.push({
       id: event.id,
@@ -810,7 +911,7 @@ export function deriveDividendHistoryForSecurity(
       status,
       source,
       excluded,
-      amountUnknown: dividendPerShareDecimal === null,
+      amountUnknown: cashDecimal === null,
       providerGrossPerShareDecimal: event.grossPerShareDecimal,
       dominatedReceipt,
       dominatedImported,
@@ -988,9 +1089,13 @@ export function deriveDividendHistoryForSecurity(
     currencyCode?: string;
     exDate?: string | null;
     providerGrossPerShareDecimal?: string | null;
-    sharesDecimal: string;
-    dividendPerShareDecimal: string;
+    sharesDecimal: string | null;
+    dividendPerShareDecimal: string | null;
     overrideFrankingPerShare: string | null;
+    // BRK-005: only ever set when `source === "imported"` for a totals-mode
+    // Sharesight payout fact -- see `DividendManualRecordFact`'s header note.
+    totalCashDecimal?: string | null;
+    totalFrankingDecimal?: string | null;
     paymentDate: string;
     dominatedReceipt?: DominatedReceipt | null;
     dominatedImported?: DominatedImported | null;
@@ -1007,9 +1112,11 @@ export function deriveDividendHistoryForSecurity(
       frankingTotalDecimal,
       grossDecimal,
       grossIncludesFranking,
-    } = computeCashGross(
-      fields.sharesDecimal,
+    } = computeCashGrossOrTotals(
       fields.dividendPerShareDecimal,
+      fields.sharesDecimal,
+      fields.totalCashDecimal ?? null,
+      fields.totalFrankingDecimal ?? null,
       franking,
     );
     rows.push({
@@ -1032,7 +1139,7 @@ export function deriveDividendHistoryForSecurity(
       status: "ex_date_passed",
       source: fields.source,
       excluded: false,
-      amountUnknown: false,
+      amountUnknown: cashDecimal === null,
       providerGrossPerShareDecimal: fields.providerGrossPerShareDecimal ?? null,
       dominatedReceipt: fields.dominatedReceipt ?? null,
       dominatedImported: fields.dominatedImported ?? null,
@@ -1138,6 +1245,8 @@ export function deriveDividendHistoryForSecurity(
           sharesDecimal: record.sharesDecimal,
           dividendPerShareDecimal: record.dividendPerShareDecimal,
           overrideFrankingPerShare: record.frankingCreditPerShareDecimal,
+          totalCashDecimal: record.totalCashDecimal,
+          totalFrankingDecimal: record.totalFrankingDecimal,
           paymentDate: record.paymentDate,
         });
       }
@@ -1201,6 +1310,8 @@ export function deriveDividendHistoryForSecurity(
         dividendPerShareDecimal: importedPick.winner.dividendPerShareDecimal,
         overrideFrankingPerShare:
           importedPick.winner.frankingCreditPerShareDecimal,
+        totalCashDecimal: importedPick.winner.totalCashDecimal,
+        totalFrankingDecimal: importedPick.winner.totalFrankingDecimal,
         paymentDate: importedPick.winner.paymentDate,
         additionalImportedCount: importedPick.additionalCount,
       });
@@ -1244,9 +1355,11 @@ export function deriveDividendHistoryForSecurity(
       frankingTotalDecimal,
       grossDecimal,
       grossIncludesFranking,
-    } = computeCashGross(
-      ownerFact.sharesDecimal,
+    } = computeCashGrossOrTotals(
       ownerFact.dividendPerShareDecimal,
+      ownerFact.sharesDecimal,
+      ownerFact.totalCashDecimal,
+      ownerFact.totalFrankingDecimal,
       franking,
     );
     const sourceId =
@@ -1275,7 +1388,7 @@ export function deriveDividendHistoryForSecurity(
       status: "ex_date_passed",
       source: ownerFact.source,
       excluded: false,
-      amountUnknown: false,
+      amountUnknown: cashDecimal === null,
       providerGrossPerShareDecimal: event.grossPerShareDecimal,
       dominatedReceipt: ownerFact.dominatedReceipt,
       dominatedImported,

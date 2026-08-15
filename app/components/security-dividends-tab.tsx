@@ -456,7 +456,9 @@ export function SecurityDividendsTab({
                       )}
                     </th>
                     <td className="numeric">
-                      {formatShares(row.sharesDecimal)}
+                      {row.sharesDecimal === null
+                        ? "Unknown"
+                        : formatShares(row.sharesDecimal)}
                     </td>
                     <td className="numeric">
                       {row.dividendPerShareDecimal === null
