@@ -1113,6 +1113,142 @@ test("BRK-008: decideInitialGrant / isGrantRejection / shouldFallBackToAuthoriza
   assert.equal(shouldFallBackToAuthorizationCode(timeoutError, true), false);
 });
 
+// BRK-008 refinement: `token.ts`'s bounded oauthErrorCode diagnostic lets
+// `shouldFallBackToAuthorizationCode` distinguish two grant-rejection
+// shapes that previously looked identical (same `kind`/`retryable`) --
+// `invalid_client` (the CLIENT itself was rejected; authorization_code
+// would send the identical client_id/client_secret and fail the same way,
+// so falling back would only burn the one-time code for nothing) from
+// `unsupported_grant_type` (the textbook "client_credentials genuinely
+// isn't enabled" signal the fallback exists for) and every other
+// grant-rejection shape (still falls back, unchanged from the original
+// behavior).
+test("BRK-008 strategy refinement: invalid_client skips the authorization_code fallback; unsupported_grant_type (and an unknown/absent code) still falls back", () => {
+  const invalidClient = {
+    kind: "authentication",
+    message: "x",
+    retryable: false,
+    oauthErrorCode: "invalid_client",
+  } as const;
+  assert.equal(
+    shouldFallBackToAuthorizationCode(invalidClient, true),
+    false,
+    "invalid_client must never fall back, even with a code configured",
+  );
+
+  const unsupportedGrantType = {
+    kind: "authentication",
+    message: "x",
+    retryable: false,
+    oauthErrorCode: "unsupported_grant_type",
+  } as const;
+  assert.equal(
+    shouldFallBackToAuthorizationCode(unsupportedGrantType, true),
+    true,
+    "unsupported_grant_type is the precise, textbook fallback trigger",
+  );
+
+  // A genuine grant-rejection with no oauthErrorCode (diagnostic couldn't
+  // identify one -- unknown code, non-JSON body, etc.) is unaffected by
+  // this refinement: it still falls back exactly as before BRK-008 added
+  // the diagnostic.
+  const noCodeIdentified = {
+    kind: "authentication",
+    message: "x",
+    retryable: false,
+  } as const;
+  assert.equal(shouldFallBackToAuthorizationCode(noCodeIdentified, true), true);
+
+  // invalid_client with no code configured is still false for the
+  // pre-existing "nothing to fall back to" reason, not the new refinement.
+  assert.equal(shouldFallBackToAuthorizationCode(invalidClient, false), false);
+});
+
+// --- 2c. BRK-008: OAuth error-code diagnostic on a non-2xx token response -
+
+test("BRK-008 diagnostic: every allowlisted token-endpoint error code surfaces as oauthErrorCode, with a static failure message", async () => {
+  const allowlistedCodes = [
+    "invalid_request",
+    "invalid_client",
+    "invalid_grant",
+    "unauthorized_client",
+    "unsupported_grant_type",
+    "invalid_scope",
+    "access_denied",
+  ] as const;
+  for (const code of allowlistedCodes) {
+    const provider = createSharesightTokenProvider({
+      clientId: FIXTURE_CLIENT_ID,
+      clientSecret: FIXTURE_CLIENT_SECRET,
+      fetcher: async () =>
+        jsonResponse(400, {
+          error: code,
+          error_description: "must never be read or surfaced",
+        }),
+      now: () => 0,
+    });
+    const result = await provider.getAccessToken();
+    assert.equal(result.ok, false, code);
+    if (!result.ok) {
+      assert.equal(result.error.oauthErrorCode, code, code);
+      assert.equal(
+        result.error.message,
+        "Sharesight token request was not accepted.",
+        code,
+      );
+    }
+  }
+});
+
+test("BRK-008 diagnostic: an unrecognized code, a missing body, a non-JSON body, and an oversized body all yield no oauthErrorCode, and never throw", async () => {
+  const cases: Array<[string, () => Promise<Response>]> = [
+    [
+      "unrecognized error code (not in the closed allowlist)",
+      async () => jsonResponse(400, { error: "some_custom_extension_code" }),
+    ],
+    [
+      "error field present but not a string",
+      async () => jsonResponse(400, { error: 12345 }),
+    ],
+    ["no body at all", async () => new Response(null, { status: 500 })],
+    [
+      "non-JSON body",
+      async () =>
+        new Response("<html>Sharesight is down</html>", {
+          status: 503,
+          headers: { "content-type": "text/html" },
+        }),
+    ],
+    [
+      // The `error` field is well-formed and near the start of the body,
+      // but a >4KB body must still be truncated before JSON.parse ever
+      // runs -- the truncation itself breaks the JSON (unterminated
+      // string/object), so this fails exactly like ordinary malformed
+      // JSON: no throw, no oauthErrorCode.
+      "oversized body (>4KB) truncated mid-value",
+      async () =>
+        jsonResponse(400, {
+          error: "invalid_grant",
+          padding: "A".repeat(10_000),
+        }),
+    ],
+  ];
+
+  for (const [label, fetcherResponse] of cases) {
+    const provider = createSharesightTokenProvider({
+      clientId: FIXTURE_CLIENT_ID,
+      clientSecret: FIXTURE_CLIENT_SECRET,
+      fetcher: fetcherResponse,
+      now: () => 0,
+    });
+    const result = await provider.getAccessToken();
+    assert.equal(result.ok, false, label);
+    if (!result.ok) {
+      assert.equal(result.error.oauthErrorCode, undefined, label);
+    }
+  }
+});
+
 test("BRK-008 secrets discipline: authorization code, redirect_uri, and refresh tokens never appear in any thrown/returned value", async () => {
   const serialized: string[] = [];
   function capture(value: unknown): void {
@@ -1140,8 +1276,9 @@ test("BRK-008 secrets discipline: authorization code, redirect_uri, and refresh 
   }
 
   // A token endpoint that (unexpectedly) echoes the auth code back in an
-  // error body must not leak it through this module's typed result -- only
-  // the HTTP status is ever consulted for a non-ok response.
+  // error body must not leak it through this module's typed result --
+  // BRK-008's bounded diagnostic reads this body (unlike before), but only
+  // ever extracts the allowlisted `error` code, never `error_description`.
   const authCodeFailureProvider = createSharesightTokenProvider({
     clientId: FIXTURE_CLIENT_ID,
     clientSecret: FIXTURE_CLIENT_SECRET,
@@ -1155,7 +1292,12 @@ test("BRK-008 secrets discipline: authorization code, redirect_uri, and refresh 
       }),
     now: () => 0,
   });
-  capture(await authCodeFailureProvider.getAccessToken());
+  const authCodeFailureResult = await authCodeFailureProvider.getAccessToken();
+  capture(authCodeFailureResult);
+  assert.equal(
+    !authCodeFailureResult.ok && authCodeFailureResult.error.oauthErrorCode,
+    "invalid_grant",
+  );
 
   // Same for a refresh_token failure echoing the refresh token itself.
   const refreshFailureProvider = createSharesightTokenProvider({
@@ -1170,7 +1312,12 @@ test("BRK-008 secrets discipline: authorization code, redirect_uri, and refresh 
       }),
     now: () => 0,
   });
-  capture(await refreshFailureProvider.getAccessToken());
+  const refreshFailureResult = await refreshFailureProvider.getAccessToken();
+  capture(refreshFailureResult);
+  assert.equal(
+    !refreshFailureResult.ok && refreshFailureResult.error.oauthErrorCode,
+    "invalid_grant",
+  );
 
   // A rotated refresh token is intentionally handed to
   // `onRefreshTokenRotated` -- the ONE documented channel for the caller to
@@ -1662,7 +1809,16 @@ test("BRK-003 secrets discipline: the fixture client secret and access token nev
       }),
     now: () => 0,
   });
-  capture(await authFailureProvider.getAccessToken());
+  const authFailureResult = await authFailureProvider.getAccessToken();
+  capture(authFailureResult);
+  // BRK-008: the allowlisted `error` code IS surfaced (exercised
+  // end-to-end here), but `error_description` -- which carried the secret
+  // above -- is discarded unread; the leak assertion below covers the
+  // negative case across every captured value in this test.
+  assert.equal(
+    !authFailureResult.ok && authFailureResult.error.oauthErrorCode,
+    "invalid_client",
+  );
 
   // Malformed token JSON.
   const malformedTokenProvider = createSharesightTokenProvider({

@@ -19,10 +19,43 @@ export type SharesightErrorKind =
   | "transient_upstream"
   | "non_get_rejected";
 
+/**
+ * BRK-008 live-spike diagnostic: the closed allowlist of RFC 6749 §5.2
+ * TOKEN-endpoint `error` values that `token.ts` will ever surface as
+ * `SharesightError.oauthErrorCode`. Any other string (a provider-specific
+ * extension code, a typo, anything not in this list) is discarded unread by
+ * `token.ts` rather than surfaced -- see that module's `readOAuthErrorCode`
+ * for why an open-ended value is never trusted onto a typed result.
+ */
+export const SHARESIGHT_OAUTH_ERROR_CODES = [
+  "invalid_request",
+  "invalid_client",
+  "invalid_grant",
+  "unauthorized_client",
+  "unsupported_grant_type",
+  "invalid_scope",
+  "access_denied",
+] as const;
+
+export type SharesightOAuthErrorCode =
+  (typeof SHARESIGHT_OAUTH_ERROR_CODES)[number];
+
 export type SharesightError = Readonly<{
   kind: SharesightErrorKind;
   message: string;
   retryable: boolean;
+  /**
+   * BRK-008 diagnostic only: the TOKEN endpoint's OAuth `error` code
+   * (RFC 6749 §5.2), present only when `token.ts` received a non-2xx
+   * response from the token endpoint whose body parsed as JSON with an
+   * `error` field matching `SHARESIGHT_OAUTH_ERROR_CODES` exactly. Never set
+   * by the data client (`client.ts`) -- that module never reads a non-2xx
+   * body at all. Distinguishes e.g. `invalid_client` (bad client id/secret)
+   * from `invalid_grant` (bad/expired code, redirect mismatch) without
+   * surfacing anything else from the body -- see `token.ts`'s
+   * `readOAuthErrorCode` for the bounded, defensive read that produces this.
+   */
+  oauthErrorCode?: SharesightOAuthErrorCode;
 }>;
 
 export type SharesightResult<T> =

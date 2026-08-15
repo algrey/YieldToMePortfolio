@@ -257,6 +257,21 @@ function printOutcome(label, result) {
   }
 }
 
+/** BRK-008 diagnostic: prints the token endpoint's OAuth `error` code for a
+ * failed grant attempt, when `token.ts` was able to identify one -- e.g.
+ * "client_credentials rejected (oauth error: unsupported_grant_type)". Never
+ * prints anything else from the failure (no `error_description`, no raw
+ * body -- see `token.ts`'s `readOAuthErrorCode` and this file's no-values
+ * rule); a result with no `oauthErrorCode` (network error, or a body that
+ * didn't parse/match the allowlist) prints nothing here. */
+function logOAuthErrorCode(grantName, result) {
+  if (!result.ok && result.error.oauthErrorCode) {
+    console.log(
+      `${grantName} rejected (oauth error: ${result.error.oauthErrorCode})`,
+    );
+  }
+}
+
 /**
  * BRK-008: implements the token-acquisition strategy documented in this
  * file's header comment. Returns `{ provider, grantUsed, result }` -- the
@@ -275,11 +290,9 @@ async function acquireSharesightToken() {
       refreshToken,
       onRefreshTokenRotated: printRotatedRefreshToken,
     });
-    return {
-      provider,
-      grantUsed: "refresh_token",
-      result: await provider.getAccessToken(),
-    };
+    const result = await provider.getAccessToken();
+    logOAuthErrorCode("refresh_token", result);
+    return { provider, grantUsed: "refresh_token", result };
   }
 
   console.log(
@@ -300,10 +313,16 @@ async function acquireSharesightToken() {
       result: clientCredentialsResult,
     };
   }
+  logOAuthErrorCode("client_credentials", clientCredentialsResult);
 
   // Never retries via a different grant on a network/timeout/rate-limit
   // error -- only a genuine, typed rejection of the client_credentials
-  // GRANT itself (see token-strategy.ts's isGrantRejection).
+  // GRANT itself (see token-strategy.ts's isGrantRejection). BRK-008
+  // refinement: an `invalid_client` oauthErrorCode is also excluded here --
+  // authorization_code would send the identical client_id/client_secret and
+  // fail the same way, so falling back would only burn the one-time code
+  // for nothing (see token-strategy.ts's shouldFallBackToAuthorizationCode
+  // doc comment for the full rationale).
   if (
     !shouldFallBackToAuthorizationCode(
       clientCredentialsResult.error,
@@ -339,10 +358,12 @@ async function acquireSharesightToken() {
     redirectUri,
     onRefreshTokenRotated: printRotatedRefreshToken,
   });
+  const authCodeResult = await authCodeProvider.getAccessToken();
+  logOAuthErrorCode("authorization_code", authCodeResult);
   return {
     provider: authCodeProvider,
     grantUsed: "authorization_code",
-    result: await authCodeProvider.getAccessToken(),
+    result: authCodeResult,
   };
 }
 

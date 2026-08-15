@@ -62,6 +62,10 @@
 // an ISO string) so tests never depend on wall-clock time.
 
 import type { SharesightError, SharesightResult } from "./contracts.ts";
+import {
+  SHARESIGHT_OAUTH_ERROR_CODES,
+  type SharesightOAuthErrorCode,
+} from "./contracts.ts";
 import type { SharesightFetcher } from "./transport.ts";
 
 export const DEFAULT_SHARESIGHT_TOKEN_URL =
@@ -422,11 +426,105 @@ function tokenError(
   kind: SharesightErrorKindForToken,
   message: string,
   retryable: boolean,
+  oauthErrorCode?: SharesightOAuthErrorCode | null,
 ): SharesightResult<never> {
-  return { ok: false, error: { kind, message, retryable } };
+  return {
+    ok: false,
+    error: {
+      kind,
+      message,
+      retryable,
+      ...(oauthErrorCode ? { oauthErrorCode } : {}),
+    },
+  };
 }
 
 type SharesightErrorKindForToken = SharesightError["kind"];
+
+const OAUTH_ERROR_CODE_SET: ReadonlySet<string> = new Set(
+  SHARESIGHT_OAUTH_ERROR_CODES,
+);
+
+/** BRK-008 diagnostic: the maximum number of bytes of a non-2xx TOKEN
+ * endpoint response body this module will ever read. Large enough for any
+ * realistic RFC 6749 §5.2 OAuth error JSON body; small enough that this
+ * diagnostic itself can never be turned into an unbounded-buffering
+ * liability by a misbehaving or hostile endpoint. Bytes beyond this bound
+ * are never read -- the diagnostic simply fails closed (`null`) rather than
+ * reading further, matching the "tolerate anything, never throw" contract
+ * below. */
+const MAX_OAUTH_ERROR_BODY_BYTES = 4_096;
+
+/**
+ * BRK-008: the ONE bounded, allowlisted-enum exception to this module's
+ * otherwise-absolute "never read a non-2xx body" rule (see the module doc
+ * comment) -- see docs/ARCHITECTURE.md §8.2 for why this specific exception
+ * is safe. Called ONLY from the non-2xx branch of `requestNewToken`, on the
+ * TOKEN endpoint response (never the data client, which is untouched by
+ * this function and never calls it).
+ *
+ * Reads at most `MAX_OAUTH_ERROR_BODY_BYTES` of the body, tolerating every
+ * failure mode by returning `null` rather than throwing: no body, a stream
+ * read error, a body that isn't valid UTF-8/JSON, or a body larger than the
+ * bound (silently truncated, which then simply fails to parse as JSON in
+ * the ordinary case). Of the parsed JSON, ONLY the top-level `error` field
+ * is read, and ONLY if it exactly matches one entry in the closed
+ * `SHARESIGHT_OAUTH_ERROR_CODES` allowlist -- an unrecognized code,
+ * `error_description` (which can reflect request data the caller sent, e.g.
+ * echoing back an authorization code or client secret -- BRK-003 leak
+ * discipline), and every other field are discarded unread: never returned
+ * from this function, never logged, never included in a thrown/returned
+ * error message.
+ */
+async function readOAuthErrorCode(
+  response: Response,
+): Promise<SharesightOAuthErrorCode | null> {
+  const body = response.body;
+  if (!body) return null;
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  let text = "";
+  let totalBytes = 0;
+  try {
+    while (totalBytes < MAX_OAUTH_ERROR_BODY_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      const remaining = MAX_OAUTH_ERROR_BODY_BYTES - totalBytes;
+      const chunk =
+        value.byteLength > remaining ? value.subarray(0, remaining) : value;
+      text += decoder.decode(chunk, { stream: true });
+      totalBytes += chunk.byteLength;
+    }
+  } catch {
+    return null;
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // Deliberately ignored -- cancellation failure must never surface.
+    }
+  }
+  if (totalBytes === 0) return null;
+  text += decoder.decode();
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // Includes a body truncated at the byte bound above, which will
+    // ordinarily fail to parse as complete JSON -- an oversized body is
+    // therefore handled by this same catch, not a separate check.
+    return null;
+  }
+
+  const record = asRecord(parsed);
+  const candidate = record ? record.error : null;
+  return typeof candidate === "string" && OAUTH_ERROR_CODE_SET.has(candidate)
+    ? (candidate as SharesightOAuthErrorCode)
+    : null;
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null
@@ -642,6 +740,12 @@ async function requestNewToken(
 
   if (!response.ok) {
     const retryable = response.status >= 500;
+    // BRK-008 diagnostic exception (module doc, docs/ARCHITECTURE.md §8.2):
+    // the ONLY body this module ever reads, bounded and allowlist-matched.
+    // The failure MESSAGE below stays static regardless of what (if
+    // anything) this returns -- only the typed, closed-enum
+    // `oauthErrorCode` field carries it.
+    const oauthErrorCode = await readOAuthErrorCode(response);
     return tokenError(
       response.status === 401 || response.status === 400
         ? "authentication"
@@ -652,6 +756,7 @@ async function requestNewToken(
             : "invalid_response",
       "Sharesight token request was not accepted.",
       retryable,
+      oauthErrorCode,
     );
   }
 

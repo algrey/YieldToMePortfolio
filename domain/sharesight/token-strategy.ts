@@ -61,10 +61,37 @@ export function isGrantRejection(error: SharesightError): boolean {
  * actually being configured (`SHARESIGHT_AUTH_CODE` is optional) -- falling
  * back with no code to fall back to would just be a second, identically-
  * shaped failure.
+ *
+ * BRK-008 refinement, made possible by `token.ts`'s bounded OAuth
+ * `error`-code diagnostic (`SharesightError.oauthErrorCode`,
+ * docs/ARCHITECTURE.md §8.2): when the token endpoint's error code is
+ * PRECISELY known, two of the seven allowlisted codes carry an especially
+ * clear signal for THIS decision --
+ *  - `unsupported_grant_type` is the textbook confirmation that
+ *    client_credentials genuinely isn't enabled for this app registration,
+ *    i.e. exactly the case the fallback exists for;
+ *  - `invalid_client` means Sharesight rejected the CLIENT itself (a bad
+ *    `client_id`/`client_secret`) -- `authorization_code` sends the exact
+ *    same `client_id`/`client_secret` in its POST body
+ *    (`token.ts`'s `buildGrantRequestBody`), so it would fail identically.
+ *    Falling back would only burn the one-time authorization code for a
+ *    request that cannot possibly succeed, so this case is skipped
+ *    entirely.
+ * Any OTHER grant-rejection (including `invalid_grant`,
+ * `unauthorized_client`, or an oauthErrorCode the token endpoint didn't
+ * return / that didn't match the allowlist) still falls back, unchanged
+ * from the original behavior -- this refinement only ADDS a precise skip
+ * for the one case that is provably wasteful, never narrows the trigger
+ * down to `unsupported_grant_type` alone, since a genuine grant-rejection
+ * with an unrecognized or absent error code is still worth attempting the
+ * fallback for.
  */
 export function shouldFallBackToAuthorizationCode(
   clientCredentialsError: SharesightError,
   hasAuthCode: boolean,
 ): boolean {
-  return hasAuthCode && isGrantRejection(clientCredentialsError);
+  if (!hasAuthCode || !isGrantRejection(clientCredentialsError)) {
+    return false;
+  }
+  return clientCredentialsError.oauthErrorCode !== "invalid_client";
 }
