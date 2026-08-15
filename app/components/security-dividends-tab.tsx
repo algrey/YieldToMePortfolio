@@ -18,6 +18,8 @@ import type {
 import {
   buildDialogPrefill,
   decimalsEqual,
+  foldedInImportedCount,
+  foldedInReceiptCount,
   formatShares,
   frankingCell,
   freshEntryPrefill,
@@ -94,6 +96,23 @@ export function SecurityDividendsTab({
   const [recordPrefill, setRecordPrefill] = useState<DialogPrefill>(() =>
     freshEntryPrefill(portfolioSecurityId),
   );
+  // UI-010: the currently-open row's dominated evidence (a receipt and/or an
+  // imported record consumed by this row -- never shown as its own row, see
+  // `domain/dividends/history.ts`'s module header), carried alongside the
+  // prefill so the dialog can render it as "superseded by this row"
+  // provenance. Reset to empty for a fresh (non-row) entry -- there is no
+  // row, so nothing can be dominated.
+  const [recordDominated, setRecordDominated] = useState<{
+    dominatedReceipt: DerivedDividendRow["dominatedReceipt"];
+    dominatedImported: DerivedDividendRow["dominatedImported"];
+    additionalReceiptsCount: number;
+    additionalImportedCount: number;
+  }>({
+    dominatedReceipt: null,
+    dominatedImported: null,
+    additionalReceiptsCount: 0,
+    additionalImportedCount: 0,
+  });
   const recordDialogRef = useRef<HTMLDialogElement>(null);
   const recordOpenerRef = useRef<HTMLButtonElement | null>(null);
 
@@ -148,6 +167,12 @@ export function SecurityDividendsTab({
   function openFreshRecordDialog(event: React.MouseEvent<HTMLButtonElement>) {
     recordOpenerRef.current = event.currentTarget;
     setRecordPrefill(freshEntryPrefill(portfolioSecurityId));
+    setRecordDominated({
+      dominatedReceipt: null,
+      dominatedImported: null,
+      additionalReceiptsCount: 0,
+      additionalImportedCount: 0,
+    });
     setRecordDialogOpen(true);
   }
 
@@ -165,6 +190,12 @@ export function SecurityDividendsTab({
         today,
       ),
     );
+    setRecordDominated({
+      dominatedReceipt: row.dominatedReceipt,
+      dominatedImported: row.dominatedImported,
+      additionalReceiptsCount: row.additionalReceiptsCount,
+      additionalImportedCount: row.additionalImportedCount,
+    });
     setRecordDialogOpen(true);
   }
 
@@ -426,6 +457,14 @@ export function SecurityDividendsTab({
                     row.providerGrossPerShareDecimal,
                     row.dividendPerShareDecimal,
                   );
+                // UI-010: dominated-evidence disclosure -- a receipt and/or
+                // an imported record consumed by this row (never shown as
+                // its own row) is disclosed here as a compact text marker so
+                // the "disclosed, not silently dropped" guarantee is
+                // actually visible, not just a type-level fact. Text, not
+                // colour, per QA-001B.
+                const foldedReceipts = foldedInReceiptCount(row);
+                const foldedImported = foldedInImportedCount(row);
                 return (
                   <tr
                     key={row.id}
@@ -494,6 +533,23 @@ export function SecurityDividendsTab({
                         {SOURCE_LABEL[row.source]}
                         {row.excluded ? " · excluded" : ""}
                       </span>
+                      {foldedReceipts > 0 ? (
+                        <>
+                          <br />
+                          <span className="dividend-fold-note">
+                            +{foldedReceipts} receipt
+                            {foldedReceipts === 1 ? "" : "s"} folded in
+                          </span>
+                        </>
+                      ) : null}
+                      {foldedImported > 0 ? (
+                        <>
+                          <br />
+                          <span className="dividend-fold-note">
+                            +{foldedImported} imported folded in
+                          </span>
+                        </>
+                      ) : null}
                     </td>
                     <td>
                       {notPaid ? (
@@ -552,6 +608,14 @@ export function SecurityDividendsTab({
           </dd>
         </div>
       </dl>
+      {rows.some(
+        (row) =>
+          foldedInReceiptCount(row) > 0 || foldedInImportedCount(row) > 0,
+      ) ? (
+        <p className="income-subtitle">
+          Some rows fold in additional records — see row details.
+        </p>
+      ) : null}
       {lifetimeTotals.excludedCount > 0 ||
       lifetimeTotals.unknownAmountCount > 0 ? (
         <p className="income-subtitle">
@@ -584,6 +648,10 @@ export function SecurityDividendsTab({
           }
           initialExpectedVersion={recordPrefill.initialExpectedVersion}
           initialExclude={recordPrefill.initialExclude}
+          dominatedReceipt={recordDominated.dominatedReceipt}
+          dominatedImported={recordDominated.dominatedImported}
+          additionalReceiptsCount={recordDominated.additionalReceiptsCount}
+          additionalImportedCount={recordDominated.additionalImportedCount}
         />
       ) : null}
 

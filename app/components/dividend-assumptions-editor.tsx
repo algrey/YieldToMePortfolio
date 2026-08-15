@@ -23,7 +23,19 @@ import {
   multiplyDecimal,
   parseDecimal,
 } from "../../domain/calculations/decimal.ts";
+import type { DerivedDividendRow } from "../../domain/dividends/index.ts";
+import { formatShares } from "../dividend-history-prefill.ts";
 import { formatIncomeMoney, formatIncomePercent } from "../income-format.ts";
+
+// UI-010: local aliases for the two dominated-evidence shapes carried on a
+// derived row (see `domain/dividends/history.ts`'s `DominatedReceipt`/
+// `DominatedImported`) -- extracted structurally via `DerivedDividendRow`
+// rather than importing the types by name so this client-reachable form
+// module keeps depending only on the row shape it already needs.
+type DominatedReceiptFact = NonNullable<DerivedDividendRow["dominatedReceipt"]>;
+type DominatedImportedFact = NonNullable<
+  DerivedDividendRow["dominatedImported"]
+>;
 
 type ProviderYield =
   | { ok: true; trailingYieldPercentDecimal: string }
@@ -597,6 +609,10 @@ export function RecordDividendDialog({
   initialFrankingCreditPerShareDecimal = null,
   initialExpectedVersion = null,
   initialExclude = false,
+  dominatedReceipt = null,
+  dominatedImported = null,
+  additionalReceiptsCount = 0,
+  additionalImportedCount = 0,
 }: {
   dialogRef: React.RefObject<HTMLDialogElement | null>;
   portfolioId: string;
@@ -616,6 +632,16 @@ export function RecordDividendDialog({
   initialFrankingCreditPerShareDecimal?: string | null;
   initialExpectedVersion?: number | null;
   initialExclude?: boolean;
+  /** UI-010: the row's dominated evidence (see the type alias comment above)
+   * -- omitted (defaulting to null/0) by every caller except UI-006C's
+   * per-security tab, which always supplies whatever the opened row itself
+   * carries (frequently empty). Rendered read-only; never part of the save
+   * payload -- this dialog cannot edit superseded evidence, only the row
+   * that consumed it. */
+  dominatedReceipt?: DominatedReceiptFact | null;
+  dominatedImported?: DominatedImportedFact | null;
+  additionalReceiptsCount?: number;
+  additionalImportedCount?: number;
 }) {
   const router = useRouter();
   // Event-linked (overriding an auto/provider row) vs a plain owner-typed
@@ -909,6 +935,65 @@ export function RecordDividendDialog({
           ? "Edit this dividend"
           : "Record dividend received"}
       </p>
+      {dominatedReceipt ||
+      dominatedImported ||
+      additionalReceiptsCount > 0 ||
+      additionalImportedCount > 0 ? (
+        // UI-010: honest provenance for evidence this row consumed (never
+        // shown as its own row) -- clearly labelled as superseded and not
+        // part of this dialog's editable/saved fields.
+        <div className="dividend-dominated-evidence">
+          <p className="dividend-form-note">
+            Superseded by this row -- not counted separately in totals:
+          </p>
+          <ul>
+            {dominatedReceipt ? (
+              <li>
+                Receipt:{" "}
+                {formatIncomeMoney(
+                  currencyCode,
+                  dominatedReceipt.dividendPerShareDecimal,
+                )}
+                /share × {formatShares(dominatedReceipt.sharesDecimal)} shares,
+                paid {dominatedReceipt.paymentDate}
+                {dominatedReceipt.frankingPerShareDecimal !== null
+                  ? ` · franking ${formatIncomeMoney(currencyCode, dominatedReceipt.frankingPerShareDecimal)}/share`
+                  : ""}
+              </li>
+            ) : null}
+            {additionalReceiptsCount > 0 ? (
+              <li>
+                +{additionalReceiptsCount} more receipt
+                {additionalReceiptsCount === 1 ? "" : "s"} not shown
+                individually
+              </li>
+            ) : null}
+            {dominatedImported ? (
+              <li>
+                Imported:{" "}
+                {dominatedImported.dividendPerShareDecimal !== null
+                  ? `${formatIncomeMoney(currencyCode, dominatedImported.dividendPerShareDecimal)}/share × ${
+                      dominatedImported.sharesDecimal !== null
+                        ? formatShares(dominatedImported.sharesDecimal)
+                        : "Unknown"
+                    } shares`
+                  : dominatedImported.totalCashDecimal !== null
+                    ? `${formatIncomeMoney(currencyCode, dominatedImported.totalCashDecimal)} total`
+                    : "Unknown amount"}
+                , paid {dominatedImported.paymentDate}
+                {dominatedImported.frankingCreditPerShareDecimal !== null
+                  ? ` · franking ${formatIncomeMoney(currencyCode, dominatedImported.frankingCreditPerShareDecimal)}/share`
+                  : ""}
+              </li>
+            ) : null}
+            {additionalImportedCount > 0 ? (
+              <li>
+                +{additionalImportedCount} more imported not shown individually
+              </li>
+            ) : null}
+          </ul>
+        </div>
+      ) : null}
       <form className="manual-ledger-form" onSubmit={submit}>
         <fieldset>
           <div className="manual-ledger-grid">

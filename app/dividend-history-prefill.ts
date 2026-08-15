@@ -87,6 +87,24 @@ export function frankingCell(
   return `${formatIncomeMoney(currencyCode, franking.perShareDecimal)} (${franking.source})`;
 }
 
+/**
+ * UI-010: a row's total count of receipts folded into it and not shown as
+ * their own row -- `dominatedReceipt` (the one whose values ARE shown,
+ * consumed by a higher-precedence winner) plus `additionalReceiptsCount`
+ * (further receipts beyond that one, never individually shown regardless of
+ * which tier won -- see `domain/dividends/history.ts`'s `resolveReceipts`).
+ * Zero for a row with no folded-in receipt evidence at all.
+ */
+export function foldedInReceiptCount(row: DerivedDividendRow): number {
+  return (row.dominatedReceipt !== null ? 1 : 0) + row.additionalReceiptsCount;
+}
+
+/** Mirrors `foldedInReceiptCount` for imported rows folded into this row via
+ * `dominatedImported`/`additionalImportedCount` (DIV-004/DIV-005). */
+export function foldedInImportedCount(row: DerivedDividendRow): number {
+  return (row.dominatedImported !== null ? 1 : 0) + row.additionalImportedCount;
+}
+
 export type DialogPrefill = {
   initialPortfolioSecurityId: string;
   initialPaymentDate: string | null;

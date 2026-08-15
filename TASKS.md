@@ -357,7 +357,7 @@ Status: DEFERRED (2026-08-15); pre-existing display-only defect confirmed by BRK
 
 #### BRK-006 — Broker position reconciliation surfacing
 
-Status: BLOCKED on BRK-005.
+Status: DEFERRED (2026-08-15, Orchestrator rescope after BRK-008/BRK-005): reconciliation requires a Sharesight POSITION source, and the live-confirmed v3 holdings endpoint is positionless (id/instrument only — BRK-008 evidence). Candidate sources (UNVERIFIED): Sharesight v2 valuation/performance endpoints. Since all trades now sync through the staged pipeline, our ledger derives positions from the same facts Sharesight holds, so drift detection adds value mainly against manual-entry gaps. Promote with a small position-source spike (BRK-008 pattern) when the owner wants cross-checks; SPK-003's reconcile-only contract semantics remain the binding design.
 
 - Objective: surface `planPositionReconciliation` drift reports in the product UI/API as reconciliation evidence, never as a silent holdings overwrite.
 - Dependencies: BRK-005.
@@ -668,7 +668,9 @@ Status: PROMOTED 2026-08-14 by owner instruction — split into CGT-001A/B below
 
 ### UI-010 — Render dominated-evidence counts in the dividends tab
 
-Status: DEFERRED (2026-08-14); from DIV-005 review — `additionalReceiptsCount`/`additionalImportedCount` (and dominated evidence generally) are type-level disclosures with no UI consumer, so the "disclosed, not silently dropped" guarantee is invisible to the owner. Surface them on UI-006C's rows/detail (e.g. "+1 additional receipt folded in") when non-zero.
+Status: DONE (2026-08-15); from DIV-005 review — `additionalReceiptsCount`/`additionalImportedCount` (and dominated evidence generally) are type-level disclosures with no UI consumer, so the "disclosed, not silently dropped" guarantee is invisible to the owner. Surface them on UI-006C's rows/detail (e.g. "+1 additional receipt folded in") when non-zero.
+
+- Completion note (2026-08-15): row-level "+N receipt(s)/imported folded in" micro-labels, a once-only totals-adjacent note when any row folds evidence, and a read-only "Superseded by this row" dialog panel rendering dominated receipt/imported values incl. BRK-005 totals-mode (unknown amounts render Unknown, never 0; evidence sits outside the form and never enters the save payload — reviewer-traced). Counting verified honest against the domain's winner-tier conventions (no self-double-count). No routes/domain changes. 17 tests. `npm run check` exit 0 (977 pass, 10 gated skips). Minor follow-up noted: dominated totals-mode franking total not yet rendered in the panel; em-dash vs double-hyphen copy inconsistency.
 
 ### CGT-002 — Capital loss carry-forward across financial years
 

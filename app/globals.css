@@ -3942,6 +3942,32 @@ dd {
   font-size: 0.72rem;
 }
 
+/* UI-010: row-level compact marker disclosing a receipt and/or an imported
+   record folded into this row (never shown as its own row) -- text, not
+   colour, per QA-001B; same muted micro-label treatment as
+   `.dividend-provider-note`. */
+.dividend-fold-note {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+/* UI-010: the record/override dialog's read-only "superseded by this row"
+   evidence panel -- honest provenance for a dominated receipt/imported
+   record, clearly separated from the editable form fields above it. */
+.dividend-dominated-evidence {
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--divider);
+  border-radius: 3px;
+}
+
+.dividend-dominated-evidence ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 /* Review fix (follow-up 3): the refresh-confirmation dialog's action button
    had no sizing class at all (unlike every other dialog's buttons, which
    inherit 44px from `.manual-ledger-form button` or similar). */
