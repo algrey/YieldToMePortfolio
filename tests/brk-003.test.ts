@@ -1579,7 +1579,13 @@ const HOLDINGS_FIXTURE = {
 // caller-supplied portfolioId), `unique_identifier`, `value`,
 // `brokerage_currency_code`, `exchange_rate`(_pair), `state`, `paid_on`,
 // `description_code`, `source_category` -- and `transaction_type`, which is
-// OPTIONAL per that same evidence (a live item can omit it entirely).
+// OPTIONAL per that same evidence (a live item can omit it entirely). The
+// second item is a genuine SELL, mirroring item #46/107's real shape
+// (docs/ARCHITECTURE.md §8.2): a negative `value` (LIVE-CONFIRMED signed),
+// a negative `quantity` (an INFERENCE only, not itself live-confirmed -- see
+// that section for why), `comments: null`, an unmodelled `broker` object,
+// and an unmodelled `market_price` extra -- both ignored for
+// forward-compatibility, not validated or retained.
 const TRADES_FIXTURE = {
   trades: [
     {
@@ -1601,6 +1607,37 @@ const TRADES_FIXTURE = {
       paid_on: null,
       description_code: "buy",
       source_category: "trade",
+      comments: "Initial buy",
+    },
+    {
+      id: 5002,
+      unique_identifier: "def-456",
+      instrument: { code: "WHC", market_code: "ASX", currency_code: "AUD" },
+      transaction_type: "SELL",
+      transaction_date: "2026-02-10",
+      // Signed the same way item #46/107's `quantity` was accepted -- an
+      // INFERENCE extrapolated from `value`'s confirmed sign, not itself
+      // live-confirmed (docs/ARCHITECTURE.md §8.2).
+      quantity: -20,
+      price: "5.50",
+      // Negative `value` -- the LIVE-CONFIRMED signed field.
+      value: -110,
+      brokerage: 9.95,
+      brokerage_currency_code: "AUD",
+      exchange_rate: 1,
+      exchange_rate_pair: "AUD/AUD",
+      holding_id: 4001,
+      portfolio_id: 3001,
+      state: "confirmed",
+      paid_on: null,
+      description_code: "sell",
+      source_category: "trade",
+      comments: null,
+      // Unmodelled live fields (broker-sourced trades carry a `broker`
+      // object; `market_price` is another extra) -- proves extras are
+      // ignored for forward-compatibility, not rejected.
+      broker: { id: 77, name: "Interactive Brokers (Synthetic)" },
+      market_price: "5.55",
     },
   ],
 };
@@ -1692,6 +1729,20 @@ test("BRK-003 parsing: valid fixtures parse into typed results with exact decima
     assert.equal(trade?.instrumentCode, "WHC");
     assert.equal(trade?.marketCode, "ASX");
     assert.equal(trade?.currencyCode, "AUD");
+    assert.equal(trade?.comments, "Initial buy");
+
+    // Second fixture item: a genuine sell, mirroring item #46/107's real
+    // shape (docs/ARCHITECTURE.md §8.2) -- negative `value` (LIVE-CONFIRMED
+    // signed), negative `quantity` (an INFERENCE only), null `comments`, and
+    // unmodelled `broker`/`market_price` extras ignored for
+    // forward-compatibility.
+    const sellTrade = trades.value[1];
+    assert.equal(sellTrade?.id, "5002");
+    assert.equal(sellTrade?.transactionType, "sell");
+    assert.equal(sellTrade?.quantityDecimal, "-20");
+    assert.equal(sellTrade?.priceDecimal, "5.50");
+    assert.equal(sellTrade?.valueDecimal, "-110");
+    assert.equal(sellTrade?.comments, null);
   }
 
   const payouts =
@@ -1872,6 +1923,130 @@ test("BRK-008: a money/quantity field whose numeric magnitude would render in ex
   assert.equal(ordinaryMagnitude.ok, true);
   if (ordinaryMagnitude.ok) {
     assert.equal(ordinaryMagnitude.value[0]?.priceDecimal, "0.0001");
+  }
+});
+
+// BRK-008 live evidence (2026-08-15, item #46/107 of the 107-trade pass --
+// see docs/ARCHITECTURE.md §8.2): that item's diagnostic reported
+// `fieldName: "value"`, `reason: "invalid_decimal"` -- and `quantity` parses
+// BEFORE `value` in `parseTradeItem`, so item #46 reaching the `value` check
+// PROVES its `quantity` already passed the (then-unsigned-only) parse. This
+// LIVE-CONFIRMS Sharesight SIGNS `value` to carry trade direction (a sell is
+// negative); it is NOT evidence that `quantity` is ever negative. `quantity`
+// also now accepts a leading `-`, but that is an INFERENCE extrapolated from
+// `value`'s confirmed signedness (kept fail-open so a genuinely signed live
+// quantity doesn't re-block the whole list), not itself confirmed --
+// `price`/`brokerage` get the same "no live evidence either way" treatment
+// and stay rejected on a negative, since there's no reason yet to prefer
+// fail-open for them. The confirmed direction signal is `value`'s sign;
+// `quantity`'s sign remains pending live confirmation.
+test("BRK-008: trades quantity/value round-trip a signed decimal exactly, both positive AND negative, while price/brokerage stay unsigned-only", async () => {
+  const sell = await clientWithFixtureBody({
+    trades: [
+      {
+        id: 1,
+        instrument: { code: "WHC", market_code: "ASX", currency_code: "AUD" },
+        transaction_date: "2026-01-15",
+        quantity: -50,
+        price: "5.20",
+        value: -260,
+        brokerage: 9.95,
+        holding_id: 1,
+        portfolio_id: 1,
+        comments: null,
+      },
+    ],
+  }).listTrades("1");
+  assert.equal(sell.ok, true);
+  if (sell.ok) {
+    assert.equal(sell.value[0]?.quantityDecimal, "-50");
+    assert.equal(sell.value[0]?.valueDecimal, "-260");
+    assert.equal(sell.value[0]?.priceDecimal, "5.20");
+    assert.equal(sell.value[0]?.brokerageDecimal, "9.95");
+    // Genuinely-null comments is an honest "unknown", not a failure.
+    assert.equal(sell.value[0]?.comments, null);
+  }
+
+  const buy = await clientWithFixtureBody({
+    trades: [
+      {
+        id: 2,
+        instrument: { code: "WHC", market_code: "ASX", currency_code: "AUD" },
+        transaction_date: "2026-01-16",
+        quantity: 50,
+        price: "5.20",
+        value: 260,
+        holding_id: 1,
+        portfolio_id: 1,
+        comments: "Dividend reinvestment",
+      },
+    ],
+  }).listTrades("1");
+  assert.equal(buy.ok, true);
+  if (buy.ok) {
+    assert.equal(buy.value[0]?.quantityDecimal, "50");
+    assert.equal(buy.value[0]?.valueDecimal, "260");
+    // A present, populated comments string round-trips exactly.
+    assert.equal(buy.value[0]?.comments, "Dividend reinvestment");
+  }
+
+  // A negative price/brokerage is NOT accepted. `value`'s negative sign is
+  // live-confirmed (item #46/107); `quantity`'s is only an inference kept
+  // fail-open. `price`/`brokerage` have neither a confirmation nor a reason
+  // to extrapolate one, so the parser stays fail-closed on a negative there
+  // (never silently accepted).
+  const negativePrice = await clientWithFixtureBody({
+    trades: [
+      {
+        id: 3,
+        instrument: { code: "WHC", market_code: "ASX", currency_code: "AUD" },
+        transaction_date: "2026-01-17",
+        quantity: 1,
+        price: -5.2,
+        holding_id: 1,
+        portfolio_id: 1,
+      },
+    ],
+  }).listTrades("1");
+  assert.equal(negativePrice.ok, false);
+
+  const negativeBrokerage = await clientWithFixtureBody({
+    trades: [
+      {
+        id: 4,
+        instrument: { code: "WHC", market_code: "ASX", currency_code: "AUD" },
+        transaction_date: "2026-01-18",
+        quantity: 1,
+        price: 5.2,
+        brokerage: -1,
+        holding_id: 1,
+        portfolio_id: 1,
+      },
+    ],
+  }).listTrades("1");
+  assert.equal(negativeBrokerage.ok, false);
+
+  // A present-but-wrong-type comments value fails the item closed rather
+  // than silently collapsing to "unknown" (absent-vs-malformed discipline).
+  const malformedComments = await clientWithFixtureBody({
+    trades: [
+      {
+        id: 5,
+        instrument: { code: "WHC", market_code: "ASX", currency_code: "AUD" },
+        transaction_date: "2026-01-19",
+        quantity: 1,
+        price: 5.2,
+        holding_id: 1,
+        portfolio_id: 1,
+        comments: 42,
+      },
+    ],
+  }).listTrades("1");
+  assert.equal(malformedComments.ok, false);
+  if (!malformedComments.ok) {
+    assert.equal(malformedComments.error.kind, "invalid_response");
+    assert.equal(malformedComments.error.itemFailure?.fieldName, "comments");
+    assert.equal(malformedComments.error.itemFailure?.reason, "wrong_type");
   }
 });
 
@@ -2375,7 +2550,7 @@ test("BRK-003 transport errors: 401 arriving after a cached token was believed v
 
 // --- BRK-008: payouts endpoint path fix + onBodyParseDiagnostic -----------
 
-test("BRK-008: listPayouts requests the .json-suffixed endpoint path (Sharesight v3 payouts convention)", async () => {
+test("BRK-008 (2026-08-15 third pass): listPayouts requests the .json-suffixed endpoint path against the LEGACY v2 API version, not v3 (per markcatley/sharesight.rs, a third-party client generated from Sharesight's published API documentation -- see docs/ARCHITECTURE.md §8.2)", async () => {
   let calledUrl: string | null = null;
   const provider = await alwaysValidTokenProvider();
   const client = createSharesightClient({
@@ -2389,7 +2564,7 @@ test("BRK-008: listPayouts requests the .json-suffixed endpoint path (Sharesight
   assert.equal(result.ok, true);
   assert.equal(
     calledUrl,
-    "https://api.sharesight.com/api/v3/portfolios/port_1/payouts.json",
+    "https://api.sharesight.com/api/v2/portfolios/port_1/payouts.json",
   );
 });
 
@@ -2409,6 +2584,62 @@ test("BRK-008: getPortfolioHoldings/listTrades request their un-suffixed v3-nati
     "https://api.sharesight.com/api/v3/portfolios/port_1/holdings",
     "https://api.sharesight.com/api/v3/portfolios/port_1/trades",
   ]);
+});
+
+// F2 (review follow-up): `withPayoutsApiVersion` derives the payouts-only
+// v2 root from the client's ALREADY host-pinned `baseUrl` by substituting
+// the `/api/vN` path segment -- it must never introduce a second host, and
+// it must degrade safely (a documented no-op, not a crash or a silently
+// wrong host) when the configured `baseUrl` carries no version segment at
+// all to substitute.
+test("BRK-008 F2: listPayouts against an unsafeAllowOtherHost-overridden baseUrl stays on that SAME custom host for its v2 payouts request, never a second host", async () => {
+  const provider = await alwaysValidTokenProvider();
+  const calledUrls: string[] = [];
+  const client = createSharesightClient({
+    baseUrl: "https://mock.example.test/api/v3",
+    unsafeAllowOtherHost: true,
+    tokenProvider: provider,
+    fetcher: async (url) => {
+      calledUrls.push(String(url));
+      return jsonResponse(200, { payouts: [] });
+    },
+  });
+  const result = await client.listPayouts("port_1");
+  assert.equal(result.ok, true);
+  assert.equal(
+    calledUrls[0],
+    "https://mock.example.test/api/v2/portfolios/port_1/payouts.json",
+  );
+});
+
+test("BRK-008 F2: a baseUrl with no /api/vN version segment is a documented no-op fallback -- listPayouts requests the SAME root as every other method, never crashing or guessing a host", async () => {
+  const provider = await alwaysValidTokenProvider();
+  const calledUrls: string[] = [];
+  const client = createSharesightClient({
+    baseUrl: "https://mock.example.test/custom-root",
+    unsafeAllowOtherHost: true,
+    tokenProvider: provider,
+    fetcher: async (url) => {
+      calledUrls.push(String(url));
+      return jsonResponse(200, {
+        portfolios: [],
+        payouts: [],
+      });
+    },
+  });
+  await client.listPortfolios();
+  await client.listPayouts("port_1");
+  // No `/api/vN` segment to substitute -- `withPayoutsApiVersion` is a
+  // no-op, so `listPayouts` falls back to the same root `listPortfolios`
+  // (and every other method) already uses.
+  assert.equal(
+    calledUrls[0],
+    "https://mock.example.test/custom-root/portfolios",
+  );
+  assert.equal(
+    calledUrls[1],
+    "https://mock.example.test/custom-root/portfolios/port_1/payouts.json",
+  );
 });
 
 test("BRK-008 onBodyParseDiagnostic: fires with metadata only when a response body is read but does not parse as JSON at all", async () => {

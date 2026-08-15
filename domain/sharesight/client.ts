@@ -36,6 +36,41 @@ import { deriveShapeEvidence } from "./shape-evidence.ts";
 
 const DEFAULT_BASE_URL = "https://api.sharesight.com/api/v3";
 const DEFAULT_TIMEOUT_MS = 8_000;
+
+/**
+ * BRK-008 (2026-08-15, documentation-derived re-derivation -- see
+ * docs/ARCHITECTURE.md §8.2): `listPayouts` alone must be requested against
+ * the LEGACY `v2` API version, never `v3` -- `markcatley/sharesight.rs`, a
+ * THIRD-PARTY Rust client generated from Sharesight's PUBLISHED Swagger/API
+ * documentation (documentation-derived evidence, not a live Sharesight
+ * response and not Sharesight's own artifact), records the portfolio-scoped
+ * payouts list (`crates/sharesight-generate/assets/api_data_2.json`, entry
+ * `ListPortfolioPayouts`) only under `GET /portfolios/:portfolio_id/
+ * payouts.json`, `User_API_Payouts` (version `2.0.0`); the SAME third-party
+ * client's `api_data_3.json` has no portfolio-scoped payouts route at all --
+ * its only `payouts` list route is `GET /holdings/{holding_id}/payouts`
+ * (`PayoutList`, `User_API_V3_Payouts`), which is scoped to a HOLDING, not a
+ * portfolio, and would require a different call shape entirely. Hitting the
+ * v2 path under a v3 URL prefix is exactly the 404 this constant fixes.
+ * `portfolios`/`holdings`/`trades` remain on `v3` (`DEFAULT_BASE_URL`),
+ * confirmed live and unaffected by this change.
+ */
+const PAYOUTS_API_VERSION = "v2";
+
+/**
+ * Derives the payouts-only `v2` request root from the client's ALREADY
+ * host-pinned/validated `baseUrl` by substituting just the `/api/vN` path
+ * segment -- never a second host, never re-validated, since it is a pure
+ * string transform of a URL that already passed `resolveBaseUrl`'s host/
+ * userinfo checks. If `baseUrl` doesn't carry a `/api/vN` segment at all (a
+ * non-default override with no version in its path), this is a no-op and
+ * `listPayouts` falls back to requesting the same root as every other
+ * endpoint -- there is no version segment to swap.
+ */
+function withPayoutsApiVersion(baseUrl: string): string {
+  return baseUrl.replace(/\/api\/v\d+(?=\/|$)/, `/api/${PAYOUTS_API_VERSION}`);
+}
+
 /** The only host a Bearer token is ever sent to by default (BRK-003 review
  * finding F6) -- a misconfigured `baseUrl` must not be able to ship the
  * access token to an arbitrary host. */
@@ -265,6 +300,10 @@ export function createSharesightClient(
   // Validated ONCE, here, before any request can be sent (BRK-003 review
   // finding F6).
   const baseUrl = resolveBaseUrl(options.baseUrl, options.unsafeAllowOtherHost);
+  // Derived ONCE from the already-pinned `baseUrl` above -- see
+  // `withPayoutsApiVersion`'s doc comment. Same origin/host as `baseUrl`,
+  // never a second one.
+  const payoutsBaseUrl = withPayoutsApiVersion(baseUrl);
   const fetcher = options.fetcher ?? fetch.bind(globalThis);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const now = options.now ?? (() => new Date().toISOString());
@@ -360,6 +399,10 @@ export function createSharesightClient(
     endpoint: string,
     path: string,
     searchParams?: Record<string, string>,
+    // BRK-008: per-endpoint API version override. Defaults to the client's
+    // pinned `baseUrl` (v3); `listPayouts` alone passes `payoutsBaseUrl` (v2)
+    // -- see `withPayoutsApiVersion`'s doc comment above.
+    requestBaseUrl: string = baseUrl,
   ): Promise<SharesightResult<unknown>> {
     // Refresh-before-expiry token acquisition happens entirely inside the
     // token provider; a refresh failure returns a typed unavailable result
@@ -371,7 +414,7 @@ export function createSharesightClient(
 
     let url: URL;
     try {
-      url = new URL(`${baseUrl}${path}`);
+      url = new URL(`${requestBaseUrl}${path}`);
     } catch {
       return requestError(
         "invalid_response",
@@ -595,16 +638,23 @@ export function createSharesightClient(
       );
     },
     async listPayouts(portfolioId, params) {
-      // BRK-008 (2026-08-15): the account's live listPayouts response was
-      // not valid JSON at the un-suffixed path -- Sharesight's v3 API
-      // documents this endpoint's path as `/portfolios/:id/payouts.json`
-      // (confirmed against the provider's published Swagger-derived
-      // client), unlike `holdings`/`trades`, which are v3-native routes
-      // that don't take a format suffix. See docs/ARCHITECTURE.md §8.2.
+      // BRK-008 (2026-08-15, documentation-derived re-derivation): a
+      // portfolio-scoped payouts list does not exist under v3 at all per
+      // this evidence -- v3 only documents a HOLDING-scoped payouts list
+      // (`GET /holdings/{holding_id}/payouts`). The portfolio-scoped
+      // `ListPortfolioPayouts` route this client needs is documented as a
+      // LEGACY v2-only route, `GET /portfolios/:portfolio_id/payouts.json`
+      // (per `markcatley/sharesight.rs`, a third-party Rust client generated
+      // from Sharesight's published Swagger/API documentation --
+      // `api_data_2.json`; documentation-derived, not a live response) --
+      // requested here against `payoutsBaseUrl` (v2, same pinned host)
+      // rather than the v3 `baseUrl` every other method uses. See
+      // docs/ARCHITECTURE.md §8.2.
       const result = await getJson(
         "listPayouts",
         `/portfolios/${encodeURIComponent(portfolioId)}/payouts.json`,
         toSearchParams(params),
+        payoutsBaseUrl,
       );
       if (!result.ok) return result;
       return reportShapeEvidenceIfInvalid(

@@ -130,7 +130,8 @@ function optionalDecimal(
  * `cg_discount`) and, as of the BRK-008 live pass, `parseTradeItem`'s
  * optional string fields too (e.g. `state`, `unique_identifier`,
  * `description_code`, `source_category`, `brokerage_currency_code`,
- * `exchange_rate_pair`, `paid_on`). */
+ * `exchange_rate_pair`, `paid_on`, and, as of the BRK-008 2026-08-15
+ * item #46/107 live pass, `comments`). */
 const MALFORMED_OPTIONAL_STRING = Symbol(
   "sharesight-malformed-optional-string",
 );
@@ -551,11 +552,36 @@ function parseTradeItem(item: unknown, portfolioId: string): SharesightTrade {
   }
   if (!isMarketDate(transactionDate))
     fail("transaction_date", "invalid_format");
+  // BRK-008 live evidence (2026-08-15, item #46/107 -- see
+  // docs/ARCHITECTURE.md §8.2): that item's `itemFailure` diagnostic reported
+  // `fieldName: "value"`, NOT `"quantity"` -- and this function parses
+  // `quantity` BEFORE `value` (see below), so item #46's `quantity` field
+  // MUST have already passed the (then-unsigned-only) parse to reach the
+  // `value` check at all. That LIVE-CONFIRMS a signed `value` (a sell is
+  // negative); it proves NOTHING about `quantity`'s sign for that item, and
+  // is certainly not evidence quantity is EVER negative. `allowNegative:
+  // true` here is therefore an INFERENCE extrapolated from `value`'s
+  // confirmed signedness (plausible: the two would ordinarily carry the same
+  // sign), kept fail-open deliberately so a genuinely signed live `quantity`
+  // does not re-block the whole list the way item #46 did -- but it remains
+  // UNCONFIRMED pending a live item that actually exercises a negative
+  // `quantity`. This SUPERSEDES BRK-003's original "quantity is always
+  // non-negative" assumption; the BRK-008 §8.2 "no recoverable direction"
+  // note is restated, not superseded: the CONFIRMED direction signal is
+  // `value`'s sign, `quantity`'s sign is pending confirmation, and
+  // `BRK-005` should treat it accordingly.
   const quantityDecimal = requiredDecimal(record, "quantity", {
-    allowNegative: false,
+    allowNegative: true,
   });
   if (!quantityDecimal)
     fail("quantity", requiredDecimalFailureReason(record, "quantity"));
+  // `price` stays unsigned -- the only LIVE-CONFIRMED signed field is
+  // `value` (item #46/107; `quantity`'s allowNegative above is an inference
+  // extrapolated from that, not its own confirmation -- see the comment on
+  // `quantityDecimal`). A sell's per-unit price is still a positive
+  // magnitude either way (the trade's direction is expressed once, not
+  // doubled onto price too). If live evidence ever shows a signed price,
+  // this must be revisited the same way value was here, not assumed.
   const priceDecimal = requiredDecimal(record, "price", {
     allowNegative: false,
   });
@@ -585,9 +611,19 @@ function parseTradeItem(item: unknown, portfolioId: string): SharesightTrade {
   }
   if (recordPortfolioId !== portfolioId) fail("portfolio_id", "mismatch");
 
-  const valueDecimal = optionalDecimal(record, "value");
+  // `value` is the LIVE-CONFIRMED signed field (item #46/107 carried a
+  // negative `value` for what the previously-unsigned regex rejected as
+  // `invalid_decimal`) -- `quantity`'s allowNegative above extrapolates FROM
+  // this observation, not the reverse.
+  const valueDecimal = optionalDecimal(record, "value", {
+    allowNegative: true,
+  });
   if (valueDecimal === MALFORMED_OPTIONAL_DECIMAL)
     fail("value", "invalid_decimal");
+  // `brokerage` stays unsigned like `price` -- a brokerage FEE is a positive
+  // magnitude; no live evidence has ever shown a negative brokerage value,
+  // and inventing sign-tolerance here without evidence would risk silently
+  // accepting a corrupt/negated fee.
   const brokerageDecimal = optionalDecimal(record, "brokerage");
   if (brokerageDecimal === MALFORMED_OPTIONAL_DECIMAL)
     fail("brokerage", "invalid_decimal");
@@ -623,6 +659,14 @@ function parseTradeItem(item: unknown, portfolioId: string): SharesightTrade {
   if (sourceCategory === MALFORMED_OPTIONAL_STRING) {
     fail("source_category", "wrong_type");
   }
+  // BRK-008 live evidence (2026-08-15, item #46/107 -- see
+  // docs/ARCHITECTURE.md §8.2): `comments` is present as a string on some
+  // trade items (item #1) and `null` on others (item #46) -- an honest
+  // "unknown", not malformed. Null-tolerant per this module's optional-field
+  // sentinel discipline: absent/null parses as `null`; present-but-wrong-type
+  // fails the item closed.
+  const comments = optionalStringField(record, "comments");
+  if (comments === MALFORMED_OPTIONAL_STRING) fail("comments", "wrong_type");
 
   return {
     id,
@@ -645,6 +689,7 @@ function parseTradeItem(item: unknown, portfolioId: string): SharesightTrade {
     paidOnDate,
     descriptionCode,
     sourceCategory,
+    comments,
   };
 }
 

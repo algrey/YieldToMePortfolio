@@ -270,6 +270,25 @@ export type SharesightTradeType = "buy" | "sell" | "other";
  * parse failure; a PRESENT value outside the modelled `buy`/`sell`/`other`
  * enum still fails the item closed (absent-vs-malformed discipline, BRK-003
  * review finding F1). The remaining fields are optional per evidence.
+ *
+ * BRK-008 live evidence (2026-08-15, item #46/107): that item's
+ * `itemFailure` diagnostic reported `fieldName: "value"`, and `quantity` is
+ * parsed BEFORE `value` in `parse.ts`'s `parseTradeItem` -- so item #46's
+ * `quantity` MUST have already passed the (then-unsigned-only) parse to
+ * reach the `value` check at all. That LIVE-CONFIRMS Sharesight SIGNS
+ * `valueDecimal` to carry trade direction (a sell is negative); it is NOT
+ * evidence that `quantityDecimal` is ever negative. `quantityDecimal` also
+ * accepts a leading `-` as an INFERENCE extrapolated from `valueDecimal`'s
+ * confirmed signedness (kept fail-open so a genuinely signed live quantity
+ * doesn't re-block the whole list), but remains UNCONFIRMED pending a live
+ * item that actually exercises a negative `quantity`. This means the
+ * `docs/ARCHITECTURE.md` §8.2 "no recoverable direction" note is RESTATED,
+ * not superseded: the CONFIRMED direction signal is `valueDecimal`'s sign;
+ * `quantityDecimal`'s sign is pending confirmation. `priceDecimal`/
+ * `brokerageDecimal` remain unsigned (a per-unit price or fee magnitude, not
+ * a direction carrier) unless future evidence says otherwise. `comments` is
+ * a new OPTIONAL string field (present as a string on some items, `null` on
+ * others) -- null-tolerant per the optional-field sentinel discipline.
  */
 export type SharesightTrade = Readonly<{
   id: string;
@@ -280,8 +299,15 @@ export type SharesightTrade = Readonly<{
   transactionType: SharesightTradeType | null;
   transactionDate: string;
   currencyCode: string;
+  /** Signed decimal string -- accepts a leading `-`. UNCONFIRMED live: this
+   * is an inference extrapolated from `valueDecimal`'s confirmed signedness
+   * (BRK-008 2026-08-15, item #46/107), not itself observed negative on a
+   * live item. */
   quantityDecimal: string;
+  /** Unsigned decimal string -- a per-unit price magnitude, never signed. */
   priceDecimal: string;
+  /** Signed decimal string when present -- negative for a sell.
+   * LIVE-CONFIRMED (BRK-008 2026-08-15, item #46/107). */
   valueDecimal: string | null;
   brokerageDecimal: string | null;
   brokerageCurrencyCode: string | null;
@@ -292,6 +318,7 @@ export type SharesightTrade = Readonly<{
   paidOnDate: string | null;
   descriptionCode: string | null;
   sourceCategory: string | null;
+  comments: string | null;
 }>;
 
 export type SharesightPayout = Readonly<{
