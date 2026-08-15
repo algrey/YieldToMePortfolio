@@ -876,6 +876,79 @@ test("BRK-005: re-running a sync with unchanged Sharesight data reuses the SAME 
   assert.equal(second.reused, true);
 });
 
+// BRK-005B review finding B2 (BLOCKING, backend gap reachable only through
+// the new UI): the digest previously omitted the LOCAL portfolioId, so two
+// different local portfolios linked to the SAME Sharesight portfolio (a
+// realistic setup -- one Sharesight account often tracks more than one
+// local portfolio) produced byte-identical digest sources and silently
+// resolved to the SAME batch via `startUpload`'s user-scoped (not
+// portfolio-scoped) ON CONFLICT key. That batch's target_portfolio_id
+// belongs to whichever portfolio synced FIRST -- the second portfolio's
+// sync would appear to succeed while staging rows against the WRONG
+// portfolio, invisible before commit.
+test("BRK-005B review B2 repro -- two local portfolios linked to the SAME Sharesight portfolio produce two DISTINCT batches, each targeting its own portfolio (no cross-portfolio batch reuse)", async () => {
+  const database = await migratedDatabase();
+  database.exec(`
+    INSERT INTO portfolios (id, user_id, code, name, base_currency_code, timezone, accounting_method, status, created_at, updated_at, version)
+    VALUES ('portfolio-a2', 'user-a', 'A2', 'Second', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-15', '2026-08-15', 1);
+  `);
+  const client = createSqliteSqlClient(database);
+  const fixtures = {
+    portfolios: [fakePortfolio()],
+    trades: [fakeTrade({ id: "trade-shared" })],
+    payouts: [] as SharesightPayout[],
+  };
+  const sharesightClient = fakeSharesightClient(fixtures);
+  const integration = { enabled: true as const, client: sharesightClient };
+
+  const linkedA = await linkSharesightPortfolioWithContext(
+    { client, userId: "user-a", requestId: "link-a" },
+    "portfolio-a",
+    { sharesightPortfolioId: "sp-1" },
+    { integration },
+  );
+  assert.equal(linkedA.ok, true);
+  const linkedB = await linkSharesightPortfolioWithContext(
+    { client, userId: "user-a", requestId: "link-b" },
+    "portfolio-a2",
+    { sharesightPortfolioId: "sp-1" },
+    { integration },
+  );
+  assert.equal(linkedB.ok, true);
+
+  const syncA = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-a" },
+    "portfolio-a",
+    { integration },
+  );
+  const syncB = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-b" },
+    "portfolio-a2",
+    { integration },
+  );
+  assert.equal(syncA.ok, true);
+  assert.equal(syncB.ok, true);
+  if (!syncA.ok || !syncB.ok) return;
+
+  assert.notEqual(
+    syncA.batchId,
+    syncB.batchId,
+    "two different local portfolios must never resolve to the SAME batch even when linked to the identical Sharesight portfolio with identical fetched data",
+  );
+  assert.equal(syncA.reused, false);
+  assert.equal(syncB.reused, false);
+
+  const staging = createOwnedImportStagingRepository(client);
+  const batchA = await staging.get("user-a", syncA.batchId);
+  const batchB = await staging.get("user-a", syncB.batchId);
+  assert.equal(batchA?.targetPortfolioId, "portfolio-a");
+  assert.equal(
+    batchB?.targetPortfolioId,
+    "portfolio-a2",
+    "portfolio-a2's batch must target portfolio-a2, never be silently reused from portfolio-a's batch",
+  );
+});
+
 test("BRK-005: reviewer B1 repro -- a Sharesight-side correction to an already-synced, already-committed trade produces a NEW batch, never a silent no-op, and the prior committed batch/transaction stay untouched", async () => {
   const database = await migratedDatabase();
   const { client, sharesightClient: firstClient } = await linkedFixture(

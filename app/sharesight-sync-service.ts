@@ -270,12 +270,29 @@ function canonicalRowDigestFields(row: ParsedImportRow): string {
   ].join("|");
 }
 
+// BRK-005B review finding B2 (BLOCKING): the digest omitted the LOCAL
+// `portfolioId` entirely -- two different local portfolios linked to the
+// SAME Sharesight portfolio produced the byte-identical digest source (same
+// `sharesightPortfolioId`, same fetched rows), so `startUpload`'s
+// `ON CONFLICT (user_id, file_sha256, parser_format, parser_version)` --
+// scoped by USER, not by target portfolio -- silently resolved the second
+// portfolio's sync to the FIRST portfolio's already-staged batch. That
+// batch's `target_portfolio_id` is the OTHER portfolio, so the rows would
+// eventually reconcile/commit against the wrong portfolio with no signal
+// before commit. Folding `portfolioId` into the hashed content makes the
+// two portfolios' digests differ even for identical fetched data, so each
+// gets its own batch correctly targeting its own portfolio.
 function canonicalFetchDigestSource(
+  portfolioId: string,
   sharesightPortfolioId: string,
   rows: readonly ParsedImportRow[],
 ): string {
   const canonicalRows = rows.map(canonicalRowDigestFields).sort();
-  return JSON.stringify({ sharesightPortfolioId, rows: canonicalRows });
+  return JSON.stringify({
+    portfolioId,
+    sharesightPortfolioId,
+    rows: canonicalRows,
+  });
 }
 
 async function sha256Hex(value: string): Promise<string> {
@@ -367,6 +384,7 @@ export async function runSharesightSyncWithContext(
   });
 
   const digestSource = canonicalFetchDigestSource(
+    portfolioId,
     link.sharesightPortfolioId,
     transformed.rows,
   );

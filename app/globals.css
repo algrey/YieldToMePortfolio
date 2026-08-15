@@ -2288,6 +2288,166 @@ dd {
   opacity: 0.6;
 }
 
+/* BRK-005B: Sharesight sync panel + link dialog, matching this file's
+   established import-screen and dialog conventions (`.import-commit-panel`'s
+   shape for the panel, `.portfolio-dialog`'s shape for the modal). */
+.sharesight-sync-panel {
+  margin-top: 28px;
+  padding: 20px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: var(--forest-raised);
+}
+
+.sharesight-sync-panel h2 {
+  margin-top: 6px;
+  font-family: var(--serif);
+  font-weight: 400;
+}
+
+.sharesight-link-status {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.sharesight-link-status code {
+  color: var(--green-bright);
+}
+
+.sharesight-sync-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.sharesight-sync-actions button {
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--green);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--cream);
+  cursor: pointer;
+}
+
+.sharesight-sync-actions button:hover {
+  background: rgb(99 200 120 / 10%);
+}
+
+.sharesight-sync-actions button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.sharesight-sync-result,
+.sharesight-sync-error,
+.sharesight-sync-inert {
+  margin-top: 16px;
+  padding: 13px 15px;
+  border-left: 2px solid var(--green);
+  background: var(--forest);
+  color: var(--cream);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.sharesight-sync-error {
+  border-left-color: var(--warning);
+  color: var(--warning);
+}
+
+.sharesight-sync-inert {
+  border-left-color: var(--divider);
+  color: var(--muted);
+}
+
+.sharesight-sync-result button {
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.sharesight-sync-error button {
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.sharesight-dialog {
+  width: min(480px, calc(100vw - 32px));
+  padding: 24px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: var(--forest-soft);
+  color: var(--cream);
+}
+
+.sharesight-dialog::backdrop {
+  background: rgb(0 0 0 / 62%);
+}
+
+.sharesight-dialog p {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+/* Review follow-up 5: `.sharesight-dialog p` (a class + element selector,
+   specificity 0,1,1) otherwise beats `.sharesight-sync-error`/
+   `.sharesight-sync-inert` (a single class, specificity 0,1,0) regardless of
+   source order, so the in-dialog "disabled"/error paragraphs silently
+   rendered in the same muted colour as ordinary body copy -- losing the
+   error/inert tone distinction this task's acceptance criteria requires.
+   These qualified selectors (0,2,1) restore it. */
+.sharesight-dialog p.sharesight-sync-error {
+  color: var(--warning);
+}
+
+.sharesight-dialog p.sharesight-sync-inert {
+  color: var(--muted);
+}
+
+.sharesight-dialog fieldset {
+  margin-top: 16px;
+  padding: 0;
+  border: 0;
+}
+
+.sharesight-dialog legend {
+  padding: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.sharesight-portfolio-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 4px 0;
+  color: var(--cream);
+  font-size: 0.86rem;
+}
+
+.sharesight-portfolio-option input {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  accent-color: var(--green);
+}
+
 .import-review-result {
   margin-top: 36px;
   padding: 20px;

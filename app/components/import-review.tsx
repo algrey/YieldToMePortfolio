@@ -5,6 +5,11 @@ import { useEffect } from "react";
 import type { ImportHistoryDetail } from "../import-history-service.ts";
 import type { ImportReversalActionResult } from "../import-reversal-service.ts";
 import { ImportHistoryDetailPanel } from "./import-history-detail.tsx";
+import { SharesightSyncPanel } from "./sharesight-sync-panel.tsx";
+import {
+  mergeSharesightLinks,
+  type SharesightLinkStatus,
+} from "../sharesight-sync-panel-helpers.ts";
 
 type PortfolioOption = { id: string; name: string; homeCurrencyCode: string };
 type Review = {
@@ -126,12 +131,27 @@ function isImportReversalResult(
 
 export function ImportReview({
   portfolios,
+  sharesightLinks = {},
 }: {
   portfolios: PortfolioOption[];
+  sharesightLinks?: Record<string, SharesightLinkStatus>;
 }) {
   const [targetPortfolioId, setTargetPortfolioId] = useState(
     portfolios[0]?.id ?? "",
   );
+  // Review finding B1 (BLOCKING): hoisted here, NOT inside
+  // `SharesightSyncPanel` -- the panel remounts (via `key={targetPortfolioId}`
+  // below) every time the owner switches the target portfolio, so any link
+  // state living only inside it is lost on switch-away-and-back. This map
+  // persists for the page's whole lifetime and is merged over the
+  // server-seeded `sharesightLinks` snapshot on every render (see
+  // `mergeSharesightLinks`'s header note for the exact guarantee this
+  // pins). Only entries for portfolios actually linked/re-linked in this
+  // session are ever written here; every other portfolio keeps reading its
+  // server-seeded status untouched.
+  const [sharesightLinkOverrides, setSharesightLinkOverrides] = useState<
+    Record<string, SharesightLinkStatus>
+  >({});
   const [review, setReview] = useState<Review | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -481,6 +501,43 @@ export function ImportReview({
     }
   }
 
+  // BRK-005B: opens a batch (a Sharesight sync's own staged batch, or any
+  // other batch id) into the SAME review section a CSV upload's preview
+  // response already renders below -- there is no separate review PAGE to
+  // link to, so this is the "link to the batch's existing review page"
+  // this task's acceptance criteria describes.
+  async function loadReviewByBatchId(batchId: string) {
+    setPending(true);
+    setMessage(null);
+    try {
+      const response = await fetch(`/api/import/preview/${batchId}`, {
+        cache: "no-store",
+      });
+      const result = (await response.json()) as
+        { ok: true; review: Review } | { ok: false; message: string };
+      if (!response.ok || result.ok === false) {
+        throw new Error(
+          result.ok === false
+            ? result.message
+            : "The batch preview could not be loaded.",
+        );
+      }
+      setReview(result.review);
+      setCommit(null);
+      setCommitConfirmed(false);
+      setCommitKey(null);
+      await loadHistory();
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "The batch preview could not be loaded.",
+      );
+    } finally {
+      setPending(false);
+    }
+  }
+
   async function refreshPreview() {
     if (!review) return;
     setPending(true);
@@ -637,6 +694,16 @@ export function ImportReview({
     }
   }
 
+  // Server-seeded snapshot overlaid by whatever has actually been
+  // linked/re-linked client-side since (see `mergeSharesightLinks`'s header
+  // note -- this is the B1 fix's whole point: computed fresh every render
+  // from state that survives a target-portfolio switch, unlike the old
+  // per-panel `initialLink` prop).
+  const effectiveSharesightLinks = mergeSharesightLinks(
+    sharesightLinks,
+    sharesightLinkOverrides,
+  );
+
   // One resolve form per distinct (kind, sourceKey) pending mapping, not per
   // row: many transaction rows commonly share the same unresolved portfolio,
   // security, or FX source key, and a `scope: "batch"` decision (saved
@@ -703,6 +770,28 @@ export function ImportReview({
           {pending ? "Preparing preview…" : "Create review preview"}
         </button>
       </form>
+
+      {targetPortfolioId ? (
+        <SharesightSyncPanel
+          key={targetPortfolioId}
+          portfolioId={targetPortfolioId}
+          link={
+            effectiveSharesightLinks[targetPortfolioId] ?? {
+              status: "not_linked",
+            }
+          }
+          onLinked={(linkedPortfolioId, sharesightPortfolioId) =>
+            setSharesightLinkOverrides((prev) => ({
+              ...prev,
+              [linkedPortfolioId]: {
+                status: "linked",
+                sharesightPortfolioId,
+              },
+            }))
+          }
+          onOpenBatch={(batchId) => void loadReviewByBatchId(batchId)}
+        />
+      ) : null}
 
       {message ? (
         <p className="action-feedback" role="alert">
