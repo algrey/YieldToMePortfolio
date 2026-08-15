@@ -200,6 +200,41 @@ function requiredIntegerIdDecimalString(
   return String(value);
 }
 
+/** Sentinel distinguishing "field present but not a valid integer id" from a
+ * genuinely absent/null field -- mirrors this module's other
+ * `MALFORMED_OPTIONAL_*` sentinels. Introduced for `SharesightPayout.id`
+ * (BRK-008, 2026-08-15 follow-up): live evidence (item #2/118) showed an
+ * explicit `id: null` on an otherwise-complete payout item -- see
+ * `SharesightPayout`'s doc comment for the (inference-labelled)
+ * unconfirmed-payout interpretation. */
+const MALFORMED_OPTIONAL_ID = Symbol("sharesight-malformed-optional-id");
+
+/**
+ * Like `requiredIntegerIdDecimalString`, but tolerates a missing id as an
+ * honest `null` rather than failing the item closed. Used ONLY for
+ * `SharesightPayout.id` (BRK-008, 2026-08-15 follow-up) -- portfolios/
+ * holdings/trades ids remain REQUIRED via `requiredIntegerIdDecimalString`,
+ * unchanged. An explicit `null` and a genuinely absent field are tolerated
+ * IDENTICALLY as `null`: live evidence confirms the former (item #2/118),
+ * but there is no evidence basis to treat an absent id any differently, so
+ * this is a documented choice, not an observation. A present value that is
+ * not a valid non-negative safe integer still fails the item closed (the
+ * same structural checks as the required version), since that is a
+ * malformed id, not an honest "unknown".
+ */
+function optionalIntegerIdDecimalString(
+  record: RecordValue,
+  field: string,
+): string | null | typeof MALFORMED_OPTIONAL_ID {
+  const value = record[field];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number") return MALFORMED_OPTIONAL_ID;
+  if (!Number.isInteger(value)) return MALFORMED_OPTIONAL_ID;
+  if (!Number.isSafeInteger(value)) return MALFORMED_OPTIONAL_ID;
+  if (value < 0) return MALFORMED_OPTIONAL_ID;
+  return String(value);
+}
+
 function isMarketDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return false;
@@ -742,10 +777,15 @@ function parsePayoutItem(item: unknown, portfolioId: string): SharesightPayout {
   const record = asRecord(item);
   if (!record) fail("<item>", "wrong_type");
 
-  // `id`/`holding_id`/`portfolio_id` are numeric on the wire -- the same
-  // technique portfolios/holdings/trades already use.
-  const id = requiredIntegerIdDecimalString(record, "id");
-  if (!id) fail("id", requiredFailureReason(record, "id", "number"));
+  // `holding_id`/`portfolio_id` are numeric on the wire and REQUIRED -- the
+  // same technique portfolios/holdings/trades already use. `id` is the same
+  // numeric-on-the-wire technique but NOT required: live evidence (item
+  // #2/118, BRK-008 2026-08-15 follow-up) showed an explicit `id: null` on
+  // an otherwise-complete payout item, so it is tolerated as `null` --
+  // see `SharesightPayout.id`'s doc comment and
+  // `optionalIntegerIdDecimalString` above for the absent-vs-null choice.
+  const id = optionalIntegerIdDecimalString(record, "id");
+  if (id === MALFORMED_OPTIONAL_ID) fail("id", "wrong_type");
   const holdingId = requiredIntegerIdDecimalString(record, "holding_id");
   if (!holdingId) {
     fail("holding_id", requiredFailureReason(record, "holding_id", "number"));

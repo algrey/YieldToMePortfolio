@@ -378,7 +378,24 @@ export type SharesightTrade = Readonly<{
  * they were silently captured here.
  */
 export type SharesightPayout = Readonly<{
-  id: string;
+  /**
+   * `string | null`. Live evidence (BRK-008, 2026-08-15 follow-up, item
+   * #2/118 of the same 118-item pass this contract's doc comment above
+   * describes) showed an explicit `id: null` on an otherwise-complete
+   * payout item (every franking/withholding field decimal-shaped,
+   * `paid_on`/`goes_ex_on`/`state`/`confirmed` all present). INFERENCE, not
+   * directly observed: Sharesight likely lists an announced/unconfirmed
+   * payout with a null id until it is confirmed -- its analogue of this
+   * codebase's declared-not-paid concept; `confirmed`/`state` likely
+   * discriminate this case, but that is not confirmed here. `parse.ts`'s
+   * `optionalIntegerIdDecimalString` tolerates both an explicit `null` and a
+   * genuinely absent `id` identically as `null` -- there is no live evidence
+   * distinguishing the two for this field, so this is a documented choice,
+   * not an observation. A null-id payout's identity for downstream
+   * dedupe/upsert purposes (e.g. falling back to `(symbol, paidOnDate,
+   * state)`) is a `BRK-005`/`DIV` wiring decision, explicitly NOT made here.
+   */
+  id: string | null;
   portfolioId: string;
   holdingId: string;
   symbol: string;

@@ -2663,6 +2663,100 @@ test("BRK-003 parsing: missing/malformed envelopes and fields produce a typed in
   }
 });
 
+// BRK-008 (2026-08-15 follow-up): reason-pinned mismatch assertion for
+// payouts, mirroring the trades equivalent (tests/brk-008.test.ts's "a
+// mismatch reason ... is identified by field name, not conflated with
+// missing/wrong_type"). The generic table above only checks ok===false and
+// kind==="invalid_response" for every case; this pins the exact itemFailure
+// shape for the portfolio_id-mismatch case specifically.
+test('BRK-008 payouts itemFailure: portfolio_id mismatch is reason-pinned as "mismatch", not conflated with missing/wrong_type', async () => {
+  const result = await clientWithFixtureBody({
+    payouts: [
+      {
+        id: 1,
+        holding_id: 1,
+        portfolio_id: 999, // well-shaped, but does not match "1" below
+        symbol: "IXJ",
+        market: "ASX",
+        currency: "AUD",
+        paid_on: "2026-02-01",
+        amount: 50.0,
+        gross_amount: 50.0,
+      },
+    ],
+  }).listPayouts("1");
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.deepEqual(result.error.itemFailure, {
+      itemIndex: 0,
+      fieldName: "portfolio_id",
+      reason: "mismatch",
+    });
+  }
+});
+
+// BRK-008 (2026-08-15 follow-up): live evidence (item #2/118) showed an
+// explicit `id: null` on an otherwise-complete payout item -- see
+// `SharesightPayout.id`'s doc comment (contracts.ts) for the
+// inference-labelled "likely unconfirmed payout" interpretation. Both an
+// explicit `null` and a genuinely absent `id` are tolerated identically as
+// `null` (documented choice, no evidence distinguishing the two for ids).
+test("BRK-008 payouts: an explicit null id parses successfully as null, with the rest of the item intact", async () => {
+  const result = await clientWithFixtureBody({
+    payouts: [
+      {
+        id: null, // live-observed shape (item #2/118)
+        holding_id: 1,
+        portfolio_id: 1,
+        symbol: "IXJ",
+        market: "ASX",
+        currency: "AUD",
+        paid_on: "2026-02-01",
+        goes_ex_on: "2026-01-15",
+        amount: 120,
+        gross_amount: 171.43,
+        state: "unconfirmed",
+        confirmed: false,
+      },
+    ],
+  }).listPayouts("1");
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    const payout = result.value[0];
+    assert.equal(payout?.id, null);
+    assert.equal(payout?.holdingId, "1");
+    assert.equal(payout?.portfolioId, "1");
+    assert.equal(payout?.symbol, "IXJ");
+    assert.equal(payout?.paidOnDate, "2026-02-01");
+    assert.equal(payout?.amountDecimal, "120");
+    assert.equal(payout?.grossAmountDecimal, "171.43");
+    assert.equal(payout?.state, "unconfirmed");
+    assert.equal(payout?.confirmed, false);
+  }
+});
+
+test("BRK-008 payouts: a genuinely absent id parses successfully as null, tolerated the same as an explicit null (no evidence basis to distinguish)", async () => {
+  const result = await clientWithFixtureBody({
+    payouts: [
+      {
+        // id genuinely absent, not just null.
+        holding_id: 1,
+        portfolio_id: 1,
+        symbol: "IXJ",
+        market: "ASX",
+        currency: "AUD",
+        paid_on: "2026-02-01",
+        amount: 120,
+        gross_amount: 171.43,
+      },
+    ],
+  }).listPayouts("1");
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.value[0]?.id, null);
+  }
+});
+
 // BRK-008: `transaction_type` is OPTIONAL (live evidence: the first item did
 // not carry it at all) -- an absent value is a success with `null`, not a
 // parse failure. `value` is nullable-tolerant the same way.

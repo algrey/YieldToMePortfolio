@@ -240,17 +240,24 @@ function printOutcome(label, result) {
   console.log(`${label}: first-item field shape (names only, no values):`);
   console.log(JSON.stringify(fieldShape(first), null, 2));
 
-  // TODO(BRK-008) confirmation 1: numeric-vs-string id shape
-  // (domain/sharesight/parse.ts). Post-parse, `id` is ALWAYS "string" by
-  // construction -- `requiredString` rejects a non-string id outright, so a
-  // parse success here only confirms the raw id WAS shaped as a JSON
-  // string, never disproves a numeric id (that would instead show up as
-  // "unavailable (invalid_response -- ...)" above, with parse.ts's
-  // malformed-entry message). This sealed client has no way to inspect the
-  // raw un-parsed JSON to go further than that -- see parse.ts's TODO.
+  // Regression evidence for the resolved BRK-008 numeric-id confirmation
+  // (domain/sharesight/parse.ts, docs/ARCHITECTURE.md §8.2): live ids are
+  // numeric integers on the wire (portfolios/holdings/trades/payouts all
+  // confirmed), normalized post-parse via `requiredIntegerIdDecimalString`
+  // (or, payouts-only, the null-tolerant `optionalIntegerIdDecimalString` --
+  // 2026-08-15 follow-up, item #2/118 showed an explicit `id: null`). This
+  // is no longer a live TODO -- ids are NOT "ALWAYS string by construction"
+  // the way a plain `requiredString` field would be; a successful parse
+  // reports `typeof first.id === "string"` for a present numeric id, or
+  // `"object"` (JS `typeof null`) for a payout item whose id tolerated as
+  // `null`. Kept as a live tripwire (not a TODO -- the question itself is
+  // closed) in case that normalization is ever broken by a future change; a
+  // raw id shaped some OTHER way (e.g. a non-integer/negative/unsafe number,
+  // or a string) would instead show up as "unavailable (invalid_response
+  // -- ...)" above, with parse.ts's malformed-entry message.
   if ("id" in first) {
     console.log(
-      `${label}: id typeof = ${typeof first.id} (TODO(BRK-008) numeric-vs-string id confirmation; see parse.ts)`,
+      `${label}: id typeof = ${typeof first.id} (BRK-008 numeric-id confirmed, resolved; see parse.ts)`,
     );
   }
 
