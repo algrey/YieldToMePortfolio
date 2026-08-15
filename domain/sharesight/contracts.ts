@@ -40,6 +40,49 @@ export const SHARESIGHT_OAUTH_ERROR_CODES = [
 export type SharesightOAuthErrorCode =
   (typeof SHARESIGHT_OAUTH_ERROR_CODES)[number];
 
+/**
+ * BRK-008 diagnostic (2026-08-15 follow-up): the closed set of reasons a
+ * single Sharesight response-list ITEM can fail `parse.ts` validation --
+ * classified by FORMAT CLASS only, never by the field's actual value:
+ *   - `missing`: the field is absent/null/empty where a value is required
+ *     (an honest "unknown", not malformed);
+ *   - `wrong_type`: the field is present but not the expected JSON type
+ *     (e.g. a number where a string was required), or a correctly-typed
+ *     value that fails a structural check with no clearer bucket (e.g. a
+ *     non-integer/negative/unsafe id number);
+ *   - `invalid_decimal`: the field is present but does not parse as a
+ *     decimal string (`parse.ts`'s `decimalString`) -- covers a malformed
+ *     money/quantity field;
+ *   - `invalid_format`: the field is a correctly-typed string that fails a
+ *     further shape check (a non-ISO-8601 date, a currency code that isn't
+ *     3 uppercase letters, a `transaction_type` outside the modelled enum);
+ *   - `mismatch`: the field is present and well-shaped but fails a
+ *     cross-check against caller-supplied context (e.g. a trade's own
+ *     `portfolio_id` disagreeing with the portfolio this fetch was scoped
+ *     to).
+ */
+export type SharesightItemFailureReason =
+  "missing" | "wrong_type" | "invalid_decimal" | "invalid_format" | "mismatch";
+
+/**
+ * BRK-008 diagnostic (2026-08-15 follow-up): identifies WHICH item in a
+ * response list failed `parse.ts` validation and WHICH field, WITHOUT ever
+ * carrying the field's value. `itemIndex` is the item's position in the raw
+ * response array (0-based); `fieldName` is a static field NAME (Sharesight's
+ * own wire name, e.g. `"transaction_date"`, or a dotted nested path like
+ * `"instrument.code"` -- never a value, never caller-supplied data); `reason`
+ * is the closed `SharesightItemFailureReason` classification above. Safe for
+ * general consumption (logs, error displays) on the same no-values footing
+ * as `kind`/`message` -- unlike the FULL item shape (`SharesightItemFailureEvidence.itemShape`
+ * on the client's opt-in `onItemFailureEvidence` diagnostic), which stays
+ * behind that separate, explicitly-opted-into callback.
+ */
+export type SharesightItemFailureDetail = Readonly<{
+  itemIndex: number;
+  fieldName: string;
+  reason: SharesightItemFailureReason;
+}>;
+
 export type SharesightError = Readonly<{
   kind: SharesightErrorKind;
   message: string;
@@ -56,6 +99,16 @@ export type SharesightError = Readonly<{
    * `readOAuthErrorCode` for the bounded, defensive read that produces this.
    */
   oauthErrorCode?: SharesightOAuthErrorCode;
+  /**
+   * BRK-008 diagnostic only (2026-08-15 follow-up): present only when `kind`
+   * is `"invalid_response"` AND the failure was traced to one specific item
+   * in a response LIST (`parse.ts`'s `parseItemList`) -- never set for an
+   * envelope-level failure (e.g. the list key itself is missing/not an
+   * array), since there is no single item to attribute it to. Names/enums
+   * only -- see `SharesightItemFailureDetail`'s doc comment for the
+   * no-values discipline.
+   */
+  itemFailure?: SharesightItemFailureDetail;
 }>;
 
 export type SharesightResult<T> =
@@ -89,7 +142,53 @@ export type SharesightBodyParseDiagnostic = Readonly<{
   contentType: string | null;
   httpStatus: number;
   bodyParseable: false;
+  /**
+   * Counts differently depending on which of the two failure classes above
+   * fired this diagnostic: on the `JSON.parse`-throw branch (a 2xx response
+   * whose body was fully read before parsing failed), this is the FULL
+   * body's exact byte length; on the non-2xx branch (2026-08-15 follow-up),
+   * this is capped at 4,096 bytes read via a bounded reader (see
+   * `client.ts`'s `readBoundedBodyByteCountForDiagnostic`) — a non-2xx body
+   * larger than that cap reports exactly `4096`, not its true size, and a
+   * stalled/unreadable non-2xx body reports `0`. Best-effort and
+   * diagnostic-only in both cases; never load-bearing for the typed error
+   * result it accompanies.
+   */
   bodyBytes: number;
+  /**
+   * BRK-008 diagnostic (2026-08-15 follow-up, payouts wiring fix):
+   * `Response.redirected` -- true when the underlying fetch followed one or
+   * more redirects before landing on the response this diagnostic describes
+   * (e.g. a data request whose URL 302's to an HTML login/error page, which
+   * is exactly the observed 2026-08-15 `listPayouts` failure mode this field
+   * exists to make visible next time). `client.ts` never sets
+   * `RequestInit.redirect` itself, so the underlying fetch follows redirects
+   * by its platform default; this field reports whether that happened, it
+   * does not change the behavior. A test harness that hand-constructs a
+   * `Response` (rather than a real fetch response) reports `false` here --
+   * absence of evidence, not evidence of absence -- but this field never
+   * fabricates `true`.
+   */
+  redirected: boolean;
+}>;
+
+/**
+ * BRK-008 diagnostic (2026-08-15 follow-up): the client's opt-in
+ * `onItemFailureEvidence` payload -- `SharesightItemFailureDetail`'s
+ * names/enums (`itemIndex`/`fieldName`/`reason`) PLUS the FAILING item's
+ * full derived shape (`deriveShapeEvidence` -- key names, `typeof` leaves,
+ * format-class annotations only; see `shape-evidence.ts`'s privacy
+ * contract). `itemShape` is deliberately NOT part of `SharesightError`
+ * itself (which flows to ordinary application error handling/logging) --
+ * it stays behind this separate, explicitly-opted-into diagnostic callback,
+ * the same separation `onShapeEvidence` already draws for the whole-payload
+ * shape.
+ */
+export type SharesightItemFailureEvidence = Readonly<{
+  itemIndex: number;
+  fieldName: string;
+  reason: SharesightItemFailureReason;
+  itemShape: unknown;
 }>;
 
 // --- v3 endpoint shapes (BRK-008 spike scope) -------------------------

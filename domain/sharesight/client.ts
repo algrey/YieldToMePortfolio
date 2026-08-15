@@ -16,6 +16,7 @@ import type {
   SharesightError,
   SharesightFetchEvidence,
   SharesightHolding,
+  SharesightItemFailureEvidence,
   SharesightListParams,
   SharesightPayout,
   SharesightPortfolio,
@@ -39,6 +40,23 @@ const DEFAULT_TIMEOUT_MS = 8_000;
  * finding F6) -- a misconfigured `baseUrl` must not be able to ship the
  * access token to an arbitrary host. */
 const EXPECTED_BASE_URL_HOST = "api.sharesight.com";
+
+/** BRK-008 diagnostic (2026-08-15 review fix, B1): the maximum number of
+ * bytes of a non-2xx DATA response body this module will ever read, ONLY to
+ * size `onBodyParseDiagnostic`'s `bodyBytes` field. Mirrors `token.ts`'s
+ * `MAX_OAUTH_ERROR_BODY_BYTES` bound/technique exactly -- large enough for
+ * any realistic error body, small enough that this diagnostic can never
+ * become an unbounded-buffering liability. */
+const MAX_NON_2XX_DIAGNOSTIC_BODY_BYTES = 4_096;
+
+/** BRK-008 diagnostic (2026-08-15 review fix, B1): the bounded read above is
+ * additionally raced against its own short timeout, independent of the
+ * OUTER per-request `timeoutMs` (that timeout only bounds the initial
+ * response; a body read performed afterward, on an already-received
+ * response, is not covered by it and could otherwise hang on a stalled or
+ * slow-drip error body). Best-effort only -- a caller that hits this timeout
+ * gets `bodyBytes: 0`, never a hang. */
+const NON_2XX_DIAGNOSTIC_READ_TIMEOUT_MS = 1_000;
 
 export type SharesightClientOptions = Readonly<{
   baseUrl?: string;
@@ -82,23 +100,72 @@ export type SharesightClientOptions = Readonly<{
   onShapeEvidence?: (endpoint: string, shape: unknown) => void;
   /**
    * BRK-008 diagnostic (sibling of `onShapeEvidence` above, for a different
-   * failure class): invoked ONLY when `getJson` reads a response body
-   * successfully but `JSON.parse` itself throws -- e.g. an endpoint that
-   * silently returns an HTML page instead of JSON (the observed 2026-08-15
-   * `listPayouts` symptom before its endpoint path was corrected). There is
-   * no parsed JSON to derive a field shape from in this case, so this
-   * callback carries transport-level metadata only: content-type, HTTP
-   * status, the fixed `bodyParseable: false` marker, and a byte count --
-   * never the body itself, matching `onShapeEvidence`'s no-values
-   * discipline. Never fired for a non-2xx response (that path never reads a
-   * body) or for a timeout. `endpoint` is the same static per-method label
-   * `onShapeEvidence` uses, never a caller-supplied value. Any exception
-   * this callback throws is caught and discarded, same as
+   * failure class): invoked whenever `getJson` reaches an `invalid_response`
+   * (or other non-2xx-derived) outcome with NO parsed JSON to derive a field
+   * shape from -- there are two such cases:
+   *   1. a response body was read successfully but `JSON.parse` itself
+   *      threw -- e.g. an endpoint that silently returns an HTML page
+   *      instead of JSON;
+   *   2. the response status itself was not 2xx (any of the
+   *      authentication/entitlement/rate_limit/transient_upstream/
+   *      invalid_response-mapped statuses) -- this is the BRK-008 2026-08-15
+   *      follow-up fix: the observed live `listPayouts` symptom (an
+   *      `invalid_response` result with NEITHER this diagnostic NOR
+   *      `onShapeEvidence` firing) was traced to exactly this previously
+   *      diagnostic-less branch, not to a dropped callback wire-up -- see
+   *      `docs/ARCHITECTURE.md` §8.2.
+   * Both cases carry transport-level metadata only: content-type, HTTP
+   * status, the fixed `bodyParseable: false` marker, a byte count, and
+   * `redirected` (`Response.redirected` -- whether the underlying fetch
+   * followed a redirect before landing on this response, e.g. a 302 to an
+   * HTML login page) -- never the body itself, matching `onShapeEvidence`'s
+   * no-values discipline. `bodyParseable: false` means something SLIGHTLY
+   * different across the two cases above, even though the literal value is
+   * identical in both: in case 1 a body WAS handed to `JSON.parse`, which
+   * then threw; in case 2 no body was ever handed to `JSON.parse` at all --
+   * the HTTP status disqualified the response before parsing was even
+   * attempted. Read it as "no usable JSON reached the domain parser," not as
+   * "JSON.parse was attempted and failed" universally. Never fired for a
+   * timeout (no response was ever received) or when JSON parses
+   * successfully, even into an invalid domain shape (`onShapeEvidence`
+   * covers that case instead). `endpoint` is the same static per-method
+   * label `onShapeEvidence` uses, never a caller-supplied value. Any
+   * exception this callback throws is caught and discarded, same as
    * `onShapeEvidence`.
+   *
+   * Review finding B1 (2026-08-15 follow-up): in case 2, the body is read
+   * ONLY when this option is actually registered -- a caller that never
+   * opts in never triggers a body read at all, and gets exactly the same
+   * prompt return as before this diagnostic existed. When it IS registered,
+   * that read is bounded (4,096 bytes, mirroring `token.ts`'s
+   * `readOAuthErrorCode`) and raced against its own short timeout
+   * independent of the outer per-request `timeoutMs`, so a stalled or
+   * slow-drip non-2xx error body can never hang the call -- see
+   * `readBoundedBodyByteCountForDiagnostic` in `client.ts`.
    */
   onBodyParseDiagnostic?: (
     endpoint: string,
     diagnostic: SharesightBodyParseDiagnostic,
+  ) => void;
+  /**
+   * BRK-008 diagnostic (2026-08-15 follow-up, sibling of `onShapeEvidence`):
+   * invoked ONLY when a `parse.ts` parser fails closed on ONE SPECIFIC item
+   * within a response list (`SharesightError.itemFailure` is present on the
+   * `invalid_response` result) -- never on an envelope-level failure (e.g.
+   * the list key itself missing) and never on success. Carries
+   * `itemFailure`'s names/enums (`itemIndex`/`fieldName`/`reason`) PLUS the
+   * FAILING item's own derived shape (`itemShape`, via `deriveShapeEvidence`
+   * on just that one item -- key names/`typeof` leaves/format-class
+   * annotations only, same privacy contract as `onShapeEvidence`'s
+   * whole-payload shape). This is what lets a parser built on invented
+   * fixtures be corrected against exactly the field a real live item failed
+   * on, without ever seeing that field's value. `endpoint` is the same
+   * static per-method label the other diagnostics use. Any exception this
+   * callback throws is caught and discarded, same as `onShapeEvidence`.
+   */
+  onItemFailureEvidence?: (
+    endpoint: string,
+    evidence: SharesightItemFailureEvidence,
   ) => void;
 }>;
 
@@ -202,6 +269,93 @@ export function createSharesightClient(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const now = options.now ?? (() => new Date().toISOString());
 
+  // BRK-008 (2026-08-15 follow-up): the single place `onBodyParseDiagnostic`
+  // is ever invoked, from either of its two firing points below (a
+  // JSON.parse failure, or a non-2xx status) -- see the option's doc comment
+  // for why both are now covered.
+  function emitBodyParseDiagnostic(
+    endpoint: string,
+    response: Response,
+    bodyBytes: number,
+  ): void {
+    if (!options.onBodyParseDiagnostic) return;
+    try {
+      options.onBodyParseDiagnostic(endpoint, {
+        contentType: response.headers.get("content-type"),
+        httpStatus: response.status,
+        bodyParseable: false,
+        bodyBytes,
+        redirected: response.redirected,
+      });
+    } catch {
+      // Deliberately ignored -- see the option's doc comment.
+    }
+  }
+
+  /**
+   * BRK-008 diagnostic (2026-08-15 review fix, B1): bounded, independently
+   * timed, best-effort byte-COUNT read of a non-2xx response body -- used
+   * ONLY to size `onBodyParseDiagnostic`'s `bodyBytes` field, and ONLY ever
+   * called after the caller has already confirmed `options.onBodyParseDiagnostic`
+   * is registered (see the call site in `getJson`'s `!response.ok` branch) --
+   * a caller that never opts into this diagnostic never reaches this
+   * function at all, so the body is never touched and the call returns
+   * exactly as promptly as it did before this diagnostic existed.
+   *
+   * Mirrors `token.ts`'s `readOAuthErrorCode` bounded-reader technique (a
+   * capped `ReadableStreamDefaultReader` loop, `MAX_NON_2XX_DIAGNOSTIC_BODY_BYTES`
+   * matching that module's `MAX_OAUTH_ERROR_BODY_BYTES`), with one addition:
+   * this read is ALSO raced against its own short timeout
+   * (`NON_2XX_DIAGNOSTIC_READ_TIMEOUT_MS`), independent of `getJson`'s outer
+   * per-request `timeoutMs` -- that outer timeout only bounds the INITIAL
+   * response, not a body read performed afterward on a response already
+   * received, so without this a stalled or slow-drip non-2xx error body
+   * could hang a call that would otherwise have returned promptly (review
+   * finding B1: an earlier version of this fix read the full body
+   * unconditionally and without a cap/timeout of its own). On ANY failure --
+   * no body, a stream error, the byte cap, or the race timeout firing --
+   * this returns whatever byte count was read so far (0 in the worst case),
+   * never throws, and is never load-bearing for the typed error result the
+   * caller returns regardless of this outcome.
+   */
+  async function readBoundedBodyByteCountForDiagnostic(
+    response: Response,
+  ): Promise<number> {
+    const body = response.body;
+    if (!body) return 0;
+    const reader = body.getReader();
+    let totalBytes = 0;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<void>((resolve) => {
+      timeoutHandle = setTimeout(resolve, NON_2XX_DIAGNOSTIC_READ_TIMEOUT_MS);
+    });
+    const readLoopPromise = (async (): Promise<void> => {
+      try {
+        while (totalBytes < MAX_NON_2XX_DIAGNOSTIC_BODY_BYTES) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value || value.byteLength === 0) continue;
+          const remaining = MAX_NON_2XX_DIAGNOSTIC_BODY_BYTES - totalBytes;
+          totalBytes +=
+            value.byteLength > remaining ? remaining : value.byteLength;
+        }
+      } catch {
+        // best-effort only -- fall through with whatever totalBytes reached
+      }
+    })();
+    try {
+      await Promise.race([readLoopPromise, timeoutPromise]);
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      try {
+        await reader.cancel();
+      } catch {
+        // Deliberately ignored -- cancellation failure must never surface.
+      }
+    }
+    return totalBytes;
+  }
+
   async function getJson(
     endpoint: string,
     path: string,
@@ -268,6 +422,23 @@ export function createSharesightClient(
 
     if (!response.ok) {
       const retryable = response.status >= 500;
+      // BRK-008 (2026-08-15 follow-up): this branch previously returned with
+      // NO diagnostic evidence at all for ANY non-2xx status -- that gap is
+      // exactly the observed live `listPayouts` symptom (invalid_response
+      // with neither this diagnostic nor `onShapeEvidence` firing; see
+      // docs/ARCHITECTURE.md §8.2). Review finding B1: the body is read here
+      // ONLY when a caller has registered `onBodyParseDiagnostic` -- a
+      // caller that hasn't returns immediately below with zero body access,
+      // exactly as promptly as before this diagnostic existed -- and, when
+      // it is read, via a bounded/independently-timed reader (see
+      // `readBoundedBodyByteCountForDiagnostic`) so a stalled or oversized
+      // non-2xx error body can never hang this call. Best-effort,
+      // diagnostic-only in all cases -- never load-bearing for the typed
+      // error result below.
+      if (options.onBodyParseDiagnostic) {
+        const bodyBytes = await readBoundedBodyByteCountForDiagnostic(response);
+        emitBodyParseDiagnostic(endpoint, response, bodyBytes);
+      }
       return requestError(
         response.status === 401
           ? "authentication"
@@ -283,6 +454,15 @@ export function createSharesightClient(
       );
     }
 
+    // Follow-up (recorded by review, 2026-08-15, B1) -- NOT fixed this
+    // round: unlike the non-2xx diagnostic read above, this 2xx success-path
+    // body read is unconditional (this IS the actual response data, not a
+    // diagnostic, so it can't be skipped) and has no byte cap or dedicated
+    // timeout of its own beyond the outer per-request `timeoutMs` (which
+    // only bounds the time to receive the INITIAL response, not this read
+    // performed afterward). The Orchestrator is recording this shape as a
+    // tracked follow-up rather than fixing it here, to keep this change
+    // scoped to the diagnostic-only paths B1 was actually raised against.
     let bodyText: string;
     try {
       bodyText = await response.text();
@@ -303,18 +483,11 @@ export function createSharesightClient(
       // all (e.g. an HTML page from a misrouted endpoint), so there is no
       // parsed JSON for `onShapeEvidence` to derive a field shape from.
       // Metadata only, never the body itself.
-      if (options.onBodyParseDiagnostic) {
-        try {
-          options.onBodyParseDiagnostic(endpoint, {
-            contentType: response.headers.get("content-type"),
-            httpStatus: response.status,
-            bodyParseable: false,
-            bodyBytes: new TextEncoder().encode(bodyText).length,
-          });
-        } catch {
-          // Deliberately ignored -- see the option's doc comment.
-        }
-      }
+      emitBodyParseDiagnostic(
+        endpoint,
+        response,
+        new TextEncoder().encode(bodyText).length,
+      );
       return requestError(
         "invalid_response",
         "Sharesight response was not valid JSON.",
@@ -336,23 +509,50 @@ export function createSharesightClient(
   // `endpoint` is always the static label below, never a caller-supplied
   // value (see the option's doc comment). `raw` is the already-parsed JSON
   // `getJson` produced; this function itself never re-reads or re-parses
-  // anything.
+  // anything. `envelopeKey` is the static list key (`"portfolios"`,
+  // `"holdings"`, `"trades"`, `"payouts"`) this endpoint's parser reads --
+  // used ONLY to re-locate the failing item within `raw` when
+  // `parsed.error.itemFailure` is present, so `onItemFailureEvidence` (BRK-008
+  // 2026-08-15 follow-up) can report that item's OWN derived shape alongside
+  // its index/field/reason.
   function reportShapeEvidenceIfInvalid<T>(
     endpoint: string,
+    envelopeKey: string,
     raw: unknown,
     parsed: SharesightResult<T>,
   ): SharesightResult<T> {
-    if (
-      !parsed.ok &&
-      parsed.error.kind === "invalid_response" &&
-      options.onShapeEvidence
-    ) {
+    if (parsed.ok || parsed.error.kind !== "invalid_response") return parsed;
+
+    if (options.onShapeEvidence) {
       try {
         options.onShapeEvidence(endpoint, deriveShapeEvidence(raw));
       } catch {
         // Deliberately ignored -- see the option's doc comment above.
       }
     }
+
+    const itemFailure = parsed.error.itemFailure;
+    if (itemFailure && options.onItemFailureEvidence) {
+      const rawRecord =
+        typeof raw === "object" && raw !== null
+          ? (raw as Record<string, unknown>)
+          : null;
+      const rawList = rawRecord ? rawRecord[envelopeKey] : undefined;
+      const rawItem = Array.isArray(rawList)
+        ? rawList[itemFailure.itemIndex]
+        : undefined;
+      try {
+        options.onItemFailureEvidence(endpoint, {
+          itemIndex: itemFailure.itemIndex,
+          fieldName: itemFailure.fieldName,
+          reason: itemFailure.reason,
+          itemShape: deriveShapeEvidence(rawItem),
+        });
+      } catch {
+        // Deliberately ignored -- see the option's doc comment above.
+      }
+    }
+
     return parsed;
   }
 
@@ -362,6 +562,7 @@ export function createSharesightClient(
       if (!result.ok) return result;
       return reportShapeEvidenceIfInvalid(
         "listPortfolios",
+        "portfolios",
         result.value,
         parseSharesightPortfolios(result.value),
       );
@@ -374,6 +575,7 @@ export function createSharesightClient(
       if (!result.ok) return result;
       return reportShapeEvidenceIfInvalid(
         "getPortfolioHoldings",
+        "holdings",
         result.value,
         parseSharesightHoldings(result.value, portfolioId),
       );
@@ -387,6 +589,7 @@ export function createSharesightClient(
       if (!result.ok) return result;
       return reportShapeEvidenceIfInvalid(
         "listTrades",
+        "trades",
         result.value,
         parseSharesightTrades(result.value, portfolioId),
       );
@@ -406,6 +609,7 @@ export function createSharesightClient(
       if (!result.ok) return result;
       return reportShapeEvidenceIfInvalid(
         "listPayouts",
+        "payouts",
         result.value,
         parseSharesightPayouts(result.value, portfolioId),
       );

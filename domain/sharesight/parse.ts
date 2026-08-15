@@ -21,6 +21,7 @@
 import type {
   SharesightError,
   SharesightHolding,
+  SharesightItemFailureReason,
   SharesightPayout,
   SharesightPortfolio,
   SharesightResult,
@@ -187,19 +188,136 @@ function isMarketDate(value: string): boolean {
   );
 }
 
-function invalid(message: string): SharesightResult<never> {
+function invalid(
+  message: string,
+  itemFailure?: {
+    itemIndex: number;
+    fieldName: string;
+    reason: SharesightItemFailureReason;
+  },
+): SharesightResult<never> {
   const error: SharesightError = {
     kind: "invalid_response",
     message,
     retryable: false,
+    ...(itemFailure ? { itemFailure } : {}),
   };
   return { ok: false, error };
+}
+
+/**
+ * BRK-008 diagnostic (2026-08-15 follow-up): thrown by an item-parser (e.g.
+ * `parsePortfolioItem`) at the exact point a single field fails validation,
+ * carrying ONLY a static field NAME and a closed `SharesightItemFailureReason`
+ * classification -- never the field's value. `parseItemList` is the only
+ * place this is ever caught; it converts the throw into the `itemFailure`
+ * detail on the returned `invalid_response` result (`invalid()` above).
+ * Any OTHER exception an item-parser throws (a real bug, not a validation
+ * failure) is deliberately left to propagate uncaught, rather than being
+ * silently reinterpreted as a validation failure.
+ */
+class ItemFieldFailure extends Error {
+  fieldName: string;
+  reason: SharesightItemFailureReason;
+
+  constructor(fieldName: string, reason: SharesightItemFailureReason) {
+    super(
+      `Sharesight item field "${fieldName}" failed validation (${reason}).`,
+    );
+    this.name = "ItemFieldFailure";
+    this.fieldName = fieldName;
+    this.reason = reason;
+  }
+}
+
+/** Throws `ItemFieldFailure` for `fieldName`/`reason` -- see that class's doc
+ * comment. Typed `never` so call sites read like the `return null` style
+ * they replace (e.g. `if (!id) fail("id", ...)`). */
+function fail(fieldName: string, reason: SharesightItemFailureReason): never {
+  throw new ItemFieldFailure(fieldName, reason);
+}
+
+/**
+ * Classifies why a REQUIRED field of the given expected JSON `typeof` failed
+ * validation, by FORMAT CLASS only (never the field's value): absent/null is
+ * `missing`; present but the wrong JS type is `wrong_type`; present as an
+ * empty/whitespace-only string is treated as `missing` (an honest "unknown",
+ * matching `requiredString`'s own absent-vs-empty convention); anything else
+ * (a correctly-typed value that still fails a FURTHER validity check, e.g. a
+ * non-integer id number) is `wrong_type` too -- the caller distinguishes a
+ * more specific reason (`invalid_decimal`/`invalid_format`) itself when one
+ * applies. Only ever called once the corresponding `required*` helper has
+ * already returned `null` for this field, so it never has to re-derive
+ * success.
+ */
+function requiredFailureReason(
+  record: RecordValue,
+  field: string,
+  expectedType: "string" | "number",
+): SharesightItemFailureReason {
+  const value = record[field];
+  if (value === undefined || value === null) return "missing";
+  if (typeof value !== expectedType) return "wrong_type";
+  if (expectedType === "string" && (value as string).trim().length === 0) {
+    return "missing";
+  }
+  return "wrong_type";
+}
+
+/** Classifies why a REQUIRED decimal field failed: absent/null is `missing`;
+ * anything present that didn't parse is `invalid_decimal` (covers both "not
+ * decimal-shaped" and disallowed-sign cases -- both are a malformed decimal,
+ * not a type mismatch). */
+function requiredDecimalFailureReason(
+  record: RecordValue,
+  field: string,
+): SharesightItemFailureReason {
+  const value = record[field];
+  return value === undefined || value === null ? "missing" : "invalid_decimal";
+}
+
+/**
+ * Identifies which single field under `record.instrument` caused
+ * `instrumentFields` to return `null` -- either `instrument` itself
+ * (absent/null -> `missing`, present but not an object -> `wrong_type`), or
+ * whichever of `code`/`market_code`/`currency_code` (checked in that order)
+ * is the first to fail `requiredString`. `fieldName` uses a dotted path
+ * (`"instrument.code"`) for the nested case -- still a static field NAME,
+ * never a value. Only ever called once `instrumentFields(record)` has
+ * already returned `null`, so by construction at least one of these checks
+ * fails; the trailing fallback is unreachable in practice but keeps this
+ * function total rather than assuming that invariant blindly.
+ */
+function instrumentFailureDetail(record: RecordValue): {
+  fieldName: string;
+  reason: SharesightItemFailureReason;
+} {
+  const rawInstrument = record.instrument;
+  const instrument = asRecord(rawInstrument);
+  if (!instrument) {
+    return {
+      fieldName: "instrument",
+      reason:
+        rawInstrument === undefined || rawInstrument === null
+          ? "missing"
+          : "wrong_type",
+    };
+  }
+  for (const key of ["code", "market_code", "currency_code"] as const) {
+    if (!requiredString(instrument, key)) {
+      return {
+        fieldName: `instrument.${key}`,
+        reason: requiredFailureReason(instrument, key, "string"),
+      };
+    }
+  }
+  return { fieldName: "instrument", reason: "wrong_type" };
 }
 
 function parseItemList<T>(
   root: unknown,
   envelopeKey: string,
-  parseItem: (item: unknown) => T | null,
+  parseItem: (item: unknown) => T,
   itemLabel: string,
 ): SharesightResult<T[]> {
   const record = asRecord(root);
@@ -208,30 +326,41 @@ function parseItemList<T>(
     return invalid(`Sharesight response is missing a "${envelopeKey}" list.`);
   }
   const items: T[] = [];
-  for (const rawItem of rawList) {
-    const parsed = parseItem(rawItem);
-    if (parsed === null) {
-      return invalid(
-        `Sharesight ${itemLabel} response contains a malformed entry.`,
-      );
+  for (let itemIndex = 0; itemIndex < rawList.length; itemIndex += 1) {
+    try {
+      items.push(parseItem(rawList[itemIndex]));
+    } catch (caught) {
+      if (caught instanceof ItemFieldFailure) {
+        return invalid(
+          `Sharesight ${itemLabel} response contains a malformed entry.`,
+          { itemIndex, fieldName: caught.fieldName, reason: caught.reason },
+        );
+      }
+      throw caught; // a real bug in an item-parser, not a validation failure
     }
-    items.push(parsed);
   }
   return { ok: true, value: items };
 }
 
-function parsePortfolioItem(item: unknown): SharesightPortfolio | null {
+function parsePortfolioItem(item: unknown): SharesightPortfolio {
   const record = asRecord(item);
-  if (!record) return null;
+  if (!record) fail("<item>", "wrong_type");
   // Live-confirmed 2026-08-15 (docs/ARCHITECTURE.md §8.2): portfolio ids are
   // numeric integers, not strings. `requiredIntegerIdDecimalString`
   // normalizes to a decimal string, rejecting non-integer/unsafe values.
   const id = requiredIntegerIdDecimalString(record, "id");
+  if (!id) fail("id", requiredFailureReason(record, "id", "number"));
   const name = requiredString(record, "name");
+  if (!name) fail("name", requiredFailureReason(record, "name", "string"));
   const currencyCodeRaw = requiredString(record, "currency_code");
-  const currencyCode =
-    currencyCodeRaw && isCurrencyCode(currencyCodeRaw) ? currencyCodeRaw : null;
-  if (!id || !name || !currencyCode) return null;
+  if (!currencyCodeRaw) {
+    fail(
+      "currency_code",
+      requiredFailureReason(record, "currency_code", "string"),
+    );
+  }
+  if (!isCurrencyCode(currencyCodeRaw)) fail("currency_code", "invalid_format");
+  const currencyCode = currencyCodeRaw;
 
   // OPTIONAL fields: present-but-null and genuinely-absent are both an
   // honest "unknown" (`null`); a present-but-wrong-type value fails the
@@ -241,25 +370,28 @@ function parsePortfolioItem(item: unknown): SharesightPortfolio | null {
   // OPAQUE string here -- never parsed/interpreted as a number or
   // percentage.
   const inceptionDate = optionalStringField(record, "inception_date");
+  if (inceptionDate === MALFORMED_OPTIONAL_STRING)
+    fail("inception_date", "wrong_type");
   const tzName = optionalStringField(record, "tz_name");
+  if (tzName === MALFORMED_OPTIONAL_STRING) fail("tz_name", "wrong_type");
   const accessLevel = optionalStringField(record, "access_level");
+  if (accessLevel === MALFORMED_OPTIONAL_STRING)
+    fail("access_level", "wrong_type");
   const financialYearEnd = optionalStringField(record, "financial_year_end");
-  const cgDiscount = optionalStringField(record, "cg_discount");
-  const countryCode = optionalStringField(record, "country_code");
-  const ownerName = optionalStringField(record, "owner_name");
-  const taxEntityType = optionalStringField(record, "tax_entity_type");
-  if (
-    inceptionDate === MALFORMED_OPTIONAL_STRING ||
-    tzName === MALFORMED_OPTIONAL_STRING ||
-    accessLevel === MALFORMED_OPTIONAL_STRING ||
-    financialYearEnd === MALFORMED_OPTIONAL_STRING ||
-    cgDiscount === MALFORMED_OPTIONAL_STRING ||
-    countryCode === MALFORMED_OPTIONAL_STRING ||
-    ownerName === MALFORMED_OPTIONAL_STRING ||
-    taxEntityType === MALFORMED_OPTIONAL_STRING
-  ) {
-    return null;
+  if (financialYearEnd === MALFORMED_OPTIONAL_STRING) {
+    fail("financial_year_end", "wrong_type");
   }
+  const cgDiscount = optionalStringField(record, "cg_discount");
+  if (cgDiscount === MALFORMED_OPTIONAL_STRING)
+    fail("cg_discount", "wrong_type");
+  const countryCode = optionalStringField(record, "country_code");
+  if (countryCode === MALFORMED_OPTIONAL_STRING)
+    fail("country_code", "wrong_type");
+  const ownerName = optionalStringField(record, "owner_name");
+  if (ownerName === MALFORMED_OPTIONAL_STRING) fail("owner_name", "wrong_type");
+  const taxEntityType = optionalStringField(record, "tax_entity_type");
+  if (taxEntityType === MALFORMED_OPTIONAL_STRING)
+    fail("tax_entity_type", "wrong_type");
 
   return {
     id,
@@ -311,26 +443,37 @@ function instrumentFields(record: RecordValue): {
 function parseHoldingItem(
   item: unknown,
   portfolioId: string,
-): SharesightHolding | null {
+): SharesightHolding {
   const record = asRecord(item);
-  if (!record) return null;
+  if (!record) fail("<item>", "wrong_type");
   // Live-confirmed 2026-08-15: `id` is a numeric integer (portfolios
   // technique) and a top-level `symbol` field is present alongside
   // `instrument.code`.
   const id = requiredIntegerIdDecimalString(record, "id");
+  if (!id) fail("id", requiredFailureReason(record, "id", "number"));
   const symbol = requiredString(record, "symbol");
+  if (!symbol)
+    fail("symbol", requiredFailureReason(record, "symbol", "string"));
   const instrument = instrumentFields(record);
-  if (!id || !symbol || !instrument) return null;
+  if (!instrument) {
+    const detail = instrumentFailureDetail(record);
+    fail(detail.fieldName, detail.reason);
+  }
   // OPTIONAL, not required -- the confirmed live `HoldingPortfolioList`
   // response carries no quantity/value field at all on this endpoint (see
   // `SharesightHolding`'s doc comment); a present-but-unparseable value
   // still fails the item closed (absent-vs-malformed discipline).
   const quantityDecimal = optionalDecimal(record, "quantity");
-  if (quantityDecimal === MALFORMED_OPTIONAL_DECIMAL) return null;
+  if (quantityDecimal === MALFORMED_OPTIONAL_DECIMAL)
+    fail("quantity", "invalid_decimal");
   const averageCostDecimal = optionalDecimal(record, "average_cost");
-  if (averageCostDecimal === MALFORMED_OPTIONAL_DECIMAL) return null;
+  if (averageCostDecimal === MALFORMED_OPTIONAL_DECIMAL) {
+    fail("average_cost", "invalid_decimal");
+  }
   const marketValueDecimal = optionalDecimal(record, "market_value");
-  if (marketValueDecimal === MALFORMED_OPTIONAL_DECIMAL) return null;
+  if (marketValueDecimal === MALFORMED_OPTIONAL_DECIMAL) {
+    fail("market_value", "invalid_decimal");
+  }
   return {
     id,
     portfolioId,
@@ -383,26 +526,45 @@ function optionalTradeType(
     : MALFORMED_TRADE_TYPE;
 }
 
-function parseTradeItem(
-  item: unknown,
-  portfolioId: string,
-): SharesightTrade | null {
+function parseTradeItem(item: unknown, portfolioId: string): SharesightTrade {
   const record = asRecord(item);
-  if (!record) return null;
+  if (!record) fail("<item>", "wrong_type");
   // Live-confirmed 2026-08-15: trade `id` is a numeric integer, like
   // portfolios/holdings -- not a string as BRK-003 originally assumed.
   const id = requiredIntegerIdDecimalString(record, "id");
+  if (!id) fail("id", requiredFailureReason(record, "id", "number"));
   const instrument = instrumentFields(record);
+  if (!instrument) {
+    const detail = instrumentFailureDetail(record);
+    fail(detail.fieldName, detail.reason);
+  }
   const transactionType = optionalTradeType(record);
-  if (transactionType === MALFORMED_TRADE_TYPE) return null;
+  if (transactionType === MALFORMED_TRADE_TYPE) {
+    fail("transaction_type", "invalid_format");
+  }
   const transactionDate = requiredString(record, "transaction_date");
+  if (!transactionDate) {
+    fail(
+      "transaction_date",
+      requiredFailureReason(record, "transaction_date", "string"),
+    );
+  }
+  if (!isMarketDate(transactionDate))
+    fail("transaction_date", "invalid_format");
   const quantityDecimal = requiredDecimal(record, "quantity", {
     allowNegative: false,
   });
+  if (!quantityDecimal)
+    fail("quantity", requiredDecimalFailureReason(record, "quantity"));
   const priceDecimal = requiredDecimal(record, "price", {
     allowNegative: false,
   });
+  if (!priceDecimal)
+    fail("price", requiredDecimalFailureReason(record, "price"));
   const holdingId = requiredIntegerIdDecimalString(record, "holding_id");
+  if (!holdingId) {
+    fail("holding_id", requiredFailureReason(record, "holding_id", "number"));
+  }
   // Real cross-check, not a reworded no-op (Orchestrator ruling): the trade
   // item's OWN `portfolio_id` must be present, well-shaped, AND EQUAL to the
   // caller-supplied `portfolioId` this fetch was scoped to. A mismatch fails
@@ -415,46 +577,51 @@ function parseTradeItem(
     record,
     "portfolio_id",
   );
-  if (
-    !id ||
-    !instrument ||
-    !transactionDate ||
-    !isMarketDate(transactionDate) ||
-    !quantityDecimal ||
-    !priceDecimal ||
-    !holdingId ||
-    !recordPortfolioId ||
-    recordPortfolioId !== portfolioId
-  ) {
-    return null;
+  if (!recordPortfolioId) {
+    fail(
+      "portfolio_id",
+      requiredFailureReason(record, "portfolio_id", "number"),
+    );
   }
+  if (recordPortfolioId !== portfolioId) fail("portfolio_id", "mismatch");
+
   const valueDecimal = optionalDecimal(record, "value");
-  if (valueDecimal === MALFORMED_OPTIONAL_DECIMAL) return null;
+  if (valueDecimal === MALFORMED_OPTIONAL_DECIMAL)
+    fail("value", "invalid_decimal");
   const brokerageDecimal = optionalDecimal(record, "brokerage");
-  if (brokerageDecimal === MALFORMED_OPTIONAL_DECIMAL) return null;
+  if (brokerageDecimal === MALFORMED_OPTIONAL_DECIMAL)
+    fail("brokerage", "invalid_decimal");
   const exchangeRateDecimal = optionalDecimal(record, "exchange_rate");
-  if (exchangeRateDecimal === MALFORMED_OPTIONAL_DECIMAL) return null;
+  if (exchangeRateDecimal === MALFORMED_OPTIONAL_DECIMAL) {
+    fail("exchange_rate", "invalid_decimal");
+  }
 
   const brokerageCurrencyCode = optionalStringField(
     record,
     "brokerage_currency_code",
   );
+  if (brokerageCurrencyCode === MALFORMED_OPTIONAL_STRING) {
+    fail("brokerage_currency_code", "wrong_type");
+  }
   const exchangeRatePair = optionalStringField(record, "exchange_rate_pair");
+  if (exchangeRatePair === MALFORMED_OPTIONAL_STRING) {
+    fail("exchange_rate_pair", "wrong_type");
+  }
   const state = optionalStringField(record, "state");
+  if (state === MALFORMED_OPTIONAL_STRING) fail("state", "wrong_type");
   const uniqueIdentifier = optionalStringField(record, "unique_identifier");
+  if (uniqueIdentifier === MALFORMED_OPTIONAL_STRING) {
+    fail("unique_identifier", "wrong_type");
+  }
   const paidOnDate = optionalStringField(record, "paid_on");
+  if (paidOnDate === MALFORMED_OPTIONAL_STRING) fail("paid_on", "wrong_type");
   const descriptionCode = optionalStringField(record, "description_code");
+  if (descriptionCode === MALFORMED_OPTIONAL_STRING) {
+    fail("description_code", "wrong_type");
+  }
   const sourceCategory = optionalStringField(record, "source_category");
-  if (
-    brokerageCurrencyCode === MALFORMED_OPTIONAL_STRING ||
-    exchangeRatePair === MALFORMED_OPTIONAL_STRING ||
-    state === MALFORMED_OPTIONAL_STRING ||
-    uniqueIdentifier === MALFORMED_OPTIONAL_STRING ||
-    paidOnDate === MALFORMED_OPTIONAL_STRING ||
-    descriptionCode === MALFORMED_OPTIONAL_STRING ||
-    sourceCategory === MALFORMED_OPTIONAL_STRING
-  ) {
-    return null;
+  if (sourceCategory === MALFORMED_OPTIONAL_STRING) {
+    fail("source_category", "wrong_type");
   }
 
   return {
@@ -493,39 +660,43 @@ export function parseSharesightTrades(
   );
 }
 
-function parsePayoutItem(
-  item: unknown,
-  portfolioId: string,
-): SharesightPayout | null {
+function parsePayoutItem(item: unknown, portfolioId: string): SharesightPayout {
   const record = asRecord(item);
-  if (!record) return null;
+  if (!record) fail("<item>", "wrong_type");
   const id = requiredString(record, "id");
+  if (!id) fail("id", requiredFailureReason(record, "id", "string"));
   const instrument = instrumentFields(record);
+  if (!instrument) {
+    const detail = instrumentFailureDetail(record);
+    fail(detail.fieldName, detail.reason);
+  }
   const paidOnDate = requiredString(record, "paid_on");
+  if (!paidOnDate)
+    fail("paid_on", requiredFailureReason(record, "paid_on", "string"));
+  if (!isMarketDate(paidOnDate)) fail("paid_on", "invalid_format");
   const amountDecimal = requiredDecimal(record, "amount", {
     allowNegative: false,
   });
-  if (
-    !id ||
-    !instrument ||
-    !paidOnDate ||
-    !isMarketDate(paidOnDate) ||
-    !amountDecimal
-  ) {
-    return null;
-  }
+  if (!amountDecimal)
+    fail("amount", requiredDecimalFailureReason(record, "amount"));
   // Franking/withholding figures feed downstream tax assumptions -- a
   // present-but-corrupt value must fail the item closed, never silently
   // become an honest "unknown" (BRK-003 review finding F1).
   const frankedAmountDecimal = optionalDecimal(record, "franked_amount");
-  if (frankedAmountDecimal === MALFORMED_OPTIONAL_DECIMAL) return null;
+  if (frankedAmountDecimal === MALFORMED_OPTIONAL_DECIMAL) {
+    fail("franked_amount", "invalid_decimal");
+  }
   const unfrankedAmountDecimal = optionalDecimal(record, "unfranked_amount");
-  if (unfrankedAmountDecimal === MALFORMED_OPTIONAL_DECIMAL) return null;
+  if (unfrankedAmountDecimal === MALFORMED_OPTIONAL_DECIMAL) {
+    fail("unfranked_amount", "invalid_decimal");
+  }
   const taxWithheldDecimal = optionalDecimal(
     record,
     "resident_withholding_tax",
   );
-  if (taxWithheldDecimal === MALFORMED_OPTIONAL_DECIMAL) return null;
+  if (taxWithheldDecimal === MALFORMED_OPTIONAL_DECIMAL) {
+    fail("resident_withholding_tax", "invalid_decimal");
+  }
   return {
     id,
     portfolioId,

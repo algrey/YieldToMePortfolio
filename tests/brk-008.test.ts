@@ -498,3 +498,237 @@ test("BRK-008 onShapeEvidence: no field value from the raw payload leaks into th
   const serialized = JSON.stringify(capturedShape);
   assert.equal(serialized.includes(SECRET), false, serialized);
 });
+
+// --- BRK-008 (2026-08-15 follow-up): callback-wiring regression ------------
+//
+// The live payouts symptom (invalid_response, no diagnostic evidence at all)
+// was initially suspected to be a dropped `onShapeEvidence` wire-up specific
+// to `listPayouts` -- the actual root cause turned out to be a genuinely
+// diagnostic-less branch shared by ALL FOUR methods (see
+// tests/brk-003.test.ts's non-2xx `onBodyParseDiagnostic` tests), not a
+// per-method wiring gap. This test still pins the class of bug that WAS
+// suspected -- a future endpoint/URL change silently dropping
+// `reportShapeEvidenceIfInvalid` for exactly one method -- since nothing
+// else in this suite exercises `onShapeEvidence` for
+// getPortfolioHoldings/listTrades/listPayouts (only listPortfolios, above).
+
+test("BRK-008 onShapeEvidence wiring regression: ALL FOUR client methods fire onShapeEvidence when their own parser fails closed with invalid_response", async () => {
+  const provider = await alwaysValidTokenProvider();
+  const calls: string[] = [];
+  const onShapeEvidence = (endpoint: string) => {
+    calls.push(endpoint);
+  };
+
+  const portfolios = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => jsonResponse(200, { portfolios: "not-an-array" }),
+    onShapeEvidence,
+  }).listPortfolios();
+  assert.equal(portfolios.ok, false);
+
+  const holdings = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => jsonResponse(200, { holdings: "not-an-array" }),
+    onShapeEvidence,
+  }).getPortfolioHoldings("port_1");
+  assert.equal(holdings.ok, false);
+
+  const trades = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => jsonResponse(200, { trades: "not-an-array" }),
+    onShapeEvidence,
+  }).listTrades("port_1");
+  assert.equal(trades.ok, false);
+
+  const payouts = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => jsonResponse(200, { payouts: "not-an-array" }),
+    onShapeEvidence,
+  }).listPayouts("port_1");
+  assert.equal(payouts.ok, false);
+
+  assert.deepEqual(calls, [
+    "listPortfolios",
+    "getPortfolioHoldings",
+    "listTrades",
+    "listPayouts",
+  ]);
+});
+
+// --- BRK-008 (2026-08-15 follow-up): failing-item diagnostics --------------
+//
+// `parse.ts` now identifies WHICH item in a list and WHICH field failed
+// (`SharesightError.itemFailure`), and the client's opt-in
+// `onItemFailureEvidence` additionally reports that one item's own derived
+// shape. Names/enums/shape only -- never a value -- see
+// `contracts.ts`'s `SharesightItemFailureDetail`/`SharesightItemFailureEvidence`
+// doc comments for the privacy contract these tests hold it to.
+
+/** A minimal, otherwise-fully-valid raw (wire-shaped) Sharesight trade item
+ * -- see `parse.ts`'s `parseTradeItem` for the exact required fields. */
+function validRawTrade(id: number): Record<string, unknown> {
+  return {
+    id,
+    instrument: { code: "BHP", market_code: "ASX", currency_code: "AUD" },
+    transaction_date: "2026-01-01",
+    quantity: 10,
+    price: 55.5,
+    holding_id: 100,
+    portfolio_id: 42,
+  };
+}
+
+function withoutField(
+  record: Record<string, unknown>,
+  field: string,
+): Record<string, unknown> {
+  const clone = { ...record };
+  delete clone[field];
+  return clone;
+}
+
+test("BRK-008 itemFailure/onItemFailureEvidence: identifies the exact item index and field name for a MISSING required field, several valid items deep into the list", async () => {
+  const provider = await alwaysValidTokenProvider();
+  const items = [
+    validRawTrade(1),
+    validRawTrade(2),
+    withoutField(validRawTrade(3), "quantity"),
+  ];
+  const calls: Array<{
+    endpoint: string;
+    itemIndex: number;
+    fieldName: string;
+    reason: string;
+    itemShape: unknown;
+  }> = [];
+  const result = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => jsonResponse(200, { trades: items }),
+    onItemFailureEvidence: (endpoint, evidence) => {
+      calls.push({ endpoint, ...evidence });
+    },
+  }).listTrades("42");
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.kind, "invalid_response");
+    assert.deepEqual(result.error.itemFailure, {
+      itemIndex: 2, // 0-based -- the third item, after two valid ones
+      fieldName: "quantity",
+      reason: "missing",
+    });
+  }
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].endpoint, "listTrades");
+  assert.equal(calls[0].itemIndex, 2);
+  assert.equal(calls[0].fieldName, "quantity");
+  assert.equal(calls[0].reason, "missing");
+  // The failing item's OWN shape (not the whole payload's) -- `quantity`
+  // must be absent from it (that's the failure), `price` must be present.
+  const itemShape = toPlain(calls[0].itemShape) as Record<string, unknown>;
+  assert.equal("quantity" in itemShape, false);
+  assert.equal(itemShape.price, "number(decimal-like)");
+});
+
+test("BRK-008 itemFailure: a mismatch reason (trade's own portfolio_id disagreeing with the queried portfolio) is identified by field name, not conflated with missing/wrong_type", async () => {
+  const provider = await alwaysValidTokenProvider();
+  const items = [validRawTrade(1), { ...validRawTrade(2), portfolio_id: 999 }];
+  const result = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => jsonResponse(200, { trades: items }),
+  }).listTrades("42");
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.deepEqual(result.error.itemFailure, {
+      itemIndex: 1,
+      fieldName: "portfolio_id",
+      reason: "mismatch",
+    });
+  }
+});
+
+test('BRK-008 itemFailure: a malformed nested instrument field reports a dotted field name ("instrument.code"), not just "instrument"', async () => {
+  const provider = await alwaysValidTokenProvider();
+  const items = [
+    {
+      ...validRawTrade(1),
+      instrument: { market_code: "ASX", currency_code: "AUD" },
+    },
+  ];
+  const result = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => jsonResponse(200, { trades: items }),
+  }).listTrades("42");
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.deepEqual(result.error.itemFailure, {
+      itemIndex: 0,
+      fieldName: "instrument.code",
+      reason: "missing",
+    });
+  }
+});
+
+test("BRK-008 itemFailure: never present on an envelope-level failure (the list key itself is missing/not an array); onItemFailureEvidence never fires", async () => {
+  const provider = await alwaysValidTokenProvider();
+  let called = false;
+  const result = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => jsonResponse(200, { trades: "not-an-array" }),
+    onItemFailureEvidence: () => {
+      called = true;
+    },
+  }).listTrades("42");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.itemFailure, undefined);
+  assert.equal(called, false);
+});
+
+test("BRK-008 itemFailure/onItemFailureEvidence: no field VALUE from the failing item ever leaks -- plant distinctive secrets in both a valid and the failing field of that item and grep everywhere a value could hide", async () => {
+  const provider = await alwaysValidTokenProvider();
+  const SECRET_IN_VALID_FIELD = "sk_live_planted_in_valid_field_9f3c";
+  const SECRET_IN_FAILING_FIELD = "sk_live_planted_in_failing_field_2d4e";
+  const items = [
+    validRawTrade(1),
+    {
+      ...validRawTrade(2),
+      // A present-but-unparseable decimal -- fails closed as
+      // "invalid_decimal", never silently treated as absent. The secret
+      // lives in the very value that triggers the failure.
+      quantity: SECRET_IN_FAILING_FIELD,
+      // A valid optional string field, also carrying a secret, to prove even
+      // a NON-failing field's value on the failing item never leaks via the
+      // item shape (deriveShapeEvidence is value-safe by construction, but
+      // this is the end-to-end proof, not just a unit test of that module).
+      state: SECRET_IN_VALID_FIELD,
+    },
+  ];
+  let capturedEvidence: unknown;
+  const result = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => jsonResponse(200, { trades: items }),
+    onItemFailureEvidence: (_endpoint, evidence) => {
+      capturedEvidence = evidence;
+    },
+  }).listTrades("42");
+
+  assert.equal(result.ok, false);
+  const serializedError = JSON.stringify(result);
+  const serializedEvidence = JSON.stringify(capturedEvidence);
+  for (const secret of [SECRET_IN_VALID_FIELD, SECRET_IN_FAILING_FIELD]) {
+    assert.equal(serializedError.includes(secret), false, serializedError);
+    assert.equal(
+      serializedEvidence.includes(secret),
+      false,
+      serializedEvidence,
+    );
+  }
+  if (!result.ok) {
+    assert.deepEqual(result.error.itemFailure, {
+      itemIndex: 1,
+      fieldName: "quantity",
+      reason: "invalid_decimal",
+    });
+  }
+});

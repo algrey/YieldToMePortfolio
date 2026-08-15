@@ -83,8 +83,14 @@
 //   `onShapeEvidence`-supplied shape (key names, `typeof` leaves, and
 //   format-class-only decimal/exponent annotations; see
 //   `domain/sharesight/shape-evidence.ts`'s privacy contract), which this
-//   script only ever prints, never derives itself. Do not add a
-//   `console.log` anywhere in this file that could print an actual
+//   script only ever prints, never derives itself; and (BRK-008 2026-08-15
+//   follow-up) -- for a list item that specifically fails validation -- the
+//   `onItemFailureEvidence`-supplied item index, static field name, static
+//   reason class, and that one item's own derived shape (same no-values
+//   privacy contract), plus `onBodyParseDiagnostic`'s transport-only
+//   metadata (content-type, HTTP status, byte count, whether a redirect was
+//   followed) for a response that never became usable JSON at all. Do not
+//   add a `console.log` anywhere in this file that could print an actual
 //   Sharesight field value, an access token, an authorization code, or a
 //   client secret.
 //
@@ -412,15 +418,33 @@ async function main() {
       console.log("=== end shape diagnostic ===");
       console.log("");
     },
-    // BRK-008: fired ONLY when a response body was read but did NOT parse
-    // as JSON at all (e.g. an HTML page from a misrouted endpoint -- the
-    // 2026-08-15 listPayouts symptom this diagnostic exists to catch next
-    // time it happens). Metadata only -- content-type, HTTP status, byte
-    // count -- never the body itself.
+    // BRK-008 (2026-08-15 follow-up): fired both when a response body was
+    // read but did NOT parse as JSON at all (e.g. an HTML page from a
+    // misrouted endpoint -- the original 2026-08-15 listPayouts symptom)
+    // AND, as of this follow-up, when the response status itself was not
+    // 2xx -- previously a diagnostic-less branch that emitted zero evidence
+    // regardless of what actually caused any given non-2xx response (see
+    // domain/sharesight/client.ts's onBodyParseDiagnostic doc comment).
+    // Metadata only -- content-type, HTTP status, byte count, whether a
+    // redirect was followed -- never the body itself.
     onBodyParseDiagnostic: (endpoint, diagnostic) => {
       console.log(
-        `${evidenceLabel} / ${endpoint}: response body was not valid JSON -- contentType=${diagnostic.contentType} httpStatus=${diagnostic.httpStatus} bodyBytes=${diagnostic.bodyBytes}`,
+        `${evidenceLabel} / ${endpoint}: response body was not usable JSON -- contentType=${diagnostic.contentType} httpStatus=${diagnostic.httpStatus} bodyBytes=${diagnostic.bodyBytes} redirected=${diagnostic.redirected}`,
       );
+    },
+    // BRK-008 (2026-08-15 follow-up): fired ONLY when a parser fails closed
+    // on one specific item within a response list -- prints WHICH item
+    // (0-based index), WHICH field, and a static reason class, plus that
+    // item's own derived shape (key names + typeof leaves only, no values --
+    // same privacy contract as onShapeEvidence above).
+    onItemFailureEvidence: (endpoint, evidence) => {
+      console.log("");
+      console.log(
+        `=== BRK-008 ITEM FAILURE DIAGNOSTIC (${evidenceLabel} / ${endpoint}) -- itemIndex=${evidence.itemIndex} fieldName=${evidence.fieldName} reason=${evidence.reason} ===`,
+      );
+      console.log(JSON.stringify(evidence.itemShape, null, 2));
+      console.log("=== end item failure diagnostic ===");
+      console.log("");
     },
   });
 

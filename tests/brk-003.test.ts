@@ -2448,7 +2448,7 @@ test("BRK-008 onBodyParseDiagnostic: fires with metadata only when a response bo
   );
 });
 
-test("BRK-008 onBodyParseDiagnostic: never fires when JSON parses (even into an invalid domain shape), on a non-2xx response, or on a timeout", async () => {
+test("BRK-008 onBodyParseDiagnostic: never fires when JSON parses (even into an invalid domain shape) or on a timeout", async () => {
   const provider = await alwaysValidTokenProvider();
   let called = false;
   const onBodyParseDiagnostic = () => {
@@ -2463,14 +2463,6 @@ test("BRK-008 onBodyParseDiagnostic: never fires when JSON parses (even into an 
   assert.equal(validJson.ok, false);
   if (!validJson.ok) assert.equal(validJson.error.kind, "invalid_response");
 
-  const non2xx = await createSharesightClient({
-    tokenProvider: provider,
-    fetcher: async () => new Response("<html>404</html>", { status: 404 }),
-    onBodyParseDiagnostic,
-  }).listPortfolios();
-  assert.equal(non2xx.ok, false);
-  if (!non2xx.ok) assert.equal(non2xx.error.kind, "invalid_response");
-
   const timeoutResult = await createSharesightClient({
     tokenProvider: provider,
     timeoutMs: 15,
@@ -2484,6 +2476,261 @@ test("BRK-008 onBodyParseDiagnostic: never fires when JSON parses (even into an 
   if (!timeoutResult.ok) assert.equal(timeoutResult.error.kind, "timeout");
 
   assert.equal(called, false);
+});
+
+// --- BRK-008 (2026-08-15 follow-up): payouts wiring fix -- root cause was
+// NOT a dropped callback (listPayouts wires onShapeEvidence/
+// onBodyParseDiagnostic identically to the other three methods -- see the
+// callback-wiring regression test below), it was that the `!response.ok`
+// branch in `client.ts`'s `getJson` returned `invalid_response` with NO
+// diagnostic evidence at all for ANY non-2xx status -- exactly matching the
+// observed live symptom (invalid_response, neither onShapeEvidence nor
+// onBodyParseDiagnostic firing). These tests pin the fix: onBodyParseDiagnostic
+// now fires for a non-2xx response too, carrying transport metadata
+// including `redirected` (Response.redirected) -- so a redirect to an HTML
+// login/error page is visible even when its FINAL status is non-2xx. -------
+
+test("BRK-008 onBodyParseDiagnostic: fires with transport metadata for a non-2xx response (2026-08-15 follow-up -- closes the non-2xx branch that emitted zero diagnostic evidence)", async () => {
+  const provider = await alwaysValidTokenProvider();
+  const calls: Array<{
+    endpoint: string;
+    diagnostic: {
+      contentType: string | null;
+      httpStatus: number;
+      bodyParseable: false;
+      bodyBytes: number;
+      redirected: boolean;
+    };
+  }> = [];
+  const client = createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () =>
+      new Response("<html>404 not found</html>", {
+        status: 404,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      }),
+    onBodyParseDiagnostic: (endpoint, diagnostic) => {
+      calls.push({ endpoint, diagnostic });
+    },
+  });
+  const result = await client.listPayouts("port_1");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.kind, "invalid_response");
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].endpoint, "listPayouts");
+  assert.equal(calls[0].diagnostic.httpStatus, 404);
+  assert.equal(calls[0].diagnostic.contentType, "text/html; charset=utf-8");
+  assert.equal(calls[0].diagnostic.bodyParseable, false);
+  assert.equal(
+    calls[0].diagnostic.bodyBytes,
+    "<html>404 not found</html>".length,
+  );
+  assert.equal(calls[0].diagnostic.redirected, false);
+});
+
+test("BRK-008 onBodyParseDiagnostic: fires for every non-2xx-mapped kind (401/403/429/5xx), not only the invalid_response-mapped statuses", async () => {
+  const provider = await alwaysValidTokenProvider();
+  const cases: Array<{ status: number; expectedKind: string }> = [
+    { status: 401, expectedKind: "authentication" },
+    { status: 403, expectedKind: "entitlement" },
+    { status: 429, expectedKind: "rate_limit" },
+    { status: 500, expectedKind: "transient_upstream" },
+  ];
+  for (const { status, expectedKind } of cases) {
+    let called = false;
+    const result = await createSharesightClient({
+      tokenProvider: provider,
+      fetcher: async () => new Response("", { status }),
+      onBodyParseDiagnostic: () => {
+        called = true;
+      },
+    }).listPortfolios();
+    assert.equal(result.ok, false, `status ${status}`);
+    if (!result.ok)
+      assert.equal(result.error.kind, expectedKind, `status ${status}`);
+    assert.equal(
+      called,
+      true,
+      `status ${status} should fire onBodyParseDiagnostic`,
+    );
+  }
+});
+
+test("BRK-008 onBodyParseDiagnostic: reports redirected=true when the underlying fetch followed a redirect before landing on the response -- the 3xx-shaped scenario the task called out (a redirect to an HTML login page, or to a non-2xx final status)", async () => {
+  const provider = await alwaysValidTokenProvider();
+
+  // Case 1: redirected to an HTML login page that itself responds 200 -- hits
+  // the JSON.parse-throw branch. A test fetcher can't make a real fetch
+  // follow a live redirect, so this duck-types a Response-shaped object with
+  // `redirected: true` (exactly what a real fetch sets after following one)
+  // -- only the properties client.ts actually reads are provided.
+  const redirectedToHtmlLogin = {
+    ok: true,
+    status: 200,
+    redirected: true,
+    headers: new Headers({ "content-type": "text/html; charset=utf-8" }),
+    text: async () => "<html>please log in</html>",
+  } as unknown as Response;
+  const htmlCalls: Array<{ endpoint: string; redirected: boolean }> = [];
+  const htmlResult = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => redirectedToHtmlLogin,
+    onBodyParseDiagnostic: (endpoint, diagnostic) => {
+      htmlCalls.push({ endpoint, redirected: diagnostic.redirected });
+    },
+  }).listPayouts("port_1");
+  assert.equal(htmlResult.ok, false);
+  assert.equal(htmlCalls.length, 1);
+  assert.equal(htmlCalls[0].endpoint, "listPayouts");
+  assert.equal(htmlCalls[0].redirected, true);
+
+  // Case 2: redirected, and the FINAL status is also non-2xx -- hits the
+  // `!response.ok` branch (this is the branch that previously had NO
+  // diagnostic at all).
+  const redirectedToNonOk = {
+    ok: false,
+    status: 404,
+    redirected: true,
+    headers: new Headers({ "content-type": "text/html; charset=utf-8" }),
+    text: async () => "<html>not found</html>",
+  } as unknown as Response;
+  const nonOkCalls: Array<{ endpoint: string; redirected: boolean }> = [];
+  const nonOkResult = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => redirectedToNonOk,
+    onBodyParseDiagnostic: (endpoint, diagnostic) => {
+      nonOkCalls.push({ endpoint, redirected: diagnostic.redirected });
+    },
+  }).listPayouts("port_1");
+  assert.equal(nonOkResult.ok, false);
+  assert.equal(nonOkCalls.length, 1);
+  assert.equal(nonOkCalls[0].endpoint, "listPayouts");
+  assert.equal(nonOkCalls[0].redirected, true);
+});
+
+// --- BRK-008 review fix (2026-08-15 follow-up, B1): the non-2xx body read is
+// opt-in, bounded, and independently timed -- an earlier version of the
+// non-2xx diagnostic fix read the full body unconditionally, with no cap or
+// dedicated timeout of its own, which review found could turn a call that
+// previously returned promptly into one that hangs on a stalled/oversized
+// error body. These tests pin the fix. ---------------------------------
+
+/** Wraps a real `Response` in a `Proxy` that records whether ANY
+ * body-reading member (`body`/`text`/`arrayBuffer`/`blob`/`json`/`bytes`)
+ * was ever accessed -- used to PROVE the non-2xx body is never touched at
+ * all when no caller has registered `onBodyParseDiagnostic` (a plain spy on
+ * `text()` alone wouldn't catch a hypothetical future switch to a different
+ * body-reading member). */
+function trackedNonOkResponse(
+  status: number,
+  body: string,
+): { response: Response; bodyAccessed: () => boolean } {
+  const real = new Response(body, { status });
+  let accessed = false;
+  const guardedProps = new Set([
+    "body",
+    "text",
+    "arrayBuffer",
+    "blob",
+    "json",
+    "bytes",
+  ]);
+  const response = new Proxy(real, {
+    get(target, prop) {
+      if (typeof prop === "string" && guardedProps.has(prop)) {
+        accessed = true;
+      }
+      // Reflect.get with the PROXY as receiver breaks native accessors that
+      // brand-check `this` against a real Response instance (e.g. `ok`'s
+      // internal private-field check) -- use `target` as the receiver so
+      // those getters run against the real underlying Response.
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return {
+    response: response as unknown as Response,
+    bodyAccessed: () => accessed,
+  };
+}
+
+test("BRK-008 review fix B1: with no onBodyParseDiagnostic registered, a non-2xx response's body is never read at all (proxied Response pins zero access) and the call returns promptly", async () => {
+  const provider = await alwaysValidTokenProvider();
+  const { response, bodyAccessed } = trackedNonOkResponse(
+    404,
+    "<html>404</html>",
+  );
+  const start = Date.now();
+  const result = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => response,
+    // Deliberately no onBodyParseDiagnostic.
+  }).listPortfolios();
+  const elapsedMs = Date.now() - start;
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.kind, "invalid_response");
+  assert.equal(bodyAccessed(), false);
+  assert.ok(elapsedMs < 200, `expected a prompt return, took ${elapsedMs}ms`);
+});
+
+/** A `Response`-shaped object whose body stream's `read()` never resolves --
+ * simulates a stalled/slow-drip error body. Only the members `client.ts`
+ * actually reads are provided. */
+function stalledBodyNonOkResponse(status: number): Response {
+  const reader = {
+    read: () => new Promise<never>(() => {}), // never resolves
+    cancel: async () => {},
+  };
+  const body = { getReader: () => reader };
+  return {
+    ok: false,
+    status,
+    redirected: false,
+    headers: new Headers({ "content-type": "text/html; charset=utf-8" }),
+    body,
+  } as unknown as Response;
+}
+
+test("BRK-008 review fix B1: a stalled non-2xx body (read() never resolves) still returns a typed result promptly, bounded by the read's own race timeout, when onBodyParseDiagnostic IS registered", async () => {
+  const provider = await alwaysValidTokenProvider();
+  const calls: Array<{ endpoint: string; bodyBytes: number }> = [];
+  const start = Date.now();
+  const result = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => stalledBodyNonOkResponse(404),
+    onBodyParseDiagnostic: (endpoint, diagnostic) => {
+      calls.push({ endpoint, bodyBytes: diagnostic.bodyBytes });
+    },
+  }).listPortfolios();
+  const elapsedMs = Date.now() - start;
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.kind, "invalid_response");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].endpoint, "listPortfolios");
+  assert.equal(calls[0].bodyBytes, 0); // nothing was read before the stall
+  // Bounded by the read's own ~1s race timeout, not the request's much
+  // longer default timeoutMs (8s) and nowhere near "never resolves".
+  assert.ok(
+    elapsedMs < 3_000,
+    `expected the read's own race timeout to bound this, took ${elapsedMs}ms`,
+  );
+});
+
+test("BRK-008 review fix B1: a non-2xx body far larger than the byte bound is capped, never buffered unbounded", async () => {
+  const provider = await alwaysValidTokenProvider();
+  const HUGE_BODY = "x".repeat(50_000); // far beyond the 4,096-byte cap
+  const calls: Array<{ bodyBytes: number }> = [];
+  const result = await createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => new Response(HUGE_BODY, { status: 404 }),
+    onBodyParseDiagnostic: (_endpoint, diagnostic) => {
+      calls.push({ bodyBytes: diagnostic.bodyBytes });
+    },
+  }).listPortfolios();
+  assert.equal(result.ok, false);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].bodyBytes, 4_096);
 });
 
 test("BRK-008 onBodyParseDiagnostic: a throwing callback is caught and discarded, never failing the parse result it reacted to", async () => {
