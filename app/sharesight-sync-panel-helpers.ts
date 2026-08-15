@@ -68,7 +68,14 @@ function statusLabel(status: string): string {
  * 2: a reused batch that is already `committed` must never read as though
  * there is fresh pending work to stage/review), row count, and a
  * skipped-payout warning naming where to find details -- never silently
- * dropping the skipped count. */
+ * dropping the skipped count.
+ *
+ * BRK-005C: `skippedPayouts` now counts only FUTURE-dated (not-yet-paid)
+ * unconfirmed payouts -- a past-dated unconfirmed payout stages as a real
+ * row instead (`domain/sharesight-sync/transform.ts`'s BRK-005C
+ * correction), so the copy below says "future-dated" rather than the prior
+ * "unconfirmed" wording, which would otherwise wrongly imply every
+ * unconfirmed payout was skipped. */
 export function formatSyncResultMessage(result: SharesightSyncSuccess): string {
   const batchLine = result.reused
     ? `No changes since last sync -- reused batch ${result.batchId} (status: ${statusLabel(result.batchStatus)}).`
@@ -76,7 +83,7 @@ export function formatSyncResultMessage(result: SharesightSyncSuccess): string {
   const rowsLine = `${result.rowsStaged} row${result.rowsStaged === 1 ? "" : "s"} staged.`;
   const skippedLine =
     result.skippedPayouts > 0
-      ? ` ${result.skippedPayouts} payout${result.skippedPayouts === 1 ? "" : "s"} skipped as unconfirmed -- details in the batch preview.`
+      ? ` ${result.skippedPayouts} future-dated payout${result.skippedPayouts === 1 ? "" : "s"} skipped -- not yet paid; details in the batch preview.`
       : "";
   return `${batchLine} ${rowsLine}${skippedLine}`;
 }

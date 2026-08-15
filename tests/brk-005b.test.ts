@@ -143,7 +143,7 @@ test("BRK-005B: formatSyncResultMessage surfaces a skipped-payout count with a p
     skippedPayouts: 1,
     reused: false,
   });
-  assert.match(one, /1 payout skipped as unconfirmed/);
+  assert.match(one, /1 future-dated payout skipped/);
   assert.match(one, /details in the batch preview/);
 
   const many = formatSyncResultMessage({
@@ -154,7 +154,7 @@ test("BRK-005B: formatSyncResultMessage surfaces a skipped-payout count with a p
     skippedPayouts: 4,
     reused: false,
   });
-  assert.match(many, /4 payouts skipped as unconfirmed/);
+  assert.match(many, /4 future-dated payouts skipped/);
 });
 
 test("BRK-005B: formatSyncResultMessage never mentions skipped payouts when there are none", () => {

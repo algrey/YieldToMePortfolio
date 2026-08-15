@@ -346,11 +346,14 @@ test("BRK-005: no usable signal at all (no value, 'other' type, unrecognized cod
 // Transform: trades/payouts -> staged rows
 // ---------------------------------------------------------------------------
 
+const FIXED_NOW = "2026-08-13T00:00:00.000Z";
+
 test("BRK-005: a live-shaped buy trade transforms into a staged transaction row with positive shares and no fabricated FX", () => {
   const result = transformSharesightSync({
     portfolioName: "Main",
     trades: [fakeTrade({ quantityDecimal: "5", priceDecimal: "10" })],
     payouts: [],
+    now: FIXED_NOW,
   });
   assert.equal(result.rows.length, 1);
   const row = result.rows[0]!;
@@ -380,6 +383,7 @@ test("BRK-005: a sell trade normalizes a signed negative quantity to a positive 
       }),
     ],
     payouts: [],
+    now: FIXED_NOW,
   });
   const row = result.rows[0]!;
   assert.equal(row.normalized.type, "sell");
@@ -397,6 +401,7 @@ test("BRK-005: an unmapped/ambiguous trade type stages an unsupported row with a
       }),
     ],
     payouts: [],
+    now: FIXED_NOW,
   });
   assert.equal(result.rows.length, 1);
   const row = result.rows[0]!;
@@ -414,6 +419,7 @@ test("BRK-005: a payout with a confirmed id stages a totals-only dividend row --
     payouts: [
       fakePayout({ amountDecimal: "2.50", frankingCreditsDecimal: "1.07" }),
     ],
+    now: FIXED_NOW,
   });
   assert.equal(result.rows.length, 1);
   const row = result.rows[0]!;
@@ -424,25 +430,17 @@ test("BRK-005: a payout with a confirmed id stages a totals-only dividend row --
   assert.equal(row.normalized.totalCashDecimal, "2.50");
   assert.equal(row.normalized.totalFrankingDecimal, "1.07");
   assert.equal(row.normalized.localTradeDate, "2026-08-05");
-  assert.equal(row.fingerprint, "sharesight-payout:payout-1");
-  assert.equal(result.summary.dividendRows, 1);
-});
-
-test("BRK-005: a null-id (unconfirmed) payout is SKIPPED with a warning issue, never staged as a fact", () => {
-  const result = transformSharesightSync({
-    portfolioName: "Main",
-    trades: [],
-    payouts: [fakePayout({ id: null })],
-  });
   assert.equal(
-    result.rows.length,
-    0,
-    "expected the null-id payout not to be staged",
+    row.fingerprint,
+    "sharesight-payout:sp-1:holding-1:2026-08-05",
+    "identity key: sharesight-payout:<sharesightPortfolioId>:<holdingId>:<paidOnDate> -- the SAME scheme a null-id payout uses, confirmed id plays no part in it",
   );
-  assert.equal(result.summary.dividendRows, 0);
-  assert.equal(result.issues.length, 1);
-  assert.equal(result.issues[0]?.code, "SHARESIGHT_PAYOUT_UNCONFIRMED");
-  assert.equal(result.issues[0]?.severity, "warning");
+  assert.match(
+    row.normalized.notes ?? "",
+    /Sharesight payout id payout-1 \(confirmed there\)/,
+    "the confirmed id is no longer part of identity, but must still surface in notes for preview/audit",
+  );
+  assert.equal(result.summary.dividendRows, 1);
 });
 
 test("BRK-005: a null franking-credits payout leaves totalFrankingDecimal unknown (never zero)", () => {
@@ -450,10 +448,308 @@ test("BRK-005: a null franking-credits payout leaves totalFrankingDecimal unknow
     portfolioName: "Main",
     trades: [],
     payouts: [fakePayout({ frankingCreditsDecimal: null })],
+    now: FIXED_NOW,
   });
   const row = result.rows[0]!;
   assert.equal(row.normalized.totalCashDecimal, "2.50");
   assert.equal(row.normalized.totalFrankingDecimal, null);
+});
+
+// ---------------------------------------------------------------------------
+// BRK-005C (owner decision, 2026-08-16): a null-id payout's `paidOnDate`
+// relative to the sync's injected `now` decides past (stage as a real,
+// "unconfirmed in Sharesight" record) vs future (still skip with a warning)
+// -- correcting the original BRK-005 inference that EVERY null-id payout was
+// merely a not-yet-paid distribution. See `transform.ts`'s BRK-005C header
+// comment for the full story (99 of 118 of the owner's real payouts were
+// null-id, all real income Sharesight itself counts in its tax reports).
+// ---------------------------------------------------------------------------
+
+test("BRK-005C: a PAST-dated null-id payout stages as a real totals-only dividend row with a holding+paidOn identity key and an 'unconfirmed in Sharesight' provenance note", () => {
+  const result = transformSharesightSync({
+    portfolioName: "Main",
+    trades: [],
+    payouts: [
+      fakePayout({
+        id: null,
+        paidOnDate: "2026-08-05",
+        amountDecimal: "2.50",
+        frankingCreditsDecimal: "1.07",
+      }),
+    ],
+    now: FIXED_NOW,
+  });
+  assert.equal(
+    result.issues.length,
+    0,
+    "a past-dated null-id payout must not raise the skip warning",
+  );
+  assert.equal(result.rows.length, 1);
+  const row = result.rows[0]!;
+  assert.equal(row.normalized.type, "dividend");
+  assert.equal(row.normalized.id, null, "no confirmed Sharesight id exists");
+  assert.equal(row.normalized.totalCashDecimal, "2.50");
+  assert.equal(row.normalized.totalFrankingDecimal, "1.07");
+  assert.equal(
+    row.fingerprint,
+    "sharesight-payout:sp-1:holding-1:2026-08-05",
+    "identity key: sharesight-payout:<sharesightPortfolioId>:<holdingId>:<paidOnDate> -- the SAME scheme a confirmed payout uses (BRK-005C: id plays no part in identity)",
+  );
+  assert.equal(
+    row.issues.length,
+    0,
+    "no collision -- a single payout for this key",
+  );
+  assert.match(row.normalized.notes ?? "", /unconfirmed in Sharesight/);
+  assert.equal(result.summary.dividendRows, 1);
+});
+
+test("BRK-005C: a null-id payout's own comments are preserved ALONGSIDE the provenance note, not overwritten", () => {
+  const result = transformSharesightSync({
+    portfolioName: "Main",
+    trades: [],
+    payouts: [
+      fakePayout({
+        id: null,
+        paidOnDate: "2026-08-05",
+        comments: "reinvested per DRP",
+      }),
+    ],
+    now: FIXED_NOW,
+  });
+  const row = result.rows[0]!;
+  assert.match(row.normalized.notes ?? "", /unconfirmed in Sharesight/);
+  assert.match(row.normalized.notes ?? "", /reinvested per DRP/);
+});
+
+test("BRK-005C: a confirmed payout's own Sharesight id surfaces in notes (visible in preview/audit) even though it is no longer part of identity", () => {
+  const result = transformSharesightSync({
+    portfolioName: "Main",
+    trades: [],
+    payouts: [
+      fakePayout({
+        id: "payout-77",
+        paidOnDate: "2026-08-05",
+        comments: "DRP",
+      }),
+    ],
+    now: FIXED_NOW,
+  });
+  const row = result.rows[0]!;
+  assert.match(
+    row.normalized.notes ?? "",
+    /Sharesight payout id payout-77 \(confirmed there\)/,
+  );
+  assert.match(row.normalized.notes ?? "", /DRP/);
+  assert.doesNotMatch(row.normalized.notes ?? "", /unconfirmed in Sharesight/);
+});
+
+test("BRK-005C: a null-id payout paid on the SAME calendar day as now counts as past (staged), not future", () => {
+  const result = transformSharesightSync({
+    portfolioName: "Main",
+    trades: [],
+    payouts: [fakePayout({ id: null, paidOnDate: "2026-08-13" })],
+    now: FIXED_NOW,
+  });
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.issues.length, 0);
+});
+
+test("BRK-005C: a FUTURE-dated null-id payout is still SKIPPED, with the warning reworded to say future-dated/not-yet-paid rather than implying every unconfirmed payout is dropped", () => {
+  const result = transformSharesightSync({
+    portfolioName: "Main",
+    trades: [],
+    payouts: [fakePayout({ id: null, paidOnDate: "2099-01-01" })],
+    now: FIXED_NOW,
+  });
+  assert.equal(
+    result.rows.length,
+    0,
+    "expected the future-dated null-id payout not to be staged",
+  );
+  assert.equal(result.summary.dividendRows, 0);
+  assert.equal(result.issues.length, 1);
+  assert.equal(result.issues[0]?.code, "SHARESIGHT_PAYOUT_UNCONFIRMED");
+  assert.equal(result.issues[0]?.severity, "warning");
+  assert.match(result.issues[0]?.message ?? "", /future-dated/);
+  assert.doesNotMatch(
+    result.issues[0]?.message ?? "",
+    /unconfirmed\/declared/,
+    "must not use the old wording that implied every unconfirmed payout is skipped",
+  );
+});
+
+test("BRK-005C: confirmed (non-null-id) payouts are completely unaffected by the past/future classification -- they stage regardless of paidOnDate", () => {
+  const future = transformSharesightSync({
+    portfolioName: "Main",
+    trades: [],
+    payouts: [
+      fakePayout({
+        id: "payout-future",
+        holdingId: "holding-future",
+        paidOnDate: "2099-01-01",
+      }),
+    ],
+    now: FIXED_NOW,
+  });
+  assert.equal(future.rows.length, 1);
+  assert.equal(future.issues.length, 0);
+  assert.equal(
+    future.rows[0]?.fingerprint,
+    "sharesight-payout:sp-1:holding-future:2099-01-01",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// BRK-005C review round FAIL, addressed (Orchestrator ruling 2026-08-16):
+// B1 (confirmation flipped id-key<->natural-key, causing a double-commit
+// once Sharesight confirmed an already-synced-and-committed payout) is
+// closed by identity NEVER depending on `id` (tested above: a confirmed and
+// an unconfirmed payout for the SAME holding+date share the identical key).
+// B2 (an invented content-sorted ordinal to disambiguate a collision) and B3
+// (a byte-identical duplicate pair silently staging as two accepted facts)
+// are closed by removing disambiguation entirely: a collision now fails
+// CLOSED and VISIBLY.
+// ---------------------------------------------------------------------------
+
+test("BRK-005C: two payouts colliding on the SAME identity key (same holding, same paid_on -- e.g. an interim and a special dividend) are BOTH staged but EACH carries a blocking error issue, never silently auto-disambiguated", () => {
+  const interim = fakePayout({
+    id: null,
+    holdingId: "holding-1",
+    paidOnDate: "2026-08-05",
+    amountDecimal: "2.50",
+    frankingCreditsDecimal: "1.07",
+  });
+  const special = fakePayout({
+    id: null,
+    holdingId: "holding-1",
+    paidOnDate: "2026-08-05",
+    amountDecimal: "9.99",
+    frankingCreditsDecimal: "3.00",
+  });
+  const key = "sharesight-payout:sp-1:holding-1:2026-08-05";
+
+  const result = transformSharesightSync({
+    portfolioName: "Main",
+    trades: [],
+    payouts: [interim, special],
+    now: FIXED_NOW,
+  });
+  assert.equal(
+    result.rows.length,
+    2,
+    "both colliding payouts are staged for visibility, never silently dropped",
+  );
+  for (const row of result.rows) {
+    assert.equal(
+      row.fingerprint,
+      key,
+      "no ordinal/disambiguation -- both rows share the LITERAL identity key",
+    );
+    assert.equal(row.issues.length, 1);
+    const issue = row.issues[0]!;
+    assert.equal(issue.code, "SHARESIGHT_PAYOUT_KEY_COLLISION");
+    assert.equal(issue.severity, "error");
+    assert.match(issue.message, /holding-1/);
+    assert.match(issue.message, /2026-08-05/);
+    assert.match(issue.message, /2/, "names the collision count");
+    // Round-2 review: the ORIGINAL copy told the owner to "reverse this
+    // batch and enter the dividend(s) manually" -- both verified false (an
+    // uncommitted batch cannot be reversed at all; manual entry does not
+    // stop the NEXT sync from re-staging the same ambiguity). The message
+    // must point at the remedy that actually works and must say the block
+    // persists across future syncs, not just this one.
+    assert.doesNotMatch(
+      issue.message,
+      /reverse this batch/i,
+      "an uncommitted batch cannot be reversed -- this instruction must not appear",
+    );
+    assert.doesNotMatch(
+      issue.message,
+      /enter the dividend/i,
+      "manual entry does not fix a Sharesight-side ambiguity that every future sync re-fetches -- this instruction must not appear",
+    );
+    assert.match(
+      issue.message,
+      /Sharesight itself/i,
+      "must point at resolving the duplicate inside Sharesight, the only remedy that works",
+    );
+    assert.match(
+      issue.message,
+      /re-sync/i,
+      "must instruct re-syncing after the Sharesight-side fix",
+    );
+    assert.match(
+      issue.message,
+      /future sync/i,
+      "must state the block persists across every subsequent sync, not just this batch",
+    );
+  }
+});
+
+test("BRK-005C: a byte-identical duplicate payout pair (same holding, same paid_on, same everything) hits the EXACT SAME collision path as two economically-different payouts -- no special-cased silent staging", () => {
+  const duplicate = fakePayout({ id: null, paidOnDate: "2026-08-05" });
+  const result = transformSharesightSync({
+    portfolioName: "Main",
+    trades: [],
+    payouts: [duplicate, { ...duplicate }],
+    now: FIXED_NOW,
+  });
+  assert.equal(result.rows.length, 2);
+  for (const row of result.rows) {
+    assert.equal(row.issues[0]?.code, "SHARESIGHT_PAYOUT_KEY_COLLISION");
+    assert.equal(row.issues[0]?.severity, "error");
+  }
+});
+
+test("BRK-005C: a confirmed payout and an unconfirmed (null-id) payout for the SAME holding+date ALSO collide -- collision detection is identity-based, not id-presence-based", () => {
+  const confirmed = fakePayout({
+    id: "payout-confirmed",
+    holdingId: "holding-1",
+    paidOnDate: "2026-08-05",
+  });
+  const unconfirmed = fakePayout({
+    id: null,
+    holdingId: "holding-1",
+    paidOnDate: "2026-08-05",
+  });
+  const result = transformSharesightSync({
+    portfolioName: "Main",
+    trades: [],
+    payouts: [confirmed, unconfirmed],
+    now: FIXED_NOW,
+  });
+  assert.equal(result.rows.length, 2);
+  for (const row of result.rows) {
+    assert.equal(row.issues[0]?.code, "SHARESIGHT_PAYOUT_KEY_COLLISION");
+  }
+});
+
+test("BRK-005C: a future-dated null-id payout never participates in collision counting -- it is skipped entirely, so it cannot collide with a payout that DOES stage for the same holding+date", () => {
+  const staged = fakePayout({
+    id: null,
+    holdingId: "holding-1",
+    paidOnDate: "2026-08-05",
+  });
+  const futureSameKey = fakePayout({
+    id: null,
+    holdingId: "holding-1",
+    paidOnDate: "2099-01-01",
+  });
+  const result = transformSharesightSync({
+    portfolioName: "Main",
+    trades: [],
+    payouts: [staged, futureSameKey],
+    now: FIXED_NOW,
+  });
+  assert.equal(result.rows.length, 1);
+  assert.equal(
+    result.rows[0]?.issues.length,
+    0,
+    "the staged payout has no collision -- the future-dated one never entered the key count",
+  );
+  assert.equal(result.issues.length, 1);
+  assert.equal(result.issues[0]?.code, "SHARESIGHT_PAYOUT_UNCONFIRMED");
 });
 
 // ---------------------------------------------------------------------------
@@ -694,7 +990,7 @@ test("BRK-005: a cross-user portfolio id is denied for listing/linking/syncing (
 // history round trip with a mixed batch (buy trade + payout).
 // ---------------------------------------------------------------------------
 
-test("BRK-005: end-to-end stage->preview->ready->commit->derived-history round trip for a mixed trade+payout sync", async () => {
+test("BRK-005/BRK-005C: end-to-end stage->preview->ready->commit->derived-history round trip for a mixed trade+confirmed-payout+past-unconfirmed-payout+future-unconfirmed-payout sync", async () => {
   const database = await migratedDatabase();
   const { client, sharesightClient } = await linkedFixture(database, {
     portfolios: [fakePortfolio()],
@@ -712,19 +1008,52 @@ test("BRK-005: end-to-end stage->preview->ready->commit->derived-history round t
         amountDecimal: "2.50",
         frankingCreditsDecimal: "1.07",
       }),
-      fakePayout({ id: null, symbol: "ABC" }),
+      // BRK-005C: past-dated (paidOnDate "2026-08-05", before the injected
+      // "now" below) and null-id -- now stages as a real record, not
+      // skipped. A DIFFERENT holdingId from the confirmed payout above
+      // (BRK-005C identity is holding+paidOn, not symbol+market -- two
+      // payouts on the SAME date for DIFFERENT holdings never collide;
+      // the same-holding/same-date collision path has its own dedicated
+      // tests).
+      fakePayout({
+        id: null,
+        symbol: "ABC",
+        holdingId: "holding-2",
+        paidOnDate: "2026-08-05",
+        amountDecimal: "1.25",
+        frankingCreditsDecimal: "0.54",
+      }),
+      // Still-future-dated null-id payout -- the ONLY case that still
+      // skips with a warning after BRK-005C.
+      fakePayout({
+        id: null,
+        symbol: "ABC",
+        holdingId: "holding-3",
+        paidOnDate: "2099-01-01",
+      }),
     ],
   });
 
   const synced = await runSharesightSyncWithContext(
     { client, userId: "user-a", requestId: "sync-req" },
     "portfolio-a",
-    { integration: { enabled: true, client: sharesightClient } },
+    {
+      integration: { enabled: true, client: sharesightClient },
+      now: () => FIXED_NOW,
+    },
   );
   assert.equal(synced.ok, true);
   if (!synced.ok) return;
-  assert.equal(synced.rowsStaged, 2);
-  assert.equal(synced.skippedPayouts, 1);
+  assert.equal(
+    synced.rowsStaged,
+    3,
+    "trade + confirmed payout + past-dated unconfirmed payout",
+  );
+  assert.equal(
+    synced.skippedPayouts,
+    1,
+    "only the future-dated unconfirmed payout is skipped",
+  );
 
   const batch = await createOwnedImportStagingRepository(client).get(
     "user-a",
@@ -749,16 +1078,38 @@ test("BRK-005: end-to-end stage->preview->ready->commit->derived-history round t
 
   const manualRepo = createDividendManualRecordRepository(client);
   const records = await manualRepo.list("user-a", "portfolio-a");
-  assert.equal(records.length, 1);
-  const record = records[0]!;
-  assert.equal(record.sharesDecimal, null);
-  assert.equal(record.dividendPerShareDecimal, null);
-  assert.equal(record.totalCashDecimal, "2.50");
-  assert.equal(record.totalFrankingDecimal, "1.07");
-  assert.equal(record.importBatchId, synced.batchId);
   assert.equal(
-    record.sourceReference,
-    "import-fingerprint:sharesight-payout:payout-e2e",
+    records.length,
+    2,
+    "the confirmed payout AND the past-dated unconfirmed payout both committed as manual records",
+  );
+  const confirmedRecord = records.find(
+    (candidate) => candidate.totalCashDecimal === "2.50",
+  );
+  assert.ok(confirmedRecord);
+  assert.equal(confirmedRecord?.sharesDecimal, null);
+  assert.equal(confirmedRecord?.dividendPerShareDecimal, null);
+  assert.equal(confirmedRecord?.totalFrankingDecimal, "1.07");
+  assert.equal(confirmedRecord?.importBatchId, synced.batchId);
+  assert.equal(
+    confirmedRecord?.sourceReference,
+    "import-fingerprint:sharesight-payout:sp-1:holding-1:2026-08-05",
+    "identity key: holding+paidOn -- the confirmed payout's own Sharesight id (payout-e2e) plays no part in it",
+  );
+
+  const unconfirmedRecord = records.find(
+    (candidate) => candidate.totalCashDecimal === "1.25",
+  );
+  assert.ok(
+    unconfirmedRecord,
+    "the past-dated null-id payout must have committed as a real manual record",
+  );
+  assert.equal(unconfirmedRecord?.totalFrankingDecimal, "0.54");
+  assert.equal(unconfirmedRecord?.importBatchId, synced.batchId);
+  assert.equal(
+    unconfirmedRecord?.sourceReference,
+    "import-fingerprint:sharesight-payout:sp-1:holding-2:2026-08-05",
+    "identity key for the id-free unconfirmed payout: same scheme, its own holdingId",
   );
 
   const derived = deriveDividendHistoryForSecurity({
@@ -767,25 +1118,31 @@ test("BRK-005: end-to-end stage->preview->ready->commit->derived-history round t
     events: [],
     overrides: [],
     receipts: [],
-    manualRecords: [
-      {
-        id: record.id,
-        paymentDate: record.paymentDate,
-        sharesDecimal: record.sharesDecimal,
-        dividendPerShareDecimal: record.dividendPerShareDecimal,
-        frankingCreditPerShareDecimal: record.frankingCreditPerShareDecimal,
-        totalCashDecimal: record.totalCashDecimal,
-        totalFrankingDecimal: record.totalFrankingDecimal,
-        importBatchId: record.importBatchId,
-      },
-    ],
+    manualRecords: records.map((record) => ({
+      id: record.id,
+      paymentDate: record.paymentDate,
+      sharesDecimal: record.sharesDecimal,
+      dividendPerShareDecimal: record.dividendPerShareDecimal,
+      frankingCreditPerShareDecimal: record.frankingCreditPerShareDecimal,
+      totalCashDecimal: record.totalCashDecimal,
+      totalFrankingDecimal: record.totalFrankingDecimal,
+      importBatchId: record.importBatchId,
+    })),
     transactions: [],
     defaultFrankingPercentDecimal: null,
     today: "2026-08-13",
   });
-  assert.equal(derived.length, 1);
-  assert.equal(derived[0]?.source, "imported");
-  assert.equal(derived[0]?.cashDecimal, "2.50");
+  assert.equal(derived.length, 2);
+  // The formerly-skipped, now-staged unconfirmed payout must derive at the
+  // SAME "imported" tier as the confirmed one -- an ordinary totals-based
+  // imported fact, never a lesser/estimated tier just because Sharesight
+  // itself has not confirmed it.
+  for (const row of derived) {
+    assert.equal(row.source, "imported");
+  }
+  const derivedUnconfirmed = derived.find((row) => row.cashDecimal === "1.25");
+  assert.ok(derivedUnconfirmed);
+  assert.equal(derivedUnconfirmed?.frankingTotalDecimal, "0.54");
 
   // Watermark: last_synced_at moves on successful STAGING (already true by
   // the time we got a batch id above); confirm it is actually persisted.
@@ -874,6 +1231,191 @@ test("BRK-005: re-running a sync with unchanged Sharesight data reuses the SAME 
     "an unchanged fetch must resolve to the SAME batch, not a duplicate",
   );
   assert.equal(second.reused, true);
+});
+
+test("BRK-005C: two payouts colliding on the SAME identity key permanently block that batch's readiness -- fail closed, and a re-sync of the identical (still-colliding) data does not silently work around it", async () => {
+  const database = await migratedDatabase();
+  const interim = fakePayout({
+    id: null,
+    holdingId: "holding-1",
+    paidOnDate: "2026-08-05",
+    amountDecimal: "2.50",
+    frankingCreditsDecimal: "1.07",
+  });
+  const special = fakePayout({
+    id: null,
+    holdingId: "holding-1",
+    paidOnDate: "2026-08-05",
+    amountDecimal: "9.99",
+    frankingCreditsDecimal: "3.00",
+  });
+  const { client, sharesightClient } = await linkedFixture(database, {
+    portfolios: [fakePortfolio()],
+    trades: [],
+    payouts: [interim, special],
+  });
+  const now = () => FIXED_NOW;
+
+  const synced = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: { enabled: true, client: sharesightClient }, now },
+  );
+  assert.equal(synced.ok, true);
+  if (!synced.ok) return;
+  assert.equal(
+    synced.rowsStaged,
+    2,
+    "both colliding payouts are staged for visibility, never silently dropped",
+  );
+
+  const staging = createOwnedImportStagingRepository(client);
+  const storedIssues = await staging.listIssues("user-a", synced.batchId);
+  const collisionIssues = storedIssues.filter(
+    (issue) => issue.code === "SHARESIGHT_PAYOUT_KEY_COLLISION",
+  );
+  assert.equal(
+    collisionIssues.length,
+    2,
+    "each colliding row persisted its OWN error issue, row-linked",
+  );
+  for (const issue of collisionIssues) {
+    assert.equal(issue.severity, "error");
+    assert.equal(issue.resolvedAt, null);
+    assert.notEqual(issue.rowId, null, "row-linked, not a batch-level issue");
+  }
+
+  const batch = await staging.get("user-a", synced.batchId);
+  assert.ok(batch);
+  const previewVersion = await currentPreviewVersion(
+    client,
+    "user-a",
+    synced.batchId,
+  );
+  const ready = await markImportReadyWithContext(
+    { client, userId: "user-a" },
+    synced.batchId,
+    { expectedVersion: batch!.version, expectedPreviewVersion: previewVersion },
+  );
+  assert.equal(
+    ready.ok,
+    false,
+    "a collision must block readiness, never silently proceed to commit",
+  );
+  if (ready.ok) return;
+  assert.equal(ready.status, 409);
+
+  // Re-syncing the identical (still-colliding) data again does not resolve
+  // it either -- fail-closed cannot be worked around by re-running the sync.
+  const resynced = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    { integration: { enabled: true, client: sharesightClient }, now },
+  );
+  assert.equal(resynced.ok, true);
+  if (!resynced.ok) return;
+  assert.equal(
+    resynced.batchId,
+    synced.batchId,
+    "an unchanged (still-colliding) fetch reuses the same still-blocked batch, not a fresh attempt",
+  );
+
+  const manualRepo = createDividendManualRecordRepository(client);
+  assert.equal(
+    (await manualRepo.list("user-a", "portfolio-a")).length,
+    0,
+    "nothing from this batch ever committed",
+  );
+});
+
+test("BRK-005C (B1 closed): a payout synced+committed while UNCONFIRMED, then CONFIRMED by Sharesight before the next sync, produces NO new record -- the identity key is unchanged by confirmation", async () => {
+  const database = await migratedDatabase();
+  const unconfirmed = fakePayout({
+    id: null,
+    holdingId: "holding-1",
+    paidOnDate: "2026-08-05",
+    amountDecimal: "2.50",
+    frankingCreditsDecimal: "1.07",
+  });
+  const { client, sharesightClient } = await linkedFixture(database, {
+    portfolios: [fakePortfolio()],
+    trades: [],
+    payouts: [unconfirmed],
+  });
+  const now = () => FIXED_NOW;
+
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: { enabled: true, client: sharesightClient }, now },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  assert.equal(first.rowsStaged, 1);
+  const firstBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    first.batchId,
+  );
+  await commitBatch(
+    client,
+    first.batchId,
+    "brk-005c-confirm-commit",
+    firstBatch!.version,
+  );
+
+  const manualRepo = createDividendManualRecordRepository(client);
+  const beforeConfirm = await manualRepo.list("user-a", "portfolio-a");
+  assert.equal(beforeConfirm.length, 1);
+  const originalSourceReference = beforeConfirm[0]!.sourceReference;
+  assert.equal(
+    originalSourceReference,
+    "import-fingerprint:sharesight-payout:sp-1:holding-1:2026-08-05",
+  );
+
+  // Sharesight confirms the SAME real-world payout before the next sync --
+  // same holding, same paid_on, same amounts, but now carrying a real id.
+  // The OLD (pre-BRK-005C-review-fix) scheme would have flipped this row's
+  // identity from the natural key to `sharesight-payout:<id>` here -- the
+  // reviewer's exact B1 repro.
+  const confirmedClient = fakeSharesightClient({
+    portfolios: [fakePortfolio()],
+    trades: [],
+    payouts: [
+      fakePayout({
+        id: "payout-now-confirmed",
+        holdingId: "holding-1",
+        paidOnDate: "2026-08-05",
+        amountDecimal: "2.50",
+        frankingCreditsDecimal: "1.07",
+      }),
+    ],
+  });
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    { integration: { enabled: true, client: confirmedClient }, now },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  // The Sharesight `id` is not a digest field (`canonicalRowDigestFields`),
+  // and every other value-bearing field is unchanged, so this resolves to
+  // the SAME already-committed batch -- there is nothing new to commit at
+  // all, which is itself part of B1 being closed (the old scheme's changed
+  // fingerprint made this look like a genuinely new fetch).
+  assert.equal(
+    second.reused,
+    true,
+    "confirmation alone (no value change) must not even look like a new fetch",
+  );
+  assert.equal(second.batchId, first.batchId);
+
+  const afterConfirm = await manualRepo.list("user-a", "portfolio-a");
+  assert.equal(
+    afterConfirm.length,
+    1,
+    "NO new record -- the confirmation transition must never double-commit (B1 closed)",
+  );
+  assert.equal(afterConfirm[0]?.sourceReference, originalSourceReference);
 });
 
 // BRK-005B review finding B2 (BLOCKING, backend gap reachable only through
@@ -1064,10 +1606,14 @@ test("BRK-005: reviewer B1 repro -- a Sharesight-side correction to an already-s
 
 test("BRK-005: reviewer PROBE 3 -- the reused-batch path reports the STORED rowsStaged/skippedPayouts against a KNOWN-correct absolute count (1 skipped payout), not merely self-consistent with a possibly-buggy DB read, and the omission's detail (symbol/paid_on) is visible in the stored issue", async () => {
   const database = await migratedDatabase();
+  // BRK-005C: must stay FUTURE-dated relative to the injected `now` below --
+  // a past-dated null-id payout now stages as a real record instead of
+  // skipping (see the BRK-005C tests above), which would defeat this
+  // test's purpose (it specifically probes the SKIP path's persistence).
   const skippedPayout = fakePayout({
     id: null,
     symbol: "XYZ",
-    paidOnDate: "2026-08-05",
+    paidOnDate: "2099-01-01",
   });
   const fixtures = {
     portfolios: [fakePortfolio()],
@@ -1080,7 +1626,7 @@ test("BRK-005: reviewer PROBE 3 -- the reused-batch path reports the STORED rows
   const first = await runSharesightSyncWithContext(
     { client, userId: "user-a", requestId: "sync-1" },
     "portfolio-a",
-    { integration },
+    { integration, now: () => FIXED_NOW },
   );
   assert.equal(first.ok, true);
   if (!first.ok) return;
@@ -1116,14 +1662,14 @@ test("BRK-005: reviewer PROBE 3 -- the reused-batch path reports the STORED rows
   // The omission's own detail (which security, which date) must reach
   // preview -- not just an anonymous "something was skipped" count.
   assert.match(firstIssue?.message ?? "", /XYZ/);
-  assert.match(firstIssue?.message ?? "", /2026-08-05/);
+  assert.match(firstIssue?.message ?? "", /2099-01-01/);
 
   assert.equal(first.skippedPayouts, 1);
 
   const second = await runSharesightSyncWithContext(
     { client, userId: "user-a", requestId: "sync-2" },
     "portfolio-a",
-    { integration },
+    { integration, now: () => FIXED_NOW },
   );
   assert.equal(second.ok, true);
   if (!second.ok) return;
@@ -1343,6 +1889,7 @@ test("BRK-005: cross-batch duplicate trade/dividend rows across two sync-shaped 
     portfolioName: "Main",
     trades: [],
     payouts: [fakePayout({ id: "payout-dup" })],
+    now: FIXED_NOW,
   });
   const row = transformed.rows[0]!;
   const insertRow = (batchId: string, rowId: string) => {

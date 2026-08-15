@@ -47,10 +47,15 @@ export type ImportIssueCode =
   | "ROW_LIMIT_EXCEEDED"
   | "FIELD_LIMIT_EXCEEDED"
   | "CSV_DECODE_FAILED"
-  // BRK-005: a Sharesight payout with no confirmed id (an unconfirmed/
-  // declared distribution) was skipped rather than staged -- see
+  // BRK-005: a future-dated Sharesight payout with no confirmed id (not yet
+  // paid) was skipped rather than staged -- see
   // `domain/sharesight-sync/transform.ts`.
-  | "SHARESIGHT_PAYOUT_UNCONFIRMED";
+  | "SHARESIGHT_PAYOUT_UNCONFIRMED"
+  // BRK-005C: two or more Sharesight payouts in one fetch share the SAME
+  // identity key (same holding, same paid_on) -- staged for visibility but
+  // blocked from readiness until the owner resolves it manually, never
+  // auto-disambiguated -- see `domain/sharesight-sync/transform.ts`.
+  | "SHARESIGHT_PAYOUT_KEY_COLLISION";
 
 export type ImportFieldName =
   | "id"

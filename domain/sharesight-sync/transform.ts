@@ -15,7 +15,14 @@
 // (`totalCashDecimal`/`totalFrankingDecimal`), never a fabricated per-share
 // figure -- see `NormalizedImportRow`'s BRK-005 header note in
 // `domain/imports/strict-versioned-parser.ts` and
-// `db/schema.ts`'s `dividendManualRecords` header note.
+// `db/schema.ts`'s `dividendManualRecords` header note. A null-id (Sharesight
+// "unconfirmed") payout stages too once its `paidOnDate` is past. EVERY
+// payout, confirmed or not, keys by `(sharesightPortfolioId, holdingId,
+// paidOnDate)` -- never the Sharesight `id` -- so confirmation never changes
+// a row's identity; see the BRK-005C block comment above
+// `payoutIdentityKey` for why the original BRK-005 skip-everything inference
+// was wrong, and why the id-vs-natural-key split of the first BRK-005C
+// attempt was replaced by this single scheme.
 import type {
   SharesightPayout,
   SharesightTrade,
@@ -287,27 +294,139 @@ export type SharesightPayoutTransformOutcome =
   | { kind: "row"; row: ParsedImportRow }
   | { kind: "skipped"; issue: ImportIssue };
 
-function buildPayoutRow(
+/**
+ * BRK-005C CORRECTION (2026-08-16, owner-confirmed against live data --
+ * `docs/ARCHITECTURE.md` §8.2 and `TASKS.md`'s BRK-005 note carry the full
+ * story). The BRK-005 inference below (`buildPayoutRow`'s original comment)
+ * was WRONG in practice: Sharesight auto-creates a payout row from every
+ * dividend ANNOUNCEMENT and leaves it "unconfirmed" (`id: null`) until the
+ * owner manually confirms it there -- but Sharesight's OWN tax reports
+ * already count an unconfirmed payout as received income once its
+ * `paid_on` date has passed. The owner's real account had 99 of 118
+ * payouts null-id; treating every one of them as "not a paid fact yet" and
+ * skipping it silently dropped the large majority of real dividend income,
+ * not a handful of not-yet-paid distributions. Owner's own words: "Unconfirmed
+ * payouts go into the tax calculations and should be kept."
+ *
+ * Corrected rule: a null-id payout whose `paidOnDate` is on or before the
+ * sync's own injected `now` (never `Date.now()` in this pure module --
+ * threaded in via `SharesightTransformInput.now` from
+ * `app/sharesight-sync-service.ts`'s existing now-injection seam) stages
+ * exactly like a confirmed payout, carrying a provenance note ("unconfirmed
+ * in Sharesight") so the owner can still see it was never manually
+ * confirmed there. Only a FUTURE-dated null-id payout (not yet due) still
+ * skips with `SHARESIGHT_PAYOUT_UNCONFIRMED`.
+ *
+ * REVIEW ROUND FAIL, addressed here (Orchestrator ruling, 2026-08-16
+ * follow-up): the FIRST version of this correction keyed a staged
+ * unconfirmed payout by `(sharesightPortfolioId, symbol, market, paidOn)`
+ * but kept the ORIGINAL `sharesight-payout:<id>` key for a confirmed one --
+ * two DIFFERENT identity schemes for the SAME real-world distribution
+ * depending only on whether Sharesight has gotten around to confirming it
+ * yet (B1: a payout synced+committed while unconfirmed, then CONFIRMED by
+ * Sharesight before the next sync, flipped from the natural key to the id
+ * key -- a different `source_reference` that the cross-batch dedupe had
+ * never seen, so it committed AGAIN as a duplicate). That version also
+ * disambiguated a same-holding/same-date collision with a content-sorted
+ * `:<ordinal>` suffix (B2: unstable if two payouts were ever indistinguishable
+ * on every other field a real API response provides, and in any case an
+ * invented mechanism the review found unwarranted) and, for a genuinely
+ * byte-identical duplicate pair, silently staged both as two separate
+ * "facts" (B3).
+ *
+ * Corrected identity scheme, unconditionally for EVERY payout (confirmed or
+ * not): `sharesight-payout:<sharesightPortfolioId>:<holdingId>:<paidOnDate>`
+ * -- see `payoutIdentityKey`. `holdingId` is Sharesight's own required,
+ * stable holding identifier (never a ticker, which can be reused/renamed --
+ * this also closes a reviewer follow-up about durable security identity),
+ * so the key is a pure function of WHICH holding got paid WHEN, completely
+ * independent of the Sharesight `id` field's confirmed/null state -- a
+ * payout that starts unconfirmed and later gets confirmed keys IDENTICALLY
+ * both times (B1 closed). The Sharesight `id`, when present, is surfaced in
+ * the row's own `notes` only (visible in preview/audit -- never used for
+ * identity; see `payoutProvenanceNote`).
+ *
+ * Collision (two payouts in one fetch sharing the SAME key -- same holding,
+ * same `paid_on`, e.g. an interim and a special dividend): no ordinal, no
+ * auto-disambiguation of any kind (B2 closed) -- `buildPayoutRow` stages
+ * BOTH (or however many) rows, but each one also carries an error-severity
+ * `SHARESIGHT_PAYOUT_KEY_COLLISION` issue naming the holding, the date, and
+ * the collision count, which blocks readiness (`hasUnresolvedPersistedIssue`
+ * in `app/import-ready-service.ts`) for THIS batch PERMANENTLY: an
+ * uncommitted batch has no reverse/discard path at all
+ * (`db/repositories/import-commit.ts`'s reversal only ever applies to an
+ * already-COMMITTED batch), so a blocked batch simply sits, harmless and
+ * never committable, in import history. The block also persists across
+ * EVERY SUBSEQUENT sync, since each one re-fetches the identical colliding
+ * pair from Sharesight and blocks its own freshly-staged batch the same
+ * way -- reviewer-verified false and removed from the guidance: neither
+ * "reverse this batch" (impossible, it was never committed) nor "enter the
+ * dividend(s) manually" (does not stop the next sync from re-staging the
+ * same ambiguity) actually resolves anything. The only remedy that
+ * actually works is OUTSIDE this pipeline entirely: resolve/deduplicate
+ * the payout inside Sharesight itself (merge or remove the duplicate so
+ * the holding reports exactly one payout for that date), then re-sync. A
+ * byte-identical duplicate pair hits this exact same path (B3 closed):
+ * this module does not attempt to distinguish "two genuinely different
+ * distributions that happen to collide" from "the same distribution
+ * reported twice" -- both are equally unsafe to auto-resolve and both
+ * require the same Sharesight-side fix. Residual, documented rather than
+ * solved (reviewer follow-up): if Sharesight ever RE-CREATES a holding (a
+ * merge or a delete-then-re-add, as opposed to editing the existing one)
+ * its `holdingId` changes, so that holding's already-committed payouts
+ * would re-commit ONCE MORE under the new id on the next sync -- a rare,
+ * bounded, one-time re-commit distinct from the collision failure mode
+ * above, not a repeating drift.
+ */
+const UNCONFIRMED_PAYOUT_PROVENANCE_NOTE =
+  "unconfirmed in Sharesight -- auto-created there from an announcement and not yet manually confirmed, but staged here as real income because Sharesight's own tax reports already count it once paid (owner decision 2026-08-16, BRK-005C).";
+
+/**
+ * The SINGLE identity scheme for every staged payout row, confirmed or not
+ * -- see the BRK-005C block comment above for why the Sharesight `id` plays
+ * no part in it. `portfolioId` is the Sharesight portfolio this fetch was
+ * scoped to (each payout's own `portfolioId` field, cross-checked equal to
+ * the requested scope by `domain/sharesight/parse.ts`); `holdingId` is
+ * Sharesight's own required, stable per-holding identifier (never a
+ * ticker). Reuses the `sharesight-payout:` prefix the pre-BRK-005C
+ * confirmed-id-only scheme used; a bare confirmed id was always a
+ * decimal-digit string, which can never collide with this colon-delimited
+ * shape, so no historically-committed `source_reference` is ambiguous
+ * against this new one.
+ */
+function payoutIdentityKey(payout: SharesightPayout): string {
+  return `sharesight-payout:${payout.portfolioId}:${payout.holdingId}:${payout.paidOnDate}`;
+}
+
+/**
+ * Follow-up (Orchestrator ruling 2026-08-16): the Sharesight `id`, when
+ * present, is no longer part of a payout's staged identity (see
+ * `payoutIdentityKey`), so it would otherwise be invisible anywhere in the
+ * staged row -- this appends it to `notes` so it stays visible in
+ * preview/audit at least at the STAGED-row layer. IMPORTANT LIMITATION,
+ * also documented in `docs/CSV_IMPORT_SPEC.md`'s Sharesight-sync section:
+ * `dividend_manual_records` has no notes/comments column at all (see
+ * `db/schema.ts`'s header note), so this value -- like a CSV dividend row's
+ * own `Notes` field -- is visible only in the STAGED import preview, never
+ * after commit; the `source_reference` (`payoutIdentityKey`) is the only
+ * durable, post-commit signal a payout came from Sharesight at all.
+ */
+function payoutProvenanceNote(payout: SharesightPayout): string {
+  const parts: string[] = [
+    payout.id === null
+      ? UNCONFIRMED_PAYOUT_PROVENANCE_NOTE
+      : `Sharesight payout id ${payout.id} (confirmed there).`,
+  ];
+  if (payout.comments) parts.push(payout.comments);
+  return parts.join(" ");
+}
+
+function buildDividendRowFromPayout(
   payout: SharesightPayout,
   rowNumber: number,
   portfolioName: string,
-): SharesightPayoutTransformOutcome {
-  if (payout.id === null) {
-    // Orchestrator ruling: a null-id payout is Sharesight's own
-    // declared-but-not-yet-confirmed distribution (this codebase's
-    // provider-event "estimated/declared" concept, not a paid fact) --
-    // skipped entirely (never staged as a fact), surfaced as a visible
-    // warning rather than silently dropped.
-    return {
-      kind: "skipped",
-      issue: {
-        code: "SHARESIGHT_PAYOUT_UNCONFIRMED",
-        severity: "warning",
-        message: `Sharesight payout for ${payout.symbol} paid ${payout.paidOnDate} has no confirmed id (an unconfirmed/declared distribution) and was skipped -- it will be picked up on a future sync once Sharesight confirms it.`,
-      },
-    };
-  }
-
+  identity: { fingerprint: string; issues: ImportIssue[] },
+): ParsedImportRow {
   const normalized = blankNormalizedRow();
   normalized.id = payout.id;
   normalized.symbol = payout.symbol;
@@ -316,7 +435,7 @@ function buildPayoutRow(
   normalized.currency = payout.currencyCode;
   normalized.type = "dividend";
   normalized.commission = "0";
-  normalized.notes = payout.comments;
+  normalized.notes = payoutProvenanceNote(payout);
   const { tradeAtUtc, localTradeDate } = deriveDates(payout.paidOnDate);
   normalized.tradeAtUtc = tradeAtUtc;
   normalized.localTradeDate = localTradeDate;
@@ -352,7 +471,7 @@ function buildPayoutRow(
   normalized.totalFrankingDecimal = payout.frankingCreditsDecimal;
 
   const rawFields = rawFieldsFor({
-    id: payout.id,
+    id: payout.id ?? "",
     symbol: payout.symbol,
     exchange: payout.marketCode,
     portfolio: portfolioName,
@@ -362,23 +481,91 @@ function buildPayoutRow(
     commission: "0",
     transactionDate: payout.paidOnDate,
     type: "Dividend",
-    notes: payout.comments ?? "",
+    notes: normalized.notes ?? "",
     frankingPerShare: "",
   });
 
   return {
+    rowNumber,
+    kind: "transaction",
+    rawFields,
+    normalized,
+    issues: identity.issues,
+    fingerprint: identity.fingerprint,
+  };
+}
+
+/** A null-id payout whose `paidOnDate` is strictly after `today` -- see
+ * `buildPayoutRow`'s header comment. Confirmed (non-null-id) payouts are
+ * NEVER classified future -- Sharesight itself already confirmed them, so
+ * there is no "not yet due" state to wait out. */
+function isFutureUnconfirmedPayout(
+  payout: SharesightPayout,
+  today: string,
+): boolean {
+  return payout.id === null && payout.paidOnDate > today;
+}
+
+/**
+ * `payoutIdentityKey` -> how many STAGEABLE payouts in this fetch share it
+ * (1 = no collision). Computed once, up front, over the WHOLE fetch's
+ * stageable set (confirmed payouts and past-dated unconfirmed payouts
+ * alike -- see the BRK-005C block comment on why they now share one
+ * identity scheme) so `buildPayoutRow` can look up any given payout's own
+ * collision count without recomputing it per row.
+ */
+function countPayoutKeyCollisions(
+  stageablePayouts: readonly SharesightPayout[],
+): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  for (const payout of stageablePayouts) {
+    const key = payoutIdentityKey(payout);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function buildPayoutRow(
+  payout: SharesightPayout,
+  rowNumber: number,
+  portfolioName: string,
+  today: string,
+  keyCollisionCounts: ReadonlyMap<string, number>,
+): SharesightPayoutTransformOutcome {
+  if (isFutureUnconfirmedPayout(payout, today)) {
+    // FUTURE-dated (not yet due): still no reliable "this really happened"
+    // fact to stage -- skipped, surfaced as a visible warning rather than
+    // silently dropped. See the BRK-005C block comment above for why a
+    // PAST-dated null-id payout, by contrast, stages.
+    return {
+      kind: "skipped",
+      issue: {
+        code: "SHARESIGHT_PAYOUT_UNCONFIRMED",
+        severity: "warning",
+        message: `Sharesight payout for ${payout.symbol} due ${payout.paidOnDate} is future-dated (not yet paid) and has no confirmed id -- it was skipped and will be picked up on a future sync once its paid-on date has passed.`,
+      },
+    };
+  }
+
+  const key = payoutIdentityKey(payout);
+  const collisionCount = keyCollisionCounts.get(key) ?? 1;
+  const issues: ImportIssue[] =
+    collisionCount > 1
+      ? [
+          {
+            code: "SHARESIGHT_PAYOUT_KEY_COLLISION",
+            severity: "error",
+            message: `Sharesight reported ${collisionCount} payouts for holding ${payout.holdingId} paid on ${payout.paidOnDate} -- these cannot be told apart automatically, so this import can never be marked ready, and every future sync will hit the same block until this is fixed. Resolve the duplicate inside Sharesight itself (merge or remove it so this holding reports exactly one payout for this date), then re-sync -- this batch itself can safely stay in your import history; it will never commit.`,
+          },
+        ]
+      : [];
+
+  return {
     kind: "row",
-    row: {
-      rowNumber,
-      kind: "transaction",
-      rawFields,
-      normalized,
-      issues: [],
-      // BRK-005 idempotency: keyed by the payout's own stable numeric id
-      // (confirmed, non-null here) -- see `buildTradeRow`'s identical
-      // convention.
-      fingerprint: `sharesight-payout:${payout.id}`,
-    },
+    row: buildDividendRowFromPayout(payout, rowNumber, portfolioName, {
+      fingerprint: key,
+      issues,
+    }),
   };
 }
 
@@ -391,6 +578,18 @@ export type SharesightTransformInput = {
   portfolioName: string;
   trades: readonly SharesightTrade[];
   payouts: readonly SharesightPayout[];
+  /**
+   * ISO-8601 instant this transform treats as "now" -- REQUIRED, and
+   * threaded through from `app/sharesight-sync-service.ts`'s existing
+   * now-injection seam (`SharesightSyncActionOptions.now`, defaulting to a
+   * real clock only at that boundary), never read from `Date.now()`/`new
+   * Date()` inside this pure domain module. Used only to classify a
+   * null-id payout's `paidOnDate` as past (on or before `now`'s own
+   * calendar date -- stages as an "unconfirmed in Sharesight" real record,
+   * BRK-005C) vs future (still skipped with a warning) -- see
+   * `buildPayoutRow`.
+   */
+  now: string;
 };
 
 /**
@@ -425,9 +624,42 @@ export function transformSharesightSync(
     }
   }
 
+  // Calendar-date-only comparison (`paidOnDate` is a plain `YYYY-MM-DD`
+  // Sharesight market date, never an instant -- see `deriveDates`'s header
+  // note): the time-of-day component of `input.now` is deliberately
+  // dropped so a payout paid earlier TODAY still counts as past-dated.
+  //
+  // FOLLOW-UP, not resolved here (documented in `docs/CSV_IMPORT_SPEC.md`'s
+  // Sharesight-sync section): `today` is a UTC calendar date (`input.now`'s
+  // own timezone, threaded from `app/sharesight-sync-service.ts`'s
+  // `new Date().toISOString()`), compared directly against `paidOnDate`,
+  // which is the SECURITY'S market-local date (e.g. an ASX payout's own
+  // Sydney-local `paid_on`). For a security several hours ahead of UTC (ASX
+  // is UTC+10/+11), a payout that is already "today" in Sydney can still
+  // read as "tomorrow" in UTC for roughly the first 10-11 local hours of
+  // that day -- a real payout could therefore be classified future-dated
+  // (skipped) for a few hours longer than strictly necessary. This is a
+  // FAIL-SAFE direction only (a payout is never staged too EARLY, only
+  // possibly held back slightly too LATE) and self-heals on the very next
+  // sync once UTC catches up -- never a permanent misclassification -- so
+  // it is accepted as a documented approximation rather than plumbed
+  // through a per-security market timezone this module does not otherwise
+  // model.
+  const today = input.now.slice(0, 10);
+  const stageablePayouts = input.payouts.filter(
+    (payout) => !isFutureUnconfirmedPayout(payout, today),
+  );
+  const keyCollisionCounts = countPayoutKeyCollisions(stageablePayouts);
+
   for (const payout of input.payouts) {
     rowNumber += 1;
-    const outcome = buildPayoutRow(payout, rowNumber, input.portfolioName);
+    const outcome = buildPayoutRow(
+      payout,
+      rowNumber,
+      input.portfolioName,
+      today,
+      keyCollisionCounts,
+    );
     if (outcome.kind === "skipped") {
       issues.push(outcome.issue);
       continue;

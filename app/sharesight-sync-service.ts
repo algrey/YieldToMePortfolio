@@ -377,10 +377,18 @@ export async function runSharesightSyncWithContext(
     };
   }
 
+  // BRK-005C: `now` must be resolved BEFORE the transform call -- the pure
+  // `transformSharesightSync` needs it (injected, never `Date.now()` inside
+  // that module) to classify a null-id payout's `paidOnDate` as past
+  // (stage as an "unconfirmed in Sharesight" real record) vs future (still
+  // skip with a warning). `nowAt` is otherwise used exactly as before, for
+  // the batch filename and the sync-state watermark.
+  const nowAt = nowIso(options);
   const transformed = transformSharesightSync({
     portfolioName: portfolio.name,
     trades: tradesResult.value,
     payouts: payoutsResult.value,
+    now: nowAt,
   });
 
   const digestSource = canonicalFetchDigestSource(
@@ -389,7 +397,6 @@ export async function runSharesightSyncWithContext(
     transformed.rows,
   );
   const fileFingerprint = await sha256Hex(digestSource);
-  const nowAt = nowIso(options);
   const parseResult: ImportParseSuccess = {
     ok: true,
     parserVersion: SHARESIGHT_SYNC_PARSER_VERSION,
