@@ -2734,6 +2734,47 @@ dd {
   line-height: 1.4;
 }
 
+/* UI-012 review follow-up: a `.history-open-review` button lives alongside
+   the primary batch-select button inside the same `li`, so it would
+   otherwise inherit `.import-history-list button`'s full-width/58px block
+   styling above and read as an equally-weighted primary action. This
+   selector is more specific (two classes + one element beats one class +
+   one element) so it wins without needing `!important`, sized down to a
+   compact secondary control with a muted border/text and an explicit
+   disabled state (opacity/cursor -- the label stays the static "Open
+   review" text either way; disabled-ness is conveyed by the `disabled`
+   attribute itself plus this non-colour cursor/opacity treatment, not by a
+   colour change alone). The same rule set, unscoped to `.import-history-list
+   li`, also styles `import-history-detail.tsx`'s own detail-panel resume
+   button (`.import-history-resume-review button`), which has no other
+   styling and would otherwise render bare UA button chrome. */
+.import-history-list li .history-open-review,
+.import-history-resume-review button {
+  display: inline-block;
+  width: auto;
+  min-height: 44px;
+  margin: 0 13px 13px;
+  padding: 0 14px;
+  border: 1px solid var(--divider);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.import-history-list li .history-open-review:hover,
+.import-history-resume-review button:hover {
+  border-color: var(--green);
+  color: var(--cream);
+}
+
+.import-history-list li .history-open-review:disabled,
+.import-history-resume-review button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
 .history-status {
   color: var(--green-bright);
   font-size: 0.78rem;
@@ -2951,7 +2992,11 @@ dd {
 
 .import-history-table {
   width: 100%;
-  min-width: 660px;
+  /* UI-012: widened for the six added row-summary columns (Symbol, Type,
+     Date, Quantity, Price/Amount, Currency) -- the wrapping
+     `.import-history-table-wrap` above already scrolls horizontally, this
+     just keeps each column legible instead of being squeezed. */
+  min-width: 1080px;
   border-collapse: collapse;
   color: var(--muted);
   font-size: 0.74rem;

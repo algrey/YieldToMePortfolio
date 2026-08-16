@@ -17,11 +17,120 @@ function statusLabel(status: string): string {
   return status.replaceAll("_", " ");
 }
 
+// IMP-008 review finding B1/B2, UI-012 review B2: THE single shared
+// eligibility gate -- mirrors the server's own exclusion-mutability check
+// (`app/import-row-exclusion-service.ts`, `setRowExclusion` in
+// `db/repositories/import-staging.ts`: exclusion stays mutable right up to
+// the moment commit actually starts, INCLUDING at `ready`, but never once
+// `committing` has begun or the batch has reached a terminal status) AND
+// doubles as "this batch still has a live server-side preview reachable via
+// `GET /api/import/preview/:batchId`" for UI-012's "Open review" resume
+// affordance -- both conditions land on the exact same four statuses, so
+// this is the ONE definition (exported here, imported by `import-review.tsx`
+// rather than re-declared there -- no circular dependency: this file already
+// has no import from `import-review.tsx`, and `import-review.tsx` already
+// imports `ImportHistoryDetailPanel` from this file, so adding this import
+// is the same direction). Every other status (`committing`/`committed`/
+// `reversing`/`reversed`/`failed`) already gets its own dedicated evidence
+// view, so no resume-review action is offered for them either.
+export function isMutableExclusionStatus(status: string): boolean {
+  return (
+    status === "parsed" ||
+    status === "needs_mapping" ||
+    status === "invalid" ||
+    status === "ready"
+  );
+}
+
+// UI-012: defensive extraction from `row.normalizedFields`
+// (`NormalizedImportRow | null` -- shared by both the CSV parser and
+// `domain/sharesight-sync/transform.ts`, see that module's field-by-field
+// build for the exact keys used below). Treated as an unknown-ish record
+// here rather than trusting the static type, since this value round-trips
+// through JSON storage (`db/repositories/import-staging.ts`'s `parseJson`)
+// before reaching the client. Never fabricates a value: a missing/blank
+// field surfaces as "Not recorded", never 0 or "" (never-zero rule,
+// AGENTS.md).
+function asFieldRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+// First candidate that is a non-blank string or a finite number; anything
+// else (null, undefined, "", NaN, objects) is treated as absent.
+function firstRecordedValue(...candidates: unknown[]): string | number | null {
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate;
+    }
+    if (typeof candidate === "number" && Number.isFinite(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function summaryCell(value: string | number | null): string {
+  return value === null ? "Not recorded" : String(value);
+}
+
+type RowSummary = {
+  symbol: string;
+  type: string;
+  date: string;
+  quantity: string;
+  amount: string;
+  currency: string;
+};
+
+/**
+ * Business-basics summary for one staged row's `normalizedFields`.
+ * `symbol`/`displaySymbol`, `currency` are shared verbatim by both source
+ * shapes. `type` prefers `cashEvent` over `type` (`cash_deposit`/
+ * `cash_withdrawal` vs `buy`/`sell`) -- mirroring
+ * `db/repositories/import-commit.ts`'s own `normalized.cashEvent ??
+ * normalized.type` precedence, since a legacy cash row's parser-level
+ * `type` stays "buy"/"sell" while the REAL effect is only encoded in
+ * `cashEvent` (`domain/imports/strict-versioned-parser.ts`'s
+ * `normalized.cashEvent = normalized.type === "buy" ? "cash_deposit" :
+ * "cash_withdrawal"`); showing the raw `type` alone would mislabel a cash
+ * deposit as a buy. `date` prefers `localTradeDate` (the business date both
+ * shapes derive via `deriveDates`/CSV date parsing -- see AGENTS.md's
+ * "prefer business-relevant dates" rule) over the raw `transactionDate`
+ * CSV column. `quantity` is `sharesOwned`, always null on a Sharesight
+ * payout-derived dividend row (BRK-005 totals-only shape) -- shown as "Not
+ * recorded", never fabricated from an amount. `amount` coalesces
+ * `costPerShare` (a trade's per-share price, OR a CSV dividend row's
+ * per-share amount) with `totalCashDecimal` (a Sharesight payout's TOTAL
+ * cash amount) -- the two are mutually exclusive by construction on every
+ * row this codebase produces (see `transform.ts`'s header comment), so this
+ * is never a lossy choice between two populated values.
+ */
+function summarizeRow(normalizedFields: unknown): RowSummary {
+  const fields = asFieldRecord(normalizedFields);
+  return {
+    symbol: summaryCell(
+      firstRecordedValue(fields.symbol, fields.displaySymbol),
+    ),
+    type: summaryCell(firstRecordedValue(fields.cashEvent, fields.type)),
+    date: summaryCell(
+      firstRecordedValue(fields.localTradeDate, fields.transactionDate),
+    ),
+    quantity: summaryCell(firstRecordedValue(fields.sharesOwned)),
+    amount: summaryCell(
+      firstRecordedValue(fields.costPerShare, fields.totalCashDecimal),
+    ),
+    currency: summaryCell(firstRecordedValue(fields.currency)),
+  };
+}
+
 export function ImportHistoryDetailPanel({
   detail,
   pending,
   onLoadMore,
   onResume,
+  onResumeReview,
   reversal,
   reversalPending,
   reversalRetryAvailable,
@@ -34,6 +143,7 @@ export function ImportHistoryDetailPanel({
   pending: boolean;
   onLoadMore: () => void;
   onResume: () => void;
+  onResumeReview: (batchId: string) => void;
   reversal: ImportReversalActionResult | null;
   reversalPending: boolean;
   reversalRetryAvailable: boolean;
@@ -46,6 +156,7 @@ export function ImportHistoryDetailPanel({
   const resumable =
     detail.batch.status === "committing" &&
     detail.progress.idempotencyKey !== null;
+  const resumableReview = isMutableExclusionStatus(detail.batch.status);
   return (
     <section
       className="import-history-detail"
@@ -60,6 +171,21 @@ export function ImportHistoryDetailPanel({
           {statusLabel(detail.batch.status)}
         </span>
       </div>
+      {resumableReview ? (
+        <p className="import-history-resume-review">
+          <button
+            type="button"
+            onClick={() => onResumeReview(detail.batch.id)}
+            disabled={pending}
+          >
+            Open review
+          </button>
+          <span>
+            {" "}
+            Restore the resolution cards and commit flow for this staged batch.
+          </span>
+        </p>
+      ) : null}
       <p>
         {detail.batch.transactionRows} transaction rows · showing{" "}
         {detail.rows.length} source rows and {detail.issues.length} issues in
@@ -284,33 +410,48 @@ export function ImportHistoryDetailPanel({
                 <th scope="col">Commit</th>
                 <th scope="col">Excluded by owner</th>
                 <th scope="col">Transaction</th>
+                <th scope="col">Symbol</th>
+                <th scope="col">Type</th>
+                <th scope="col">Date</th>
+                <th scope="col">Quantity</th>
+                <th scope="col">Price/Amount</th>
+                <th scope="col">Currency</th>
                 <th scope="col">Original fields</th>
                 <th scope="col">Normalized facts</th>
               </tr>
             </thead>
             <tbody>
-              {detail.rows.map((row) => (
-                <tr key={row.id}>
-                  <td>{row.physicalRowNumber}</td>
-                  <td>{row.rowClass}</td>
-                  <td>{row.validationStatus}</td>
-                  <td>{row.commitStatus}</td>
-                  <td>{row.excludedByOwnerAt ?? "No"}</td>
-                  <td>{row.commitTransactionId ?? "None"}</td>
-                  <td>
-                    <details>
-                      <summary>View</summary>
-                      <code>{displayValue(row.originalFields)}</code>
-                    </details>
-                  </td>
-                  <td>
-                    <details>
-                      <summary>View</summary>
-                      <code>{displayValue(row.normalizedFields)}</code>
-                    </details>
-                  </td>
-                </tr>
-              ))}
+              {detail.rows.map((row) => {
+                const summary = summarizeRow(row.normalizedFields);
+                return (
+                  <tr key={row.id}>
+                    <td>{row.physicalRowNumber}</td>
+                    <td>{row.rowClass}</td>
+                    <td>{row.validationStatus}</td>
+                    <td>{row.commitStatus}</td>
+                    <td>{row.excludedByOwnerAt ?? "No"}</td>
+                    <td>{row.commitTransactionId ?? "None"}</td>
+                    <td>{summary.symbol}</td>
+                    <td>{summary.type}</td>
+                    <td>{summary.date}</td>
+                    <td>{summary.quantity}</td>
+                    <td>{summary.amount}</td>
+                    <td>{summary.currency}</td>
+                    <td>
+                      <details>
+                        <summary>View</summary>
+                        <code>{displayValue(row.originalFields)}</code>
+                      </details>
+                    </td>
+                    <td>
+                      <details>
+                        <summary>View</summary>
+                        <code>{displayValue(row.normalizedFields)}</code>
+                      </details>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

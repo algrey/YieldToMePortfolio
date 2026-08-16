@@ -4,7 +4,10 @@ import { useState } from "react";
 import { useEffect, useRef } from "react";
 import type { ImportHistoryDetail } from "../import-history-service.ts";
 import type { ImportReversalActionResult } from "../import-reversal-service.ts";
-import { ImportHistoryDetailPanel } from "./import-history-detail.tsx";
+import {
+  ImportHistoryDetailPanel,
+  isMutableExclusionStatus,
+} from "./import-history-detail.tsx";
 import { SharesightSyncPanel } from "./sharesight-sync-panel.tsx";
 import {
   mergeSharesightLinks,
@@ -138,20 +141,6 @@ function statusLabel(status: string): string {
   return status.replaceAll("_", " ");
 }
 
-// IMP-008 review finding B1/B2: mirrors the server's own eligibility gate
-// (`app/import-row-exclusion-service.ts`, `setRowExclusion` in
-// `db/repositories/import-staging.ts`) -- exclusion stays mutable right up
-// to the moment commit actually starts, INCLUDING at `ready`, but never
-// once `committing` has begun or the batch has reached a terminal status.
-function isMutableExclusionStatus(status: string): boolean {
-  return (
-    status === "parsed" ||
-    status === "needs_mapping" ||
-    status === "invalid" ||
-    status === "ready"
-  );
-}
-
 // IMP-008 review finding B2-residual: nothing ever marks a persisted issue
 // resolved just because the OWNER excluded its row (excluding is a
 // separate mechanism from resolving the issue -- see
@@ -248,6 +237,19 @@ export function ImportReview({
   const exclusionOpenerRef = useRef<HTMLButtonElement | null>(null);
   const [exclusionPending, setExclusionPending] = useState(false);
   const [exclusionError, setExclusionError] = useState<string | null>(null);
+  // UI-012: the review section (`import-review-result` below) renders far
+  // ABOVE the import-history section further down the page. Opening a
+  // pre-commit batch's review from history via `resumeReviewFromHistory`
+  // therefore needs to scroll the now-populated review section into view --
+  // otherwise the owner's "no errors or ability to commit" report repeats,
+  // since the restored resolution cards render off-screen above where they
+  // clicked. Only the resume-from-history path arms this ref (set right
+  // before the load call); a fresh CSV-upload preview or the Sharesight
+  // sync panel's own `onOpenBatch` already render the review section next
+  // to where the owner is looking, so those paths leave it unset and this
+  // effect is a no-op for them.
+  const reviewSectionRef = useRef<HTMLElement | null>(null);
+  const pendingReviewScrollBatchIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     const dialog = exclusionDialogRef.current;
@@ -265,6 +267,23 @@ export function ImportReview({
   useEffect(() => {
     void loadHistory();
   }, []);
+
+  // UI-012: fires once the review that `resumeReviewFromHistory` requested
+  // has actually landed in state (matched by batch id, not just "any
+  // review changed") -- see the ref's own header note above. Review
+  // finding: no explicit `behavior: "smooth"` here -- passing it would
+  // override the CSS `scroll-behavior` property entirely (including
+  // globals.css's `@media (prefers-reduced-motion: reduce)` rule that
+  // forces `scroll-behavior: auto !important`), reintroducing motion for a
+  // reader who asked their OS to suppress it. Omitting `behavior` leaves
+  // the browser to follow that CSS property, so the reduced-motion
+  // override already applies unchanged.
+  useEffect(() => {
+    if (review && pendingReviewScrollBatchIdRef.current === review.batch.id) {
+      pendingReviewScrollBatchIdRef.current = null;
+      reviewSectionRef.current?.scrollIntoView({ block: "start" });
+    }
+  }, [review]);
 
   async function loadHistory() {
     setHistoryPending(true);
@@ -682,6 +701,13 @@ export function ImportReview({
       setCommitKey(null);
       await loadHistory();
     } catch (error) {
+      // UI-012 review follow-up: clear a scroll request armed by
+      // `resumeReviewFromHistory` on failure too -- otherwise a LATER,
+      // unrelated successful load of the SAME batch id (e.g. a retry after
+      // fixing the error, or `refreshPreview()`/`onOpenBatch` reusing this
+      // same function) would still match the stale armed id and trigger an
+      // unexpected scroll.
+      pendingReviewScrollBatchIdRef.current = null;
       setMessage(
         error instanceof Error
           ? error.message
@@ -690,6 +716,19 @@ export function ImportReview({
     } finally {
       setPending(false);
     }
+  }
+
+  // UI-012: the explicit "Open review" affordance for a pre-commit batch
+  // reached from import history (list entry or detail panel) -- arms the
+  // scroll-into-view ref above, then reuses `loadReviewByBatchId` exactly
+  // as the Sharesight sync panel's `onOpenBatch` does. Callers are
+  // responsible for status-gating (see `isMutableExclusionStatus`); this
+  // function does not re-check status itself since the server's own
+  // preview endpoint is the authority on whether a batch still has a
+  // reviewable preview.
+  function resumeReviewFromHistory(batchId: string) {
+    pendingReviewScrollBatchIdRef.current = batchId;
+    void loadReviewByBatchId(batchId);
   }
 
   async function refreshPreview() {
@@ -977,6 +1016,7 @@ export function ImportReview({
         <section
           className="import-review-result"
           aria-labelledby="review-title"
+          ref={reviewSectionRef}
         >
           <div className="section-heading compact">
             <div>
@@ -1519,6 +1559,16 @@ export function ImportReview({
                     {businessDate(batch.createdAt)} · {batch.totalRows} rows
                   </span>
                 </button>
+                {isMutableExclusionStatus(batch.status) ? (
+                  <button
+                    type="button"
+                    className="history-open-review"
+                    onClick={() => resumeReviewFromHistory(batch.id)}
+                    disabled={pending}
+                  >
+                    Open review
+                  </button>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -1539,6 +1589,7 @@ export function ImportReview({
             }
           }}
           onResume={() => void resumeHistoryCommit()}
+          onResumeReview={(batchId) => resumeReviewFromHistory(batchId)}
           reversal={reversal}
           reversalPending={reversalPending}
           reversalRetryAvailable={reversalKey !== null}

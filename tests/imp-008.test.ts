@@ -1377,23 +1377,36 @@ test("IMP-008 B4: the security-candidate skip button and confirm-dialog copy bot
 // copy must reflect whether the batch can still be mutated.
 // ---------------------------------------------------------------------------
 
-// `isMutableExclusionStatus` is a small module-private pure function in
-// import-review.tsx; every OTHER test of this file exercises the component
+// `isMutableExclusionStatus` is a small pure function -- UI-012 review
+// finding B2 moved its ONE definition into import-history-detail.tsx
+// (exported, since that file both needs it for the "Open review" resume
+// affordance's own gating AND is already imported by import-review.tsx, so
+// import-review.tsx now imports it rather than re-declaring a duplicate).
+// Every OTHER test of this file exercises the import-review.tsx component
 // through source-text assertions (it is a stateful client component with no
 // prop-injectable review state, so it cannot be rendered standalone the way
 // `ImportHistoryDetailPanel` is in tests/ui-005c.test.ts). This test goes
 // one step further than a plain source match: it extracts the ACTUAL
-// shipped function body by name and evaluates it, so a typo/logic drift in
-// the real function (not a hand-duplicated copy of it) would be caught.
+// shipped function body by name (from its new home) and evaluates it, so a
+// typo/logic drift in the real function (not a hand-duplicated copy of it)
+// would be caught -- then separately confirms import-review.tsx's own JSX
+// still calls it by this exact name.
 test("IMP-008 B2: isMutableExclusionStatus gates the include button/future-tense copy to exactly the still-mutable statuses", async () => {
   const component = await readFile(
     new URL("../app/components/import-review.tsx", import.meta.url),
     "utf8",
   );
-  const match = component.match(
-    /function isMutableExclusionStatus\(status: string\): boolean \{([\s\S]*?)\n\}/,
+  const definitionSource = await readFile(
+    new URL("../app/components/import-history-detail.tsx", import.meta.url),
+    "utf8",
   );
-  assert.ok(match, "expected to find isMutableExclusionStatus in the source");
+  const match = definitionSource.match(
+    /export function isMutableExclusionStatus\(status: string\): boolean \{([\s\S]*?)\n\}/,
+  );
+  assert.ok(
+    match,
+    "expected to find isMutableExclusionStatus in import-history-detail.tsx",
+  );
   // Evaluates the REAL extracted function body (not a re-implementation of
   // it), so a typo/logic drift in the actual shipped code would be caught.
   const isMutableExclusionStatus = new Function("status", match![1]!) as (
@@ -1453,6 +1466,19 @@ test("IMP-008 B2: isMutableExclusionStatus gates the include button/future-tense
   // `isRowStillBlocking`), never the raw, unfiltered `review.issues`.
   assert.match(blockedRowsSection, /blockedRowIssues\.map\(/);
   assert.doesNotMatch(blockedRowsSection, /review\.issues\.filter/);
+
+  // UI-012 review finding B2: import-review.tsx must import the shared
+  // predicate rather than re-declare its own copy (no drift between two
+  // definitions).
+  assert.doesNotMatch(
+    component,
+    /function isMutableExclusionStatus\(status: string\): boolean \{/,
+    "import-review.tsx must not re-declare isMutableExclusionStatus locally",
+  );
+  assert.match(
+    component,
+    /isMutableExclusionStatus,\s*\n\} from "\.\/import-history-detail\.tsx";/,
+  );
 });
 
 // IMP-008 review finding B2-residual: `isRowStillBlocking` decides whether
