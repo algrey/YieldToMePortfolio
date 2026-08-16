@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `security_identifiers_owner_attested_ticker_unique` ON `security_identifiers` (`scheme`,`value`) WHERE "security_identifiers"."source" = 'owner_attested' AND "security_identifiers"."valid_to" IS NULL;

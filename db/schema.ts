@@ -301,6 +301,37 @@ export const securityIdentifiers = sqliteTable(
       table.validFrom,
       table.validTo,
     ),
+    // IMP-009: the convergence/dedupe key for owner-attested securities
+    // (`db/repositories/security-attestation.ts`). Scoped to
+    // `source = 'owner_attested'` so it constrains ONLY rows this codebase's
+    // attestation path itself creates -- it must never collide with the
+    // pre-existing provider-verified path (`security-verification.ts`),
+    // which can legitimately insert several `scheme = 'ticker'` identifier
+    // rows sharing the same `value` (ticker text) across different
+    // exchanges, since it always writes `exchange_id = NULL` and
+    // distinguishes those rows by `provider_exchange` on
+    // `security_provider_mappings` instead -- a table this constraint does
+    // not touch. Within the owner-attested namespace, an attestation has no
+    // provider/exchange evidence at all, so `(scheme, value)` (case-folded
+    // to upper case before storage/lookup, see `normalizeToken` in
+    // `domain/securities/verify-identity.ts`) is the most precise key the
+    // schema can express without a new exchange-alias-carrying column; two
+    // concurrent attestations of the same ticker text converge on one row
+    // via this index (mirroring `security_provider_mappings_provider_symbol_from_unique`'s
+    // throw-and-reread technique), and currency agreement is still checked
+    // explicitly (never silently) at link time, exactly like the
+    // provider-verified dedupe-link path already does. `WHERE valid_to IS
+    // NULL` scopes uniqueness to the currently-active identifier only, so a
+    // superseded attested identifier does not block a later one. See
+    // `docs/DATA_MODEL.md`'s `security_identifiers` entry for the accepted
+    // limitation this implies (two genuinely different securities sharing
+    // the same ticker text can only be told apart, even under attestation,
+    // once one of them is later provider-verified).
+    uniqueIndex("security_identifiers_owner_attested_ticker_unique")
+      .on(table.scheme, table.value)
+      .where(
+        sql`${table.source} = 'owner_attested' AND ${table.validTo} IS NULL`,
+      ),
   ],
 );
 

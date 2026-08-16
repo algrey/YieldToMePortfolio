@@ -73,6 +73,12 @@ type Review = {
     physicalRowNumber: number;
     symbol: string | null;
   }>;
+  // IMP-009: resolved-candidate `securities.id` values that are
+  // owner-attested and not yet provider-verified -- drives the "Owner-attested
+  // identity; market data unavailable until provider-verified" label.
+  // Optional/defaulted here so any test-constructed `Review` literal that
+  // predates IMP-009 keeps compiling and rendering unchanged.
+  attestedSecurityIds?: string[];
 };
 
 // IMP-008: the row(s) an exclude/include confirm dialog is currently open
@@ -94,6 +100,19 @@ type PendingExclusion = {
   action: "exclude" | "include";
   target: ExclusionTarget;
   description: string;
+};
+
+// IMP-009: the unresolved security candidate a "Resolve manually" confirm
+// dialog is currently open for, plus the owner-editable display name field
+// (default: the symbol) the dialog collects.
+type PendingAttestation = {
+  candidate: {
+    portfolioId: string;
+    sourceSymbol: string;
+    sourceExchangeAlias: string | null;
+    sourceCurrencyCode: string;
+  };
+  displayName: string;
 };
 
 type PendingMapping = {
@@ -237,6 +256,14 @@ export function ImportReview({
   const exclusionOpenerRef = useRef<HTMLButtonElement | null>(null);
   const [exclusionPending, setExclusionPending] = useState(false);
   const [exclusionError, setExclusionError] = useState<string | null>(null);
+  // IMP-009: "Resolve manually" confirm dialog -- mirrors the exclusion
+  // dialog's ref + `showModal()`/opener-focus-restore pattern above.
+  const [pendingAttestation, setPendingAttestation] =
+    useState<PendingAttestation | null>(null);
+  const attestationDialogRef = useRef<HTMLDialogElement>(null);
+  const attestationOpenerRef = useRef<HTMLButtonElement | null>(null);
+  const [attestationPending, setAttestationPending] = useState(false);
+  const [attestationError, setAttestationError] = useState<string | null>(null);
   // UI-012: the review section (`import-review-result` below) renders far
   // ABOVE the import-history section further down the page. Opening a
   // pre-commit batch's review from history via `resumeReviewFromHistory`
@@ -263,6 +290,19 @@ export function ImportReview({
       exclusionOpenerRef.current = null;
     }
   }, [pendingExclusion]);
+
+  useEffect(() => {
+    const dialog = attestationDialogRef.current;
+    if (pendingAttestation && dialog && !dialog.open) {
+      dialog.showModal();
+      dialog.querySelector<HTMLButtonElement>(".sheet-close")?.focus();
+    }
+    if (!pendingAttestation && dialog?.open) dialog.close();
+    if (!pendingAttestation && attestationOpenerRef.current) {
+      attestationOpenerRef.current.focus();
+      attestationOpenerRef.current = null;
+    }
+  }, [pendingAttestation]);
 
   useEffect(() => {
     void loadHistory();
@@ -608,6 +648,65 @@ export function ImportReview({
       );
     } finally {
       setPending(false);
+    }
+  }
+
+  // IMP-009: opens the "Resolve manually" confirm dialog for one unresolved
+  // security candidate, defaulting the owner-editable display name to the
+  // symbol per the Orchestrator ruling.
+  function openAttestationDialog(
+    event: React.MouseEvent<HTMLButtonElement>,
+    candidate: PendingAttestation["candidate"],
+  ) {
+    attestationOpenerRef.current = event.currentTarget;
+    setAttestationError(null);
+    setPendingAttestation({ candidate, displayName: candidate.sourceSymbol });
+  }
+
+  async function submitAttestation() {
+    if (!review || !pendingAttestation) return;
+    setAttestationPending(true);
+    setAttestationError(null);
+    try {
+      const response = await fetch(
+        `/api/import/preview/${review.batch.id}/securities/attest`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            portfolioId: pendingAttestation.candidate.portfolioId,
+            sourceSymbol: pendingAttestation.candidate.sourceSymbol,
+            sourceExchangeAlias:
+              pendingAttestation.candidate.sourceExchangeAlias,
+            sourceCurrencyCode: pendingAttestation.candidate.sourceCurrencyCode,
+            displayName: pendingAttestation.displayName,
+            expectedVersion: review.batch.version,
+            expectedPreviewVersion: review.previewVersion,
+          }),
+        },
+      );
+      const result = (await response.json()) as
+        { ok: true; review: Review } | { ok: false; message: string };
+      if (!response.ok || result.ok === false) {
+        throw new Error(
+          result.ok === false
+            ? result.message
+            : "This security could not be resolved manually.",
+        );
+      }
+      setReview(result.review);
+      setMessage(
+        `${pendingAttestation.candidate.sourceSymbol} was resolved manually. Owner-attested identity; market data unavailable until provider-verified.`,
+      );
+      setPendingAttestation(null);
+    } catch (error) {
+      setAttestationError(
+        error instanceof Error
+          ? error.message
+          : "This security could not be resolved manually.",
+      );
+    } finally {
+      setAttestationPending(false);
     }
   }
 
@@ -1124,17 +1223,21 @@ export function ImportReview({
                   );
                 }
                 // Security mapping: an existing owner-private security
-                // candidate that is already resolved (linked to a verified
-                // security) is one valid target -- committing against an
+                // candidate that is already resolved (linked to a security --
+                // provider-verified OR, since IMP-009, owner-attested; see
+                // the "Owner-attested identity" label appended to its option
+                // below) is one valid target -- committing against an
                 // unresolved candidate is never allowed (AGENTS.md: a
                 // ticker is not a durable security ID). A brand-new symbol
                 // that matches no existing resolved candidate cannot be
                 // published as a canonical security from a user decision
                 // here (`securities` is a shared master writable only
                 // through the server-verified path in
-                // `security-verification-service.ts`); instead this offers
-                // a request for that server-side verification against the
-                // configured market-data provider (IMP-004B).
+                // `security-verification-service.ts`, or the owner-attested
+                // path in `security-attestation-service.ts`); instead this
+                // offers a request for server-side verification against the
+                // configured market-data provider (IMP-004B) or manual
+                // resolution (IMP-009).
                 const [portfolioId] = mapping.sourceKey.split("|");
                 const candidates = review.securityCandidates.filter(
                   (candidate) =>
@@ -1187,6 +1290,12 @@ export function ImportReview({
                               <option value={candidate.id} key={candidate.id}>
                                 {candidate.sourceSymbol} ·{" "}
                                 {candidate.sourceCurrencyCode} · {candidate.id}
+                                {candidate.securityId &&
+                                (review.attestedSecurityIds ?? []).includes(
+                                  candidate.securityId,
+                                )
+                                  ? " · Owner-attested identity; market data unavailable until provider-verified"
+                                  : ""}
                               </option>
                             ))}
                           </select>
@@ -1224,6 +1333,26 @@ export function ImportReview({
                             : "Verify with market-data provider"}
                         </button>
                       </form>
+                    ) : null}
+                    {unresolvedCandidate ? (
+                      // IMP-009: manual resolution for when the provider is
+                      // unavailable, or the ticker is delisted and can never
+                      // be provider-verified.
+                      <button
+                        type="button"
+                        onClick={(event) =>
+                          openAttestationDialog(event, {
+                            portfolioId: unresolvedCandidate.portfolioId,
+                            sourceSymbol: unresolvedCandidate.sourceSymbol,
+                            sourceExchangeAlias:
+                              unresolvedCandidate.sourceExchangeAlias,
+                            sourceCurrencyCode:
+                              unresolvedCandidate.sourceCurrencyCode,
+                          })
+                        }
+                      >
+                        Resolve manually
+                      </button>
                     ) : null}
                     {unresolvedCandidate ? (
                       <button
@@ -1522,6 +1651,80 @@ export function ImportReview({
                       : "Include these rows"}
                 </button>
               </div>
+            </dialog>
+          ) : null}
+
+          {pendingAttestation ? (
+            <dialog
+              ref={attestationDialogRef}
+              className="import-exclusion-dialog"
+              aria-labelledby="attestation-dialog-title"
+              onCancel={(event) => {
+                event.preventDefault();
+                if (attestationPending) return;
+                attestationDialogRef.current?.close();
+              }}
+              onClose={() => setPendingAttestation(null)}
+            >
+              <button
+                type="button"
+                className="sheet-close"
+                onClick={() => {
+                  if (attestationPending) return;
+                  attestationDialogRef.current?.close();
+                }}
+              >
+                Close
+              </button>
+              <p className="eyebrow" id="attestation-dialog-title">
+                Resolve {pendingAttestation.candidate.sourceSymbol} manually?
+              </p>
+              <p>
+                You are taking responsibility for this security&rsquo;s
+                identity. No market data -- prices, dividends, or corporate
+                actions -- will be fetched or displayed for it until it is later
+                verified against the market-data provider. Owner-attested
+                identity; market data unavailable until provider-verified.
+              </p>
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void submitAttestation();
+                }}
+              >
+                <label>
+                  Display name
+                  <input
+                    value={pendingAttestation.displayName}
+                    onChange={(event) =>
+                      setPendingAttestation((current) =>
+                        current
+                          ? { ...current, displayName: event.target.value }
+                          : current,
+                      )
+                    }
+                    required
+                    disabled={attestationPending}
+                  />
+                </label>
+                {attestationError ? (
+                  <p role="alert" className="sharesight-sync-error">
+                    {attestationError}
+                  </p>
+                ) : null}
+                <div className="dialog-actions">
+                  <button
+                    type="button"
+                    onClick={() => attestationDialogRef.current?.close()}
+                    disabled={attestationPending}
+                  >
+                    Cancel
+                  </button>
+                  <button type="submit" disabled={attestationPending}>
+                    {attestationPending ? "Resolving…" : "Resolve manually"}
+                  </button>
+                </div>
+              </form>
             </dialog>
           ) : null}
         </section>

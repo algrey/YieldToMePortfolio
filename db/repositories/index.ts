@@ -176,6 +176,12 @@ export {
   type SecurityVerificationRepository,
 } from "./security-verification.ts";
 export {
+  createOwnedSecurityAttestationRepository,
+  listAttestedSecurityIds,
+  type SecurityAttestationIdentity,
+  type SecurityAttestationRepository,
+} from "./security-attestation.ts";
+export {
   buildDividendManualRecordImportInsertStatements,
   createCorporateActionRefreshRepository,
   createDividendAssumptionsRepository,

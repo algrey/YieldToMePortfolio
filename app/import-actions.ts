@@ -2,6 +2,7 @@ import {
   createOwnedImportMappingDecisionRepository,
   createOwnedImportStagingRepository,
   createOwnedPortfolioRepository,
+  listAttestedSecurityIds,
   type ImportMappingConfidence,
   type ImportMappingKind,
   type ImportMappingScope,
@@ -17,6 +18,7 @@ import {
   type SecurityVerifyActionFailure,
   type SecurityVerifyActionSuccess,
 } from "./security-verification-service.ts";
+import { attestSecurityCandidateWithContext } from "./security-attestation-service.ts";
 import {
   setImportRowExclusionWithContext,
   type ImportRowExclusionActionFailure,
@@ -111,6 +113,12 @@ async function loadReview(
     portfolioSecurityId: String(row.portfolio_security_id),
     paymentDate: String(row.payment_date),
   }));
+  const attestedSecurityIds = await listAttestedSecurityIds(
+    client,
+    securityCandidates
+      .map((candidate) => candidate.securityId)
+      .filter((id): id is string => id !== null),
+  );
   return buildImportReviewPreview({
     batch,
     rows,
@@ -119,6 +127,7 @@ async function loadReview(
     portfolios: previewPortfolios,
     securityCandidates,
     existingDividendEntries,
+    attestedSecurityIds,
   });
 }
 
@@ -360,6 +369,24 @@ export async function verifySecurityCandidateAction(
   const context = await getAuthenticatedSqlContext();
   if (!context.ok) return context;
   return verifySecurityCandidateWithContext(context, batchId, value);
+}
+
+// The business logic lives in `security-attestation-service.ts`'s
+// `attestSecurityCandidateWithContext`, kept free of `next/headers`/D1-binding
+// resolution for the same testability reason as `verifySecurityCandidateAction`
+// above. This action only resolves the authenticated context (which already
+// carries `requestId`, needed for the attestation audit event) and
+// delegates. Declared against THIS file's own broader `ImportActionFailure`
+// (not `SecurityAttestActionFailure`, which deliberately excludes 401/503 --
+// see that type's header comment) -- mirrors `markImportReadyAction` above,
+// the established pattern for exactly this auth-context-pass-through case.
+export async function attestSecurityCandidateAction(
+  batchId: string,
+  value: unknown,
+): Promise<ImportActionSuccess | ImportActionFailure> {
+  const context = await getAuthenticatedSqlContext();
+  if (!context.ok) return context;
+  return attestSecurityCandidateWithContext(context, batchId, value);
 }
 
 // The business logic lives in `import-row-exclusion-service.ts`'s

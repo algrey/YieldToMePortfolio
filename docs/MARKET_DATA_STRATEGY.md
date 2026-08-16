@@ -182,6 +182,8 @@ Provider errors are typed as authentication, entitlement, rate limit, unavailabl
 
 Steps 4-6 (historical backfill) are not part of IMP-004B's scope: verification publishes the canonical identity and links the owner's candidate so the batch can reach `ready`/commit; price/FX/corporate-action backfill for a freshly verified security follows the ordinary refresh lifecycle below once the security is held.
 
+IMP-009's owner-attested securities (`db/repositories/security-attestation.ts`, used when this provider is unavailable or a ticker is delisted) carry no `security_provider_mappings` row at all, so none of steps 2-6 above ever run for them until a later provider verification upgrades the same row in place -- no quotes, no dividend/split history, no FX backfill, until that upgrade happens (see `docs/DATA_MODEL.md`'s `security_provider_mappings` section for the write path).
+
 ### Refresh
 
 - During market hours, delayed-capable securities refresh no more frequently than the source delay/rate budget permits; identical canonical securities are coalesced.

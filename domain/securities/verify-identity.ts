@@ -34,7 +34,13 @@ export type SecurityIdentityVerificationOutcome =
       message: string;
     };
 
-function normalizeToken(value: string): string {
+// Exported so IMP-009's owner-attestation path (`db/repositories/security-attestation.ts`,
+// `db/repositories/security-verification.ts`'s attested-identifier lookup) can
+// normalize ticker symbols the exact same way this module's own
+// case-insensitive agreement check does -- a single definition of "same
+// symbol" shared by both the provider-evidence path and the owner-attested
+// fallback path, rather than two independently-drifting implementations.
+export function normalizeToken(value: string): string {
   return value.trim().toUpperCase();
 }
 

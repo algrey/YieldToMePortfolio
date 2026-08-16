@@ -36,6 +36,16 @@ export type ImportReviewPreview = {
     physicalRowNumber: number;
     symbol: string | null;
   }>;
+  // IMP-009: `securities.id` values among this batch's resolved candidates
+  // that are owner-attested and NOT YET provider-verified (no active
+  // verified `security_provider_mappings` row) -- the queryable
+  // absence-of-mapping provenance signal the review UI reads to render the
+  // "Owner-attested identity; market data unavailable until
+  // provider-verified" state label. See `db/repositories/security-attestation.ts`'s
+  // `listAttestedSecurityIds`. Optional on input (defaults to empty) so
+  // every pre-existing caller of this function -- test fixtures included --
+  // keeps compiling unchanged; always present on output.
+  attestedSecurityIds: readonly string[];
 };
 
 export function buildImportReviewPreview(input: {
@@ -46,6 +56,7 @@ export function buildImportReviewPreview(input: {
   portfolios: ImportPreviewPortfolio[];
   securityCandidates: ImportPreviewSecurityCandidate[];
   existingDividendEntries?: ImportPreviewExistingDividendEntry[];
+  attestedSecurityIds?: readonly string[];
 }): ImportReviewPreview {
   const built = buildImportReview({
     batch: input.batch,
@@ -78,5 +89,6 @@ export function buildImportReviewPreview(input: {
     mappings: input.mappings,
     securityCandidates: input.securityCandidates,
     excludedRows,
+    attestedSecurityIds: input.attestedSecurityIds ?? [],
   };
 }

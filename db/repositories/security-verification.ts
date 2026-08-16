@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
-import type { VerifiedSecurityIdentity } from "../../domain/securities/verify-identity.ts";
+import {
+  normalizeToken,
+  type VerifiedSecurityIdentity,
+} from "../../domain/securities/verify-identity.ts";
 
 export type SecurityVerificationCandidateInput = {
   portfolioId: string;
@@ -62,6 +65,29 @@ export function createOwnedSecurityVerificationRepository(
       [securityId],
     );
     return row?.primary_currency_code;
+  }
+
+  // IMP-009 upgrade path: is `providerSymbol` (this verify request's OWN
+  // provider identity, case-folded the same way `security-attestation.ts`
+  // stores it) already published as an owner-ATTESTED security -- one with
+  // no provider mapping yet, per `db/schema.ts`'s
+  // `security_identifiers_owner_attested_ticker_unique`? If so, this verify
+  // must ATTACH its mapping evidence to that SAME `securities` row instead
+  // of creating a duplicate for what is, by ticker text, the identical
+  // identity. Never touches `security_identifiers` itself -- the attested
+  // row stays exactly as the owner recorded it, and once a mapping is
+  // attached the row naturally stops being reported by
+  // `listAttestedSecurityIds` (no mapping-less identity left to find).
+  async function existingAttestedIdentifier(
+    providerSymbol: string,
+  ): Promise<{ security_id: string } | undefined> {
+    return client.get<{ security_id: string }>(
+      `SELECT security_id FROM security_identifiers
+       WHERE scheme = 'ticker' AND UPPER(value) = ? AND valid_to IS NULL
+         AND source = 'owner_attested'
+       LIMIT 1`,
+      [normalizeToken(providerSymbol)],
+    );
   }
 
   async function existingCandidateRow(
@@ -275,6 +301,152 @@ export function createOwnedSecurityVerificationRepository(
       // fold no link statement into the batch and resolve it afterward.
       const alreadyResolvedElsewhere =
         existingRow !== undefined && existingRow.security_id !== null;
+
+      // IMP-009 upgrade path: no provider mapping exists for this identity
+      // yet, but an owner-attested security already publishes the exact
+      // same ticker text -- attach this verify's mapping evidence to that
+      // SAME `securities` row rather than creating a duplicate. On a
+      // currency disagreement this fails explicitly (never silently
+      // rewrites the attested identity), matching the dedupe-link currency
+      // check above.
+      const attested = await existingAttestedIdentifier(providerSymbol);
+      if (attested) {
+        const currency = await securityCurrency(attested.security_id);
+        if (currency !== identity.currencyCode) {
+          return { ok: false, reason: "currency_mismatch" };
+        }
+        const attachMappingId = randomUUID();
+        const attachLinkId = randomUUID();
+        const attachNowIso = now();
+        const attachToday = attachNowIso.slice(0, 10);
+        const attachStatements: SqlStatement[] = [
+          {
+            sql: `INSERT INTO security_provider_mappings (
+                    id, security_id, provider_id, provider_exchange, provider_symbol,
+                    valid_from, valid_to, status, verified_by_user_id, verified_at
+                  )
+                  SELECT ?, ?, ?, ?, ?, ?, NULL, 'verified', ?, ?
+                  WHERE NOT EXISTS (
+                    SELECT 1 FROM security_provider_mappings
+                    WHERE provider_id = ? AND provider_exchange = ? AND provider_symbol = ?
+                  )`,
+            params: [
+              attachMappingId,
+              attested.security_id,
+              providerId,
+              providerExchange,
+              providerSymbol,
+              attachToday,
+              userId,
+              attachNowIso,
+              providerId,
+              providerExchange,
+              providerSymbol,
+            ],
+          },
+        ];
+        if (!alreadyResolvedElsewhere) {
+          attachStatements.push(
+            existingRow
+              ? {
+                  sql: `UPDATE portfolio_securities
+                        SET security_id = (
+                              SELECT security_id FROM security_provider_mappings
+                              WHERE provider_id = ? AND provider_exchange = ? AND provider_symbol = ?
+                                AND valid_to IS NULL
+                              ORDER BY valid_from DESC LIMIT 1
+                            ),
+                            status = 'held', updated_at = ?
+                        WHERE id = ? AND user_id = ? AND portfolio_id = ?
+                          AND status = 'unresolved' AND security_id IS NULL
+                          AND EXISTS (
+                            SELECT 1 FROM security_provider_mappings
+                            WHERE provider_id = ? AND provider_exchange = ? AND provider_symbol = ?
+                              AND valid_to IS NULL
+                          )`,
+                  params: [
+                    providerId,
+                    providerExchange,
+                    providerSymbol,
+                    attachNowIso,
+                    existingRow.id,
+                    userId,
+                    candidate.portfolioId,
+                    providerId,
+                    providerExchange,
+                    providerSymbol,
+                  ],
+                }
+              : {
+                  sql: `INSERT INTO portfolio_securities (
+                          id, user_id, portfolio_id, security_id, source_symbol, source_exchange_alias,
+                          source_currency_code, status, created_at, updated_at
+                        )
+                        SELECT ?, ?, ?,
+                               (SELECT security_id FROM security_provider_mappings
+                                 WHERE provider_id = ? AND provider_exchange = ? AND provider_symbol = ?
+                                   AND valid_to IS NULL
+                                 ORDER BY valid_from DESC LIMIT 1),
+                               ?, ?, ?, 'held', ?, ?
+                        WHERE EXISTS (
+                                SELECT 1 FROM security_provider_mappings
+                                WHERE provider_id = ? AND provider_exchange = ? AND provider_symbol = ?
+                                  AND valid_to IS NULL
+                              )
+                          AND NOT EXISTS (
+                                SELECT 1 FROM portfolio_securities
+                                WHERE user_id = ? AND portfolio_id = ? AND source_symbol = ?
+                                  AND COALESCE(source_exchange_alias, '') = COALESCE(?, '')
+                                  AND source_currency_code = ?
+                              )`,
+                  params: [
+                    attachLinkId,
+                    userId,
+                    candidate.portfolioId,
+                    providerId,
+                    providerExchange,
+                    providerSymbol,
+                    candidate.sourceSymbol,
+                    candidate.sourceExchangeAlias,
+                    candidate.sourceCurrencyCode,
+                    attachNowIso,
+                    attachNowIso,
+                    providerId,
+                    providerExchange,
+                    providerSymbol,
+                    userId,
+                    candidate.portfolioId,
+                    candidate.sourceSymbol,
+                    candidate.sourceExchangeAlias,
+                    candidate.sourceCurrencyCode,
+                  ],
+                },
+          );
+        }
+        try {
+          await client.batch(attachStatements);
+        } catch {
+          // Fall through to the unconditional re-read below.
+        }
+        const attachWinner = await existingMapping(
+          providerId,
+          providerExchange,
+          providerSymbol,
+        );
+        if (!attachWinner) return { ok: false, reason: "conflict" };
+        if (alreadyResolvedElsewhere) {
+          return linkToSecurity(
+            userId,
+            attachWinner.security_id,
+            candidate,
+            existingRow,
+          );
+        }
+        return readLinkOutcome(userId, attachWinner.security_id, candidate, {
+          knownRowId: existingRow?.id,
+          insertedId: existingRow ? undefined : attachLinkId,
+        });
+      }
 
       const securityId = randomUUID();
       const identifierId = randomUUID();

@@ -3,6 +3,7 @@ import {
   createOwnedImportStagingRepository,
   createOwnedPortfolioRepository,
   createOwnedSecurityVerificationRepository,
+  listAttestedSecurityIds,
   type SqlClient,
 } from "../db/repositories/index.ts";
 import {
@@ -94,6 +95,12 @@ async function loadImportReview(
       sourceCurrencyCode: String(row.source_currency_code),
       securityId: row.security_id === null ? null : String(row.security_id),
     }));
+  const attestedSecurityIds = await listAttestedSecurityIds(
+    client,
+    securityCandidates
+      .map((candidate) => candidate.securityId)
+      .filter((id): id is string => id !== null),
+  );
   return buildImportReviewPreview({
     batch,
     rows,
@@ -106,6 +113,7 @@ async function loadImportReview(
       historyCompleteFrom: portfolio.historyCompleteFrom,
     })),
     securityCandidates,
+    attestedSecurityIds,
   });
 }
 
