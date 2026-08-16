@@ -75,6 +75,11 @@ export type ImportCommitSuccess = {
   highWaterRow: number;
   committedRows: number;
   skippedRows: number;
+  // IMP-008: the subset of `skippedRows` that were skipped because the
+  // OWNER excluded them pre-commit (as opposed to a duplicate/blank/
+  // unsupported-row skip) -- "N rows excluded by owner" in commit metadata
+  // and batch history, per the Orchestrator ruling.
+  excludedByOwnerRows: number;
   rebuildJobId: string | null;
   rebuildJobIds: string[];
 };
@@ -117,6 +122,7 @@ type StagedRow = {
   targetPortfolioId: string | null;
   targetPortfolioSecurityId: string | null;
   commitStatus: string;
+  excludedByOwnerAt: string | null;
 };
 
 function nowIso(now: () => string): string {
@@ -189,6 +195,10 @@ function mapRows(rows: Record<string, unknown>[]): StagedRow[] {
         ? null
         : String(row.target_portfolio_security_id),
     commitStatus: String(row.commit_status),
+    excludedByOwnerAt:
+      row.excluded_by_owner_at === null
+        ? null
+        : String(row.excluded_by_owner_at),
   }));
 }
 
@@ -324,24 +334,40 @@ export function createOwnedImportCommitRepository(
       })),
       securityCandidates,
     });
+    // IMP-008: rows the owner excluded pre-commit never block revalidation
+    // -- their own persisted validation state and any error-severity issue
+    // linked to them (e.g. SHARESIGHT_PAYOUT_KEY_COLLISION) are excluded
+    // from every check below. A batch-level issue (`rowId === null`) is
+    // untouched by row exclusion, per the Orchestrator ruling; a row-linked
+    // issue only stops blocking once ITS OWN row is excluded (both rows of
+    // a colliding pair carry independent copies of the issue -- see
+    // `domain/sharesight-sync/transform.ts` -- so excluding only one leaves
+    // the other's copy still blocking, exactly as intended).
+    const excludedRowIds = new Set(
+      rows.filter((row) => row.excludedByOwnerAt !== null).map((row) => row.id),
+    );
     const hasBlockingPersistedState =
       !isSupportedImportBatchFormat(
         ownedBatch.parserFormat,
         ownedBatch.parserVersion,
       ) ||
       issues.some(
-        (issue) => issue.severity === "error" && issue.resolvedAt === null,
+        (issue) =>
+          issue.severity === "error" &&
+          issue.resolvedAt === null &&
+          (issue.rowId === null || !excludedRowIds.has(issue.rowId)),
       ) ||
       rows.some(
         (row) =>
-          row.validationStatus === "invalid" ||
-          row.errorCount > 0 ||
-          (row.rowClass === "transaction" &&
-            built.preview.resolvedTargets[row.id] === undefined &&
-            !built.preview.issues.some(
-              (issue) =>
-                issue.rowId === row.id && issue.code === "DUPLICATE_ROW",
-            )),
+          row.excludedByOwnerAt === null &&
+          (row.validationStatus === "invalid" ||
+            row.errorCount > 0 ||
+            (row.rowClass === "transaction" &&
+              built.preview.resolvedTargets[row.id] === undefined &&
+              !built.preview.issues.some(
+                (issue) =>
+                  issue.rowId === row.id && issue.code === "DUPLICATE_ROW",
+              ))),
       );
     if (!built.preview.ready || hasBlockingPersistedState) {
       return { ok: false, reason: "revalidation_failed" };
@@ -382,7 +408,9 @@ export function createOwnedImportCommitRepository(
     const counts = await client.get<Record<string, unknown>>(
       `SELECT
          SUM(CASE WHEN commit_status = 'committed' THEN 1 ELSE 0 END) AS committed_rows,
-         SUM(CASE WHEN commit_status = 'skipped' THEN 1 ELSE 0 END) AS skipped_rows
+         SUM(CASE WHEN commit_status = 'skipped' THEN 1 ELSE 0 END) AS skipped_rows,
+         SUM(CASE WHEN commit_status = 'skipped' AND excluded_by_owner_at IS NOT NULL
+              THEN 1 ELSE 0 END) AS excluded_by_owner_rows
        FROM import_rows WHERE user_id = ? AND batch_id = ?`,
       [userId, batchId],
     );
@@ -402,6 +430,7 @@ export function createOwnedImportCommitRepository(
       highWaterRow: batch.commitHighWaterRow,
       committedRows: Number(counts?.committed_rows ?? 0),
       skippedRows: Number(counts?.skipped_rows ?? 0),
+      excludedByOwnerRows: Number(counts?.excluded_by_owner_rows ?? 0),
       rebuildJobId: rebuildJobIds[0] ?? null,
       rebuildJobIds,
     };
@@ -785,7 +814,7 @@ export function createOwnedImportCommitRepository(
         await client.all<Record<string, unknown>>(
           `SELECT id, batch_id, physical_row_number, row_class, normalized_fields_json,
                   normalized_fingerprint, validation_status, target_portfolio_id,
-                  target_portfolio_security_id, commit_status
+                  target_portfolio_security_id, commit_status, excluded_by_owner_at
            FROM import_rows WHERE user_id = ? AND batch_id = ?
              AND physical_row_number > ? AND commit_status = 'staged'
            ORDER BY physical_row_number ASC, id ASC LIMIT ?`,
@@ -808,6 +837,21 @@ export function createOwnedImportCommitRepository(
         const statements: SqlStatement[] = [];
         let committedRowCount = 0;
         for (const row of chunk) {
+          // IMP-008: an owner-excluded row is NEVER eligible to commit --
+          // it is marked 'skipped' with no ledger/dividend effect and no
+          // `resolveInput`/`target` lookup at all (which would otherwise
+          // fail closed below since `validation.targets` never contains an
+          // excluded row -- `revalidate()`'s `buildImportReview` call omits
+          // excluded rows from reconciliation entirely). Checked first, the
+          // same way blank/unsupported rows and duplicate-skip rows are.
+          if (row.excludedByOwnerAt !== null) {
+            statements.push({
+              sql: `UPDATE import_rows SET commit_status = 'skipped', updated_at = ?, version = version + 1
+                WHERE id = ? AND user_id = ? AND batch_id = ? AND commit_status = 'staged'`,
+              params: [nowIso(now), row.id, userId, batch.id],
+            });
+            continue;
+          }
           if (row.rowClass !== "transaction") {
             statements.push({
               sql: `UPDATE import_rows SET commit_status = 'skipped', updated_at = ?, version = version + 1

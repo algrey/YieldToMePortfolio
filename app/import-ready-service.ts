@@ -179,8 +179,16 @@ export async function markImportReadyWithContext(
       message: "This preview is stale. Reload it before marking it ready.",
     };
   }
+  // IMP-008: a persisted error-severity issue linked to a row the owner has
+  // excluded (e.g. SHARESIGHT_PAYOUT_KEY_COLLISION) never blocks readiness
+  // -- only a batch-level issue (`rowId === null`) or one linked to a
+  // still-INCLUDED row does.
+  const excludedRowIds = new Set(review.excludedRows.map((row) => row.id));
   const hasUnresolvedPersistedIssue = review.issues.some(
-    (issue) => issue.severity === "error" && issue.resolvedAt === null,
+    (issue) =>
+      issue.severity === "error" &&
+      issue.resolvedAt === null &&
+      (issue.rowId === null || !excludedRowIds.has(issue.rowId)),
   );
   const unsupportedParser = !isSupportedImportBatchFormat(
     batch.parserFormat,

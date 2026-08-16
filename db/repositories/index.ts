@@ -16,6 +16,7 @@ export {
   type ImportCommitSuccess,
 } from "./import-commit.ts";
 export {
+  buildReadyToNeedsMappingStatement,
   createOwnedImportStagingRepository,
   IMPORT_HISTORY_LIMITS,
   type ImportBatchRecord,

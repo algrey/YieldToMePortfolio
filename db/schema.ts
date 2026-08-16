@@ -607,6 +607,14 @@ export const importRows = sqliteTable(
     targetPortfolioSecurityId: text("target_portfolio_security_id"),
     commitStatus: text("commit_status").notNull().default("staged"),
     commitTransactionId: text("commit_transaction_id"),
+    // IMP-008: NULL = not excluded. A non-null ISO timestamp records that
+    // the OWNER (never the system) explicitly excluded this row from
+    // commit, pre-commit and reversibly (un-skip clears it back to NULL).
+    // Deliberately a dedicated column rather than an overload of
+    // `commit_status` (which describes what COMMIT did to a row, not a
+    // pre-commit owner decision) -- see docs/CSV_IMPORT_SPEC.md for the
+    // full exclusion/readiness/commit semantics this column drives.
+    excludedByOwnerAt: text("excluded_by_owner_at"),
     errorCount: integer("error_count").notNull().default(0),
     warningCount: integer("warning_count").notNull().default(0),
     infoCount: integer("info_count").notNull().default(0),

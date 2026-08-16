@@ -1,0 +1,1 @@
+ALTER TABLE `import_rows` ADD `excluded_by_owner_at` text;

@@ -26,6 +26,16 @@ export type ImportReviewPreview = {
   // security" as a target distinct from `preview.unresolvedCandidates`
   // (which only lists candidates still awaiting resolution).
   securityCandidates: ImportPreviewSecurityCandidate[];
+  // IMP-008: rows the owner has excluded from this batch's commit.
+  // `preview` above silently omits these rows entirely (see
+  // `buildImportReview`), so this is the ONLY place the review surfaces
+  // them -- the "N rows excluded by owner" disclosure and the un-skip
+  // affordance both read from here.
+  excludedRows: ReadonlyArray<{
+    id: string;
+    physicalRowNumber: number;
+    symbol: string | null;
+  }>;
 };
 
 export function buildImportReviewPreview(input: {
@@ -46,6 +56,14 @@ export function buildImportReviewPreview(input: {
     securityCandidates: input.securityCandidates,
     existingDividendEntries: input.existingDividendEntries,
   });
+  const excludedRows = input.rows
+    .filter((row) => row.excludedByOwnerAt !== null)
+    .map((row) => ({
+      id: row.id,
+      physicalRowNumber: row.physicalRowNumber,
+      symbol: row.normalizedFields?.symbol ?? null,
+    }))
+    .sort((left, right) => left.physicalRowNumber - right.physicalRowNumber);
   return {
     batch: {
       id: input.batch.id,
@@ -59,5 +77,6 @@ export function buildImportReviewPreview(input: {
     issues: input.issues,
     mappings: input.mappings,
     securityCandidates: input.securityCandidates,
+    excludedRows,
   };
 }

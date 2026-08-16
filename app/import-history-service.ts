@@ -41,6 +41,7 @@ export type ImportHistoryRow = Pick<
   | "validationStatus"
   | "commitStatus"
   | "commitTransactionId"
+  | "excludedByOwnerAt"
   | "errorCount"
   | "warningCount"
   | "infoCount"
@@ -66,6 +67,10 @@ export type ImportHistoryDetail = {
   audit: AuditEventRecord[];
   progress: ImportCommitProgressRecord;
   pagination: ImportHistoryPagination;
+  // IMP-008: the WHOLE batch's excluded-row count -- unlike `rows` above,
+  // never paginated, so "N rows excluded by owner" reads correctly no
+  // matter which page of rows is currently loaded.
+  excludedRowCount: number;
 };
 
 export type ImportHistoryContext = {
@@ -103,6 +108,7 @@ function rowHistory(row: ImportRowRecord): ImportHistoryRow {
     validationStatus: row.validationStatus,
     commitStatus: row.commitStatus,
     commitTransactionId: row.commitTransactionId,
+    excludedByOwnerAt: row.excludedByOwnerAt,
     errorCount: row.errorCount,
     warningCount: row.warningCount,
     infoCount: row.infoCount,
@@ -124,24 +130,32 @@ export async function loadImportBatchHistoryWithContext(
       ORDER BY created_at ASC, id ASC LIMIT 1`,
     [context.userId, batchId],
   );
-  const [rows, issues, mappings, audit, progress] = await Promise.all([
-    staging.listRowsPage(context.userId, batchId, offset, limit),
-    staging.listIssuesPage(context.userId, batchId, offset, limit),
-    createOwnedImportMappingDecisionRepository(context.client).listPage(
-      context.userId,
-      batchId,
-      offset,
-      limit,
-    ),
-    createAuditRepository(context.client).listForOwnerTargetPage(
-      context.userId,
-      "import_batch",
-      batchId,
-      offset,
-      limit,
-    ),
-    staging.getCommitProgress(context.userId, batchId),
-  ]);
+  const [rows, issues, mappings, audit, progress, excludedRowCountRow] =
+    await Promise.all([
+      staging.listRowsPage(context.userId, batchId, offset, limit),
+      staging.listIssuesPage(context.userId, batchId, offset, limit),
+      createOwnedImportMappingDecisionRepository(context.client).listPage(
+        context.userId,
+        batchId,
+        offset,
+        limit,
+      ),
+      createAuditRepository(context.client).listForOwnerTargetPage(
+        context.userId,
+        "import_batch",
+        batchId,
+        offset,
+        limit,
+      ),
+      staging.getCommitProgress(context.userId, batchId),
+      // IMP-008: an unpaginated whole-batch count, not derived from `rows`
+      // above (which is only the current page).
+      context.client.get<{ excluded_row_count: number }>(
+        `SELECT COUNT(*) AS excluded_row_count FROM import_rows
+         WHERE user_id = ? AND batch_id = ? AND excluded_by_owner_at IS NOT NULL`,
+        [context.userId, batchId],
+      ),
+    ]);
   if (!progress) return null;
   const hasMore =
     rows.hasMore || issues.hasMore || mappings.hasMore || audit.hasMore;
@@ -153,6 +167,7 @@ export async function loadImportBatchHistoryWithContext(
     mappings: mappings.items,
     audit: audit.items,
     progress,
+    excludedRowCount: Number(excludedRowCountRow?.excluded_row_count ?? 0),
     pagination: {
       offset,
       limit,

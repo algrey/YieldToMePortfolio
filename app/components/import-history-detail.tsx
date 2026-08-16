@@ -63,7 +63,7 @@ export function ImportHistoryDetailPanel({
       <p>
         {detail.batch.transactionRows} transaction rows · showing{" "}
         {detail.rows.length} source rows and {detail.issues.length} issues in
-        this bounded page
+        this bounded page · {detail.excludedRowCount} rows excluded by owner
       </p>
 
       {detail.batch.status === "committed" ||
@@ -282,6 +282,7 @@ export function ImportHistoryDetailPanel({
                 <th scope="col">Class</th>
                 <th scope="col">Validation</th>
                 <th scope="col">Commit</th>
+                <th scope="col">Excluded by owner</th>
                 <th scope="col">Transaction</th>
                 <th scope="col">Original fields</th>
                 <th scope="col">Normalized facts</th>
@@ -294,6 +295,7 @@ export function ImportHistoryDetailPanel({
                   <td>{row.rowClass}</td>
                   <td>{row.validationStatus}</td>
                   <td>{row.commitStatus}</td>
+                  <td>{row.excludedByOwnerAt ?? "No"}</td>
                   <td>{row.commitTransactionId ?? "None"}</td>
                   <td>
                     <details>

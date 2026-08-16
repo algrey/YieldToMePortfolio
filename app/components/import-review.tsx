@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import type { ImportHistoryDetail } from "../import-history-service.ts";
 import type { ImportReversalActionResult } from "../import-reversal-service.ts";
 import { ImportHistoryDetailPanel } from "./import-history-detail.tsx";
@@ -56,6 +56,41 @@ type Review = {
     sourceCurrencyCode: string;
     securityId: string | null;
   }>;
+  issues: Array<{
+    id: string;
+    rowId: string | null;
+    physicalRowNumber: number | null;
+    severity: "error" | "warning" | "info";
+    code: string;
+    message: string;
+    resolvedAt: string | null;
+  }>;
+  excludedRows: Array<{
+    id: string;
+    physicalRowNumber: number;
+    symbol: string | null;
+  }>;
+};
+
+// IMP-008: the row(s) an exclude/include confirm dialog is currently open
+// for -- mirrors `SharesightSyncPanel`'s dialog-state pattern (a single
+// `useState` describing what the dialog is FOR, opened imperatively via
+// `showModal()`).
+type ExclusionTarget =
+  | {
+      kind: "securityCandidate";
+      portfolioId: string;
+      sourceSymbol: string;
+      sourceExchangeAlias: string | null;
+      sourceCurrencyCode: string;
+    }
+  | { kind: "issue"; issueId: string }
+  | { kind: "rowIds"; rowIds: string[] };
+
+type PendingExclusion = {
+  action: "exclude" | "include";
+  target: ExclusionTarget;
+  description: string;
 };
 
 type PendingMapping = {
@@ -91,6 +126,7 @@ type CommitResult = {
   highWaterRow: number;
   committedRows: number;
   skippedRows: number;
+  excludedByOwnerRows: number;
   rebuildJobId: string | null;
 };
 
@@ -100,6 +136,40 @@ function businessDate(value: string): string {
 
 function statusLabel(status: string): string {
   return status.replaceAll("_", " ");
+}
+
+// IMP-008 review finding B1/B2: mirrors the server's own eligibility gate
+// (`app/import-row-exclusion-service.ts`, `setRowExclusion` in
+// `db/repositories/import-staging.ts`) -- exclusion stays mutable right up
+// to the moment commit actually starts, INCLUDING at `ready`, but never
+// once `committing` has begun or the batch has reached a terminal status.
+function isMutableExclusionStatus(status: string): boolean {
+  return (
+    status === "parsed" ||
+    status === "needs_mapping" ||
+    status === "invalid" ||
+    status === "ready"
+  );
+}
+
+// IMP-008 review finding B2-residual: nothing ever marks a persisted issue
+// resolved just because the OWNER excluded its row (excluding is a
+// separate mechanism from resolving the issue -- see
+// `app/import-row-exclusion-service.ts`), so a row's unresolved issue would
+// otherwise sit in "Blocked rows" forever, including after commit, still
+// asserting "blocked" about a row that is no longer blocked (already
+// excluded, and shown accurately in "Excluded rows" instead) or blocking
+// (batch may be committed). True only for an issue that is STILL genuinely
+// blocking: unresolved, error-severity, and not already excluded.
+function isRowStillBlocking(
+  issue: { severity: string; resolvedAt: string | null; rowId: string | null },
+  excludedRowIds: ReadonlySet<string>,
+): boolean {
+  return (
+    issue.severity === "error" &&
+    issue.resolvedAt === null &&
+    (issue.rowId === null || !excludedRowIds.has(issue.rowId))
+  );
 }
 
 // Mirrors `normalized()` in domain/imports/reconciliation.ts so the client
@@ -170,6 +240,27 @@ export function ImportReview({
   );
   const [reversalKey, setReversalKey] = useState<string | null>(null);
   const [successorPending, setSuccessorPending] = useState(false);
+  // IMP-008: skip/un-skip confirm dialog -- mirrors `SharesightSyncPanel`'s
+  // ref + `showModal()`/opener-focus-restore pattern.
+  const [pendingExclusion, setPendingExclusion] =
+    useState<PendingExclusion | null>(null);
+  const exclusionDialogRef = useRef<HTMLDialogElement>(null);
+  const exclusionOpenerRef = useRef<HTMLButtonElement | null>(null);
+  const [exclusionPending, setExclusionPending] = useState(false);
+  const [exclusionError, setExclusionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const dialog = exclusionDialogRef.current;
+    if (pendingExclusion && dialog && !dialog.open) {
+      dialog.showModal();
+      dialog.querySelector<HTMLButtonElement>(".sheet-close")?.focus();
+    }
+    if (!pendingExclusion && dialog?.open) dialog.close();
+    if (!pendingExclusion && exclusionOpenerRef.current) {
+      exclusionOpenerRef.current.focus();
+      exclusionOpenerRef.current = null;
+    }
+  }, [pendingExclusion]);
 
   useEffect(() => {
     void loadHistory();
@@ -501,6 +592,69 @@ export function ImportReview({
     }
   }
 
+  // IMP-008: opens the consequence-stating confirm dialog for a skip
+  // (exclude) or un-skip (include) action. `description` is the exact
+  // consequence copy shown in the dialog -- callers compose it from
+  // whatever they already know about the target (symbol, row count).
+  function openExclusionDialog(
+    event: React.MouseEvent<HTMLButtonElement>,
+    action: "exclude" | "include",
+    target: ExclusionTarget,
+    description: string,
+  ) {
+    exclusionOpenerRef.current = event.currentTarget;
+    setExclusionError(null);
+    setPendingExclusion({ action, target, description });
+  }
+
+  async function submitExclusion() {
+    if (!review || !pendingExclusion) return;
+    setExclusionPending(true);
+    setExclusionError(null);
+    try {
+      const response = await fetch(
+        `/api/import/preview/${review.batch.id}/exclusions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            action: pendingExclusion.action,
+            target: pendingExclusion.target,
+            expectedVersion: review.batch.version,
+            expectedPreviewVersion: review.previewVersion,
+          }),
+        },
+      );
+      const result = (await response.json()) as
+        | { ok: true; review: Review; changedRowCount: number }
+        | { ok: false; message: string };
+      if (!response.ok || result.ok === false) {
+        throw new Error(
+          result.ok === false
+            ? result.message
+            : "This exclusion could not be saved.",
+        );
+      }
+      setReview(result.review);
+      setMessage(
+        result.changedRowCount === 0
+          ? "No rows changed -- they may already be in that state."
+          : pendingExclusion.action === "exclude"
+            ? `${result.changedRowCount} row${result.changedRowCount === 1 ? "" : "s"} excluded -- they will not be committed.`
+            : `${result.changedRowCount} row${result.changedRowCount === 1 ? "" : "s"} restored and will be committed again.`,
+      );
+      setPendingExclusion(null);
+    } catch (error) {
+      setExclusionError(
+        error instanceof Error
+          ? error.message
+          : "This exclusion could not be saved.",
+      );
+    } finally {
+      setExclusionPending(false);
+    }
+  }
+
   // BRK-005B: opens a batch (a Sharesight sync's own staged batch, or any
   // other batch id) into the SAME review section a CSV upload's preview
   // response already renders below -- there is no separate review PAGE to
@@ -739,6 +893,17 @@ export function ImportReview({
       ]
     : [];
 
+  // IMP-008 review finding B2-residual: an already-excluded row's issue is
+  // shown, accurately, in "Excluded rows" below -- suppressed here (see
+  // `isRowStillBlocking`) rather than relabelled, to avoid listing the same
+  // row in two places.
+  const excludedRowIds = new Set(
+    review ? review.excludedRows.map((row) => row.id) : [],
+  );
+  const blockedRowIssues = review
+    ? review.issues.filter((issue) => isRowStillBlocking(issue, excludedRowIds))
+    : [];
+
   return (
     <main className="import-review-page">
       <p className="eyebrow">Import review</p>
@@ -838,6 +1003,7 @@ export function ImportReview({
             <span>{review.preview.counts.candidateCreates} new candidates</span>
             <span>{review.preview.counts.skips} skipped</span>
             <span>{review.preview.counts.unresolved} unresolved</span>
+            <span>{review.excludedRows.length} excluded by owner</span>
           </div>
 
           {pendingMappings.length > 0 ? (
@@ -947,6 +1113,18 @@ export function ImportReview({
                         normalizedKeyPart(candidate.sourceCurrencyCode),
                       ].join("|") === mapping.sourceKey,
                   );
+                // IMP-008 review finding B4: the ruling's exact copy is
+                // "Skip N rows referencing SYMBOL" -- every row currently
+                // blocked by this candidate carries its own
+                // `SECURITY_MAPPING_REQUIRED` issue with this candidate's
+                // `sourceKey` (see `rowsBlockedBySecurityCandidate` in
+                // `app/import-row-exclusion-service.ts`, which counts the
+                // SAME way server-side when resolving the exclude target).
+                const blockedRowCount = review.preview.issues.filter(
+                  (issue) =>
+                    issue.code === "SECURITY_MAPPING_REQUIRED" &&
+                    issue.sourceKey === mapping.sourceKey,
+                ).length;
                 return (
                   <div className="import-mapping-form" key={mapping.key}>
                     <p>{mapping.message}</p>
@@ -1006,6 +1184,31 @@ export function ImportReview({
                             : "Verify with market-data provider"}
                         </button>
                       </form>
+                    ) : null}
+                    {unresolvedCandidate ? (
+                      <button
+                        type="button"
+                        onClick={(event) =>
+                          openExclusionDialog(
+                            event,
+                            "exclude",
+                            {
+                              kind: "securityCandidate",
+                              portfolioId: unresolvedCandidate.portfolioId,
+                              sourceSymbol: unresolvedCandidate.sourceSymbol,
+                              sourceExchangeAlias:
+                                unresolvedCandidate.sourceExchangeAlias,
+                              sourceCurrencyCode:
+                                unresolvedCandidate.sourceCurrencyCode,
+                            },
+                            `Skip ${blockedRowCount} row${blockedRowCount === 1 ? "" : "s"} referencing ${unresolvedCandidate.sourceSymbol} -- they will not be committed. Skipped rows are absent from holdings, gains, and income until you include them again.`,
+                          )
+                        }
+                      >
+                        Skip {blockedRowCount} row
+                        {blockedRowCount === 1 ? "" : "s"} referencing{" "}
+                        {unresolvedCandidate.sourceSymbol}
+                      </button>
                     ) : null}
                     {candidates.length === 0 && !unresolvedCandidate ? (
                       <p role="note">
@@ -1093,7 +1296,7 @@ export function ImportReview({
                   role="status"
                 >
                   {commit.status === "committed"
-                    ? `Committed ${commit.committedRows} row effects; ${commit.skippedRows} rows were skipped.`
+                    ? `Committed ${commit.committedRows} row effects; ${commit.skippedRows} rows were skipped (${commit.excludedByOwnerRows} excluded by owner).`
                     : `Commit is resumable after physical row ${commit.highWaterRow}. It is not complete.`}
                 </p>
               ) : null}
@@ -1120,11 +1323,167 @@ export function ImportReview({
               </ul>
             )}
           </section>
+
+          {/* IMP-008: persisted, row-linked, unresolved error issues (e.g.
+              SHARESIGHT_PAYOUT_KEY_COLLISION) -- distinct from the
+              reconciliation-computed `preview.issues` above, and the only
+              place these are otherwise visible before the batch reaches
+              import history. Skipping the row removes it from this list
+              (and, once every remaining blocking row/issue is likewise
+              excluded, unblocks readiness -- see
+              `app/import-row-exclusion-service.ts`). */}
+          <section
+            className="import-issues"
+            aria-labelledby="blocked-rows-title"
+          >
+            <h3 id="blocked-rows-title">Blocked rows</h3>
+            {blockedRowIssues.length === 0 ? (
+              <p>No blocking row issues were found.</p>
+            ) : (
+              <ul>
+                {blockedRowIssues.map((issue) => (
+                  <li key={issue.id}>
+                    <strong>{issue.code}</strong>
+                    <span>
+                      {issue.physicalRowNumber
+                        ? `Row ${issue.physicalRowNumber}: `
+                        : ""}
+                      {issue.message}
+                    </span>
+                    {issue.rowId &&
+                    isMutableExclusionStatus(review.batch.status) ? (
+                      <button
+                        type="button"
+                        onClick={(event) =>
+                          openExclusionDialog(
+                            event,
+                            "exclude",
+                            { kind: "issue", issueId: issue.id },
+                            `Skip this row -- it will not be committed. Skipped rows are absent from holdings, gains, and income until you include them again.`,
+                          )
+                        }
+                      >
+                        Skip this row
+                      </button>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          {/* IMP-008: rows excluded from this batch's commit visibly listed
+              with an un-skip toggle, per the Orchestrator ruling. Review
+              finding B2: exclusion stays mutable through `ready` (B1), but
+              NOT once commit has actually started or finished (`committing`/
+              `committed`/`reversing`/`reversed`/`failed`) -- the include
+              button is only offered while mutation could actually succeed,
+              and the consequence copy switches from future to past tense
+              once the batch has left the pre-commit window, since a
+              committed/failed batch's excluded rows genuinely WERE never
+              committed, not merely "will not be". */}
+          <section
+            className="import-issues"
+            aria-labelledby="excluded-rows-title"
+          >
+            <h3 id="excluded-rows-title">
+              Excluded rows ({review.excludedRows.length})
+            </h3>
+            {review.excludedRows.length === 0 ? (
+              <p>No rows are currently excluded from this import.</p>
+            ) : (
+              <ul>
+                {review.excludedRows.map((row) => (
+                  <li key={row.id}>
+                    <span>
+                      Row {row.physicalRowNumber}
+                      {row.symbol ? ` (${row.symbol})` : ""}{" "}
+                      {isMutableExclusionStatus(review.batch.status)
+                        ? "will not be committed."
+                        : "was not committed."}
+                    </span>
+                    {isMutableExclusionStatus(review.batch.status) ? (
+                      <button
+                        type="button"
+                        onClick={(event) =>
+                          openExclusionDialog(
+                            event,
+                            "include",
+                            { kind: "rowIds", rowIds: [row.id] },
+                            `Include row ${row.physicalRowNumber} again -- it will be committed with the rest of this reviewed preview.`,
+                          )
+                        }
+                      >
+                        Include this row again
+                      </button>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
           <p className="import-no-commit" role="note">
             Review only until you confirm the commit above. Review evidence
             remains available after commit, and the preview does not change
             ledger, cash, security, or portfolio totals beforehand.
           </p>
+
+          {pendingExclusion ? (
+            <dialog
+              ref={exclusionDialogRef}
+              className="import-exclusion-dialog"
+              aria-labelledby="exclusion-dialog-title"
+              onCancel={(event) => {
+                event.preventDefault();
+                if (exclusionPending) return;
+                exclusionDialogRef.current?.close();
+              }}
+              onClose={() => setPendingExclusion(null)}
+            >
+              <button
+                type="button"
+                className="sheet-close"
+                onClick={() => {
+                  if (exclusionPending) return;
+                  exclusionDialogRef.current?.close();
+                }}
+              >
+                Close
+              </button>
+              <p className="eyebrow" id="exclusion-dialog-title">
+                {pendingExclusion.action === "exclude"
+                  ? "Skip these rows?"
+                  : "Include these rows again?"}
+              </p>
+              <p>{pendingExclusion.description}</p>
+              {exclusionError ? (
+                <p role="alert" className="sharesight-sync-error">
+                  {exclusionError}
+                </p>
+              ) : null}
+              <div className="dialog-actions">
+                <button
+                  type="button"
+                  onClick={() => exclusionDialogRef.current?.close()}
+                  disabled={exclusionPending}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void submitExclusion()}
+                  disabled={exclusionPending}
+                >
+                  {exclusionPending
+                    ? "Saving…"
+                    : pendingExclusion.action === "exclude"
+                      ? "Skip these rows"
+                      : "Include these rows"}
+                </button>
+              </div>
+            </dialog>
+          ) : null}
         </section>
       ) : null}
 

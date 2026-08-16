@@ -556,7 +556,8 @@ Exact file duplicate is owner-scoped unique by hash and parser version as policy
 - validation status;
 - target portfolio and owner-scoped portfolio-security membership IDs;
 - commit status and resulting transaction ID;
-- error/warning counts.
+- error/warning counts;
+- `excluded_by_owner_at` (`IMP-008`): nullable ISO timestamp, `NULL` = not excluded from commit. A dedicated column rather than an overload of `commit_status` -- `commit_status` describes what COMMIT did to a row; this records a pre-commit OWNER decision, reversible until commit (un-skip clears it back to `NULL`). Added by a plain `ALTER TABLE ADD COLUMN` (no rebuild); see `docs/CSV_IMPORT_SPEC.md` §8 "Owner row-exclusion (skip)" for the full readiness/commit/reversal semantics this column drives.
 
 Unique `(batch_id, physical_row_number)` and index `(user_id, normalized_fingerprint)`.
 

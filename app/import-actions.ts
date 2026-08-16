@@ -18,6 +18,11 @@ import {
   type SecurityVerifyActionSuccess,
 } from "./security-verification-service.ts";
 import {
+  setImportRowExclusionWithContext,
+  type ImportRowExclusionActionFailure,
+  type ImportRowExclusionActionSuccess,
+} from "./import-row-exclusion-service.ts";
+import {
   assessCsvImportUploadStart,
   parseStrictVersionedCsvImport,
 } from "../domain/imports";
@@ -355,6 +360,20 @@ export async function verifySecurityCandidateAction(
   const context = await getAuthenticatedSqlContext();
   if (!context.ok) return context;
   return verifySecurityCandidateWithContext(context, batchId, value);
+}
+
+// The business logic lives in `import-row-exclusion-service.ts`'s
+// `setImportRowExclusionWithContext`, kept free of `next/headers`/D1-binding
+// resolution for the same testability reason as `markImportReadyWithContext`
+// and `verifySecurityCandidateAction` above. This action only resolves the
+// authenticated context and delegates.
+export async function setImportRowExclusionAction(
+  batchId: string,
+  value: unknown,
+): Promise<ImportRowExclusionActionSuccess | ImportRowExclusionActionFailure> {
+  const context = await getAuthenticatedSqlContext();
+  if (!context.ok) return context;
+  return setImportRowExclusionWithContext(context, batchId, value);
 }
 
 // Reloads the current server-issued review for a batch without mutating

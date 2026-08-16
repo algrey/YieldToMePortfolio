@@ -98,6 +98,9 @@ export type ImportRowRecord = {
   targetPortfolioSecurityId: string | null;
   commitStatus: ImportCommitStatus;
   commitTransactionId: string | null;
+  // IMP-008: NULL = not excluded; a non-null ISO timestamp is the owner's
+  // pre-commit exclusion decision. See `db/schema.ts`'s column comment.
+  excludedByOwnerAt: string | null;
   errorCount: number;
   warningCount: number;
   infoCount: number;
@@ -301,6 +304,10 @@ function createRowRecord(row: Record<string, unknown>): ImportRowRecord {
       row.commit_transaction_id === null
         ? null
         : String(row.commit_transaction_id),
+    excludedByOwnerAt:
+      row.excluded_by_owner_at === null
+        ? null
+        : String(row.excluded_by_owner_at),
     errorCount: Number(row.error_count),
     warningCount: Number(row.warning_count),
     infoCount: Number(row.info_count),
@@ -408,8 +415,34 @@ function isValidTransition(
     uploaded: ["parsed", "invalid", "failed"],
     parsed: ["needs_mapping", "ready", "invalid", "failed"],
     needs_mapping: ["ready", "invalid", "failed"],
-    invalid: [],
-    ready: ["committing", "failed"],
+    // IMP-008 (supersedes BRK-005D): a batch reaches `invalid` when a
+    // PERSISTED, parse/sync-time error-severity row issue exists (e.g.
+    // SHARESIGHT_PAYOUT_KEY_COLLISION) -- normally a dead end, since the
+    // owner cannot "map" their way out of a structurally invalid row. The
+    // owner CAN, however, exclude the specific blocking row(s) from commit;
+    // when that removes every remaining blocking persisted row/issue, the
+    // row-exclusion service (`app/import-row-exclusion-service.ts`) advances
+    // the batch here -- to `needs_mapping`, never straight to `ready` --
+    // so it re-enters `markImportReadyWithContext`'s existing
+    // parsed/needs_mapping gate rather than duplicating that readiness
+    // logic. No other caller performs this transition.
+    invalid: ["needs_mapping", "failed"],
+    // IMP-008 review finding B1: exclusion must stay reversible right up to
+    // the moment commit actually starts, INCLUDING at `ready` -- an un-skip
+    // (include) at `ready` can re-surface a blocking issue the owner had
+    // previously excluded away, so the batch is no longer genuinely ready.
+    // `ready` -> `needs_mapping` records that this edge is conceptually
+    // valid (matching `import-mapping-decisions.ts`'s precedent of staying
+    // editable through `ready`), even though the row-exclusion service
+    // applies it via a raw guarded `UPDATE` (`buildReadyToNeedsMappingStatement`
+    // below) bundled into the SAME atomic `client.batch()` call as the row
+    // update/audit insert, rather than through `transitionStatus` here --
+    // atomicity with the row change is the point: a two-step (row update,
+    // then a separate `transitionStatus` call) would leave a window where a
+    // concurrent commit request could read a stale `ready` status. Commit's
+    // own `revalidate()` remains the independent, fail-closed final check
+    // regardless.
+    ready: ["committing", "needs_mapping", "failed"],
     committing: ["committed", "failed"],
     committed: ["reversing", "failed"],
     reversing: ["reversed", "failed"],
@@ -726,6 +759,33 @@ async function resolveMutationFailure(
   return row
     ? { ok: false, reason: "version_conflict" }
     : { ok: false, reason: "not_found" };
+}
+
+// IMP-008 review finding B1: a standalone statement builder (not a method
+// that executes it) so `app/import-row-exclusion-service.ts` can fold this
+// EXACT guarded `ready` -> `needs_mapping` downgrade into the SAME atomic
+// `client.batch()` call as its row-exclusion writes and audit insert, when
+// an exclusion change at `ready` leaves the batch no longer actually ready.
+// Deliberately a plain `UPDATE` with no `RETURNING` (the caller reloads the
+// full batch/preview afterward regardless) and guarded on `status =
+// 'ready'` directly in the `WHERE` clause -- if a concurrent writer already
+// moved the batch off `ready` (e.g. commit already started), this no-ops
+// rather than clobbering that writer's own transition, matching the
+// idempotent-guard style every other statement in the same atomic call
+// already uses.
+export function buildReadyToNeedsMappingStatement(
+  userId: string,
+  batchId: string,
+  updatedAt: string,
+): SqlStatement {
+  return {
+    sql: `
+      UPDATE import_batches
+      SET status = 'needs_mapping', updated_at = ?, version = version + 1
+      WHERE id = ? AND user_id = ? AND status = 'ready'
+    `,
+    params: [updatedAt, batchId, userId],
+  };
 }
 
 export function createOwnedImportStagingRepository(
@@ -1129,6 +1189,91 @@ export function createOwnedImportStagingRepository(
       };
     },
 
+    // IMP-008: applies an owner-initiated exclude/un-exclude decision to a
+    // caller-derived set of row ids, atomically with whatever additional
+    // statements `buildExtraStatements` returns (an audit-event insert, in
+    // every production call site, plus a conditional `ready` ->
+    // `needs_mapping` downgrade -- built by the caller, never here, so this
+    // module never needs to import `./audit.ts` and risk a cycle with it
+    // importing `IMPORT_HISTORY_LIMITS`/`ImportHistoryPage` back from here).
+    // The callback receives the ACTUALLY ELIGIBLE/CHANGED row ids (computed
+    // below from the eligibility SELECT), never the caller's originally
+    // REQUESTED ids -- review finding B3: a request mixing one real staged
+    // row with a foreign/ineligible id must record an audit event (and any
+    // readiness recomputation) against the row that actually changed only,
+    // never the id(s) that didn't. Only rows still `commit_status =
+    // 'staged'` (i.e. genuinely pre-commit) are eligible, and only a batch
+    // in `parsed`/`needs_mapping`/`invalid`/`ready` accepts exclusion
+    // changes at all -- reversible right up to the moment commit actually
+    // starts (review finding B1); post-commit statuses must never have
+    // their committed facts' row linkage rewritten.
+    async setRowExclusion(
+      userId: string,
+      batchId: string,
+      input: {
+        rowIds: readonly string[];
+        excluded: boolean;
+        buildExtraStatements?: (
+          changedRowIds: readonly string[],
+        ) => readonly SqlStatement[] | Promise<readonly SqlStatement[]>;
+      },
+    ): Promise<{ ok: true; changedRowIds: string[] } | ImportMutationFailure> {
+      if (input.rowIds.length === 0) {
+        return { ok: true, changedRowIds: [] };
+      }
+      const batch = await loadBatch(userId, batchId);
+      if (!batch) return { ok: false, reason: "not_found" };
+      if (
+        batch.status !== "parsed" &&
+        batch.status !== "needs_mapping" &&
+        batch.status !== "invalid" &&
+        batch.status !== "ready"
+      ) {
+        return { ok: false, reason: "invalid_transition" };
+      }
+      const placeholders = input.rowIds.map(() => "?").join(", ");
+      // Review finding FU-3 (left unfixed, documented): this SELECT runs
+      // OUTSIDE the atomic `client.batch()` call below, so a same-user
+      // concurrent write in the narrow gap between it and the guarded
+      // `UPDATE`s below could make an id look eligible here yet have its
+      // own guarded `UPDATE` no-op moments later -- `changedRowIds` (and
+      // the audit metadata built from it) would then name a row whose
+      // exclusion state did not actually change. Not client-controllable
+      // (the gap is entirely server-internal, between two of THIS
+      // function's own statements) and narrow (single caller/single
+      // writer per user in practice); accepted rather than closed with,
+      // e.g., a second post-batch verification read.
+      const eligible = await client.all<{ id: string }>(
+        `
+          SELECT id FROM import_rows
+          WHERE user_id = ? AND batch_id = ? AND commit_status = 'staged'
+            AND excluded_by_owner_at IS ${input.excluded ? "NULL" : "NOT NULL"}
+            AND id IN (${placeholders})
+        `,
+        [userId, batchId, ...input.rowIds],
+      );
+      if (eligible.length === 0) {
+        return { ok: true, changedRowIds: [] };
+      }
+      const changedRowIds = eligible.map((row) => row.id);
+      const updatedAt = nowIso(now);
+      const excludedAt = input.excluded ? updatedAt : null;
+      const statements: SqlStatement[] = eligible.map((row) => ({
+        sql: `
+          UPDATE import_rows
+          SET excluded_by_owner_at = ?, updated_at = ?, version = version + 1
+          WHERE id = ? AND user_id = ? AND batch_id = ? AND commit_status = 'staged'
+            AND excluded_by_owner_at IS ${input.excluded ? "NULL" : "NOT NULL"}
+        `,
+        params: [excludedAt, updatedAt, row.id, userId, batchId],
+      }));
+      if (input.buildExtraStatements) {
+        statements.push(...(await input.buildExtraStatements(changedRowIds)));
+      }
+      await client.batch(statements);
+      return { ok: true, changedRowIds };
+    },
+
     async get(
       userId: string,
       batchId: string,
@@ -1177,7 +1322,8 @@ export function createOwnedImportStagingRepository(
             id, user_id, batch_id, physical_row_number, row_class,
             original_fields_json, normalized_fields_json, normalized_fingerprint,
             validation_status, target_portfolio_id, target_portfolio_security_id,
-            commit_status, commit_transaction_id, error_count, warning_count,
+            commit_status, commit_transaction_id, excluded_by_owner_at,
+            error_count, warning_count,
             info_count, created_at, updated_at, version
           FROM import_rows
           WHERE user_id = ? AND batch_id = ?
@@ -1202,7 +1348,8 @@ export function createOwnedImportStagingRepository(
             id, user_id, batch_id, physical_row_number, row_class,
             original_fields_json, normalized_fields_json, normalized_fingerprint,
             validation_status, target_portfolio_id, target_portfolio_security_id,
-            commit_status, commit_transaction_id, error_count, warning_count,
+            commit_status, commit_transaction_id, excluded_by_owner_at,
+            error_count, warning_count,
             info_count, created_at, updated_at, version
           FROM import_rows
           WHERE user_id = ? AND batch_id = ?

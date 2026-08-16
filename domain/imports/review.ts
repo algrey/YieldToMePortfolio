@@ -33,6 +33,13 @@ export type ImportReviewRow = Readonly<{
   commitStatus: string;
   errorCount: number;
   version: number;
+  // IMP-008: NULL when the owner has not excluded this row. A non-null
+  // value removes the row from reconciliation entirely (see
+  // `buildImportReview` below) -- it generates no issue, contributes to no
+  // count, and can never block or satisfy readiness -- while still being
+  // part of the canonical hashed evidence, so excluding/un-excluding a row
+  // always changes `previewVersion`.
+  excludedByOwnerAt: string | null;
 }>;
 
 export type ImportReviewIssue = Readonly<{
@@ -99,16 +106,24 @@ function byId<T extends { id: string }>(left: T, right: T): number {
 export function buildImportReview(
   evidence: ImportReviewEvidence,
 ): BuiltImportReview {
-  const rows: ImportReconciliationRow[] = evidence.rows.map((row) => ({
-    id: row.id,
-    physicalRowNumber: row.physicalRowNumber,
-    rowClass: row.rowClass,
-    normalized: row.normalizedFields ?? EMPTY_NORMALIZED_ROW,
-    fingerprint: row.normalizedFingerprint ?? row.id,
-    targetPortfolioId:
-      row.targetPortfolioId ?? evidence.batch.targetPortfolioId,
-    targetPortfolioSecurityId: row.targetPortfolioSecurityId,
-  }));
+  // IMP-008: an owner-excluded row is dropped BEFORE reconciliation ever
+  // sees it -- it generates no issue, is never an unresolved candidate, and
+  // contributes to no count, so readiness depends only on non-excluded
+  // rows. It remains part of `evidence.rows` for the hash below (see
+  // `ImportReviewRow`'s doc comment), so exclude/un-exclude still changes
+  // `previewVersion`.
+  const rows: ImportReconciliationRow[] = evidence.rows
+    .filter((row) => row.excludedByOwnerAt === null)
+    .map((row) => ({
+      id: row.id,
+      physicalRowNumber: row.physicalRowNumber,
+      rowClass: row.rowClass,
+      normalized: row.normalizedFields ?? EMPTY_NORMALIZED_ROW,
+      fingerprint: row.normalizedFingerprint ?? row.id,
+      targetPortfolioId:
+        row.targetPortfolioId ?? evidence.batch.targetPortfolioId,
+      targetPortfolioSecurityId: row.targetPortfolioSecurityId,
+    }));
   const preview = createImportReconciliationPreview({
     rows,
     portfolios: evidence.portfolios,
