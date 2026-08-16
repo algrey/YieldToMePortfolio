@@ -260,6 +260,13 @@
       "when": 1786836883784,
       "tag": "0036_dashing_switch",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "6",
+      "when": 1786852547102,
+      "tag": "0037_steady_signal",
+      "breakpoints": true
     }
   ]
 }

@@ -69,8 +69,10 @@ async function fixture(): Promise<DatabaseSync> {
     INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at) VALUES
       ('psa1','a','pa','s1','ALPHA','AUD','held','2026-08-01','2026-08-01'),
       ('psa2','a','pa','s2','BETA','AUD','held','2026-08-01','2026-08-01');
-    INSERT INTO market_data_providers(id,code,name,status,capabilities_json,rate_limit_json) VALUES
-      ('yahoo-compatible','yahoo-best-effort','Yahoo','enabled','{}','{}');
+    -- market_data_providers' 'yahoo-compatible' row is no longer seeded
+    -- here: MKT-007's drizzle/0037_steady_signal.sql migration now ships it
+    -- as reference data, so the full migration chain applied above already
+    -- produced it.
     INSERT INTO security_provider_mappings(id,security_id,provider_id,provider_exchange,provider_symbol,valid_from,status,verified_by_user_id,verified_at) VALUES
       ('mapping-s1','s1','yahoo-compatible','ASX','ALPHA.AX','2026-08-01','verified','a','2026-08-01T00:00:00Z');
 

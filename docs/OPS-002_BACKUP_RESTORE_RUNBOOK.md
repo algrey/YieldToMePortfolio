@@ -112,6 +112,13 @@ the operator workstation policy.
      --file="$WORK_DIR/restore-data.sql"
    ```
 
+   `market_data_providers` (MKT-007) is a static reference-data table seeded
+   by the migrations applied above, so `restore-data.sql` replays that
+   table's rows non-strictly (`INSERT OR IGNORE`, not the plain `INSERT`
+   used for every other table) rather than aborting on the row the
+   migrations already inserted; step 5's evidence comparison still catches
+   a genuinely divergent row there.
+
 4. Export the isolated restored database to a temporary SQL file for local
    verification:
 

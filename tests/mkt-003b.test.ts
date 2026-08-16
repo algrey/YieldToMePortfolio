@@ -49,11 +49,10 @@ function seedMarketData(database: DatabaseSync): void {
       'user-a', 'active', 'a@example.com', 'Australia/Sydney',
       '2026-08-03T00:00:00Z', '2026-08-03T00:00:00Z', 1
     );
-    INSERT INTO market_data_providers (
-      id, code, name, capabilities_json, rate_limit_json
-    ) VALUES (
-      'yahoo-compatible', 'yahoo-best-effort', 'Yahoo', '{}', '{}'
-    );
+    -- market_data_providers' 'yahoo-compatible' row is no longer seeded
+    -- here: MKT-007's drizzle/0037_steady_signal.sql migration now ships it
+    -- as reference data, so the full migration chain applied above already
+    -- produced it.
     INSERT INTO securities (
       id, asset_type, primary_currency_code, canonical_name,
       created_at, updated_at

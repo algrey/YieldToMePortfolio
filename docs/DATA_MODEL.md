@@ -181,6 +181,10 @@ Provider registry:
 
 No API key in D1.
 
+MKT-007: the row for the one adapter this codebase ships (`id = 'yahoo-compatible'`, `code = 'yahoo-best-effort'`, `status = 'enabled'`) is seeded as static reference data by the hand-authored, data-only migration `drizzle/0037_steady_signal.sql` (untargeted `INSERT ... ON CONFLICT DO NOTHING`, idempotent against both the `id` and `code`-unique constraints on re-apply), not by any per-deployment or test-only setup step. This row's presence/status only says the codebase knows how to talk to that provider — it does not itself enable verification or refresh; `MARKET_DATA_PROVIDER` (Worker env) remains the sole per-deployment activation gate (see `docs/MARKET_DATA_STRATEGY.md` §5 "Activation model").
+
+Upgrading a database already at migration 0036 (i.e. created before MKT-007 shipped): apply `drizzle/0037_steady_signal.sql` on its own — `scripts/setup-local-db.mjs` is a destructive full reset (deletes and recreates the local D1 file from scratch), not an incremental upgrade path, so it is not how an existing database picks up this migration. The untargeted `ON CONFLICT DO NOTHING` also means this INSERT silently no-ops, rather than erroring, if a row with `code = 'yahoo-best-effort'` already exists under a _different_ `id` (e.g. from an old ad hoc seed): verification stays 503 in that case, since the code's `PROVIDER_ID` constant looks up `id = 'yahoo-compatible'` specifically, and an operator must reconcile the conflicting row by hand before the migration's row can take effect.
+
 ### `security_provider_mappings`
 
 - `security_id`, `provider_id`;

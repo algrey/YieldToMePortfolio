@@ -114,8 +114,10 @@ async function migratedDatabase(): Promise<DatabaseSync> {
     VALUES ('portfolio-a', 'user-a', 'A', 'Main', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-11', '2026-08-11', 1),
            ('portfolio-a2', 'user-a', 'A2', 'Second', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-11', '2026-08-11', 1),
            ('portfolio-b', 'user-b', 'B', 'Other', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-11', '2026-08-11', 1);
-    INSERT INTO market_data_providers (id, code, name, status, capabilities_json, rate_limit_json)
-    VALUES ('yahoo-compatible', 'yahoo-best-effort', 'Yahoo', 'enabled', '{}', '{}');
+    -- market_data_providers' 'yahoo-compatible' row is no longer seeded
+    -- here: MKT-007's drizzle/0037_steady_signal.sql migration now ships it
+    -- as reference data, so the full migration chain applied above already
+    -- produced it.
     INSERT INTO import_batches (
       id, user_id, target_portfolio_id, parser_format, parser_version, filename,
       byte_size, file_sha256, status, created_at, updated_at, version
@@ -816,8 +818,10 @@ test("acceptance drill: docs/Example_Portfolio.csv reaches committed holdings on
     VALUES ('user-a', 'AUD', 'Australia/Sydney', '2026-08-11', '2026-08-11', 1);
     INSERT INTO portfolios (id, user_id, code, name, base_currency_code, timezone, accounting_method, status, created_at, updated_at, version)
     VALUES ('p-super', 'user-a', 'SUP', 'Aus Super', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-11', '2026-08-11', 1);
-    INSERT INTO market_data_providers (id, code, name, status, capabilities_json, rate_limit_json)
-    VALUES ('yahoo-compatible', 'yahoo-best-effort', 'Yahoo', 'enabled', '{}', '{}');
+    -- market_data_providers' 'yahoo-compatible' row is no longer seeded
+    -- here: MKT-007's drizzle/0037_steady_signal.sql migration now ships it
+    -- as reference data, so the full migration chain applied above already
+    -- produced it.
   `);
   const client = createSqliteSqlClient(database);
   const context = { client, userId: "user-a" };
@@ -1051,8 +1055,10 @@ async function seedD1Fixture(database: D1Database): Promise<void> {
      VALUES ('user-a', 'AUD', 'Australia/Sydney', '2026-08-12', '2026-08-12', 1)`,
     `INSERT INTO portfolios (id, user_id, code, name, base_currency_code, timezone, accounting_method, status, created_at, updated_at, version)
      VALUES ('portfolio-a', 'user-a', 'A', 'Main', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-12', '2026-08-12', 1)`,
-    `INSERT INTO market_data_providers (id, code, name, status, capabilities_json, rate_limit_json)
-     VALUES ('yahoo-compatible', 'yahoo-best-effort', 'Yahoo', 'enabled', '{}', '{}')`,
+    // market_data_providers' 'yahoo-compatible' row is no longer seeded
+    // here: MKT-007's drizzle/0037_steady_signal.sql migration now ships it
+    // as reference data, so migrateD1's full migration chain already
+    // produced it.
   ];
   for (const sql of statements) {
     await database.prepare(sql).run();

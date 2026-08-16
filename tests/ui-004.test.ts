@@ -39,8 +39,10 @@ async function database(): Promise<DatabaseSync> {
     VALUES ('user-a', 'AUD', 'Australia/Sydney', '2026-08-03', '2026-08-03', 1);
     INSERT INTO portfolios (id, user_id, code, name, base_currency_code, timezone, accounting_method, status, created_at, updated_at, version)
     VALUES ('portfolio-a', 'user-a', 'A', 'Alice', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-03', '2026-08-03', 1);
-    INSERT INTO market_data_providers (id, code, name, capabilities_json, rate_limit_json)
-    VALUES ('yahoo-compatible', 'yahoo-best-effort', 'Yahoo', '{}', '{}');
+    -- market_data_providers' 'yahoo-compatible' row is no longer seeded
+    -- here: MKT-007's drizzle/0037_steady_signal.sql migration now ships it
+    -- as reference data, so the full migration chain applied above already
+    -- produced it.
     INSERT INTO securities (id, asset_type, primary_currency_code, canonical_name, created_at, updated_at)
     VALUES ('security-a', 'equity', 'AUD', 'Security A', '2026-08-03', '2026-08-03'),
            ('security-b', 'equity', 'USD', 'Security B', '2026-08-03', '2026-08-03');

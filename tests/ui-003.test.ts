@@ -584,7 +584,10 @@ async function holdingsDatabase() {
     INSERT INTO currencies (code, numeric_code, name, minor_unit_digits, is_active) VALUES ('AUD',36,'Australian dollar',2,1),('USD',840,'US dollar',2,1);
     INSERT INTO users (id,status,primary_email,timezone,created_at,updated_at,version) VALUES ('owner-a','active','a@example.com','Australia/Sydney','2026-08-03','2026-08-03',1),('owner-b','active','b@example.com','Australia/Sydney','2026-08-03','2026-08-03',1);
     INSERT INTO portfolios (id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at,version) VALUES ('portfolio-a','owner-a','A','A','AUD','Australia/Sydney','fifo','active','2026-08-03','2026-08-03',1),('portfolio-b','owner-b','B','B','AUD','Australia/Sydney','fifo','active','2026-08-03','2026-08-03',1);
-    INSERT INTO market_data_providers (id,code,name,capabilities_json,rate_limit_json) VALUES ('yahoo-compatible','yahoo','Yahoo','{}','{}');
+    -- market_data_providers' 'yahoo-compatible' row is no longer seeded
+    -- here: MKT-007's drizzle/0037_steady_signal.sql migration now ships it
+    -- as reference data, so the full migration chain applied above already
+    -- produced it.
     INSERT INTO exchanges (id,mic,name,country_code,timezone,calendar_code) VALUES ('nyse','XNYS','New York Stock Exchange','US','America/New_York','XNYS');
     INSERT INTO securities (id,asset_type,exchange_id,primary_currency_code,canonical_name,created_at,updated_at) VALUES ('security-a','equity','nyse','USD','Long Foreign Security','2026-08-03','2026-08-03');
     INSERT INTO security_provider_mappings (id,security_id,provider_id,provider_exchange,provider_symbol,valid_from,status) VALUES ('mapping-a','security-a','yahoo-compatible','NYSE','AAA','2026-01-01','verified');

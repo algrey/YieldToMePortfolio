@@ -1,0 +1,55 @@
+-- MKT-007 (HAND-AUTHORED, AGENTS.md disclosure): this migration is entirely
+-- hand-written, not drizzle-kit generated -- there is no schema change for
+-- drizzle-kit to diff (the `market_data_providers` table shape is unchanged
+-- from 0036), so `drizzle-kit generate` would emit nothing here. The
+-- `market_data_providers` row this INSERT seeds is static reference data
+-- describing the ONE provider this codebase ships an adapter for
+-- (`domain/market-data/yahoo-compatible.ts`, id `yahoo-compatible`,
+-- code `yahoo-best-effort`) -- it is not user data, not a secret, and not
+-- deployment-specific, so it belongs in the migration chain rather than a
+-- manual per-environment seeding step.
+--
+-- Root cause this migration fixes (MKT-007): `app/security-verification-service.ts`
+-- gates "Verify with market-data provider" on this exact row existing with
+-- `status = 'enabled'` (see `PROVIDER_ID` there and the guard around line
+-- 282). Until now only test fixtures ever inserted it (e.g.
+-- `tests/imp-004b.test.ts`, `tests/mkt-003b.test.ts`), so every real
+-- database -- a fresh local rebuild today, production later -- fails closed
+-- on that guard with no path to enable it, even after the operator sets
+-- `MARKET_DATA_PROVIDER=yahoo-best-effort`.
+--
+-- This migration seeds ONLY the registry row -- it does not activate
+-- anything by itself. `MARKET_DATA_PROVIDER` (read by
+-- `resolveConfiguredProvider` in `app/security-verification-service.ts` via
+-- `worker/runtime-config.ts`) remains the sole per-deployment activation
+-- gate: a deployment with this row present but the env var absent/disabled
+-- still resolves the disabled provider stub, which fails every call with
+-- `unavailable_capability` and makes no live network request (see
+-- `tests/mkt-007.test.ts` for the activation-gate proof). `status = 'enabled'`
+-- on this row therefore means "this is a provider the codebase knows how to
+-- talk to", not "this deployment has verification switched on".
+--
+-- `capabilities_json`/`rate_limit_json` are seeded as `'{}'` to match every
+-- existing test fixture that inserts this row (both columns are free-form
+-- JSON text per `db/schema.ts`; no code currently reads structured fields
+-- out of either for this provider, so an honest empty object -- rather than
+-- fabricated capability/rate-limit numbers this repo has not verified with
+-- the live Yahoo-compatible endpoint -- is the correct value here).
+--
+-- The bare `ON CONFLICT DO NOTHING` (no target) makes this migration
+-- idempotent against BOTH unique constraints this table carries -- the `id`
+-- primary key AND `market_data_providers_code_unique` -- not just `id`.
+-- A target-qualified `ON CONFLICT(id) DO NOTHING` would only cover the `id`
+-- collision case; a legacy/test database that already has a DIFFERENT `id`
+-- carrying this same `code` (`yahoo-best-effort`) would still abort on the
+-- code-unique constraint. The untargeted form no-ops on either conflict, so
+-- re-applying this migration, or running it against a database seeded by
+-- any prior ad hoc fixture under either unique key, is genuinely safe with
+-- no pre-check required. Pure INSERT -- no ALTER/rebuild/trigger involved,
+-- so there is no rebuild-drops-the-trigger hazard of the kind 0035's
+-- disclosure comment documents for `dividend_manual_records`.
+INSERT INTO `market_data_providers`
+  (`id`, `code`, `name`, `status`, `capabilities_json`, `rate_limit_json`)
+VALUES
+  ('yahoo-compatible', 'yahoo-best-effort', 'Yahoo-compatible market data', 'enabled', '{}', '{}')
+ON CONFLICT DO NOTHING;

@@ -242,9 +242,32 @@ export async function writeD1DataImport(
     const statements = dependencyOrderedTables(input.database).flatMap(
       (tableName) => {
         const columns = tableColumns(input.database, tableName);
+        // MKT-007: `market_data_providers` now carries a static
+        // reference-data row (id 'yahoo-compatible') seeded by the
+        // migration chain itself, not by any user action. The documented
+        // restore procedure this drill exercises applies migrations to the
+        // target FIRST (so the target already has that row) and then
+        // replays this full data export -- which, dumped from a
+        // migrated source, also contains that same row. Plain INSERT would
+        // make every restore fail on this one migration-owned row, so it
+        // alone uses OR IGNORE; every other (user-owned/ledger) table keeps
+        // a strict INSERT. NOTE this is coarser than "tolerates an
+        // already-present match": OR IGNORE swallows ANY constraint
+        // violation on this table during replay, not only an identical
+        // duplicate of the migration-seeded row -- e.g. a genuinely
+        // divergent row that happens to collide on `id` or `code` would
+        // also be silently dropped here rather than raising. That gap is
+        // covered, not eliminated: `verifyRestoredDatabase`'s per-table
+        // row-count/sha256 digest comparison against `expectedEvidence`
+        // (see `tableEvidence` below) still runs over the RESTORED
+        // database's actual `market_data_providers` contents afterward, so
+        // a divergence this INSERT silently dropped still fails the drill
+        // via the digest mismatch rather than going unnoticed.
+        const insertVerb =
+          tableName === "market_data_providers" ? "INSERT OR IGNORE" : "INSERT";
         return dependencyOrderedRows(input.database, tableName, columns).map(
           (row) =>
-            `INSERT INTO ${quoteIdentifier(tableName)} (${columns
+            `${insertVerb} INTO ${quoteIdentifier(tableName)} (${columns
               .map(quoteIdentifier)
               .join(", ")}) VALUES (${columns
               .map((column) => sqlLiteral(row[column]))
