@@ -141,6 +141,23 @@ type MutableNormalizedImportRow = {
   // `?? null` wherever consumed.
   totalCashDecimal?: string | null;
   totalFrankingDecimal?: string | null;
+  // BRK-009A: OPTIONAL Sharesight instrument metadata, carried through so a
+  // later resolution/review step (BRK-009B) can use it -- never consumed by
+  // THIS type or any CSV path. Always `null` for a CSV-parsed row (no CSV
+  // column ever populates these); set (present, possibly null when
+  // Sharesight itself didn't carry the value) only by
+  // `domain/sharesight-sync/transform.ts`. Optional (not just nullable) so
+  // every pre-BRK-009A fixture/caller that never mentions these fields keeps
+  // compiling unchanged, mirroring `totalCashDecimal`/`totalFrankingDecimal`
+  // above -- read as `?? null` wherever consumed. Deliberately EXCLUDED from
+  // `app/sharesight-sync-service.ts`'s `canonicalRowDigestFields` value list
+  // and from every row's own `fingerprint` (both stay keyed on pre-existing
+  // fields only), so carrying these does not change the batch digest or any
+  // row's fingerprint for existing data -- see that module and
+  // `domain/sharesight-sync/transform.ts` for the stability proof.
+  sharesightInstrumentId?: string | null;
+  instrumentName?: string | null;
+  isin?: string | null;
 };
 
 export type NormalizedImportRow = Readonly<MutableNormalizedImportRow>;

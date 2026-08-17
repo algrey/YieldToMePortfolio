@@ -492,6 +492,10 @@ function instrumentFields(record: RecordValue): {
   instrumentCode: string;
   marketCode: string;
   currencyCode: string;
+  /** The raw, already-validated-present `instrument` sub-object, threaded
+   * through to `instrumentMetadataFields` so it doesn't have to re-derive
+   * `asRecord(record.instrument)` itself (BRK-009A). */
+  raw: RecordValue;
 } | null {
   const instrument = asRecord(record.instrument);
   if (!instrument) return null;
@@ -499,7 +503,87 @@ function instrumentFields(record: RecordValue): {
   const marketCode = requiredString(instrument, "market_code");
   const currencyCode = requiredString(instrument, "currency_code");
   if (!instrumentCode || !marketCode || !currencyCode) return null;
-  return { instrumentCode, marketCode, currencyCode };
+  return { instrumentCode, marketCode, currencyCode, raw: instrument };
+}
+
+/**
+ * F1 (2026-08-18 reviewer ruling, `docs/ARCHITECTURE.md` §8.2's BRK-009A
+ * addendum): a DELIBERATE DEVIATION from this module's otherwise-universal
+ * fail-closed discipline for optional fields. `instrument.id`/payouts'
+ * `instrument_id` are Sharesight's own record id for the instrument -- an
+ * AUXILIARY MATCHING AID `domain/securities/resolve-security.ts`'s
+ * `sharesight_instrument` tier can use, not financial data -- and their
+ * presence/shape on the wire is UNCONFIRMED (an inference, not an
+ * observation; see the §8.2 note). Unlike a corrupt franking figure or
+ * price, a malformed value here must never be able to fail a whole live
+ * sync closed: it simply degrades that instrument to ticker-tier
+ * resolution instead. Accepts a numeric integer (the same
+ * `requiredIntegerIdDecimalString`/`optionalIntegerIdDecimalString`
+ * technique every other id field uses) OR an integer-SHAPED string
+ * (trimmed, digits-only, safe-integer range) -- both normalize to the SAME
+ * canonical decimal string, tolerating either wire shape since neither is
+ * confirmed. Any OTHER present value (boolean, object, array, float,
+ * non-digit string, negative/unsafe integer) resolves to `null` -- never a
+ * thrown failure, unlike `MALFORMED_OPTIONAL_ID`'s ordinary fail-closed
+ * sibling `optionalIntegerIdDecimalString` above (still used, unchanged,
+ * for genuinely financial/identity-critical ids like `SharesightPayout.id`
+ * itself).
+ */
+function optionalAuxiliaryInstrumentId(
+  record: RecordValue,
+  field: string,
+): string | null {
+  const value = record[field];
+  if (value === undefined || value === null) return null;
+  if (typeof value === "number") {
+    if (!Number.isInteger(value)) return null;
+    if (!Number.isSafeInteger(value)) return null;
+    if (value < 0) return null;
+    return String(value);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!/^\d+$/.test(trimmed)) return null;
+    const numeric = Number(trimmed);
+    if (!Number.isSafeInteger(numeric)) return null;
+    return String(numeric);
+  }
+  return null; // boolean, object, array, etc. -- degrade, never fail
+}
+
+/**
+ * BRK-009A (2026-08-18): reads the OPTIONAL, absent-tolerant instrument
+ * metadata keys (`id`, `name`, `isin`) off an already-validated `instrument`
+ * sub-object -- the REQUIRED `code`/`market_code`/`currency_code` keys are
+ * validated separately by `instrumentFields` above and are never touched
+ * here. UNCONFIRMED presence: the BRK-008 live pass that confirmed the three
+ * required keys never confirmed whether `id`/`name`/`isin` are present on
+ * the real wire shape (per `docs/ARCHITECTURE.md` §8.2 and TASKS.md's
+ * BRK-009A ruling). `name`/`isin` follow this module's established
+ * absent-vs-malformed discipline exactly: absent/null is an honest `null`;
+ * present-but-wrong-type fails the WHOLE ITEM closed. `id` is the ONE
+ * exception -- see `optionalAuxiliaryInstrumentId`'s doc comment (F1): a
+ * malformed value degrades to `null` rather than failing the item. Never
+ * invented when absent, never required.
+ */
+function instrumentMetadataFields(instrument: RecordValue): {
+  sharesightInstrumentId: string | null;
+  instrumentName: string | null;
+  isin: string | null;
+} {
+  const sharesightInstrumentId = optionalAuxiliaryInstrumentId(
+    instrument,
+    "id",
+  );
+  const instrumentName = optionalStringField(instrument, "name");
+  if (instrumentName === MALFORMED_OPTIONAL_STRING) {
+    fail("instrument.name", "wrong_type");
+  }
+  const isin = optionalStringField(instrument, "isin");
+  if (isin === MALFORMED_OPTIONAL_STRING) {
+    fail("instrument.isin", "wrong_type");
+  }
+  return { sharesightInstrumentId, instrumentName, isin };
 }
 
 function parseHoldingItem(
@@ -536,6 +620,9 @@ function parseHoldingItem(
   if (marketValueDecimal === MALFORMED_OPTIONAL_DECIMAL) {
     fail("market_value", "invalid_decimal");
   }
+  // BRK-009A: OPTIONAL, absent-tolerant instrument metadata -- see
+  // `instrumentMetadataFields`'s doc comment.
+  const metadata = instrumentMetadataFields(instrument.raw);
   return {
     id,
     portfolioId,
@@ -546,6 +633,9 @@ function parseHoldingItem(
     quantityDecimal,
     averageCostDecimal,
     marketValueDecimal,
+    sharesightInstrumentId: metadata.sharesightInstrumentId,
+    instrumentName: metadata.instrumentName,
+    isin: metadata.isin,
   };
 }
 
@@ -600,6 +690,9 @@ function parseTradeItem(item: unknown, portfolioId: string): SharesightTrade {
     const detail = instrumentFailureDetail(record);
     fail(detail.fieldName, detail.reason);
   }
+  // BRK-009A: OPTIONAL, absent-tolerant instrument metadata -- see
+  // `instrumentMetadataFields`'s doc comment.
+  const instrumentMetadata = instrumentMetadataFields(instrument.raw);
   const transactionType = optionalTradeType(record);
   if (transactionType === MALFORMED_TRADE_TYPE) {
     fail("transaction_type", "invalid_format");
@@ -735,6 +828,9 @@ function parseTradeItem(item: unknown, portfolioId: string): SharesightTrade {
     holdingId,
     instrumentCode: instrument.instrumentCode,
     marketCode: instrument.marketCode,
+    sharesightInstrumentId: instrumentMetadata.sharesightInstrumentId,
+    instrumentName: instrumentMetadata.instrumentName,
+    isin: instrumentMetadata.isin,
     transactionType,
     transactionDate,
     currencyCode: instrument.currencyCode,
@@ -786,6 +882,18 @@ function parsePayoutItem(item: unknown, portfolioId: string): SharesightPayout {
   // `optionalIntegerIdDecimalString` above for the absent-vs-null choice.
   const id = optionalIntegerIdDecimalString(record, "id");
   if (id === MALFORMED_OPTIONAL_ID) fail("id", "wrong_type");
+  // BRK-009A (2026-08-18): `instrument_id` is LIVE-CONFIRMED present on the
+  // 118-item payout fixture but was previously ignored -- now captured
+  // OPTIONALLY so a payout's instrument can resolve via the
+  // `sharesight_instrument` identifier tier too. See `SharesightPayout`'s
+  // doc comment. F1 (2026-08-18 reviewer ruling): unlike `id` immediately
+  // above, this is an auxiliary matching aid, not financial data -- a
+  // malformed value degrades to `null` rather than failing the item closed
+  // (see `optionalAuxiliaryInstrumentId`'s doc comment).
+  const sharesightInstrumentId = optionalAuxiliaryInstrumentId(
+    record,
+    "instrument_id",
+  );
   const holdingId = requiredIntegerIdDecimalString(record, "holding_id");
   if (!holdingId) {
     fail("holding_id", requiredFailureReason(record, "holding_id", "number"));
@@ -903,6 +1011,7 @@ function parsePayoutItem(item: unknown, portfolioId: string): SharesightPayout {
     id,
     portfolioId,
     holdingId,
+    sharesightInstrumentId,
     symbol,
     marketCode,
     currencyCode,

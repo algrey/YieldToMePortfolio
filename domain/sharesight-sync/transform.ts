@@ -137,6 +137,14 @@ function blankNormalizedRow(): MutableNormalizedRow {
     frankingPerShare: null,
     totalCashDecimal: null,
     totalFrankingDecimal: null,
+    // BRK-009A: additive metadata carriage only -- see
+    // `NormalizedImportRow`'s doc comment (`strict-versioned-parser.ts`) for
+    // why these stay OUT of `canonicalRowDigestFields`
+    // (`app/sharesight-sync-service.ts`) and every row's own `fingerprint`
+    // below, both of which are unaffected by this block.
+    sharesightInstrumentId: null,
+    instrumentName: null,
+    isin: null,
   };
 }
 
@@ -215,6 +223,14 @@ function buildTradeRow(
   normalized.currency = trade.currencyCode;
   normalized.commission = trade.brokerageDecimal ?? "0";
   normalized.notes = trade.comments;
+  // BRK-009A: additive, absent-tolerant metadata carriage -- present when
+  // Sharesight's `instrument.id`/`instrument.name`/`instrument.isin` were,
+  // `null` otherwise. Never affects `fingerprint` below or the batch digest
+  // (`canonicalRowDigestFields` in `app/sharesight-sync-service.ts`
+  // deliberately omits these fields).
+  normalized.sharesightInstrumentId = trade.sharesightInstrumentId;
+  normalized.instrumentName = trade.instrumentName;
+  normalized.isin = trade.isin;
 
   const issues: ImportIssue[] = [];
   const direction = resolveSharesightTradeDirection(trade);
@@ -436,6 +452,13 @@ function buildDividendRowFromPayout(
   normalized.type = "dividend";
   normalized.commission = "0";
   normalized.notes = payoutProvenanceNote(payout);
+  // BRK-009A: additive, absent-tolerant metadata carriage -- payouts carry a
+  // FLAT `instrument_id` only (no nested `instrument` object, so no name/isin
+  // evidence exists for this shape -- see `SharesightPayout`'s doc comment);
+  // `instrumentName`/`isin` stay `null` for every payout-derived row. Never
+  // affects `fingerprint`/the batch digest -- see `blankNormalizedRow`'s
+  // comment.
+  normalized.sharesightInstrumentId = payout.sharesightInstrumentId;
   const { tradeAtUtc, localTradeDate } = deriveDates(payout.paidOnDate);
   normalized.tradeAtUtc = tradeAtUtc;
   normalized.localTradeDate = localTradeDate;

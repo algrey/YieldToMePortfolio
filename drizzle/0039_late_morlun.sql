@@ -1,0 +1,3 @@
+CREATE UNIQUE INDEX `security_identifiers_sharesight_instrument_unique` ON `security_identifiers` (`scheme`,`value`) WHERE "security_identifiers"."scheme" = 'sharesight_instrument' AND "security_identifiers"."valid_to" IS NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX `security_identifiers_isin_scheme_unique` ON `security_identifiers` (`scheme`,`value`) WHERE "security_identifiers"."scheme" = 'isin' AND "security_identifiers"."valid_to" IS NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX `security_identifiers_figi_scheme_unique` ON `security_identifiers` (`scheme`,`value`) WHERE "security_identifiers"."scheme" = 'figi' AND "security_identifiers"."valid_to" IS NULL;

@@ -1652,7 +1652,7 @@ const PAYOUTS_FIXTURE = {
     {
       id: 6001,
       holding_id: 4001,
-      instrument_id: 1234, // unmodelled, ignored for forward-compatibility
+      instrument_id: 1234, // BRK-009A: now captured as `sharesightInstrumentId`
       portfolio_id: 3001,
       company_event_id: 5678, // unmodelled, ignored for forward-compatibility
       paid_on: "2026-02-01",
@@ -1809,6 +1809,9 @@ test("BRK-003 parsing: valid fixtures parse into typed results with exact decima
     assert.equal(payout?.trust, false);
     assert.equal(payout?.nonTaxable, false);
     assert.equal(payout?.comments, "Franked dividend");
+    // BRK-009A (2026-08-18): previously-ignored `instrument_id` is now
+    // captured optionally -- see the fixture's own comment.
+    assert.equal(payout?.sharesightInstrumentId, "1234");
   }
 });
 

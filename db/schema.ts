@@ -332,6 +332,38 @@ export const securityIdentifiers = sqliteTable(
       .where(
         sql`${table.source} = 'owner_attested' AND ${table.validTo} IS NULL`,
       ),
+    // BRK-009A (2026-08-18): three new identifier-scheme VALUES, additive to
+    // this already-existing table -- `scheme` has no CHECK constraint (kept
+    // free-text, see the table's own header comment), so the closed set this
+    // task defines (`ticker`, `sharesight_instrument`, `isin`, `figi`) is
+    // documented here and in `docs/DATA_MODEL.md`, not enforced by a DB
+    // constraint. Each new scheme gets its own partial unique index on
+    // `(scheme, value) WHERE scheme = '<value>' AND valid_to IS NULL` --
+    // exactly the `security_identifiers_owner_attested_ticker_unique`
+    // pattern above, scoped by `scheme` instead of `source` since these
+    // value-spaces (a Sharesight instrument id, an ISIN, a FIGI) are each
+    // globally unique identifiers with no legitimate reason for two
+    // DIFFERENT securities to share one active value -- unlike `ticker`,
+    // which can legitimately repeat across exchanges. `WHERE valid_to IS
+    // NULL` scopes uniqueness to the currently-active row only, so a
+    // superseded identifier never blocks a later one; this mirrors the
+    // `domain/securities/resolve-security.ts` resolver's own "durable-id
+    // tiers only ever match the active row" rule, keeping the schema's
+    // constraint and the resolver's read-time assumption in lockstep. Index
+    // (not column/rebuild) migration -- trigger-hazard checked (this table
+    // carries no `account_purge_lock_*` triggers to preserve; see
+    // `tests/db-schema.test.ts`).
+    uniqueIndex("security_identifiers_sharesight_instrument_unique")
+      .on(table.scheme, table.value)
+      .where(
+        sql`${table.scheme} = 'sharesight_instrument' AND ${table.validTo} IS NULL`,
+      ),
+    uniqueIndex("security_identifiers_isin_scheme_unique")
+      .on(table.scheme, table.value)
+      .where(sql`${table.scheme} = 'isin' AND ${table.validTo} IS NULL`),
+    uniqueIndex("security_identifiers_figi_scheme_unique")
+      .on(table.scheme, table.value)
+      .where(sql`${table.scheme} = 'figi' AND ${table.validTo} IS NULL`),
   ],
 );
 

@@ -237,6 +237,22 @@ export type SharesightPortfolio = Readonly<{
  * field at all on this endpoint; `averageCostDecimal`/`marketValueDecimal`
  * remain optional for the same reason, kept in case a different
  * params/endpoint combination ever returns them.
+ *
+ * BRK-009A (2026-08-18): `sharesightInstrumentId`/`instrumentName`/`isin`
+ * are OPTIONAL, absent-tolerant metadata read off the nested `instrument`
+ * object's `id`/`name`/`isin` keys. UNCONFIRMED presence -- the live pass
+ * that confirmed `code`/`market_code`/`currency_code` never confirmed
+ * whether the wire also carries these three. The discipline SPLITS by
+ * field (`parse.ts`'s `instrumentMetadataFields`): `instrumentName`/`isin`
+ * follow this module's ordinary absent-vs-malformed rule -- absent/null ->
+ * `null`, present-but-wrong-type fails the whole item closed.
+ * `sharesightInstrumentId` does NOT -- it is an auxiliary matching aid, not
+ * financial data (F1, `docs/ARCHITECTURE.md` §8.2), so `parse.ts`'s
+ * `optionalAuxiliaryInstrumentId` accepts a numeric integer OR an
+ * integer-shaped string (normalized to the same decimal-string form); ANY
+ * other present value (boolean, object, float, non-digit string,
+ * negative/unsafe integer) degrades to `null` rather than failing the item.
+ * Never required; never invented.
  */
 export type SharesightHolding = Readonly<{
   id: string;
@@ -248,6 +264,9 @@ export type SharesightHolding = Readonly<{
   quantityDecimal: string | null;
   averageCostDecimal: string | null;
   marketValueDecimal: string | null;
+  sharesightInstrumentId: string | null;
+  instrumentName: string | null;
+  isin: string | null;
 }>;
 
 export type SharesightTradeType = "buy" | "sell" | "other";
@@ -296,6 +315,19 @@ export type SharesightTrade = Readonly<{
   holdingId: string;
   instrumentCode: string;
   marketCode: string;
+  /** BRK-009A (2026-08-18): the nested `instrument` object's OPTIONAL
+   * `id`/`name`/`isin` -- see `SharesightHolding`'s doc comment for the
+   * same UNCONFIRMED-presence discipline (`instrument.code`/
+   * `instrument.market_code`/`instrument.currency_code` are the only
+   * instrument keys BRK-008 actually confirmed) AND the same SPLIT
+   * discipline: `instrumentName`/`isin` are absent-tolerant with a
+   * present-but-malformed value failing the item closed;
+   * `sharesightInstrumentId` is an auxiliary matching aid (F1) that
+   * degrades to `null` on any present value that isn't an integer or an
+   * integer-shaped string, never failing the item. */
+  sharesightInstrumentId: string | null;
+  instrumentName: string | null;
+  isin: string | null;
   transactionType: SharesightTradeType | null;
   transactionDate: string;
   currencyCode: string;
@@ -365,8 +397,23 @@ export type SharesightTrade = Readonly<{
  * source that could close that gap -- a `DIV-001` receipts-ingestion
  * decision, not made here, but the data is now confirmed available.
  *
+ * BRK-009A (2026-08-18): `instrument_id` -- LIVE-CONFIRMED present on the
+ * live 118-item pass (this doc comment's own fixture evidence) but
+ * previously ignored -- is now captured as the OPTIONAL `sharesightInstrumentId`
+ * via `parse.ts`'s `optionalAuxiliaryInstrumentId` (NOT the fail-closed
+ * `optionalIntegerIdDecimalString` this payout's own `id`/`holding_id`/
+ * `portfolio_id` use), so a payout's instrument can be resolved against
+ * `domain/securities/resolve-security.ts`'s `sharesight_instrument` tier
+ * the same way a holding/trade's nested `instrument.id` can. Never
+ * required -- absent/null is an honest `null`, and unlike every other
+ * optional field on this type, a present-but-malformed value does NOT fail
+ * the item closed either: this is an auxiliary matching aid, not financial
+ * data (F1, `docs/ARCHITECTURE.md` §8.2), so only a numeric integer or an
+ * integer-shaped string is accepted (normalized to the same decimal-string
+ * form) -- any other present value degrades to `null`.
+ *
  * IGNORED, forward-compatibility (present on the live item, deliberately not
- * modelled or validated here): `instrument_id`, `company_event_id`, `links`
+ * modelled or validated here): `company_event_id`, `links`
  * (envelope/item navigation, not domain data), and the tax-component fields
  * `interest_payment`, `deferred_income`, `foreign_source_income`,
  * `other_net_fsi`, `cgt_concession_amount`, `discounted_capital_gains`,
@@ -398,6 +445,10 @@ export type SharesightPayout = Readonly<{
   id: string | null;
   portfolioId: string;
   holdingId: string;
+  /** BRK-009A (2026-08-18): the flat, live-confirmed `instrument_id` --
+   * absent-tolerant AND malformed-tolerant (degrades to `null`, never
+   * fails the item), see this type's doc comment above (F1). */
+  sharesightInstrumentId: string | null;
   symbol: string;
   marketCode: string;
   currencyCode: string;
