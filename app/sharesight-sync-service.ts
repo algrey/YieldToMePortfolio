@@ -34,6 +34,7 @@ import {
   createSharesightIntegrationConfig,
   type SharesightIntegrationConfig,
 } from "../worker/sharesight-config.ts";
+import { resolveSharesightBatchSecuritiesWithContext } from "./security-resolution-service.ts";
 
 export type SharesightSyncActionFailure = {
   ok: false;
@@ -458,6 +459,27 @@ export async function runSharesightSyncWithContext(
     }
     batchStatus = recorded.batch.status;
   }
+
+  // BRK-009B: the explicit "resolve securities" pass -- runs automatically
+  // right after staging, for a freshly-staged batch AND for a REUSED one
+  // (an older batch staged before this feature shipped, or whose sync-time
+  // pass only partially completed, still resolves on the next sync of the
+  // identical fetch), so the review the owner sees next already reflects
+  // resolved/created security state with zero manual verification steps.
+  // Idempotent (`app/security-resolution-service.ts`) and best-effort: a
+  // resolution failure here never fails the sync itself (the batch is
+  // already safely staged) -- it is also re-run, idempotently, as the first
+  // step of the atomic accept action for any batch this pass did not fully
+  // resolve.
+  await resolveSharesightBatchSecuritiesWithContext(
+    {
+      client: context.client,
+      userId: context.userId,
+      requestId: context.requestId,
+    },
+    started.batch.id,
+    { now: options.now },
+  );
 
   // Watermark update (BRK-005 ruling 4): `last_synced_at` moves on
   // successful STAGING, never on commit -- commit is a separate, later,

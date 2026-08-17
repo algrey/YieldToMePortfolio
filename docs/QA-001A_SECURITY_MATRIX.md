@@ -61,6 +61,7 @@ the authenticated principal's internal id, never a client-supplied value.
 | `/api/import/preview/:batchId/exclusions` (`createImportRowExclusionPost` → `setImportRowExclusionWithContext`)                                         | POST          | `staging.get(userId, batchId)` scopes the batch; the target rows are re-derived server-side from the batch's own freshly recomputed preview/rows (never a client-supplied row-id list trusted for the `securityCandidate`/`issue` target kinds), and the underlying `setRowExclusion` write is scoped `WHERE id = ? AND user_id = ? AND batch_id = ?`                                                                                                                                                                | Yes (new in this task, `app/import-row-exclusion-route.ts`)                                                                  | `tests/imp-008.test.ts` "the exclusions route enforces CSRF before its authenticated action, and succeeds for a same-origin request"; "a cross-user exclusion attempt is denied as not-found, never leaking or mutating another owner's batch"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `/api/import/commit/:batchId` (`commitImportAction`)                                                                                                    | POST          | owner-scoped batch resolution                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Yes (pre-existing)                                                                                                           | `tests/imp-003a.test.ts` "commit route rejects cross-site mutation before authentication or parsing"; "atomic rollback, duplicate-file reuse, idempotency, ownership, and confirmation fail closed"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `/api/import/commit/:batchId/reverse` (`reverseImportAction`)                                                                                           | POST          | same                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Yes (pre-existing)                                                                                                           | `tests/imp-003b.test.ts` "reversal route enforces CSRF before its authenticated action and returns private progress"; "direct reversal denies another owner without changing the batch"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `/api/import/preview/:batchId/accept` (`createImportAcceptPost` → `acceptImportWithContext`)                                                            | POST          | `staging.get(userId, batchId)` scopes the batch at every internal step (resolve/ready/commit); every expected version/preview-version value is re-derived fresh from the database inside the action itself, never trusted from the request (the route reads no body at all beyond CSRF headers); scoped to `sharesight_sync` batches only -- a non-Sharesight (CSV) batch is rejected with an honest `400` before any resolve/ready/commit step is attempted (F4, 2026-08-18 review round)                           | Yes (new in this task, `app/import-accept-route.ts`)                                                                         | `tests/brk-009b.test.ts` "accept route enforces CSRF before its authenticated action"; "accept action denies another owner's batch as not-found"; "accept denies a non-Sharesight (CSV) batch with an honest 400 naming the review flow"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `/api/import/history` (`loadImportHistoryAction`)                                                                                                       | GET           | `getAuthenticatedSqlContext()` → `listBatches(userId)`                                                                                                                                                                                                                                                                                                                                                                                                                                                               | N/A (read)                                                                                                                   | `tests/imp-002b.test.ts`; `tests/import-staging.test.ts` "denies cross-user access and enforces row bounds with foreign keys enabled"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `/api/import/history/:batchId` (`loadImportBatchHistoryAction`)                                                                                         | GET           | same, batch resolved by `userId`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | N/A (read)                                                                                                                   | `tests/ui-005c.test.ts` "history detail is owner-scoped, bounded, and exposes durable resume progress"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `/api/market-data/overrides` (`listManualOverrideAction`)                                                                                               | GET           | `authenticatedSqlContext(portfolioId)`                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | N/A (read)                                                                                                                   | `tests/mkt-003a.test.ts` "manual overrides are owner-scoped, interval-conflict checked, supersedable, and removable"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -658,3 +659,106 @@ answer to "which security" being `portfolio_securities.security_id` itself;
 and source assertions for the "Resolve manually" card, its confirm dialog,
 consequence copy, and the owner-attested state label in
 `app/components/import-review.tsx`).
+
+### BRK-009B addition (2026-08-18)
+
+One new fixed route: `POST /api/import/preview/:batchId/accept`
+(`createImportAcceptPost` → `acceptImportWithContext`, CSRF gated first,
+owner-scoped). Unlike every other mutation route on this batch, it reads no
+request body at all beyond the CSRF-relevant headers -- every expected
+version/preview-version value it needs is re-derived fresh from the database
+inside the action itself immediately before each internal step
+(resolve-securities → mark-ready → commit), never trusted from the client, so
+there is no client-supplied state to validate or leak in the first place.
+`staging.get(userId, batchId)` scopes the batch at the top of the action and
+every internal step (the existing `markImportReadyWithContext`/
+`createOwnedImportCommitRepository` machinery) re-checks ownership on its own
+independently-tested reads/writes. The new automatic security-resolution pass
+this action's first step reuses (`app/security-resolution-service.ts`,
+`db/repositories/security-resolution.ts`) is scoped to `sharesight_sync`
+batches only and writes exclusively through owner-scoped/guard-conditional
+statements identical in shape to IMP-004B's/IMP-009's pre-existing
+publish-and-link technique -- no new write surface, no new trust boundary.
+`npm run check` passes end-to-end (prettier, eslint zero problems, `tsc
+--noEmit`, `vinext check`, `vinext build`, full test suite: 1112 tests, 1102
+passed, 0 failed, 10 skipped -- the pre-existing env-gated D1 drills,
+unrelated to this task).
+
+New tests: `tests/brk-009b.test.ts` ("BRK-009B: a zero-security sharesight
+sync auto-resolves and auto-creates from Sharesight metadata, reaches ready
+with zero manual verification, and accept commits atomically with holdings
+and income present" -- end-to-end from zero securities through auto-create
+(asserts the `source = 'sharesight'` ticker + `sharesight_instrument`
+identifier rows, the owner-attributed audit event, and that NO
+`security_provider_mappings` row is ever written), ready with zero manual
+verification, atomic accept committing holdings and income, idempotent
+re-accept, and a full reversal round trip); "BRK-009B: an existing attested
+security with agreeing ticker+currency and no exchange evidence on either
+side links via the same-user fallback instead of duplicating"; "BRK-009B:
+exchange evidence that disagrees on both sides stages a blocking
+SECURITY_RESOLUTION_CONFLICT issue instead of auto-resolving"; "BRK-009B: the
+sharesight_instrument tier beats a historical ticker alias (Z1P renamed to
+ZIP)"; "BRK-009B: a metadata-less row (no sharesightInstrumentId) still
+resolves through the ticker+currency fallback" (BRK-009A's carried F3
+finding); "BRK-009B: a CSV batch is completely unaffected -- resolution never
+runs and SECURITY_MAPPING_REQUIRED is still emitted for an unresolved
+candidate" (proves the scoping rule -- CSV batches are byte-for-byte
+unchanged); "BRK-009B: two concurrent syncs for the same instrument converge
+on one created security, never a duplicate"; "BRK-009B: accept action denies
+another owner's batch as not-found"; "BRK-009B: accept route enforces CSRF
+before its authenticated action"; "BRK-009B: the ready service accept reuses
+still rejects a stale expectedVersion/expectedPreviewVersion with 409".
+
+### BRK-009B review-round addition (2026-08-18, same day)
+
+Independent review reproduced two BLOCKING currency-blind-merge findings
+against the real schema (B1/B2) plus a related permanently-uncreatable-identity
+finding (B3) in the FIRST `BRK-009B` implementation's create-fallback path
+(`db/repositories/security-resolution.ts`): the "winner" security a
+metadata-less row resolved to was decided purely on `scheme = 'ticker' AND
+UPPER(value) = ?`, with no currency or exchange predicate at all, so a
+metadata-less USD row could resolve onto (and then commit against) an
+unrelated pre-existing AUD security sharing only the ticker text, the SAME
+currency-blind guard permanently blocked a genuinely creatable
+distinct-currency identity behind a misleading "concurrent update" message,
+and the `portfolio_securities` link statement could persist that wrong link
+even when the guarded creates themselves correctly no-op'd. Fixed by
+resolving through three explicit priority tiers (strict resolver + same-user
+fallback, then a NEW `global_ticker_currency` cross-owner fallback tier, then
+creation) that all share the identical ticker+CURRENCY identity predicate --
+see `docs/DATA_MODEL.md`'s `security_identifiers` entry for the full
+mechanics. No route/ownership surface changed by this fix (same route, same
+owner-scoping, same CSRF gate); this addition documents the follow-up
+rulings that DO touch this matrix's ownership/trust-boundary claims:
+
+- **F4**: the accept route is now scoped to `sharesight_sync` batches only --
+  see the updated `/api/import/preview/:batchId/accept` matrix row above.
+- **F1**: `SECURITY_RESOLUTION_CONFLICT` issues now self-clear (with an
+  owner-attributed audit event) when a re-run resolves the same instrument
+  successfully -- a housekeeping write scoped to this service's own issues
+  for the acting owner's own batch, no new trust boundary.
+- **F2**: the auto-created `canonical_name` is now sanitized
+  (control-character-stripped, length-capped) before being written -- an
+  input-hardening fix, no new write surface.
+- **F5**: `existingCandidateRow`'s symbol comparison is now case-insensitive,
+  matching `domain/imports/reconciliation.ts`'s own candidate-match rule --
+  correctness fix, not a security boundary change.
+
+`npm run check` passes end-to-end (prettier, eslint zero problems, `tsc
+--noEmit`, `vinext check`, `vinext build`, full test suite).
+
+New tests added to `tests/brk-009b.test.ts` for this round: "BRK-009B: a
+ticker-text collision with a DIFFERENT currency creates a second, distinct
+security -- never a merge, never a permanent conflict" (B1/B3 reviewer drill,
+reproduced then fixed); "BRK-009B: differing exchange evidence on both sides
+of a cross-owner ticker+currency match stages a conflict, never a silent
+merge, and persists nothing" (B1/B2's zero-partial-persistence property);
+"BRK-009B: cross-owner same ticker+currency with agreeing (uncontradicted)
+identity links to the shared canonical security, never duplicating it" (F4's
+cross-owner-dedupe-only-with-agreeing-identity pin, IMP-004B precedent);
+"BRK-009B: a re-resolution pass clears a previously-staged
+SECURITY_RESOLUTION_CONFLICT issue once the underlying disagreement no longer
+reproduces, with an audit event" (F1); "BRK-009B: an auto-created canonical
+name strips control characters and truncates to 120 characters" (F2);
+"BRK-009B: accept denies a non-Sharesight (CSV) batch with an honest 400
+naming the review flow" (F4).

@@ -1,0 +1,777 @@
+import { randomUUID } from "node:crypto";
+import { normalizeToken } from "../../domain/securities/verify-identity.ts";
+import {
+  GLOBAL_TICKER_CURRENCY_TIER,
+  resolveGlobalTickerCurrencyCandidate,
+  resolveSecurityCandidate,
+  type ResolveSecurityCandidateTier,
+  type SameUserSecurityEvidenceRow,
+} from "../../domain/securities/resolve-security-candidate.ts";
+import type { SecurityIdentifierCandidateRow } from "../../domain/securities/resolve-security.ts";
+import type { SqlClient, SqlStatement } from "./sql-client.ts";
+import type { SecurityVerificationCandidateInput } from "./security-verification.ts";
+
+// BRK-009B: auto-resolution/auto-creation for `sharesight_sync` batches ONLY
+// -- CSV batches keep the pre-existing owner-driven candidate/verify/attest
+// flow (`security-verification.ts`/`security-attestation.ts`) completely
+// unchanged; this module is never consulted for a CSV-sourced candidate. It
+// mirrors those two repositories' creation-only, guard-conditional,
+// single-`batch()`-call discipline (see `security-attestation.ts`'s header
+// comment for the pattern this follows) but resolves through BRK-009A's
+// multi-scheme resolver (`domain/securities/resolve-security.ts`) wrapped by
+// THREE priority tiers, each strictly currency-aware and never merging on
+// ticker text alone (2026-08-18 review round, findings B1/B2/B3):
+//   1. `resolveSecurityCandidate`'s strict + same-user fallback.
+//   2. `resolveGlobalTickerCurrencyCandidate` -- a cross-owner ticker+currency
+//      dedupe tier (legitimate: `securities` is a shared canonical master,
+//      IMP-004B precedent), consulted only when (1) found no match.
+//   3. Genuine creation -- reached only when NEITHER (1) NOR (2) found
+//      anything, guarded on ticker+CURRENCY (never ticker text alone, which
+//      would permanently block a legitimately distinct-currency security --
+//      B3) plus, when Sharesight supplied one, the `sharesight_instrument`
+//      value-space (the 0039 migration's real unique index).
+// Every SQL predicate that resolves "does a ticker match already exist"
+// (creation guards, the post-batch winner lookup, and the pre-check that
+// decides between tier (2)/tier (3)) carries the SAME `ticker text +
+// currency` join against `securities.primary_currency_code` -- there is
+// exactly one identity key this repository ever treats as sufficient for a
+// ticker-text match, and it is never ticker text alone (B1).
+
+export type SecurityResolutionCandidateIdentity = {
+  symbol: string;
+  exchangeAlias: string | null;
+  currencyCode: string;
+  sharesightInstrumentId: string | null;
+  isin: string | null;
+  /** Sharesight's own instrument display name, when present -- becomes
+   * `securities.canonical_name` on creation only (falls back to the symbol
+   * when absent); never used for matching. Sanitized (control-character
+   * stripped, length-capped) before being written -- see
+   * `sanitizeCanonicalName` below (BRK-009B review finding F2). */
+  instrumentName: string | null;
+};
+
+// F2 (BRK-009B review): mirrors IMP-009's owner-attested display-name cap
+// (`security-attestation-service.ts`, <=120 chars, no control characters),
+// but Sharesight data has no interactive owner to correct a malformed value
+// inline the way a form submission does, so this module prefers TRUNCATE +
+// STRIP over REJECT: a malformed/over-length instrument name degrades to a
+// still-usable display string rather than failing the whole auto-create --
+// and therefore the owner's real holdings/income -- closed over a label
+// formatting quirk.
+const MAX_CANONICAL_NAME_LENGTH = 120;
+const CONTROL_CHARACTER_PATTERN = /[\x00-\x1f\x7f]/g;
+
+function sanitizeCanonicalName(rawName: string): string {
+  const stripped = rawName.replace(CONTROL_CHARACTER_PATTERN, "").trim();
+  const safe = stripped.length > 0 ? stripped : "Unnamed security";
+  return safe.slice(0, MAX_CANONICAL_NAME_LENGTH);
+}
+
+// A tier label distinct from every tier `resolve-security.ts`/
+// `resolve-security-candidate.ts` themselves define, reported ONLY when a
+// PRE-EXISTING `portfolio_securities` link is found to disagree on currency
+// with the identity now being resolved (B2) -- a defensive re-validation of
+// data this repository never wrote in the first place, so it is reported
+// under its own name rather than borrowed from another tier's meaning.
+const EXISTING_LINK_CURRENCY_MISMATCH_TIER = "existing_link_currency_mismatch";
+
+export type SecurityResolutionLinkResult =
+  | {
+      ok: true;
+      outcome: "already_resolved" | "matched" | "created";
+      securityId: string;
+      portfolioSecurityId: string;
+      tier: ResolveSecurityCandidateTier | null;
+      created: boolean;
+    }
+  | {
+      ok: false;
+      reason: "conflict";
+      tiers: readonly (
+        | ResolveSecurityCandidateTier
+        | typeof EXISTING_LINK_CURRENCY_MISMATCH_TIER
+      )[];
+      securityIds: readonly string[];
+    }
+  | { ok: false; reason: "invalid_currency" }
+  | { ok: false; reason: "link_conflict" };
+
+export type SecurityResolutionRepository = {
+  /**
+   * Resolves `identity` against the shared `securities` master and links
+   * (creating the `portfolio_securities` row if it does not exist yet) the
+   * owner's `candidate`. Never writes a `security_provider_mappings` row --
+   * see `security-attestation.ts`'s identical provenance-honesty rule, which
+   * this mirrors exactly (auto-created securities are provider-mapping-less
+   * until a later provider verify/IMP-009 attest upgrades them, exactly like
+   * an owner-attested security today).
+   */
+  resolveAndLink(
+    userId: string,
+    identity: SecurityResolutionCandidateIdentity,
+    candidate: SecurityVerificationCandidateInput,
+  ): Promise<SecurityResolutionLinkResult>;
+};
+
+export function createOwnedSecurityResolutionRepository(
+  client: SqlClient,
+  now: () => string = () => new Date().toISOString(),
+): SecurityResolutionRepository {
+  // F5 (BRK-009B review): case-insensitive symbol compare, matching
+  // `domain/imports/reconciliation.ts`'s own `normalized()` candidate-match
+  // rule (trim + lower-case) -- a Sharesight sync's own symbol casing must
+  // never fail to find a candidate row reconciliation.ts would otherwise
+  // treat as the identical one.
+  async function existingCandidateRow(
+    userId: string,
+    candidate: SecurityVerificationCandidateInput,
+  ): Promise<
+    { id: string; security_id: string | null; status: string } | undefined
+  > {
+    return client.get<{
+      id: string;
+      security_id: string | null;
+      status: string;
+    }>(
+      `SELECT id, security_id, status FROM portfolio_securities
+       WHERE user_id = ? AND portfolio_id = ? AND UPPER(source_symbol) = UPPER(?)
+         AND COALESCE(source_exchange_alias, '') = COALESCE(?, '')
+         AND source_currency_code = ?
+       LIMIT 1`,
+      [
+        userId,
+        candidate.portfolioId,
+        candidate.sourceSymbol,
+        candidate.sourceExchangeAlias,
+        candidate.sourceCurrencyCode,
+      ],
+    );
+  }
+
+  async function securityCurrency(
+    securityId: string,
+  ): Promise<string | undefined> {
+    const row = await client.get<{ primary_currency_code: string }>(
+      `SELECT primary_currency_code FROM securities WHERE id = ? LIMIT 1`,
+      [securityId],
+    );
+    return row?.primary_currency_code;
+  }
+
+  // Global (cross-owner) identifier evidence for the strict resolver's own
+  // four durable/ticker tiers -- `security_identifiers` is the shared
+  // canonical master, not owner-scoped (matching `security-verification.ts`/
+  // `security-attestation.ts`'s existing global lookups). Every ticker row
+  // this codebase writes today carries `exchange_id = NULL` (BRK-009A
+  // carried finding F2), so `exchangeAlias` is always reported `null` here
+  // -- there is nothing to resolve it from; that gap is exactly what the
+  // same-user and global-ticker-currency fallback tiers below exist to
+  // cover, both of which apply currency (and, for same-user, exchange)
+  // predicates the strict resolver's own ticker tiers cannot reach.
+  async function loadGlobalIdentifiers(
+    identity: SecurityResolutionCandidateIdentity,
+  ): Promise<SecurityIdentifierCandidateRow[]> {
+    const normalizedSymbol = normalizeToken(identity.symbol);
+    const rows = await client.all<Record<string, unknown>>(
+      `SELECT si.security_id AS security_id, si.scheme AS scheme, si.value AS value,
+              si.valid_from AS valid_from, si.valid_to AS valid_to,
+              s.primary_currency_code AS primary_currency_code
+       FROM security_identifiers si
+       JOIN securities s ON s.id = si.security_id
+       WHERE (si.scheme = 'ticker' AND UPPER(si.value) = ?)
+          OR (? IS NOT NULL AND si.scheme = 'sharesight_instrument' AND si.value = ?)
+          OR (? IS NOT NULL AND si.scheme = 'isin' AND si.value = ?)`,
+      [
+        normalizedSymbol,
+        identity.sharesightInstrumentId,
+        identity.sharesightInstrumentId,
+        identity.isin,
+        identity.isin,
+      ],
+    );
+    return rows.map((row) => ({
+      securityId: String(row.security_id),
+      scheme: String(row.scheme),
+      value: String(row.value),
+      exchangeAlias: null,
+      validFrom: String(row.valid_from),
+      validTo: row.valid_to === null ? null : String(row.valid_to),
+      primaryCurrencyCode: String(row.primary_currency_code),
+    }));
+  }
+
+  // Same-user dedupe evidence (BRK-009A carried finding F2): securities the
+  // RESOLVING OWNER has already linked (via CSV verify/attest or an earlier
+  // sync) whose ticker text and canonical currency already agree with
+  // `identity` -- scoped to `userId`'s own `portfolio_securities` rows only
+  // (never another owner's), per
+  // `domain/securities/resolve-security-candidate.ts`'s header comment.
+  // Exchange evidence is assembled from BOTH `portfolio_securities.source_exchange_alias`
+  // and any active `security_provider_mappings.provider_exchange` for the
+  // same security, exactly as the BRK-009B ruling names.
+  async function loadSameUserEvidence(
+    userId: string,
+    identity: SecurityResolutionCandidateIdentity,
+  ): Promise<SameUserSecurityEvidenceRow[]> {
+    const normalizedSymbol = normalizeToken(identity.symbol);
+    const normalizedCurrency = normalizeToken(identity.currencyCode);
+    const rows = await client.all<Record<string, unknown>>(
+      `SELECT ps.security_id AS security_id,
+              COALESCE(ps.source_exchange_alias, spm.provider_exchange) AS exchange_alias
+       FROM portfolio_securities ps
+       JOIN securities s ON s.id = ps.security_id
+       LEFT JOIN security_provider_mappings spm
+         ON spm.security_id = ps.security_id AND spm.valid_to IS NULL
+       WHERE ps.user_id = ? AND ps.security_id IS NOT NULL
+         AND UPPER(ps.source_symbol) = ? AND UPPER(s.primary_currency_code) = ?`,
+      [userId, normalizedSymbol, normalizedCurrency],
+    );
+    return rows.map((row) => ({
+      securityId: String(row.security_id),
+      exchangeAlias:
+        row.exchange_alias === null ? null : String(row.exchange_alias),
+    }));
+  }
+
+  // GLOBAL (cross-owner) ticker+currency evidence -- the third, lowest
+  // priority resolution tier (B1/B3 fix). `securities`/`security_identifiers`
+  // are a shared canonical master (IMP-004B precedent: two different owners
+  // verifying the identical provider identity dedupe onto ONE row), so a
+  // ticker+currency match belonging to ANOTHER owner is legitimate dedupe
+  // evidence too -- but only ever a MATCH when no exchange evidence anywhere
+  // contradicts it (`resolveGlobalTickerCurrencyCandidate` enforces this).
+  // Every matched security_id is represented by at least one row even with
+  // NO exchange evidence anywhere (an explicit null-evidence baseline),
+  // since "no evidence" must still count as "no contradiction", never as
+  // "this security doesn't exist".
+  async function loadGlobalTickerCurrencyEvidence(
+    symbol: string,
+    currencyCode: string,
+  ): Promise<SameUserSecurityEvidenceRow[]> {
+    const normalizedSymbol = normalizeToken(symbol);
+    const normalizedCurrency = normalizeToken(currencyCode);
+    const securityRows = await client.all<Record<string, unknown>>(
+      `SELECT DISTINCT si.security_id AS security_id
+       FROM security_identifiers si
+       JOIN securities s ON s.id = si.security_id
+       WHERE si.scheme = 'ticker' AND UPPER(si.value) = ? AND si.valid_to IS NULL
+         AND UPPER(s.primary_currency_code) = ?`,
+      [normalizedSymbol, normalizedCurrency],
+    );
+    const securityIds = securityRows.map((row) => String(row.security_id));
+    if (securityIds.length === 0) return [];
+    const rows: SameUserSecurityEvidenceRow[] = securityIds.map((id) => ({
+      securityId: id,
+      exchangeAlias: null,
+    }));
+    const placeholders = securityIds.map(() => "?").join(", ");
+    const exchangeRows = await client.all<Record<string, unknown>>(
+      `SELECT security_id, provider_exchange AS exchange_alias
+         FROM security_provider_mappings
+        WHERE security_id IN (${placeholders}) AND valid_to IS NULL
+       UNION ALL
+       SELECT security_id, source_exchange_alias AS exchange_alias
+         FROM portfolio_securities
+        WHERE security_id IN (${placeholders}) AND source_exchange_alias IS NOT NULL`,
+      [...securityIds, ...securityIds],
+    );
+    for (const row of exchangeRows) {
+      rows.push({
+        securityId: String(row.security_id),
+        exchangeAlias:
+          row.exchange_alias === null ? null : String(row.exchange_alias),
+      });
+    }
+    return rows;
+  }
+
+  // Ticker+CURRENCY-scoped lookup (never ticker text alone -- B1) for a
+  // security genuinely matching `symbol`/`currencyCode`, ANY source. Used
+  // both to decide "does anything already satisfy this identity" before a
+  // create attempt is even considered, and to determine the winner after a
+  // guarded create batch (this attempt's own row, or a concurrent racer's).
+  async function findTickerCurrencySecurityId(
+    symbol: string,
+    currencyCode: string,
+  ): Promise<string | undefined> {
+    const normalizedSymbol = normalizeToken(symbol);
+    const normalizedCurrency = normalizeToken(currencyCode);
+    const row = await client.get<{ security_id: string }>(
+      `SELECT si.security_id AS security_id
+       FROM security_identifiers si
+       JOIN securities s ON s.id = si.security_id
+       WHERE si.scheme = 'ticker' AND UPPER(si.value) = ? AND si.valid_to IS NULL
+         AND UPPER(s.primary_currency_code) = ?
+       LIMIT 1`,
+      [normalizedSymbol, normalizedCurrency],
+    );
+    return row?.security_id;
+  }
+
+  // Links (or creates) the owner's `portfolio_securities` row against an
+  // already-resolved `securityId` -- mirrors `security-verification.ts`'s
+  // identically-named private helper exactly (see that file's header
+  // comment for why each write-path repository keeps its own copy rather
+  // than sharing one).
+  async function linkToSecurity(
+    userId: string,
+    securityId: string,
+    candidate: SecurityVerificationCandidateInput,
+    existingRow:
+      { id: string; security_id: string | null; status: string } | undefined,
+  ): Promise<
+    { ok: true; portfolioSecurityId: string; created: boolean } | { ok: false }
+  > {
+    const nowIso = now();
+    if (existingRow) {
+      if (existingRow.security_id === securityId) {
+        return {
+          ok: true,
+          portfolioSecurityId: existingRow.id,
+          created: false,
+        };
+      }
+      if (existingRow.security_id !== null) {
+        return { ok: false };
+      }
+      try {
+        await client.batch([
+          {
+            sql: `UPDATE portfolio_securities SET security_id = ?, status = 'held', updated_at = ?
+                  WHERE id = ? AND user_id = ? AND portfolio_id = ?
+                    AND status = 'unresolved' AND security_id IS NULL`,
+            params: [
+              securityId,
+              nowIso,
+              existingRow.id,
+              userId,
+              candidate.portfolioId,
+            ],
+          },
+        ]);
+      } catch {
+        // Fall through to the re-read below.
+      }
+      const fresh = await client.get<{ security_id: string | null }>(
+        `SELECT security_id FROM portfolio_securities WHERE id = ? AND user_id = ? LIMIT 1`,
+        [existingRow.id, userId],
+      );
+      if (fresh?.security_id === securityId) {
+        return {
+          ok: true,
+          portfolioSecurityId: existingRow.id,
+          created: false,
+        };
+      }
+      return { ok: false };
+    }
+
+    const newId = randomUUID();
+    try {
+      await client.batch([
+        {
+          sql: `INSERT INTO portfolio_securities (
+                  id, user_id, portfolio_id, security_id, source_symbol, source_exchange_alias,
+                  source_currency_code, status, created_at, updated_at
+                )
+                SELECT ?, ?, ?, ?, ?, ?, ?, 'held', ?, ?
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM portfolio_securities
+                  WHERE user_id = ? AND portfolio_id = ? AND UPPER(source_symbol) = UPPER(?)
+                    AND COALESCE(source_exchange_alias, '') = COALESCE(?, '')
+                    AND source_currency_code = ?
+                )`,
+          params: [
+            newId,
+            userId,
+            candidate.portfolioId,
+            securityId,
+            candidate.sourceSymbol,
+            candidate.sourceExchangeAlias,
+            candidate.sourceCurrencyCode,
+            nowIso,
+            nowIso,
+            userId,
+            candidate.portfolioId,
+            candidate.sourceSymbol,
+            candidate.sourceExchangeAlias,
+            candidate.sourceCurrencyCode,
+          ],
+        },
+      ]);
+    } catch {
+      // Fall through to the re-read below.
+    }
+    const fresh = await existingCandidateRow(userId, candidate);
+    if (fresh?.security_id === securityId) {
+      return {
+        ok: true,
+        portfolioSecurityId: fresh.id,
+        created: fresh.id === newId,
+      };
+    }
+    return { ok: false };
+  }
+
+  async function createAndLink(
+    userId: string,
+    identity: SecurityResolutionCandidateIdentity,
+    candidate: SecurityVerificationCandidateInput,
+    existingRow:
+      { id: string; security_id: string | null; status: string } | undefined,
+  ): Promise<SecurityResolutionLinkResult> {
+    const normalizedSymbol = normalizeToken(identity.symbol);
+    const normalizedCurrency = normalizeToken(identity.currencyCode);
+    const currencyRow = await client.get<{ code: string }>(
+      `SELECT code FROM currencies WHERE code = ? LIMIT 1`,
+      [normalizedCurrency],
+    );
+    if (!currencyRow) return { ok: false, reason: "invalid_currency" };
+
+    const alreadyResolvedElsewhere =
+      existingRow !== undefined && existingRow.security_id !== null;
+
+    const securityId = randomUUID();
+    const tickerIdentifierId = randomUUID();
+    const instrumentIdentifierId = randomUUID();
+    const linkId = randomUUID();
+    const nowIso = now();
+    const today = nowIso.slice(0, 10);
+    const canonicalName = sanitizeCanonicalName(
+      identity.instrumentName ?? identity.symbol,
+    );
+    const sharesightInstrumentId = identity.sharesightInstrumentId;
+
+    // Creation-only guard, scoped to ticker+CURRENCY (B3 fix -- a bare
+    // ticker-text guard would permanently block a legitimately
+    // distinct-currency security from ever being created) -- reused
+    // identically across the securities insert, the ticker identifier
+    // insert, and the winner-resolution/link statements below, so every
+    // decision this function makes shares exactly one identity predicate.
+    const tickerCurrencyGuard = `NOT EXISTS (
+                SELECT 1 FROM security_identifiers tcg
+                JOIN securities tcgs ON tcgs.id = tcg.security_id
+                WHERE tcg.scheme = 'ticker' AND UPPER(tcg.value) = ? AND tcg.valid_to IS NULL
+                  AND UPPER(tcgs.primary_currency_code) = ?
+              )`;
+    // When Sharesight supplied an instrument id, ALSO guard on the
+    // `sharesight_instrument` value-space -- the 0039 migration's real
+    // unique index, giving hard atomic convergence for that identity
+    // (unchanged from before this review round).
+    const instrumentGuard = sharesightInstrumentId
+      ? `AND NOT EXISTS (SELECT 1 FROM security_identifiers WHERE scheme = 'sharesight_instrument' AND value = ? AND valid_to IS NULL)`
+      : "";
+
+    const securitiesParams: unknown[] = [
+      securityId,
+      normalizedCurrency,
+      canonicalName,
+      nowIso,
+      nowIso,
+      normalizedSymbol,
+      normalizedCurrency,
+    ];
+    if (sharesightInstrumentId) securitiesParams.push(sharesightInstrumentId);
+
+    const statements: SqlStatement[] = [
+      {
+        sql: `INSERT INTO securities (
+                id, asset_type, exchange_id, primary_currency_code, canonical_name,
+                isin, status, first_trade_date, last_trade_date, created_at, updated_at
+              )
+              SELECT ?, 'equity', NULL, ?, ?, NULL, 'active', NULL, NULL, ?, ?
+              WHERE ${tickerCurrencyGuard}
+              ${instrumentGuard}`,
+        params: securitiesParams,
+      },
+      {
+        sql: `INSERT INTO security_identifiers (
+                id, security_id, scheme, value, exchange_id, valid_from, valid_to, source
+              )
+              SELECT ?, ?, 'ticker', ?, NULL, ?, NULL, 'sharesight'
+              WHERE EXISTS (SELECT 1 FROM securities WHERE id = ?)
+                AND ${tickerCurrencyGuard}`,
+        params: [
+          tickerIdentifierId,
+          securityId,
+          normalizedSymbol,
+          today,
+          securityId,
+          normalizedSymbol,
+          normalizedCurrency,
+        ],
+      },
+    ];
+    if (sharesightInstrumentId) {
+      statements.push({
+        sql: `INSERT INTO security_identifiers (
+                id, security_id, scheme, value, exchange_id, valid_from, valid_to, source
+              )
+              SELECT ?, ?, 'sharesight_instrument', ?, NULL, ?, NULL, 'sharesight'
+              WHERE EXISTS (SELECT 1 FROM securities WHERE id = ?)
+                AND NOT EXISTS (
+                  SELECT 1 FROM security_identifiers
+                  WHERE scheme = 'sharesight_instrument' AND value = ? AND valid_to IS NULL
+                )`,
+        params: [
+          instrumentIdentifierId,
+          securityId,
+          sharesightInstrumentId,
+          today,
+          securityId,
+          sharesightInstrumentId,
+        ],
+      });
+    }
+
+    // Fold the owner's `portfolio_securities` link into this SAME batch,
+    // resolved via a live subquery (not the literal `securityId` generated
+    // above) so linking is correct even when a concurrent creation's row --
+    // not this attempt's -- is the one still standing once this statement
+    // runs. Scoped to ticker+CURRENCY throughout (B1/B2 fix): the subquery
+    // and its guard share the EXACT SAME predicate as the creation guards
+    // above, so this statement can never resolve to (and therefore can
+    // never persist a link to) a currency-mismatched pre-existing security
+    // -- if nothing satisfies that predicate, the guard is false and NOTHING
+    // persists (B2's "if the winner fails validation, nothing persists").
+    const winnerSubquery = `(SELECT wsq.security_id FROM security_identifiers wsq
+           JOIN securities wsqs ON wsqs.id = wsq.security_id
+           WHERE wsq.scheme = 'ticker' AND UPPER(wsq.value) = ? AND wsq.valid_to IS NULL
+             AND UPPER(wsqs.primary_currency_code) = ? LIMIT 1)`;
+    const winnerGuardExists = `EXISTS (SELECT 1 FROM security_identifiers wge
+           JOIN securities wges ON wges.id = wge.security_id
+           WHERE wge.scheme = 'ticker' AND UPPER(wge.value) = ? AND wge.valid_to IS NULL
+             AND UPPER(wges.primary_currency_code) = ?)`;
+
+    if (!alreadyResolvedElsewhere) {
+      statements.push(
+        existingRow
+          ? {
+              sql: `UPDATE portfolio_securities
+                    SET security_id = ${winnerSubquery},
+                        status = 'held', updated_at = ?
+                    WHERE id = ? AND user_id = ? AND portfolio_id = ?
+                      AND status = 'unresolved' AND security_id IS NULL
+                      AND ${winnerGuardExists}`,
+              params: [
+                normalizedSymbol,
+                normalizedCurrency,
+                nowIso,
+                existingRow.id,
+                userId,
+                candidate.portfolioId,
+                normalizedSymbol,
+                normalizedCurrency,
+              ],
+            }
+          : {
+              sql: `INSERT INTO portfolio_securities (
+                      id, user_id, portfolio_id, security_id, source_symbol, source_exchange_alias,
+                      source_currency_code, status, created_at, updated_at
+                    )
+                    SELECT ?, ?, ?, ${winnerSubquery}, ?, ?, ?, 'held', ?, ?
+                    WHERE ${winnerGuardExists}
+                      AND NOT EXISTS (
+                            SELECT 1 FROM portfolio_securities
+                            WHERE user_id = ? AND portfolio_id = ? AND UPPER(source_symbol) = UPPER(?)
+                              AND COALESCE(source_exchange_alias, '') = COALESCE(?, '')
+                              AND source_currency_code = ?
+                          )`,
+              params: [
+                linkId,
+                userId,
+                candidate.portfolioId,
+                normalizedSymbol,
+                normalizedCurrency,
+                candidate.sourceSymbol,
+                candidate.sourceExchangeAlias,
+                candidate.sourceCurrencyCode,
+                nowIso,
+                nowIso,
+                normalizedSymbol,
+                normalizedCurrency,
+                userId,
+                candidate.portfolioId,
+                candidate.sourceSymbol,
+                candidate.sourceExchangeAlias,
+                candidate.sourceCurrencyCode,
+              ],
+            },
+      );
+    }
+
+    try {
+      // Everything -- the canonical rows plus the owner's link -- runs in
+      // one atomic `batch()` call, mirroring `security-attestation.ts`'s and
+      // `security-verification.ts`'s identical creation-only technique (see
+      // either file's header comment for the full atomicity discussion).
+      await client.batch(statements);
+    } catch {
+      // Fall through to the unconditional re-read below.
+    }
+
+    const winner = await findTickerCurrencySecurityId(
+      identity.symbol,
+      identity.currencyCode,
+    );
+    if (!winner) return { ok: false, reason: "link_conflict" };
+
+    const linked = alreadyResolvedElsewhere
+      ? await linkToSecurity(userId, winner, candidate, existingRow)
+      : existingRow
+        ? await (async () => {
+            const fresh = await client.get<{ security_id: string | null }>(
+              `SELECT security_id FROM portfolio_securities WHERE id = ? AND user_id = ? LIMIT 1`,
+              [existingRow.id, userId],
+            );
+            return fresh?.security_id === winner
+              ? {
+                  ok: true as const,
+                  portfolioSecurityId: existingRow.id,
+                  created: false,
+                }
+              : { ok: false as const };
+          })()
+        : await (async () => {
+            const fresh = await existingCandidateRow(userId, candidate);
+            return fresh?.security_id === winner
+              ? {
+                  ok: true as const,
+                  portfolioSecurityId: fresh.id,
+                  created: fresh.id === linkId,
+                }
+              : { ok: false as const };
+          })();
+
+    if (!linked.ok) return { ok: false, reason: "link_conflict" };
+    return {
+      ok: true,
+      outcome: winner === securityId ? "created" : "matched",
+      securityId: winner,
+      portfolioSecurityId: linked.portfolioSecurityId,
+      tier: winner === securityId ? null : GLOBAL_TICKER_CURRENCY_TIER,
+      created: winner === securityId,
+    };
+  }
+
+  return {
+    async resolveAndLink(userId, identity, candidate) {
+      const existingRow = await existingCandidateRow(userId, candidate);
+      if (existingRow?.security_id) {
+        // B2: re-validate a PRE-EXISTING link's currency agreement before
+        // trusting it -- never silently launder a bad prior link (e.g. one
+        // a pre-fix version of this repository created) into a committed
+        // batch. This never happens for a link genuinely created by the
+        // current logic (which always validates currency before linking),
+        // only for data this repository did not itself just write.
+        const linkedCurrency = await securityCurrency(existingRow.security_id);
+        if (
+          linkedCurrency !== undefined &&
+          normalizeToken(linkedCurrency) !==
+            normalizeToken(identity.currencyCode)
+        ) {
+          return {
+            ok: false,
+            reason: "conflict",
+            tiers: [EXISTING_LINK_CURRENCY_MISMATCH_TIER],
+            securityIds: [existingRow.security_id],
+          };
+        }
+        return {
+          ok: true,
+          outcome: "already_resolved",
+          securityId: existingRow.security_id,
+          portfolioSecurityId: existingRow.id,
+          tier: null,
+          created: false,
+        };
+      }
+
+      const [globalIdentifiers, sameUserEvidence] = await Promise.all([
+        loadGlobalIdentifiers(identity),
+        loadSameUserEvidence(userId, identity),
+      ]);
+      const stage1 = resolveSecurityCandidate(
+        {
+          symbol: identity.symbol,
+          exchangeAlias: identity.exchangeAlias,
+          currencyCode: identity.currencyCode,
+          sharesightInstrumentId: identity.sharesightInstrumentId,
+          isin: identity.isin,
+        },
+        globalIdentifiers,
+        sameUserEvidence,
+      );
+
+      if (stage1.outcome === "conflict") {
+        return {
+          ok: false,
+          reason: "conflict",
+          tiers: stage1.tiers,
+          securityIds: stage1.securityIds,
+        };
+      }
+
+      if (stage1.outcome === "matched") {
+        const linked = await linkToSecurity(
+          userId,
+          stage1.securityId,
+          candidate,
+          existingRow,
+        );
+        if (!linked.ok) return { ok: false, reason: "link_conflict" };
+        return {
+          ok: true,
+          outcome: "matched",
+          securityId: stage1.securityId,
+          portfolioSecurityId: linked.portfolioSecurityId,
+          tier: stage1.tier,
+          created: false,
+        };
+      }
+
+      // Stage 1 (strict resolver + same-user fallback) found nothing --
+      // try the THIRD, lowest-priority tier: a genuinely agreeing
+      // cross-owner ticker+currency match (B1/B4 ruling: shared canonical
+      // securities may legitimately dedupe cross-user, but ONLY with
+      // agreeing identity -- never a silent currency-blind merge).
+      const globalEvidence = await loadGlobalTickerCurrencyEvidence(
+        identity.symbol,
+        identity.currencyCode,
+      );
+      const stage2 = resolveGlobalTickerCurrencyCandidate(
+        identity.exchangeAlias,
+        globalEvidence,
+      );
+      if (stage2.outcome === "conflict") {
+        return {
+          ok: false,
+          reason: "conflict",
+          tiers: stage2.tiers,
+          securityIds: stage2.securityIds,
+        };
+      }
+      if (stage2.outcome === "matched") {
+        const linked = await linkToSecurity(
+          userId,
+          stage2.securityId,
+          candidate,
+          existingRow,
+        );
+        if (!linked.ok) return { ok: false, reason: "link_conflict" };
+        return {
+          ok: true,
+          outcome: "matched",
+          securityId: stage2.securityId,
+          portfolioSecurityId: linked.portfolioSecurityId,
+          tier: stage2.tier,
+          created: false,
+        };
+      }
+
+      // Genuinely no match anywhere -- create.
+      return createAndLink(userId, identity, candidate, existingRow);
+    },
+  };
+}

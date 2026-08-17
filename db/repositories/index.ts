@@ -182,6 +182,12 @@ export {
   type SecurityAttestationRepository,
 } from "./security-attestation.ts";
 export {
+  createOwnedSecurityResolutionRepository,
+  type SecurityResolutionCandidateIdentity,
+  type SecurityResolutionLinkResult,
+  type SecurityResolutionRepository,
+} from "./security-resolution.ts";
+export {
   buildDividendManualRecordImportInsertStatements,
   createCorporateActionRefreshRepository,
   createDividendAssumptionsRepository,
