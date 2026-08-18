@@ -253,9 +253,14 @@ for (const status of ["parsed", "needs_mapping", "invalid", "ready"]) {
   });
 }
 
+// UI-013 review round B3c (BLOCKING correction): `committing` moved from
+// the "no affordance" group to its own case below -- a batch stranded
+// `committing` (the accept loop's own bounded cap reached, or a closed tab
+// mid-loop) must stay reachable from import history so Accept Import can
+// resume it, instead of the dead end `isMutableExclusionStatus` alone left.
+// See `isResumableReviewStatus` in import-history-detail.tsx.
 for (const status of [
   "uploaded",
-  "committing",
   "committed",
   "reversing",
   "reversed",
@@ -266,6 +271,11 @@ for (const status of [
     assert.doesNotMatch(html, />Open review</);
   });
 }
+
+test('UI-013 review round B3c: a "committing" batch\'s history detail DOES render the "Open review" affordance (widened from UI-012\'s original four statuses) so Accept Import can resume it', () => {
+  const html = renderHistoryDetailPanel(baseDetail("committing"));
+  assert.match(html, />Open review</);
+});
 
 test("UI-012: resumeReviewFromHistory in import-review.tsx arms the scroll ref before loading the batch's preview, and gates on isMutableExclusionStatus everywhere it is offered", async () => {
   const component = await readFile(
@@ -300,11 +310,13 @@ test("UI-012: resumeReviewFromHistory in import-review.tsx arms the scroll ref b
   );
 
   // Both the history-list-entry and detail-panel affordances call
-  // resumeReviewFromHistory, and the list entry is gated on the same
-  // pre-commit status check the panel's own isResumableReviewStatus mirrors.
+  // resumeReviewFromHistory. UI-013 review round B3c widened the list
+  // entry's gate from `isMutableExclusionStatus` to `isResumableReviewStatus`
+  // (which also allows a `committing` batch -- see tests/ui-013.test.ts),
+  // matching the detail panel's own `resumableReview` gate exactly.
   assert.match(
     component,
-    /isMutableExclusionStatus\(batch\.status\) \? \(\s*\n\s*<button[\s\S]*?resumeReviewFromHistory\(batch\.id\)/,
+    /isResumableReviewStatus\(batch\.status\) \? \(\s*\n\s*<button[\s\S]*?resumeReviewFromHistory\(batch\.id\)/,
   );
   assert.match(
     component,

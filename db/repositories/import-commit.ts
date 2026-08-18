@@ -80,6 +80,15 @@ export type ImportCommitSuccess = {
   // unsupported-row skip) -- "N rows excluded by owner" in commit metadata
   // and batch history, per the Orchestrator ruling.
   excludedByOwnerRows: number;
+  // UI-013 (review round B1): still-`staged` rows this batch has not yet
+  // processed -- the real, machinery-derived denominator for a client's
+  // "N of M rows" commit progress display. Deliberately NOT
+  // `preview.counts.transactionCreates + dividendCreates` (a RECONCILIATION
+  // intent count, not a ledger fact) -- see `getCommitProgress`'s identical
+  // `remaining_rows` computation in `import-staging.ts`, which this mirrors
+  // for the commit response itself so the client never needs a second
+  // round trip to know how much work remains.
+  remainingRows: number;
   rebuildJobId: string | null;
   rebuildJobIds: string[];
 };
@@ -410,7 +419,8 @@ export function createOwnedImportCommitRepository(
          SUM(CASE WHEN commit_status = 'committed' THEN 1 ELSE 0 END) AS committed_rows,
          SUM(CASE WHEN commit_status = 'skipped' THEN 1 ELSE 0 END) AS skipped_rows,
          SUM(CASE WHEN commit_status = 'skipped' AND excluded_by_owner_at IS NOT NULL
-              THEN 1 ELSE 0 END) AS excluded_by_owner_rows
+              THEN 1 ELSE 0 END) AS excluded_by_owner_rows,
+         SUM(CASE WHEN commit_status = 'staged' THEN 1 ELSE 0 END) AS remaining_rows
        FROM import_rows WHERE user_id = ? AND batch_id = ?`,
       [userId, batchId],
     );
@@ -431,6 +441,7 @@ export function createOwnedImportCommitRepository(
       committedRows: Number(counts?.committed_rows ?? 0),
       skippedRows: Number(counts?.skipped_rows ?? 0),
       excludedByOwnerRows: Number(counts?.excluded_by_owner_rows ?? 0),
+      remainingRows: Number(counts?.remaining_rows ?? 0),
       rebuildJobId: rebuildJobIds[0] ?? null,
       rebuildJobIds,
     };

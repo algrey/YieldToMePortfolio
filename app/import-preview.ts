@@ -66,6 +66,26 @@ export type ImportReviewPreview = {
   // for the derivation and its own header comment for why "conflict" and
   // "unresolved" are both genuine, distinct states.
   securities: readonly SharesightSecuritySummaryEntry[];
+  // UI-013 review round B1 (BLOCKING): the review's committed/reversed
+  // status line must report actual LEDGER EFFECTS, never reconciliation
+  // INTENT (`preview.counts.transactionCreates`/`dividendCreates` describe
+  // what a commit WOULD create from the current preview, not what a past
+  // commit actually did -- a re-sync that overlaps an already-committed
+  // batch can show a materially different preview count than what was
+  // actually committed). Derived straight from `input.rows`' own
+  // `commitStatus`/`excludedByOwnerAt` -- the same authoritative source
+  // `db/repositories/import-commit.ts`'s `summary()` and
+  // `import-staging.ts`'s `getCommitProgress()` read, just computed here in
+  // JS over rows this function already received (no extra query). Accurate
+  // for any batch status: all zero pre-commit, live-accurate mid-`committing`,
+  // and a stable historical fact once `committed`/`reversed` (reversal does
+  // not rewrite `import_rows.commit_status` -- ledger facts are immutable).
+  commitProgress: {
+    committedRows: number;
+    skippedRows: number;
+    excludedByOwnerRows: number;
+    remainingRows: number;
+  };
 };
 
 export function buildImportReviewPreview(input: {
@@ -104,6 +124,19 @@ export function buildImportReviewPreview(input: {
       symbol: row.normalizedFields?.symbol ?? null,
     }))
     .sort((left, right) => left.physicalRowNumber - right.physicalRowNumber);
+  // UI-013 review round B1: see the field's own doc comment above -- ledger
+  // fact, not reconciliation intent.
+  const commitProgress = {
+    committedRows: input.rows.filter((row) => row.commitStatus === "committed")
+      .length,
+    skippedRows: input.rows.filter((row) => row.commitStatus === "skipped")
+      .length,
+    excludedByOwnerRows: input.rows.filter(
+      (row) => row.commitStatus === "skipped" && row.excludedByOwnerAt !== null,
+    ).length,
+    remainingRows: input.rows.filter((row) => row.commitStatus === "staged")
+      .length,
+  };
   const securities: SharesightSecuritySummaryEntry[] =
     input.batch.parserFormat === SHARESIGHT_SYNC_PARSER_FORMAT
       ? deriveSharesightSecuritiesSummary({
@@ -142,5 +175,6 @@ export function buildImportReviewPreview(input: {
     excludedRows,
     attestedSecurityIds: input.attestedSecurityIds ?? [],
     securities,
+    commitProgress,
   };
 }

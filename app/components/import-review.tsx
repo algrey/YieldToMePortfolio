@@ -7,12 +7,20 @@ import type { ImportReversalActionResult } from "../import-reversal-service.ts";
 import {
   ImportHistoryDetailPanel,
   isMutableExclusionStatus,
+  isResumableReviewStatus,
 } from "./import-history-detail.tsx";
 import { SharesightSyncPanel } from "./sharesight-sync-panel.tsx";
 import {
   mergeSharesightLinks,
   type SharesightLinkStatus,
 } from "../sharesight-sync-panel-helpers.ts";
+import {
+  acceptLoopProgress,
+  deriveCommittedStatusLine,
+  isCommittedOrReversed as deriveIsCommittedOrReversed,
+  runAcceptCommitLoop,
+  scopeCommitToBatch,
+} from "../import-review-commit-state.ts";
 
 type PortfolioOption = { id: string; name: string; homeCurrencyCode: string };
 // BRK-009C: distinct securities the "Review securities" table renders, one
@@ -108,6 +116,24 @@ type Review = {
   // BRK-009C: `[]` for a CSV batch; optional/defaulted for the same
   // pre-existing-test-fixture reason as `attestedSecurityIds` above.
   securities?: SecuritySummaryEntry[];
+  // UI-013 review round B1: real commit-machinery row counts (never
+  // reconciliation intent) -- see `app/import-preview.ts`'s field of the
+  // same name and `deriveCommittedStatusLine`'s doc comment. Optional/
+  // defaulted (all zero) for the same pre-existing-test-fixture reason as
+  // `attestedSecurityIds` above.
+  commitProgress?: {
+    committedRows: number;
+    skippedRows: number;
+    excludedByOwnerRows: number;
+    remainingRows: number;
+  };
+};
+
+const EMPTY_COMMIT_PROGRESS = {
+  committedRows: 0,
+  skippedRows: 0,
+  excludedByOwnerRows: 0,
+  remainingRows: 0,
 };
 
 // IMP-008: the row(s) an exclude/include confirm dialog is currently open
@@ -178,6 +204,9 @@ type CommitResult = {
   committedRows: number;
   skippedRows: number;
   excludedByOwnerRows: number;
+  // UI-013 review round B1: still-`staged` rows -- the real denominator for
+  // "N of M rows" accept progress (see `acceptLoopProgress`).
+  remainingRows: number;
   rebuildJobId: string | null;
 };
 
@@ -302,6 +331,32 @@ export function ImportReview({
   const acceptOpenerRef = useRef<HTMLButtonElement | null>(null);
   const [acceptPending, setAcceptPending] = useState(false);
   const [acceptError, setAcceptError] = useState<string | null>(null);
+  // UI-013: accept drives a multi-chunk commit (`db/repositories/import-
+  // commit.ts` processes at most `MAX_CHUNK_SIZE` rows per server
+  // invocation, by architectural design -- see ARCHITECTURE.md's "processes
+  // one chunk per invocation" -- so a single accept response can still be
+  // `committing`) to COMPLETION client-side: `submitAccept` below loops the
+  // same idempotent accept call (via `runAcceptCommitLoop`) until the batch
+  // is `committed`, and this tracks the running "N of M rows" progress --
+  // both numbers from the commit machinery's OWN response fields
+  // (`acceptLoopProgress`), never reconciliation-intent preview counts --
+  // so the owner is never left pumping chunks by hand.
+  const [acceptProgress, setAcceptProgress] = useState<{
+    processed: number;
+    total: number;
+  } | null>(null);
+  // UI-013 review round (unmount/navigation guard, UI-008's bounded-fetch
+  // pattern applied to a LOOP rather than a single request): aborts the
+  // in-flight accept loop's current fetch if the component unmounts mid-
+  // loop (see the cleanup effect below) -- otherwise a slow multi-request
+  // accept keeps issuing requests and writing state after the owner has
+  // navigated away.
+  const acceptAbortControllerRef = useRef<AbortController | null>(null);
+  useEffect(() => {
+    return () => {
+      acceptAbortControllerRef.current?.abort();
+    };
+  }, []);
   // BRK-009C: per-security name/exchange metadata edit -- reuses the shared
   // `pending`/`message` state every other one-off preview mutation in this
   // component already reuses (`resolveMapping`, `verifySecurityCandidate`),
@@ -1001,39 +1056,69 @@ export function ImportReview({
     setAcceptDialogOpen(true);
   }
 
-  // BRK-009C: the single "Accept Import" owner action for a `sharesight_sync`
-  // batch -- `POST /api/import/preview/:batchId/accept` (BRK-009B) collapses
-  // resolve-securities -> mark-ready -> commit into one server-orchestrated
-  // request with no client-supplied version/preview fields (every step
-  // re-derives its own expected state fresh from the database). The
-  // response carries a commit result, not a refreshed review, so this
-  // reuses `refreshPreview()`/`loadHistory()`/`loadHistoryDetail()` exactly
-  // like `commitImport()` above to resynchronize the rest of the screen.
+  // UI-013: an owner-reported defect after the first real Sharesight commit
+  // -- accept could return with the batch still `committing` (each
+  // server-side `commit()` call is bounded to `MAX_CHUNK_SIZE` (2) staged
+  // rows by design -- see `db/repositories/import-commit.ts` and
+  // ARCHITECTURE.md's "processes one chunk per invocation" -- and
+  // `acceptImportWithContext` only loops that call up to its own bounded
+  // safety cap, `ACCEPT_COMMIT_LOOP_MAX_ITERATIONS`, before returning
+  // whatever status it reached), leaving the owner to click Commit
+  // repeatedly to pump the rest. `acceptImportWithContext`'s server-side
+  // loop now finishes realistically-sized batches in ONE request; this
+  // client-side loop (`runAcceptCommitLoop`, `app/import-review-commit-
+  // state.ts` -- pulled out to a pure function so its termination behaviour
+  // has its own real-input/real-output tests) is the layer above it that
+  // finishes the rest for a batch large enough to exceed even that cap, so
+  // the owner NEVER manually pumps chunks either way: each iteration
+  // re-POSTs the identical accept request (safe -- `acceptImportWithContext`
+  // uses a deterministic `accept:<batchId>` commit idempotency key, so a
+  // repeat call against a `committing` batch resumes from
+  // `commit_high_water_row` via the existing idempotent resume branch, not
+  // a fresh commit attempt) until the response reports `committed`, a real
+  // error (a 409/etc. ends the loop immediately with that error shown,
+  // never silently retried), the request is aborted (unmount), or the
+  // safety iteration cap is hit. `acceptProgress` drives the dialog's
+  // "Committing... N of M rows" text between iterations, sourced from the
+  // commit machinery's own response fields (`acceptLoopProgress`), never
+  // preview reconciliation counts.
   async function submitAccept() {
     if (!review) return;
+    const batchId = review.batch.id;
+    acceptAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    acceptAbortControllerRef.current = controller;
     setAcceptPending(true);
     setAcceptError(null);
+    setAcceptProgress(null);
     try {
-      const response = await fetch(
-        `/api/import/preview/${review.batch.id}/accept`,
-        { method: "POST" },
-      );
-      const result = (await response.json()) as
-        { ok: true; commit: CommitResult } | { ok: false; message: string };
-      if (!response.ok || result.ok === false) {
-        throw new Error(
-          result.ok === false
-            ? result.message
-            : "This import could not be accepted.",
-        );
+      const outcome = await runAcceptCommitLoop<CommitResult>({
+        // Generous bound, not a realistic ceiling: at `MAX_CHUNK_SIZE` (2)
+        // rows per iteration this still covers many thousands of
+        // committable rows while guaranteeing the loop terminates even if
+        // the server ever stops making forward progress, rather than
+        // hanging the tab.
+        maxIterations: 5000,
+        signal: controller.signal,
+        fetchAccept: () =>
+          fetch(`/api/import/preview/${batchId}/accept`, {
+            method: "POST",
+            signal: controller.signal,
+          }),
+        onProgress: (commitResult) => {
+          setCommit(commitResult);
+          const { processed, total } = acceptLoopProgress(commitResult);
+          setAcceptProgress({ processed, total });
+        },
+      });
+      if (!outcome.ok) {
+        if (outcome.aborted) return;
+        throw new Error(outcome.message);
       }
-      setCommit(result.commit);
       setAcceptDialogOpen(false);
       await refreshPreview();
       await loadHistory();
-      if (result.commit.status === "committed") {
-        await loadHistoryDetail(review.batch.id);
-      }
+      await loadHistoryDetail(batchId);
     } catch (error) {
       setAcceptError(
         error instanceof Error
@@ -1042,6 +1127,10 @@ export function ImportReview({
       );
     } finally {
       setAcceptPending(false);
+      setAcceptProgress(null);
+      if (acceptAbortControllerRef.current === controller) {
+        acceptAbortControllerRef.current = null;
+      }
     }
   }
 
@@ -1227,11 +1316,22 @@ export function ImportReview({
   // button exists to fix. If the server's resolution pass still cannot
   // resolve everything, `acceptImportWithContext` returns its existing
   // honest error and `acceptError` below surfaces it.
+  // UI-013 review round B2 (BLOCKING): `commit` is set by BOTH this
+  // review's own accept/commit actions AND the independent "Resume this
+  // commit" affordance for a DIFFERENT batch shown in the import-history
+  // panel below (`resumeHistoryCommit`) -- reading raw `commit` here would
+  // let resuming batch B's interrupted commit falsely mark THIS review
+  // (batch A) as committed. Every read of `commit` in the review section
+  // below goes through this scoped value, never the raw state.
+  const reviewCommit = scopeCommitToBatch(
+    commit,
+    review ? { id: review.batch.id, status: review.batch.status } : null,
+  );
   const acceptDisabled =
     !review ||
     blockedRowIssues.length > 0 ||
     acceptPending ||
-    commit?.status === "committed" ||
+    reviewCommit?.status === "committed" ||
     review.batch.status === "committed";
   const acceptTargetPortfolioName =
     portfolios.find(
@@ -1245,6 +1345,50 @@ export function ImportReview({
   const unresolvedSecurityCount = (securitiesReview ?? []).filter(
     (entry) => entry.state === "unresolved",
   ).length;
+  // UI-013: once a batch is done -- server-confirmed `committed`/`reversed`
+  // (reachable after a reload/resume of an already-finished batch), or
+  // `reviewCommit` reports `committed` from an action taken THIS session for
+  // THIS batch (CSV's `commitImport()` deliberately never refreshes
+  // `review.batch.status`, see its own comment, so `review.batch.status`
+  // alone would miss a same-session CSV commit) -- neither the Accept
+  // Import buttons nor the legacy commit panel render: both are "do this to
+  // commit" affordances, and the batch is already done. A status line
+  // replaces them; the rest of the review (securities table, issues,
+  // excluded rows) stays as evidence.
+  const isCommittedOrReversed =
+    review !== null &&
+    deriveIsCommittedOrReversed(
+      { id: review.batch.id, status: review.batch.status },
+      reviewCommit,
+    );
+  // UI-013 review round B1: the committed/reversed status line's exact
+  // text, sourced from real commit-machinery counts only -- see
+  // `deriveCommittedStatusLine`'s doc comment for why (never reconciliation
+  // -intent `preview.counts`).
+  const committedStatusLine =
+    review && isCommittedOrReversed
+      ? deriveCommittedStatusLine(
+          review.batch.status,
+          reviewCommit,
+          review.commitProgress ?? EMPTY_COMMIT_PROGRESS,
+        )
+      : null;
+  // UI-013 (one blessed path per batch type): a `sharesight_sync` batch's
+  // pre-commit path is Accept Import ALONE -- it collapses resolve
+  // securities -> mark ready -> commit (BRK-009B) into one action, and its
+  // commit step is the same idempotent `commit()` resume used everywhere
+  // else, so a `committing` batch (see `acceptDisabled` above, which does
+  // not gate on `committing`) is resumed automatically by `submitAccept`'s
+  // own client-side continuation loop -- no separate click, no separate
+  // affordance needed. Accept Import doubles as the resume affordance, so
+  // the legacy "Mark import ready"/"Financial commit" panels never render
+  // for these batches at all (avoiding the exact "two buttons, unsure which
+  // one to click" confusion the owner reported). The history detail panel's
+  // separate "Resume this commit" affordance (`import-history-detail.tsx`)
+  // remains available too, independent of batch type, for a `committing`
+  // batch reached from import history (a fresh page load, no live
+  // `review`/`commit` state) rather than from this live review.
+  const isSharesightSyncBatch = securitiesReview !== null;
 
   return (
     <main className="import-review-page">
@@ -1349,6 +1493,12 @@ export function ImportReview({
             <span>{review.excludedRows.length} excluded by owner</span>
           </div>
 
+          {committedStatusLine ? (
+            <p className="import-commit-status complete" role="status">
+              {committedStatusLine}
+            </p>
+          ) : null}
+
           {securitiesReview ? (
             <section
               className="import-securities-review"
@@ -1387,15 +1537,18 @@ export function ImportReview({
                   automatically on accept.
                 </p>
               ) : null}
-              <div className="import-accept-actions">
-                <button
-                  type="button"
-                  onClick={(event) => openAcceptDialog(event)}
-                  disabled={acceptDisabled}
-                >
-                  Accept Import
-                </button>
-              </div>
+              {!isCommittedOrReversed ? (
+                <div className="import-accept-actions">
+                  <button
+                    type="button"
+                    onClick={(event) => openAcceptDialog(event)}
+                    disabled={acceptDisabled}
+                    aria-busy={acceptPending || undefined}
+                  >
+                    Accept Import
+                  </button>
+                </div>
+              ) : null}
 
               <div className="table-scroll">
                 <table className="import-securities-table">
@@ -1481,15 +1634,18 @@ export function ImportReview({
                 </table>
               </div>
 
-              <div className="import-accept-actions">
-                <button
-                  type="button"
-                  onClick={(event) => openAcceptDialog(event)}
-                  disabled={acceptDisabled}
-                >
-                  Accept Import
-                </button>
-              </div>
+              {!isCommittedOrReversed ? (
+                <div className="import-accept-actions">
+                  <button
+                    type="button"
+                    onClick={(event) => openAcceptDialog(event)}
+                    disabled={acceptDisabled}
+                    aria-busy={acceptPending || undefined}
+                  >
+                    Accept Import
+                  </button>
+                </div>
+              ) : null}
             </section>
           ) : null}
 
@@ -1740,8 +1896,14 @@ export function ImportReview({
             </section>
           ) : null}
 
-          {review.batch.status === "parsed" ||
-          review.batch.status === "needs_mapping" ? (
+          {/* UI-013: hidden entirely for a `sharesight_sync` batch -- Accept
+              Import (above) is the ONE path for these batches, including
+              marking ready; see `isSharesightSyncBatch`'s definition for why
+              a second, legacy "Mark ready" affordance would recreate the
+              exact two-buttons confusion the owner reported. */}
+          {!isSharesightSyncBatch &&
+          (review.batch.status === "parsed" ||
+            review.batch.status === "needs_mapping") ? (
             <section
               className="import-commit-panel"
               aria-labelledby="ready-title"
@@ -1757,15 +1919,22 @@ export function ImportReview({
                 type="button"
                 onClick={() => void markReady()}
                 disabled={!review.preview.ready || readyPending}
+                aria-busy={readyPending || undefined}
               >
                 {readyPending ? "Marking ready…" : "Mark import ready"}
               </button>
             </section>
           ) : null}
 
-          {review.batch.status === "ready" ||
-          review.batch.status === "committing" ||
-          review.batch.status === "committed" ? (
+          {/* UI-013: `committed` deliberately dropped from this gate (the
+              committed status line above replaces this panel entirely --
+              see `isCommittedOrReversed`) and, for a `sharesight_sync`
+              batch, the whole panel is hidden regardless of status -- see
+              the comment on the readiness panel just above. */}
+          {!isSharesightSyncBatch &&
+          !isCommittedOrReversed &&
+          (review.batch.status === "ready" ||
+            review.batch.status === "committing") ? (
             <section
               className="import-commit-panel"
               aria-labelledby="commit-title"
@@ -1782,7 +1951,9 @@ export function ImportReview({
                   type="checkbox"
                   checked={commitConfirmed}
                   onChange={(event) => setCommitConfirmed(event.target.checked)}
-                  disabled={commitPending || commit?.status === "committed"}
+                  disabled={
+                    commitPending || reviewCommit?.status === "committed"
+                  }
                 />
                 I confirm this exact reviewed preview and its mappings.
               </label>
@@ -1792,29 +1963,30 @@ export function ImportReview({
                 disabled={
                   !commitConfirmed ||
                   commitPending ||
-                  commit?.status === "committed"
+                  reviewCommit?.status === "committed"
                 }
+                aria-busy={commitPending || undefined}
               >
                 {commitPending
                   ? "Submitting commit…"
-                  : commit?.status === "committing"
+                  : reviewCommit?.status === "committing"
                     ? "Resume commit"
-                    : commit?.status === "committed"
+                    : reviewCommit?.status === "committed"
                       ? "Commit complete"
                       : "Commit reviewed import"}
               </button>
-              {commit ? (
+              {reviewCommit ? (
                 <p
                   className={
-                    commit.status === "committed"
+                    reviewCommit.status === "committed"
                       ? "import-commit-status complete"
                       : "import-commit-status resumable"
                   }
                   role="status"
                 >
-                  {commit.status === "committed"
-                    ? `Committed ${commit.committedRows} row effects; ${commit.skippedRows} rows were skipped (${commit.excludedByOwnerRows} excluded by owner).`
-                    : `Commit is resumable after physical row ${commit.highWaterRow}. It is not complete.`}
+                  {reviewCommit.status === "committed"
+                    ? `Committed ${reviewCommit.committedRows} row effects; ${reviewCommit.skippedRows} rows were skipped (${reviewCommit.excludedByOwnerRows} excluded by owner).`
+                    : `Commit is resumable after physical row ${reviewCommit.highWaterRow}. It is not complete.`}
                 </p>
               ) : null}
             </section>
@@ -2131,8 +2303,13 @@ export function ImportReview({
                   type="button"
                   onClick={() => void submitAccept()}
                   disabled={acceptPending}
+                  aria-busy={acceptPending || undefined}
                 >
-                  {acceptPending ? "Accepting…" : "Accept Import"}
+                  {acceptPending
+                    ? acceptProgress
+                      ? `Committing… ${acceptProgress.processed} of ${acceptProgress.total} rows`
+                      : "Accepting…"
+                    : "Accept Import"}
                 </button>
               </div>
             </dialog>
@@ -2172,7 +2349,7 @@ export function ImportReview({
                     {businessDate(batch.createdAt)} · {batch.totalRows} rows
                   </span>
                 </button>
-                {isMutableExclusionStatus(batch.status) ? (
+                {isResumableReviewStatus(batch.status) ? (
                   <button
                     type="button"
                     className="history-open-review"

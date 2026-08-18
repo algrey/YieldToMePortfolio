@@ -1427,17 +1427,20 @@ test("BRK-009C review round B3: acceptDisabled gates on persisted blocking issue
   );
   assert.match(match![1]!, /blockedRowIssues\.length > 0/);
 
+  // UI-013 review round B2: `acceptDisabled` now reads the batch-scoped
+  // `reviewCommit` (not raw `commit` state) -- see
+  // tests/ui-013.test.ts for the scoping behaviour itself.
   const evaluate = new Function(
     "review",
     "blockedRowIssues",
     "acceptPending",
-    "commit",
+    "reviewCommit",
     `return (${match![1]!});`,
   ) as (
     review: { batch: { status: string } },
     blockedRowIssues: unknown[],
     acceptPending: boolean,
-    commit: { status: string } | null,
+    reviewCommit: { status: string } | null,
   ) => boolean;
 
   const preResolution = { batch: { status: "parsed" } };

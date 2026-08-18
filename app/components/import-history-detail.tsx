@@ -17,22 +17,20 @@ function statusLabel(status: string): string {
   return status.replaceAll("_", " ");
 }
 
-// IMP-008 review finding B1/B2, UI-012 review B2: THE single shared
-// eligibility gate -- mirrors the server's own exclusion-mutability check
-// (`app/import-row-exclusion-service.ts`, `setRowExclusion` in
-// `db/repositories/import-staging.ts`: exclusion stays mutable right up to
-// the moment commit actually starts, INCLUDING at `ready`, but never once
-// `committing` has begun or the batch has reached a terminal status) AND
-// doubles as "this batch still has a live server-side preview reachable via
-// `GET /api/import/preview/:batchId`" for UI-012's "Open review" resume
-// affordance -- both conditions land on the exact same four statuses, so
-// this is the ONE definition (exported here, imported by `import-review.tsx`
+// IMP-008 review finding B1/B2: mirrors the server's own exclusion-
+// mutability check (`app/import-row-exclusion-service.ts`, `setRowExclusion`
+// in `db/repositories/import-staging.ts`: exclusion stays mutable right up
+// to the moment commit actually starts, INCLUDING at `ready`, but never once
+// `committing` has begun or the batch has reached a terminal status). This
+// is the ONE definition (exported here, imported by `import-review.tsx`
 // rather than re-declared there -- no circular dependency: this file already
 // has no import from `import-review.tsx`, and `import-review.tsx` already
 // imports `ImportHistoryDetailPanel` from this file, so adding this import
-// is the same direction). Every other status (`committing`/`committed`/
-// `reversing`/`reversed`/`failed`) already gets its own dedicated evidence
-// view, so no resume-review action is offered for them either.
+// is the same direction).
+//
+// UI-013 review round B3c: this is now DISTINCT from "this batch's review is
+// safe to REACH" (`isResumableReviewStatus` below) -- exclusion mutations
+// stay gated on exactly this function, unchanged.
 export function isMutableExclusionStatus(status: string): boolean {
   return (
     status === "parsed" ||
@@ -40,6 +38,25 @@ export function isMutableExclusionStatus(status: string): boolean {
     status === "invalid" ||
     status === "ready"
   );
+}
+
+// UI-013 review round B3c (BLOCKING correction): a `committing` sharesight
+// batch that exhausted `acceptImportWithContext`'s own bounded server-side
+// commit loop (`app/import-accept-service.ts`) used to be a dead end --
+// `isMutableExclusionStatus` excludes `committing`, so "Open review" never
+// offered a way back in, leaving only ~100 manual "Commit" clicks as
+// (formerly) the sole recovery path. A `committing` batch's live-server
+// preview is exactly as reachable via `GET /api/import/preview/:batchId` as
+// any other status (`loadImportPreviewAction` never gates on batch status),
+// and reopening it lets Accept Import double as the resume affordance (see
+// `isSharesightSyncBatch`'s comment in `import-review.tsx`: its own
+// client-side accept loop resumes an already-`committing` batch exactly
+// like a fresh one). Deliberately NOT folded into
+// `isMutableExclusionStatus` itself -- exclusion mutations (skip/un-skip a
+// row/candidate) must stay blocked once commit has actually started; only
+// the ability to REACH the review widens.
+export function isResumableReviewStatus(status: string): boolean {
+  return isMutableExclusionStatus(status) || status === "committing";
 }
 
 // UI-012: defensive extraction from `row.normalizedFields`
@@ -156,7 +173,7 @@ export function ImportHistoryDetailPanel({
   const resumable =
     detail.batch.status === "committing" &&
     detail.progress.idempotencyKey !== null;
-  const resumableReview = isMutableExclusionStatus(detail.batch.status);
+  const resumableReview = isResumableReviewStatus(detail.batch.status);
   return (
     <section
       className="import-history-detail"
@@ -213,6 +230,7 @@ export function ImportHistoryDetailPanel({
                   type="button"
                   onClick={() => onReverse(detail.batch.version)}
                   disabled={reversalPending}
+                  aria-busy={reversalPending || undefined}
                 >
                   {reversalPending
                     ? "Checking reversal…"
@@ -272,11 +290,17 @@ export function ImportHistoryDetailPanel({
                   creates compensating facts while retaining source history.
                 </span>
               </label>
+              {/* UI-013: `disabled` mixes a validation reason (confirmation
+                  unchecked) with a genuine in-flight reason (`reversalPending`)
+                  -- `aria-busy` isolates the latter so `.import-reversal-button`
+                  can show `cursor: wait` only while a request is actually in
+                  flight, not-allowed otherwise (see globals.css). */}
               <button
                 className="import-reversal-button"
                 type="button"
                 onClick={() => onReverse(detail.batch.version)}
                 disabled={!confirmation || reversalPending}
+                aria-busy={reversalPending || undefined}
               >
                 {reversalPending
                   ? "Reversing…"

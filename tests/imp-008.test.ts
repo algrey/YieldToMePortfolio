@@ -1475,9 +1475,12 @@ test("IMP-008 B2: isMutableExclusionStatus gates the include button/future-tense
     /function isMutableExclusionStatus\(status: string\): boolean \{/,
     "import-review.tsx must not re-declare isMutableExclusionStatus locally",
   );
+  // UI-013 review round B3c added a sibling import (`isResumableReviewStatus`)
+  // to the same statement, so this now matches ANY import from that module
+  // naming `isMutableExclusionStatus`, not only as the last named import.
   assert.match(
     component,
-    /isMutableExclusionStatus,\s*\n\} from "\.\/import-history-detail\.tsx";/,
+    /import \{[\s\S]*?\bisMutableExclusionStatus\b[\s\S]*?\} from "\.\/import-history-detail\.tsx";/,
   );
 });
 

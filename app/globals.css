@@ -374,6 +374,15 @@ dd {
   color: var(--ink);
 }
 
+/* UI-013 review round follow-up: the Accept Import confirm dialog's own
+   confirm button carries `aria-busy="true"` only while its request is
+   actually in flight (import-review.tsx's `submitAccept`) -- an honest
+   busy cursor for that one case; every other `.dialog-actions button`
+   never sets the attribute, so this is inert for them. */
+.dialog-actions button[aria-busy="true"] {
+  cursor: wait;
+}
+
 .portfolio-popover {
   left: 0;
 }
@@ -2533,7 +2542,17 @@ dd {
   background: rgb(99 200 120 / 10%);
 }
 
-.import-accept-actions button:disabled {
+/* UI-013 review round follow-up: the trigger buttons disable for a
+   validation/state reason (blocked rows, already committed) MOST of the
+   time, but also disable while `acceptPending` is genuinely true (a
+   request in flight) -- `[aria-busy="true"]` (set only then, see
+   import-review.tsx) isolates the honest busy cursor. */
+.import-accept-actions button[aria-busy="true"] {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.import-accept-actions button:disabled:not([aria-busy="true"]) {
   cursor: not-allowed;
   opacity: 0.5;
 }
@@ -2792,11 +2811,30 @@ dd {
   background: rgb(99 200 120 / 10%);
 }
 
-.import-commit-panel > button:disabled,
+/* UI-013: `.history-refresh`/`.history-commit-progress button`/
+   `.history-load-more` are disabled ONLY by an in-flight `pending` flag
+   (never a validation/state reason), so `cursor: wait` is honest there
+   unconditionally. `.import-commit-panel > button` disables for BOTH a
+   genuine in-flight reason (`readyPending`/`commitPending`) AND a
+   validation/state reason (nothing to mark ready yet, the confirmation
+   checkbox unticked, an already-committed batch) -- those two buttons carry
+   `aria-busy="true"` only while their own request is actually in flight
+   (see import-review.tsx), so the busy cursor is scoped to that attribute
+   and every other disabled reason falls through to `not-allowed`. */
 .history-refresh:disabled,
 .history-commit-progress button:disabled,
 .history-load-more:disabled {
   cursor: wait;
+  opacity: 0.6;
+}
+
+.import-commit-panel > button[aria-busy="true"] {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.import-commit-panel > button:disabled:not([aria-busy="true"]) {
+  cursor: not-allowed;
   opacity: 0.6;
 }
 
@@ -2978,8 +3016,19 @@ dd {
   cursor: pointer;
 }
 
-.import-reversal-button:disabled {
+/* UI-013: `.import-reversal-button` disables for a genuine in-flight reason
+   (`reversalPending`) on every usage, but "Reverse this committed import"
+   also disables while the confirmation checkbox is unticked -- a
+   validation/state reason, not "busy". `aria-busy="true"` (set only while
+   `reversalPending`, see import-history-detail.tsx) isolates the honest
+   busy cursor; every other disabled reason falls through to `not-allowed`. */
+.import-reversal-button[aria-busy="true"] {
   cursor: wait;
+  opacity: 0.55;
+}
+
+.import-reversal-button:disabled:not([aria-busy="true"]) {
+  cursor: not-allowed;
   opacity: 0.55;
 }
 

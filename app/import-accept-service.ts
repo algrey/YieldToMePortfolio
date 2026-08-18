@@ -273,13 +273,64 @@ export async function acceptImportWithContext(
     }
     expectedPreviewVersion = validated.previewVersion;
   }
-  const commitResult = await commitRepository.commit(context.userId, batchId, {
+  // UI-013 review round B3 (BLOCKING correction): a single `commit()` call
+  // only ever processes `MAX_CHUNK_SIZE` (2) staged rows -- deliberately,
+  // see `db/repositories/import-commit.ts` and ARCHITECTURE.md's dated
+  // amendment (originally "processes one chunk per invocation" for the
+  // manual commit route; this accept path is now documented as its own
+  // bounded, measured exception). Left as one call, any batch with more
+  // than a couple of committable rows would return here still `committing`,
+  // leaving the owner to manually re-click Accept/Commit to pump the rest
+  // -- the exact defect this task fixes. This loop repeats the SAME
+  // idempotent commit step (deterministic `accept:<batchId>` key, resuming
+  // from `commit_high_water_row` each time -- nothing here departs from the
+  // existing resumable-commit machinery) until the batch is `committed`, a
+  // real error occurs, or the safety cap below is reached.
+  //
+  // The cap is a MEASURED budget, not a guess: the reviewer's own repro
+  // (accepting a realistic 225-row Sharesight batch against the original
+  // 25-iteration cap) measured ~1000-1083 D1 statements emitted -- over
+  // D1's per-invocation statement budget and directly against the
+  // one-chunk-per-invocation discipline this loop is meant to respect, and
+  // a failure there strands the batch `committing` with (at the time) no
+  // way to reopen its review. That works out to ~40-43 statements per
+  // 2-row chunk (each committed row's ledger posting is itself several
+  // statements -- lots, postings, the row update -- plus the chunk-tracking
+  // and audit inserts every chunk pays regardless of row count). 8
+  // iterations x ~43 statements is ~350 -- comfortable headroom under that
+  // budget, while still finishing realistically-sized batches (a 225-row
+  // batch needs ~113 two-row chunks; ~15 client-side accept calls at
+  // 8-iterations-per-call, each cheap, is a fine failure mode -- see
+  // `import-review.tsx`'s `submitAccept`, which re-POSTs the identical
+  // idempotent accept request until the batch reports `committed`, resuming
+  // exactly where this loop left off). A batch stuck `committing` between
+  // client retries is also no longer a dead end: `isResumableReviewStatus`
+  // (`import-history-detail.tsx`) now allows reopening a `committing`
+  // batch's review from import history specifically to resume it, closing
+  // the stranding hole the original cap's failure mode exposed.
+  const ACCEPT_COMMIT_LOOP_MAX_ITERATIONS = 8;
+  let commitResult = await commitRepository.commit(context.userId, batchId, {
     expectedVersion: beforeCommit.version,
     expectedPreviewVersion,
     idempotencyKey: acceptCommitIdempotencyKey(batchId),
     confirmation: true,
     requestId: context.requestId,
   });
+  for (
+    let iteration = 1;
+    commitResult.ok &&
+    commitResult.status === "committing" &&
+    iteration < ACCEPT_COMMIT_LOOP_MAX_ITERATIONS;
+    iteration += 1
+  ) {
+    commitResult = await commitRepository.commit(context.userId, batchId, {
+      expectedVersion: beforeCommit.version,
+      expectedPreviewVersion: "",
+      idempotencyKey: acceptCommitIdempotencyKey(batchId),
+      confirmation: true,
+      requestId: context.requestId,
+    });
+  }
   if (!commitResult.ok) {
     return {
       ok: false,
