@@ -49,6 +49,22 @@ export type SecurityResolutionCandidateIdentity = {
    * stripped, length-capped) before being written -- see
    * `sanitizeCanonicalName` below (BRK-009B review finding F2). */
   instrumentName: string | null;
+  /** BRK-010: `"trade"` when every row in this candidate's group is a
+   * buy/sell, `"dividend"` when every row is a payout/dividend row -- the
+   * caller (`app/security-resolution-service.ts`) groups rows by
+   * symbol+exchange+currency, so a group is naturally one or the other
+   * (occasionally a payout happens to share a trade's currency and lands in
+   * the SAME group; the group as a whole is still safely `"trade"` in that
+   * case, since currency already agrees so the exemption is moot). Threaded
+   * through to `resolveSecurityCandidate`'s strict-resolver call AND to this
+   * repository's own pre-existing-link currency recheck below -- see
+   * `domain/securities/resolve-security.ts`'s `rowClass` doc comment for the
+   * exemption this enables. Optional, defaulting to `"trade"` (the strict,
+   * pre-BRK-010 behaviour) when omitted -- mirrors
+   * `ResolveSecurityCandidateIdentity.rowClass`'s identical default, so
+   * every pre-BRK-010 caller/fixture keeps compiling and behaving
+   * unchanged. */
+  rowClass?: "trade" | "dividend";
 };
 
 // F2 (BRK-009B review): mirrors IMP-009's owner-attested display-name cap
@@ -188,6 +204,81 @@ export async function listNameEditableSecurityIds(
     [...uniqueIds, userId],
   );
   return rows.map((row) => row.security_id);
+}
+
+export type ResolvedInstrumentCurrencyRow = {
+  /** Present only when a `security_identifiers` row with
+   * `scheme = 'sharesight_instrument'` (valid_to IS NULL) exists for this
+   * security -- `null` for a security that was never linked via Sharesight
+   * evidence (e.g. CSV-only). */
+  sharesightInstrumentId: string | null;
+  /** `portfolio_securities.source_symbol` -- for a Sharesight-sourced row
+   * this is the trade's `instrumentCode` or the payout's `symbol`,
+   * byte-identical either way (both feed the same `candidate.sourceSymbol`
+   * in `app/security-resolution-service.ts`). */
+  symbol: string;
+  /** `portfolio_securities.source_exchange_alias` -- the trade's/payout's
+   * own `marketCode`. */
+  exchangeAlias: string | null;
+  /** The REAL, DB-resolved `securities.primary_currency_code` for whatever
+   * security this instrument is already linked to in this user's portfolio
+   * -- never a guess or a portfolio-base fallback. */
+  currencyCode: string;
+};
+
+/**
+ * BRK-010 review round 3 (BLOCKING): `domain/sharesight-sync/transform.ts`'s
+ * `payoutSecurityCurrencyProxy` previously fell back to the portfolio's own
+ * base currency whenever THIS SAME FETCH carried no trade for a payout's
+ * instrument -- but trades are historical (fetched once, rarely repeated)
+ * while payouts recur, so "no same-fetch trade" is the REALISTIC STEADY
+ * STATE, not an edge case, and that fallback was a bare guess masquerading
+ * as evidence (an NZD-security's recurring USD payout wrongly read as
+ * "case B, achievable" forever, with NOTHING inside a batch able to clear
+ * the resulting `SHARESIGHT_PAYOUT_FX_RATE_MISSING` block -- re-resolution
+ * only clears `SECURITY_RESOLUTION_CONFLICT`, never this code; see
+ * `app/security-resolution-service.ts`'s `markConflictIssuesResolved`).
+ * Every instrument this user has ALREADY resolved a security for, in THIS
+ * portfolio, regardless of source (an earlier Sharesight sync or a CSV
+ * import) -- real evidence, called from `app/sharesight-sync-service.ts`
+ * BEFORE the pure `transformSharesightSync` runs, so the proxy can prefer
+ * it over both the same-fetch trade heuristic and (now removed) the
+ * portfolio-base guess. A brand-new, payout-only instrument with no
+ * resolved security anywhere yet simply returns no row for that instrument
+ * here -- the caller then has genuinely NO evidence and must not guess
+ * (see `payoutSecurityCurrencyProxy`'s own doc comment for how that absence
+ * is handled: never a block).
+ */
+export async function loadResolvedPortfolioInstrumentCurrencies(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+): Promise<ResolvedInstrumentCurrencyRow[]> {
+  const rows = await client.all<Record<string, unknown>>(
+    `SELECT ps.source_symbol AS source_symbol,
+            ps.source_exchange_alias AS source_exchange_alias,
+            s.primary_currency_code AS primary_currency_code,
+            si.value AS sharesight_instrument_id
+       FROM portfolio_securities ps
+       JOIN securities s ON s.id = ps.security_id
+       LEFT JOIN security_identifiers si
+         ON si.security_id = ps.security_id
+        AND si.scheme = 'sharesight_instrument' AND si.valid_to IS NULL
+      WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.security_id IS NOT NULL`,
+    [userId, portfolioId],
+  );
+  return rows.map((row) => ({
+    sharesightInstrumentId:
+      row.sharesight_instrument_id === null
+        ? null
+        : String(row.sharesight_instrument_id),
+    symbol: String(row.source_symbol),
+    exchangeAlias:
+      row.source_exchange_alias === null
+        ? null
+        : String(row.source_exchange_alias),
+    currencyCode: String(row.primary_currency_code),
+  }));
 }
 
 export function createOwnedSecurityResolutionRepository(
@@ -490,6 +581,51 @@ export function createOwnedSecurityResolutionRepository(
     return { ok: false };
   }
 
+  // BRK-010: `linkToSecurity` above is keyed by (symbol, exchange, currency)
+  // -- exactly right for a TRADE-class candidate, but wrong for a
+  // DIVIDEND-class one resolved via the currency exemption
+  // (`resolve-security.ts`'s `rowClass` doc comment): `portfolio_securities_resolved_unique`
+  // permits only ONE row per (portfolio_id, security_id), so a dividend
+  // group whose payout currency (e.g. USD) differs from an ALREADY-LINKED
+  // trade group's own currency (e.g. AUD) for the SAME security must never
+  // try to create a SECOND, differently-currencied row for that same
+  // security -- it would violate the unique index. A dividend fact's own
+  // cash currency lives on `dividend_manual_records` (this repository's
+  // caller stores it there), never on `portfolio_securities.source_currency_code`,
+  // so reusing whatever row already exists for this security -- regardless
+  // of ITS OWN currency -- is exactly correct, not a loss of information.
+  // Only when this security has NO `portfolio_securities` row in this
+  // portfolio at all yet (a brand-new holding whose only evidence so far is
+  // a dividend) does this fall through to the normal, currency-keyed
+  // create/link path, which then creates a row in the dividend's own
+  // currency (the only evidence available in that degenerate case).
+  async function linkResolvedSecurity(
+    userId: string,
+    securityId: string,
+    identity: SecurityResolutionCandidateIdentity,
+    candidate: SecurityVerificationCandidateInput,
+    existingRow:
+      { id: string; security_id: string | null; status: string } | undefined,
+  ): Promise<
+    { ok: true; portfolioSecurityId: string; created: boolean } | { ok: false }
+  > {
+    if (identity.rowClass === "dividend") {
+      const existingForSecurity = await client.get<{ id: string }>(
+        `SELECT id FROM portfolio_securities
+         WHERE user_id = ? AND portfolio_id = ? AND security_id = ? LIMIT 1`,
+        [userId, candidate.portfolioId, securityId],
+      );
+      if (existingForSecurity) {
+        return {
+          ok: true,
+          portfolioSecurityId: existingForSecurity.id,
+          created: false,
+        };
+      }
+    }
+    return linkToSecurity(userId, securityId, candidate, existingRow);
+  }
+
   async function createAndLink(
     userId: string,
     identity: SecurityResolutionCandidateIdentity,
@@ -743,6 +879,14 @@ export function createOwnedSecurityResolutionRepository(
         // only for data this repository did not itself just write.
         const linkedCurrency = await securityCurrency(existingRow.security_id);
         if (
+          // BRK-010: this re-validation exists to catch a genuinely bad
+          // PRE-EXISTING link (B2, see this function's header comment) --
+          // for a dividend-class candidate a currency "mismatch" against the
+          // linked security is the EXPECTED, legitimate shape (a foreign-
+          // currency payout linked to a security that trades in a different
+          // currency), never evidence of a bad link, so the check is skipped
+          // exactly like the strict resolver's own exemption below.
+          identity.rowClass !== "dividend" &&
           linkedCurrency !== undefined &&
           normalizeToken(linkedCurrency) !==
             normalizeToken(identity.currencyCode)
@@ -775,6 +919,7 @@ export function createOwnedSecurityResolutionRepository(
           currencyCode: identity.currencyCode,
           sharesightInstrumentId: identity.sharesightInstrumentId,
           isin: identity.isin,
+          rowClass: identity.rowClass,
         },
         globalIdentifiers,
         sameUserEvidence,
@@ -790,9 +935,10 @@ export function createOwnedSecurityResolutionRepository(
       }
 
       if (stage1.outcome === "matched") {
-        const linked = await linkToSecurity(
+        const linked = await linkResolvedSecurity(
           userId,
           stage1.securityId,
+          identity,
           candidate,
           existingRow,
         );
@@ -829,9 +975,10 @@ export function createOwnedSecurityResolutionRepository(
         };
       }
       if (stage2.outcome === "matched") {
-        const linked = await linkToSecurity(
+        const linked = await linkResolvedSecurity(
           userId,
           stage2.securityId,
+          identity,
           candidate,
           existingRow,
         );

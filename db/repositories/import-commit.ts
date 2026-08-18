@@ -556,34 +556,122 @@ export function createOwnedImportCommitRepository(
       // `normalized` fields never sets both), so this signal alone decides
       // which insert shape to build -- never guessing/deriving one from the
       // other.
-      const built =
-        (normalized.totalCashDecimal ?? null) !== null
-          ? buildDividendManualRecordImportInsertStatements({
-              userId,
-              portfolioId,
-              portfolioSecurityId: target.portfolioSecurityId,
-              paymentDate: normalized.localTradeDate,
-              totalCashDecimal: normalized.totalCashDecimal ?? null,
-              totalFrankingDecimal: normalized.totalFrankingDecimal ?? null,
-              importBatchId: batch.id,
-              sourceReference,
-              requestId,
-              now: nowIso(now),
-            })
-          : buildDividendManualRecordImportInsertStatements({
-              userId,
-              portfolioId,
-              portfolioSecurityId: target.portfolioSecurityId,
-              paymentDate: normalized.localTradeDate,
-              sharesDecimal: normalized.sharesOwned ?? "",
-              dividendPerShareDecimal: normalized.costPerShare ?? "",
-              frankingCreditPerShareDecimal:
-                normalized.frankingPerShare ?? null,
-              importBatchId: batch.id,
-              sourceReference,
-              requestId,
-              now: nowIso(now),
-            });
+      const isTotalsMode = (normalized.totalCashDecimal ?? null) !== null;
+      // BRK-010 review finding B4: a Sharesight payout paid in a currency
+      // other than its OWN SECURITY's currency must never be committed as
+      // if it were 1:1. Three cases, keyed on the SECURITY's own
+      // `primary_currency_code` (S) -- the REAL, DB-resolved value, unlike
+      // `domain/sharesight-sync/transform.ts`'s pre-resolution proxy --
+      // against the payout's own currency (P) and the portfolio's base
+      // currency (B):
+      //   A. P == S: the payout is NATIVE to the security -- no conversion
+      //      is ever needed at the per-security-native-currency level
+      //      `domain/dividends/history.ts` operates in, regardless of B (a
+      //      USD-denominated security paying a USD dividend inside an
+      //      AUD-base portfolio commits exactly like any other native
+      //      dividend). No currency_code stored, no rate required, never
+      //      blocks -- matches the transform-time proxy's identical intent
+      //      for this same case.
+      //   B. P != S and S == B: conversion to the security's own currency
+      //      IS achievable via a record-currency -> PORTFOLIO-BASE rate
+      //      (S and B coincide here), so a rate is REQUIRED -- fails closed
+      //      (`mapping_incomplete`) without one. `currency_code`/rate/
+      //      source are stored; `domain/dividends/history.ts`'s read-time
+      //      derivation can correctly apply this rate (see that module's
+      //      B4 assertion).
+      //   C. P != S and S != B: Sharesight's rate (when present) only ever
+      //      converts P -> B, which is NOT the security's own currency S --
+      //      there is no rate this codebase could ever be given that makes
+      //      this conversion achievable, so a MISSING rate is never a
+      //      reason to block (blocking would falsely imply "get a rate and
+      //      this resolves," which isn't true here). `currency_code`/rate/
+      //      source (when present) are still stored as honest provenance,
+      //      but the read-time derivation must NEVER use them to convert
+      //      into S -- it falls into DIV-001's existing mixed-currency
+      //      degradation path instead (see history.ts).
+      // Scoped to the TOTALS-mode (Sharesight payout) branch only -- a CSV
+      // per-share dividend row has no established FX mechanism at all
+      // (`purchaseExchangeRate` is a trade-only field), so a foreign-
+      // currency CSV dividend row's pre-existing behaviour (committed
+      // as-is, no currency tracked) is deliberately left unchanged here --
+      // out of this task's scope.
+      const rowCurrency = normalized.currency;
+      const rowExchangeRateDecimal = normalized.exchangeRateDecimal ?? null;
+      let fxFields: {
+        currencyCode?: string;
+        fxRateToPortfolioDecimal?: string;
+        fxRateSource?: "sharesight";
+      } = {};
+      if (isTotalsMode) {
+        const security = target.portfolioSecurityId
+          ? await client.get<{ primary_currency_code: string }>(
+              `SELECT s.primary_currency_code AS primary_currency_code
+               FROM portfolio_securities ps
+               JOIN securities s ON s.id = ps.security_id
+               WHERE ps.id = ? AND ps.user_id = ? AND ps.portfolio_id = ?
+               LIMIT 1`,
+              [target.portfolioSecurityId, userId, portfolioId],
+            )
+          : undefined;
+        const securityCurrency = security?.primary_currency_code ?? null;
+        const isForeignToSecurity =
+          securityCurrency !== null && rowCurrency !== securityCurrency;
+        if (isForeignToSecurity) {
+          const conversionAchievable =
+            securityCurrency === portfolio.base_currency_code;
+          if (conversionAchievable && rowExchangeRateDecimal === null) {
+            // Case B, no rate: fail closed -- conversion is achievable in
+            // principle but we have nothing to achieve it with.
+            return { ok: false, reason: "mapping_incomplete" };
+          }
+          if (rowExchangeRateDecimal !== null) {
+            // Case B or C, rate present: store it as honest provenance
+            // either way -- history.ts's B4 assertion decides at READ time
+            // whether it is safe to actually apply.
+            fxFields = {
+              currencyCode: rowCurrency,
+              fxRateToPortfolioDecimal: rowExchangeRateDecimal,
+              fxRateSource: "sharesight",
+            };
+          } else {
+            // Case C, no rate: never blocks (see the case-C reasoning
+            // above), but the foreign currency must still be recorded so
+            // the row never gets silently mislabelled as the security's
+            // own currency at read time.
+            fxFields = { currencyCode: rowCurrency };
+          }
+        }
+        // Case A (rowCurrency === securityCurrency, or securityCurrency
+        // unavailable defensively): fxFields stays empty -- native row,
+        // unchanged from every pre-BRK-010 dividend commit.
+      }
+      const built = isTotalsMode
+        ? buildDividendManualRecordImportInsertStatements({
+            userId,
+            portfolioId,
+            portfolioSecurityId: target.portfolioSecurityId,
+            paymentDate: normalized.localTradeDate,
+            totalCashDecimal: normalized.totalCashDecimal ?? null,
+            totalFrankingDecimal: normalized.totalFrankingDecimal ?? null,
+            importBatchId: batch.id,
+            sourceReference,
+            requestId,
+            now: nowIso(now),
+            ...fxFields,
+          })
+        : buildDividendManualRecordImportInsertStatements({
+            userId,
+            portfolioId,
+            portfolioSecurityId: target.portfolioSecurityId,
+            paymentDate: normalized.localTradeDate,
+            sharesDecimal: normalized.sharesOwned ?? "",
+            dividendPerShareDecimal: normalized.costPerShare ?? "",
+            frankingCreditPerShareDecimal: normalized.frankingPerShare ?? null,
+            importBatchId: batch.id,
+            sourceReference,
+            requestId,
+            now: nowIso(now),
+          });
       if (!built.ok) return { ok: false, reason: "mapping_incomplete" };
       return {
         ok: true,

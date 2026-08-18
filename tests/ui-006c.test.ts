@@ -877,6 +877,9 @@ function row(overrides: Partial<DerivedDividendRow>): DerivedDividendRow {
     dominatedImported: null,
     additionalReceiptsCount: 0,
     additionalImportedCount: 0,
+    originalCurrencyCode: null,
+    fxRateToPortfolioDecimal: null,
+    fxRateSource: null,
     ...overrides,
   };
 }

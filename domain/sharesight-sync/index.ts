@@ -1,6 +1,7 @@
 export {
   resolveSharesightTradeDirection,
   transformSharesightSync,
+  invertToPortfolioConversionRate,
   SHARESIGHT_SYNC_PARSER_FORMAT,
   SHARESIGHT_SYNC_PARSER_VERSION,
   type SharesightPayoutTransformOutcome,

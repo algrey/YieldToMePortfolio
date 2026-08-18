@@ -26,6 +26,20 @@
 // exchange agreement -- or no exchange evidence at all on either side -- is
 // simply not a match, active or historical; it is never silently accepted
 // as "close enough".
+//
+// BRK-010 addendum (dividend-class currency exemption): the currency
+// agreement this module otherwise enforces at every tier is REQUIRED for
+// `rowClass: "trade"` identities (the default) but EXEMPT for
+// `rowClass: "dividend"` ones -- a security can legitimately trade in one
+// currency and pay a dividend in another (e.g. an ASX-listed security
+// trading in AUD that pays a USD dividend, the owner-reported RMD case),
+// and that payout currency is a property of the cash event, not the
+// security's identity. Every other safeguard (ticker+exchange agreement,
+// durable-id value equality, same-tier/cross-tier security-id
+// disagreement) still applies identically to a dividend-class identity --
+// see `ResolveSecurityCandidateIdentity.rowClass`'s doc comment and the
+// single `currencyDisagrees` check below for the exact scope of the
+// exemption.
 
 /**
  * The five tiers this resolver checks, in priority order. `ticker_active`
@@ -85,6 +99,22 @@ export type ResolveSecurityCandidateIdentity = Readonly<{
   sharesightInstrumentId?: string | null;
   isin?: string | null;
   figi?: string | null;
+  /**
+   * BRK-010: which kind of import row this identity was assembled from --
+   * `"trade"` (the default when omitted, preserving every pre-BRK-010
+   * caller's exact behaviour) keeps the currency-agreement rule below in
+   * full force; `"dividend"` exempts this identity from it (see
+   * `rowMatchesTier`'s currency check further down). A dividend/payout cash
+   * event's currency is a property of THAT CASH EVENT, not the security --
+   * an ASX-listed security that trades in AUD but pays a USD dividend is a
+   * legitimate, common real-world shape (Orchestrator ruling, TASKS.md
+   * BRK-010), not the suspicious mismatch the currency check exists to
+   * catch. Every OTHER safeguard this resolver enforces (ticker+exchange
+   * agreement, durable-id value equality, cross-tier/same-tier security-id
+   * disagreement) still applies identically regardless of `rowClass` --
+   * this field only ever loosens the currency check, nothing else.
+   */
+  rowClass?: "trade" | "dividend";
 }>;
 
 export type ResolveSecurityOutcome =
@@ -259,11 +289,20 @@ export function resolveSecurity(
     const distinctSecurityIds = [
       ...new Set(matchingRows.map((row) => row.securityId)),
     ];
-    const currencyDisagrees = matchingRows.some(
-      (row) =>
-        normalizeToken(row.primaryCurrencyCode) !==
-        normalizeToken(identity.currencyCode),
-    );
+    // BRK-010: a dividend-class identity is exempt from the currency check
+    // -- a payout's cash currency is a property of the cash event, not the
+    // security (see `ResolveSecurityCandidateIdentity.rowClass`'s doc
+    // comment). Every other tier condition (ticker+exchange agreement,
+    // durable-id equality, same-tier/cross-tier security-id disagreement)
+    // is completely unaffected -- this is the ONLY check `rowClass`
+    // loosens.
+    const currencyDisagrees =
+      identity.rowClass !== "dividend" &&
+      matchingRows.some(
+        (row) =>
+          normalizeToken(row.primaryCurrencyCode) !==
+          normalizeToken(identity.currencyCode),
+      );
 
     // Currency disagreement, or two rows within this SAME tier resolving to
     // different securities, is a conflict at THIS tier -- reported

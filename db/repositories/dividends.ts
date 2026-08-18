@@ -24,6 +24,47 @@ function isValidDateString(value: string): boolean {
   );
 }
 
+// BRK-010: mirrors `domain/calculations/multi-currency.ts`'s
+// `CURRENCY_CODE` pattern -- duplicated locally rather than imported so
+// this server-only repository layer's dependency surface stays as narrow
+// as its existing helpers above (same rationale as
+// `domain/securities/resolve-security.ts`'s deliberately re-derived
+// `normalizeToken`).
+const CURRENCY_CODE_PATTERN = /^[A-Z]{3}$/;
+
+function isCurrencyCodeString(value: unknown): value is string {
+  return typeof value === "string" && CURRENCY_CODE_PATTERN.test(value);
+}
+
+// BRK-010: the only source this codebase currently writes for a dividend
+// manual record's `fx_rate_source` -- mirrors
+// `dividend_manual_records_fx_rate_source_check`'s closed CHECK set. A
+// future user-applied-conversion source (owner's stated lower-priority
+// preference, TASKS.md BRK-010) would extend both this set and that CHECK
+// together, not silently widen one without the other.
+const FX_RATE_SOURCES = new Set(["sharesight"]);
+
+function isFxRateSourceString(value: unknown): value is string {
+  return typeof value === "string" && FX_RATE_SOURCES.has(value);
+}
+
+// BRK-010 review finding F3: caps a stored FX rate's decimal scale at the
+// same 24-place boundary `domain/dividends/history.ts`'s read-time
+// conversion rounds to (`FX_CONVERSION_SCALE`, itself matching
+// `franking.ts`'s established `DEFAULT_TIER_SCALE`) -- rejected at THIS
+// write-time boundary, with an honest message, rather than ever letting an
+// over-precision rate reach storage and only fail later at read time (where
+// a single bad row could otherwise abort loading a whole security's
+// dividend history -- see history.ts's per-record isolation for the
+// read-time half of this fix).
+const MAX_FX_RATE_DECIMAL_SCALE = 24;
+
+function hasDecimalScaleWithinLimit(value: string, maxScale: number): boolean {
+  const dotIndex = value.indexOf(".");
+  if (dotIndex === -1) return true;
+  return value.length - dotIndex - 1 <= maxScale;
+}
+
 const DECIMAL_PATTERN = /^-?(0|[1-9]\d*)(\.\d+)?$/;
 
 function isDecimalString(value: unknown): value is string {
@@ -1065,6 +1106,19 @@ export type BuildDividendManualRecordImportInsertInput = {
   frankingCreditPerShareDecimal?: string | null;
   totalCashDecimal?: string | null;
   totalFrankingDecimal?: string | null;
+  // BRK-010 review finding B4: `fxRateToPortfolioDecimal`/`fxRateSource` are
+  // paired (all-or-neither) and never supplied without `currencyCode`, but
+  // `currencyCode` MAY be supplied alone (mirrors
+  // `dividend_manual_records_fx_provenance_check`, re-validated here for
+  // the same D1-enforcement-uncertainty reason the mode fields above are).
+  // Supplied when the row's own currency differs from its OWN SECURITY's
+  // currency -- see `db/repositories/import-commit.ts`'s dividend branch
+  // for the full three-case model (native / rate-achievable / rate-
+  // unachievable). Omit/leave undefined for a native (security-currency)
+  // or legacy row.
+  currencyCode?: string | null;
+  fxRateToPortfolioDecimal?: string | null;
+  fxRateSource?: string | null;
   importBatchId: string;
   sourceReference: string;
   requestId: string;
@@ -1127,6 +1181,42 @@ export function buildDividendManualRecordImportInsertStatements(
     totalFrankingDecimal = input.totalFrankingDecimal ?? null;
   }
 
+  // BRK-010 review finding B4: `fxRateToPortfolioDecimal`/`fxRateSource` are
+  // paired (all-or-neither) and never present without `currencyCode`, but
+  // `currencyCode` MAY stand alone (a payout foreign to its own security
+  // whose security ALSO differs from the portfolio's base currency has no
+  // achievable Sharesight rate -- see `db/schema.ts`'s table header note's
+  // case-C reasoning; the row's true currency is still recorded so it is
+  // never silently mislabelled). Re-validated at this repository boundary
+  // exactly like every other decimal/enum field above (D1 CHECK-enforcement
+  // is not independently verified -- see this function's header comment).
+  const currencyCode = input.currencyCode ?? null;
+  const fxRateToPortfolioDecimal = input.fxRateToPortfolioDecimal ?? null;
+  const fxRateSource = input.fxRateSource ?? null;
+  if (
+    (fxRateToPortfolioDecimal !== null) !== (fxRateSource !== null) ||
+    (fxRateToPortfolioDecimal !== null && currencyCode === null)
+  ) {
+    return { ok: false, reason: "invalid_input" };
+  }
+  if (currencyCode !== null && !isCurrencyCodeString(currencyCode)) {
+    return { ok: false, reason: "invalid_input" };
+  }
+  if (fxRateToPortfolioDecimal !== null) {
+    // F3: an over-precision rate is rejected here, with an honest message,
+    // rather than ever reaching storage.
+    if (
+      !isPositiveDecimalString(fxRateToPortfolioDecimal) ||
+      !hasDecimalScaleWithinLimit(
+        fxRateToPortfolioDecimal,
+        MAX_FX_RATE_DECIMAL_SCALE,
+      ) ||
+      !isFxRateSourceString(fxRateSource)
+    ) {
+      return { ok: false, reason: "invalid_input" };
+    }
+  }
+
   const id = input.id ?? randomUUID();
   const statements: SqlStatement[] = [
     {
@@ -1135,8 +1225,9 @@ export function buildDividendManualRecordImportInsertStatements(
         shares_decimal, dividend_per_share_decimal,
         franking_credit_per_share_decimal, import_batch_id, source_reference,
         total_cash_decimal, total_franking_decimal,
+        currency_code, fx_rate_to_portfolio_decimal, fx_rate_source,
         created_at, updated_at, version
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       params: [
         id,
         input.userId,
@@ -1150,6 +1241,9 @@ export function buildDividendManualRecordImportInsertStatements(
         input.sourceReference,
         totalCashDecimal,
         totalFrankingDecimal,
+        currencyCode,
+        fxRateToPortfolioDecimal,
+        fxRateSource,
         input.now,
         input.now,
       ],
@@ -2225,6 +2319,15 @@ export type DividendManualRecordRecord = {
   // every per-share row (owner-typed or CSV-imported).
   totalCashDecimal: string | null;
   totalFrankingDecimal: string | null;
+  // BRK-010 review finding B4: `fxRateToPortfolioDecimal`/`fxRateSource`
+  // are paired (all-or-neither) and never present without `currencyCode`,
+  // but `currencyCode` MAY stand alone (see `db/schema.ts`'s header note
+  // and `dividend_manual_records_fx_provenance_check`). NULL `currencyCode`
+  // means "already in this row's own SECURITY's currency" -- every
+  // pre-BRK-010 row and every native row going forward.
+  currencyCode: string | null;
+  fxRateToPortfolioDecimal: string | null;
+  fxRateSource: string | null;
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -2260,6 +2363,7 @@ const DIVIDEND_MANUAL_RECORD_COLUMNS = `
   shares_decimal, dividend_per_share_decimal,
   franking_credit_per_share_decimal, import_batch_id, source_reference,
   idempotency_key, total_cash_decimal, total_franking_decimal,
+  currency_code, fx_rate_to_portfolio_decimal, fx_rate_source,
   created_at, updated_at, version
 `;
 
@@ -2294,6 +2398,13 @@ function mapDividendManualRecord(
       row.total_franking_decimal === null
         ? null
         : String(row.total_franking_decimal),
+    currencyCode: row.currency_code === null ? null : String(row.currency_code),
+    fxRateToPortfolioDecimal:
+      row.fx_rate_to_portfolio_decimal === null
+        ? null
+        : String(row.fx_rate_to_portfolio_decimal),
+    fxRateSource:
+      row.fx_rate_source === null ? null : String(row.fx_rate_source),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     version: Number(row.version),

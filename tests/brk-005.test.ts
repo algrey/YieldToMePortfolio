@@ -355,6 +355,7 @@ const FIXED_NOW = "2026-08-13T00:00:00.000Z";
 test("BRK-005: a live-shaped buy trade transforms into a staged transaction row with positive shares and no fabricated FX", () => {
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [fakeTrade({ quantityDecimal: "5", priceDecimal: "10" })],
     payouts: [],
     now: FIXED_NOW,
@@ -378,6 +379,7 @@ test("BRK-005: a live-shaped buy trade transforms into a staged transaction row 
 test("BRK-005: a sell trade normalizes a signed negative quantity to a positive Shares Owned with type sell", () => {
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [
       fakeTrade({
         id: "trade-sell",
@@ -397,6 +399,7 @@ test("BRK-005: a sell trade normalizes a signed negative quantity to a positive 
 test("BRK-005: an unmapped/ambiguous trade type stages an unsupported row with an explicit error issue, never silently guessed", () => {
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [
       fakeTrade({
         id: "trade-ambiguous",
@@ -419,6 +422,7 @@ test("BRK-005: an unmapped/ambiguous trade type stages an unsupported row with a
 test("BRK-005: a payout with a confirmed id stages a totals-only dividend row -- never a fabricated per-share amount", () => {
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [],
     payouts: [
       fakePayout({ amountDecimal: "2.50", frankingCreditsDecimal: "1.07" }),
@@ -450,6 +454,7 @@ test("BRK-005: a payout with a confirmed id stages a totals-only dividend row --
 test("BRK-005: a null franking-credits payout leaves totalFrankingDecimal unknown (never zero)", () => {
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [],
     payouts: [fakePayout({ frankingCreditsDecimal: null })],
     now: FIXED_NOW,
@@ -472,6 +477,7 @@ test("BRK-005: a null franking-credits payout leaves totalFrankingDecimal unknow
 test("BRK-005C: a PAST-dated null-id payout stages as a real totals-only dividend row with a holding+paidOn identity key and an 'unconfirmed in Sharesight' provenance note", () => {
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [],
     payouts: [
       fakePayout({
@@ -511,6 +517,7 @@ test("BRK-005C: a PAST-dated null-id payout stages as a real totals-only dividen
 test("BRK-005C: a null-id payout's own comments are preserved ALONGSIDE the provenance note, not overwritten", () => {
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [],
     payouts: [
       fakePayout({
@@ -529,6 +536,7 @@ test("BRK-005C: a null-id payout's own comments are preserved ALONGSIDE the prov
 test("BRK-005C: a confirmed payout's own Sharesight id surfaces in notes (visible in preview/audit) even though it is no longer part of identity", () => {
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [],
     payouts: [
       fakePayout({
@@ -551,6 +559,7 @@ test("BRK-005C: a confirmed payout's own Sharesight id surfaces in notes (visibl
 test("BRK-005C: a null-id payout paid on the SAME calendar day as now counts as past (staged), not future", () => {
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [],
     payouts: [fakePayout({ id: null, paidOnDate: "2026-08-13" })],
     now: FIXED_NOW,
@@ -562,6 +571,7 @@ test("BRK-005C: a null-id payout paid on the SAME calendar day as now counts as 
 test("BRK-005C: a FUTURE-dated null-id payout is still SKIPPED, with the warning reworded to say future-dated/not-yet-paid rather than implying every unconfirmed payout is dropped", () => {
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [],
     payouts: [fakePayout({ id: null, paidOnDate: "2099-01-01" })],
     now: FIXED_NOW,
@@ -586,6 +596,7 @@ test("BRK-005C: a FUTURE-dated null-id payout is still SKIPPED, with the warning
 test("BRK-005C: confirmed (non-null-id) payouts are completely unaffected by the past/future classification -- they stage regardless of paidOnDate", () => {
   const future = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [],
     payouts: [
       fakePayout({
@@ -635,6 +646,7 @@ test("BRK-005C: two payouts colliding on the SAME identity key (same holding, sa
 
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [],
     payouts: [interim, special],
     now: FIXED_NOW,
@@ -695,6 +707,7 @@ test("BRK-005C: a byte-identical duplicate payout pair (same holding, same paid_
   const duplicate = fakePayout({ id: null, paidOnDate: "2026-08-05" });
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [],
     payouts: [duplicate, { ...duplicate }],
     now: FIXED_NOW,
@@ -719,6 +732,7 @@ test("BRK-005C: a confirmed payout and an unconfirmed (null-id) payout for the S
   });
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [],
     payouts: [confirmed, unconfirmed],
     now: FIXED_NOW,
@@ -742,6 +756,7 @@ test("BRK-005C: a future-dated null-id payout never participates in collision co
   });
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [],
     payouts: [staged, futureSameKey],
     now: FIXED_NOW,
@@ -1891,6 +1906,7 @@ test("BRK-005: cross-batch duplicate trade/dividend rows across two sync-shaped 
   const client = createSqliteSqlClient(database);
   const transformed = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [],
     payouts: [fakePayout({ id: "payout-dup" })],
     now: FIXED_NOW,

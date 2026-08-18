@@ -56,6 +56,14 @@ type NormalizedRowGroup = {
   instrumentName: string | null;
   isin: string | null;
   rows: { id: string; physicalRowNumber: number }[];
+  // BRK-010: true until a non-dividend row is seen in this group -- a group
+  // is symbol+exchange+currency, so a security's AUD trades and USD payouts
+  // naturally land in DIFFERENT groups (different currency) and this stays
+  // true for the payout-only group, false for the trade group. See
+  // `db/repositories/security-resolution.ts`'s `SecurityResolutionCandidateIdentity.rowClass`
+  // doc comment for why this matters: only a group whose rows are ALL
+  // dividend/payout rows is exempt from the strict currency-agreement rule.
+  allDividendRows: boolean;
 };
 
 function groupKey(
@@ -187,10 +195,14 @@ export async function resolveSharesightBatchSecuritiesWithContext(
         instrumentName: null,
         isin: null,
         rows: [],
+        allDividendRows: true,
       };
       groups.set(key, group);
     }
     group.rows.push({ id: row.id, physicalRowNumber: row.physicalRowNumber });
+    if (normalized?.type !== "dividend") {
+      group.allDividendRows = false;
+    }
     if (
       group.sharesightInstrumentId === null &&
       normalized?.sharesightInstrumentId
@@ -230,6 +242,11 @@ export async function resolveSharesightBatchSecuritiesWithContext(
         sharesightInstrumentId: group.sharesightInstrumentId,
         isin: group.isin,
         instrumentName: group.instrumentName,
+        // BRK-010: exempts this candidate from the strict currency-agreement
+        // rule when (and only when) EVERY row in this symbol+exchange+
+        // currency group is a payout/dividend row -- see
+        // `NormalizedRowGroup.allDividendRows`'s doc comment.
+        rowClass: group.allDividendRows ? "dividend" : "trade",
       },
       candidate,
     );

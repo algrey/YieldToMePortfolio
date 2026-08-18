@@ -105,10 +105,14 @@ export async function loadOwnedDividendHistory(
   now = new Date(),
 ): Promise<OwnedDividendHistory> {
   const portfolio = await client.get<Row>(
-    `SELECT id FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
+    `SELECT id, base_currency_code FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
     [portfolioId, userId],
   );
   if (!portfolio) throw new Error("not_owned");
+  // BRK-010 review finding B4: threaded into `deriveDividendHistoryForSecurity`
+  // below so it can assert a stored FX rate is only ever applied toward the
+  // portfolio's own base currency, never an arbitrary security's currency.
+  const portfolioBaseCurrencyCode = String(portfolio.base_currency_code);
 
   const settings = await createOwnedUserSettingsRepository(client).get(userId);
   if (!settings) throw new Error("missing_user_settings");
@@ -235,6 +239,12 @@ export async function loadOwnedDividendHistory(
       // DIV-004: carried through so the derivation can separate the
       // owner-typed and imported tiers -- see domain/dividends/history.ts.
       importBatchId: record.importBatchId,
+      // BRK-010: foreign-currency payout provenance -- null on every
+      // pre-BRK-010/same-currency row. See domain/dividends/history.ts's
+      // `convertImportedRecordToSecurityCurrency`.
+      currencyCode: record.currencyCode,
+      fxRateToPortfolioDecimal: record.fxRateToPortfolioDecimal,
+      fxRateSource: record.fxRateSource,
     });
     manualBySecurity.set(record.portfolioSecurityId, list);
   }
@@ -324,6 +334,7 @@ export async function loadOwnedDividendHistory(
       const rows = deriveDividendHistoryForSecurity({
         portfolioSecurityId: identity.id,
         securityCurrencyCode: identity.currencyCode,
+        portfolioBaseCurrencyCode,
         events,
         overrides,
         receipts,

@@ -55,7 +55,52 @@ export type ImportIssueCode =
   // identity key (same holding, same paid_on) -- staged for visibility but
   // blocked from readiness until the owner resolves it manually, never
   // auto-disambiguated -- see `domain/sharesight-sync/transform.ts`.
-  | "SHARESIGHT_PAYOUT_KEY_COLLISION";
+  | "SHARESIGHT_PAYOUT_KEY_COLLISION"
+  // BRK-010 review round 3 correction: the gate is a best-effort SECURITY-
+  // CURRENCY proxy, in strict priority order -- REAL, DB-resolved evidence
+  // (an instrument this user has already linked to a security, in this
+  // portfolio, from any source) FIRST, then same-fetch trade evidence when
+  // present, and otherwise NO fallback at all (never the portfolio's own
+  // base currency -- round 2's fallback-to-base guess was itself corrected
+  // away in round 3, since "no same-fetch trade" turned out to be the
+  // realistic steady state for a recurring payout, not a rare edge case,
+  // and nothing inside a batch can ever clear a wrongly-fired instance of
+  // this code) -- see `domain/sharesight-sync/transform.ts`'s
+  // `payoutSecurityCurrencyProxy`. A Sharesight payout paid in a currency
+  // other than that proxy target, with no USABLE `exchange_rate` to
+  // convert it (covers missing, zero, malformed, and over-24dp-precision
+  // raw rates -- round 3 SMALL-1/SMALL-2, judged by whether
+  // `invertToPortfolioConversionRate` actually returns a value -- PLUS
+  // negative raw rates, round 4 correction: a negative rate inverts to a
+  // negative VALUE, not `null`, so it needs an explicit non-positive check
+  // on top of that return value, not the bare `!== null` test alone),
+  // stages for visibility but blocks readiness until resolved
+  // (confirm the payout in Sharesight so it carries a valid rate, then
+  // re-sync) or excluded (IMP-008) -- but ONLY when conversion is actually
+  // achievable (the proxy target equals the portfolio's own base currency)
+  // AND the proxy has real evidence at all (a `null` proxy target -- no
+  // evidence anywhere yet -- never blocks either, since nothing here can
+  // tell whether conversion would even be needed); otherwise (the proxy
+  // target itself differs from the portfolio base) no rate could ever make
+  // the conversion valid, so this code is never emitted for that shape at
+  // all -- see `transform.ts`'s `payoutMissingFxRateIssue`.
+  | "SHARESIGHT_PAYOUT_FX_RATE_MISSING"
+  // BRK-010 review round 2 finding B2 (product ruling): franking credits
+  // are an AU-tax construct; whether Sharesight denominates a FOREIGN
+  // payout's franking fields in AUD or in the payout's own currency is an
+  // UNVERIFIED ASSUMPTION this codebase will not resolve by inspecting real
+  // tax amounts (AGENTS.md's secrets/tax-data discipline). A foreign-to-
+  // its-security payout (best-effort proxy, see
+  // `domain/sharesight-sync/transform.ts`'s `payoutSecurityCurrencyProxy`)
+  // whose franking total is NONZERO stages with this WARNING (never an
+  // error -- it never blocks readiness) naming the unverified-currency
+  // reason; `domain/dividends/history.ts`'s derivation independently marks
+  // that record's franking UNKNOWN (never converted, never trusted
+  // as-stored) regardless of whether this warning is later resolved/
+  // excluded. A zero/absent franking total on a foreign payout (the
+  // overwhelmingly common case -- foreign-currency dividends are typically
+  // unfranked) never triggers this at all.
+  | "SHARESIGHT_PAYOUT_FRANKING_CURRENCY_UNVERIFIED";
 
 export type ImportFieldName =
   | "id"
@@ -158,6 +203,30 @@ type MutableNormalizedImportRow = {
   sharesightInstrumentId?: string | null;
   instrumentName?: string | null;
   isin?: string | null;
+  // BRK-010: OPTIONAL Sharesight payout `exchange_rate` (live-confirmed,
+  // BRK-008 §8.2), ALREADY CORRECTED to this codebase's multiply-to-
+  // portfolio-base convention by `domain/sharesight-sync/transform.ts`'s
+  // `invertToPortfolioConversionRate` (see that function's doc comment and
+  // `SharesightPayout.exchangeRateDecimal`'s live evidence in
+  // `contracts.ts` for the review-round B1 direction proof) -- Sharesight's
+  // OWN conversion rate for a dividend paid in a currency other than the
+  // security's/portfolio's own, carried through so commit-time can
+  // honestly record a foreign-currency payout's cash total WITH its rate
+  // rather than silently treating it as 1:1 (see `db/schema.ts`'s
+  // `dividendManualRecords` header note and `domain/dividends/history.ts`'s
+  // conversion-at-read logic). Always `null` for a CSV-parsed row and for
+  // every TRADE row (buy/sell FX already has its own established
+  // `purchaseExchangeRate` mechanism -- this field is payout-only).
+  // Optional, absent-tolerant. BRK-010 review finding B2: unlike
+  // `sharesightInstrumentId`/`instrumentName`/`isin` above (pure matching
+  // aids, deliberately digest-excluded), this field is VALUE-BEARING money
+  // data and therefore IS included in `app/sharesight-sync-service.ts`'s
+  // `canonicalRowDigestFields` -- a corrected/late rate from Sharesight
+  // must re-stage as a genuinely new batch (BRK-005B's identical digest
+  // philosophy for a trade correction), never silently reuse a stale one.
+  // The row's own `fingerprint` (identity/dedupe key) is unaffected either
+  // way -- payout identity never depended on this field.
+  exchangeRateDecimal?: string | null;
 };
 
 export type NormalizedImportRow = Readonly<MutableNormalizedImportRow>;

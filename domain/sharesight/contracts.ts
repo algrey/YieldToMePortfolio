@@ -466,6 +466,33 @@ export type SharesightPayout = Readonly<{
   trust: boolean | null;
   nonTaxable: boolean | null;
   comments: string | null;
+  /**
+   * BRK-010 review (2026-08-19), LIVE-CONFIRMED DIRECTION: a narrow,
+   * read-only live spike (`scripts/sharesight-fx-rate-spike.mjs`, owner's
+   * real AUD-base portfolio, GET-only client, no amounts/ids printed --
+   * only `currency`/`paid_on`/`exchange_rate`) fetched every USD-currency
+   * payout item and observed `exchange_rate` values of 0.649526387,
+   * 0.6620689655, 0.6608478803, 0.6681, 0.6385542169, 0.64, 0.6493506494,
+   * 0.6528835691, 0.7092198582, 0.7220216606 across paid_on dates spanning
+   * 2024-03-14 through 2026-06-18 (10 items). AUD/USD traded roughly
+   * 0.60-0.72 (AUD-quoted-in-USD) across this exact window, and the
+   * observed values sit squarely in that band -- NOT the reciprocal
+   * ~1.4-1.7 band a "multiply this payout's own USD amount by
+   * exchange_rate to reach the AUD portfolio total" reading would require.
+   * CONFIRMED: this wire field is NOT the multiply-to-portfolio-base
+   * factor -- it is the inverse (empirically, USD received per 1 AUD, the
+   * ordinary AUD/USD quote convention). `domain/sharesight-sync/transform.ts`'s
+   * `invertToPortfolioConversionRate` inverts this raw wire value (exact
+   * decimal reciprocal, half-even rounded to the same 24-place scale
+   * `franking.ts` uses) before it ever reaches `NormalizedImportRow.exchangeRateDecimal`
+   * or `dividend_manual_records.fx_rate_to_portfolio_decimal` -- every
+   * OTHER layer of this codebase (staging, commit, read-time conversion)
+   * consumes the ALREADY-CORRECTED, multiply-to-portfolio-base value, never
+   * this raw field's own (inverse) sign. This field itself stays a
+   * faithful, unmodified capture of Sharesight's own wire value -- the
+   * correction lives entirely in `transform.ts`, one call site, so it can
+   * never silently drift out of sync with this evidence.
+   */
   exchangeRateDecimal: string | null;
 }>;
 

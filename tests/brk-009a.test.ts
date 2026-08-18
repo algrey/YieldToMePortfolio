@@ -692,6 +692,7 @@ test("BRK-009A transform: trade rows carry instrument metadata into normalized f
   });
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [trade],
     payouts: [],
     now: "2026-08-18T00:00:00.000Z",
@@ -706,6 +707,7 @@ test("BRK-009A transform: trade rows carry null instrument metadata when absent"
   const trade = fakeTrade({ id: "trade-no-meta" });
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [trade],
     payouts: [],
     now: "2026-08-18T00:00:00.000Z",
@@ -723,6 +725,7 @@ test("BRK-009A transform: payout rows carry sharesightInstrumentId when present,
   });
   const result = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [],
     payouts: [payout],
     now: "2026-08-18T00:00:00.000Z",
@@ -736,6 +739,7 @@ test("BRK-009A transform: payout rows carry sharesightInstrumentId when present,
 test("BRK-009A transform: row fingerprints are byte-identical whether instrument metadata is present or absent", () => {
   const withoutMetadata = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [fakeTrade({ id: "trade-fp" })],
     payouts: [
       fakePayout({
@@ -748,6 +752,7 @@ test("BRK-009A transform: row fingerprints are byte-identical whether instrument
   });
   const withMetadata = transformSharesightSync({
     portfolioName: "Main",
+    portfolioBaseCurrencyCode: "AUD",
     trades: [
       fakeTrade({
         id: "trade-fp",

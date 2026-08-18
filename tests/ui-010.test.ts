@@ -58,6 +58,9 @@ function row(overrides: Partial<DerivedDividendRow>): DerivedDividendRow {
     dominatedImported: null,
     additionalReceiptsCount: 0,
     additionalImportedCount: 0,
+    originalCurrencyCode: null,
+    fxRateToPortfolioDecimal: null,
+    fxRateSource: null,
     ...overrides,
   };
 }
@@ -76,6 +79,9 @@ const sampleDominatedImported = {
   totalCashDecimal: null,
   totalFrankingDecimal: null,
   paymentDate: "2026-03-08",
+  currencyCode: null,
+  fxRateToPortfolioDecimal: null,
+  fxRateSource: null,
 };
 
 test("UI-010: foldedInReceiptCount is 0 for a row with no dominated receipt and no additional count", () => {

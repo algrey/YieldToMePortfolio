@@ -3001,6 +3001,64 @@ export const dividendEventOverrides = sqliteTable(
  * already used for a provider event with no known amount) while still
  * using the real `totalCashDecimal`/`totalFrankingDecimal` for the row's
  * cash/franking totals -- see that module's `computeCashGrossOrTotals`.
+ *
+ * BRK-010 addition (migration 0042 -- a GENUINE TABLE REBUILD, not a plain
+ * `ADD COLUMN`: this migration also adds two new CHECK constraints, which
+ * SQLite cannot add via `ALTER TABLE`. Same trigger hazard as 0035's own
+ * rebuild before it -- the three `account_purge_lock_dividend_manual_records_*`
+ * triggers are hand-recreated byte-identically after the rename in the
+ * migration file itself; `tests/db-schema.test.ts` checks the three
+ * trigger NAMES survive the rebuild, it does NOT re-probe actual
+ * enforcement -- see `tests/db-005.test.ts`'s purge-lock drills for the
+ * enforcement coverage this schema relies on): a security can legitimately
+ * trade in one currency and pay a dividend in another (an ASX-listed
+ * security trading in AUD that pays a USD dividend -- the owner-reported
+ * RMD case, `sharesight_instrument` 2964). Three new NULLABLE columns carry
+ * that honestly: `currencyCode` (FK `currencies`), `fxRateToPortfolioDecimal`,
+ * and `fxRateSource`.
+ *
+ * NULL `currencyCode` means "this row's amounts are already in the
+ * SECURITY's own currency" -- every pre-BRK-010 row (NULL by construction)
+ * and every row whose payout currency already equals its security's own
+ * `securities.primary_currency_code` reads this way; `domain/dividends/history.ts`
+ * treats this as "no conversion needed," matching this module's
+ * established per-security-native-currency scope. A NON-NULL `currencyCode`
+ * is set when the row's cash total is denominated in a currency other than
+ * its OWN SECURITY's currency (`db/repositories/import-commit.ts`'s
+ * dividend branch, using the REAL `securities.primary_currency_code`, not
+ * the portfolio's base currency -- a security can differ from its
+ * portfolio's base too).
+ *
+ * BRK-010 REVIEW FINDING B4 CORRECTION: `fxRateToPortfolioDecimal`/
+ * `fxRateSource` are NOT always set together with `currencyCode` --
+ * `dividend_manual_records_fx_provenance_check` enforces a NARROWER
+ * invariant than the column's first-shipped version did: `fxRateToPortfolioDecimal`
+ * and `fxRateSource` are still paired (all-or-neither, and never present
+ * without `currencyCode` also being set), but `currencyCode` MAY stand
+ * alone with both rate columns NULL. This is a genuine, expected state:
+ * Sharesight's own rate always converts record-currency -> PORTFOLIO BASE,
+ * never into an arbitrary security's own currency, so when a payout's
+ * security differs from BOTH the payout's own currency AND the portfolio's
+ * base currency, no rate this codebase could ever be given would let it
+ * honestly convert into that security's currency -- the row still needs
+ * `currencyCode` recorded (so it is never silently mislabelled as being in
+ * its security's currency) but a MISSING rate in that shape is never a
+ * commit-time failure, only a read-time `mixed_currency` degradation (see
+ * `domain/dividends/history.ts`'s derivation, B4). `fxRateSource` is
+ * currently only ever `'sharesight'` (Sharesight's own payout
+ * `exchange_rate`, live-confirmed BRK-008 §8.2, direction CONFIRMED and
+ * corrected by a live spike -- review finding B1, see
+ * `domain/sharesight/contracts.ts`'s `SharesightPayout.exchangeRateDecimal`
+ * doc comment for the evidence) -- the CHECK constraint keeps the value set
+ * closed rather than accepting arbitrary free text, matching this schema's
+ * established enum-via-CHECK convention (e.g. `dividend_receipts_source_check`).
+ * Fail-closed ONLY when a rate is genuinely achievable and missing: a
+ * foreign-to-security payout whose security currency equals the portfolio's
+ * base currency, with no rate, never reaches this table -- it stages with a
+ * blocking, excludable `SHARESIGHT_PAYOUT_FX_RATE_MISSING` issue instead
+ * (see `domain/sharesight-sync/transform.ts`); a payout whose security
+ * currency differs from BOTH is never blocked (see the case-C reasoning
+ * above).
  */
 export const dividendManualRecords = sqliteTable(
   "dividend_manual_records",
@@ -3019,6 +3077,10 @@ export const dividendManualRecords = sqliteTable(
     // BRK-005: totals-only Sharesight payout shape -- see the header note.
     totalCashDecimal: text("total_cash_decimal"),
     totalFrankingDecimal: text("total_franking_decimal"),
+    // BRK-010: foreign-currency payout provenance -- see the header note.
+    currencyCode: text("currency_code"),
+    fxRateToPortfolioDecimal: text("fx_rate_to_portfolio_decimal"),
+    fxRateSource: text("fx_rate_source"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     version: integer("version").notNull().default(1),
@@ -3037,6 +3099,11 @@ export const dividendManualRecords = sqliteTable(
         portfolioSecurities.userId,
         portfolioSecurities.portfolioId,
       ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "dividend_manual_records_currency_code_currencies_code_fk",
+      columns: [table.currencyCode],
+      foreignColumns: [currencies.code],
     }).onDelete("restrict"),
     uniqueIndex("dividend_manual_records_id_user_portfolio_unique").on(
       table.id,
@@ -3078,6 +3145,30 @@ export const dividendManualRecords = sqliteTable(
           AND ${table.totalCashDecimal} IS NOT NULL
         )
       `,
+    ),
+    // BRK-010 review finding B4: `fxRateToPortfolioDecimal`/`fxRateSource`
+    // are paired (all-or-neither) and never appear without `currencyCode`
+    // also being set (a rate/source with no currency to name what it
+    // converts FROM would be meaningless) -- but `currencyCode` MAY stand
+    // alone with both rate columns NULL: a payout foreign to its OWN
+    // SECURITY whose security also differs from the portfolio's base
+    // currency has no achievable Sharesight rate at all (see the table's
+    // header note's case-C reasoning), yet the row's true currency must
+    // still be recorded, never silently defaulted to its security's own
+    // currency. See the table's header note for the full three-case model.
+    check(
+      "dividend_manual_records_fx_provenance_check",
+      sql`
+        (${table.fxRateToPortfolioDecimal} IS NULL) = (${table.fxRateSource} IS NULL)
+        AND (
+          ${table.fxRateToPortfolioDecimal} IS NULL
+          OR ${table.currencyCode} IS NOT NULL
+        )
+      `,
+    ),
+    check(
+      "dividend_manual_records_fx_rate_source_check",
+      sql`${table.fxRateSource} IS NULL OR ${table.fxRateSource} IN ('sharesight')`,
     ),
   ],
 );

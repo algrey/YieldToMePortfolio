@@ -128,8 +128,10 @@ import {
 import {
   addDecimal,
   formatDecimalExact,
+  isZero,
   multiplyDecimal,
   parseDecimal,
+  roundDecimal,
 } from "../calculations/decimal.ts";
 
 export const PROXIMITY_WINDOW_DAYS = 7;
@@ -180,6 +182,36 @@ export type DividendManualRecordFact = {
   // "manual" (owner-typed) tier vs the "imported" tier -- see the module
   // header precedence.
   importBatchId: string | null;
+  // BRK-010 review finding B4: foreign-currency payout provenance -- present
+  // only on an "imported" tier fact (a Sharesight payout) whose cash total
+  // was recorded in a currency other than its OWN SECURITY's currency
+  // (`db/schema.ts`'s `dividendManualRecords` header note's three-case
+  // model); a manual/receipt fact never carries these.
+  // `fxRateToPortfolioDecimal`/`fxRateSource` are paired (never present
+  // without `currencyCode`), but `currencyCode` MAY stand alone (no
+  // achievable rate -- see the schema header note's case C). Optional (not
+  // just nullable) so every pre-BRK-010 fixture/caller that never mentions
+  // these fields keeps compiling unchanged, mirroring `totalCashDecimal`
+  // above -- read as `?? null` everywhere this module consumes them. See
+  // `resolveImportedRecordCurrency` for how this module uses them.
+  currencyCode?: string | null;
+  fxRateToPortfolioDecimal?: string | null;
+  fxRateSource?: string | null;
+  // BRK-010 review finding F2/B4: INTERNAL bookkeeping flag, set by this
+  // module's own `resolveImportedRecordCurrency` pre-pass -- never set by
+  // any external caller (always `undefined`/falsy on a freshly loaded
+  // fact). `true` only when `totalCashDecimal`/`totalFrankingDecimal` above
+  // were ACTUALLY converted into the security's own currency (the
+  // record's `currencyCode` differed from `securityCurrencyCode`, its own
+  // `securityCurrencyCode` equalled the portfolio's base currency, and a
+  // rate was present and applied). Row construction reads this to decide
+  // between surfacing `originalCurrencyCode`/rate/source as PROVENANCE
+  // (converted) vs. displaying the record's own `currencyCode` as the
+  // row's TRUE currency, degrading to `mixed_currency` at aggregation
+  // (never converted, or conversion was not achievable at all) -- see
+  // `resolveOwnerFact`'s `originalCurrencyCode`/`degradedCurrencyCode`
+  // split below.
+  convertedToSecurityCurrency?: boolean;
 };
 
 export type DerivedDividendRowSource =
@@ -207,6 +239,15 @@ export type DominatedImported = {
   totalCashDecimal: string | null;
   totalFrankingDecimal: string | null;
   paymentDate: string;
+  // BRK-010: the ORIGINAL payout currency/rate/source, when this dominated
+  // fact was foreign-currency (by this point `totalCashDecimal`/
+  // `totalFrankingDecimal` above have already been converted into the
+  // security's own currency -- see `convertImportedRecordToSecurityCurrency`
+  // -- so these three fields are the only place the original currency/rate
+  // survives for display). `null` for a same-currency/legacy fact.
+  currencyCode: string | null;
+  fxRateToPortfolioDecimal: string | null;
+  fxRateSource: string | null;
 };
 
 export type DerivedDividendRow = {
@@ -241,11 +282,42 @@ export type DerivedDividendRow = {
   additionalReceiptsCount: number;
   /** DIV-005: imported rows transitively chained into this row (Round B, eventless clusters only) beyond the single one shown via `dominatedImported` -- not silently discarded, counted here, mirroring `additionalReceiptsCount`'s convention. Always 0 for event-anchored rows (Round A only ever attaches one). */
   additionalImportedCount: number;
+  /** BRK-010: non-null only when `source === "imported"` and the WINNING
+   * fact was a foreign-currency Sharesight payout -- the currency the
+   * payout was actually paid in, before conversion (`cashDecimal`/
+   * `grossDecimal` above are already converted into this row's own
+   * `currencyCode`, matching this module's per-security single-currency
+   * invariant -- see the module header's scope-boundary note). `null` for
+   * every other source and for a same-currency/legacy imported row. */
+  originalCurrencyCode: string | null;
+  /** BRK-010: Sharesight's own rate that converted `originalCurrencyCode`
+   * into this row's `currencyCode` -- see `convertImportedRecordToSecurityCurrency`.
+   * Non-null exactly when `originalCurrencyCode` is. */
+  fxRateToPortfolioDecimal: string | null;
+  /** BRK-010: currently always `"sharesight"` when set -- see
+   * `db/schema.ts`'s `dividendManualRecords` header note for the closed
+   * source set. Non-null exactly when `originalCurrencyCode` is. */
+  fxRateSource: string | null;
 };
 
 export type DeriveDividendHistoryInput = {
   portfolioSecurityId: string;
   securityCurrencyCode: string;
+  /** BRK-010 review finding B4: the committing portfolio's own base
+   * currency (`portfolios.base_currency_code`) -- used so
+   * `resolveImportedRecordCurrency` can assert that a stored
+   * record-currency -> portfolio-base rate is actually being applied
+   * TOWARD the portfolio base (the only direction it is valid for) before
+   * ever using it to convert an imported fact's totals; see that
+   * function's doc comment for the full three-case model. Optional,
+   * defaulting to `securityCurrencyCode` when omitted -- every pre-BRK-010
+   * fixture/caller that never supplies a foreign `currencyCode` on a
+   * manual record is completely unaffected by this default either way
+   * (the conversion function's very first check short-circuits before this
+   * field is ever consulted), so every existing test/caller keeps
+   * compiling and behaving unchanged; `app/owned-dividend-history.ts`, the
+   * one production caller, always supplies the real value explicitly. */
+  portfolioBaseCurrencyCode?: string;
   /** ALL events for the security (active AND superseded -- required for lineage). */
   events: readonly ProviderDividendEventFact[];
   overrides: readonly EventOverrideFact[];
@@ -373,6 +445,183 @@ function computeCashGrossOrTotals(
   };
 }
 
+// BRK-010: half-even rounding at the same 24-decimal-place intermediate
+// scale `franking.ts`'s `DEFAULT_TIER_SCALE` establishes for financial math
+// with no natural terminating decimal scale (see that module's header
+// comment) -- reused here rather than re-exported, since a Sharesight FX
+// rate multiplied against a cash total is likewise not guaranteed to
+// terminate at a fixed decimal count the way `computeCashGross`'s
+// shares-times-per-share multiplication normally does.
+const FX_CONVERSION_SCALE = 24;
+
+function convertDecimalToSecurityCurrency(
+  amountDecimal: string,
+  fxRateToPortfolioDecimal: string,
+): string {
+  return formatDecimalExact(
+    roundDecimal(
+      multiplyDecimal(
+        parseDecimal(amountDecimal),
+        parseDecimal(fxRateToPortfolioDecimal),
+      ),
+      FX_CONVERSION_SCALE,
+    ),
+  );
+}
+
+/**
+ * BRK-010 review finding B4 (BINDING CORRECTION): the stored rate's
+ * semantics are record-currency -> PORTFOLIO BASE (matching the
+ * `fx_rate_to_portfolio_decimal` column name literally) -- it does NOT know
+ * how to convert into an arbitrary SECURITY's own currency. This function
+ * may therefore apply it ONLY when the requested target
+ * (`securityCurrencyCode`) equals `portfolioBaseCurrencyCode` -- asserted
+ * at this, the one call site that ever attempts a conversion. When they
+ * differ (a security whose own currency is neither the payout's currency
+ * NOR the portfolio's base -- e.g. an NZD-denominated security paying a
+ * USD dividend inside an AUD-base portfolio), NO CASH conversion is
+ * attempted and `totalCashDecimal` stays in the payout's own (foreign)
+ * currency; `convertedToSecurityCurrency` stays falsy, so row construction
+ * displays the record's TRUE currency (never silently relabelled as the
+ * security's own) and DIV-001's existing `mixed_currency` aggregation
+ * degradation naturally applies -- see `computeLifetimeDividendTotals`'s/
+ * `computeFyDividendTotals`'s pre-existing currency-agreement checks, which
+ * this function does nothing to bypass. `totalFrankingDecimal` is handled
+ * SEPARATELY from cash and independently of this achievable/not-achievable
+ * split -- see the B2 franking rule below, which can null it out even in
+ * this unachievable case.
+ *
+ * A record whose `currencyCode` is null (legacy) or already equal to
+ * `securityCurrencyCode` is native -- returned unchanged, matching
+ * `domain/ledger/projections.ts`'s "rate is trivially exact by currency
+ * identity" convention for the same case. When conversion IS achievable
+ * (`securityCurrencyCode === portfolioBaseCurrencyCode`) but no rate is
+ * present -- defensively reached only if `import-commit.ts`'s fail-closed
+ * gate was somehow bypassed -- totals become genuinely unknown (never
+ * guessed at 1:1, never left mislabelled as the security's currency
+ * either: the record's own currency still displays as the row's TRUE
+ * currency). BRK-010 review finding F3: the actual arithmetic is wrapped
+ * in try/catch -- a malformed or over-precision stored rate (write-time
+ * validation should already reject one, but this is defence-in-depth, and
+ * a legacy/direct-DB-write row is not otherwise guarded) degrades ONLY
+ * this one record's totals to unavailable, never throws and aborts the
+ * whole security's dividend history.
+ *
+ * BRK-010 review round 2 finding B2 (product ruling, franking): franking
+ * credits are an AU-tax construct; whether Sharesight denominates a
+ * FOREIGN payout's franking fields in AUD or in the payout's own currency
+ * is UNVERIFIED. For ANY foreign record (this function's very first
+ * branch above already excludes native ones) whose `totalFrankingDecimal`
+ * is genuinely NONZERO, this function nulls it out (marks it unknown) --
+ * NEVER converts it, NEVER trusts it as-stored -- independently of whether
+ * the cash figure above is achievable (case B) or not (case C). A
+ * zero/absent franking total (the overwhelmingly common shape for a
+ * foreign-currency dividend, which is typically unfranked) is left
+ * completely unaffected.
+ */
+// BRK-010 review round 2 finding B2: `true` only for a genuinely present,
+// non-zero decimal string -- mirrors `domain/sharesight-sync/transform.ts`'s
+// identical `isNonZeroDecimal` (duplicated rather than shared, matching
+// this module's own established pattern of re-deriving small primitives
+// rather than depending across that boundary). Malformed input degrades to
+// `false` defensively.
+function isNonZeroStoredDecimal(value: string | null): boolean {
+  if (value === null) return false;
+  try {
+    return !isZero(parseDecimal(value));
+  } catch {
+    return false;
+  }
+}
+
+function resolveImportedRecordCurrency(
+  record: DividendManualRecordFact,
+  securityCurrencyCode: string,
+  portfolioBaseCurrencyCode: string,
+): DividendManualRecordFact {
+  const recordCurrency = record.currencyCode ?? null;
+  if (recordCurrency === null || recordCurrency === securityCurrencyCode) {
+    return record; // Case A: native -- no FX question of any kind.
+  }
+
+  // BRK-010 review round 2 finding B2 (product ruling): franking credits
+  // are an AU-tax construct; whether Sharesight denominates a FOREIGN
+  // payout's franking fields in AUD or in the payout's own currency is an
+  // UNVERIFIED ASSUMPTION this codebase will not resolve by inspecting real
+  // tax amounts. A NONZERO franking total on a foreign record is therefore
+  // NEVER trusted as-stored and NEVER converted -- it becomes unknown
+  // (`null`), regardless of whether the CASH conversion below succeeds
+  // (case B) or degrades (case C, below). A zero/absent franking total --
+  // the overwhelmingly common shape, since foreign-currency dividends are
+  // typically unfranked -- is left completely unaffected either way.
+  const rawTotalFranking = record.totalFrankingDecimal ?? null;
+  const frankingUnverified = isNonZeroStoredDecimal(rawTotalFranking);
+  const totalFrankingDecimal = frankingUnverified ? null : rawTotalFranking;
+
+  if (securityCurrencyCode !== portfolioBaseCurrencyCode) {
+    // Case C: cash conversion not achievable -- see this function's own
+    // doc comment above for the full three-case model. The franking fix
+    // above still applies regardless.
+    return { ...record, totalFrankingDecimal };
+  }
+  const rate = record.fxRateToPortfolioDecimal ?? null;
+  if (rate === null) {
+    return { ...record, totalCashDecimal: null, totalFrankingDecimal: null };
+  }
+  const totalCashDecimal = record.totalCashDecimal ?? null;
+  try {
+    return {
+      ...record,
+      totalCashDecimal:
+        totalCashDecimal !== null
+          ? convertDecimalToSecurityCurrency(totalCashDecimal, rate)
+          : null,
+      // Franking is NEVER converted (B2) -- either already nulled above
+      // (unverified/nonzero) or passed through as the trusted zero/absent
+      // value; `convertDecimalToSecurityCurrency` is never called on it.
+      totalFrankingDecimal,
+      convertedToSecurityCurrency: true,
+    };
+  } catch {
+    // F3: never let one malformed rate abort the whole derivation.
+    return { ...record, totalCashDecimal: null, totalFrankingDecimal: null };
+  }
+}
+
+/**
+ * BRK-010 review finding B4/F2: the row-level currency signal an
+ * "imported" tier fact contributes -- `currencyCodeOverride` is the row's
+ * TRUE currency when the fact's totals were NEVER converted into the
+ * security's own currency (native already, so no override needed -- `null`
+ * -- or genuinely foreign and degraded, in which case the override IS the
+ * record's own currency, never silently defaulted to the security's);
+ * `originalCurrencyCode`/`fxRateToPortfolioDecimal`/`fxRateSource` are the
+ * PROVENANCE trio, populated only when a conversion actually occurred (F2).
+ * Exactly one of the two is ever non-null for a genuinely foreign fact.
+ */
+function importedFactCurrencyDisplay(record: DividendManualRecordFact): {
+  currencyCodeOverride: string | null;
+  originalCurrencyCode: string | null;
+  fxRateToPortfolioDecimal: string | null;
+  fxRateSource: string | null;
+} {
+  const recordCurrency = record.currencyCode ?? null;
+  if (record.convertedToSecurityCurrency === true) {
+    return {
+      currencyCodeOverride: null,
+      originalCurrencyCode: recordCurrency,
+      fxRateToPortfolioDecimal: record.fxRateToPortfolioDecimal ?? null,
+      fxRateSource: record.fxRateSource ?? null,
+    };
+  }
+  return {
+    currencyCodeOverride: recordCurrency,
+    originalCurrencyCode: null,
+    fxRateToPortfolioDecimal: null,
+    fxRateSource: null,
+  };
+}
+
 /**
  * GLOBAL nearest-wins proximity matching (B4 fix, replacing an earlier
  * per-event-greedy pass that could mis-assign a manual record to a nearby
@@ -449,6 +698,10 @@ function toDominatedReceipt(receipt: DividendReceiptFact): DominatedReceipt {
 function toDominatedImported(
   record: DividendManualRecordFact,
 ): DominatedImported {
+  // BRK-010 review finding F2: provenance fields are set ONLY when a
+  // conversion actually occurred -- see `DividendManualRecordFact.convertedToSecurityCurrency`'s
+  // doc comment.
+  const converted = record.convertedToSecurityCurrency === true;
   return {
     sharesDecimal: record.sharesDecimal,
     dividendPerShareDecimal: record.dividendPerShareDecimal,
@@ -456,6 +709,11 @@ function toDominatedImported(
     totalCashDecimal: record.totalCashDecimal ?? null,
     totalFrankingDecimal: record.totalFrankingDecimal ?? null,
     paymentDate: record.paymentDate,
+    currencyCode: converted ? (record.currencyCode ?? null) : null,
+    fxRateToPortfolioDecimal: converted
+      ? (record.fxRateToPortfolioDecimal ?? null)
+      : null,
+    fxRateSource: converted ? (record.fxRateSource ?? null) : null,
   };
 }
 
@@ -613,9 +871,25 @@ export function deriveDividendHistoryForSecurity(
   const ownerManualRecords = input.manualRecords.filter(
     (record) => record.importBatchId === null,
   );
-  const importedRecords = input.manualRecords.filter(
-    (record) => record.importBatchId !== null,
-  );
+  // BRK-010 review finding B4: attempt to convert every imported
+  // (Sharesight-derived) fact's totals into the security's own currency
+  // BEFORE any matching/collapsing logic below runs -- ONLY WHEN that
+  // conversion is actually achievable (`securityCurrencyCode ===
+  // portfolioBaseCurrencyCode`; see `resolveImportedRecordCurrency`'s doc
+  // comment for the full three-case model). A fact left unconverted
+  // (native already, or genuinely not achievable) keeps its OWN recorded
+  // currency, so `importedFactCurrencyDisplay` below can surface it
+  // honestly at row-construction time rather than the rest of this module
+  // silently assuming every imported fact is already security-native.
+  const importedRecords = input.manualRecords
+    .filter((record) => record.importBatchId !== null)
+    .map((record) =>
+      resolveImportedRecordCurrency(
+        record,
+        input.securityCurrencyCode,
+        input.portfolioBaseCurrencyCode ?? input.securityCurrencyCode,
+      ),
+    );
   const candidateEvents = activeEvents.map((event) => ({
     event,
     referenceDate: event.paymentDate ?? event.exDate!,
@@ -683,6 +957,13 @@ export function deriveDividendHistoryForSecurity(
     dominatedReceipt: DominatedReceipt | null;
     dominatedImported: DominatedImported | null;
     additionalReceiptsCount: number;
+    // BRK-010: non-null only when `source === "imported"` -- see
+    // `importedFactCurrencyDisplay`'s doc comment for the
+    // override-vs-provenance split.
+    currencyCodeOverride: string | null;
+    originalCurrencyCode: string | null;
+    fxRateToPortfolioDecimal: string | null;
+    fxRateSource: string | null;
   } | null {
     if (manual) {
       return {
@@ -698,6 +979,10 @@ export function deriveDividendHistoryForSecurity(
           : null,
         dominatedImported: imported ? toDominatedImported(imported) : null,
         additionalReceiptsCount: receiptResolution?.additionalCount ?? 0,
+        currencyCodeOverride: null,
+        originalCurrencyCode: null,
+        fxRateToPortfolioDecimal: null,
+        fxRateSource: null,
       };
     }
     if (receiptResolution) {
@@ -714,9 +999,14 @@ export function deriveDividendHistoryForSecurity(
         dominatedReceipt: null,
         dominatedImported: imported ? toDominatedImported(imported) : null,
         additionalReceiptsCount: receiptResolution.additionalCount,
+        currencyCodeOverride: null,
+        originalCurrencyCode: null,
+        fxRateToPortfolioDecimal: null,
+        fxRateSource: null,
       };
     }
     if (imported) {
+      const display = importedFactCurrencyDisplay(imported);
       return {
         source: "imported",
         sharesDecimal: imported.sharesDecimal,
@@ -728,6 +1018,10 @@ export function deriveDividendHistoryForSecurity(
         dominatedReceipt: null,
         dominatedImported: null,
         additionalReceiptsCount: 0,
+        currencyCodeOverride: display.currencyCodeOverride,
+        originalCurrencyCode: display.originalCurrencyCode,
+        fxRateToPortfolioDecimal: display.fxRateToPortfolioDecimal,
+        fxRateSource: display.fxRateSource,
       };
     }
     return null;
@@ -835,6 +1129,10 @@ export function deriveDividendHistoryForSecurity(
     let dominatedImported: DominatedImported | null = null;
     let additionalReceiptsCount = 0;
     let paymentDate: string | null;
+    let originalCurrencyCode: string | null = null;
+    let fxRateToPortfolioDecimal: string | null = null;
+    let fxRateSource: string | null = null;
+    let currencyCodeOverride: string | null = null;
 
     if (override) {
       source = "edited";
@@ -857,6 +1155,10 @@ export function deriveDividendHistoryForSecurity(
       dominatedReceipt = ownerFact.dominatedReceipt;
       dominatedImported = ownerFact.dominatedImported;
       additionalReceiptsCount = ownerFact.additionalReceiptsCount;
+      originalCurrencyCode = ownerFact.originalCurrencyCode;
+      fxRateToPortfolioDecimal = ownerFact.fxRateToPortfolioDecimal;
+      fxRateSource = ownerFact.fxRateSource;
+      currencyCodeOverride = ownerFact.currencyCodeOverride;
       // DIV-005 Round A: an imported row that missed this event's own
       // window but is within window of the WINNING manual/receipt fact's
       // own date chains in here instead of surfacing as a second row.
@@ -898,7 +1200,11 @@ export function deriveDividendHistoryForSecurity(
       portfolioSecurityId: input.portfolioSecurityId,
       dividendEventId: event.id,
       kind: event.kind,
-      currencyCode: event.currencyCode,
+      // BRK-010 review finding B4: an imported fact's degraded (unconverted
+      // foreign) currency overrides the event's own currency here -- see
+      // `importedFactCurrencyDisplay`'s doc comment. `null` for every other
+      // source/case, leaving the event's own currency as before.
+      currencyCode: currencyCodeOverride ?? event.currencyCode,
       exDate: event.exDate,
       paymentDate,
       sharesDecimal,
@@ -917,6 +1223,9 @@ export function deriveDividendHistoryForSecurity(
       dominatedImported,
       additionalReceiptsCount,
       additionalImportedCount: 0, // Round A only ever attaches one imported row per event
+      originalCurrencyCode,
+      fxRateToPortfolioDecimal,
+      fxRateSource,
     });
   }
 
@@ -1101,6 +1410,12 @@ export function deriveDividendHistoryForSecurity(
     dominatedImported?: DominatedImported | null;
     additionalReceiptsCount?: number;
     additionalImportedCount?: number;
+    // BRK-010: only ever set when `source === "imported"` for a
+    // foreign-currency Sharesight payout fact -- see `DerivedDividendRow`'s
+    // matching doc comment.
+    originalCurrencyCode?: string | null;
+    fxRateToPortfolioDecimal?: string | null;
+    fxRateSource?: string | null;
   }): void {
     const franking = resolveFrankingPerShare(
       fields.overrideFrankingPerShare,
@@ -1145,6 +1460,9 @@ export function deriveDividendHistoryForSecurity(
       dominatedImported: fields.dominatedImported ?? null,
       additionalReceiptsCount: fields.additionalReceiptsCount ?? 0,
       additionalImportedCount: fields.additionalImportedCount ?? 0,
+      originalCurrencyCode: fields.originalCurrencyCode ?? null,
+      fxRateToPortfolioDecimal: fields.fxRateToPortfolioDecimal ?? null,
+      fxRateSource: fields.fxRateSource ?? null,
     });
   }
 
@@ -1239,6 +1557,7 @@ export function deriveDividendHistoryForSecurity(
       }
       for (const record of clusterImported) {
         if (partitionConsumedImportedIds.has(record.id)) continue;
+        const display = importedFactCurrencyDisplay(record);
         pushEventlessRow({
           source: "imported",
           rowId: `imported:${record.id}`,
@@ -1248,6 +1567,10 @@ export function deriveDividendHistoryForSecurity(
           totalCashDecimal: record.totalCashDecimal,
           totalFrankingDecimal: record.totalFrankingDecimal,
           paymentDate: record.paymentDate,
+          currencyCode: display.currencyCodeOverride ?? undefined,
+          originalCurrencyCode: display.originalCurrencyCode,
+          fxRateToPortfolioDecimal: display.fxRateToPortfolioDecimal,
+          fxRateSource: display.fxRateSource,
         });
       }
       continue;
@@ -1303,6 +1626,7 @@ export function deriveDividendHistoryForSecurity(
         additionalImportedCount: importedPick?.additionalCount ?? 0,
       });
     } else if (importedPick) {
+      const display = importedFactCurrencyDisplay(importedPick.winner);
       pushEventlessRow({
         source: "imported",
         rowId: `imported:${importedPick.winner.id}`,
@@ -1314,6 +1638,10 @@ export function deriveDividendHistoryForSecurity(
         totalFrankingDecimal: importedPick.winner.totalFrankingDecimal,
         paymentDate: importedPick.winner.paymentDate,
         additionalImportedCount: importedPick.additionalCount,
+        currencyCode: display.currencyCodeOverride ?? undefined,
+        originalCurrencyCode: display.originalCurrencyCode,
+        fxRateToPortfolioDecimal: display.fxRateToPortfolioDecimal,
+        fxRateSource: display.fxRateSource,
       });
     }
   }
@@ -1373,7 +1701,9 @@ export function deriveDividendHistoryForSecurity(
       portfolioSecurityId: input.portfolioSecurityId,
       dividendEventId: event.id,
       kind: event.kind,
-      currencyCode: event.currencyCode,
+      // BRK-010 review finding B4: see the non-excluded main loop's
+      // identical override above.
+      currencyCode: ownerFact.currencyCodeOverride ?? event.currencyCode,
       exDate: event.exDate,
       paymentDate: ownerFact.paymentDate,
       sharesDecimal: ownerFact.sharesDecimal,
@@ -1394,6 +1724,9 @@ export function deriveDividendHistoryForSecurity(
       dominatedImported,
       additionalReceiptsCount: ownerFact.additionalReceiptsCount,
       additionalImportedCount: 0, // Round A only ever attaches one imported row per event
+      originalCurrencyCode: ownerFact.originalCurrencyCode,
+      fxRateToPortfolioDecimal: ownerFact.fxRateToPortfolioDecimal,
+      fxRateSource: ownerFact.fxRateSource,
     });
   }
 

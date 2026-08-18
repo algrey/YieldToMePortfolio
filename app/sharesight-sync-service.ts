@@ -15,6 +15,7 @@ import {
   createOwnedImportStagingRepository,
   createOwnedPortfolioRepository,
   createSharesightSyncStateRepository,
+  loadResolvedPortfolioInstrumentCurrencies,
   type SqlClient,
 } from "../db/repositories/index.ts";
 import type {
@@ -268,6 +269,17 @@ function canonicalRowDigestFields(row: ParsedImportRow): string {
     normalized.frankingPerShare ?? "",
     normalized.totalCashDecimal ?? "",
     normalized.totalFrankingDecimal ?? "",
+    // BRK-010 review finding B2: `exchangeRateDecimal` is VALUE-BEARING
+    // money data (unlike `sharesightInstrumentId`/`instrumentName`/`isin`,
+    // deliberately digest-excluded matching aids) -- a corrected/late rate
+    // from Sharesight must re-stage as a genuinely new batch, mirroring
+    // this exact B1 fix's own "hash the transformed rows' VALUE-BEARING
+    // fields" rationale above (a Sharesight-side correction with the id set
+    // unchanged must still change the digest). `startUpload`'s
+    // `ON CONFLICT ... DO NOTHING` would otherwise silently resolve a
+    // corrected-rate re-sync to the OLD batch, exactly the B1 failure mode
+    // this function exists to prevent.
+    normalized.exchangeRateDecimal ?? "",
   ].join("|");
 }
 
@@ -385,10 +397,28 @@ export async function runSharesightSyncWithContext(
   // skip with a warning). `nowAt` is otherwise used exactly as before, for
   // the batch filename and the sync-state watermark.
   const nowAt = nowIso(options);
+  // BRK-010 review round 3 (BLOCKING): REAL, DB-resolved currency evidence
+  // for every instrument this user has already linked in THIS portfolio,
+  // from any source -- queried BEFORE the pure transform runs so
+  // `payoutSecurityCurrencyProxy` can prefer it over both the same-fetch
+  // trade heuristic and (removed) the portfolio-base guess. See
+  // `db/repositories/security-resolution.ts`'s
+  // `loadResolvedPortfolioInstrumentCurrencies` doc comment for why this
+  // was necessary: "no same-fetch trade evidence" is the realistic steady
+  // state for a recurring payout (trades are historical), not a rare edge
+  // case, so guessing there was never safe.
+  const resolvedInstrumentCurrencies =
+    await loadResolvedPortfolioInstrumentCurrencies(
+      context.client,
+      context.userId,
+      portfolioId,
+    );
   const transformed = transformSharesightSync({
     portfolioName: portfolio.name,
     trades: tradesResult.value,
     payouts: payoutsResult.value,
+    portfolioBaseCurrencyCode: portfolio.baseCurrencyCode,
+    resolvedInstrumentCurrencies,
     now: nowAt,
   });
 

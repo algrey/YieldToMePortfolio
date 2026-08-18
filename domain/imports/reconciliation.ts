@@ -316,6 +316,19 @@ export function createImportReconciliationPreview(
     }
 
     const isCash = row.normalized.cashEvent !== null;
+    // BRK-010: a totals-mode Sharesight payout row's own cash currency is a
+    // property of the CASH EVENT, not the security's identity (see
+    // `db/repositories/security-resolution.ts`'s `linkResolvedSecurity` doc
+    // comment for the matching resolution-time ruling) -- computed here,
+    // ahead of its other use further down, so the candidate match below can
+    // ignore currency for exactly this row shape. Narrowly scoped to
+    // totals-mode (`totalCashDecimal` set) rather than every dividend row:
+    // a CSV per-share dividend row has no established FX mechanism at all
+    // (this task's `import-commit.ts` fix is likewise totals-mode-only), so
+    // its pre-existing currency-matched candidate behaviour is unchanged.
+    const isTotalsModeDividend =
+      row.normalized.type === "dividend" &&
+      (row.normalized.totalCashDecimal ?? null) !== null;
     let membershipId: string | null = null;
     if (!isCash) {
       const key = securityKey(portfolio.id, row);
@@ -327,8 +340,9 @@ export function createImportReconciliationPreview(
             normalized(row.normalized.symbol ?? "") &&
           normalized(candidate.sourceExchangeAlias ?? "") ===
             normalized(row.normalized.exchange ?? "") &&
-          normalized(candidate.sourceCurrencyCode) ===
-            normalized(row.normalized.currency ?? ""),
+          (isTotalsModeDividend ||
+            normalized(candidate.sourceCurrencyCode) ===
+              normalized(row.normalized.currency ?? "")),
       );
       const selectedTargetId =
         decision?.targetId ?? row.targetPortfolioSecurityId ?? null;
