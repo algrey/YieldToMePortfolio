@@ -751,17 +751,76 @@ Type-specific values may move to separate tables if query complexity justifies i
 
 - portfolio, range, calculation version;
 - reason/invalidation source;
+- `pipeline` (`CALC-004`, migration 0040): discriminates which of the two
+  resumable pipelines that share this row shape a row belongs to --
+  `projection` (holdings/lots/allocations, `projection_publications`) or
+  `snapshot` (the Overview daily-history chart, `snapshot_publications`).
+  `NOT NULL DEFAULT 'projection'` so every pre-CALC-004 row/writer keeps its
+  existing identity unchanged. `claim()`/`complete()` transition a run to a
+  terminal `completed` status exactly once, and the two pipelines' checkpoint
+  columns below are mutually incompatible on one row (see the columns'
+  own description), so they cannot safely share a row -- every queueing
+  site (ledger posting/reversal, import commit) now inserts ONE row per
+  pipeline per triggering event, and every coalescing/claim query
+  (`nextClaimable`, `hasNewerRun`, `supersedeStaleQueuedRuns`,
+  `listClaimablePortfolios`) is scoped by this column so a newer run in one
+  pipeline never supersedes, or is mistaken for progress on, an in-progress
+  run in the other;
 - status, attempt, lease;
-- ledger high-water, completed-security/output-offset checkpoints, and counts;
+- `stall_count`/`stall_checkpoint` (`CALC-004` review-round B1 fix, migration
+  0041 -- a plain `ALTER TABLE ADD COLUMN`, no new CHECK constraint, so no
+  recreate-table/trigger-hazard risk): `attempt` above increments on EVERY
+  claim, including ordinary budget-exhaustion re-claims that make real
+  forward progress -- the snapshot pipeline is DESIGNED to need many of
+  those (a multi-year history can legitimately need on the order of a
+  hundred claims at a small budget), so `attempt` alone cannot distinguish
+  a healthy, slowly-progressing run from a genuinely poisoned one. At each
+  claim, a fingerprint of every checkpoint column either pipeline's
+  rebuild can advance (`processed_snapshot_count`/`processed_holding_count`/
+  `processed_ledger_count`/`projection_output_offset`/
+  `projection_cursor_security_id`/`projection_active_security_id`) is
+  compared against `stall_checkpoint` (the fingerprint recorded at the
+  PREVIOUS claim): unchanged increments `stall_count`; any movement resets
+  it to 0. Only `stall_count` crossing the executor's threshold
+  (`MAX_STALL_CLAIMS = 5` consecutive zero-progress claims) terminates a
+  run;
+- ledger high-water, completed-security/output-offset checkpoints, and counts
+  -- `processed_snapshot_count`/`processed_holding_count` carry INCOMPATIBLE
+  meanings depending on `pipeline`: for `snapshot` runs they are absolute
+  per-date-range cursors keyed off `range_from`/`range_to` (`processed_snapshot_count`
+  = how many of the range's dates are done; `processed_holding_count` = the
+  in-progress date's own holding-row offset, resetting to 0 each date); for
+  `projection` runs `processed_holding_count` increments cumulatively across
+  the whole rebuild instead, alongside the projection-only
+  `projection_cursor_security_id`/`projection_active_security_id`/
+  `projection_output_offset` cursor (unused, left at defaults, for `snapshot`
+  runs);
 - immutable market-data ingestion cutoff and bounded canonical version-2
   trading-calendar session evidence JSON captured when the run is requested.
   Each validity-dated exchange/MIC entry carries timezone, provenance/revision,
   and session open/close instants; the payload is shared across holdings rather
   than a duplicated per-holding market-date map;
 - started/completed timestamps;
-- redacted error category.
+- redacted error category -- includes `stall_limit_exceeded` (`CALC-004`
+  review-round B1 fix, replacing an earlier, INCORRECT `attempt_limit_exceeded`
+  design that counted `attempt` directly and would have terminated any
+  real multi-year snapshot backfill as "poisoned" -- see `stall_count`
+  above): a run whose checkpoint has not moved for `MAX_STALL_CLAIMS` (5)
+  CONSECUTIVE claims is failed terminally rather than being re-claimed by
+  every future trigger forever, so a genuinely poisoned run cannot starve
+  a portfolio+pipeline's queue of a later, healthy run -- while a run
+  making real, if slow, progress every claim is never mistaken for one.
 
-Provides idempotent bounded rebuilds and future Queue compatibility.
+Provides idempotent bounded rebuilds and future Queue compatibility. For the
+snapshot pipeline specifically, the requested `range_from`/`range_to` is the
+portfolio's FULL known history (its `history_complete_from` marker, or its
+earliest posted/reversed transaction date, capped at ~10 years back) through
+"today" in the portfolio's own IANA timezone at queue time -- never just the
+triggering event's own touched dates -- because a completed snapshot run
+publishes exactly the date range it was asked to compute; an incremental
+"just today" range would silently drop every earlier chart point the next
+time the portfolio republishes (`db/repositories/snapshots.ts`'s
+`computeSnapshotRunRange`/`resolveSnapshotRunRange`).
 
 ### `projection_publications`
 

@@ -392,10 +392,15 @@ test("validated row mappings drive per-portfolio postings and real rebuild high-
       },
     ],
   );
+  // CALC-004: `finalize` now also queues a sibling `snapshot`-pipeline row
+  // per affected portfolio (`pipeline = 'projection'` isolates this test's
+  // original per-portfolio projection-rebuild-job assertion below from
+  // that addition).
   const jobs = database
     .prepare(
       `SELECT id, portfolio_id, ledger_high_water_start
-       FROM calculation_runs WHERE reason = 'import_commit' ORDER BY portfolio_id`,
+       FROM calculation_runs WHERE reason = 'import_commit' AND pipeline = 'projection'
+       ORDER BY portfolio_id`,
     )
     .all() as Array<Record<string, unknown>>;
   assert.equal(jobs.length, 2);
@@ -477,6 +482,98 @@ test("one invocation enforces D1 query, statement, and parameter budgets", async
         chunkSize: IMPORT_COMMIT_LIMITS.maxChunkSize + 1,
       }),
     /invalid_import_commit_chunk_size/,
+  );
+});
+
+// CALC-004 review-round B2 REQUIRED regression: a batch touching EXACTLY
+// `IMPORT_COMMIT_LIMITS.maxAffectedPortfolios` (25) distinct portfolios --
+// the documented ceiling `finalize` itself enforces (`affected.length >
+// maxAffectedPortfolios` fails closed) -- must still commit to completion.
+// `finalize`'s one atomic `batch()` call emits `2 * affectedCount + 2`
+// statements (one `calculation_runs` INSERT per pipeline per affected
+// portfolio, plus one audit insert, plus one batch-status UPDATE); at
+// N=25 that is exactly 52, which exceeded the ORIGINAL 50-statement
+// `maxStatementsPerChunk` bound and made `isBoundedAtomicUnit` reject the
+// batch outright every single retry (a real batch touching 25 portfolios
+// could never finish committing). Reproduces the reviewer's finding
+// directly against the real commit machinery, not just the constant.
+test("CALC-004 review-round B2: a commit touching exactly 25 distinct portfolios (the documented ceiling) still commits to completion", async () => {
+  const database = await migratedDatabase();
+  const PORTFOLIO_COUNT = 25;
+  for (let index = 0; index < PORTFOLIO_COUNT; index += 1) {
+    database
+      .prepare(
+        `INSERT INTO portfolios (id, user_id, code, name, base_currency_code, timezone, accounting_method, status, created_at, updated_at, version)
+         VALUES (?, 'user-a', ?, ?, 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-03', '2026-08-03', 1)`,
+      )
+      .run(`portfolio-n${index}`, `N${index}`, `Portfolio ${index}`);
+    database
+      .prepare(
+        `INSERT INTO securities (id, canonical_name, asset_type, primary_currency_code, status, created_at, updated_at)
+         VALUES (?, ?, 'equity', 'AUD', 'active', '2026-08-03', '2026-08-03')`,
+      )
+      .run(`security-n${index}`, `Security ${index}`);
+    database
+      .prepare(
+        `INSERT INTO portfolio_securities (id, user_id, portfolio_id, security_id, source_symbol, source_currency_code, status, created_at, updated_at)
+         VALUES (?, 'user-a', ?, ?, ?, 'AUD', 'held', '2026-08-03', '2026-08-03')`,
+      )
+      .run(
+        `membership-n${index}`,
+        `portfolio-n${index}`,
+        `security-n${index}`,
+        `SYM${index}`,
+      );
+  }
+  const rowInsert = database.prepare(
+    `INSERT INTO import_rows (
+       id, user_id, batch_id, physical_row_number, row_class,
+       original_fields_json, normalized_fields_json, normalized_fingerprint,
+       validation_status, target_portfolio_id, target_portfolio_security_id,
+       commit_status, created_at, updated_at, version
+     ) VALUES (?, 'user-a', 'batch-a', ?, 'transaction', '[]', ?, ?, 'valid', ?, ?,
+       'staged', '2026-08-03', '2026-08-03', 1)`,
+  );
+  for (let index = 0; index < PORTFOLIO_COUNT; index += 1) {
+    const rowNumber = index + 2;
+    rowInsert.run(
+      `row-n${index}`,
+      rowNumber,
+      JSON.stringify(
+        normalized(rowNumber, {
+          symbol: `SYM${index}`,
+          name: `Security ${index}`,
+        }),
+      ),
+      `fingerprint-n${index}`,
+      `portfolio-n${index}`,
+      `membership-n${index}`,
+    );
+  }
+  const client = createSqliteSqlClient(database);
+  const version = await previewVersion(client);
+  const repository = createOwnedImportCommitRepository(client, {
+    chunkSize: IMPORT_COMMIT_LIMITS.maxChunkSize,
+  });
+  const result = await finish(repository, input(version));
+  assert.equal(result.status, "committed");
+  assert.equal(result.committedRows, PORTFOLIO_COUNT);
+
+  const runCount = database
+    .prepare(
+      `SELECT COUNT(*) AS count FROM calculation_runs WHERE reason = 'import_commit'`,
+    )
+    .get() as { count: number };
+  // One row per pipeline per affected portfolio.
+  assert.equal(runCount.count, PORTFOLIO_COUNT * 2);
+  const pipelines = database
+    .prepare(
+      `SELECT DISTINCT pipeline FROM calculation_runs WHERE reason = 'import_commit' ORDER BY pipeline`,
+    )
+    .all() as Array<{ pipeline: string }>;
+  assert.deepEqual(
+    pipelines.map((row) => row.pipeline),
+    ["projection", "snapshot"],
   );
 });
 

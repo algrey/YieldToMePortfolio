@@ -614,6 +614,102 @@ function localDateAt(timestamp: number, timezone: string): string | null {
   }
 }
 
+// CALC-004: resolves the local calendar-date range a NEW snapshot-pipeline
+// `calculation_runs` row should request when queued by a ledger mutation,
+// import commit, or manual-override invalidation (`db/repositories/
+// ledger.ts`, `import-commit.ts`, `market-data.ts`). Unlike the projection
+// pipeline (which always rebuilds the WHOLE ledger regardless of `range_*`
+// -- see `app/calculation-executor-service.ts`'s doc comment), the
+// snapshot/Overview pipeline's completed run publishes exactly the date
+// range it was asked to compute (`loadPublishedOverview` rejects a
+// publication whose stored range doesn't cover every requested date), so an
+// incremental "just today" range would silently DROP every earlier chart
+// point the next time this portfolio republishes. This always requests the
+// portfolio's FULL known history (its `history_complete_from` marker, or
+// its earliest posted/reversed transaction date, whichever is known) through
+// "today" in the portfolio's own IANA timezone -- matching the FY-window
+// chart consumption in `docs/CALCULATIONS.md` §9, which needs at minimum
+// last-FY-to-date, and in practice needs the whole history for the "since
+// inception" view. Capped at `MAX_OVERVIEW_HISTORY_POINTS - 1` days back
+// (the same 3,660-day/~10-year ceiling `loadPublishedOverview` and
+// `dateRange` already hard-enforce) so an ancient `history_complete_from`
+// can never request an oversized, unbounded rebuild. Returns `null` only
+// when the portfolio itself cannot be found (defensive; callers already
+// hold a validated portfolio id from the same transaction).
+// Pure date math shared by `resolveSnapshotRunRange` (below) and by
+// `db/repositories/import-commit.ts`'s `finalize`, which folds the same
+// three facts (portfolio timezone/`history_complete_from`/earliest trade
+// date) into a query it ALREADY has to run per affected portfolio, to stay
+// inside `IMPORT_COMMIT_LIMITS.maxQueriesPerInvocation` rather than paying
+// for a second round trip per portfolio.
+export function computeSnapshotRunRange(
+  facts: {
+    timezone: string;
+    historyCompleteFrom: string | null;
+    earliestTradeDate: string | null;
+  },
+  now: string,
+): { rangeFrom: string; rangeTo: string } | null {
+  const nowMs = Date.parse(now);
+  const rangeTo =
+    (Number.isFinite(nowMs) ? localDateAt(nowMs, facts.timezone) : null) ??
+    (isValidInstant(now) ? now.slice(0, 10) : null) ??
+    now.slice(0, 10);
+  if (!isValidCalendarDate(rangeTo)) return null;
+  let rangeFrom: string;
+  if (
+    facts.historyCompleteFrom &&
+    isValidCalendarDate(facts.historyCompleteFrom)
+  ) {
+    rangeFrom = facts.historyCompleteFrom;
+  } else if (
+    facts.earliestTradeDate &&
+    isValidCalendarDate(facts.earliestTradeDate)
+  ) {
+    rangeFrom = facts.earliestTradeDate;
+  } else {
+    rangeFrom = rangeTo;
+  }
+  const earliestAllowed = daysBefore(rangeTo, MAX_OVERVIEW_HISTORY_POINTS - 1);
+  if (rangeFrom < earliestAllowed) rangeFrom = earliestAllowed;
+  if (rangeFrom > rangeTo) rangeFrom = rangeTo;
+  return { rangeFrom, rangeTo };
+}
+
+export async function resolveSnapshotRunRange(
+  sql: SqlClient,
+  userId: string,
+  portfolioId: string,
+  now: string,
+): Promise<{ rangeFrom: string; rangeTo: string } | null> {
+  // ONE round trip (not two): the earliest-transaction fallback is an
+  // inline correlated subquery rather than a separate `sql.get` call --
+  // this function runs on the ledger-mutation/manual-override hot path
+  // (once per queued run), which has its own tight D1-statement budget
+  // discipline; halving this function's own query count keeps that
+  // headroom real rather than doubling it away.
+  const portfolio = await sql.get<
+    PortfolioRow & { earliest_trade_date: string | null }
+  >(
+    `SELECT base_currency_code, timezone, history_complete_from,
+       (SELECT t.local_trade_date FROM transactions t
+        WHERE t.user_id = p.user_id AND t.portfolio_id = p.id
+          AND t.status IN ('posted', 'reversed')
+        ORDER BY t.local_trade_date ASC, t.id ASC LIMIT 1) AS earliest_trade_date
+     FROM portfolios p WHERE p.id = ? AND p.user_id = ?`,
+    [portfolioId, userId],
+  );
+  if (!portfolio) return null;
+  return computeSnapshotRunRange(
+    {
+      timezone: portfolio.timezone,
+      historyCompleteFrom: portfolio.history_complete_from,
+      earliestTradeDate: portfolio.earliest_trade_date,
+    },
+    now,
+  );
+}
+
 function portfolioCutoff(date: string, timezone: string): number | null {
   const start = Date.parse(`${date}T00:00:00Z`) - 36 * 60 * 60 * 1000;
   if (!Number.isFinite(start)) return null;
@@ -1164,6 +1260,7 @@ export function createHistoricalSnapshotRepository(
       );
       return runs.request(userId, {
         ...input,
+        pipeline: "snapshot",
         calendarEvidenceJson,
       });
     },

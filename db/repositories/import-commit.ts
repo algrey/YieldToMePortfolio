@@ -13,6 +13,7 @@ import {
   type NormalizedImportRow,
 } from "../../domain/imports/index.ts";
 import { createOwnedImportStagingRepository } from "./import-staging.ts";
+import { computeSnapshotRunRange } from "./snapshots.ts";
 import { createOwnedImportMappingDecisionRepository } from "./import-mapping-decisions.ts";
 import { createOwnedPortfolioRepository } from "./owned-portfolios.ts";
 import { buildDividendManualRecordImportInsertStatements } from "./dividends.ts";
@@ -45,7 +46,29 @@ const DECIMAL = /^(0|[1-9]\d*)(\.\d+)?$/;
 
 export const IMPORT_COMMIT_LIMITS = {
   maxChunkSize: MAX_CHUNK_SIZE,
-  maxStatementsPerChunk: 50,
+  // CALC-004 review-round B2 fix: `finalize`'s one atomic `batch()` call
+  // now emits 2 `calculation_runs` INSERTs per affected portfolio (one per
+  // pipeline -- see `finalize`'s own comment) plus 1 audit insert plus 1
+  // batch-status UPDATE, i.e. `2 * affectedCount + 2` statements. At the
+  // documented `maxAffectedPortfolios` ceiling of 25 that is exactly 52,
+  // which exceeded the ORIGINAL 50-statement bound here -- reviewer-
+  // reproduced: `isBoundedAtomicUnit` rejected the batch outright
+  // (`atomic_failure`, `resumable: true`), and because `affected.length`
+  // (and therefore the statement count) is deterministic from the
+  // batch's own already-committed rows, EVERY retry recomputed the
+  // identical 52 statements and failed identically -- a batch touching
+  // 25 portfolios could never finish committing. Raised to 60 (8
+  // statements of headroom above the 52-statement worst case). This is
+  // NOT a loosening of D1's real per-invocation ceiling: this bound
+  // constrains ONE atomic `batch()` call within a single commit
+  // invocation, and D1's actually-relevant constraint is total
+  // statements per INVOCATION (the same ~1000-statement assumption
+  // `app/calculation-executor-service.ts`'s budgets are calibrated
+  // against) -- 60 statements in one batch call is nowhere near that.
+  // `maxAffectedPortfolios` itself is UNCHANGED at 25 (a real batch
+  // touching more than 25 distinct portfolios in one commit is
+  // exceptionally unusual, and unrelated to this fix).
+  maxStatementsPerChunk: 60,
   maxParametersPerStatement: 100,
   maxQueriesPerInvocation: 50,
   maxChunksPerInvocation: 1,
@@ -424,9 +447,19 @@ export function createOwnedImportCommitRepository(
        FROM import_rows WHERE user_id = ? AND batch_id = ?`,
       [userId, batchId],
     );
+    // CALC-004: scoped to the `projection` pipeline -- `finalize` below now
+    // also queues a sibling `snapshot`-pipeline row per affected portfolio,
+    // but `rebuildJobIds`' established meaning (one id per affected
+    // portfolio, historically the projection rebuild job) stays stable for
+    // its existing consumers (`app/import-commit-actions.ts`, `app/import-
+    // accept-service.ts`, both feeding it straight into
+    // `advanceCalculationRunsForCommit`, which independently discovers and
+    // advances EACH portfolio's snapshot pipeline too regardless of which
+    // pipeline's id is in this list -- see that function's doc comment).
     const jobs = await client.all<{ id: string }>(
       `SELECT id FROM calculation_runs
        WHERE user_id = ? AND reason = 'import_commit' AND invalidation_source = ?
+         AND pipeline = 'projection'
        ORDER BY portfolio_id ASC, id ASC`,
       [userId, batchId],
     );
@@ -563,10 +596,23 @@ export function createOwnedImportCommitRepository(
 
     let fxRate: string | null = null;
     let fxRateSource: string | null = null;
-    if (
-      normalized.purchaseExchangeRate !== null &&
-      normalized.currency !== portfolio.base_currency_code
-    ) {
+    if (normalized.currency === portfolio.base_currency_code) {
+      // CALC-004 follow-up (b), carried from CALC-003's completion note: a
+      // row already denominated in the portfolio's own base currency needs
+      // no FX conversion at all -- the rate is trivially exact by currency
+      // identity, matching `domain/market-data/selection.ts`'s
+      // `selectFxObservation` precedent for the same case (`source:
+      // "identity"`, `rateDecimal: "1"`). Before this fix, neither branch
+      // below set `fxRate` for a same-currency row, so it was persisted as
+      // `fx_rate_to_base_decimal = NULL` on the transaction; downstream,
+      // `domain/ledger/projections.ts`'s `basisStatus` treats a null FX
+      // rate as `"incomplete_fx"` regardless of whether one was ever
+      // actually needed, so every same-currency CSV-imported buy silently
+      // reported `missing_basis` on its holding despite complete, correct
+      // native-currency cost data.
+      fxRate = "1";
+      fxRateSource = "identity";
+    } else if (normalized.purchaseExchangeRate !== null) {
       if (
         target.fxDirection !== "native_to_home" &&
         target.fxDirection !== "home_to_native"
@@ -579,8 +625,6 @@ export function createOwnedImportCommitRepository(
           : invertDecimal(normalized.purchaseExchangeRate);
       if (!fxRate) return { ok: false, reason: "mapping_incomplete" };
       fxRateSource = "csv_import";
-    } else if (normalized.currency !== portfolio.base_currency_code) {
-      fxRateSource = null;
     }
     const type = normalized.cashEvent ?? normalized.type;
     if (!type) return { ok: false, reason: "mapping_incomplete" };
@@ -630,16 +674,31 @@ export function createOwnedImportCommitRepository(
     nowAt: string,
     requestId: string,
   ): Promise<ImportCommitResult> {
+    // CALC-004: also resolves each affected portfolio's snapshot-pipeline
+    // queue range (`p.timezone`/`p.history_complete_from`, plus the
+    // earliest-ever posted/reversed transaction as the no-`history_complete_from`
+    // fallback -- see `resolveSnapshotRunRange`'s doc comment for why the
+    // snapshot pipeline needs the portfolio's FULL history range, not just
+    // this commit's touched dates) IN THIS SAME QUERY rather than a
+    // separate per-portfolio round trip, to stay inside
+    // `IMPORT_COMMIT_LIMITS.maxQueriesPerInvocation`.
     const affected = await client.all<Record<string, unknown>>(
       `SELECT t.portfolio_id, MIN(t.local_trade_date) AS range_from,
               MAX(t.local_trade_date) AS range_to, COUNT(*) AS committed_count,
               (SELECT latest.id FROM transactions latest
                WHERE latest.user_id = ? AND latest.portfolio_id = t.portfolio_id
                  AND latest.status IN ('posted', 'reversed')
-               ORDER BY latest.trade_at DESC, latest.id DESC LIMIT 1) AS ledger_high_water
+               ORDER BY latest.trade_at DESC, latest.id DESC LIMIT 1) AS ledger_high_water,
+              p.timezone AS portfolio_timezone,
+              p.history_complete_from AS portfolio_history_complete_from,
+              (SELECT earliest.local_trade_date FROM transactions earliest
+               WHERE earliest.user_id = t.user_id AND earliest.portfolio_id = t.portfolio_id
+                 AND earliest.status IN ('posted', 'reversed')
+               ORDER BY earliest.local_trade_date ASC, earliest.id ASC LIMIT 1) AS portfolio_earliest_trade_date
        FROM import_rows r
        JOIN transactions t ON t.id = r.commit_transaction_id
          AND t.user_id = r.user_id
+       JOIN portfolios p ON p.id = t.portfolio_id AND p.user_id = t.user_id
        WHERE r.user_id = ? AND r.batch_id = ? AND r.commit_status = 'committed'
        GROUP BY t.portfolio_id
        ORDER BY t.portfolio_id ASC
@@ -683,6 +742,60 @@ export function createOwnedImportCommitRepository(
         ],
       };
     });
+    // CALC-004: one sibling `snapshot`-pipeline run per affected portfolio,
+    // alongside the `projection`-pipeline run queued above -- see
+    // `db/repositories/ledger.ts`'s `snapshotCalculationRunStatement` doc
+    // comment for why the two pipelines need separate rows. Unlike the
+    // projection row (whose `range_*` is just this commit's touched-date
+    // span -- irrelevant to a full-ledger rebuild), the snapshot row needs
+    // the portfolio's FULL known history range so the Overview chart
+    // publication never drops earlier dates (`computeSnapshotRunRange`'s
+    // doc comment) -- computed from the `affected` query's own portfolio_*
+    // columns above (no extra per-portfolio round trip; see that query's
+    // comment). A portfolio whose date math fails (defensive; should not
+    // happen for an id already resolved above) simply queues no snapshot
+    // run this commit -- the projection pipeline and holdings are
+    // unaffected, and a later mutation/cron sweep queues one normally.
+    for (const row of affected) {
+      const portfolioId = String(row.portfolio_id);
+      const ledgerHighWater = String(row.ledger_high_water);
+      const range = computeSnapshotRunRange(
+        {
+          timezone: String(row.portfolio_timezone),
+          historyCompleteFrom:
+            row.portfolio_history_complete_from === null
+              ? null
+              : String(row.portfolio_history_complete_from),
+          earliestTradeDate:
+            row.portfolio_earliest_trade_date === null
+              ? null
+              : String(row.portfolio_earliest_trade_date),
+        },
+        nowAt,
+      );
+      if (!range) continue;
+      const snapshotRunId = `import-rebuild-snapshot:${batch.id}:${portfolioId}:${commitKey}`;
+      statements.push({
+        sql: `INSERT INTO calculation_runs (
+          id, user_id, portfolio_id, range_from, range_to, calculation_version,
+          reason, invalidation_source, pipeline, status, attempt,
+          ledger_high_water_start, idempotency_key, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 1, 'import_commit', ?, 'snapshot', 'queued', 0, ?, ?, ?, ?)
+        ON CONFLICT (user_id, portfolio_id, calculation_version, idempotency_key) DO NOTHING`,
+        params: [
+          snapshotRunId,
+          userId,
+          portfolioId,
+          range.rangeFrom,
+          range.rangeTo,
+          batch.id,
+          ledgerHighWater,
+          snapshotRunId,
+          nowAt,
+          nowAt,
+        ],
+      });
+    }
     statements.push(
       createAuditInsertStatement(
         {

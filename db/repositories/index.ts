@@ -134,12 +134,14 @@ export {
 } from "./market-data.ts";
 export {
   createCalculationRunRepository,
+  type CalculationRunPipeline,
   type CalculationRunRecord,
   type CalculationRunStatus,
   type ClaimableCalculationRunPortfolio,
   type ClaimCalculationRunResult,
   type CompleteCalculationRunResult,
   type FailCalculationRunResult,
+  type RecordClaimProgressResult,
   type RequestCalculationRunInput,
 } from "./calculation-runs.ts";
 export {
@@ -241,7 +243,9 @@ export {
   type UpsertSharesightSyncStateInput,
 } from "./sharesight-sync-state.ts";
 export {
+  computeSnapshotRunRange,
   createHistoricalSnapshotRepository,
+  resolveSnapshotRunRange,
   type HistoricalSeriesPoint,
   type HistoricalSeriesResponse,
   type PublishedOverviewReadModel,

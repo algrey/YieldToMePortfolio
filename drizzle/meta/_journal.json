@@ -281,6 +281,20 @@
       "when": 1787002723921,
       "tag": "0039_late_morlun",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "6",
+      "when": 1787026884236,
+      "tag": "0040_bright_blindfold",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "6",
+      "when": 1787029970390,
+      "tag": "0041_narrow_gabe_jones",
+      "breakpoints": true
     }
   ]
 }

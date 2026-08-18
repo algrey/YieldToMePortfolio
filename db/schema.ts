@@ -1718,8 +1718,41 @@ export const calculationRuns = sqliteTable(
     calculationVersion: integer("calculation_version").notNull(),
     reason: text("reason").notNull(),
     invalidationSource: text("invalidation_source"),
+    // CALC-004: discriminates the two independent resumable pipelines that
+    // share this row shape -- `projection` (holdings/lots/allocations,
+    // `db/repositories/projections.ts`) and `snapshot` (the Overview daily
+    // history chart, `db/repositories/snapshots.ts`). `claim`/`complete`
+    // are one-shot terminal transitions on a run, so the two pipelines
+    // cannot share one row without one completing foreclosing the other;
+    // every queueing site now inserts ONE row per pipeline per triggering
+    // event, and the executor's coalescing queries (`nextClaimable`,
+    // `hasNewerRun`, `supersedeStaleQueuedRuns`, `listClaimablePortfolios`)
+    // are scoped by this column so a newer run in one pipeline never
+    // supersedes an in-progress run in the other. Defaults to `projection`
+    // so every pre-existing raw INSERT (`ledger.ts`, `import-commit.ts`,
+    // `market-data.ts`) that does not yet name this column keeps its
+    // existing (correct) pipeline identity unchanged.
+    pipeline: text("pipeline").notNull().default("projection"),
     status: text("status").notNull().default("queued"),
     attempt: integer("attempt").notNull().default(0),
+    // CALC-004 review-round B1 fix: `attempt` increments on EVERY claim,
+    // including ordinary budget-exhaustion re-claims that make real
+    // forward progress (a multi-year snapshot range can legitimately need
+    // 100+ claims at a small read-time budget) -- it cannot distinguish a
+    // healthy, slowly-progressing run from a genuinely poisoned one that
+    // never advances. `stall_count`/`stall_checkpoint` track that instead:
+    // at each claim, `app/calculation-executor-service.ts` compares the
+    // run's current checkpoint columns (a fingerprint of
+    // `processed_snapshot_count`/`processed_holding_count`/
+    // `processed_ledger_count`/`projection_output_offset`/
+    // `projection_cursor_security_id`/`projection_active_security_id` --
+    // every column either pipeline's rebuild can advance) against the
+    // fingerprint recorded at the PREVIOUS claim; unchanged increments
+    // `stall_count`, any movement resets it to 0. Only `stall_count`
+    // reaching the executor's threshold terminates a run -- never
+    // `attempt` alone.
+    stallCount: integer("stall_count").notNull().default(0),
+    stallCheckpoint: text("stall_checkpoint"),
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: text("lease_expires_at"),
     ledgerHighWaterStart: text("ledger_high_water_start").notNull(),
@@ -1756,6 +1789,10 @@ export const calculationRuns = sqliteTable(
     check(
       "calculation_runs_status_check",
       sql`${table.status} IN ('queued', 'running', 'completed', 'failed', 'abandoned')`,
+    ),
+    check(
+      "calculation_runs_pipeline_check",
+      sql`${table.pipeline} IN ('projection', 'snapshot')`,
     ),
     check(
       "calculation_runs_range_check",

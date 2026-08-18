@@ -246,6 +246,22 @@ export function createOwnedManualOverrideRepository(
         createdAt,
       ],
     });
+    // CALC-004 review-round B3 (documented, KNOWN GAP -- not fixed by this
+    // task, scope explicitly excluded): this queues ONLY a `projection`-
+    // pipeline run (the implicit `pipeline` column default -- no `pipeline`
+    // named here). `db/repositories/snapshots.ts`'s `loadFacts` DOES read
+    // `manual_overrides` as an input to the snapshot/Overview rebuild, so a
+    // manual price/FX/basis override's effect is genuinely visible to that
+    // pipeline's computation -- but no SIBLING `snapshot`-pipeline run is
+    // queued here, so the Overview chart keeps serving whatever it last
+    // published (pre-override values, or the honest unavailable state) for
+    // any date range this override affects, until an UNRELATED ledger
+    // mutation or import commit happens to queue a fresh snapshot run whose
+    // range covers those dates. Holdings/`owned-capital-gains` (the
+    // `projection` pipeline) are unaffected and self-heal normally via
+    // this same run. See `docs/ARCHITECTURE.md`'s dated CALC-004 review-
+    // round entry for the full rationale and why this was left as a
+    // documented gap rather than silently expanding this task's scope.
     if (invalidationId && input.portfolioId) {
       statements.push({
         sql: `INSERT INTO calculation_runs (
@@ -317,6 +333,12 @@ export function createOwnedManualOverrideRepository(
         params: [id, userId],
       },
     ];
+    // CALC-004 review-round B3: same documented gap as `save`'s identical
+    // `manual_override` INSERT above -- `pipeline` defaults to
+    // `projection` here too, so revoking an override does not queue a
+    // `snapshot`-pipeline run either. The Overview chart continues serving
+    // whatever it last published until an unrelated ledger mutation/import
+    // commit's range covers the affected dates.
     if (invalidationId && existing.portfolioId) {
       statements.push({
         sql: `INSERT INTO calculation_runs (

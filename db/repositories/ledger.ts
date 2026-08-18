@@ -14,6 +14,7 @@ import {
   consumeManualLedgerMutationKeyStatement,
   type LedgerMutationAuthorization,
 } from "./manual-ledger-keys.ts";
+import { resolveSnapshotRunRange } from "./snapshots.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 import {
   prepareLedgerPosting,
@@ -298,6 +299,59 @@ async function atomic(
   await client.batch(statements);
 }
 
+// CALC-004: alongside the existing `ledger_mutation` `calculation_runs` row
+// (pipeline `projection`, implicit via the column default), every posted/
+// reversed ledger event also queues a SIBLING `snapshot`-pipeline row so the
+// Overview chart pipeline (`db/repositories/snapshots.ts`) advances on the
+// same triggers as holdings/lots, without either row's coalescing ever
+// touching the other (see `calculation-runs.ts`'s `pipeline`-scoped
+// `hasNewerRun`/`supersedeStaleQueuedRuns`). Reuses the SAME
+// `ledgerHighWaterStart` anchor the projection row uses (this transaction's
+// own id) -- it is a pure claim-time self-consistency check inside
+// `snapshots.rebuild`, not a literal "latest ledger row" computation, so
+// anchoring both sibling rows identically is correct and requires no extra
+// high-water lookup. Returns `null` (queueing nothing) only if the
+// portfolio itself cannot be found -- defensive; every caller already holds
+// a validated portfolio id from the same transaction.
+async function snapshotCalculationRunStatement(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  calculationVersion: number,
+  invalidationSource: string,
+  ledgerHighWaterStart: string,
+  idempotencyKey: string,
+  createdAt: string,
+): Promise<SqlStatement | null> {
+  const range = await resolveSnapshotRunRange(
+    client,
+    userId,
+    portfolioId,
+    createdAt,
+  );
+  if (!range) return null;
+  return {
+    sql: `INSERT INTO calculation_runs (
+      id, user_id, portfolio_id, range_from, range_to, calculation_version,
+      reason, invalidation_source, pipeline, status, attempt,
+      ledger_high_water_start, idempotency_key, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'ledger_mutation', ?, 'snapshot', 'queued', 0, ?, ?, ?, ?)`,
+    params: [
+      randomUUID(),
+      userId,
+      portfolioId,
+      range.rangeFrom,
+      range.rangeTo,
+      calculationVersion,
+      invalidationSource,
+      ledgerHighWaterStart,
+      idempotencyKey,
+      createdAt,
+      createdAt,
+    ],
+  };
+}
+
 /** Build one posting's statements so import chunks can share one D1 batch. */
 export async function buildLedgerPostingStatements(
   client: SqlClient,
@@ -414,6 +468,17 @@ export async function buildLedgerPostingStatements(
       createdAt,
     ],
   });
+  const snapshotRunStatement = await snapshotCalculationRunStatement(
+    client,
+    userId,
+    input.portfolioId,
+    prepared.calculationVersion,
+    prepared.transactionId,
+    prepared.transactionId,
+    `ledger-snapshot:${prepared.idempotencyKey}`,
+    createdAt,
+  );
+  if (snapshotRunStatement) statements.push(snapshotRunStatement);
   statements.push(
     createAuditInsertStatement(
       {
@@ -705,9 +770,16 @@ export function createOwnedLedgerRepository(
     idempotent: boolean,
   ): Promise<LedgerMutationSuccess> {
     const cashEntry = await getCashEntry(userId, portfolioId, transaction.id);
+    // CALC-004: this transaction now queues a `calculation_runs` row per
+    // pipeline (see `snapshotCalculationRunStatement` above) -- scoped to
+    // `projection` so this lookup keeps returning the SAME run identity
+    // callers already relied on (e.g. `import-reversal.ts`'s
+    // `rebuildJobIds`), never nondeterministically picking either sibling
+    // row.
     const run = await client.get<{ id: string }>(
       `SELECT id FROM calculation_runs
        WHERE user_id = ? AND portfolio_id = ? AND invalidation_source = ?
+         AND pipeline = 'projection'
        ORDER BY created_at DESC, id DESC LIMIT 1`,
       [userId, portfolioId, transaction.id],
     );
@@ -901,6 +973,17 @@ export function createOwnedLedgerRepository(
         createdAt,
       ],
     });
+    const snapshotRunStatement = await snapshotCalculationRunStatement(
+      client,
+      userId,
+      input.portfolioId,
+      prepared.calculationVersion,
+      prepared.transactionId,
+      prepared.transactionId,
+      `ledger-snapshot:${prepared.idempotencyKey}`,
+      createdAt,
+    );
+    if (snapshotRunStatement) statements.push(snapshotRunStatement);
     statements.push(
       createAuditInsertStatement(
         {

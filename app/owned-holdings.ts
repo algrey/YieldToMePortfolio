@@ -439,7 +439,12 @@ export async function loadOwnedHoldings(
     // never a fabricated result.
     await advanceCalculationRuns(
       { client, now: () => nowIso },
-      { userId, portfolioId, budget: READ_TIME_CALCULATION_BUDGET },
+      {
+        userId,
+        portfolioId,
+        pipeline: "projection",
+        budget: READ_TIME_CALCULATION_BUDGET,
+      },
     ).catch(() => undefined);
     publicationCount = await client.get<Row>(
       `SELECT count(*) AS count FROM projection_publications pp WHERE pp.user_id = ? AND pp.portfolio_id = ?`,

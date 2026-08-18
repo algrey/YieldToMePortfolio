@@ -237,6 +237,8 @@ If source examples prove the exported rate is inverse, invert with decimal arith
 
 Source zero becomes missing with `FX_ZERO_TREATED_AS_UNKNOWN`. It does not block native ledger import but blocks dependent base-basis/realised calculations until resolved.
 
+**Same-currency rows (`CALC-004` fix)**: when a row's transaction currency already equals the portfolio's base currency, no `Purchase Exchange Rate` is needed or consumed -- the commit layer (`db/repositories/import-commit.ts`'s `resolveInput`) sets `fx_rate_to_base_decimal = "1"` and `fx_rate_source = "identity"` directly, matching `domain/market-data/selection.ts`'s `selectFxObservation` identity-conversion precedent for the same-currency case. Before this fix, neither FX branch applied to a same-currency row, so it persisted a `NULL` FX rate; `domain/ledger/projections.ts`'s `basisStatus` treats a null rate as `incomplete_fx` unconditionally (never distinguishing "no rate needed" from "rate genuinely unknown"), so every same-currency import's home-currency basis silently reported `missing_basis` despite the native cost being fully known.
+
 ## 7. Upload constraints and safety
 
 - Authenticated owner only.
@@ -356,7 +358,7 @@ For each bounded chunk:
 - link each result to import row/batch;
 - store commit high-water mark and audit event.
 
-The validated row-level portfolio/security target and FX direction are the only mapping result consumed by posting. Persist durable target IDs in the same bounded unit as their ledger effect; never resolve them again from display symbols during posting. Process at most one chunk per Worker invocation so the 50-query invocation budget, 50-statement atomic-unit budget, and 100-parameter-per-query bound remain enforceable.
+The validated row-level portfolio/security target and FX direction are the only mapping result consumed by posting. Persist durable target IDs in the same bounded unit as their ledger effect; never resolve them again from display symbols during posting. Process at most one chunk per Worker invocation so the 50-query invocation budget, 60-statement atomic-unit budget, and 100-parameter-per-query bound remain enforceable. (`CALC-004` review-round B2 fix: the atomic-unit budget was raised from 50 to 60 statements -- the finalization unit, which queues one `calculation_runs` row per pipeline per affected portfolio plus one audit insert plus one batch-status update, is `2 * affectedPortfolioCount + 2` statements; at the documented 25-affected-portfolio ceiling that is 52, which exceeded the original 50-statement bound and permanently stranded a 25-portfolio commit in `committing` on every retry. See `db/repositories/import-commit.ts`'s `IMPORT_COMMIT_LIMITS` doc comment.)
 
 Stage 2/3 parse-persistence (`persistParsedResult` in `db/repositories/import-staging.ts`) is an Orchestrator-approved exception to the 50-statement atomic-unit budget above: it is one atomic `batch()` call whose statement count equals one status-transitioning `UPDATE` plus one guarded `INSERT` per parsed row/issue, bounded by the upload row cap in §7 (100,000 rows) rather than by a 50-statement chunk size. See `docs/DATA_MODEL.md` §11 ("Guard-conditional single batch") for the atomicity technique and the documented risk that an upload near the row cap can exceed D1's per-batch statement ceiling and fail closed.
 

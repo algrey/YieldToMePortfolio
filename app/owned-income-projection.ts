@@ -415,6 +415,12 @@ export async function loadOwnedIncomeProjection(
   let historicalPortfolioValueByYear = new Map<number, string | null>();
   if (yearsBack > 0) {
     try {
+      // CALC-004 review-round B3: unlike `app/authenticated-workspace.ts`'s
+      // Overview branch, this secondary best-effort read has NO read-time
+      // self-heal trigger -- a `null` overview here just leaves this
+      // function's per-year values `"unavailable"` (never fabricated), and
+      // the pipeline advances only when the owner visits the Overview page
+      // itself (or the cron sweep runs).
       const overview = await createHistoricalSnapshotRepository(
         client,
       ).loadPublishedOverview(userId, portfolioId);

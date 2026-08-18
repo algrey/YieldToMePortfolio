@@ -285,20 +285,31 @@ test("CALC-003 end-to-end: a committed batch's queued runs are advanced, publish
       budget: 50,
     },
   );
-  assert.equal(results.length, 1);
-  // Exactly 1, not the 4 queued runs: EVERY committed row's own ledger
-  // posting (`db/repositories/ledger.ts`) independently queues its own
-  // 'ledger_mutation' run in addition to `finalize()`'s aggregate
-  // 'import_commit' run (`db/repositories/import-commit.ts`) -- pre-
-  // existing, out-of-scope-for-this-task behaviour this test documents
-  // rather than papers over. `hasNewerRun`'s run-creation-order coalescing
-  // (review-round B1 fix) means only the run with the LATEST `created_at`
-  // for the portfolio ever completes -- here that's `finalize()`'s
-  // import_commit run, queued after all three individual row postings --
-  // and every older run (the 3 ledger_mutation ones) fails fast as
-  // `superseded_by_newer_run` without attempting a rebuild.
-  assert.equal(results[0]?.completed, 1);
+  // 2, not the 1 this test asserted pre-CALC-004: `advanceCalculationRunsForCommit`
+  // now advances BOTH pipelines (projection, then snapshot) per distinct
+  // affected portfolio -- see that function's doc comment. Still exactly 1
+  // portfolio here (not the 4 queued runs' worth of results): EVERY
+  // committed row's own ledger posting (`db/repositories/ledger.ts`)
+  // independently queues its own 'ledger_mutation' run (per pipeline) in
+  // addition to `finalize()`'s aggregate 'import_commit' run (per
+  // pipeline, `db/repositories/import-commit.ts`) -- pre-existing,
+  // out-of-scope-for-this-task behaviour this test documents rather than
+  // papers over. `hasNewerRun`'s run-creation-order coalescing (review-round
+  // B1 fix, now pipeline-scoped) means only the run with the LATEST
+  // `created_at` for the portfolio+pipeline ever completes -- here that's
+  // each pipeline's `finalize()` import_commit run, queued after all three
+  // individual row postings -- and every older run (the 3 ledger_mutation
+  // ones, per pipeline) fails fast as `superseded_by_newer_run` without
+  // attempting a rebuild.
+  assert.equal(results.length, 2);
+  assert.equal(results[0]?.completed, 1); // projection pipeline
   assert.equal(results[0]?.remaining, false);
+  // results[1] is the snapshot-pipeline advance -- not asserted further
+  // here (this test's date range runs from the fixture's fixed trade date
+  // to REAL wall-clock "today", since `commit()` does not take a `now`
+  // override, so its completion is environment/date-dependent at this
+  // budget). `tests/calc-004.test.ts` exercises the snapshot pipeline's
+  // completion/publication deterministically with an overridden `now`.
   assert.equal(await publicationCount(client, "user-a", "portfolio-a"), 1);
 
   const holdings = await loadOwnedHoldings(
@@ -319,22 +330,24 @@ test("CALC-003 end-to-end: a committed batch's queued runs are advanced, publish
     value: "60",
     reason: null,
   });
-  // Home basis is honestly `missing_basis`, not a fabricated "60": the CSV
-  // import commit path (`db/repositories/import-commit.ts`'s `resolveInput`)
-  // never populates `fx_rate_to_base_decimal` for a same-currency row (only
-  // `purchaseExchangeRate`-carrying cross-currency rows get one), and
+  // CALC-004 follow-up (b) fix (was CALC-003's documented gap): home basis
+  // now correctly reports the identity-converted "60", not a fabricated
+  // fraction and not the old `missing_basis`/`unavailable` state either.
+  // Before this fix, `db/repositories/import-commit.ts`'s `resolveInput`
+  // never populated `fx_rate_to_base_decimal` for a same-currency row (only
+  // `purchaseExchangeRate`-carrying cross-currency rows got one), and
   // `domain/ledger/projections.ts`'s `basisStatus` treats a null FX rate as
   // `incomplete_fx` unconditionally -- so a home-currency CSV import's base
-  // basis stays "not yet known" rather than assuming identity. This is a
-  // pre-existing gap in the import mapper (outside CALC-003's scope: it
-  // never executes calculation runs, only the FX rate the ledger row itself
-  // carries), not something this task's executor could or should paper
-  // over -- see this task's completion report.
+  // basis stayed "not yet known" despite the native cost being fully known.
+  // `resolveInput` now sets `fxRate = "1"`/`fxRateSource = "identity"`
+  // whenever the row's currency already equals the portfolio's base
+  // currency, matching `domain/market-data/selection.ts`'s
+  // `selectFxObservation` identity-conversion precedent.
   assert.deepEqual(holdings.rows[0]?.homeBasis, {
-    status: "unavailable",
+    status: "available",
     currencyCode: "AUD",
-    value: null,
-    reason: "missing_basis",
+    value: "60",
+    reason: null,
   });
 });
 
@@ -1407,7 +1420,16 @@ test("CALC-003 B5 regression: accepting 120 committed rows across 12 securities 
       budget: POST_COMMIT_CALCULATION_BUDGET,
     },
   );
-  assert.equal(results.length, 1);
+  // 2, not the 1 this test asserted pre-CALC-004 -- results[0] is the
+  // projection-pipeline advance (asserted below, unchanged); results[1] is
+  // the snapshot-pipeline advance, not asserted further here (its date
+  // range runs to real wall-clock "today", so completion at this budget is
+  // environment/date-dependent -- `tests/calc-004.test.ts` exercises the
+  // snapshot pipeline's completion deterministically with an overridden
+  // `now`). The combined-statement assertion below DOES include both
+  // pipelines' real cost, confirming one synchronous post-commit request
+  // for both pipelines together still stays under D1's ceiling.
+  assert.equal(results.length, 2);
   assert.equal(results[0]?.completed, 1);
   assert.equal(results[0]?.remaining, false);
   assert.ok(

@@ -13,6 +13,10 @@ import { loadOwnedQuotes } from "./owned-quotes";
 import { loadOwnedHoldings } from "./owned-holdings";
 import { createHistoricalSnapshotRepository } from "../db/repositories/snapshots.ts";
 import {
+  advanceCalculationRuns,
+  READ_TIME_SNAPSHOT_CALCULATION_BUDGET,
+} from "./calculation-executor-service.ts";
+import {
   createOverviewData,
   createUnavailableOverviewData,
 } from "./overview-read-model";
@@ -136,12 +140,40 @@ export async function loadAuthenticatedWorkspace(
     }
     if (options.includeOverview) {
       try {
-        const overview = await createHistoricalSnapshotRepository(
-          client,
-        ).loadPublishedOverview(
-          result.context.user.id,
-          configuredWorkspace.activePortfolio.id,
+        const snapshotRepo = createHistoricalSnapshotRepository(client);
+        const userId = result.context.user.id;
+        const portfolioId = configuredWorkspace.activePortfolio.id;
+        let overview = await snapshotRepo.loadPublishedOverview(
+          userId,
+          portfolioId,
         );
+        if (overview === null) {
+          // CALC-004 trigger 2 (read-time self-heal), mirroring
+          // `owned-holdings.ts`'s identical CALC-003 pattern for the
+          // projection pipeline: this is the choke point every Overview
+          // read passes through when the snapshot pipeline's calculation
+          // runs were queued (by a ledger post or import commit) but never
+          // advanced -- e.g. local dev with no cron, or trigger 1's
+          // post-commit snapshot budget exhausting before this portfolio's
+          // (typically much larger) history rebuild finished. Best-effort,
+          // bounded, and re-read exactly once: if nothing is claimable (or
+          // another reader already claimed it -- lease semantics prevent
+          // stampedes) this falls through to the existing honest
+          // unavailable overview state below, never a fabricated chart.
+          await advanceCalculationRuns(
+            { client, now: () => nowInstant },
+            {
+              userId,
+              portfolioId,
+              pipeline: "snapshot",
+              budget: READ_TIME_SNAPSHOT_CALCULATION_BUDGET,
+            },
+          ).catch(() => undefined);
+          overview = await snapshotRepo.loadPublishedOverview(
+            userId,
+            portfolioId,
+          );
+        }
         return {
           ...configuredWorkspace,
           overview: createOverviewData(overview),

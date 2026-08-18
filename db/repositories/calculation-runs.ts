@@ -3,6 +3,11 @@ import type { SqlClient } from "./sql-client.ts";
 export type CalculationRunStatus =
   "queued" | "running" | "completed" | "failed" | "abandoned";
 
+// CALC-004: which resumable pipeline this row belongs to -- see the
+// migration 0040 doc comment on `db/schema.ts`'s `calculationRuns.pipeline`
+// column for why the two pipelines cannot share one row.
+export type CalculationRunPipeline = "projection" | "snapshot";
+
 export type CalculationRunRecord = {
   id: string;
   userId: string;
@@ -12,8 +17,18 @@ export type CalculationRunRecord = {
   calculationVersion: number;
   reason: string;
   invalidationSource: string | null;
+  pipeline: CalculationRunPipeline;
   status: CalculationRunStatus;
   attempt: number;
+  // CALC-004 review-round B1 fix: see `db/schema.ts`'s `stallCount`/
+  // `stallCheckpoint` doc comment. `stallCount` is the number of
+  // CONSECUTIVE claims that observed the identical checkpoint fingerprint
+  // as the claim before it (i.e. made zero forward progress); it resets to
+  // 0 the moment any checkpoint column moves. `attempt` above must never
+  // be used as a poison signal on its own -- it counts ordinary,
+  // progress-making re-claims too.
+  stallCount: number;
+  stallCheckpoint: string | null;
   leaseOwner: string | null;
   leaseExpiresAt: string | null;
   ledgerHighWaterStart: string;
@@ -42,6 +57,10 @@ export type RequestCalculationRunInput = {
   calculationVersion: number;
   reason: string;
   invalidationSource?: string | null;
+  // Optional, defaults to "projection" -- every pre-CALC-004 caller (tests
+  // and every existing queueing site's raw INSERTs) implicitly queues a
+  // projection-pipeline run and never needs to say so explicitly.
+  pipeline?: CalculationRunPipeline;
   ledgerHighWaterStart: string;
   marketDataCutoff?: string | null;
   calendarEvidenceJson?: string | null;
@@ -63,7 +82,30 @@ export type FailCalculationRunResult =
 export type ClaimableCalculationRunPortfolio = {
   userId: string;
   portfolioId: string;
+  pipeline: CalculationRunPipeline;
 };
+
+export type RecordClaimProgressResult =
+  { ok: true; stallCount: number } | { ok: false; reason: "not-owned" };
+
+// CALC-004 review-round B1 fix: a fingerprint of every checkpoint column
+// either pipeline's rebuild can advance -- `processed_snapshot_count`/
+// `processed_holding_count` (both pipelines, incompatible meanings, see
+// `db/schema.ts`), `processed_ledger_count`/`projection_output_offset`/
+// `projection_cursor_security_id`/`projection_active_security_id`
+// (projection pipeline only). Deliberately pipeline-agnostic (compares
+// ALL of them regardless of which pipeline the run belongs to) so this
+// stays a single shared implementation rather than a per-pipeline one.
+function checkpointFingerprint(run: CalculationRunRecord): string {
+  return [
+    run.processedSnapshotCount,
+    run.processedHoldingCount,
+    run.processedLedgerCount,
+    run.projectionOutputOffset,
+    run.projectionCursorSecurityId ?? "",
+    run.projectionActiveSecurityId ?? "",
+  ].join(":");
+}
 
 function mapRun(row: Record<string, unknown>): CalculationRunRecord {
   return {
@@ -76,8 +118,12 @@ function mapRun(row: Record<string, unknown>): CalculationRunRecord {
     reason: String(row.reason),
     invalidationSource:
       row.invalidation_source === null ? null : String(row.invalidation_source),
+    pipeline: String(row.pipeline) as CalculationRunPipeline,
     status: String(row.status) as CalculationRunStatus,
     attempt: Number(row.attempt),
+    stallCount: Number(row.stall_count),
+    stallCheckpoint:
+      row.stall_checkpoint === null ? null : String(row.stall_checkpoint),
     leaseOwner: row.lease_owner === null ? null : String(row.lease_owner),
     leaseExpiresAt:
       row.lease_expires_at === null ? null : String(row.lease_expires_at),
@@ -143,10 +189,11 @@ export function createCalculationRunRepository(sql: SqlClient) {
         `
           INSERT INTO calculation_runs (
             id, user_id, portfolio_id, range_from, range_to,
-            calculation_version, reason, invalidation_source, status, attempt,
+            calculation_version, reason, invalidation_source, pipeline,
+            status, attempt,
             ledger_high_water_start, idempotency_key, created_at, updated_at
             , market_data_cutoff, calendar_evidence_json
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?)
           ON CONFLICT (user_id, portfolio_id, calculation_version, idempotency_key)
           DO NOTHING
         `,
@@ -159,6 +206,7 @@ export function createCalculationRunRepository(sql: SqlClient) {
           input.calculationVersion,
           input.reason,
           input.invalidationSource ?? null,
+          input.pipeline ?? "projection",
           input.ledgerHighWaterStart,
           input.idempotencyKey,
           input.now,
@@ -292,12 +340,13 @@ export function createCalculationRunRepository(sql: SqlClient) {
     async nextClaimable(
       userId: string,
       portfolioId: string,
+      pipeline: CalculationRunPipeline,
       now: string,
     ): Promise<CalculationRunRecord | null> {
       const row = await sql.get<Record<string, unknown>>(
         `
           SELECT * FROM calculation_runs
-          WHERE user_id = ? AND portfolio_id = ?
+          WHERE user_id = ? AND portfolio_id = ? AND pipeline = ?
             AND (
               status = 'queued'
               OR (status = 'running' AND lease_expires_at IS NOT NULL
@@ -305,7 +354,7 @@ export function createCalculationRunRepository(sql: SqlClient) {
             )
           ORDER BY created_at ASC, id ASC LIMIT 1
         `,
-        [userId, portfolioId, now],
+        [userId, portfolioId, pipeline, now],
       );
       return row ? mapRun(row) : null;
     },
@@ -328,20 +377,32 @@ export function createCalculationRunRepository(sql: SqlClient) {
     // and already published while this run's lease was still held elsewhere
     // must still be recognised as newer once this run resumes, so a stale
     // resume can never overwrite a fresher publication.
+    //
+    // CALC-004: scoped by `pipeline` -- a commit today queues ONE row per
+    // pipeline (see `db/repositories/snapshots.ts`'s `resolveSnapshotRunRange`/
+    // `computeSnapshotRunRange` and their callers in `ledger.ts`/
+    // `import-commit.ts`), and
+    // without this scope the snapshot row (inserted after the projection
+    // row for the same commit) would look like a "newer run" to the
+    // projection row's own coalescing check and vice versa, permanently
+    // superseding a healthy sibling pipeline's run that was never actually
+    // superseded by anything in ITS OWN pipeline. This is the core
+    // structural risk this task's tests probe.
     async hasNewerRun(
       userId: string,
       portfolioId: string,
+      pipeline: CalculationRunPipeline,
       createdAt: string,
       runId: string,
     ): Promise<boolean> {
       const row = await sql.get<{ marker: number }>(
         `
           SELECT 1 AS marker FROM calculation_runs
-          WHERE user_id = ? AND portfolio_id = ?
+          WHERE user_id = ? AND portfolio_id = ? AND pipeline = ?
             AND (created_at > ? OR (created_at = ? AND id > ?))
           LIMIT 1
         `,
-        [userId, portfolioId, createdAt, createdAt, runId],
+        [userId, portfolioId, pipeline, createdAt, createdAt, runId],
       );
       return row !== undefined;
     },
@@ -414,6 +475,45 @@ export function createCalculationRunRepository(sql: SqlClient) {
       return result.changes === 1;
     },
 
+    // CALC-004 review-round B1 fix: called once per claim (after the
+    // supersession check, before any rebuild call) with the run record AS
+    // CLAIMED -- its checkpoint columns reflect whatever they were left at
+    // by the run's PREVIOUS advance, before this invocation does any work
+    // of its own. Compares that against `stall_checkpoint` (the
+    // fingerprint recorded at the run's PREVIOUS claim): identical means
+    // the previous claim made ZERO forward progress (a genuine transient-
+    // failure loop, never a healthy resumption -- see
+    // `checkpointFingerprint`'s doc comment for why every checkpoint
+    // column either pipeline can move is covered), so `stall_count`
+    // increments; any movement resets it to 0. The executor terminates a
+    // run once `stall_count` crosses its threshold -- this method only
+    // measures and persists, it never decides to fail the run itself.
+    async recordClaimProgress(
+      userId: string,
+      portfolioId: string,
+      runId: string,
+      leaseOwner: string,
+      claimedRun: CalculationRunRecord,
+      now: string,
+    ): Promise<RecordClaimProgressResult> {
+      const fingerprint = checkpointFingerprint(claimedRun);
+      const stallCount =
+        claimedRun.stallCheckpoint === fingerprint
+          ? claimedRun.stallCount + 1
+          : 0;
+      const result = await sql.run(
+        `
+          UPDATE calculation_runs
+          SET stall_count = ?, stall_checkpoint = ?, updated_at = ?
+          WHERE id = ? AND user_id = ? AND portfolio_id = ?
+            AND status = 'running' AND lease_owner = ?
+        `,
+        [stallCount, fingerprint, now, runId, userId, portfolioId, leaseOwner],
+      );
+      if (result.changes !== 1) return { ok: false, reason: "not-owned" };
+      return { ok: true, stallCount };
+    },
+
     // CALC-003 review-round B5a fix: a real committed batch/accept can queue
     // one `ledger_mutation` run PER committed row (100+ for a realistic
     // import) in addition to the aggregate `import_commit` run -- claiming
@@ -426,9 +526,13 @@ export function createCalculationRunRepository(sql: SqlClient) {
     // is never touched here -- it may be actively leased elsewhere; the
     // per-claim `hasNewerRun` check remains the correctness backstop for
     // that rarer case). Returns the number of runs superseded.
+    // CALC-004: scoped by `pipeline` on BOTH the outer stale-candidate row
+    // and the `newer` subquery -- see `hasNewerRun`'s doc comment for why a
+    // cross-pipeline row must never count as "newer" here either.
     async supersedeStaleQueuedRuns(
       userId: string,
       portfolioId: string,
+      pipeline: CalculationRunPipeline,
       now: string,
     ): Promise<number> {
       const result = await sql.run(
@@ -436,11 +540,13 @@ export function createCalculationRunRepository(sql: SqlClient) {
           UPDATE calculation_runs
           SET status = 'failed', failure_category = 'superseded_by_newer_run',
               updated_at = ?
-          WHERE user_id = ? AND portfolio_id = ? AND status = 'queued'
+          WHERE user_id = ? AND portfolio_id = ? AND pipeline = ?
+            AND status = 'queued'
             AND EXISTS (
               SELECT 1 FROM calculation_runs newer
               WHERE newer.user_id = calculation_runs.user_id
                 AND newer.portfolio_id = calculation_runs.portfolio_id
+                AND newer.pipeline = calculation_runs.pipeline
                 AND (
                   newer.created_at > calculation_runs.created_at
                   OR (newer.created_at = calculation_runs.created_at
@@ -448,7 +554,7 @@ export function createCalculationRunRepository(sql: SqlClient) {
                 )
             )
         `,
-        [now, userId, portfolioId],
+        [now, userId, portfolioId, pipeline],
       );
       return result.changes;
     },
@@ -488,18 +594,24 @@ export function createCalculationRunRepository(sql: SqlClient) {
     // per-user-scoped repositories the request-path triggers use (no
     // ownership widening beyond this bookkeeping-only discovery query).
     // Oldest-pending-work-first, matching `nextClaimable`'s ordering.
+    // CALC-004: groups by `pipeline` too, since each pipeline is advanced
+    // through its own separate `advanceCalculationRuns` call (see
+    // `app/calculation-executor-service.ts`'s `sweepCalculationRuns`) --
+    // otherwise a (user, portfolio) pair with claimable work in only ONE
+    // pipeline would still spend a sweep slot advancing the other,
+    // untouched pipeline for no reason.
     async listClaimablePortfolios(
       now: string,
       limit: number,
     ): Promise<ClaimableCalculationRunPortfolio[]> {
       const rows = await sql.all<Record<string, unknown>>(
         `
-          SELECT user_id, portfolio_id, MIN(created_at) AS oldest
+          SELECT user_id, portfolio_id, pipeline, MIN(created_at) AS oldest
           FROM calculation_runs
           WHERE status = 'queued'
             OR (status = 'running' AND lease_expires_at IS NOT NULL
                 AND lease_expires_at <= ?)
-          GROUP BY user_id, portfolio_id
+          GROUP BY user_id, portfolio_id, pipeline
           ORDER BY oldest ASC
           LIMIT ?
         `,
@@ -508,6 +620,7 @@ export function createCalculationRunRepository(sql: SqlClient) {
       return rows.map((row) => ({
         userId: String(row.user_id),
         portfolioId: String(row.portfolio_id),
+        pipeline: String(row.pipeline) as CalculationRunPipeline,
       }));
     },
   };
