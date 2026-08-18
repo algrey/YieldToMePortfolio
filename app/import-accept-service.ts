@@ -17,6 +17,10 @@ import type { ImportPreviewSecurityCandidate } from "../domain/imports/reconcili
 import { markImportReadyWithContext } from "./import-ready-service.ts";
 import { resolveSharesightBatchSecuritiesWithContext } from "./security-resolution-service.ts";
 import { SHARESIGHT_SYNC_PARSER_FORMAT } from "../domain/sharesight-sync/index.ts";
+import {
+  advanceCalculationRunsForCommit,
+  POST_COMMIT_CALCULATION_BUDGET,
+} from "./calculation-executor-service.ts";
 
 // BRK-009B: the single atomic "Accept Import" owner action -- (re-run
 // security resolution idempotently for a sharesight_sync batch) -> mark
@@ -345,6 +349,24 @@ export async function acceptImportWithContext(
               : 409,
       message: commitFailureMessage(commitResult.reason),
     };
+  }
+  // CALC-003 trigger 1: identical rationale to the manual commit route
+  // (`app/import-commit-actions.ts`) -- a batch that finished committing
+  // here just queued `calculation_runs` rows nothing else would advance.
+  // Best-effort and bounded; never turns a successful accept into an
+  // error.
+  if (
+    commitResult.status === "committed" &&
+    commitResult.rebuildJobIds.length > 0
+  ) {
+    await advanceCalculationRunsForCommit(
+      { client: context.client },
+      {
+        userId: context.userId,
+        calculationRunIds: commitResult.rebuildJobIds,
+        budget: POST_COMMIT_CALCULATION_BUDGET,
+      },
+    ).catch(() => undefined);
   }
   return { ok: true, commit: commitResult };
 }

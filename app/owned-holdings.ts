@@ -34,6 +34,10 @@ import type {
   OwnedHoldingValue,
 } from "./owned-holdings-contract.ts";
 import type { Tone } from "./prototype-data.ts";
+import {
+  advanceCalculationRuns,
+  READ_TIME_CALCULATION_BUDGET,
+} from "./calculation-executor-service.ts";
 
 const MAX_HELD = 500;
 const MAX_PROJECTIONS = 500;
@@ -45,6 +49,14 @@ const OVERRIDE_TARGET_CHUNK = 32;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 const DECIMAL = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
+// cash_ledger_entries.signed_amount_decimal is the one genuinely signed
+// source-of-record decimal this module reads directly (a withdrawal is
+// negative by construction, e.g. paying for a buy) -- every other
+// `sourceDecimal`/`DECIMAL` use here is a price, rate, quantity, or basis,
+// none of which are ever negative at the source. Kept as its own pattern
+// rather than loosening `DECIMAL` itself, so an unexpectedly negative
+// price/quantity/basis still fails closed instead of silently validating.
+const SIGNED_DECIMAL = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
 const CURRENCY = /^[A-Z]{3}$/;
 
 function priorDate(value: string): string {
@@ -123,6 +135,11 @@ function sourceDecimal(
   if (!DECIMAL.test(value)) throw new Error(`invalid_${key}`);
   const parsed = parseDecimal(value);
   if (positive && isZero(parsed)) throw new Error(`invalid_${key}`);
+  return value;
+}
+function signedSourceDecimal(value: string, key: string): string {
+  if (!SIGNED_DECIMAL.test(value)) throw new Error(`invalid_${key}`);
+  parseDecimalResult(value);
   return value;
 }
 function resultDecimal(value: string | null, key: string): string | null {
@@ -404,10 +421,31 @@ export async function loadOwnedHoldings(
       },
     };
   }
-  const publicationCount = await client.get<Row>(
+  let publicationCount = await client.get<Row>(
     `SELECT count(*) AS count FROM projection_publications pp WHERE pp.user_id = ? AND pp.portfolio_id = ?`,
     [userId, portfolioId],
   );
+  if (integer(publicationCount ?? {}, "count") !== 1) {
+    // CALC-003 trigger 2 (read-time self-heal): this is the single choke
+    // point every owned-holdings read passes through (and, transitively via
+    // `loadOwnedHoldings`, `owned-income-projection.ts` and
+    // `owned-dividend-assumptions.ts`) when a portfolio's calculation runs
+    // were queued (by a ledger post or import commit) but never advanced --
+    // e.g. local dev with no cron, or trigger 1's post-commit budget
+    // exhausting before this portfolio's run finished. Best-effort, bounded,
+    // and re-read exactly once: if nothing is claimable (or another reader
+    // already claimed it -- lease semantics prevent stampedes) this falls
+    // through to the existing honest "not yet calculated" failure below,
+    // never a fabricated result.
+    await advanceCalculationRuns(
+      { client, now: () => nowIso },
+      { userId, portfolioId, budget: READ_TIME_CALCULATION_BUDGET },
+    ).catch(() => undefined);
+    publicationCount = await client.get<Row>(
+      `SELECT count(*) AS count FROM projection_publications pp WHERE pp.user_id = ? AND pp.portfolio_id = ?`,
+      [userId, portfolioId],
+    );
+  }
   if (integer(publicationCount ?? {}, "count") !== 1)
     throw new Error("invalid_projection_publication_count");
   const publication = await client.get<Row>(
@@ -1119,10 +1157,10 @@ async function loadCash(
         addDecimal(
           parseDecimalResult(balance),
           parseDecimalResult(
-            sourceDecimal(
+            signedSourceDecimal(
               requiredText(entry, "signed_amount_decimal"),
               "signed_amount_decimal",
-            )!,
+            ),
           ),
         ),
       );

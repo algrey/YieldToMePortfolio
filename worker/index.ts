@@ -18,6 +18,7 @@ import {
   emitStructuredLog,
 } from "../domain/observability/index.ts";
 import {
+  runScheduledCalculationSweep,
   runScheduledCorporateActionRefresh,
   runScheduledMarketDataRefresh,
 } from "./scheduled-refresh";
@@ -156,6 +157,22 @@ const worker: ExportedHandler<Env> = {
             securitiesFailed: corporateActionResult.securitiesFailed,
           }
         : { reason: corporateActionResult.reason },
+    });
+
+    const calculationSweepResult = await runScheduledCalculationSweep();
+    emitStructuredLog({
+      level: calculationSweepResult.ok ? "info" : "error",
+      event: "calculation.sweep",
+      action: "calculation.sweep.scheduled",
+      result: calculationSweepResult.ok ? "success" : "failure",
+      requestId: "scheduled",
+      metadata: calculationSweepResult.ok
+        ? {
+            portfolios: calculationSweepResult.portfolios,
+            advanced: calculationSweepResult.advanced,
+            completed: calculationSweepResult.completed,
+          }
+        : { reason: calculationSweepResult.reason },
     });
   },
 };

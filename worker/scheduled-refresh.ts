@@ -6,6 +6,11 @@ import {
   runDueCorporateActionRefresh,
 } from "../domain/market-data/index.ts";
 import { resolveRuntimeConfig } from "./runtime-config.ts";
+import {
+  CRON_CALCULATION_BUDGET_PER_PORTFOLIO,
+  CRON_MAX_PORTFOLIOS_PER_SWEEP,
+  sweepCalculationRuns,
+} from "../app/calculation-executor-service.ts";
 
 const CORPORATE_ACTION_PROVIDER_ID = "yahoo-compatible";
 
@@ -105,5 +110,42 @@ export async function runScheduledCorporateActionRefresh(
     };
   } catch {
     return { ok: false, reason: "refresh" };
+  }
+}
+
+export type ScheduledCalculationSweepResult =
+  | { ok: true; portfolios: number; advanced: number; completed: number }
+  | { ok: false; reason: "database" | "sweep" };
+
+/**
+ * CALC-003 trigger 3: the cron backstop for the bounded calculation-run
+ * executor (`app/calculation-executor-service.ts`). Runs alongside the
+ * existing hourly price/FX and corporate-action sweeps (same `scheduled`
+ * handler, `worker/index.ts`) so an abandoned/interrupted run (a crashed
+ * request-path invocation whose lease has since expired) or a run that
+ * simply never got a request-time trigger (no reader ever hit the
+ * read-time trigger for that portfolio) eventually still gets advanced and
+ * published, without needing configuration-gated provider access -- unlike
+ * the other two scheduled refreshes, this does not depend on
+ * `MARKET_DATA_PROVIDER`.
+ */
+export async function runScheduledCalculationSweep(): Promise<ScheduledCalculationSweepResult> {
+  try {
+    const client = await getSqlClient();
+    const summary = await sweepCalculationRuns(
+      { client },
+      {
+        maxPortfolios: CRON_MAX_PORTFOLIOS_PER_SWEEP,
+        budgetPerPortfolio: CRON_CALCULATION_BUDGET_PER_PORTFOLIO,
+      },
+    );
+    return {
+      ok: true,
+      portfolios: summary.portfoliosSwept,
+      advanced: summary.advanced,
+      completed: summary.completed,
+    };
+  } catch {
+    return { ok: false, reason: "sweep" };
   }
 }

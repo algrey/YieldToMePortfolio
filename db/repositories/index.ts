@@ -136,8 +136,10 @@ export {
   createCalculationRunRepository,
   type CalculationRunRecord,
   type CalculationRunStatus,
+  type ClaimableCalculationRunPortfolio,
   type ClaimCalculationRunResult,
   type CompleteCalculationRunResult,
+  type FailCalculationRunResult,
   type RequestCalculationRunInput,
 } from "./calculation-runs.ts";
 export {

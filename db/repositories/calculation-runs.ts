@@ -57,6 +57,14 @@ export type CompleteCalculationRunResult =
   | { ok: true; run: CalculationRunRecord }
   | { ok: false; reason: "stale-ledger" | "not-owned" | "not-running" };
 
+export type FailCalculationRunResult =
+  { ok: true; run: CalculationRunRecord } | { ok: false; reason: "not-owned" };
+
+export type ClaimableCalculationRunPortfolio = {
+  userId: string;
+  portfolioId: string;
+};
+
 function mapRun(row: Record<string, unknown>): CalculationRunRecord {
   return {
     id: String(row.id),
@@ -271,6 +279,236 @@ export function createCalculationRunRepository(sql: SqlClient) {
 
       const run = await get(userId, portfolioId, runId);
       return run ? { ok: true, run } : { ok: false, reason: "not-running" };
+    },
+
+    // CALC-003: the oldest claimable (queued, or running with an expired
+    // lease) run for one user/portfolio -- the executor's coalescing model
+    // relies on processing these oldest-first (see
+    // `app/calculation-executor-service.ts`'s doc comment and `hasNewerRun`
+    // below, which is what actually decides supersession -- NOT a
+    // recomputed "current ledger high water", per the CALC-003 review round
+    // that found comparing against `MAX(trade_at)` gives false positives
+    // for a reversal of a non-latest transaction or a backdated post).
+    async nextClaimable(
+      userId: string,
+      portfolioId: string,
+      now: string,
+    ): Promise<CalculationRunRecord | null> {
+      const row = await sql.get<Record<string, unknown>>(
+        `
+          SELECT * FROM calculation_runs
+          WHERE user_id = ? AND portfolio_id = ?
+            AND (
+              status = 'queued'
+              OR (status = 'running' AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at <= ?)
+            )
+          ORDER BY created_at ASC, id ASC LIMIT 1
+        `,
+        [userId, portfolioId, now],
+      );
+      return row ? mapRun(row) : null;
+    },
+
+    // CALC-003 (review-round B1 fix): is there a STRICTLY newer
+    // `calculation_runs` row for this user/portfolio, of ANY status (not
+    // just currently claimable ones)? This is the executor's sole
+    // supersession signal -- a run whose own `(created_at, id)` is not the
+    // latest for its portfolio has, by construction, already been
+    // overtaken by whatever later ledger mutation/import queued the newer
+    // row, regardless of that newer row's current processing status
+    // (queued, still running under another worker's live lease, or already
+    // completed/failed). Comparing against calculation_runs' own insertion
+    // order rather than the transactions table's `trade_at` ordering is
+    // deliberate: `trade_at` does not move for a reversal of a non-latest
+    // transaction or a backdated post, which previously produced false-
+    // positive "superseded" failures even though nothing else was queued.
+    // Checking ANY status (not only claimable ones) closes the race a
+    // claimable-only check would leave open: a newer run that raced ahead
+    // and already published while this run's lease was still held elsewhere
+    // must still be recognised as newer once this run resumes, so a stale
+    // resume can never overwrite a fresher publication.
+    async hasNewerRun(
+      userId: string,
+      portfolioId: string,
+      createdAt: string,
+      runId: string,
+    ): Promise<boolean> {
+      const row = await sql.get<{ marker: number }>(
+        `
+          SELECT 1 AS marker FROM calculation_runs
+          WHERE user_id = ? AND portfolio_id = ?
+            AND (created_at > ? OR (created_at = ? AND id > ?))
+          LIMIT 1
+        `,
+        [userId, portfolioId, createdAt, createdAt, runId],
+      );
+      return row !== undefined;
+    },
+
+    // CALC-003: terminates a run this caller currently holds the lease on.
+    // Used for two distinct cases the executor must tell apart (see its doc
+    // comment): a run superseded by a newer ledger high-water mark
+    // (`failureCategory: "superseded_by_newer_run"`), and a run whose
+    // rebuild step returned a genuine structural failure (invalid decimal/
+    // scale, oversell, an oversized per-security event count) that retrying
+    // the identical computation could never fix. Never called for
+    // transient failures (`not_owned`, `atomic_failure`) -- those are left
+    // `running` so the existing lease-expiry machinery retries them.
+    async fail(
+      userId: string,
+      portfolioId: string,
+      runId: string,
+      leaseOwner: string,
+      now: string,
+      failureCategory: string,
+    ): Promise<FailCalculationRunResult> {
+      const result = await sql.run(
+        `
+          UPDATE calculation_runs
+          SET status = 'failed', failure_category = ?,
+              lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+          WHERE user_id = ? AND portfolio_id = ? AND id = ?
+            AND status = 'running' AND lease_owner = ?
+        `,
+        [failureCategory, now, userId, portfolioId, runId, leaseOwner],
+      );
+      if (result.changes !== 1) return { ok: false, reason: "not-owned" };
+
+      const run = await get(userId, portfolioId, runId);
+      return run ? { ok: true, run } : { ok: false, reason: "not-owned" };
+    },
+
+    // CALC-003 review-round B4 fix: `db/repositories/market-data.ts` queues
+    // `manual_override` runs with `ledger_high_water_start = ''` (no
+    // triggering ledger transaction to anchor to). `projections.rebuild`'s
+    // own staleness guard compares the run's STORED `ledger_high_water_start`
+    // against the caller's `currentLedgerHighWater` input -- passing a
+    // resolved real value as the input while the STORED column stays ''
+    // would make every rebuild/publish call for this run fail closed
+    // (stale_ledger), never mismatch-tolerant. This persists a resolved,
+    // REAL transaction id into the row itself (guarded on the column still
+    // being '' and this caller owning the lease, so a normal run's real
+    // value can never be overwritten) so every subsequent read/compare
+    // (including `projection_publications.ledger_high_water`, which must
+    // never carry '' -- `owned-holdings.ts`/`owned-capital-gains.ts` both
+    // reject an empty value) is internally consistent.
+    async resolveEmptyHighWater(
+      userId: string,
+      portfolioId: string,
+      runId: string,
+      leaseOwner: string,
+      highWater: string,
+      now: string,
+    ): Promise<boolean> {
+      const result = await sql.run(
+        `
+          UPDATE calculation_runs
+          SET ledger_high_water_start = ?, updated_at = ?
+          WHERE id = ? AND user_id = ? AND portfolio_id = ?
+            AND status = 'running' AND lease_owner = ?
+            AND ledger_high_water_start = ''
+        `,
+        [highWater, now, runId, userId, portfolioId, leaseOwner],
+      );
+      return result.changes === 1;
+    },
+
+    // CALC-003 review-round B5a fix: a real committed batch/accept can queue
+    // one `ledger_mutation` run PER committed row (100+ for a realistic
+    // import) in addition to the aggregate `import_commit` run -- claiming
+    // and failing each individually (`nextClaimable` + `claim` + `fail`,
+    // ~5-6 statements each) burns the entire post-commit statement budget
+    // on bookkeeping before the executor ever reaches the one run that can
+    // actually complete. This does the SAME "supersede everything not the
+    // latest-created row" decision `hasNewerRun` makes per-claim, but as
+    // ONE bulk UPDATE covering every `queued` row at once (a `running` row
+    // is never touched here -- it may be actively leased elsewhere; the
+    // per-claim `hasNewerRun` check remains the correctness backstop for
+    // that rarer case). Returns the number of runs superseded.
+    async supersedeStaleQueuedRuns(
+      userId: string,
+      portfolioId: string,
+      now: string,
+    ): Promise<number> {
+      const result = await sql.run(
+        `
+          UPDATE calculation_runs
+          SET status = 'failed', failure_category = 'superseded_by_newer_run',
+              updated_at = ?
+          WHERE user_id = ? AND portfolio_id = ? AND status = 'queued'
+            AND EXISTS (
+              SELECT 1 FROM calculation_runs newer
+              WHERE newer.user_id = calculation_runs.user_id
+                AND newer.portfolio_id = calculation_runs.portfolio_id
+                AND (
+                  newer.created_at > calculation_runs.created_at
+                  OR (newer.created_at = calculation_runs.created_at
+                      AND newer.id > calculation_runs.id)
+                )
+            )
+        `,
+        [now, userId, portfolioId],
+      );
+      return result.changes;
+    },
+
+    // CALC-003 review-round B5b fix: releases (without abandoning) a run
+    // this caller holds the lease on, by moving `lease_expires_at` to
+    // `now` -- `nextClaimable`/`claim`'s own "running AND lease expired"
+    // branch then treats it as immediately claimable, rather than the
+    // caller (or a later trigger) having to wait out the remainder of
+    // `LEASE_DURATION_MS`. Every persisted cursor field (`processed_*`,
+    // `projection_cursor_security_id`, `projection_active_security_id`,
+    // `projection_output_offset`) is untouched -- this is purely a lease
+    // release, not a reset, matching the existing resumable machinery's own
+    // "abandoned lease" resume path exactly (only reachable sooner).
+    async releaseLease(
+      userId: string,
+      portfolioId: string,
+      runId: string,
+      leaseOwner: string,
+      now: string,
+    ): Promise<boolean> {
+      const result = await sql.run(
+        `
+          UPDATE calculation_runs
+          SET lease_expires_at = ?, updated_at = ?
+          WHERE id = ? AND user_id = ? AND portfolio_id = ?
+            AND status = 'running' AND lease_owner = ?
+        `,
+        [now, now, runId, userId, portfolioId, leaseOwner],
+      );
+      return result.changes === 1;
+    },
+
+    // CALC-003 cron backstop (trigger 3): discovers which (user, portfolio)
+    // pairs have claimable work WITHOUT reading any other owner-scoped
+    // table -- the sweep then advances each pair through the same
+    // per-user-scoped repositories the request-path triggers use (no
+    // ownership widening beyond this bookkeeping-only discovery query).
+    // Oldest-pending-work-first, matching `nextClaimable`'s ordering.
+    async listClaimablePortfolios(
+      now: string,
+      limit: number,
+    ): Promise<ClaimableCalculationRunPortfolio[]> {
+      const rows = await sql.all<Record<string, unknown>>(
+        `
+          SELECT user_id, portfolio_id, MIN(created_at) AS oldest
+          FROM calculation_runs
+          WHERE status = 'queued'
+            OR (status = 'running' AND lease_expires_at IS NOT NULL
+                AND lease_expires_at <= ?)
+          GROUP BY user_id, portfolio_id
+          ORDER BY oldest ASC
+          LIMIT ?
+        `,
+        [now, limit],
+      );
+      return rows.map((row) => ({
+        userId: String(row.user_id),
+        portfolioId: String(row.portfolio_id),
+      }));
     },
   };
 }

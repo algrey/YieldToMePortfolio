@@ -3,6 +3,10 @@ import {
   type ImportCommitSuccess,
 } from "../db/repositories/index.ts";
 import { getAuthenticatedSqlContext } from "./portfolio-actions.ts";
+import {
+  advanceCalculationRunsForCommit,
+  POST_COMMIT_CALCULATION_BUDGET,
+} from "./calculation-executor-service.ts";
 
 type ImportCommitActionFailure = {
   ok: false;
@@ -77,7 +81,27 @@ export async function commitImportAction(
       confirmation,
       requestId: context.requestId,
     });
-    if (result.ok) return { ok: true, commit: result };
+    if (result.ok) {
+      // CALC-003 trigger 1: a committed batch just queued
+      // `calculation_runs` rows (`rebuildJobIds`) that otherwise sit
+      // `queued` forever with no production caller to advance them (the
+      // root cause of "Holdings/Overview empty, Income zero after a real
+      // committed import"). Best-effort and bounded -- a failure here must
+      // never turn an already-successful commit into an error response;
+      // trigger 2 (read-time, `owned-holdings.ts`) and trigger 3 (cron)
+      // pick up anything left queued or interrupted.
+      if (result.status === "committed" && result.rebuildJobIds.length > 0) {
+        await advanceCalculationRunsForCommit(
+          { client: context.client },
+          {
+            userId: context.userId,
+            calculationRunIds: result.rebuildJobIds,
+            budget: POST_COMMIT_CALCULATION_BUDGET,
+          },
+        ).catch(() => undefined);
+      }
+      return { ok: true, commit: result };
+    }
     return {
       ok: false,
       status:
