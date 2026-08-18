@@ -762,3 +762,134 @@ reproduces, with an audit event" (F1); "BRK-009B: an auto-created canonical
 name strips control characters and truncates to 120 characters" (F2);
 "BRK-009B: accept denies a non-Sharesight (CSV) batch with an honest 400
 naming the review flow" (F4).
+
+### BRK-009C addition (2026-08-18)
+
+One new fixed route: `POST /api/import/preview/:batchId/securities/metadata`
+(`createImportSecurityMetadataPost` → `updateImportSecurityMetadataWithContext`,
+CSRF gated first, owner-scoped, request fields re-validated against the
+server's own recomputed preview -- the identical `securities/attest`/
+`securities/verify` discipline). Edits exactly ONE field, never
+`security_id`, never exchange, never currency: an auto-CREATED security's
+`securities.canonical_name`, sanitized through BRK-009B's own
+`sanitizeCanonicalName` (now exported for reuse). `staging.get(userId,
+batchId)` scopes the batch at the top of the action; the requested
+`portfolioId` must equal `batch.targetPortfolioId` (400 otherwise -- never
+trusted as the authority for which portfolio the edit targets); the
+requested identity tuple must match one of the batch's own
+CURRENTLY-derived distinct securities
+(`domain/imports/security-summary.ts`'s `deriveSharesightSecuritiesSummary`,
+via `ImportReviewPreview.securities`, currency compared case-insensitively)
+-- never trusted from the client alone. `expectedVersion`/`expectedPreviewVersion`
+are checked for staleness on hashed evidence, but `canonical_name` is
+deliberately excluded from `previewVersion`'s hash (display metadata, not
+commit-relevant evidence), so two concurrent name edits against the same
+preview last-write-win rather than 409-conflicting with each other -- safe
+because `accept` re-derives resolution state fresh and never reads
+`canonical_name` as identity evidence.
+
+**Review-round fix (BLOCKING, findings B1/B2/B3, plus follow-ups
+F1-F4).** Independent review reproduced two BLOCKING issues against
+migrated sqlite in the FIRST implementation:
+
+- **B1 -- cross-owner rename of a shared canonical security.** The first
+  cut gated the name edit on a SERVICE-SIDE derivation only
+  (`entry.state === "created"`); a security `securities`/`security_identifiers`
+  share as canonical master (IMP-004B precedent) can be linked by another
+  owner, or later provider-verified, without that derivation ever
+  reflecting it. Fixed by moving enforcement into the `UPDATE securities
+... WHERE` statement itself, requiring ALL THREE predicates at the SQL
+  level: (a) an active `scheme = 'ticker' AND source = 'sharesight'`
+  identifier exists (BRK-009B auto-created it); (b) no active `status =
+'verified'` `security_provider_mappings` row exists; (c) `NOT EXISTS
+(SELECT 1 FROM portfolio_securities WHERE security_id = ? AND user_id <>
+?)` -- no other owner is linked. Zero rows updated is an honest 409
+  ("This security is shared or provider-verified; its name can no longer
+  be edited here."), never a silent no-op. `db/repositories/security-resolution.ts`'s
+  new `listNameEditableSecurityIds` (user-scoped, mirrors
+  `listAttestedSecurityIds`'s absence/presence-of-identifier technique)
+  derives the identical three predicates for the UI's `nameEditable` flag
+  -- a UX convenience only; the guarded `UPDATE` is the sole authority.
+  `domain/imports/security-summary.ts`'s summary entry carries
+  `nameEditable`, and the review component gates the edit form on it
+  (never merely `state === "created"`).
+- **B2 -- the exchange edit was dead UI whose own membership check trusted
+  an unvalidated client-supplied `portfolioId`.** A Sharesight row's
+  `market_code` is `requiredString`-gated at the parse boundary exactly
+  like `currency_code`, so the `null`-exchange case the edit's own gate
+  checked for cannot occur for the only batches this screen serves.
+  REMOVED entirely: the mutation branch, its route-contract `exchange`
+  field, `sanitizeExchangeAlias`, and the now-dead tests. Exchange (and
+  currency) render permanently read-only. The follow-up also closed the
+  membership gap the removal mooted for that branch but not the surviving
+  name branch: `portfolioId` is now validated against
+  `batch.targetPortfolioId` server-side before any other work (F4:
+  currency comparison in the membership match is case-insensitive,
+  matching `security-resolution.ts`'s own `UPPER()`/`normalizeToken`
+  convention).
+- **B3 -- the accept buttons were greyed out in exactly the state accept
+  exists to fix.** `acceptDisabled` gated on `!review.preview.ready`, a
+  COMPUTED flag that also reflects `SECURITY_MAPPING_REQUIRED` for a
+  merely `unresolved` (not yet resolved, not blocked) security --
+  `acceptImportWithContext`'s own first step auto-resolves exactly that.
+  Fixed: `acceptDisabled` now gates ONLY on `blockedRowIssues.length > 0`
+  (persisted, error-severity, non-excluded issues -- computed
+  `SECURITY_MAPPING_REQUIRED`/`_AMBIGUOUS` are never persisted to
+  `import_issues`, so `blockedRowIssues` already excludes them correctly)
+  plus pending/already-committed. If the server's resolution pass still
+  cannot resolve everything, the existing honest error surfaces via
+  `acceptError`. The blocked-vs-unresolved summary copy now states which
+  case applies ("Resolve N blocked rows..." vs. "N unresolved securities
+  will be resolved automatically on accept").
+- **F1** (`domain/imports/security-summary.ts`): the conflict check now
+  runs BEFORE trusting a non-null `security_id` -- `security-resolution.ts`'s
+  own B2 fix re-validates a pre-existing link's currency agreement and
+  reports `existing_link_currency_mismatch` as a conflict WITHOUT clearing
+  the disputed `security_id` column, so a candidate could carry a stale
+  linked id while genuinely blocked. `state` now reports `conflict` in
+  that case (never `resolved`/`created`), and the summary's own
+  `securityId` field is `null` whenever `state === "conflict"`.
+- **F3**: a name edit now asserts its own owner-attributed audit event
+  (`import.security.update_metadata`) in tests.
+
+`npm run check` passes end-to-end (prettier, eslint zero problems, `tsc
+--noEmit`, `vinext check`, `vinext build`, full test suite).
+
+New tests: `tests/brk-009c.test.ts` (38 tests) -- pure
+`deriveSharesightSecuritiesSummary` derivation (distinct-security grouping
+with accurate row counts, a missing exchange grouping separately and
+rendering `null`/"Unknown" rather than fabricated, an owner-excluded row
+never inflating a count and a fully-excluded security never appearing,
+non-transaction rows never contributing, `resolved`/`created`/`unresolved`/
+`conflict` state derivation with `nameEditable` reflecting the eligibility
+set, the F1 conflict-with-a-stale-linked-id case reporting `conflict` with
+a `null` `securityId`, instrument-name fallback vs. a genuine `null`,
+case/whitespace-insensitive grouping matching `reconciliation.ts`); the full
+DB-backed `buildImportReviewPreview` path (incl. `nameEditable`) for a
+`sharesight_sync` batch, the `[]` unchanged-UI case for a
+`strict-versioned-csv` batch, and the DB-backed conflict case;
+`listNameEditableSecurityIds` in isolation (excludes a security another
+user is linked to, excludes one with an active verified provider mapping,
+excludes one whose ticker identifier is not sharesight-sourced); the
+metadata route's name sanitization (control-strip + 120-char truncate),
+`security_id` never changing across an edit, a name edit on a `resolved`
+(not auto-created) security rejected 409, **the B1 cross-owner-rename
+repro rejected 409 by the guarded `UPDATE` with `canonical_name`
+untouched**, a name edit on a provider-verified security rejected 409 with
+`canonical_name` untouched, a mismatched `portfolioId` rejected 400, a
+source-level + functional confirmation that exchange/currency have no edit
+code path at all, a not-part-of-this-batch identity rejected 404,
+cross-user denial 404, stale `expectedVersion`/`expectedPreviewVersion`
+both rejected 409, the F4 case-insensitive membership match, the F3 audit
+event assertion, and CSRF-before-action; import-review.tsx source/behaviour
+assertions for the securities section rendering only for `sharesight_sync`,
+two "Accept Import" buttons (one before/one after the table) sharing one
+dialog/state/action, `acceptDisabled` (evaluated against constructed
+fixtures via `new Function`, matching this file's `isMutableExclusionStatus`
+precedent) rendering ENABLED for a pre-resolution/unresolved batch and
+DISABLED once a persisted blocking issue exists -- and never referencing
+`review.preview.ready` at all, the blocked-vs-unresolved summary copy,
+Exchange/Currency always rendering as plain read-only text with no form,
+the name edit gated on `entry.nameEditable`, text-not-colour state
+rendering for all four states, and a labelled 44px-minimum name edit input
+and button.

@@ -183,6 +183,9 @@ export {
 } from "./security-attestation.ts";
 export {
   createOwnedSecurityResolutionRepository,
+  listAutoCreatedSecurityIds,
+  listNameEditableSecurityIds,
+  sanitizeCanonicalName,
   type SecurityResolutionCandidateIdentity,
   type SecurityResolutionLinkResult,
   type SecurityResolutionRepository,

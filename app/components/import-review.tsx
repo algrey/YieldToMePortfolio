@@ -15,6 +15,27 @@ import {
 } from "../sharesight-sync-panel-helpers.ts";
 
 type PortfolioOption = { id: string; name: string; homeCurrencyCode: string };
+// BRK-009C: distinct securities the "Review securities" table renders, one
+// per distinct security a `sharesight_sync` batch's rows reference. See
+// `domain/imports/security-summary.ts`'s `SharesightSecuritySummaryEntry`
+// (the server-side source of truth this type mirrors) for why "conflict"
+// and "unresolved" are both genuine, distinct, non-fabricated states.
+type SecuritySummaryEntry = {
+  sourceSymbol: string;
+  sourceExchangeAlias: string | null;
+  sourceCurrencyCode: string;
+  name: string | null;
+  securityId: string | null;
+  rowCount: number;
+  state: "resolved" | "created" | "conflict" | "unresolved";
+  // BRK-009C review round (finding B1): whether THIS user's name-edit
+  // request would actually be accepted right now -- `state === "created"`
+  // AND sole-linked to this user AND no active verified provider mapping.
+  // Optional/defaulted to false so a pre-review-round test fixture keeps
+  // compiling; the server's own guarded `UPDATE ... WHERE` re-enforces the
+  // identical predicates regardless of what this flag says.
+  nameEditable?: boolean;
+};
 type Review = {
   batch: {
     id: string;
@@ -22,6 +43,11 @@ type Review = {
     status: string;
     version: number;
     targetPortfolioId: string | null;
+    // BRK-009C: gates the "Review securities" section -- present on every
+    // review the server issues, but optional here so any pre-BRK-009C
+    // test-constructed `Review` literal keeps compiling; treated as a
+    // non-Sharesight (CSV) batch when absent.
+    parserFormat?: string;
   };
   previewVersion: string;
   preview: {
@@ -79,6 +105,9 @@ type Review = {
   // Optional/defaulted here so any test-constructed `Review` literal that
   // predates IMP-009 keeps compiling and rendering unchanged.
   attestedSecurityIds?: string[];
+  // BRK-009C: `[]` for a CSV batch; optional/defaulted for the same
+  // pre-existing-test-fixture reason as `attestedSecurityIds` above.
+  securities?: SecuritySummaryEntry[];
 };
 
 // IMP-008: the row(s) an exclude/include confirm dialog is currently open
@@ -264,6 +293,19 @@ export function ImportReview({
   const attestationOpenerRef = useRef<HTMLButtonElement | null>(null);
   const [attestationPending, setAttestationPending] = useState(false);
   const [attestationError, setAttestationError] = useState<string | null>(null);
+  // BRK-009C: "Accept Import" confirm dialog for a `sharesight_sync`
+  // batch's "Review securities" section -- ONE dialog shared by both the
+  // top and bottom accept buttons, mirroring the exclusion/attestation
+  // dialogs' identical ref + `showModal()`/opener-focus-restore pattern.
+  const [acceptDialogOpen, setAcceptDialogOpen] = useState(false);
+  const acceptDialogRef = useRef<HTMLDialogElement>(null);
+  const acceptOpenerRef = useRef<HTMLButtonElement | null>(null);
+  const [acceptPending, setAcceptPending] = useState(false);
+  const [acceptError, setAcceptError] = useState<string | null>(null);
+  // BRK-009C: per-security name/exchange metadata edit -- reuses the shared
+  // `pending`/`message` state every other one-off preview mutation in this
+  // component already reuses (`resolveMapping`, `verifySecurityCandidate`),
+  // rather than inventing a new per-row pending scheme.
   // UI-012: the review section (`import-review-result` below) renders far
   // ABOVE the import-history section further down the page. Opening a
   // pre-commit batch's review from history via `resumeReviewFromHistory`
@@ -303,6 +345,19 @@ export function ImportReview({
       attestationOpenerRef.current = null;
     }
   }, [pendingAttestation]);
+
+  useEffect(() => {
+    const dialog = acceptDialogRef.current;
+    if (acceptDialogOpen && dialog && !dialog.open) {
+      dialog.showModal();
+      dialog.querySelector<HTMLButtonElement>(".sheet-close")?.focus();
+    }
+    if (!acceptDialogOpen && dialog?.open) dialog.close();
+    if (!acceptDialogOpen && acceptOpenerRef.current) {
+      acceptOpenerRef.current.focus();
+      acceptOpenerRef.current = null;
+    }
+  }, [acceptDialogOpen]);
 
   useEffect(() => {
     void loadHistory();
@@ -938,6 +993,114 @@ export function ImportReview({
     }
   }
 
+  // BRK-009C: opens the ONE "Accept Import" confirm dialog shared by both
+  // the top and bottom accept buttons on the "Review securities" section.
+  function openAcceptDialog(event: React.MouseEvent<HTMLButtonElement>) {
+    acceptOpenerRef.current = event.currentTarget;
+    setAcceptError(null);
+    setAcceptDialogOpen(true);
+  }
+
+  // BRK-009C: the single "Accept Import" owner action for a `sharesight_sync`
+  // batch -- `POST /api/import/preview/:batchId/accept` (BRK-009B) collapses
+  // resolve-securities -> mark-ready -> commit into one server-orchestrated
+  // request with no client-supplied version/preview fields (every step
+  // re-derives its own expected state fresh from the database). The
+  // response carries a commit result, not a refreshed review, so this
+  // reuses `refreshPreview()`/`loadHistory()`/`loadHistoryDetail()` exactly
+  // like `commitImport()` above to resynchronize the rest of the screen.
+  async function submitAccept() {
+    if (!review) return;
+    setAcceptPending(true);
+    setAcceptError(null);
+    try {
+      const response = await fetch(
+        `/api/import/preview/${review.batch.id}/accept`,
+        { method: "POST" },
+      );
+      const result = (await response.json()) as
+        { ok: true; commit: CommitResult } | { ok: false; message: string };
+      if (!response.ok || result.ok === false) {
+        throw new Error(
+          result.ok === false
+            ? result.message
+            : "This import could not be accepted.",
+        );
+      }
+      setCommit(result.commit);
+      setAcceptDialogOpen(false);
+      await refreshPreview();
+      await loadHistory();
+      if (result.commit.status === "committed") {
+        await loadHistoryDetail(review.batch.id);
+      }
+    } catch (error) {
+      setAcceptError(
+        error instanceof Error
+          ? error.message
+          : "This import could not be accepted.",
+      );
+    } finally {
+      setAcceptPending(false);
+    }
+  }
+
+  // BRK-009C: the per-security name edit -- `entry` supplies the CURRENT
+  // identity tuple the server re-derives batch membership from. Exchange
+  // and currency have NO edit path at all (review round finding B2 removed
+  // the exchange branch as dead UI -- see the Exchange/Currency cells
+  // below, which always render read-only text). Reuses the shared
+  // `pending`/`message` state, matching this component's other one-off
+  // preview mutations (`resolveMapping`, `verifySecurityCandidate`).
+  async function submitSecurityMetadata(
+    entry: SecuritySummaryEntry,
+    event: React.FormEvent<HTMLFormElement>,
+  ) {
+    event.preventDefault();
+    if (!review) return;
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get("name") ?? "");
+    setPending(true);
+    setMessage(null);
+    try {
+      const response = await fetch(
+        `/api/import/preview/${review.batch.id}/securities/metadata`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            portfolioId: review.batch.targetPortfolioId,
+            sourceSymbol: entry.sourceSymbol,
+            sourceExchangeAlias: entry.sourceExchangeAlias,
+            sourceCurrencyCode: entry.sourceCurrencyCode,
+            securityId: entry.securityId,
+            name,
+            expectedVersion: review.batch.version,
+            expectedPreviewVersion: review.previewVersion,
+          }),
+        },
+      );
+      const result = (await response.json()) as
+        { ok: true; review: Review } | { ok: false; message: string };
+      if (!response.ok || result.ok === false) {
+        throw new Error(
+          result.ok === false
+            ? result.message
+            : "This security's details could not be saved.",
+        );
+      }
+      setReview(result.review);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "This security's details could not be saved.",
+      );
+    } finally {
+      setPending(false);
+    }
+  }
+
   async function resumeHistoryCommit() {
     if (
       historyDetail?.batch.status !== "committing" ||
@@ -1042,6 +1205,47 @@ export function ImportReview({
     ? review.issues.filter((issue) => isRowStillBlocking(issue, excludedRowIds))
     : [];
 
+  // BRK-009C: `parserFormat` distinguishes a `sharesight_sync` batch (gets
+  // the "Review securities" section) from a `strict-versioned-csv` one
+  // (unchanged UI, per the Orchestrator ruling) -- literal string, matching
+  // this file's existing convention of comparing batch status by literal
+  // rather than importing a server-only domain constant into a client
+  // component.
+  const securitiesReview =
+    review && review.batch.parserFormat === "sharesight_sync"
+      ? (review.securities ?? [])
+      : null;
+  // BRK-009C review round (finding B3): gates ONLY on PERSISTED,
+  // error-severity, non-excluded issues (`blockedRowIssues`, already
+  // exactly that -- computed `SECURITY_MAPPING_REQUIRED`/`_AMBIGUOUS` are
+  // never persisted to `import_issues`, so they never appear here) plus
+  // pending/already-committed. Deliberately NOT `review.preview.ready`:
+  // that COMPUTED flag also reflects `SECURITY_MAPPING_REQUIRED` for a
+  // merely `unresolved` security, which accept's own first step (the
+  // resolution pass) resolves automatically -- gating the button on it
+  // would grey out "Accept Import" in exactly the pre-resolution state the
+  // button exists to fix. If the server's resolution pass still cannot
+  // resolve everything, `acceptImportWithContext` returns its existing
+  // honest error and `acceptError` below surfaces it.
+  const acceptDisabled =
+    !review ||
+    blockedRowIssues.length > 0 ||
+    acceptPending ||
+    commit?.status === "committed" ||
+    review.batch.status === "committed";
+  const acceptTargetPortfolioName =
+    portfolios.find(
+      (portfolio) => portfolio.id === review?.batch.targetPortfolioId,
+    )?.name ?? "this portfolio";
+  // BRK-009C review round (B3): the informational (non-blocking)
+  // counterpart to the blocked-row summary -- how many of THIS batch's
+  // distinct securities are merely `unresolved` (not blocked by any
+  // persisted issue), which accept's own resolution pass will resolve
+  // automatically. Shown only when there is nothing actually blocking.
+  const unresolvedSecurityCount = (securitiesReview ?? []).filter(
+    (entry) => entry.state === "unresolved",
+  ).length;
+
   return (
     <main className="import-review-page">
       <p className="eyebrow">Import review</p>
@@ -1144,6 +1348,150 @@ export function ImportReview({
             <span>{review.preview.counts.unresolved} unresolved</span>
             <span>{review.excludedRows.length} excluded by owner</span>
           </div>
+
+          {securitiesReview ? (
+            <section
+              className="import-securities-review"
+              aria-labelledby="securities-title"
+            >
+              <div className="section-heading compact">
+                <div>
+                  <p className="eyebrow">Review securities</p>
+                  <h3 id="securities-title">
+                    {securitiesReview.length} distinct{" "}
+                    {securitiesReview.length === 1 ? "security" : "securities"}
+                  </h3>
+                </div>
+              </div>
+              <p>
+                Accepting will commit {review.preview.counts.transactionCreates}{" "}
+                transaction row
+                {review.preview.counts.transactionCreates === 1
+                  ? ""
+                  : "s"} and {review.preview.counts.dividendCreates} dividend
+                row
+                {review.preview.counts.dividendCreates === 1
+                  ? ""
+                  : "s"} into {acceptTargetPortfolioName}.
+              </p>
+              {blockedRowIssues.length > 0 ? (
+                <p role="note">
+                  Resolve {blockedRowIssues.length} blocked row
+                  {blockedRowIssues.length === 1 ? "" : "s"} below before this
+                  import can be accepted.
+                </p>
+              ) : unresolvedSecurityCount > 0 ? (
+                <p role="note">
+                  {unresolvedSecurityCount} unresolved securit
+                  {unresolvedSecurityCount === 1 ? "y" : "ies"} will be resolved
+                  automatically on accept.
+                </p>
+              ) : null}
+              <div className="import-accept-actions">
+                <button
+                  type="button"
+                  onClick={(event) => openAcceptDialog(event)}
+                  disabled={acceptDisabled}
+                >
+                  Accept Import
+                </button>
+              </div>
+
+              <div className="table-scroll">
+                <table className="import-securities-table">
+                  <caption className="sr-only">
+                    Distinct securities referenced by this import, one row per
+                    security
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Ticker</th>
+                      <th scope="col">Exchange</th>
+                      <th scope="col">Currency</th>
+                      <th scope="col">Name</th>
+                      <th scope="col">Rows</th>
+                      <th scope="col">State</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {securitiesReview.map((entry) => {
+                      const rowKey = `${entry.sourceSymbol}|${entry.sourceExchangeAlias ?? ""}|${entry.sourceCurrencyCode}`;
+                      return (
+                        <tr key={rowKey}>
+                          <td>{entry.sourceSymbol}</td>
+                          {/* Exchange and currency are always read-only --
+                              review round finding B2: a Sharesight row can
+                              never carry a missing market_code/currency_code
+                              (domain/sharesight/parse.ts's requiredString
+                              gate), so an edit control for either would be
+                              dead UI. */}
+                          <td>{entry.sourceExchangeAlias ?? "Unknown"}</td>
+                          <td>{entry.sourceCurrencyCode}</td>
+                          <td>
+                            {entry.nameEditable &&
+                            isMutableExclusionStatus(review.batch.status) ? (
+                              <form
+                                className="import-securities-edit"
+                                onSubmit={(event) =>
+                                  void submitSecurityMetadata(entry, event)
+                                }
+                              >
+                                <label>
+                                  Name for {entry.sourceSymbol}
+                                  <input
+                                    name="name"
+                                    defaultValue={entry.name ?? ""}
+                                    maxLength={120}
+                                    required
+                                    disabled={pending}
+                                  />
+                                </label>
+                                <button type="submit" disabled={pending}>
+                                  Save
+                                </button>
+                              </form>
+                            ) : (
+                              (entry.name ?? "Unknown")
+                            )}
+                          </td>
+                          <td>
+                            {entry.rowCount} row
+                            {entry.rowCount === 1 ? "" : "s"}
+                          </td>
+                          <td>
+                            {entry.state === "conflict" ? (
+                              <a href="#blocked-rows-title">
+                                Conflict -- see blocked rows below
+                              </a>
+                            ) : entry.state === "unresolved" ? (
+                              <a href="#mappings-title">
+                                Awaiting resolution -- see pending mappings
+                                above
+                              </a>
+                            ) : entry.state === "created" ? (
+                              "Newly added security"
+                            ) : (
+                              "Resolved to an existing security"
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="import-accept-actions">
+                <button
+                  type="button"
+                  onClick={(event) => openAcceptDialog(event)}
+                  disabled={acceptDisabled}
+                >
+                  Accept Import
+                </button>
+              </div>
+            </section>
+          ) : null}
 
           {pendingMappings.length > 0 ? (
             <section
@@ -1725,6 +2073,68 @@ export function ImportReview({
                   </button>
                 </div>
               </form>
+            </dialog>
+          ) : null}
+
+          {acceptDialogOpen && review ? (
+            <dialog
+              ref={acceptDialogRef}
+              className="import-exclusion-dialog"
+              aria-labelledby="accept-dialog-title"
+              onCancel={(event) => {
+                event.preventDefault();
+                if (acceptPending) return;
+                acceptDialogRef.current?.close();
+              }}
+              onClose={() => setAcceptDialogOpen(false)}
+            >
+              <button
+                type="button"
+                className="sheet-close"
+                onClick={() => {
+                  if (acceptPending) return;
+                  acceptDialogRef.current?.close();
+                }}
+              >
+                Close
+              </button>
+              <p className="eyebrow" id="accept-dialog-title">
+                Accept this import?
+              </p>
+              <p>
+                Accepting commits {review.preview.counts.transactionCreates}{" "}
+                transaction row
+                {review.preview.counts.transactionCreates === 1
+                  ? ""
+                  : "s"} and {review.preview.counts.dividendCreates} dividend
+                row
+                {review.preview.counts.dividendCreates === 1
+                  ? ""
+                  : "s"} into {acceptTargetPortfolioName}. This creates the
+                reviewed ledger effects; it cannot be undone from this screen,
+                only reversed afterward from import history.
+              </p>
+              {acceptError ? (
+                <p role="alert" className="sharesight-sync-error">
+                  {acceptError}
+                </p>
+              ) : null}
+              <div className="dialog-actions">
+                <button
+                  type="button"
+                  onClick={() => acceptDialogRef.current?.close()}
+                  disabled={acceptPending}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void submitAccept()}
+                  disabled={acceptPending}
+                >
+                  {acceptPending ? "Accepting…" : "Accept Import"}
+                </button>
+              </div>
             </dialog>
           ) : null}
         </section>

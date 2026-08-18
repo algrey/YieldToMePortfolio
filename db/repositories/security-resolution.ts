@@ -62,7 +62,11 @@ export type SecurityResolutionCandidateIdentity = {
 const MAX_CANONICAL_NAME_LENGTH = 120;
 const CONTROL_CHARACTER_PATTERN = /[\x00-\x1f\x7f]/g;
 
-function sanitizeCanonicalName(rawName: string): string {
+// Exported (BRK-009C) so `app/import-security-metadata-service.ts`'s owner
+// name-correction edit for an auto-created security applies the EXACT SAME
+// sanitization this module's own auto-create path does, rather than a
+// second, potentially-drifting reimplementation of the same rule.
+export function sanitizeCanonicalName(rawName: string): string {
   const stripped = rawName.replace(CONTROL_CHARACTER_PATTERN, "").trim();
   const safe = stripped.length > 0 ? stripped : "Unnamed security";
   return safe.slice(0, MAX_CANONICAL_NAME_LENGTH);
@@ -113,6 +117,78 @@ export type SecurityResolutionRepository = {
     candidate: SecurityVerificationCandidateInput,
   ): Promise<SecurityResolutionLinkResult>;
 };
+
+// BRK-009C: the durable, queryable "was this security auto-created by
+// BRK-009B's own resolution pass" signal the "Review securities" summary
+// reads to distinguish `state: "created"` from `state: "resolved"` (a
+// candidate this batch merely matched to a security that already existed,
+// however it was made) -- mirrors `listAttestedSecurityIds`'s identical
+// absence/presence-of-identifier technique (`security-attestation.ts`)
+// rather than parsing audit-log metadata: `createAndLink` above ALWAYS
+// stamps a fresh `ticker` identifier with `source = 'sharesight'` when it
+// creates a security (never on a match/link-only path, and never written
+// by any other repository -- `security-verification.ts` stamps the
+// provider's own name, `security-attestation.ts` stamps
+// `'owner_attested'`), so this is a durable per-security fact, not scoped
+// to any one batch's own resolution run.
+export async function listAutoCreatedSecurityIds(
+  client: SqlClient,
+  securityIds: readonly string[],
+): Promise<string[]> {
+  const uniqueIds = [...new Set(securityIds)];
+  if (uniqueIds.length === 0) return [];
+  const placeholders = uniqueIds.map(() => "?").join(", ");
+  const rows = await client.all<{ security_id: string }>(
+    `SELECT DISTINCT security_id AS security_id
+       FROM security_identifiers
+      WHERE scheme = 'ticker' AND source = 'sharesight' AND valid_to IS NULL
+        AND security_id IN (${placeholders})`,
+    uniqueIds,
+  );
+  return rows.map((row) => row.security_id);
+}
+
+// BRK-009C review round (finding B1): a STRICTER, user-scoped subset of
+// `listAutoCreatedSecurityIds` above -- the securities whose name THIS user
+// may edit from the "Review securities" screen right now. Auto-created
+// alone is not sufficient: `securities`/`security_identifiers` are a shared
+// canonical master (IMP-004B precedent), so a security this app created can
+// later be (a) linked by ANOTHER owner's portfolio (making it shared
+// canon -- renaming it here would silently rename another owner's holding's
+// display name), or (b) upgraded by a later provider verification (adding
+// an active `security_provider_mappings` row -- the provider's own naming
+// becomes authoritative, never overwritten by an owner's free-text edit
+// here). This function is a UX convenience only (drives which rows the UI
+// even OFFERS the edit control for); `app/import-security-metadata-service.ts`'s
+// guarded `UPDATE securities ... WHERE` re-enforces the identical three
+// predicates at write time regardless, so a race between this read and the
+// write can never actually rename a security that fails any predicate.
+export async function listNameEditableSecurityIds(
+  client: SqlClient,
+  userId: string,
+  securityIds: readonly string[],
+): Promise<string[]> {
+  const uniqueIds = [...new Set(securityIds)];
+  if (uniqueIds.length === 0) return [];
+  const placeholders = uniqueIds.map(() => "?").join(", ");
+  const rows = await client.all<{ security_id: string }>(
+    `SELECT DISTINCT si.security_id AS security_id
+       FROM security_identifiers si
+      WHERE si.scheme = 'ticker' AND si.source = 'sharesight' AND si.valid_to IS NULL
+        AND si.security_id IN (${placeholders})
+        AND NOT EXISTS (
+              SELECT 1 FROM security_provider_mappings spm
+               WHERE spm.security_id = si.security_id
+                 AND spm.valid_to IS NULL AND spm.status = 'verified'
+            )
+        AND NOT EXISTS (
+              SELECT 1 FROM portfolio_securities ps
+               WHERE ps.security_id = si.security_id AND ps.user_id <> ?
+            )`,
+    [...uniqueIds, userId],
+  );
+  return rows.map((row) => row.security_id);
+}
 
 export function createOwnedSecurityResolutionRepository(
   client: SqlClient,

@@ -3,6 +3,8 @@ import {
   createOwnedImportStagingRepository,
   createOwnedPortfolioRepository,
   listAttestedSecurityIds,
+  listAutoCreatedSecurityIds,
+  listNameEditableSecurityIds,
   type ImportMappingConfidence,
   type ImportMappingKind,
   type ImportMappingScope,
@@ -19,6 +21,7 @@ import {
   type SecurityVerifyActionSuccess,
 } from "./security-verification-service.ts";
 import { attestSecurityCandidateWithContext } from "./security-attestation-service.ts";
+import { updateImportSecurityMetadataWithContext } from "./import-security-metadata-service.ts";
 import {
   setImportRowExclusionWithContext,
   type ImportRowExclusionActionFailure,
@@ -65,11 +68,12 @@ async function loadReview(
     createOwnedImportMappingDecisionRepository(client).list(userId, batchId),
     createOwnedPortfolioRepository(client).list(userId),
     client.all<Record<string, unknown>>(
-      `SELECT id, portfolio_id, source_symbol, source_exchange_alias,
-        source_currency_code, security_id
-       FROM portfolio_securities
-       WHERE user_id = ?
-       ORDER BY source_symbol ASC, id ASC`,
+      `SELECT ps.id, ps.portfolio_id, ps.source_symbol, ps.source_exchange_alias,
+        ps.source_currency_code, ps.security_id, s.canonical_name
+       FROM portfolio_securities ps
+       LEFT JOIN securities s ON s.id = ps.security_id
+       WHERE ps.user_id = ?
+       ORDER BY ps.source_symbol ASC, ps.id ASC`,
       [userId],
     ),
     // DIV-004: existing OWNER-typed manual records only (import_batch_id
@@ -113,12 +117,25 @@ async function loadReview(
     portfolioSecurityId: String(row.portfolio_security_id),
     paymentDate: String(row.payment_date),
   }));
-  const attestedSecurityIds = await listAttestedSecurityIds(
-    client,
-    securityCandidates
-      .map((candidate) => candidate.securityId)
-      .filter((id): id is string => id !== null),
-  );
+  const linkedSecurityIds = securityCandidates
+    .map((candidate) => candidate.securityId)
+    .filter((id): id is string => id !== null);
+  // BRK-009C: `securities.canonical_name` for every linked candidate, read
+  // from the SAME query above (widened by one LEFT JOIN column) -- feeds
+  // the "Review securities" summary's Name column without a separate
+  // round trip.
+  const securityNames = new Map<string, string>();
+  for (const row of candidateRows) {
+    if (row.security_id !== null && row.canonical_name !== null) {
+      securityNames.set(String(row.security_id), String(row.canonical_name));
+    }
+  }
+  const [attestedSecurityIds, autoCreatedSecurityIds, nameEditableSecurityIds] =
+    await Promise.all([
+      listAttestedSecurityIds(client, linkedSecurityIds),
+      listAutoCreatedSecurityIds(client, linkedSecurityIds),
+      listNameEditableSecurityIds(client, userId, linkedSecurityIds),
+    ]);
   return buildImportReviewPreview({
     batch,
     rows,
@@ -128,6 +145,9 @@ async function loadReview(
     securityCandidates,
     existingDividendEntries,
     attestedSecurityIds,
+    securityNames,
+    autoCreatedSecurityIds,
+    nameEditableSecurityIds,
   });
 }
 
@@ -387,6 +407,24 @@ export async function attestSecurityCandidateAction(
   const context = await getAuthenticatedSqlContext();
   if (!context.ok) return context;
   return attestSecurityCandidateWithContext(context, batchId, value);
+}
+
+// The business logic lives in `import-security-metadata-service.ts`'s
+// `updateImportSecurityMetadataWithContext`, kept free of `next/headers`/
+// D1-binding resolution for the same testability reason as
+// `attestSecurityCandidateAction` above. This action only resolves the
+// authenticated context (which already carries `requestId`, needed for the
+// edit's audit event) and delegates. Declared against THIS file's own
+// broader `ImportActionFailure` (not `ImportSecurityMetadataActionFailure`,
+// which deliberately excludes 401/503) for the identical reason
+// `attestSecurityCandidateAction`'s header comment gives.
+export async function updateImportSecurityMetadataAction(
+  batchId: string,
+  value: unknown,
+): Promise<ImportActionSuccess | ImportActionFailure> {
+  const context = await getAuthenticatedSqlContext();
+  if (!context.ok) return context;
+  return updateImportSecurityMetadataWithContext(context, batchId, value);
 }
 
 // The business logic lives in `import-row-exclusion-service.ts`'s

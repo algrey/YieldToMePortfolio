@@ -5,6 +5,8 @@ import {
   createOwnedImportStagingRepository,
   createOwnedPortfolioRepository,
   listAttestedSecurityIds,
+  listAutoCreatedSecurityIds,
+  listNameEditableSecurityIds,
   type ImportBatchRecord,
   type ImportRowRecord,
   type SqlClient,
@@ -68,11 +70,12 @@ async function loadImportReview(
       createOwnedImportMappingDecisionRepository(client).list(userId, batchId),
       createOwnedPortfolioRepository(client).list(userId),
       client.all<Record<string, unknown>>(
-        `SELECT id, portfolio_id, source_symbol, source_exchange_alias,
-        source_currency_code, security_id
-       FROM portfolio_securities
-       WHERE user_id = ?
-       ORDER BY source_symbol ASC, id ASC`,
+        `SELECT ps.id, ps.portfolio_id, ps.source_symbol, ps.source_exchange_alias,
+        ps.source_currency_code, ps.security_id, s.canonical_name
+       FROM portfolio_securities ps
+       LEFT JOIN securities s ON s.id = ps.security_id
+       WHERE ps.user_id = ?
+       ORDER BY ps.source_symbol ASC, ps.id ASC`,
         [userId],
       ),
     ],
@@ -89,12 +92,25 @@ async function loadImportReview(
       sourceCurrencyCode: String(row.source_currency_code),
       securityId: row.security_id === null ? null : String(row.security_id),
     }));
-  const attestedSecurityIds = await listAttestedSecurityIds(
-    client,
-    securityCandidates
-      .map((candidate) => candidate.securityId)
-      .filter((id): id is string => id !== null),
-  );
+  const linkedSecurityIds = securityCandidates
+    .map((candidate) => candidate.securityId)
+    .filter((id): id is string => id !== null);
+  // BRK-009C: `securities.canonical_name` for every linked candidate, read
+  // from the SAME query above (widened by one LEFT JOIN column) -- feeds
+  // the "Review securities" summary's Name column without a separate
+  // round trip.
+  const securityNames = new Map<string, string>();
+  for (const row of candidateRows) {
+    if (row.security_id !== null && row.canonical_name !== null) {
+      securityNames.set(String(row.security_id), String(row.canonical_name));
+    }
+  }
+  const [attestedSecurityIds, autoCreatedSecurityIds, nameEditableSecurityIds] =
+    await Promise.all([
+      listAttestedSecurityIds(client, linkedSecurityIds),
+      listAutoCreatedSecurityIds(client, linkedSecurityIds),
+      listNameEditableSecurityIds(client, userId, linkedSecurityIds),
+    ]);
   return buildImportReviewPreview({
     batch,
     rows,
@@ -108,6 +124,9 @@ async function loadImportReview(
     })),
     securityCandidates,
     attestedSecurityIds,
+    securityNames,
+    autoCreatedSecurityIds,
+    nameEditableSecurityIds,
   });
 }
 

@@ -2499,6 +2499,128 @@ dd {
   line-height: 1.35;
 }
 
+/* BRK-009C: the pre-acceptance "Review securities" section for a
+   `sharesight_sync` batch. */
+.import-securities-review {
+  margin-top: 28px;
+}
+
+.import-securities-review > p {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.import-accept-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.import-accept-actions button {
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--green);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--cream);
+  cursor: pointer;
+}
+
+.import-accept-actions button:hover {
+  background: rgb(99 200 120 / 10%);
+}
+
+.import-accept-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.import-securities-review .table-scroll {
+  margin-top: 16px;
+  overflow-x: auto;
+}
+
+.import-securities-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.import-securities-table th,
+.import-securities-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--divider);
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.import-securities-table th {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.import-securities-table a {
+  color: var(--green-bright);
+  text-decoration: underline;
+}
+
+.import-securities-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  white-space: normal;
+}
+
+.import-securities-edit label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.import-securities-edit input {
+  min-height: 44px;
+  min-width: 140px;
+  padding: 6px 10px;
+  border: 1px solid var(--divider);
+  border-radius: 3px;
+  background: var(--ink);
+  color: var(--cream);
+  font-size: 0.86rem;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.import-securities-edit button {
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--green);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--cream);
+  cursor: pointer;
+}
+
+.import-securities-edit button:hover {
+  background: rgb(99 200 120 / 10%);
+}
+
+.import-securities-edit button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
 .import-mapping-list {
   margin-top: 28px;
 }

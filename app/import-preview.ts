@@ -6,6 +6,11 @@ import type {
 } from "../domain/imports/reconciliation.ts";
 import { buildImportReview } from "../domain/imports/review.ts";
 import type { ImportReviewMapping } from "../domain/imports/review.ts";
+import {
+  deriveSharesightSecuritiesSummary,
+  type SharesightSecuritySummaryEntry,
+} from "../domain/imports/security-summary.ts";
+import { SHARESIGHT_SYNC_PARSER_FORMAT } from "../domain/sharesight-sync/index.ts";
 import type {
   ImportBatchRecord,
   ImportIssueRecord,
@@ -15,7 +20,15 @@ import type {
 export type ImportReviewPreview = {
   batch: Pick<
     ImportBatchRecord,
-    "id" | "filename" | "status" | "version" | "targetPortfolioId"
+    | "id"
+    | "filename"
+    | "status"
+    | "version"
+    | "targetPortfolioId"
+    // BRK-009C: the review UI needs to know a batch's parser format to
+    // decide whether to render the "Review securities" section at all --
+    // CSV (`strict-versioned-csv`) batches never get one (unchanged UI).
+    | "parserFormat"
   >;
   previewVersion: string;
   preview: ImportReconciliationPreview;
@@ -46,6 +59,13 @@ export type ImportReviewPreview = {
   // every pre-existing caller of this function -- test fixtures included --
   // keeps compiling unchanged; always present on output.
   attestedSecurityIds: readonly string[];
+  // BRK-009C: the pre-acceptance "Review securities" table's data, one
+  // entry per DISTINCT security this `sharesight_sync` batch's rows
+  // reference. Always `[]` for a `strict-versioned-csv` batch (unchanged
+  // UI, per the Orchestrator ruling) -- see `deriveSharesightSecuritiesSummary`
+  // for the derivation and its own header comment for why "conflict" and
+  // "unresolved" are both genuine, distinct states.
+  securities: readonly SharesightSecuritySummaryEntry[];
 };
 
 export function buildImportReviewPreview(input: {
@@ -57,6 +77,15 @@ export function buildImportReviewPreview(input: {
   securityCandidates: ImportPreviewSecurityCandidate[];
   existingDividendEntries?: ImportPreviewExistingDividendEntry[];
   attestedSecurityIds?: readonly string[];
+  // BRK-009C: pre-fetched inputs to `deriveSharesightSecuritiesSummary` --
+  // this function stays a synchronous, DB-free builder (like every other
+  // field here), so every caller queries these itself first. Optional/
+  // defaulted so pre-BRK-009C callers/test fixtures keep compiling
+  // unchanged; harmless no-ops for a CSV batch either way (the summary is
+  // only ever derived for a `sharesight_sync` batch below).
+  securityNames?: ReadonlyMap<string, string>;
+  autoCreatedSecurityIds?: readonly string[];
+  nameEditableSecurityIds?: readonly string[];
 }): ImportReviewPreview {
   const built = buildImportReview({
     batch: input.batch,
@@ -75,6 +104,27 @@ export function buildImportReviewPreview(input: {
       symbol: row.normalizedFields?.symbol ?? null,
     }))
     .sort((left, right) => left.physicalRowNumber - right.physicalRowNumber);
+  const securities: SharesightSecuritySummaryEntry[] =
+    input.batch.parserFormat === SHARESIGHT_SYNC_PARSER_FORMAT
+      ? deriveSharesightSecuritiesSummary({
+          rows: input.rows,
+          targetPortfolioId: input.batch.targetPortfolioId,
+          securityCandidates: input.securityCandidates,
+          conflictedRowIds: new Set(
+            input.issues
+              .filter(
+                (issue) =>
+                  issue.code === "SECURITY_RESOLUTION_CONFLICT" &&
+                  issue.resolvedAt === null,
+              )
+              .map((issue) => issue.rowId)
+              .filter((rowId): rowId is string => rowId !== null),
+          ),
+          securityNames: input.securityNames ?? new Map(),
+          autoCreatedSecurityIds: new Set(input.autoCreatedSecurityIds ?? []),
+          nameEditableSecurityIds: new Set(input.nameEditableSecurityIds ?? []),
+        })
+      : [];
   return {
     batch: {
       id: input.batch.id,
@@ -82,6 +132,7 @@ export function buildImportReviewPreview(input: {
       status: input.batch.status,
       version: input.batch.version,
       targetPortfolioId: input.batch.targetPortfolioId,
+      parserFormat: input.batch.parserFormat,
     },
     previewVersion: built.previewVersion,
     preview: built.preview,
@@ -90,5 +141,6 @@ export function buildImportReviewPreview(input: {
     securityCandidates: input.securityCandidates,
     excludedRows,
     attestedSecurityIds: input.attestedSecurityIds ?? [],
+    securities,
   };
 }
