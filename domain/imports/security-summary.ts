@@ -23,7 +23,16 @@ export type SharesightSecuritySummaryRow = Readonly<{
     "portfolio_security_definition" | "transaction" | "blank" | "unsupported";
   normalizedFields: Pick<
     NormalizedImportRow,
-    "symbol" | "exchange" | "currency" | "instrumentName"
+    | "symbol"
+    | "exchange"
+    | "currency"
+    | "instrumentName"
+    // UI-015: needed to recognize a Sharesight totals-mode dividend row
+    // (`type === "dividend" && totalCashDecimal !== null`), mirroring
+    // `reconciliation.ts`'s `isTotalsModeDividend` -- see that flag's own
+    // grouping use below.
+    | "type"
+    | "totalCashDecimal"
   > | null;
   // IMP-008: an owner-excluded row contributes to no security's row count
   // and can never be the sole reason a security appears in this summary --
@@ -79,6 +88,24 @@ export type SharesightSecuritySummaryEntry = Readonly<{
   // server-side regardless (this field is a UX convenience, never the sole
   // guard).
   nameEditable: boolean;
+  // UI-015: extra payout currencies actually present among rows that were
+  // folded into THIS line -- see the merge pass below. A dividend-only
+  // group in a foreign currency (BRK-010: same instrument, cash currency is
+  // a property of the CASH EVENT, not the security) merges into its
+  // resolved security's own line rather than rendering as a second,
+  // falsely "unresolved" line; this is how the merged line discloses the
+  // extra currency honestly -- never fabricated, always exactly the
+  // currencies this batch's own rows carry. Empty for every entry that
+  // wasn't merged.
+  additionalPayoutCurrencyCodes: readonly string[];
+  // UI-015 review round F4: true when THIS line's rows are entirely
+  // totals-mode dividend payouts with NO non-dividend (primary) sibling
+  // present in the batch to merge into -- the payout-only steady state (a
+  // resync batch that is 100% foreign-currency dividends for a security
+  // whose trades were committed in an earlier batch). The UI reads this to
+  // append a "(dividends only)" hint so a foreign currency shown here is
+  // never mistaken for the security's own trading currency.
+  dividendOnly: boolean;
 }>;
 
 // Mirrors `normalized()` in `domain/imports/reconciliation.ts` (trim +
@@ -94,7 +121,25 @@ type Group = {
   sourceCurrencyCode: string;
   instrumentName: string | null;
   rowIds: string[];
+  // UI-015: true while EVERY row seen so far in this group is a Sharesight
+  // totals-mode dividend payout -- mirrors reconciliation.ts's per-row
+  // `isTotalsModeDividend` flag (a totals-mode payout's cash currency is a
+  // property of the CASH EVENT, not the security's identity, so candidate
+  // matching for such a group ignores currency below, exactly like
+  // reconciliation's own committed-row matching). A single non-payout row
+  // (a trade) or a per-share CSV-style dividend row (no established FX
+  // mechanism) anywhere in the group permanently disqualifies it.
+  isTotalsModeDividendOnly: boolean;
 };
+
+function isTotalsModeDividendRow(
+  fields: SharesightSecuritySummaryRow["normalizedFields"],
+): boolean {
+  return (
+    (fields?.type ?? null) === "dividend" &&
+    (fields?.totalCashDecimal ?? null) !== null
+  );
+}
 
 export function deriveSharesightSecuritiesSummary(input: {
   rows: readonly SharesightSecuritySummaryRow[];
@@ -151,6 +196,7 @@ export function deriveSharesightSecuritiesSummary(input: {
         sourceCurrencyCode: currency,
         instrumentName: null,
         rowIds: [],
+        isTotalsModeDividendOnly: true,
       };
       groups.set(key, group);
     }
@@ -158,10 +204,20 @@ export function deriveSharesightSecuritiesSummary(input: {
     if (group.instrumentName === null && row.normalizedFields?.instrumentName) {
       group.instrumentName = row.normalizedFields.instrumentName;
     }
+    group.isTotalsModeDividendOnly =
+      group.isTotalsModeDividendOnly &&
+      isTotalsModeDividendRow(row.normalizedFields);
   }
 
-  const entries: SharesightSecuritySummaryEntry[] = [];
+  type RawEntry = SharesightSecuritySummaryEntry & {
+    isTotalsModeDividendOnly: boolean;
+  };
+  const rawEntries: RawEntry[] = [];
   for (const group of groups.values()) {
+    // UI-015: a dividend-only group's candidate match ignores currency --
+    // mirrors reconciliation.ts's `isTotalsModeDividend` exception on its
+    // own `candidates` filter (~line 336-345), so this derivation can never
+    // disagree with what reconciliation itself actually resolved.
     const candidate = input.securityCandidates.find(
       (item) =>
         item.portfolioId === input.targetPortfolioId &&
@@ -169,8 +225,9 @@ export function deriveSharesightSecuritiesSummary(input: {
           normalizedKeyPart(group.sourceSymbol) &&
         normalizedKeyPart(item.sourceExchangeAlias ?? "") ===
           normalizedKeyPart(group.sourceExchangeAlias ?? "") &&
-        normalizedKeyPart(item.sourceCurrencyCode) ===
-          normalizedKeyPart(group.sourceCurrencyCode),
+        (group.isTotalsModeDividendOnly ||
+          normalizedKeyPart(item.sourceCurrencyCode) ===
+            normalizedKeyPart(group.sourceCurrencyCode)),
     );
     const linkedSecurityId = candidate?.securityId ?? null;
     // F1 (BRK-009C review round): a conflict check runs BEFORE trusting a
@@ -203,7 +260,7 @@ export function deriveSharesightSecuritiesSummary(input: {
       securityId = null;
       name = group.instrumentName;
     }
-    entries.push({
+    rawEntries.push({
       sourceSymbol: group.sourceSymbol,
       sourceExchangeAlias: group.sourceExchangeAlias,
       sourceCurrencyCode: group.sourceCurrencyCode,
@@ -215,6 +272,96 @@ export function deriveSharesightSecuritiesSummary(input: {
         state === "created" &&
         securityId !== null &&
         input.nameEditableSecurityIds.has(securityId),
+      additionalPayoutCurrencyCodes: [],
+      // Placeholder -- the merge pass below computes the REAL, final
+      // `dividendOnly` value per rendered entry (see its own field comment).
+      dividendOnly: false,
+      isTotalsModeDividendOnly: group.isTotalsModeDividendOnly,
+    });
+  }
+
+  // UI-015: fold a dividend-only foreign-currency group into its resolved
+  // security's own (non-dividend-only) line -- one line per security, per
+  // the Orchestrator ruling. Only entries that actually resolved THIS batch
+  // (state "resolved"/"created", non-null securityId) are eligible;
+  // "conflict"/"unresolved" groups are left exactly as computed above.
+  const bySecurityId = new Map<string, RawEntry[]>();
+  for (const raw of rawEntries) {
+    if (raw.securityId === null) continue;
+    if (raw.state !== "resolved" && raw.state !== "created") continue;
+    const siblings = bySecurityId.get(raw.securityId) ?? [];
+    siblings.push(raw);
+    bySecurityId.set(raw.securityId, siblings);
+  }
+
+  const entries: SharesightSecuritySummaryEntry[] = [];
+  for (const raw of rawEntries) {
+    const siblings =
+      raw.securityId !== null ? (bySecurityId.get(raw.securityId) ?? []) : [];
+    // F1 (review round): a security should never have more than one
+    // non-dividend-only ("primary") sibling in one batch -- the unique
+    // portfolio_securities index makes it near-impossible -- but guarded
+    // anyway: only the FIRST primary sibling (deterministic, earliest row
+    // order) ever absorbs the dividend-only siblings, so a hypothetical
+    // second primary can never double-count the same dividend rows or
+    // duplicate the currency disclosure.
+    const primary = siblings.find(
+      (sibling) => !sibling.isTotalsModeDividendOnly,
+    );
+    if (raw.isTotalsModeDividendOnly && primary !== undefined) {
+      // Folded into the primary line for this security below -- never
+      // rendered as its own, second line.
+      continue;
+    }
+    if (
+      !raw.isTotalsModeDividendOnly &&
+      siblings.length > 1 &&
+      raw === primary
+    ) {
+      const extraCurrencies = [
+        ...new Set(
+          siblings
+            .filter(
+              (sibling) => sibling !== raw && sibling.isTotalsModeDividendOnly,
+            )
+            .map((sibling) => sibling.sourceCurrencyCode),
+        ),
+      ].sort();
+      const rowCount = siblings
+        .filter(
+          (sibling) => sibling === raw || sibling.isTotalsModeDividendOnly,
+        )
+        .reduce((sum, sibling) => sum + sibling.rowCount, 0);
+      entries.push({
+        sourceSymbol: raw.sourceSymbol,
+        sourceExchangeAlias: raw.sourceExchangeAlias,
+        sourceCurrencyCode: raw.sourceCurrencyCode,
+        name: raw.name,
+        securityId: raw.securityId,
+        rowCount,
+        state: raw.state,
+        nameEditable: raw.nameEditable,
+        additionalPayoutCurrencyCodes: extraCurrencies,
+        dividendOnly: false,
+      });
+      continue;
+    }
+    entries.push({
+      sourceSymbol: raw.sourceSymbol,
+      sourceExchangeAlias: raw.sourceExchangeAlias,
+      sourceCurrencyCode: raw.sourceCurrencyCode,
+      name: raw.name,
+      securityId: raw.securityId,
+      rowCount: raw.rowCount,
+      state: raw.state,
+      nameEditable: raw.nameEditable,
+      additionalPayoutCurrencyCodes: raw.additionalPayoutCurrencyCodes,
+      // F4 (review round): a solo line composed entirely of totals-mode
+      // dividend rows (no primary sibling to merge into -- the payout-only
+      // steady state) flags itself so the UI can hint that this currency is
+      // the PAYOUT currency, not necessarily the security's own trading
+      // currency.
+      dividendOnly: raw.isTotalsModeDividendOnly,
     });
   }
 

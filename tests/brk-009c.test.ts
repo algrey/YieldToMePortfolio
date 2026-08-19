@@ -72,6 +72,12 @@ function row(
               overrides.instrumentName === undefined
                 ? null
                 : overrides.instrumentName,
+            // UI-015: every pre-existing BRK-009C fixture row is a plain
+            // trade, never a Sharesight totals-mode dividend payout -- so
+            // it must never engage the new dividend-currency-agnostic
+            // merge path.
+            type: "buy",
+            totalCashDecimal: null,
           },
     excludedByOwnerAt: overrides.excludedByOwnerAt ?? null,
   };
@@ -1487,9 +1493,13 @@ test("BRK-009C review round B2: the Exchange and Currency cells are always plain
     component,
     /<td>\{entry\.sourceExchangeAlias \?\? "Unknown"\}<\/td>/,
   );
-  assert.match(component, /<td>\{entry\.sourceCurrencyCode\}<\/td>/);
+  // UI-015: the currency cell now leads with the plain read-only currency
+  // code, optionally followed by an honest "(dividends in ...)" disclosure
+  // for a BRK-010-merged line -- still never an editable form.
+  assert.match(component, /<td>\s*\{entry\.sourceCurrencyCode\}/);
   assert.doesNotMatch(component, /Exchange for \{entry\.sourceSymbol\}/);
   assert.doesNotMatch(component, /name="exchange"/);
+  assert.doesNotMatch(component, /name="currency"/);
 });
 
 test("BRK-009C: the name edit is gated on entry.nameEditable, never merely state === 'created'", async () => {

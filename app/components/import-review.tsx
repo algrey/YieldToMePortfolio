@@ -44,6 +44,17 @@ type SecuritySummaryEntry = {
   // compiling; the server's own guarded `UPDATE ... WHERE` re-enforces the
   // identical predicates regardless of what this flag says.
   nameEditable?: boolean;
+  // UI-015: extra payout currencies actually present among rows folded into
+  // this line (BRK-010's dividend-currency-agnostic merge -- see
+  // `domain/imports/security-summary.ts`'s field of the same name).
+  // Optional/defaulted to `[]` for the same pre-existing-test-fixture reason
+  // as `nameEditable` above.
+  additionalPayoutCurrencyCodes?: string[];
+  // UI-015 review round F4: true for a solo line composed entirely of
+  // totals-mode dividend rows (the payout-only steady state -- no primary
+  // sibling in this batch to merge into). Optional/defaulted to false for
+  // the same pre-existing-test-fixture reason as `nameEditable` above.
+  dividendOnly?: boolean;
 };
 type Review = {
   batch: {
@@ -256,6 +267,27 @@ function securityRowKey(entry: {
   sourceCurrencyCode: string;
 }): string {
   return `${entry.sourceSymbol}|${entry.sourceExchangeAlias ?? ""}|${entry.sourceCurrencyCode}`;
+}
+
+// UI-015: the identical key shape reconciliation.ts's own `securityKey()`
+// builds server-side (portfolioId RAW, symbol/exchange/currency normalized)
+// -- lets the securities table recognize which pending "security" mapping,
+// if any, actually names THIS entry's group, so the "Awaiting resolution"
+// affordance only ever claims an affordance that genuinely exists above.
+function pendingSecurityMappingKeyFor(
+  portfolioId: string,
+  entry: {
+    sourceSymbol: string;
+    sourceExchangeAlias: string | null;
+    sourceCurrencyCode: string;
+  },
+): string {
+  return [
+    portfolioId,
+    normalizedKeyPart(entry.sourceSymbol),
+    normalizedKeyPart(entry.sourceExchangeAlias ?? ""),
+    normalizedKeyPart(entry.sourceCurrencyCode),
+  ].join("|");
 }
 
 // UI-014 part 3: renders one row's business-basics facts (symbol/type/
@@ -1362,6 +1394,16 @@ export function ImportReview({
       ]
     : [];
 
+  // UI-015: the exact set of "security" pending-mapping keys the block
+  // above actually produced -- the securities table's "Awaiting resolution"
+  // affordance below must never claim a link to the pending-mappings
+  // section that isn't genuinely there.
+  const pendingSecurityMappingKeys = new Set(
+    pendingMappings
+      .filter((mapping) => mapping.kind === "security")
+      .map((mapping) => mapping.sourceKey),
+  );
+
   // IMP-008 review finding B2-residual: an already-excluded row's issue is
   // shown, accurately, in "Excluded rows" below -- suppressed here (see
   // `isRowStillBlocking`) rather than relabelled, to avoid listing the same
@@ -1658,7 +1700,35 @@ export function ImportReview({
                               gate), so an edit control for either would be
                               dead UI. */}
                           <td>{entry.sourceExchangeAlias ?? "Unknown"}</td>
-                          <td>{entry.sourceCurrencyCode}</td>
+                          <td>
+                            {entry.sourceCurrencyCode}
+                            {/* UI-015: a dividend-only foreign-currency
+                                group merged into this line (BRK-010's
+                                dividend-currency-agnostic match) discloses
+                                the extra payout currency honestly, text not
+                                color -- never fabricated, only currencies
+                                genuinely present among this line's own
+                                rows. */}
+                            {(entry.additionalPayoutCurrencyCodes ?? [])
+                              .length > 0 ? (
+                              <>
+                                {" "}
+                                (dividends in{" "}
+                                {(
+                                  entry.additionalPayoutCurrencyCodes ?? []
+                                ).join(", ")}
+                                )
+                              </>
+                            ) : null}
+                            {/* UI-015 review round F4: a solo payout-only
+                                line (dividendOnly, no primary sibling to
+                                merge into) hints that this currency is the
+                                PAYOUT currency -- not necessarily the
+                                security's own trading currency -- so a USD
+                                cell on what is really an AUD security is
+                                never ambiguous. */}
+                            {entry.dividendOnly ? <> (dividends only)</> : null}
+                          </td>
                           <td>
                             {/* UI-014 part 1 (owner-reported): a prefilled
                                 name is plain text -- no input, no Save --
@@ -1726,10 +1796,25 @@ export function ImportReview({
                                 Conflict -- see blocked rows below
                               </a>
                             ) : entry.state === "unresolved" ? (
-                              <a href="#mappings-title">
-                                Awaiting resolution -- see pending mappings
-                                above
-                              </a>
+                              // UI-015: the affordance this text points at
+                              // must actually exist -- an "unresolved"
+                              // group with no matching pending mapping
+                              // (e.g. already satisfied by a batch-scope
+                              // mapping decision) never claims a link to
+                              // nothing. Names the symbol either way.
+                              pendingSecurityMappingKeys.has(
+                                pendingSecurityMappingKeyFor(
+                                  review.batch.targetPortfolioId ?? "",
+                                  entry,
+                                ),
+                              ) ? (
+                                <a href="#mappings-title">
+                                  Awaiting resolution -- see pending mappings
+                                  above ({entry.sourceSymbol})
+                                </a>
+                              ) : (
+                                `Not yet resolved (${entry.sourceSymbol})`
+                              )
                             ) : entry.state === "created" ? (
                               "Newly added security"
                             ) : (
