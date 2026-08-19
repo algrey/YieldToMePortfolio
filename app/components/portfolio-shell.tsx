@@ -849,10 +849,45 @@ function OwnedHoldingsScreen({
           <p className="detail-explanation">{selectedHolding.explanation}</p>
           {portfolioId ? (
             <p>
+              {/* UI-016: the sheet is a real showModal() top-layer dialog
+                  (see the `.sheet-back`/QuotesScreen precedent above) --
+                  leaving it open while the client router's async RSC
+                  transition swaps in the dividends page left the new page
+                  rendering underneath a still-open top-layer element, so
+                  the click looked dead. Close the dialog synchronously on
+                  activation (before Link's own async navigate runs) and
+                  keep a real `href` so the anchor still works with JS
+                  disabled. Styled as a visible action (`.sheet-back`),
+                  not a trailing word.
+
+                  Review follow-up (c): a modified click (cmd/ctrl/shift/
+                  alt, or a non-primary button such as a middle click) is
+                  the browser's own "open in a new tab/window" gesture --
+                  Link's OWN handler already skips its SPA navigate for
+                  exactly this case (`vinext/dist/shims/link.js`'s
+                  `e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey ||
+                  e.altKey` guard) and lets the native browser action open a
+                  second tab while THIS tab's sheet stays put. Mirror the
+                  identical guard here so this dialog does not close (and
+                  the sheet does not vanish) out from under an owner who
+                  never left the current tab. */}
               <Link
+                className="sheet-back"
                 href={`/portfolio/${portfolioId}/securities/${selectedHolding.id}/dividends`}
+                onClick={(event) => {
+                  if (
+                    event.button !== 0 ||
+                    event.metaKey ||
+                    event.ctrlKey ||
+                    event.shiftKey ||
+                    event.altKey
+                  ) {
+                    return;
+                  }
+                  dialogRef.current?.close();
+                }}
               >
-                Dividends
+                View dividends
               </Link>
             </p>
           ) : null}

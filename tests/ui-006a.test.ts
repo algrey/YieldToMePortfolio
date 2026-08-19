@@ -107,6 +107,8 @@ const landingProps = {
   assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
   // CGT-001B: the third tab's target, added alongside the existing two.
   gainsHref: "/portfolio/portfolio-a/gains",
+  // UI-016: the portfolio-wide individual-dividends list link.
+  dividendsHref: "/portfolio/portfolio-a/income/dividends",
 };
 
 function renderLanding(overrides: Record<string, unknown> = {}) {
@@ -636,7 +638,7 @@ test("UI-006A: both Income routes load via the owner-scoped context, deny an uno
   assert.match(service, /if \(!portfolio\) throw new Error\("not_owned"\)/);
 });
 
-test("follow-up 3: the landing page requests the smallest valid year range (0 back / 1 forward) instead of the service's 10/10 default, since it never renders multiYear/pastFinancialYears/currentFinancialYear", async () => {
+test("UI-016 (supersedes follow-up 3): the landing page now requests real past-FY history (5 back / 1 forward), since it renders pastFinancialYears; multiYear/currentFinancialYear are still unused and not fetched wider than necessary", async () => {
   const [landingPage, landingComponent] = await Promise.all([
     readFile(
       new URL(
@@ -652,12 +654,14 @@ test("follow-up 3: the landing page requests the smallest valid year range (0 ba
   ]);
   assert.match(
     landingPage,
-    /loadOwnedIncomeProjection\(\s*context\.client,\s*context\.userId,\s*portfolioId,\s*new Date\(\),\s*\{ yearsBack: 0, yearsForward: 1 \}/,
+    /loadOwnedIncomeProjection\(\s*context\.client,\s*context\.userId,\s*portfolioId,\s*new Date\(\),\s*\{ yearsBack: 5, yearsForward: 1 \}/,
   );
-  // IncomeLanding really does not read the fields the wider range would
-  // have computed -- the optimisation is safe, not just applied blindly.
+  // UI-016: IncomeLanding now DOES read pastFinancialYears (the past-FY
+  // table this task added) -- multiYear/currentFinancialYear remain
+  // unused by this screen (the multi-year sub-page owns those), so the
+  // fetched range stays as narrow as the screen's real needs allow.
+  assert.match(landingComponent, /projection\.pastFinancialYears/);
   assert.doesNotMatch(landingComponent, /projection\.multiYear/);
-  assert.doesNotMatch(landingComponent, /projection\.pastFinancialYears/);
   assert.doesNotMatch(landingComponent, /projection\.currentFinancialYear/);
 });
 

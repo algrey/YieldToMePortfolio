@@ -13,11 +13,33 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { OwnedIncomeProjection } from "../owned-income-projection.ts";
+import type { PastFyDividendSource } from "../../domain/dividends/projection.ts";
 import {
   formatCoverage,
   formatIncomeMoney,
   formatIncomePercent,
 } from "../income-format.ts";
+
+// UI-016: compact source-status text for the past-FY table -- literal,
+// honest labels only (never collapses `no_evidence`/`unavailable` into a
+// fabricated "actual"). Mirrors `income-multi-year.tsx`'s `mapPastRow`
+// grouping but keeps `no_evidence` and `unavailable` visibly distinct here
+// since this compact table has no row-detail dialog to explain the
+// difference the way the multi-year sub-page does.
+function pastFySourceStatus(source: PastFyDividendSource): string {
+  switch (source) {
+    case "fy_override":
+    case "actual":
+      return "actual";
+    case "provider_estimate":
+    case "partially_estimated":
+      return "estimate";
+    case "no_evidence":
+      return "no evidence";
+    case "unavailable":
+      return "unavailable";
+  }
+}
 
 export function IncomeLanding({
   projection,
@@ -25,12 +47,14 @@ export function IncomeLanding({
   multiYearHref,
   assumptionsHref,
   gainsHref,
+  dividendsHref,
 }: {
   projection: OwnedIncomeProjection;
   portfolioId: string;
   multiYearHref: string;
   assumptionsHref: string;
   gainsHref: string;
+  dividendsHref: string;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const explainOpenerRef = useRef<HTMLButtonElement | null>(null);
@@ -80,6 +104,7 @@ export function IncomeLanding({
         <span aria-current="page">Next 12 months</span>
         <Link href={multiYearHref}>Multi-year</Link>
         <Link href={gainsHref}>Capital gains</Link>
+        <Link href={dividendsHref}>All dividends</Link>
       </nav>
 
       {breakdown.status === "no_coverage" ? (
@@ -190,6 +215,112 @@ export function IncomeLanding({
           </dl>
         </>
       )}
+
+      {/* UI-016: recent financial-year history on the main Income tab --
+          previously `pastFinancialYears` was threaded to this component but
+          never rendered here (only the multi-year sub-page showed it), and
+          the page requested `yearsBack: 0` so the rows were empty anyway.
+          Independent of `breakdown.status` (a forward-projection coverage
+          gap doesn't mean past history is unavailable). Honest states only:
+          `formatIncomeMoney(null)` renders "Unavailable" rather than a
+          fabricated zero, and the source column names `no_evidence` /
+          `unavailable` explicitly rather than folding them into "actual". */}
+      <section
+        className="income-past-fy"
+        aria-labelledby="income-past-fy-title"
+      >
+        <p className="eyebrow" id="income-past-fy-title">
+          Recent financial years
+        </p>
+        {!projection.pastFinancialYears.ok ? (
+          <p className="status-banner warning" role="status">
+            <strong>Past financial years unavailable</strong>
+            <span>
+              {projection.pastFinancialYears.reason === "invalid_years"
+                ? "The requested years-back range is invalid."
+                : "The financial-year start month is invalid."}
+            </span>
+          </p>
+        ) : projection.pastFinancialYears.rows.length === 0 ? (
+          <p>No financial years in range.</p>
+        ) : (
+          <div className="income-fy-table-wrap">
+            <table className="income-fy-table">
+              <caption>Recent financial-year dividends</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Year</th>
+                  <th scope="col" className="numeric">
+                    Gross
+                  </th>
+                  <th scope="col" className="numeric">
+                    Cash
+                  </th>
+                  <th scope="col" className="numeric">
+                    Franking
+                  </th>
+                  <th scope="col">Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {projection.pastFinancialYears.rows
+                  .slice()
+                  .reverse()
+                  .map((row) => (
+                    <tr key={`past-fy-${row.endingYear}`}>
+                      <th scope="row">
+                        {row.label}
+                        {row.excludedSecurities.length > 0 ? (
+                          <span className="unavailable"> · partial</span>
+                        ) : null}
+                      </th>
+                      <td className="numeric">
+                        {formatIncomeMoney(
+                          projection.baseCurrencyCode,
+                          row.dividendGrossDecimal,
+                        )}
+                      </td>
+                      <td className="numeric">
+                        {formatIncomeMoney(
+                          projection.baseCurrencyCode,
+                          row.dividendCashDecimal,
+                        )}
+                      </td>
+                      <td className="numeric">
+                        {formatIncomeMoney(
+                          projection.baseCurrencyCode,
+                          row.dividendFrankingKnownDecimal,
+                        )}
+                        {row.dividendFrankingIncomplete ? (
+                          <span className="unavailable"> · partial</span>
+                        ) : null}
+                      </td>
+                      <td>
+                        <span className="income-source">
+                          {pastFySourceStatus(row.dividendSource)}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p>
+          {/* Follow-up (b): the sub-page's own default is 2 years back
+              (`DEFAULT_YEARS_BACK`, income-year-range.ts) -- without an
+              explicit query value, following this link would show FEWER
+              years than the compact table above it. `?yearsBack=10`
+              (`MAX_YEARS`) so the owner actually reaches the full range in
+              one click, matching the promise of "full". */}
+          <Link
+            href={`${multiYearHref}?yearsBack=10`}
+            className="income-coverage-link"
+          >
+            See the full multi-year range
+          </Link>
+        </p>
+      </section>
 
       {explainOpen ? (
         <dialog

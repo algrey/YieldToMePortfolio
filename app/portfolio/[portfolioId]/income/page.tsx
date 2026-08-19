@@ -52,19 +52,23 @@ export default async function IncomePage({ params }: IncomePageProps) {
 
   let projection: Awaited<ReturnType<typeof loadOwnedIncomeProjection>>;
   try {
-    // Follow-up 3: the landing view only ever reads `status`, `breakdown`,
-    // and `aggregateYield.method` (the next-12-months figures) -- never
-    // `multiYear`/`pastFinancialYears`/`currentFinancialYear` -- so it asks
-    // for the smallest valid range (0 years back, 1 year forward) instead of
-    // the service's 10/10 default, which would otherwise run the historical
-    // snapshot lookups and the full past-FY loop on every landing-page
-    // request for data this page never renders.
+    // UI-016: the landing view previously read only `status`/`breakdown`/
+    // `aggregateYield.method` (the next-12-months figures), so Follow-up 3
+    // asked for the smallest valid range (0 years back). The owner reported
+    // there was NO way to see past-FY dividend history from this tab at
+    // all -- the landing view now also renders `pastFinancialYears` (a
+    // compact recent-history table), so it needs real history. 5 years back
+    // (not the multi-year sub-page's own 2-year default) covers the recent
+    // range the owner actually cares about at a glance -- the owner's real
+    // data spans roughly six FYs -- while the full range stays one click
+    // away via the "See the full multi-year range" link.
+
     projection = await loadOwnedIncomeProjection(
       context.client,
       context.userId,
       portfolioId,
       new Date(),
-      { yearsBack: 0, yearsForward: 1 },
+      { yearsBack: 5, yearsForward: 1 },
     );
   } catch {
     return (
@@ -79,6 +83,7 @@ export default async function IncomePage({ params }: IncomePageProps) {
       multiYearHref={`/portfolio/${portfolioId}/income/multi-year`}
       assumptionsHref={`/portfolio/${portfolioId}/income/assumptions`}
       gainsHref={`/portfolio/${portfolioId}/gains`}
+      dividendsHref={`/portfolio/${portfolioId}/income/dividends`}
     />
   );
 }
