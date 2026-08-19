@@ -21,6 +21,7 @@ import {
   runAcceptCommitLoop,
   scopeCommitToBatch,
 } from "../import-review-commit-state.ts";
+import type { RowSummary } from "../../domain/imports/row-summary.ts";
 
 type PortfolioOption = { id: string; name: string; homeCurrencyCode: string };
 // BRK-009C: distinct securities the "Review securities" table renders, one
@@ -127,6 +128,12 @@ type Review = {
     excludedByOwnerRows: number;
     remainingRows: number;
   };
+  // UI-014 part 3: business-basics facts for rows an issue references (see
+  // `app/import-preview.ts`'s field of the same name). Optional/defaulted
+  // to `{}` for the same pre-existing-test-fixture reason as
+  // `attestedSecurityIds` above -- a fixture that omits it simply renders no
+  // inline row facts, never a crash.
+  rowSummaries?: Record<string, RowSummary>;
 };
 
 const EMPTY_COMMIT_PROGRESS = {
@@ -216,6 +223,49 @@ function businessDate(value: string): string {
 
 function statusLabel(status: string): string {
   return status.replaceAll("_", " ");
+}
+
+// UI-014 part 1 (owner-reported): the Review securities table used to
+// render an editable name input + Save for EVERY name-editable row, even
+// one Sharesight already supplied a real name for -- implying the owner
+// must act on every row, when only a still-placeholder name genuinely
+// needs one. `nameEditable` alone (gated below, unchanged) says WHETHER an
+// edit is allowed; this says whether one is actually NEEDED. A
+// `state === "created"` security's placeholder name is always exactly
+// "Unnamed security" (BRK-009B's `sanitizeCanonicalName` fallback --
+// `canonical_name` is `NOT NULL`, so it is never blank/null in practice);
+// "Unknown"/blank/null are also treated as missing defensively, matching
+// this table's own pre-existing "Unknown" display fallback for a
+// non-editable entry with no instrument name.
+function isSecurityNameMissing(name: string | null): boolean {
+  if (name === null) return true;
+  const trimmed = name.trim();
+  return (
+    trimmed.length === 0 ||
+    trimmed === "Unknown" ||
+    trimmed === "Unnamed security"
+  );
+}
+
+// UI-014 follow-up: the same identity tuple the securities table keys its
+// `<tr>` on (below) and `submitSecurityMetadata` arms its post-save focus
+// target with -- one definition so the two never drift apart.
+function securityRowKey(entry: {
+  sourceSymbol: string;
+  sourceExchangeAlias: string | null;
+  sourceCurrencyCode: string;
+}): string {
+  return `${entry.sourceSymbol}|${entry.sourceExchangeAlias ?? ""}|${entry.sourceCurrencyCode}`;
+}
+
+// UI-014 part 3: renders one row's business-basics facts (symbol/type/
+// date/quantity/amount/currency, "Not recorded" fallbacks already baked in
+// by `summarizeRow`) as a compact, text-only inline disclosure -- reused by
+// both the "Row and field issues" and "Blocked rows" sections below so the
+// owner can see what a row-linked issue is actually ABOUT without hunting
+// through import history (owner-reported gap, UI-014 part 3).
+function rowFactsText(summary: RowSummary): string {
+  return `Symbol ${summary.symbol} · Type ${summary.type} · Date ${summary.date} · Quantity ${summary.quantity} · Amount ${summary.amount} · Currency ${summary.currency}`;
 }
 
 // IMP-008 review finding B2-residual: nothing ever marks a persisted issue
@@ -361,6 +411,16 @@ export function ImportReview({
   // `pending`/`message` state every other one-off preview mutation in this
   // component already reuses (`resolveMapping`, `verifySecurityCandidate`),
   // rather than inventing a new per-row pending scheme.
+  // UI-014 follow-up: a successful rename unmounts the row's Save button
+  // (Part 1's fix flips the row to plain text once the name is no longer
+  // missing), so focus would otherwise silently fall back to <body> --
+  // mirrors this file's other opener-focus-restore refs (exclusion/
+  // attestation/accept dialogs above), but targets the row's own new-text
+  // cell rather than a dialog opener: armed with the just-saved row's key
+  // in `submitSecurityMetadata`, consumed by that cell's callback ref
+  // (`securitiesReview.map` below) the moment it mounts in the same commit
+  // the form unmounts in.
+  const savedNameFocusRowKeyRef = useRef<string | null>(null);
   // UI-012: the review section (`import-review-result` below) renders far
   // ABOVE the import-history section further down the page. Opening a
   // pre-commit batch's review from history via `resumeReviewFromHistory`
@@ -1179,6 +1239,25 @@ export function ImportReview({
         );
       }
       setReview(result.review);
+      // UI-014 part 2 root cause: the previous version never called
+      // `setMessage` on SUCCESS -- only on error -- and the name `<input>`
+      // is UNCONTROLLED (`defaultValue`, not `value`), so re-rendering with
+      // the server's updated `entry.name` never changed what the input
+      // visibly showed either (a `defaultValue` prop change is ignored by
+      // React once a DOM node exists). Combined, a successful save looked
+      // IDENTICAL to a silent no-op: the spinner (the shared `pending`
+      // state) went away and the same form, showing the same typed text,
+      // reappeared -- indistinguishable from failure. Part 1's fix (the
+      // form only renders while the name is still missing) now makes a
+      // successful save visibly flip the row to plain text; this explicit
+      // confirmation is the second half of the fix.
+      setMessage(`${entry.sourceSymbol}'s name was saved.`);
+      // UI-014 follow-up: the Save button this submit came from is about to
+      // unmount (Part 1's fix). `entry`'s identity tuple (symbol/exchange/
+      // currency) is unaffected by a name-only edit, so it still matches
+      // the SAME row's key in the next render -- arm the focus-restore ref
+      // consumed by that row's text-cell callback ref below.
+      savedNameFocusRowKeyRef.current = securityRowKey(entry);
     } catch (error) {
       setMessage(
         error instanceof Error
@@ -1568,7 +1647,7 @@ export function ImportReview({
                   </thead>
                   <tbody>
                     {securitiesReview.map((entry) => {
-                      const rowKey = `${entry.sourceSymbol}|${entry.sourceExchangeAlias ?? ""}|${entry.sourceCurrencyCode}`;
+                      const rowKey = securityRowKey(entry);
                       return (
                         <tr key={rowKey}>
                           <td>{entry.sourceSymbol}</td>
@@ -1581,7 +1660,14 @@ export function ImportReview({
                           <td>{entry.sourceExchangeAlias ?? "Unknown"}</td>
                           <td>{entry.sourceCurrencyCode}</td>
                           <td>
-                            {entry.nameEditable &&
+                            {/* UI-014 part 1 (owner-reported): a prefilled
+                                name is plain text -- no input, no Save --
+                                since nothing about it needs owner action.
+                                The edit affordance renders ONLY when the
+                                name is still missing (see
+                                `isSecurityNameMissing`) AND editable. */}
+                            {isSecurityNameMissing(entry.name) &&
+                            entry.nameEditable &&
                             isMutableExclusionStatus(review.batch.status) ? (
                               <form
                                 className="import-securities-edit"
@@ -1599,12 +1685,35 @@ export function ImportReview({
                                     disabled={pending}
                                   />
                                 </label>
-                                <button type="submit" disabled={pending}>
-                                  Save
+                                <button
+                                  type="submit"
+                                  disabled={pending}
+                                  aria-busy={pending || undefined}
+                                >
+                                  {pending ? "Saving…" : "Save"}
                                 </button>
                               </form>
                             ) : (
-                              (entry.name ?? "Unknown")
+                              <span
+                                tabIndex={-1}
+                                ref={(node) => {
+                                  // UI-014 follow-up: focus this cell the
+                                  // moment it mounts, but ONLY when it is
+                                  // the row a save just succeeded for
+                                  // (never on an unrelated render, e.g. a
+                                  // different row's save, or the initial
+                                  // load of an already-named row).
+                                  if (
+                                    node &&
+                                    savedNameFocusRowKeyRef.current === rowKey
+                                  ) {
+                                    node.focus();
+                                    savedNameFocusRowKeyRef.current = null;
+                                  }
+                                }}
+                              >
+                                {entry.name ?? "Unknown"}
+                              </span>
                             )}
                           </td>
                           <td>
@@ -1998,17 +2107,35 @@ export function ImportReview({
               <p>No reconciliation issues were found.</p>
             ) : (
               <ul>
-                {review.preview.issues.map((issue, index) => (
-                  <li key={`${issue.rowId ?? "batch"}-${issue.code}-${index}`}>
-                    <strong>{issue.code}</strong>
-                    <span>
-                      {issue.physicalRowNumber
-                        ? `Row ${issue.physicalRowNumber}: `
-                        : ""}
-                      {issue.message}
-                    </span>
-                  </li>
-                ))}
+                {review.preview.issues.map((issue, index) => {
+                  // UI-014 part 3: the row this warning/issue is actually
+                  // ABOUT -- server-derived, bounded to rows an issue
+                  // references (see `app/import-preview.ts`'s
+                  // `rowSummaries`). Absent for a batch-level issue (no
+                  // `rowId`) or a pre-UI-014 test fixture omitting the
+                  // field; renders nothing extra either way.
+                  const summary = issue.rowId
+                    ? review.rowSummaries?.[issue.rowId]
+                    : undefined;
+                  return (
+                    <li
+                      key={`${issue.rowId ?? "batch"}-${issue.code}-${index}`}
+                    >
+                      <strong>{issue.code}</strong>
+                      <span>
+                        {issue.physicalRowNumber
+                          ? `Row ${issue.physicalRowNumber}: `
+                          : ""}
+                        {issue.message}
+                      </span>
+                      {summary ? (
+                        <span className="import-issue-row-facts">
+                          {rowFactsText(summary)}
+                        </span>
+                      ) : null}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </section>
@@ -2030,33 +2157,44 @@ export function ImportReview({
               <p>No blocking row issues were found.</p>
             ) : (
               <ul>
-                {blockedRowIssues.map((issue) => (
-                  <li key={issue.id}>
-                    <strong>{issue.code}</strong>
-                    <span>
-                      {issue.physicalRowNumber
-                        ? `Row ${issue.physicalRowNumber}: `
-                        : ""}
-                      {issue.message}
-                    </span>
-                    {issue.rowId &&
-                    isMutableExclusionStatus(review.batch.status) ? (
-                      <button
-                        type="button"
-                        onClick={(event) =>
-                          openExclusionDialog(
-                            event,
-                            "exclude",
-                            { kind: "issue", issueId: issue.id },
-                            `Skip this row -- it will not be committed. Skipped rows are absent from holdings, gains, and income until you include them again.`,
-                          )
-                        }
-                      >
-                        Skip this row
-                      </button>
-                    ) : null}
-                  </li>
-                ))}
+                {blockedRowIssues.map((issue) => {
+                  // UI-014 part 3: see the identical lookup's comment above.
+                  const summary = issue.rowId
+                    ? review.rowSummaries?.[issue.rowId]
+                    : undefined;
+                  return (
+                    <li key={issue.id}>
+                      <strong>{issue.code}</strong>
+                      <span>
+                        {issue.physicalRowNumber
+                          ? `Row ${issue.physicalRowNumber}: `
+                          : ""}
+                        {issue.message}
+                      </span>
+                      {summary ? (
+                        <span className="import-issue-row-facts">
+                          {rowFactsText(summary)}
+                        </span>
+                      ) : null}
+                      {issue.rowId &&
+                      isMutableExclusionStatus(review.batch.status) ? (
+                        <button
+                          type="button"
+                          onClick={(event) =>
+                            openExclusionDialog(
+                              event,
+                              "exclude",
+                              { kind: "issue", issueId: issue.id },
+                              `Skip this row -- it will not be committed. Skipped rows are absent from holdings, gains, and income until you include them again.`,
+                            )
+                          }
+                        >
+                          Skip this row
+                        </button>
+                      ) : null}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </section>

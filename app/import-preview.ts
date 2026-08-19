@@ -10,6 +10,10 @@ import {
   deriveSharesightSecuritiesSummary,
   type SharesightSecuritySummaryEntry,
 } from "../domain/imports/security-summary.ts";
+import {
+  summarizeRow,
+  type RowSummary,
+} from "../domain/imports/row-summary.ts";
 import { SHARESIGHT_SYNC_PARSER_FORMAT } from "../domain/sharesight-sync/index.ts";
 import type {
   ImportBatchRecord,
@@ -86,6 +90,17 @@ export type ImportReviewPreview = {
     excludedByOwnerRows: number;
     remainingRows: number;
   };
+  // UI-014 part 3: business-basics facts (symbol/type/date/quantity/amount/
+  // currency, "Not recorded" fallbacks -- `domain/imports/row-summary.ts`'s
+  // `summarizeRow`, the SAME derivation UI-012's history detail table
+  // already uses) for every row a row-linked issue references, so the
+  // owner-reported "which row is this even about" gap on the blocked-rows
+  // and warnings lists can show real facts inline without hunting through
+  // import history. Server-derived and BOUNDED to rows an issue actually
+  // names -- never the full batch (`preview.issues` is itself bounded by
+  // reconciliation findings, `issues` by persisted rows), so this never
+  // grows unbounded with batch size. Keyed by `import_rows.id`.
+  rowSummaries: Readonly<Record<string, RowSummary>>;
 };
 
 export function buildImportReviewPreview(input: {
@@ -158,6 +173,27 @@ export function buildImportReviewPreview(input: {
           nameEditableSecurityIds: new Set(input.nameEditableSecurityIds ?? []),
         })
       : [];
+  // UI-014 part 3: collect the rowIds every row-linked issue actually
+  // references -- BOTH the persisted, DB-sourced `issues` (blocked-row
+  // issues like SHARESIGHT_PAYOUT_FX_RATE_MISSING/PAYOUT_UNCONFIRMED) and
+  // the computed, reconciliation-derived `built.preview.issues` (warnings
+  // like INCOMPLETE_HISTORY/FX_RATE_INCOMPLETE) -- then derive a summary
+  // only for those rows from `input.rows`, already loaded in memory for
+  // this same build (no extra query). Bounded by issue count, not batch
+  // size.
+  const issueRowIds = new Set<string>();
+  for (const issue of input.issues) {
+    if (issue.rowId !== null) issueRowIds.add(issue.rowId);
+  }
+  for (const issue of built.preview.issues) {
+    if (issue.rowId !== undefined) issueRowIds.add(issue.rowId);
+  }
+  const rowSummaries: Record<string, RowSummary> = {};
+  for (const row of input.rows) {
+    if (issueRowIds.has(row.id)) {
+      rowSummaries[row.id] = summarizeRow(row.normalizedFields);
+    }
+  }
   return {
     batch: {
       id: input.batch.id,
@@ -176,5 +212,6 @@ export function buildImportReviewPreview(input: {
     attestedSecurityIds: input.attestedSecurityIds ?? [],
     securities,
     commitProgress,
+    rowSummaries,
   };
 }

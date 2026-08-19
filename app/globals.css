@@ -2635,8 +2635,17 @@ dd {
   background: rgb(99 200 120 / 10%);
 }
 
-.import-securities-edit button:disabled {
+/* UI-014: mirrors `.import-accept-actions button`'s split above --
+   `cursor: wait` only while `aria-busy="true"` (a real in-flight save),
+   `not-allowed` for a merely-disabled state, matching UI-013's established
+   convention throughout this file. */
+.import-securities-edit button[aria-busy="true"] {
   cursor: wait;
+  opacity: 0.6;
+}
+
+.import-securities-edit button:disabled:not([aria-busy="true"]) {
+  cursor: not-allowed;
   opacity: 0.6;
 }
 
@@ -2688,6 +2697,15 @@ dd {
   color: var(--warning);
   font-size: 0.68rem;
   letter-spacing: 0.08em;
+}
+
+/* UI-014 part 3: the row-linked issue's underlying business facts (symbol/
+   type/date/quantity/amount/currency) -- text, not colour, distinguished
+   from the issue message only by muted colour and size (never the sole
+   signal, per QA-001B). */
+.import-issue-row-facts {
+  color: var(--muted);
+  font-size: 0.74rem;
 }
 
 /* IMP-008: skip/un-skip actions on a blocked-row or excluded-row list item
@@ -4202,6 +4220,14 @@ dd {
    colour, per QA-001B; same muted micro-label treatment as
    `.dividend-provider-note`. */
 .dividend-fold-note {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+/* UI-014 part 4 (BRK-010 provenance rendering): the original foreign
+   currency/rate/source beneath a converted row's Cash figure -- text, not
+   colour, same muted micro-label treatment as `.dividend-provider-note`. */
+.dividend-fx-provenance {
   color: var(--muted);
   font-size: 0.72rem;
 }

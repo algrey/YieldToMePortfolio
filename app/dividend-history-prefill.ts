@@ -88,6 +88,28 @@ export function frankingCell(
 }
 
 /**
+ * UI-014 part 4 (BRK-010 provenance rendering): a compact display form of a
+ * stored FX rate for the "converted from" disclosure below -- the stored
+ * rate itself (`DerivedDividendRow.fxRateToPortfolioDecimal`) is kept at a
+ * 24dp intermediate scale (see `domain/dividends/history.ts`'s
+ * `FX_CONVERSION_SCALE`), too long to show inline. This ONLY trims the
+ * DISPLAY string (half-even at 6dp, trailing zeros dropped) -- it never
+ * reads back into any calculation, mirroring `formatShares`'s identical
+ * display-only convention above. Malformed input (never expected from a
+ * validated, DB-sourced decimal) falls back to the raw string rather than
+ * throwing during render.
+ */
+export function formatFxRate(rateDecimal: string): string {
+  try {
+    return formatDecimalTrimmed(parseDecimalResult(rateDecimal), 6, {
+      trimTrailingZeros: true,
+    });
+  } catch {
+    return rateDecimal;
+  }
+}
+
+/**
  * UI-010: a row's total count of receipts folded into it and not shown as
  * their own row -- `dominatedReceipt` (the one whose values ARE shown,
  * consumed by a higher-precedence winner) plus `additionalReceiptsCount`

@@ -24,7 +24,7 @@ import {
   parseDecimal,
 } from "../../domain/calculations/decimal.ts";
 import type { DerivedDividendRow } from "../../domain/dividends/index.ts";
-import { formatShares } from "../dividend-history-prefill.ts";
+import { formatFxRate, formatShares } from "../dividend-history-prefill.ts";
 import { formatIncomeMoney, formatIncomePercent } from "../income-format.ts";
 
 // UI-010: local aliases for the two dominated-evidence shapes carried on a
@@ -649,6 +649,29 @@ export function RecordDividendDialog({
   // opened it (UI-006C's history-row entry always supplies
   // `initialDividendEventId` for the former).
   const isEventLinked = initialDividendEventId !== null;
+  // UI-014 follow-up: the same compact conversion-provenance disclosure the
+  // dividends tab's Cash cell renders (`app/components/security-dividends-
+  // tab.tsx`) -- only when BOTH plumbed fields are populated (a converted
+  // foreign payout; `toDominatedImported` never sets one without the
+  // other), never a back-derived original amount. `?? null` on each field
+  // individually (rather than `dominatedImported.currencyCode !== null`
+  // directly) guards a defensively-possible absent key the same way
+  // `toDominatedImported` itself already does, and lets TypeScript narrow
+  // these LOCAL consts (a property-access expression can't be narrowed the
+  // same way).
+  const dominatedImportedOriginalCurrencyCode =
+    dominatedImported?.currencyCode ?? null;
+  const dominatedImportedFxRate =
+    dominatedImported?.fxRateToPortfolioDecimal ?? null;
+  const dominatedImportedFxProvenance =
+    dominatedImportedOriginalCurrencyCode !== null &&
+    dominatedImportedFxRate !== null
+      ? `${dominatedImportedOriginalCurrencyCode} @ ${formatFxRate(dominatedImportedFxRate)}${
+          dominatedImported?.fxRateSource
+            ? ` (${dominatedImported.fxRateSource})`
+            : ""
+        }`
+      : null;
   const [portfolioSecurityId, setPortfolioSecurityId] = useState(
     initialPortfolioSecurityId ?? securities[0]?.portfolioSecurityId ?? "",
   );
@@ -984,6 +1007,14 @@ export function RecordDividendDialog({
                 {dominatedImported.frankingCreditPerShareDecimal !== null
                   ? ` · franking ${formatIncomeMoney(currencyCode, dominatedImported.frankingCreditPerShareDecimal)}/share`
                   : ""}
+                {dominatedImportedFxProvenance ? (
+                  <>
+                    <br />
+                    <span className="dividend-fx-provenance">
+                      converted from {dominatedImportedFxProvenance}
+                    </span>
+                  </>
+                ) : null}
               </li>
             ) : null}
             {additionalImportedCount > 0 ? (

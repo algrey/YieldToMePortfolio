@@ -20,6 +20,7 @@ import {
   decimalsEqual,
   foldedInImportedCount,
   foldedInReceiptCount,
+  formatFxRate,
   formatShares,
   frankingCell,
   freshEntryPrefill,
@@ -465,6 +466,22 @@ export function SecurityDividendsTab({
                 // colour, per QA-001B.
                 const foldedReceipts = foldedInReceiptCount(row);
                 const foldedImported = foldedInImportedCount(row);
+                // UI-014 part 4 (BRK-010 provenance rendering): non-null
+                // exactly when this row's cash was converted from a foreign
+                // Sharesight payout currency into `row.currencyCode` (see
+                // `DerivedDividendRow.originalCurrencyCode`'s doc comment) --
+                // renders the already-plumbed original currency/rate/source
+                // beneath the (already-converted) Cash figure below. The
+                // ORIGINAL amount itself is not plumbed to this row (only
+                // the converted total survives -- see
+                // `resolveImportedRecordCurrency` in domain/dividends/
+                // history.ts), so this deliberately shows currency+rate+
+                // source only, never a back-derived amount.
+                const fxProvenance =
+                  row.originalCurrencyCode !== null &&
+                  row.fxRateToPortfolioDecimal !== null
+                    ? `${row.originalCurrencyCode} @ ${formatFxRate(row.fxRateToPortfolioDecimal)}${row.fxRateSource ? ` (${row.fxRateSource})` : ""}`
+                    : null;
                 return (
                   <tr
                     key={row.id}
@@ -524,6 +541,14 @@ export function SecurityDividendsTab({
                     </td>
                     <td className="numeric">
                       {formatIncomeMoney(row.currencyCode, row.cashDecimal)}
+                      {fxProvenance ? (
+                        <>
+                          <br />
+                          <span className="dividend-fx-provenance">
+                            converted from {fxProvenance}
+                          </span>
+                        </>
+                      ) : null}
                     </td>
                     <td className="numeric">
                       {formatIncomeMoney(row.currencyCode, row.grossDecimal)}

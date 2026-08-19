@@ -392,8 +392,10 @@ test("UI-012 review B1: a legacy cash row (type: 'buy', cashEvent: 'cash_deposit
 });
 
 test("UI-012 review B1: summarizeRow's Type cell resolves cashEvent before type, mirroring import-commit.ts's normalized.cashEvent ?? normalized.type precedence", async () => {
+  // UI-014 moved summarizeRow (unchanged) to domain/imports/row-summary.ts --
+  // see that test's own header comment.
   const component = await readFile(
-    new URL("../app/components/import-history-detail.tsx", import.meta.url),
+    new URL("../domain/imports/row-summary.ts", import.meta.url),
     "utf8",
   );
   assert.match(
@@ -437,8 +439,14 @@ test("UI-012: the summary table never renders a fabricated 0 for a genuinely mis
   // Direct evaluation of the actual shipped summarizeRow function against a
   // Sharesight-payout-shaped input, mirroring the imp-008 pattern of
   // extracting and running the real function body rather than a re-implementation.
+  // UI-014 moved summarizeRow (unchanged) out of this component into the
+  // shared pure module `domain/imports/row-summary.ts`, so
+  // `app/import-preview.ts` (server) and `app/components/import-review.tsx`
+  // can reuse the SAME derivation for row-linked issue context -- see that
+  // module's own header comment. This test now reads the source it actually
+  // lives in.
   const component = await readFile(
-    new URL("../app/components/import-history-detail.tsx", import.meta.url),
+    new URL("../domain/imports/row-summary.ts", import.meta.url),
     "utf8",
   );
   for (const helperName of [
