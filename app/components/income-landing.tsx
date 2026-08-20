@@ -171,6 +171,18 @@ export function IncomeLanding({
             >
               Explain this estimate
             </button>
+            {/* UI-017 (owner directive): the Next 12 Months section links to
+                the dividend list filtered to what is KNOWN of the window
+                (declared/pending + already-paid rows) -- never the
+                projection itself, which is not a list of real rows. */}
+            <p>
+              <Link
+                href={`${dividendsHref}?window=next12`}
+                className="income-next12-link"
+              >
+                View known dividends in this window
+              </Link>
+            </p>
           </section>
 
           <dl className="income-metric-list" aria-label="Income statistics">
@@ -269,10 +281,20 @@ export function IncomeLanding({
                   .map((row) => (
                     <tr key={`past-fy-${row.endingYear}`}>
                       <th scope="row">
-                        {row.label}
-                        {row.excludedSecurities.length > 0 ? (
-                          <span className="unavailable"> · partial</span>
-                        ) : null}
+                        {/* UI-017 (owner directive): clicking a year row
+                            opens the dividend list filtered to that year --
+                            the whole label (including the partial marker)
+                            is wrapped in one real link so the row is
+                            keyboard-accessible and works without JS. */}
+                        <Link
+                          href={`${dividendsHref}?fy=${row.endingYear}`}
+                          className="income-fy-row-link"
+                        >
+                          {row.label}
+                          {row.excludedSecurities.length > 0 ? (
+                            <span className="unavailable"> · partial</span>
+                          ) : null}
+                        </Link>
                       </th>
                       <td className="numeric">
                         {formatIncomeMoney(

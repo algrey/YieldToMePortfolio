@@ -13,7 +13,11 @@ export {
   type EventOverrideFact,
   type EventOverrideLineageNode,
 } from "./event-override-resolution.ts";
-export { fyWindowForDate, type FyWindowForDateResult } from "./fy-window.ts";
+export {
+  fyWindowForDate,
+  fyWindowForEndingYear,
+  type FyWindowForDateResult,
+} from "./fy-window.ts";
 export {
   deriveDividendHistoryForSecurity,
   PROXIMITY_WINDOW_DAYS,

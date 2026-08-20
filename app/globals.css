@@ -3843,6 +3843,24 @@ dd {
   color: var(--green-bright);
 }
 
+/* UI-017: year-row drill-through links to the dividend list filtered to
+   that FY (`?fy=<endingYear>`), plus the Next-12-Months section's link to
+   the known-only window (`?window=next12`). */
+.income-fy-row-link,
+.income-fy-year-link,
+.income-next12-link {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--green-bright);
+  text-decoration: underline;
+}
+
+.income-fy-year-link {
+  margin-left: 8px;
+  font-size: 0.72rem;
+}
+
 .income-source {
   color: var(--muted);
   font-size: 0.7rem;

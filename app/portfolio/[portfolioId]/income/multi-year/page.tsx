@@ -82,6 +82,7 @@ export default async function IncomeMultiYearPage({
       landingHref={`/portfolio/${portfolioId}/income`}
       assumptionsHref={`/portfolio/${portfolioId}/income/assumptions`}
       gainsHref={`/portfolio/${portfolioId}/gains`}
+      dividendsHref={`/portfolio/${portfolioId}/income/dividends`}
       baseCurrencyCode={projection.baseCurrencyCode}
       pastFinancialYears={projection.pastFinancialYears}
       currentFinancialYear={projection.currentFinancialYear}

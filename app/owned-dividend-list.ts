@@ -76,6 +76,12 @@ export type OwnedDividendListRow = {
 
 export type OwnedDividendList = {
   today: string;
+  /** UI-017: the portfolio owner's FY start month (FY-001A), threaded
+   * straight through from `loadOwnedDividendHistory` -- the `?fy=` route
+   * filter needs it to resolve an ending year to its boundary dates via
+   * `fyWindowForEndingYear`. Exposing an already-computed setting value is
+   * not a derivation change. */
+  financialYearStartMonth: number;
   rows: OwnedDividendListRow[];
   /** True when the flattened list exceeded `MAX_DIVIDEND_LIST_ROWS` and was cut to the most recent rows. */
   truncated: boolean;
@@ -148,5 +154,11 @@ export async function loadOwnedDividendList(
     fxRateSource: row.fxRateSource,
   }));
 
-  return { today: full.today, rows, truncated, totalCount };
+  return {
+    today: full.today,
+    financialYearStartMonth: full.financialYearStartMonth,
+    rows,
+    truncated,
+    totalCount,
+  };
 }

@@ -57,11 +57,17 @@ type DisplayRow = {
   includedSecurityCount: number | null;
   excludedSecurities: readonly PastFyExclusion[];
   overrideHref: string | null;
+  /** UI-017 (owner directive): the dividend list filtered to this row's own
+   * FY (`?fy=<endingYear>`) -- `null` for every PROJECTED row (B2, round-1
+   * review ruling: a projection is a forecast, not a dividend row, so it
+   * never links out). Past/current rows always carry a real value here. */
+  dividendsHref: string | null;
 };
 
 function mapPastRow(
   row: PastFinancialYearRow,
   assumptionsHref: string,
+  dividendsHref: string,
 ): DisplayRow {
   const sourceLabel: SourceLabel =
     row.dividendSource === "fy_override" || row.dividendSource === "actual"
@@ -85,10 +91,14 @@ function mapPastRow(
     includedSecurityCount: row.includedSecurityCount,
     excludedSecurities: row.excludedSecurities,
     overrideHref: `${assumptionsHref}?overrideYear=${row.endingYear}`,
+    dividendsHref: `${dividendsHref}?fy=${row.endingYear}`,
   };
 }
 
-function mapCurrentRow(row: CurrentFinancialYearRow): DisplayRow {
+function mapCurrentRow(
+  row: CurrentFinancialYearRow,
+  dividendsHref: string,
+): DisplayRow {
   const sourceLabel: SourceLabel =
     row.dividendSource === "fy_override"
       ? "actual"
@@ -110,6 +120,7 @@ function mapCurrentRow(row: CurrentFinancialYearRow): DisplayRow {
     includedSecurityCount: row.includedSecurityCount,
     excludedSecurities: row.excludedSecurities,
     overrideHref: null,
+    dividendsHref: `${dividendsHref}?fy=${row.endingYear}`,
   };
 }
 
@@ -132,6 +143,13 @@ function mapProjectedRow(
     includedSecurityCount: null,
     excludedSecurities: [],
     overrideHref: null,
+    // B2 (round-1 review, RULING): a projected row is a FORECAST, not a
+    // dividend row -- `?fy=<endingYear>` would either 404-honest-fallback
+    // (years beyond the clamp) or, worse, silently show a mostly-empty real
+    // list under a heading the owner just saw as a projection. Only past
+    // and current (FY-to-date) rows -- which have REAL underlying dividend
+    // rows -- ever link out.
+    dividendsHref: null,
   };
 }
 
@@ -167,6 +185,7 @@ export function IncomeMultiYear({
   landingHref,
   assumptionsHref,
   gainsHref,
+  dividendsHref,
   baseCurrencyCode,
   pastFinancialYears,
   currentFinancialYear,
@@ -180,6 +199,7 @@ export function IncomeMultiYear({
   landingHref: string;
   assumptionsHref: string;
   gainsHref: string;
+  dividendsHref: string;
   baseCurrencyCode: string;
   pastFinancialYears: ComputePastFinancialYearRowsResult;
   currentFinancialYear: ComputeCurrentFinancialYearRowResult;
@@ -244,11 +264,11 @@ export function IncomeMultiYear({
     ? pastFinancialYears.rows
         .slice()
         .reverse()
-        .map((row) => mapPastRow(row, assumptionsHref))
+        .map((row) => mapPastRow(row, assumptionsHref, dividendsHref))
     : [];
   const currentRow =
     currentFinancialYear.ok && currentFinancialYear.row
-      ? [mapCurrentRow(currentFinancialYear.row)]
+      ? [mapCurrentRow(currentFinancialYear.row, dividendsHref)]
       : [];
   const projectedRows =
     activeProjection && activeProjection.ok
@@ -399,6 +419,21 @@ export function IncomeMultiYear({
                     >
                       {row.label}
                     </button>
+                    {/* UI-017 (owner directive): a real, keyboard-accessible
+                        link to the dividend list filtered to this row's own
+                        FY -- separate from the row-detail button above,
+                        which keeps its existing dialog affordance
+                        (assumptions/method/override). `null` for every
+                        projected/forecast row (B2 ruling: a projection is
+                        not a dividend row). */}
+                    {row.dividendsHref ? (
+                      <Link
+                        href={row.dividendsHref}
+                        className="income-fy-year-link"
+                      >
+                        View dividends
+                      </Link>
+                    ) : null}
                   </th>
                   <td className="numeric">
                     <ValueCell

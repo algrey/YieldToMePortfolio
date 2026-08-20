@@ -79,3 +79,28 @@ export function fyWindowForDate(
     label: fyLabel(window),
   };
 }
+
+/**
+ * The FY window (and label) for a given ENDING year -- the inverse of
+ * `fyWindowForDate` (which finds the window containing an arbitrary date).
+ * UI-017: the dividend list route's `?fy=<endingYear>` filter already knows
+ * WHICH FY it wants (a route parameter, not a date to classify), so it
+ * needs this direction instead. Reuses `fyWindowForDate`'s own boundary
+ * math (rather than re-deriving start/end dates independently) by
+ * constructing that FY's own start date and asking which window it falls
+ * in -- by definition, itself.
+ */
+export function fyWindowForEndingYear(
+  endingYear: number,
+  startMonth: number,
+): FyWindowForDateResult {
+  if (!isValidFinancialYearStartMonth(startMonth)) {
+    return { ok: false, reason: "invalid_start_month" };
+  }
+  if (!Number.isInteger(endingYear)) {
+    return { ok: false, reason: "invalid_date" };
+  }
+  const startYear = startMonth === 1 ? endingYear : endingYear - 1;
+  const anchorDate = `${pad4(startYear)}-${pad2(startMonth)}-01`;
+  return fyWindowForDate(anchorDate, startMonth);
+}
