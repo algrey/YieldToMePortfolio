@@ -79,6 +79,11 @@ const OWNED_TABLES = [
   // `price_observations`/`fx_rate_observations` "user-scoped-observation"
   // special-cases below.
   "sharesight_delayed_prices",
+  // MKT-008: owner-uploaded price-history batch attribution -- keyed
+  // directly by `user_id` like `sharesight_delayed_prices` above, not a
+  // "user-scoped-observation" special case (this row IS the owner's upload
+  // record, not a shared-master-linked price fact).
+  "price_upload_batches",
   "import_batches",
   "import_commit_chunks",
   "import_rows",
@@ -333,6 +338,12 @@ const PURGE_TABLES_IN_FK_ORDER = [
   "portfolios",
   "user_settings",
   "price_observations",
+  // MKT-008: `price_observations.upload_batch_id` is a soft (unenforced-by-FK)
+  // reference to this table -- see db/schema.ts's header comment on that
+  // column -- but purge order still deletes children before parents by
+  // convention even without a real constraint, so `price_observations` (the
+  // "child" by reference) is deleted first.
+  "price_upload_batches",
   "fx_rate_observations",
   "market_data_refresh_jobs",
   "security_provider_mappings",

@@ -512,3 +512,121 @@ If a file does not match one of the confirmed header signatures -- the 17-column
 - require an explicit, separately versioned schema decision before support for a further header shape is added.
 
 Parser selection is by exact normalized header signature -- tried in order, first match wins -- not field count alone. A batch's `import_batches.parser_version` records exactly which of the two matched.
+
+## 15. Owner price-history import formats (MKT-008)
+
+**This section is a SEPARATE, standalone specification** for the "Historical
+Data" section on the import page -- it shares NO parser, header contract, or
+staging table with §1-14 above (the ledger transaction CSV). Two distinct
+formats exist; both are comma- OR tab-delimited (auto-detected per-file from
+the header line, tab taking priority when both delimiters are present) and
+use a PLAIN delimiter split (no RFC4180 quote-escaping) -- appropriate for
+the narrow, simple numeric/date data both formats carry, unlike the ledger
+CSV's free-text fields.
+
+### 15.1 Single-security price history (`domain/market-data/price-csv.ts`)
+
+Owner directive shape (Intelligent Investor's export): a header row
+`DateTime,<TICKER>` or `DateTime<TAB><TICKER>` where the SECOND column's
+literal name IS the ticker whose prices the file carries (e.g. `FMG`); every
+column after the second is ignored. One data row per trading day:
+`<date>[,| <TAB>]<price>`. The date accepts `YYYY-MM-DD HH:MM:SS` or a
+bare `YYYY-MM-DD` -- when a time-of-day is present it is DISCARDED, never
+treated as genuine intraday precision (see §15.3's timezone rule). The
+price must be a positive decimal string (`^(0|[1-9]\d*)(\.\d+)?$` with at
+least one nonzero digit) -- negative, zero, exponent-notation, and
+non-decimal values all fail that row closed.
+
+Malformed rows are counted with a reason (`wrong_column_count` |
+`invalid_date` | `invalid_price`) and disclosed in the preview -- NEVER
+silently dropped, matching the ledger CSV's own malformed-row discipline
+(§9). Caps: 2 MiB / 20,000 rows (`DEFAULT_PRICE_CSV_LIMITS`) -- generous
+headroom for a single security's entire multi-decade daily-close history,
+bounded the same way §7 bounds the ledger upload.
+
+Settings accompanying the upload: exchange (defaults `ASX`) and currency
+(defaults `AUD`) -- free text, matching the existing `source_exchange_alias`
+convention, NOT validated against an `exchanges` table row (that table is
+unpopulated in this deployment; see `docs/MARKET_DATA_STRATEGY.md` §18).
+
+### 15.2 Full backup export / re-import (`domain/market-data/price-backup-csv.ts`)
+
+A SEPARATE, self-describing CSV format -- comma-delimited, RFC4180
+quote-free (every field either a constrained token or sanitized on export;
+see that module's header comment) -- for a lossless round trip of
+everything MKT-008 and Sharesight's accretion (BRK-012B) have written for
+the owner. Header (exact, case-sensitive):
+
+```
+format_version,provider_id,source_label,provider_symbol,provider_exchange,currency_code,market_date,price_decimal,observation_at,market_timezone,interval,quality,adjustment_state,delayed_minutes
+```
+
+`format_version` repeats `"yieldtome-price-backup-v1"` on every row (a
+per-row column, not a leading comment line -- keeps the parser a plain CSV
+reader). `provider_id` is restricted to an explicit allow-list
+(`sharesight`, `owner-import` today -- the only providers this deployment
+can honestly have exported) and re-imports under that SAME provider id,
+never relabelled. Export scope: the owner's `access_scope = 'user'`
+`price_observations` rows ONLY -- deployment-scoped rows (the shared
+Yahoo-compatible feed) are never the owner's to export.
+
+Re-import resolves each row's identity via the SAME same-user-scope ticker
+resolver §15.1 uses (never a separate, looser rule), previews per-provider/
+per-security counts, a per-reason malformed-row breakdown, and any
+unresolved/ambiguous/exchange-mismatched rows before writing, and writes
+with natural-key idempotent upsert -- overlaying a backup onto already-live
+data (including Sharesight's own ongoing hourly accretion) is safe by
+construction. Caps: 20 MiB / 500,000 rows (`DEFAULT_PRICE_BACKUP_LIMITS`).
+
+**Follow-up (2), the "lossless" claim's exact bound.** "Lossless" is bound
+to the provider allow-list above: a row whose `provider_id` this deployment
+could never honestly have exported is rejected as `unknown_provider`, so
+the round trip is lossless for `sharesight`/`owner-import` facts, not a
+universal guarantee that would silently extend to a hypothetical future
+provider without a code change. Restoring a backup ALWAYS re-stamps
+`ingested_at` to the restore's own write time -- the original ingestion
+instant is never preserved verbatim. This is intentional: `ingested_at`
+means "when THIS deployment ingested the fact," and a restore genuinely IS
+a fresh ingestion event, not a replay of history; every other field
+(`market_date`, `price_decimal`, `observation_at`, `provider_id`, quality
+metadata) round-trips exactly.
+
+### 15.3 Provenance, attribution, and reversibility
+
+Every write is stamped `upload_batch_id` (a new `price_upload_batches` row
+per upload -- see `docs/DATA_MODEL.md`), never a `price_upload_rows` staging
+table: unlike the ledger CSV flow, parsing/resolution here are pure and
+deterministic over the file's own bytes plus the owner's already-existing
+securities, so "preview" is the identical read-only computation "confirm"
+runs, with nothing an owner needs to actively adjudicate beyond confirming
+the match looks right.
+
+**Attribution is stamped on INSERT only, never reassigned by a later
+overlay (review B1 fix, BLOCKING, 2026-08-21).** An upload whose write
+overlays (natural-key-conflicts with) a row some OTHER upload -- or
+Sharesight's own accretion, or no upload at all -- already created updates
+that row's price/quote fields but leaves `upload_batch_id` untouched, so it
+always still names whoever CREATED the row. Deleting an upload therefore
+removes EXACTLY the rows it created, never a row it merely overlaid; the
+prior design (attribution moved to whichever upload wrote most recently)
+let deleting an overlaying upload silently destroy an un-refetchable
+Sharesight-accreted observation the deleting upload never created -- fixed
+by this ordering rule, not by adding a versioned-override history (still
+out of scope: an overlaid row's PRICE is not reverted when the overlaying
+upload is later deleted, only re-attributed correctly to its original
+creator). The owner-facing delete confirmation states this precisely:
+"Removes the N observations this upload created. Prices it changed on rows
+created elsewhere are not reverted." `price_upload_batches.row_count`
+(every valid row the file contained) and `inserted_row_count` (the subset
+actually created) are both recorded and both shown when they differ.
+Re-uploading the identical file after a delete reconstructs byte-identical
+facts under a new batch id (market-data observations carry no
+versioned-override ledger the way ledger transactions do -- "restore" means
+the same facts exist again, not that the same row ids return).
+
+`observation_at` is derived from the file's bare trading date via the
+midnight-exchange-timezone convention: the UTC instant of MIDNIGHT on that
+date in the exchange's own timezone (ASX -> `Australia/Sydney`, an explicit
+allow-list -- `docs/MARKET_DATA_STRATEGY.md` §18) -- never a fabricated
+intraday time, and never the file's own `HH:MM:SS` (an export artifact,
+not real precision this app has evidence for).

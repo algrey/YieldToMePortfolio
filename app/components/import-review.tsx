@@ -10,6 +10,7 @@ import {
   isResumableReviewStatus,
 } from "./import-history-detail.tsx";
 import { SharesightSyncPanel } from "./sharesight-sync-panel.tsx";
+import { HistoricalDataPanel } from "./historical-data-panel.tsx";
 import {
   mergeSharesightLinks,
   type SharesightLinkStatus,
@@ -1564,6 +1565,8 @@ export function ImportReview({
           onOpenBatch={(batchId) => void loadReviewByBatchId(batchId)}
         />
       ) : null}
+
+      <HistoricalDataPanel />
 
       {message ? (
         <p className="action-feedback" role="alert">

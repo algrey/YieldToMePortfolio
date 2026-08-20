@@ -126,6 +126,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "portfolio_settings",
     "portfolios",
     "price_observations",
+    "price_upload_batches",
     "projection_publications",
     "securities",
     "security_identifiers",
@@ -194,6 +195,10 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "price_observations_provider_scope_mapping_date_unique",
     "price_observations_provider_scope_mapping_unique",
     "price_observations_security_date_idx",
+    "price_observations_upload_batch_idx",
+  ]);
+  assert.deepEqual(indexNames(database, "price_upload_batches"), [
+    "price_upload_batches_owner_created_idx",
   ]);
   assert.deepEqual(indexNames(database, "fx_rate_observations"), [
     "fx_rate_observations_pair_date_idx",

@@ -1217,6 +1217,38 @@ export const priceObservations = sqliteTable(
     ingestedAt: text("ingested_at").notNull(),
     providerRevisionId: text("provider_revision_id"),
     payloadSha256: text("payload_sha256"),
+    // MKT-008: attribution to the owner-upload batch that CREATED this row
+    // (review B1 fix, 2026-08-21: stamped on INSERT only -- an overlay/
+    // conflict never reassigns it, see `price_upload_batches`' own header
+    // comment for why), NULL for every row no such upload ever created
+    // (Yahoo/Sharesight writes, and any row from before this column
+    // existed). Deliberately a plain nullable ADD COLUMN with NO
+    // table-level FK to `price_upload_batches` -- adding a real FK
+    // constraint to this already-large, heavily-triggered table would
+    // require a full REBUILD (see `sharesightSyncState`'s identical
+    // disclosure a few tables below for why drizzle-kit cannot express a
+    // new FK via plain `ALTER TABLE ADD COLUMN`), which would drop and
+    // require hand-recreating this table's
+    // `account_purge_lock_price_observations_*` triggers -- a much bigger
+    // risk than this task's ADD COLUMN precedent (BRK-012B's
+    // `lastPriceRefreshAt` trio) accepts.
+    //
+    // Review finding (2026-08-21): an earlier version of this comment
+    // claimed the referential invariant was enforced by a same-`batch()`
+    // guard/subquery mirroring `mapping_id`'s technique -- that was FALSE.
+    // `db/repositories/price-uploads.ts` writes the batch row via its OWN separate
+    // `run()`/`INSERT`, NOT inside the same atomic `batch()` call as the
+    // chunked `price_observations` writes that reference it. What actually
+    // prevents an orphaned reference is ORDERING, not shared-transaction
+    // atomicity: `app/price-upload-service.ts`'s confirm flow creates the
+    // `price_upload_batches` row FIRST (before any `price_observations`
+    // chunk that could reference its id) and only UPDATEs that row's
+    // `inserted_row_count` afterward -- so a crash before the batch row
+    // exists writes no observations at all, and a crash partway through
+    // the chunked writes simply leaves a batch row with fewer attributed
+    // rows than its file contained, never a `price_observations` row
+    // pointing at a batch id that was never created.
+    uploadBatchId: text("upload_batch_id"),
   },
   (table) => [
     foreignKey({
@@ -1320,6 +1352,10 @@ export const priceObservations = sqliteTable(
       table.adjustmentState,
       table.marketDate,
     ),
+    // MKT-008: delete-by-upload (the "undo this import" affordance) scans
+    // by `upload_batch_id` alone -- this index keeps that bounded instead of
+    // a full table scan. Index-only, no rebuild, no trigger hazard.
+    index("price_observations_upload_batch_idx").on(table.uploadBatchId),
   ],
 );
 
@@ -3400,5 +3436,78 @@ export const sharesightDelayedPrices = sqliteTable(
       table.securityId,
     ),
     index("sharesight_delayed_prices_user_idx").on(table.userId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// MKT-008: owner-uploaded price-history batches -- the "Historical Data"
+// section's own attribution record, one row per upload (a single-security
+// Intelligent-Investor-style CSV, or a full backup re-import). Mirrors
+// `import_batches`' role for the ledger CSV flow, but deliberately much
+// smaller: this feature never STAGES rows for review (parsing is
+// deterministic and a preview is computed on demand from the same bytes the
+// owner is about to confirm -- see `app/price-upload-actions.ts`'s header
+// comment for why no `price_upload_rows` staging table exists), so this
+// table only needs to record WHO uploaded WHAT and the resulting counts, for
+// the delete/undo affordance and the past-uploads list.
+//
+// `source_label` is free text (e.g. "intelligent-investor", or a backup
+// re-import's own label) -- the SOURCE DETAIL lives here, not as a second
+// `market_data_providers` row, per this task's ruling: every row this
+// feature writes carries `provider_id = 'owner-import'` (single-CSV
+// imports) or whatever provider a backup row originally carried (backup
+// re-imports preserve it, never relabel), so a future second owner-upload
+// source (a different broker's CSV shape, say) fits by choosing a new
+// `source_label` value, never a new provider row or a schema change.
+//
+// Review B1 fix (BLOCKING, 2026-08-21): `upload_batch_id` on
+// `price_observations` is now stamped on INSERT ONLY -- an overlay (a
+// natural-key conflict) updates price/quote fields but NEVER reassigns
+// attribution, so an upload never takes ownership of a row it merely
+// overwrote (the reviewer's drill: overlay-then-delete was destroying data
+// the deleted upload never created, including an un-refetchable Sharesight
+// row). `row_count`/`inserted_row_count` can therefore now legitimately
+// differ: `row_count` is every valid row this upload's file/backup
+// contained (matched + written, whether inserted or merely overlaid an
+// existing row), `inserted_row_count` is the subset THIS upload actually
+// CREATED -- exactly the rows a delete of this batch will remove. The UI
+// states both when they differ (never implies a delete reverts overlaid
+// values on rows it did not create).
+export const priceUploadBatches = sqliteTable(
+  "price_upload_batches",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    sourceLabel: text("source_label").notNull(),
+    format: text("format").notNull(),
+    filename: text("filename").notNull(),
+    rowCount: integer("row_count").notNull().default(0),
+    insertedRowCount: integer("inserted_row_count").notNull().default(0),
+    malformedRowCount: integer("malformed_row_count").notNull().default(0),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "price_upload_batches_user_id_users_id_fk",
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    check(
+      "price_upload_batches_format_check",
+      sql`${table.format} IN ('single', 'backup')`,
+    ),
+    check("price_upload_batches_row_count_check", sql`${table.rowCount} >= 0`),
+    check(
+      "price_upload_batches_inserted_row_count_check",
+      sql`${table.insertedRowCount} >= 0 AND ${table.insertedRowCount} <= ${table.rowCount}`,
+    ),
+    check(
+      "price_upload_batches_malformed_row_count_check",
+      sql`${table.malformedRowCount} >= 0`,
+    ),
+    index("price_upload_batches_owner_created_idx").on(
+      table.userId,
+      table.createdAt,
+    ),
   ],
 );
