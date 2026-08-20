@@ -4,6 +4,21 @@
 // sending a POST (that capability lives solely in `token.ts`, consumed here
 // only as an already-negotiated `SharesightTokenProvider`).
 //
+// BRK-012A (2026-08-20) added three EVIDENCE-PROBE methods --
+// `listUserInstruments`, `listInstrumentPrices`, `getPortfolioValuation` --
+// for the price-endpoint evidence spike (docs/ARCHITECTURE.md §8.2). Unlike
+// `listPortfolios`/`getPortfolioHoldings`/`listTrades`/`listPayouts`, these
+// three deliberately return RAW parsed JSON (`SharesightResult<unknown>`,
+// no `parse.ts` domain contract) -- BRK-012A is evidence-only (no schema, no
+// pipeline), so building a typed contract ahead of live shape confirmation
+// would risk guessing. They still go through `getJson`/`sharesightGet` only,
+// under the same host pin and GET-only enforcement as every other method --
+// the AGENTS.md rule that ALL Sharesight traffic goes through this sealed
+// module applies to spike/evidence probes exactly the same as production
+// reads. BRK-012B is expected to either promote these to typed, validated
+// methods (mirroring the other four) or replace them, once the live shapes
+// are confirmed.
+//
 // Server-only: this module performs network I/O and consumes constructor-
 // supplied credentials indirectly via the token provider; it must only ever
 // be imported from server code (a Worker route/service), never from an
@@ -335,6 +350,97 @@ export type SharesightClient = Readonly<{
     portfolioId: string,
     params?: SharesightListParams,
   ): Promise<SharesightResult<SharesightPayout[]>>;
+  /**
+   * BRK-012A evidence probe (2026-08-20) -- documentation-derived candidate
+   * for the CURRENT ~20-minute-delayed price per instrument the user holds.
+   * Third-party documentation (`markcatley/sharesight.rs`,
+   * `api_data_2.json`, `ListUserInstruments`, `GET /user_instruments.json`,
+   * v2, no version-suffix qualifier) shows a flat list of every instrument
+   * across the user's portfolios, each carrying `current_price` AND
+   * `current_price_updated_at` -- exactly the freshness/delay evidence
+   * BRK-012C's read gate needs, if live-confirmed. Requested against the
+   * same v2 root `listPayouts` already uses. Returns RAW parsed JSON --
+   * see this file's header comment for why no domain contract exists yet.
+   */
+  listUserInstruments?(
+    // BRK-012A follow-up probe (2026-08-20): `user_instruments.json` is
+    // documented with NO params at all -- `extraParams` lets the spike
+    // script test undocumented date/history overloads (e.g. `start_date`,
+    // `as_of_date`) without another client change. Always empty/absent in
+    // ordinary use.
+    // spike-only (BRK-012A): remove or constrain in BRK-012B.
+    params?: Readonly<{ extraParams?: Record<string, string> }>,
+  ): Promise<SharesightResult<unknown>>;
+  /**
+   * LIVE RESULT (2026-08-20, both the original spike and the follow-up
+   * content-negotiation/path/query sweep): HTTP 406 on every
+   * policy-compliant variant tried (default request, every Accept-header
+   * value, the `.json`-suffix-dropped path, and every query-param
+   * combination); the only variant that returned a DIFFERENT status was
+   * requesting under the v3 API root instead, which 404s as expected
+   * (v3 has no such route at all, confirming absence rather than fixing
+   * anything). CONCLUSION: this endpoint is NOT USABLE from this API
+   * client -- do not re-attempt in BRK-012B without new evidence (e.g. a
+   * changed entitlement, or a corrected account/app registration); see
+   * `docs/ARCHITECTURE.md` §8.2's BRK-012A follow-up entry for the full
+   * per-variant status table.
+   *
+   * BRK-012A evidence probe (2026-08-20) -- documentation-derived candidate
+   * for HISTORICAL DAILY prices per instrument. Third-party documentation
+   * (`markcatley/sharesight.rs`, `api_data_2.json`, `InstrumentPrices`,
+   * `GET /instruments/:instrument_id/prices.json`) is tagged `-mobile` in
+   * that documentation -- a genuinely distinguishing tag (only 3 of the v2
+   * doc's 73 entries carry it) -- so whether this app's OAuth grant is
+   * entitled to it is UNCONFIRMED pending a live pass, not assumed.
+   * `from`/`to` map to the documented `start_date`/`end_date`; `numPoints`
+   * maps to the documented `num_points` (server-side default 1000; the
+   * documentation describes this as thinning returned points across the
+   * requested range to hit approximately this count, NOT guaranteeing one
+   * point per calendar day -- a live pass must confirm actual behavior
+   * before BRK-012B relies on it for a daily backfill). Returns RAW parsed
+   * JSON, same discipline as `listUserInstruments` above.
+   *
+   * BRK-012A follow-up probe (2026-08-20): the live HTTP 406 this endpoint
+   * returned needed content-negotiation/path/query variants to
+   * distinguish a fixable mismatch from a hard gate -- `acceptOverride`
+   * (`undefined` = the client's normal `"application/json"`, `null` =
+   * omit the header, any string = send it verbatim), `pathSuffix`
+   * (`".json"` default, matching every other confirmed endpoint, vs `""`),
+   * `apiVersion` (`"v2"` default, matching the documentation, vs `"v3"`,
+   * cheap-to-check and undocumented -- expected 404), and `limit` (an
+   * UNDOCUMENTED guessed param name, probe-only) are all follow-up
+   * probe-only knobs, never used by ordinary callers.
+   */
+  listInstrumentPrices?(
+    instrumentId: string,
+    params?: Readonly<{
+      from?: string;
+      to?: string;
+      numPoints?: number;
+      // spike-only (BRK-012A): remove or constrain in BRK-012B.
+      limit?: number;
+      // spike-only (BRK-012A): remove or constrain in BRK-012B.
+      acceptOverride?: string | null;
+      // spike-only (BRK-012A): remove or constrain in BRK-012B.
+      pathSuffix?: string;
+      // spike-only (BRK-012A): remove or constrain in BRK-012B.
+      apiVersion?: "v2" | "v3";
+    }>,
+  ): Promise<SharesightResult<unknown>>;
+  /**
+   * BRK-012A evidence probe (2026-08-20) -- documentation-derived candidate
+   * for a per-holding current price bundled with a full portfolio valuation
+   * report. Third-party documentation (`markcatley/sharesight.rs`,
+   * `api_data_2.json`, `Valuation`, `GET /portfolios/:portfolio_id/
+   * valuation.json`) shows `portfolio_valuation_holdings[].instrument_price`
+   * as of an optional `balanceDate` (documented server-side default:
+   * today). Returns RAW parsed JSON, same discipline as the two probes
+   * above.
+   */
+  getPortfolioValuation?(
+    portfolioId: string,
+    params?: Readonly<{ balanceDate?: string }>,
+  ): Promise<SharesightResult<unknown>>;
 }>;
 
 async function sha256Hex(value: string): Promise<string> {
@@ -474,6 +580,18 @@ export function createSharesightClient(
     // pinned `baseUrl` (v3); `listPayouts` alone passes `payoutsBaseUrl` (v2)
     // -- see `withPayoutsApiVersion`'s doc comment above.
     requestBaseUrl: string = baseUrl,
+    // BRK-012A follow-up probe (2026-08-20): optional Accept-header
+    // override, added SOLELY to test whether `listInstrumentPrices`'s live
+    // HTTP 406 is content-negotiation-driven (406 is a "not acceptable
+    // representation" status, not an auth/routing failure). `undefined`
+    // (the default, used by every other call site) sends the unchanged
+    // `"application/json"` value every production endpoint has always
+    // sent; `null` OMITS the Accept header entirely; any other string
+    // sends that exact value. Never touches the request METHOD (still
+    // hard-coded GET via `sharesightGet`) and never introduces a new
+    // host -- this is a content-negotiation probe only, nothing else.
+    // spike-only (BRK-012A): remove or constrain in BRK-012B.
+    acceptOverride?: string | null,
   ): Promise<SharesightResult<unknown>> {
     // Refresh-before-expiry token acquisition happens entirely inside the
     // token provider; a refresh failure returns a typed unavailable result
@@ -508,14 +626,25 @@ export function createSharesightClient(
       }, timeoutMs);
     });
 
+    // BRK-012A follow-up: `acceptOverride === null` omits the Accept header
+    // entirely (a bare object literal, never `headers.accept = undefined`,
+    // since `fetch` would still send a header with an "undefined" string
+    // value for that -- omitting the KEY is the only way to send none).
+    // Every call site except the follow-up probe passes `undefined`, which
+    // preserves the exact `"application/json"` value this client has
+    // always sent.
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${tokenResult.value}`,
+    };
+    if (acceptOverride !== null) {
+      headers.accept = acceptOverride ?? "application/json";
+    }
+
     let response: Response;
     try {
       response = await Promise.race([
         sharesightGet(fetcher, url, {
-          headers: {
-            accept: "application/json",
-            authorization: `Bearer ${tokenResult.value}`,
-          },
+          headers,
           signal: controller.signal,
         }),
         timeoutPromise,
@@ -738,6 +867,64 @@ export function createSharesightClient(
         "payouts",
         result.value,
         parseSharesightPayouts(result.value, portfolioId),
+      );
+    },
+    // BRK-012A evidence probes -- RAW passthrough, no domain parsing (see
+    // this file's header comment and each method's doc comment on
+    // `SharesightClient` above). All three request against `payoutsBaseUrl`
+    // (v2), matching the third-party documentation these candidates are
+    // derived from -- never a second host, same as `listPayouts`.
+    async listUserInstruments(params) {
+      // spike-only (BRK-012A): extraParams passthrough -- remove or
+      // constrain in BRK-012B.
+      const searchParams =
+        params?.extraParams && Object.keys(params.extraParams).length > 0
+          ? params.extraParams
+          : undefined;
+      return getJson(
+        "listUserInstruments",
+        "/user_instruments.json",
+        searchParams,
+        payoutsBaseUrl,
+      );
+    },
+    async listInstrumentPrices(instrumentId, params) {
+      const searchParams: Record<string, string> = {};
+      if (params?.from) searchParams.start_date = params.from;
+      if (params?.to) searchParams.end_date = params.to;
+      if (params?.numPoints !== undefined) {
+        searchParams.num_points = String(params.numPoints);
+      }
+      // spike-only (BRK-012A): limit -- remove or constrain in BRK-012B.
+      if (params?.limit !== undefined) {
+        searchParams.limit = String(params.limit);
+      }
+      // BRK-012A follow-up: `pathSuffix`/`apiVersion` default to the
+      // documented/confirmed shape (".json", v2 via `payoutsBaseUrl`) --
+      // only the follow-up probe script ever overrides either.
+      // spike-only (BRK-012A): pathSuffix -- remove or constrain in
+      // BRK-012B.
+      const pathSuffix = params?.pathSuffix ?? ".json";
+      // spike-only (BRK-012A): apiVersion -- remove or constrain in
+      // BRK-012B.
+      const requestBaseUrl =
+        params?.apiVersion === "v3" ? baseUrl : payoutsBaseUrl;
+      return getJson(
+        "listInstrumentPrices",
+        `/instruments/${encodeURIComponent(instrumentId)}/prices${pathSuffix}`,
+        Object.keys(searchParams).length > 0 ? searchParams : undefined,
+        requestBaseUrl,
+        // spike-only (BRK-012A): acceptOverride -- remove or constrain in
+        // BRK-012B.
+        params?.acceptOverride,
+      );
+    },
+    async getPortfolioValuation(portfolioId, params) {
+      return getJson(
+        "getPortfolioValuation",
+        `/portfolios/${encodeURIComponent(portfolioId)}/valuation.json`,
+        params?.balanceDate ? { balance_date: params.balanceDate } : undefined,
+        payoutsBaseUrl,
       );
     },
   };
