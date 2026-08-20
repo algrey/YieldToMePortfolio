@@ -409,6 +409,31 @@ Status: DONE on 2026-08-19 (owner-reported after the successful BRK-010 resync: 
 - No behavior change to resolution/readiness/accept — display derivation only.
 - Tests: RMD-shaped fixture renders one line with the USD-dividends disclosure; genuinely-unresolved group still shows the awaiting state with a real pending mapping present; no regression to conflict-state rendering.
 
+#### BRK-012A — Sharesight price-endpoint evidence spike
+
+Status: READY (2026-08-20, owner directive: "move from Yahoo to Sharesight for pricing"). Establish, with BRK-008-discipline evidence, which Sharesight API endpoints expose (a) historical daily prices per instrument and (b) the current 20-minute-delayed price for a holding. Method: third-party API documentation first (the `markcatley/sharesight.rs`-derived evidence used for BRK-008 — candidate routes: v2 instrument price/valuation endpoints, holding valuation, `prices`-shaped routes), then narrow LIVE GET reads through the sealed client against the owner's real account (shape evidence: field NAMES/typeof only; price VALUES are not tax data but keep prints minimal — a handful of observed points is acceptable to confirm semantics like currency/date alignment; never print tokens). Deliverables: dated §8.2 evidence (endpoints, params, shapes, delay semantics, pagination/limits), client method contracts for BRK-012B, and an honest statement of anything Sharesight does NOT expose (if historical dailies are unavailable, STOP and report — the owner's plan depends on it). GET-only rule absolute.
+
+#### BRK-012B — Sharesight historical daily prices: schema, backfill, hourly refresh
+
+Status: READY (2026-08-20, owner directive; depends BRK-012A). Rulings (BINDING):
+
+- Historical dailies land in the EXISTING `price_observations` table (it already carries the non-negotiable provenance: currency, timezone, source, observation time, ingestion time, adjustment state) with `source='sharesight'` and `access_scope='user'`/`scope_user_id` = the owner (prices fetched with the owner's credentials are user-scoped observations — never published deployment-wide). The owner's "separate table" requirement is satisfied by this dedicated price store; do NOT create a parallel daily-price table (adapt-don't-duplicate). Any needed column additions are ADD COLUMN with the standing trigger-hazard check.
+- Scope: only securities that are or have been held in the owner's portfolios (portfolio_securities-linked, any current quantity incl. zero/exited). Resolution through the durable security id + `sharesight_instrument` identifier (BRK-009A) — never ticker text.
+- Backfill: owner-initiated or first-refresh-triggered, resumable/bounded (statement-budget discipline per CALC-003/UI-013 precedent), idempotent (re-fetch upserts identical observations without duplication — natural key security+date+source+scope).
+- Hourly refresh: extend the existing scheduled sweep (worker/index.ts) with a bounded per-user pass fetching recent dailies for in-scope securities; failures explicit and retryable, never partial-silent.
+- New client methods live in the sealed GET-only module with the BRK-012A-evidenced shapes; parse with the established absent-vs-malformed discipline; money as decimal strings (exact round-trip, exponent rejected).
+- Docs: MARKET_DATA_STRATEGY (Sharesight as a price source: entitlement = owner's own account, delayed data, never labelled live), DATA_MODEL (scope/source semantics), ARCHITECTURE §8.2.
+- Tests: backfill/refresh idempotency, scope filter (non-held securities never fetched), provenance completeness, bounded budgets, cross-user isolation, parse edge cases per evidence.
+
+#### BRK-012C — Delayed-price cache and 10-minute read gate
+
+Status: READY (2026-08-20, owner directive; depends BRK-012B). Rulings (BINDING):
+
+- New small table for the latest delayed price per (user, security): price decimal string, currency, Sharesight's own quote timestamp when supplied, `fetched_at` (ingestion), source metadata — freshness must be unambiguous from the row alone.
+- Read gate: on authenticated portfolio load (holdings/overview read path), if a current holding's cached delayed price has `fetched_at` older than 10 minutes, fetch fresh delayed prices for ALL current holdings from Sharesight (batched, bounded) and update the cache; within the 10-minute window serve the cache and make ZERO Sharesight pricing requests (test asserts no client call). Stampede-safe (lease or single-flight per user, mirroring the executor's lease discipline); a fetch failure serves the stale cache with its honest age shown, never blocks the page.
+- Display: delayed prices feed the existing holdings/overview valuation paths as `price_observations`-compatible inputs or a parallel read (worker designs within existing selection semantics — MKT selection lookback etc.); ALWAYS labelled as delayed (never "live" — AGENTS rule), with the quote timestamp accessible; `Price unavailable` states unchanged where no price exists.
+- Tests: 10-minute gate boundary (9m59s = cache only; 10m01s = refresh), zero-request-within-window assertion, stale-serve-on-failure, stampede single-flight, freshness display, cross-user isolation.
+
 #### BRK-011 — Foreign-currency dividend franking valuation
 
 Status: READY (2026-08-19, owner directive). BRK-010 deliberately left franking credits on foreign-currency payouts as UNKNOWN at read time (their currency denomination on the Sharesight wire is unverified; a warning issue is staged, never converted-by-assumption). The owner has now ruled the resolution cascade (BINDING, in priority order):
