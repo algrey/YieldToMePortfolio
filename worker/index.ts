@@ -21,6 +21,7 @@ import {
   runScheduledCalculationSweep,
   runScheduledCorporateActionRefresh,
   runScheduledMarketDataRefresh,
+  runScheduledSharesightPriceRefresh,
 } from "./scheduled-refresh";
 
 const accessJwtVerifier = createAccessJwtVerifier();
@@ -157,6 +158,29 @@ const worker: ExportedHandler<Env> = {
             securitiesFailed: corporateActionResult.securitiesFailed,
           }
         : { reason: corporateActionResult.reason },
+    });
+
+    const sharesightPriceRefreshResult =
+      await runScheduledSharesightPriceRefresh(env);
+    emitStructuredLog({
+      level: sharesightPriceRefreshResult.ok ? "info" : "error",
+      event: "market.refresh",
+      action: "market.refresh.sharesight_price.scheduled",
+      result: sharesightPriceRefreshResult.ok ? "success" : "failure",
+      requestId: "scheduled",
+      metadata: sharesightPriceRefreshResult.ok
+        ? {
+            skipped: sharesightPriceRefreshResult.skipped,
+            usersProcessed: sharesightPriceRefreshResult.usersProcessed,
+            usersFailed: sharesightPriceRefreshResult.usersFailed,
+            matchedCount: sharesightPriceRefreshResult.matchedCount,
+            unmatchedCount: sharesightPriceRefreshResult.unmatchedCount,
+            invalidTimestampCount:
+              sharesightPriceRefreshResult.invalidTimestampCount,
+            observationsWritten:
+              sharesightPriceRefreshResult.observationsWritten,
+          }
+        : { reason: sharesightPriceRefreshResult.reason },
     });
 
     const calculationSweepResult = await runScheduledCalculationSweep();

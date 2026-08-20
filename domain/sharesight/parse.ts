@@ -27,6 +27,7 @@ import type {
   SharesightResult,
   SharesightTrade,
   SharesightTradeType,
+  SharesightUserInstrument,
 } from "./contracts.ts";
 
 type RecordValue = Record<string, unknown>;
@@ -233,6 +234,30 @@ function optionalIntegerIdDecimalString(
   if (!Number.isSafeInteger(value)) return MALFORMED_OPTIONAL_ID;
   if (value < 0) return MALFORMED_OPTIONAL_ID;
   return String(value);
+}
+
+/**
+ * BRK-012B: validates `current_price_updated_at`'s shape WITHOUT converting
+ * it -- an ISO-8601 date-time carrying an explicit offset (`Z` or a numeric
+ * `+HH:MM`/`-HH:MM`), matching every observed live value
+ * (`docs/ARCHITECTURE.md` §8.2's BRK-012A entry, e.g. `+10:00` for Sydney).
+ * `Date.parse` is used only as a sanity check that the value is a real
+ * instant (rejects e.g. `2026-13-40T99:99:99+10:00`); the STRING itself,
+ * offset intact, is what `SharesightUserInstrument.currentPriceUpdatedAt`
+ * retains and what `price-accretion.ts` derives a trading date from -- never
+ * `new Date(value).toISOString()`, which would silently re-express the
+ * instant in UTC and could shift a late-evening positive-offset observation
+ * onto the wrong calendar day.
+ */
+function isTimestampWithOffset(value: string): boolean {
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(
+      value,
+    )
+  ) {
+    return false;
+  }
+  return Number.isFinite(Date.parse(value));
 }
 
 function isMarketDate(value: string): boolean {
@@ -1042,5 +1067,75 @@ export function parseSharesightPayouts(
     "payouts",
     (item) => parsePayoutItem(item, portfolioId),
     "payouts",
+  );
+}
+
+/**
+ * BRK-012B: parses `user_instruments.json`'s `instruments` list into typed
+ * `SharesightUserInstrument`s. EVERY returned item is validated (not just
+ * the 8/18 BRK-012A directly sampled) -- an item missing/malformed on any of
+ * the five required fields fails THAT item closed via `itemFailure`, per
+ * this module's universal per-item discipline (`parseItemList`).
+ */
+function parseUserInstrumentItem(item: unknown): SharesightUserInstrument {
+  const record = asRecord(item);
+  if (!record) fail("<item>", "wrong_type");
+  // Same numeric-id technique portfolios/holdings/trades already use.
+  const id = requiredIntegerIdDecimalString(record, "id");
+  if (!id) fail("id", requiredFailureReason(record, "id", "number"));
+  const code = requiredString(record, "code");
+  if (!code) fail("code", requiredFailureReason(record, "code", "string"));
+  const marketCode = requiredString(record, "market_code");
+  if (!marketCode) {
+    fail("market_code", requiredFailureReason(record, "market_code", "string"));
+  }
+  const currencyCodeRaw = requiredString(record, "currency_code");
+  if (!currencyCodeRaw) {
+    fail(
+      "currency_code",
+      requiredFailureReason(record, "currency_code", "string"),
+    );
+  }
+  if (!isCurrencyCode(currencyCodeRaw)) fail("currency_code", "invalid_format");
+  const currencyCode = currencyCodeRaw;
+  const currentPriceDecimal = requiredDecimal(record, "current_price");
+  if (!currentPriceDecimal) {
+    fail(
+      "current_price",
+      requiredDecimalFailureReason(record, "current_price"),
+    );
+  }
+  const currentPriceUpdatedAt = requiredString(
+    record,
+    "current_price_updated_at",
+  );
+  if (!currentPriceUpdatedAt) {
+    fail(
+      "current_price_updated_at",
+      requiredFailureReason(record, "current_price_updated_at", "string"),
+    );
+  }
+  if (!isTimestampWithOffset(currentPriceUpdatedAt)) {
+    fail("current_price_updated_at", "invalid_format");
+  }
+
+  return {
+    id,
+    code,
+    marketCode,
+    currencyCode,
+    currentPriceDecimal,
+    currentPriceUpdatedAt,
+  };
+}
+
+export function parseSharesightUserInstruments(
+  root: unknown,
+): SharesightResult<SharesightUserInstrument[]> {
+  return parseItemList(
+    root,
+    "instruments",
+    parseUserInstrumentItem,
+    "user instruments",
   );
 }

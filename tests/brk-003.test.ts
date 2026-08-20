@@ -159,13 +159,21 @@ const EXPECTED_BARREL_EXPORT_NAMES = [
   "SharesightTokenGrantConfigError",
   "SharesightTokenUrlRejectedError",
   "assertSharesightTokenUrl",
+  // BRK-012B: pure market-date/offset derivation + scope-match plan
+  // builder, added to the barrel alongside the typed `listUserInstruments`
+  // promotion -- see domain/sharesight/price-accretion.ts.
+  "buildSharesightPriceAccretionPlan",
   "createSharesightClient",
   "createSharesightTokenProvider",
+  "deriveMarketDateFromTimestamp",
   "deriveShapeEvidence",
+  "extractOffsetSuffix",
   "parseSharesightHoldings",
   "parseSharesightPayouts",
   "parseSharesightPortfolios",
   "parseSharesightTrades",
+  // BRK-012B: promoted from BRK-012A's raw evidence probe.
+  "parseSharesightUserInstruments",
   "validateSharesightRedirectUri",
   "validateSharesightTokenUrlShape",
 ].sort();
@@ -3047,13 +3055,22 @@ test("BRK-008 F2: a baseUrl with no /api/vN version segment is a documented no-o
   );
 });
 
-// --- BRK-012A: evidence-probe methods (RAW passthrough, no domain parse) --
+// --- BRK-012B: listUserInstruments promoted to a typed, validated method --
 
-test("BRK-012A: listUserInstruments requests /user_instruments.json against the v2 root and returns the raw parsed body unmodified", async () => {
+test("BRK-012B: listUserInstruments requests /user_instruments.json against the v2 root and returns a typed, validated result", async () => {
   const provider = await alwaysValidTokenProvider();
   let calledUrl: string | null = null;
   const rawBody = {
-    instruments: [{ id: 1, code: "ABC", current_price: 5.1 }],
+    instruments: [
+      {
+        id: 1,
+        code: "ABC",
+        market_code: "ASX",
+        currency_code: "AUD",
+        current_price: 5.1,
+        current_price_updated_at: "2026-08-20T16:10:03+10:00",
+      },
+    ],
   };
   const client = createSharesightClient({
     tokenProvider: provider,
@@ -3062,66 +3079,84 @@ test("BRK-012A: listUserInstruments requests /user_instruments.json against the 
       return jsonResponse(200, rawBody);
     },
   });
-  const result = await client.listUserInstruments?.();
+  const result = await client.listUserInstruments();
   assert.equal(
     calledUrl,
     "https://api.sharesight.com/api/v2/user_instruments.json",
   );
-  assert.equal(result?.ok, true);
-  if (result?.ok) {
-    assert.deepEqual(result.value, rawBody);
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.deepEqual(result.value, [
+      {
+        id: "1",
+        code: "ABC",
+        marketCode: "ASX",
+        currencyCode: "AUD",
+        currentPriceDecimal: "5.1",
+        currentPriceUpdatedAt: "2026-08-20T16:10:03+10:00",
+      },
+    ]);
   }
 });
 
-test("BRK-012A: listInstrumentPrices requests /instruments/:id/prices.json against the v2 root, maps from/to/numPoints to start_date/end_date/num_points, and returns the raw parsed body unmodified", async () => {
+test("BRK-012B: listUserInstruments fails an individual malformed item closed (item-failure diagnostic), never silently drops it", async () => {
   const provider = await alwaysValidTokenProvider();
-  let calledUrl: string | null = null;
-  const rawBody = {
-    instrument_id: 429,
-    instrument_prices: [{ last_traded_on: "2020-01-01", value: 27.52 }],
-  };
+  const shapeCalls: Array<{ endpoint: string; shape: unknown }> = [];
+  const itemFailureCalls: Array<{
+    endpoint: string;
+    itemIndex: number;
+    fieldName: string;
+  }> = [];
   const client = createSharesightClient({
     tokenProvider: provider,
-    fetcher: async (url) => {
-      calledUrl = String(url);
-      return jsonResponse(200, rawBody);
-    },
+    fetcher: async () =>
+      jsonResponse(200, {
+        instruments: [
+          {
+            id: 1,
+            code: "ABC",
+            market_code: "ASX",
+            currency_code: "AUD",
+            current_price: 5.1,
+            current_price_updated_at: "2026-08-20T16:10:03+10:00",
+          },
+          {
+            id: 2,
+            code: "DEF",
+            market_code: "NYSE",
+            // currency_code deliberately missing on this LATER item -- the
+            // 8/18 BRK-012A caveat this promotion closes.
+            current_price: 12.4,
+            current_price_updated_at: "2026-08-20T16:10:03+10:00",
+          },
+        ],
+      }),
+    onShapeEvidence: (endpoint, shape) => shapeCalls.push({ endpoint, shape }),
+    onItemFailureEvidence: (endpoint, evidence) =>
+      itemFailureCalls.push({
+        endpoint,
+        itemIndex: evidence.itemIndex,
+        fieldName: evidence.fieldName,
+      }),
   });
-  const result = await client.listInstrumentPrices?.("429", {
-    from: "2020-01-01",
-    to: "2020-01-31",
-    numPoints: 31,
-  });
-  assert.equal(
-    calledUrl,
-    "https://api.sharesight.com/api/v2/instruments/429/prices.json?start_date=2020-01-01&end_date=2020-01-31&num_points=31",
-  );
-  assert.equal(result?.ok, true);
-  if (result?.ok) {
-    assert.deepEqual(result.value, rawBody);
+  const result = await client.listUserInstruments();
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.kind, "invalid_response");
+    assert.deepEqual(result.error.itemFailure, {
+      itemIndex: 1,
+      fieldName: "currency_code",
+      reason: "missing",
+    });
   }
+  assert.equal(itemFailureCalls.length, 1);
+  assert.equal(itemFailureCalls[0]?.endpoint, "listUserInstruments");
+  assert.equal(itemFailureCalls[0]?.fieldName, "currency_code");
+  assert.equal(shapeCalls.length, 1);
+  assert.equal(shapeCalls[0]?.endpoint, "listUserInstruments");
 });
 
-test("BRK-012A: listInstrumentPrices with no params omits query string entirely", async () => {
-  const provider = await alwaysValidTokenProvider();
-  let calledUrl: string | null = null;
-  const client = createSharesightClient({
-    tokenProvider: provider,
-    fetcher: async (url) => {
-      calledUrl = String(url);
-      return jsonResponse(200, { instrument_id: 1, instrument_prices: [] });
-    },
-  });
-  await client.listInstrumentPrices?.("1");
-  assert.equal(
-    calledUrl,
-    "https://api.sharesight.com/api/v2/instruments/1/prices.json",
-  );
-});
-
-// --- BRK-012A follow-up probe: content-negotiation/path/query variants ---
-
-test("BRK-012A follow-up: every ordinary getJson call site (unaffected by the new acceptOverride param) still sends the unchanged accept: application/json header", async () => {
+test("BRK-012B: every ordinary getJson call site still sends the unchanged accept: application/json header (acceptOverride plumbing removed with listInstrumentPrices)", async () => {
   const provider = await alwaysValidTokenProvider();
   const captured: { headers: Record<string, string> | null } = {
     headers: null,
@@ -3137,116 +3172,30 @@ test("BRK-012A follow-up: every ordinary getJson call site (unaffected by the ne
   assert.equal(captured.headers?.accept, "application/json");
 });
 
-test("BRK-012A follow-up: listInstrumentPrices acceptOverride sends the exact override value (accept-header content-negotiation probe)", async () => {
+test("BRK-012B: listInstrumentPrices is removed entirely -- the 406-dead route is not re-attempted", async () => {
   const provider = await alwaysValidTokenProvider();
-  const captured: { headers: Record<string, string> | null } = {
-    headers: null,
-  };
   const client = createSharesightClient({
     tokenProvider: provider,
-    fetcher: async (_url, init) => {
-      captured.headers = (init?.headers ?? {}) as Record<string, string>;
-      return jsonResponse(200, { instrument_id: 1, instrument_prices: [] });
-    },
+    fetcher: async () => jsonResponse(200, {}),
   });
-  await client.listInstrumentPrices?.("1", { acceptOverride: "*/*" });
-  assert.equal(captured.headers?.accept, "*/*");
-});
-
-test("BRK-012A follow-up: listInstrumentPrices acceptOverride: null omits the Accept header key entirely, never sending it as the string 'undefined'", async () => {
-  const provider = await alwaysValidTokenProvider();
-  const captured: { headers: Record<string, string> | null } = {
-    headers: null,
-  };
-  const client = createSharesightClient({
-    tokenProvider: provider,
-    fetcher: async (_url, init) => {
-      captured.headers = (init?.headers ?? {}) as Record<string, string>;
-      return jsonResponse(200, { instrument_id: 1, instrument_prices: [] });
-    },
-  });
-  await client.listInstrumentPrices?.("1", { acceptOverride: null });
-  assert.equal("accept" in (captured.headers ?? {}), false);
   assert.equal(
-    captured.headers?.authorization,
-    `Bearer ${FIXTURE_ACCESS_TOKEN}`,
+    (client as Record<string, unknown>).listInstrumentPrices,
+    undefined,
   );
 });
 
-test("BRK-012A follow-up: listInstrumentPrices pathSuffix='' drops the .json suffix, and apiVersion='v3' requests against the v3 (not v2) root", async () => {
-  const provider = await alwaysValidTokenProvider();
-  const calledUrls: string[] = [];
-  const client = createSharesightClient({
-    tokenProvider: provider,
-    fetcher: async (url) => {
-      calledUrls.push(String(url));
-      return jsonResponse(404, {});
-    },
-  });
-  await client.listInstrumentPrices?.("1", { pathSuffix: "" });
-  await client.listInstrumentPrices?.("1", { apiVersion: "v3" });
-  assert.deepEqual(calledUrls, [
-    "https://api.sharesight.com/api/v2/instruments/1/prices",
-    "https://api.sharesight.com/api/v3/instruments/1/prices.json",
-  ]);
-});
-
-test("BRK-012A follow-up: listInstrumentPrices limit maps to an undocumented ?limit= query param, probe-only", async () => {
-  const provider = await alwaysValidTokenProvider();
-  let calledUrl: string | null = null;
-  const client = createSharesightClient({
-    tokenProvider: provider,
-    fetcher: async (url) => {
-      calledUrl = String(url);
-      return jsonResponse(200, { instrument_id: 1, instrument_prices: [] });
-    },
-  });
-  await client.listInstrumentPrices?.("1", { limit: 50 });
-  assert.equal(
-    calledUrl,
-    "https://api.sharesight.com/api/v2/instruments/1/prices.json?limit=50",
-  );
-});
-
-test("BRK-012A follow-up: listUserInstruments extraParams pass through verbatim as query params (undocumented overload probe), and are omitted entirely when absent/empty", async () => {
-  const provider = await alwaysValidTokenProvider();
-  const calledUrls: string[] = [];
-  const client = createSharesightClient({
-    tokenProvider: provider,
-    fetcher: async (url) => {
-      calledUrls.push(String(url));
-      return jsonResponse(200, { instruments: [] });
-    },
-  });
-  await client.listUserInstruments?.({
-    extraParams: { start_date: "2020-01-01" },
-  });
-  await client.listUserInstruments?.();
-  await client.listUserInstruments?.({ extraParams: {} });
-  assert.deepEqual(calledUrls, [
-    "https://api.sharesight.com/api/v2/user_instruments.json?start_date=2020-01-01",
-    "https://api.sharesight.com/api/v2/user_instruments.json",
-    "https://api.sharesight.com/api/v2/user_instruments.json",
-  ]);
-});
-
-test("BRK-012A follow-up (F4): every evidence-probe method still sends an explicit method: 'GET' through the sealed transport, same as every production endpoint -- sharesightGet hard-codes method: 'GET' onto init (transport.ts) rather than leaving it unset for fetch's own default", async () => {
+test("BRK-012B (carried from BRK-012A follow-up F4): listUserInstruments still sends an explicit method: 'GET' through the sealed transport, same as every production endpoint -- sharesightGet hard-codes method: 'GET' onto init (transport.ts) rather than leaving it unset for fetch's own default", async () => {
   const provider = await alwaysValidTokenProvider();
   const capturedInits: Array<RequestInit | undefined> = [];
   const client = createSharesightClient({
     tokenProvider: provider,
     fetcher: async (_url, init) => {
       capturedInits.push(init);
-      return jsonResponse(200, {
-        instruments: [],
-        instrument_id: 1,
-        instrument_prices: [],
-      });
+      return jsonResponse(200, { instruments: [] });
     },
   });
-  await client.listUserInstruments?.();
-  await client.listInstrumentPrices?.("1");
-  assert.equal(capturedInits.length, 2);
+  await client.listUserInstruments();
+  assert.equal(capturedInits.length, 1);
   for (const init of capturedInits) {
     assert.equal(init?.method, "GET");
   }

@@ -101,6 +101,11 @@ export async function loadOwnedQuotes(
           candidate.portfolio_security_id === row.portfolio_security_id,
       ) === index,
   );
+  // BRK-012B review note (2026-08-20): unlike owned-holdings.ts/snapshots.ts,
+  // this read is ALREADY `access_scope = 'deployment'`-only (no OR-branch
+  // admitting a user-scoped row at all), so a Sharesight accretion row
+  // (always `access_scope = 'user'`) can never reach it -- no
+  // `provider_id <> 'sharesight'` predicate is needed here for THIS slice.
   const observations = await client.all<Record<string, unknown>>(
     `SELECT po.* FROM price_observations po
        JOIN portfolio_securities ps ON ps.security_id = po.security_id

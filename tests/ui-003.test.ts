@@ -8,6 +8,11 @@ import {
   sortOwnedHoldings,
   type OwnedHoldingRow,
 } from "../app/owned-holdings-contract.ts";
+import {
+  resolveScopedSharesightInstrumentSecurities,
+  upsertSharesightPriceObservations,
+} from "../db/repositories/sharesight-price-refresh.ts";
+import { buildSharesightPriceAccretionPlan } from "../domain/sharesight/index.ts";
 
 function row(
   symbol: string,
@@ -692,5 +697,103 @@ test("UI-003 renders cash-only portfolios as cash summary rather than an empty s
   assert.equal(cashOnly.rows.length, 0);
   assert.equal(cashOnly.cash.cashSubtotal, "25");
   assert.equal(cashOnly.status, "complete");
+  db.close();
+});
+
+// ---------------------------------------------------------------------------
+// BRK-012B review B1/B3 regression: a Sharesight-sourced price_observations
+// row must never blank or displace the holdings view for THIS storage-only
+// slice. Reviewer drill (B1 severe): the FIRST hourly write, before the
+// fix, stored `observation_at` with Sharesight's raw `+10:00` offset
+// intact -- `mapPrice`'s `ISO` regex (Z-only) then failed closed on that
+// row, and the failure was swallowed by the caller's `catch` into a blanked
+// "unavailable" holdings view. Both parts of the fix are drilled here: (a)
+// `observation_at` is now normalized to UTC `Z` at write time, and (b) a
+// Sharesight row is explicitly excluded from selection regardless.
+// ---------------------------------------------------------------------------
+
+test("BRK-012B x UI-003 regression (B1 drill): a REAL Sharesight accretion write (raw +10:00 timestamp, through the actual production pipeline) leaves the owner's holdings view completely intact", async () => {
+  const db = await holdingsDatabase();
+  db.exec(`
+    INSERT INTO security_identifiers (id, security_id, scheme, value, valid_from, valid_to, source)
+    VALUES ('ident-sharesight-a', 'security-a', 'sharesight_instrument', '101', '2026-08-03', NULL, 'sharesight');
+  `);
+  const client = createSqliteSqlClient(db);
+
+  // The exact production pipeline: resolve scope -> build the accretion
+  // plan from a raw Sharesight instrument (offset timestamp, unconverted)
+  // -> upsert. Nothing here is a shortcut/mock of the real write path.
+  const scopeMap = await resolveScopedSharesightInstrumentSecurities(
+    client,
+    "owner-a",
+  );
+  const plan = buildSharesightPriceAccretionPlan(
+    [
+      {
+        id: "101",
+        code: "AAA",
+        marketCode: "NYSE",
+        currencyCode: "USD",
+        currentPriceDecimal: "9.99",
+        // Raw Sharesight offset timestamp -- the exact shape that blanked
+        // the holdings view before this fix.
+        currentPriceUpdatedAt: "2026-08-03T16:10:03+10:00",
+      },
+    ],
+    scopeMap,
+  );
+  assert.equal(plan.matchedCount, 1);
+  await upsertSharesightPriceObservations(client, {
+    userId: "owner-a",
+    candidates: plan.candidates,
+    now: "2026-08-03T17:00:00.000Z",
+  });
+
+  // Confirm the write actually landed with a Z-suffixed observation_at
+  // (B1(a)) -- proves the fix's storage side, not just its read-side
+  // exclusion.
+  const written = db
+    .prepare(
+      `SELECT observation_at FROM price_observations WHERE provider_id = 'sharesight'`,
+    )
+    .get() as { observation_at: string };
+  assert.match(written.observation_at, /Z$/);
+  assert.equal(written.observation_at, "2026-08-03T06:10:03.000Z");
+
+  // The B1 drill itself: the holdings view must be completely unaffected --
+  // not blanked, not thrown, not silently degraded -- exactly the baseline
+  // `holdingsDatabase()` fixture's own established result.
+  const result = await loadOwnedHoldings(
+    client,
+    "owner-a",
+    "portfolio-a",
+    new Date("2026-08-03T08:00:00Z"),
+  );
+  assert.equal(result.status, "complete");
+  assert.equal(result.rows[0]?.homeValue.status, "available");
+  assert.equal(result.rows[0]?.homeValue.value, "8");
+  assert.equal(result.rows[0]?.dailyMovement.value, "1");
+  db.close();
+});
+
+test("BRK-012B x UI-003 regression (B1(b)): a Sharesight row with a newer/better-looking observation than the Yahoo-compatible one is still never selected for the holdings view", async () => {
+  const db = await holdingsDatabase();
+  db.exec(`
+    INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+      VALUES ('mapping-sharesight-a', 'security-a', 'sharesight', 'NYSE', 'AAA', '2026-01-01', 'candidate');
+    INSERT INTO price_observations (id,provider_id,access_scope,scope_user_id,scope_key,mapping_id,security_id,interval,observation_at,market_date,market_timezone,currency_code,close_decimal,previous_close_decimal,adjustment_state,quality,ingested_at)
+    VALUES ('price-sharesight-a','sharesight','user','owner-a','owner-a','mapping-sharesight-a','security-a','delayed','2026-08-03T05:00:00.000Z','2026-08-03','+10:00','USD','5000','4999','raw','observed','2026-08-03T05:01:00.000Z');
+  `);
+  const result = await loadOwnedHoldings(
+    createSqliteSqlClient(db),
+    "owner-a",
+    "portfolio-a",
+    new Date("2026-08-03T08:00:00Z"),
+  );
+  // Unchanged from the baseline `holdingsDatabase()` fixture's own
+  // established Yahoo-compatible result -- the wildly different Sharesight
+  // close_decimal ('5000') never appears.
+  assert.equal(result.rows[0]?.homeValue.value, "8");
+  assert.equal(result.rows[0]?.dailyMovement.value, "1");
   db.close();
 });

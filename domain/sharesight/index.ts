@@ -25,6 +25,7 @@ export type {
   SharesightResult,
   SharesightTrade,
   SharesightTradeType,
+  SharesightUserInstrument,
 } from "./contracts.ts";
 
 // `SharesightFetcher` is re-exported type-only because it's part of the
@@ -61,6 +62,7 @@ export {
   parseSharesightPayouts,
   parseSharesightPortfolios,
   parseSharesightTrades,
+  parseSharesightUserInstruments,
 } from "./parse.ts";
 
 // `deriveShapeEvidence` is pure and side-effect free (no fetch, no I/O --
@@ -70,3 +72,14 @@ export {
   deriveShapeEvidence,
   type DeriveShapeEvidenceOptions,
 } from "./shape-evidence.ts";
+
+// BRK-012B: pure market-date/offset derivation + scope-match plan builder --
+// no fetch, no I/O, safe to export from this barrel for the same reason
+// `deriveShapeEvidence` is.
+export {
+  buildSharesightPriceAccretionPlan,
+  deriveMarketDateFromTimestamp,
+  extractOffsetSuffix,
+  type SharesightPriceAccretionCandidate,
+  type SharesightPriceAccretionPlan,
+} from "./price-accretion.ts";

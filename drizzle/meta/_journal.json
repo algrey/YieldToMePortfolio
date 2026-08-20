@@ -302,6 +302,20 @@
       "when": 1787089002131,
       "tag": "0042_premium_vin_gonzales",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "6",
+      "when": 1787212802812,
+      "tag": "0043_daily_tinkerer",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "6",
+      "when": 1787212807887,
+      "tag": "0044_seed_sharesight_provider",
+      "breakpoints": true
     }
   ]
 }

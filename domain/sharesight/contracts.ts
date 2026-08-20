@@ -500,3 +500,50 @@ export type SharesightListParams = Readonly<{
   from?: string;
   to?: string;
 }>;
+
+/**
+ * BRK-012B: typed, validated contract for `GET /user_instruments.json`,
+ * promoted from BRK-012A's raw evidence-probe shape now that the price
+ * refresh pipeline actually consumes it -- see `docs/ARCHITECTURE.md` §8.2's
+ * BRK-012A entry for the live evidence this rests on (18 returned
+ * instruments; 8 directly sampled + the first item's derived shape). Unlike
+ * that entry's "required-on-observed-sample" caveat, `parse.ts`'s
+ * `parseSharesightUserInstruments` now validates EVERY returned item, not
+ * just the sampled 8/18 -- a later item missing e.g. `currency_code` fails
+ * THAT item closed (`itemFailure`), never silently passes because only the
+ * first few items were checked at evidence-gathering time.
+ *
+ * All five fields are REQUIRED: `id` (numeric on the wire, normalized to a
+ * decimal string via `requiredIntegerIdDecimalString`, the same technique
+ * portfolios/holdings/trades already use), `code`, `marketCode`,
+ * `currencyCode` (ISO 4217-shaped, `isCurrencyCode`), `currentPriceDecimal`
+ * (an exact double round-trip decimal string, the same `decimalString`
+ * discipline every other money field on this module uses), and
+ * `currentPriceUpdatedAt` -- kept as the RAW ISO-8601 timestamp string
+ * Sharesight sent, offset included (e.g. `"2026-08-20T16:10:03+10:00"`),
+ * deliberately NEVER reformatted/converted to UTC: BRK-012B's market-date
+ * derivation (`domain/sharesight/price-accretion.ts`) reads the calendar
+ * date straight out of this string's own offset, so re-expressing it in UTC
+ * here would silently shift a late-evening observation onto the wrong
+ * trading day for a positive-offset market (the live evidence is Sydney,
+ * `+10:00`/`+11:00`). Every other `current_price_updated_at`-adjacent
+ * fundamentals field the wire carries (`pe_ratio`, `nta`, `eps`, sector/
+ * industry classification, `security_type`, `registry_name`, etc.) is
+ * ignored, not validated or retained -- this contract exists solely to
+ * source a delayed, timestamped price per instrument, never to become a
+ * general instrument-metadata cache.
+ *
+ * Never labelled `live` anywhere downstream (AGENTS.md non-negotiable):
+ * `current_price` is Sharesight's own cached/delayed figure, and the
+ * BRK-012A live pass found the owner's "~20-minute delay" claim
+ * INCONCLUSIVE (both spike runs ran after ASX close) -- freshness rests
+ * solely on `currentPriceUpdatedAt`, never an assumed delay magnitude.
+ */
+export type SharesightUserInstrument = Readonly<{
+  id: string;
+  code: string;
+  marketCode: string;
+  currencyCode: string;
+  currentPriceDecimal: string;
+  currentPriceUpdatedAt: string;
+}>;

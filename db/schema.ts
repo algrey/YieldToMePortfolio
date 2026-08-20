@@ -1280,6 +1280,41 @@ export const priceObservations = sqliteTable(
       table.observationAt,
       table.adjustmentState,
     ),
+    // BRK-012B: a SECOND unique index, index-only (no rebuild, no
+    // trigger-hazard -- `CREATE UNIQUE INDEX` never drops the table's
+    // `account_purge_lock_price_observations_*` triggers). The unique index
+    // above is keyed on the exact `observation_at` TIMESTAMP -- correct for
+    // the EXISTING eod/corrections model (`market-data-refresh.ts`'s
+    // upserts, `tests/calc-002-repository.test.ts`'s same-day "correction
+    // received later" fixture), where TWO rows for the SAME `market_date`
+    // but a DIFFERENT `observation_at` are a legitimate, intentional
+    // same-day correction (selection picks the best one at read time; see
+    // `domain/market-data/selection.ts`) -- a plain, unscoped
+    // `market_date`-keyed unique index would make that pattern impossible
+    // for EVERY provider, not just Sharesight (confirmed the hard way: an
+    // earlier unscoped version of this index broke
+    // `tests/calc-002-repository.test.ts`'s correction fixture with a real
+    // UNIQUE constraint violation). Sharesight's accretion-forward model
+    // (TASKS.md's BRK-012B RESCOPE) is different: it writes potentially
+    // several observations across ONE trading day (each hourly refresh's
+    // `current_price_updated_at`), and EVERY later write within the SAME
+    // `market_date` must OVERWRITE the earlier one (converging toward the
+    // close), never accumulate as a same-day "correction" row. This index
+    // is therefore a PARTIAL unique index, scoped to `provider_id =
+    // 'sharesight'` only -- every other provider's rows (including a future
+    // one) are completely unaffected, and `db/repositories/sharesight-
+    // price-refresh.ts`'s `ON CONFLICT (provider_id, scope_key, mapping_id,
+    // interval, market_date, adjustment_state)` targets it precisely.
+    uniqueIndex("price_observations_provider_scope_mapping_date_unique")
+      .on(
+        table.providerId,
+        table.scopeKey,
+        table.mappingId,
+        table.interval,
+        table.marketDate,
+        table.adjustmentState,
+      )
+      .where(sql`${table.providerId} = 'sharesight'`),
     index("price_observations_security_date_idx").on(
       table.securityId,
       table.adjustmentState,
@@ -3210,6 +3245,33 @@ export const sharesightSyncState = sqliteTable(
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
     lastSyncedAt: text("last_synced_at"),
     lastTradeWatermark: text("last_trade_watermark"),
+    // BRK-012B: the price-refresh watermark, ADD COLUMN (column-only, no
+    // rebuild -- see this comment's trigger-hazard note below). Reuses this
+    // existing per-(user, portfolio, sharesightPortfolioId) sync-state row
+    // rather than a new table (AGENTS.md scope discipline -- "reuse/extend
+    // an existing state table if one fits"): the hourly refresh calls
+    // `listUserInstruments` ONCE per Sharesight account and then updates
+    // the watermark on every ENABLED row belonging to that owner, so each
+    // linked portfolio's sync state honestly reflects the last attempt
+    // regardless of how many local portfolios share one Sharesight account.
+    // `lastPriceRefreshStatus` is nullable (no attempt yet) and NEVER
+    // partial-silent -- a failed fetch/parse still writes `'failed'` plus
+    // `lastPriceRefreshErrorKind`, mirroring `corporate_action_refresh_state`'s
+    // `last_status` convention. Deliberately NO new DB CHECK constraint here
+    // (`db/repositories/sharesight-price-refresh.ts` validates the status
+    // value in application code instead): a table-level CHECK cannot be
+    // added via SQLite's `ALTER TABLE ADD COLUMN` at all -- drizzle-kit's
+    // only way to add one is a genuine table REBUILD (verified by running
+    // `drizzle-kit generate` against an earlier draft of this change: it
+    // emitted a `__new_sharesight_sync_state`/DROP/RENAME sequence), which
+    // would DROP this table's three `account_purge_lock_*` triggers and
+    // require hand-recreating them (the exact hazard 0035/0042's disclosure
+    // comments document for `dividend_manual_records`). Three plain ADD
+    // COLUMN statements avoid that rebuild entirely and leave the existing
+    // triggers untouched.
+    lastPriceRefreshAt: text("last_price_refresh_at"),
+    lastPriceRefreshStatus: text("last_price_refresh_status"),
+    lastPriceRefreshErrorKind: text("last_price_refresh_error_kind"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     version: integer("version").notNull().default(1),

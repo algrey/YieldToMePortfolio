@@ -530,14 +530,27 @@ export async function loadOwnedHoldings(
   )
     throw new Error("projection_identity_mismatch");
   const priceCountRow = await client.get<Row>(
-    `SELECT count(*) AS count FROM price_observations po WHERE po.adjustment_state = 'raw' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?)) AND EXISTS (SELECT 1 FROM portfolio_securities ps WHERE ps.security_id = po.security_id AND ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held')`,
+    // BRK-012B review B1/B3 (2026-08-20): this SELECT genuinely reads BOTH
+    // deployment- and user-scoped rows (the `access_scope` OR clause below
+    // is pre-existing, not new) -- so it is exactly the read path a
+    // user-scoped Sharesight accretion row would otherwise reach. That row
+    // is EXPLICITLY excluded here (`po.provider_id <> 'sharesight'`) for
+    // THIS slice: BRK-012B is pure storage, and valuation/holdings behavior
+    // must not change until BRK-012C deliberately wires delayed prices in
+    // with its own docs/CALCULATIONS.md update and freshness/labelling
+    // rules. Remove this predicate only as part of that dedicated task, not
+    // incidentally.
+    `SELECT count(*) AS count FROM price_observations po WHERE po.adjustment_state = 'raw' AND po.provider_id <> 'sharesight' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?)) AND EXISTS (SELECT 1 FROM portfolio_securities ps WHERE ps.security_id = po.security_id AND ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held')`,
     [asOf, asOf, nowIso, nowIso, userId, userId, portfolioId],
   );
   const priceCount = integer(priceCountRow ?? {}, "count");
   if (priceCount > MAX_OBSERVATIONS)
     throw new Error("too_many_price_observations");
   const prices = await client.all<Row>(
-    `SELECT po.* FROM price_observations po WHERE po.adjustment_state = 'raw' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?)) AND EXISTS (SELECT 1 FROM portfolio_securities ps WHERE ps.security_id = po.security_id AND ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held') ORDER BY po.security_id, po.market_date DESC, po.observation_at DESC LIMIT ?`,
+    // See the count query above for why `provider_id <> 'sharesight'` is
+    // here -- same BRK-012B review ruling, same predicate, both queries
+    // must agree or `priceCount`/`prices.length` could diverge.
+    `SELECT po.* FROM price_observations po WHERE po.adjustment_state = 'raw' AND po.provider_id <> 'sharesight' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?)) AND EXISTS (SELECT 1 FROM portfolio_securities ps WHERE ps.security_id = po.security_id AND ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held') ORDER BY po.security_id, po.market_date DESC, po.observation_at DESC LIMIT ?`,
     [
       asOf,
       asOf,

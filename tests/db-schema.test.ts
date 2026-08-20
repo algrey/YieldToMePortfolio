@@ -190,6 +190,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "cash_entries_transaction_type_unique",
   ]);
   assert.deepEqual(indexNames(database, "price_observations"), [
+    "price_observations_provider_scope_mapping_date_unique",
     "price_observations_provider_scope_mapping_unique",
     "price_observations_security_date_idx",
   ]);

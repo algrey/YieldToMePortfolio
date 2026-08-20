@@ -11,6 +11,8 @@ import {
   CRON_MAX_PORTFOLIOS_PER_SWEEP,
   sweepCalculationRuns,
 } from "../app/calculation-executor-service.ts";
+import { runSharesightPriceRefresh } from "../app/sharesight-price-refresh-service.ts";
+import { createSharesightIntegrationConfig } from "./sharesight-config.ts";
 
 const CORPORATE_ACTION_PROVIDER_ID = "yahoo-compatible";
 
@@ -116,6 +118,55 @@ export async function runScheduledCorporateActionRefresh(
 export type ScheduledCalculationSweepResult =
   | { ok: true; portfolios: number; advanced: number; completed: number }
   | { ok: false; reason: "database" | "sweep" };
+
+export type ScheduledSharesightPriceRefreshResult =
+  | {
+      ok: true;
+      skipped: boolean;
+      usersProcessed: number;
+      usersFailed: number;
+      matchedCount: number;
+      unmatchedCount: number;
+      invalidTimestampCount: number;
+      observationsWritten: number;
+    }
+  | {
+      ok: false;
+      reason: "fetch_failed";
+      errorKind: string;
+      usersMarkedFailed: number;
+    }
+  | { ok: false; reason: "database" };
+
+/**
+ * BRK-012B trigger: runs alongside the existing hourly price/FX and
+ * corporate-action sweeps (same `scheduled` handler, `worker/index.ts`).
+ * Gated on BOTH `SHARESIGHT_CLIENT_ID`/`SHARESIGHT_CLIENT_SECRET` being
+ * configured (`createSharesightIntegrationConfig`'s `{ enabled: false }`
+ * typed state, never a thrown error) AND at least one owner having an
+ * enabled `sharesight_sync_state` link -- `runSharesightPriceRefresh`
+ * itself enforces both gates with zero DB reads/Sharesight requests when
+ * either is absent (see that module's doc comment); this wrapper only
+ * builds the client and reports the outcome, mirroring
+ * `runScheduledMarketDataRefresh`'s shape exactly.
+ */
+export async function runScheduledSharesightPriceRefresh(
+  env: Env,
+): Promise<ScheduledSharesightPriceRefreshResult> {
+  try {
+    const client = await getSqlClient();
+    const integration = createSharesightIntegrationConfig(
+      env as unknown as Parameters<typeof createSharesightIntegrationConfig>[0],
+    );
+    const result = await runSharesightPriceRefresh({
+      client,
+      sharesightClient: integration.enabled ? integration.client : null,
+    });
+    return result;
+  } catch {
+    return { ok: false, reason: "database" };
+  }
+}
 
 /**
  * CALC-003 trigger 3: the cron backstop for the bounded calculation-run

@@ -751,6 +751,12 @@ function fakeSharesightClient(fixtures: {
     async listPayouts() {
       return { ok: true, value: [] };
     },
+    // BRK-012B: listUserInstruments is now a REQUIRED typed method on
+    // SharesightClient; this suite doesn't exercise the price refresh path,
+    // so an empty result is a safe, unused-by-these-tests stub.
+    async listUserInstruments() {
+      return { ok: true, value: [] };
+    },
   };
 }
 

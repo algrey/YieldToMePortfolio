@@ -77,13 +77,16 @@ test("full-chain migration seeds the yahoo-compatible provider row as enabled re
   assert.equal(row!.status, "enabled");
   assert.equal(row!.capabilities_json, "{}");
   assert.equal(row!.rate_limit_json, "{}");
+  // BRK-012B (0044_seed_sharesight_provider.sql) adds a second seeded row
+  // (id `sharesight`) via the same idempotent, hand-authored seed technique
+  // -- the full migration chain now seeds 2 providers, not 1.
   assert.equal(
     (
       database
         .prepare("SELECT COUNT(*) AS n FROM market_data_providers")
         .get() as { n: number }
     ).n,
-    1,
+    2,
   );
 });
 
@@ -97,13 +100,16 @@ test("re-applying the seeding migration is idempotent (ON CONFLICT DO NOTHING, n
   );
   database.exec(await readMigrationFile("0037_steady_signal.sql"));
 
+  // BRK-012B: the fully-migrated fixture also carries the sharesight seed
+  // row (0044) -- re-applying 0037's yahoo-compatible seed must leave that
+  // second row untouched too, so the count stays 2, not reset to 1.
   assert.equal(
     (
       database
         .prepare("SELECT COUNT(*) AS n FROM market_data_providers")
         .get() as { n: number }
     ).n,
-    1,
+    2,
   );
   assert.equal(
     (

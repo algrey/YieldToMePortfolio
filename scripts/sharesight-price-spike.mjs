@@ -7,14 +7,24 @@
 // file's header comment for the full grant-fallback rationale, which this
 // script does not repeat.
 //
-// This is EVIDENCE ONLY (BRK-012A): no schema, no pipeline, no persistence.
-// The three candidate routes this script probes
-// (`listUserInstruments`/`listInstrumentPrices`/`getPortfolioValuation`)
-// are new BRK-012A "evidence probe" methods added to
-// `domain/sharesight/client.ts` -- see that file's header comment. They
-// deliberately return RAW, unparsed JSON (no `parse.ts` domain contract
-// exists for these endpoints yet); typed/validated contracts are BRK-012B's
-// job once this evidence is confirmed.
+// This is EVIDENCE ONLY: no schema, no pipeline, no persistence -- it never
+// writes to `price_observations` (see `db/repositories/sharesight-price-
+// refresh.ts`/`app/sharesight-price-refresh-service.ts` for the actual
+// BRK-012B write path this evidence informed).
+//
+// STATUS (2026-08-20, BRK-012B review finding B4): this script originally
+// probed THREE candidate routes. `listUserInstruments` was PROMOTED to a
+// typed, validated `domain/sharesight/client.ts` method (Probe A below now
+// calls it exactly the way production code does) -- still live/useful to
+// re-probe (e.g. the still-outstanding market-hours freshness re-run, see
+// docs/ARCHITECTURE.md §8.2). `listInstrumentPrices` was CONFIRMED DEAD (a
+// hard HTTP 406 gate, exhaustively re-tested) and REMOVED from the client
+// entirely -- the probes that exercised it (and a related
+// `listUserInstruments` overload probe that relied on a param the
+// promotion also removed) were deleted here rather than left as
+// silently-broken dead code; see the deletion note where Probe C begins
+// below. `getPortfolioValuation` remains an unpromoted raw evidence probe,
+// unchanged.
 //
 // THE NO-VALUES RULE, NARROWED FOR THIS SPIKE (mirrors
 // sharesight-fx-rate-spike.mjs's own narrowing): this script's whole point
@@ -200,32 +210,16 @@ function minutesSince(isoTimestamp, now) {
   return Math.round((now.getTime() - then) / 60_000);
 }
 
-/** Analyzes the DATE spacing of a `last_traded_on`/similar date list -- a
- * derived summary (min/max gap in days, span, count), never the dates
- * themselves beyond the small bounded sample already printed elsewhere. */
-function summarizeDateGaps(dates) {
-  const parsed = dates
-    .map((d) => Date.parse(d))
-    .filter((t) => Number.isFinite(t))
-    .sort((a, b) => a - b);
-  if (parsed.length < 2) return null;
-  const gapsDays = [];
-  for (let i = 1; i < parsed.length; i++) {
-    gapsDays.push(Math.round((parsed[i] - parsed[i - 1]) / 86_400_000));
-  }
-  const spanDays = Math.round(
-    (parsed[parsed.length - 1] - parsed[0]) / 86_400_000,
-  );
-  return {
-    count: parsed.length,
-    spanDays,
-    minGapDays: Math.min(...gapsDays),
-    maxGapDays: Math.max(...gapsDays),
-  };
-}
+// `summarizeDateGaps` (date-spacing analysis for a `last_traded_on` list)
+// and `MAX_PROBED_INSTRUMENTS` were removed 2026-08-20 (BRK-012B review
+// finding B4) alongside Probes B/B2 below -- both existed solely to serve
+// `listInstrumentPrices`, a route BRK-012B's client removed entirely (a
+// confirmed hard HTTP 406 gate, not a fixable request-shape mismatch; see
+// docs/ARCHITECTURE.md §8.2). Keeping dead helpers only used by deleted
+// probe code around risks exactly the "fabricated-looking result" hazard
+// this review finding named.
 
 const MAX_PRINTED_POINTS = 8;
-const MAX_PROBED_INSTRUMENTS = 3;
 
 async function main() {
   console.log("acquire token: attempting...");
@@ -297,6 +291,14 @@ async function main() {
   }
 
   // === Probe A: listUserInstruments -- candidate for (b) current price ===
+  // BRK-012B (2026-08-20): `listUserInstruments` was promoted from a raw
+  // evidence probe to a TYPED, VALIDATED client method
+  // (`domain/sharesight/client.ts`) -- `result.value` is now a parsed
+  // `SharesightUserInstrument[]` directly (camelCase fields), never the raw
+  // `{instruments: [...]}` envelope this probe originally inspected. Updated
+  // in place rather than removed, since the route itself is still live and
+  // useful to re-probe (e.g. a market-hours freshness re-run, still
+  // outstanding per docs/ARCHITECTURE.md §8.2).
   console.log(
     "\n=== Probe A: listUserInstruments (GET /user_instruments.json, v2) ===",
   );
@@ -307,304 +309,63 @@ async function main() {
     if (!result.ok) {
       logFailure("listUserInstruments", result);
     } else {
-      const body = result.value;
-      const list =
-        body && typeof body === "object" && Array.isArray(body.instruments)
-          ? body.instruments
-          : null;
+      const list = result.value;
       console.log(
-        `listUserInstruments: ok, envelope shape = ${JSON.stringify(deriveShapeEvidence(body))}`,
+        `listUserInstruments: ok, shape = ${JSON.stringify(deriveShapeEvidence(list))}`,
       );
-      if (!list) {
-        console.log(
-          "listUserInstruments: response did not carry an `instruments` array -- documentation assumption not confirmed.",
-        );
-      } else {
-        console.log(
-          `listUserInstruments: ${list.length} instrument(s) returned.`,
-        );
-        let printed = 0;
-        for (const item of list) {
-          if (printed >= MAX_PRINTED_POINTS) break;
-          if (!item || typeof item !== "object") continue;
-          const updatedAtMinutesAgo = item.current_price_updated_at
-            ? minutesSince(item.current_price_updated_at, now)
-            : null;
-          console.log(
-            `  instrument_id=${item.id ?? "?"} currency=${item.currency_code ?? "?"} current_price=${item.current_price ?? "?"} current_price_updated_at=${item.current_price_updated_at ?? "?"} (${updatedAtMinutesAgo === null ? "n/a" : `${updatedAtMinutesAgo}m ago`})`,
-          );
-          printed += 1;
-        }
-      }
-    }
-  }
-
-  // === Probe B: listInstrumentPrices -- candidate for (a) historical daily
-  // prices ===
-  console.log(
-    "\n=== Probe B: listInstrumentPrices (GET /instruments/:id/prices.json, v2, doc-tagged -mobile) ===",
-  );
-  if (typeof client.listInstrumentPrices !== "function") {
-    console.log("listInstrumentPrices: not available on this client build.");
-  } else if (instrumentIds.length === 0) {
-    console.log(
-      "listInstrumentPrices: no resolvable instrument id from holdings -- skipped.",
-    );
-  } else {
-    const probedIds = instrumentIds.slice(0, MAX_PROBED_INSTRUMENTS);
-    for (const instrumentId of probedIds) {
-      // Narrow recent-range read first (bounded footprint) -- confirms the
-      // endpoint is reachable/entitled at all before requesting deep
-      // history.
-      const recentResult = await client.listInstrumentPrices(instrumentId, {
-        from: "2026-07-01",
-        to: "2026-08-20",
-        numPoints: 60,
-      });
-      if (!recentResult.ok) {
-        logFailure(
-          `listInstrumentPrices(${instrumentId}, recent range)`,
-          recentResult,
-        );
-        continue;
-      }
-      const recentBody = recentResult.value;
-      const recentList =
-        recentBody &&
-        typeof recentBody === "object" &&
-        Array.isArray(recentBody.instrument_prices)
-          ? recentBody.instrument_prices
-          : null;
       console.log(
-        `listInstrumentPrices(${instrumentId}, recent): ok, envelope shape = ${JSON.stringify(deriveShapeEvidence(recentBody))}`,
-      );
-      if (!recentList) {
-        console.log(
-          "  response did not carry an `instrument_prices` array -- documentation assumption not confirmed.",
-        );
-        continue;
-      }
-      console.log(
-        `  ${recentList.length} price point(s) in the recent-range probe.`,
+        `listUserInstruments: ${list.length} instrument(s) returned.`,
       );
       let printed = 0;
-      const recentDates = [];
-      for (const point of recentList) {
-        if (!point || typeof point !== "object") continue;
-        const date = point.last_traded_on ?? null;
-        if (date) recentDates.push(date);
-        if (printed < MAX_PRINTED_POINTS) {
-          console.log(
-            `    date=${date ?? "?"} value=${point.value ?? "?"} last_traded_value=${point.last_traded_value ?? "?"}`,
-          );
-          printed += 1;
-        }
-      }
-      const recentGaps = summarizeDateGaps(recentDates);
-      if (recentGaps) {
-        console.log(
-          `  date-gap summary: count=${recentGaps.count} spanDays=${recentGaps.spanDays} minGapDays=${recentGaps.minGapDays} maxGapDays=${recentGaps.maxGapDays}`,
-        );
-      }
-
-      // Deep-history read, only for the FIRST resolvable instrument --
-      // confirms whether history reaches back to ~2020 and how `num_points`
-      // behaves over a long span (BRK-012B's pagination/limits question).
-      if (instrumentId === probedIds[0]) {
-        const deepResult = await client.listInstrumentPrices(instrumentId, {
-          from: "2020-01-01",
-          to: "2026-08-20",
-          numPoints: 3000,
-        });
-        if (!deepResult.ok) {
-          logFailure(
-            `listInstrumentPrices(${instrumentId}, deep history)`,
-            deepResult,
-          );
-        } else {
-          const deepBody = deepResult.value;
-          const deepList =
-            deepBody &&
-            typeof deepBody === "object" &&
-            Array.isArray(deepBody.instrument_prices)
-              ? deepBody.instrument_prices
-              : null;
-          if (!deepList) {
-            console.log(
-              "  deep-history probe: response did not carry an `instrument_prices` array.",
-            );
-          } else {
-            const deepDates = deepList
-              .map((p) =>
-                p && typeof p === "object" ? p.last_traded_on : null,
-              )
-              .filter(Boolean);
-            const deepGaps = summarizeDateGaps(deepDates);
-            console.log(
-              `  deep-history probe (from=2020-01-01, numPoints=3000): ${deepList.length} point(s) returned.` +
-                (deepGaps
-                  ? ` date-gap summary: spanDays=${deepGaps.spanDays} minGapDays=${deepGaps.minGapDays} maxGapDays=${deepGaps.maxGapDays}`
-                  : ""),
-            );
-            if (deepDates.length > 0) {
-              const earliest = deepDates.reduce((a, b) => (a < b ? a : b));
-              const latest = deepDates.reduce((a, b) => (a > b ? a : b));
-              console.log(
-                `  earliest date returned=${earliest} latest date returned=${latest}`,
-              );
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // === Probe B2 (2026-08-20 follow-up): content-negotiation/path/query
-  // variants on listInstrumentPrices, to distinguish a fixable mismatch
-  // from a hard gate for the HTTP 406 Probe B observed on every instrument
-  // it tried. Coordinator-directed. Every variant is still a plain GET
-  // through the sealed transport -- only the Accept header VALUE, path
-  // suffix, API-version root, and query param NAME ever change; the
-  // request method never does. `-mobile` docs investigation (see below)
-  // found no documented header/scope requirement beyond the same Bearer
-  // token every other endpoint uses, so no client impersonation (a fake
-  // mobile user-agent, an undocumented scope, etc.) is attempted here --
-  // only a plain Accept-header value is varied, which is what content
-  // negotiation actually inspects.
-  console.log(
-    "\n=== Probe B2 (follow-up): listInstrumentPrices content-negotiation/path/query variants ===",
-  );
-  if (typeof client.listInstrumentPrices !== "function") {
-    console.log("listInstrumentPrices: not available on this client build.");
-  } else if (instrumentIds.length === 0) {
-    console.log(
-      "listInstrumentPrices: no resolvable instrument id -- skipped.",
-    );
-  } else {
-    const instrumentId = instrumentIds[0];
-    console.log(
-      `(all B2 variants probed against instrument_id=${instrumentId})`,
-    );
-
-    async function tryVariant(label, params) {
-      const result = await client.listInstrumentPrices(instrumentId, params);
-      if (result.ok) {
-        const body = result.value;
-        const list =
-          body &&
-          typeof body === "object" &&
-          Array.isArray(body.instrument_prices)
-            ? body.instrument_prices
-            : null;
-        console.log(
-          `  [${label}] 200 OK -- envelope shape = ${JSON.stringify(deriveShapeEvidence(body))}${list ? ` (${list.length} point(s))` : ""}`,
-        );
-        if (list && list.length > 0) {
-          const dates = list
-            .map((p) => (p && typeof p === "object" ? p.last_traded_on : null))
-            .filter(Boolean);
-          const gaps = summarizeDateGaps(dates);
-          console.log(
-            `    sample: date=${list[0]?.last_traded_on ?? "?"} value=${list[0]?.value ?? "?"} last_traded_value=${list[0]?.last_traded_value ?? "?"}` +
-              (gaps
-                ? ` | date-gap summary: count=${gaps.count} spanDays=${gaps.spanDays} minGapDays=${gaps.minGapDays} maxGapDays=${gaps.maxGapDays}`
-                : ""),
-          );
-        }
-        return true;
-      }
-      // The [diagnostic] line (httpStatus etc.) already printed via the
-      // client-level onBodyParseDiagnostic hook wired above -- this line
-      // just attributes it to the variant under test.
-      console.log(`  [${label}] FAILED (${result.error.kind})`);
-      return false;
-    }
-
-    const outcomes = [];
-    console.log(
-      "-- 1. Accept-header variants (default request otherwise unchanged) --",
-    );
-    outcomes.push(
-      await tryVariant(
-        "accept: application/json (baseline, same as Probe B)",
-        {},
-      ),
-    );
-    outcomes.push(await tryVariant("accept: */*", { acceptOverride: "*/*" }));
-    outcomes.push(
-      await tryVariant("accept: <omitted>", { acceptOverride: null }),
-    );
-    outcomes.push(
-      await tryVariant("accept: application/vnd.api+json", {
-        acceptOverride: "application/vnd.api+json",
-      }),
-    );
-
-    console.log("-- 2. Path variants --");
-    outcomes.push(
-      await tryVariant("path without .json suffix (v2)", { pathSuffix: "" }),
-    );
-    outcomes.push(
-      await tryVariant("v3 base instead of v2 (expected 404 -- undocumented)", {
-        apiVersion: "v3",
-      }),
-    );
-
-    console.log("-- 3. Query param variants (small explicit date range) --");
-    outcomes.push(
-      await tryVariant("start_date=2026-08-01&end_date=2026-08-20", {
-        from: "2026-08-01",
-        to: "2026-08-20",
-      }),
-    );
-    outcomes.push(
-      await tryVariant(
-        "start_date=2026-08-01&end_date=2026-08-20&limit=20 (undocumented limit)",
-        { from: "2026-08-01", to: "2026-08-20", limit: 20 },
-      ),
-    );
-
-    const anyVariantWorked = outcomes.some(Boolean);
-    console.log(
-      anyVariantWorked
-        ? "B2 summary: at least one variant returned 200 (see above for the winning shape)."
-        : "B2 summary: EVERY variant above failed the same way as Probe B (see each line's status). Historical dailies via this documented route are NOT reachable from this API client under any header/path/query combination tried.",
-    );
-  }
-
-  // === Probe A2 (2026-08-20 follow-up): does listUserInstruments accept an
-  // undocumented date/history overload (some APIs overload a "list current"
-  // route with an as-of/date param)? Coordinator-directed. ===
-  console.log(
-    "\n=== Probe A2 (follow-up): listUserInstruments undocumented date/history param probe ===",
-  );
-  if (typeof client.listUserInstruments !== "function") {
-    console.log("listUserInstruments: not available on this client build.");
-  } else {
-    for (const [label, extraParams] of [
-      [
-        "start_date/end_date",
-        { start_date: "2026-08-01", end_date: "2026-08-20" },
-      ],
-      ["as_of_date", { as_of_date: "2026-08-01" }],
-      ["date", { date: "2026-08-01" }],
-      ["history=true", { history: "true" }],
-    ]) {
-      const result = await client.listUserInstruments({ extraParams });
-      if (!result.ok) {
-        console.log(`  [${label}] FAILED (${result.error.kind})`);
-        continue;
-      }
-      const body = result.value;
-      const list =
-        body && typeof body === "object" && Array.isArray(body.instruments)
-          ? body.instruments
+      for (const item of list) {
+        if (printed >= MAX_PRINTED_POINTS) break;
+        const updatedAtMinutesAgo = item.currentPriceUpdatedAt
+          ? minutesSince(item.currentPriceUpdatedAt, now)
           : null;
-      console.log(
-        `  [${label}] 200 OK -- ${list ? `${list.length} instrument(s), same shape as Probe A (params silently ignored unless the shape/count differs)` : "no instruments array"}`,
-      );
+        console.log(
+          `  instrument_id=${item.id} currency=${item.currencyCode} current_price=${item.currentPriceDecimal} current_price_updated_at=${item.currentPriceUpdatedAt} (${updatedAtMinutesAgo === null ? "n/a" : `${updatedAtMinutesAgo}m ago`})`,
+        );
+        printed += 1;
+      }
     }
   }
+
+  // === Probes B/B2/A2: HISTORICAL, REMOVED (2026-08-20, BRK-012B review
+  // finding B4) ===
+  // These three probes are DELETED, not merely disabled, per the review
+  // ruling that they must never be able to "emit fabricated-looking
+  // results or burn needless [live API] calls":
+  //   - Probe B (`listInstrumentPrices` recent/deep-history reads) and
+  //     Probe B2 (its content-negotiation/path/query follow-up sweep)
+  //     probed a route BRK-012B's client removed entirely --
+  //     `listInstrumentPrices` no longer exists on `SharesightClient` at
+  //     all (see `domain/sharesight/client.ts`'s header comment). The
+  //     route's conclusion is not just probed-and-inconclusive, it is
+  //     CONFIRMED DEAD (a hard HTTP 406 gate across every policy-compliant
+  //     Accept/path/query variant tried) -- see docs/ARCHITECTURE.md §8.2's
+  //     BRK-012A follow-up entry for the full per-variant status table.
+  //     Re-running these probes cannot produce new evidence, only burn
+  //     Sharesight API budget against a route this codebase will not call.
+  //   - Probe A2 (`listUserInstruments`'s undocumented date/history
+  //     overload probe) called `client.listUserInstruments({ extraParams })`
+  //     -- but BRK-012B's promoted, typed `listUserInstruments()` takes NO
+  //     parameters at all (the probe-only `extraParams` passthrough was
+  //     removed along with the rest of BRK-012A's spike-only params). A
+  //     JS call site passing an extra argument to a function that ignores
+  //     it does not error -- every "variant" in this probe would silently
+  //     collapse into the SAME plain request, four times, each mislabelled
+  //     with a distinct param name that was never actually sent. That is
+  //     exactly the "fabricated-looking result" this review finding names:
+  //     the printed output would claim four param overloads were tested
+  //     when only one, unparametrized, request was ever made. The
+  //     conclusion this probe already reached (`listUserInstruments` is
+  //     current-only; unrecognized params are silently ignored) is already
+  //     documented in docs/ARCHITECTURE.md §8.2 and does not need
+  //     re-confirming through a broken probe.
+  // Live evidence from all three is preserved in docs/ARCHITECTURE.md §8.2
+  // (dated entries) and in this file's own git history -- deletion here
+  // does not lose that evidence, it only removes a stale, now-inaccurate
+  // re-probe capability.
 
   // === Probe C: getPortfolioValuation -- alternate candidate for (b) ===
   console.log(

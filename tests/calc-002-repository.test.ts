@@ -285,6 +285,76 @@ test("CALC-002 rebuild is owner-scoped, bounded, resumable, and only completed r
   );
 });
 
+test("CALC-002 regression (BRK-012B review B1/B3 drill): a same-owner, same-day, same-security Sharesight-sourced price_observations row never displaces the Yahoo-compatible EOD value in a published snapshot", async () => {
+  const db = await database();
+  // A Sharesight accretion row for the SAME owner/security/day as the
+  // baseline fixture's `price-a` (close_decimal '10'), carrying a WILDLY
+  // different value ('5000') so any accidental selection of it would be
+  // immediately visible in the published total. `market_data_providers`
+  // already has a 'sharesight' row (migration 0044, part of the full
+  // migration chain `database()` applies above) -- no need to insert one.
+  db.exec(`
+    INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+      VALUES ('mapping-sharesight-a', 'security-a', 'sharesight', 'XASX', 'ABC', '2026-01-01', 'candidate');
+    INSERT INTO price_observations (id, provider_id, access_scope, scope_user_id, scope_key, mapping_id, security_id, interval, observation_at, market_date, market_timezone, currency_code, close_decimal, adjustment_state, quality, ingested_at)
+      VALUES ('price-sharesight-a', 'sharesight', 'user', 'user-a', 'user-a', 'mapping-sharesight-a', 'security-a', 'delayed', '2026-08-01T09:00:00Z', '2026-08-01', '+10:00', 'AUD', '5000', 'raw', 'observed', '2026-08-01T09:01:00Z');
+  `);
+  const sql = createSqliteSqlClient(db);
+  const repository = createHistoricalSnapshotRepository(sql, {
+    maxHoldingRowsPerChunk: 1,
+    calendarEvidence: calendarEvidence(["2026-08-01"]),
+  });
+  const run = await repository.request("user-a", {
+    id: "run-sharesight-drill",
+    portfolioId: "portfolio-a",
+    rangeFrom: "2026-08-01",
+    rangeTo: "2026-08-01",
+    calculationVersion: 9,
+    reason: "historical_rebuild",
+    ledgerHighWaterStart: "trade-a",
+    marketDataCutoff: "2026-08-03T00:00:00Z",
+    idempotencyKey: "history-9",
+    now: "2026-08-03T00:00:00Z",
+  });
+  assert.equal(
+    (
+      await repository.claim(
+        "user-a",
+        "portfolio-a",
+        run.id,
+        "worker-a",
+        "2026-08-03T01:00:00Z",
+        "2026-08-03T00:01:00Z",
+      )
+    ).ok,
+    true,
+  );
+  const rebuilt = await repository.rebuild("user-a", {
+    portfolioId: "portfolio-a",
+    calculationRunId: run.id,
+    leaseOwner: "worker-a",
+    currentLedgerHighWater: "trade-a",
+    now: "2026-08-03T00:02:00Z",
+  });
+  assert.equal(rebuilt.ok && rebuilt.status, "completed");
+  const series = await repository.loadSeries(
+    "user-a",
+    "portfolio-a",
+    "2026-08-01",
+    "2026-08-01",
+    9,
+  );
+  assert.ok(series);
+  // "100" is the SAME Yahoo-driven value the baseline fixture's first test
+  // establishes for this exact day (10 shares * price-a's close_decimal
+  // '10') -- if the Sharesight row's '5000' had leaked into selection this
+  // would be a wildly different number, not silently off-by-one.
+  assert.deepEqual(
+    series?.points.map((point) => point.totalValueDecimal),
+    ["100"],
+  );
+});
+
 test("CALC-002 excludes another owner's scoped FX observations", async () => {
   const db = await database();
   db.exec(`

@@ -798,12 +798,20 @@ export function createHistoricalSnapshotRepository(
       `SELECT COUNT(*) AS count FROM transactions WHERE user_id = ? AND portfolio_id = ? AND local_trade_date <= ?`,
       [userId, run.portfolioId, asOfDate],
     );
+    // BRK-012B review B1/B3 (2026-08-20): explicitly excludes
+    // provider_id = 'sharesight' rows -- this snapshot rebuild already
+    // reads both deployment- and user-scoped rows (the access_scope OR
+    // clause is pre-existing), so a Sharesight accretion row would
+    // otherwise reach it. BRK-012B is pure storage; snapshot valuation must
+    // keep selecting the Yahoo-compatible EOD feed until BRK-012C
+    // deliberately wires delayed prices in with its own docs/CALCULATIONS.md
+    // update -- remove this predicate only as part of that task.
     const priceCount = await sql.get<{ count: number }>(
       `SELECT COUNT(*) AS count FROM price_observations po
        JOIN portfolio_securities ps ON ps.security_id = po.security_id
        WHERE ps.user_id = ? AND ps.portfolio_id = ?
          AND po.market_date BETWEEN ? AND ? AND po.ingested_at <= ?
-         AND po.adjustment_state = 'raw'
+         AND po.adjustment_state = 'raw' AND po.provider_id <> 'sharesight'
          AND (po.access_scope = 'deployment' OR (po.access_scope = 'user' AND po.scope_user_id = ?))`,
       [
         userId,
@@ -897,12 +905,14 @@ export function createHistoricalSnapshotRepository(
        ORDER BY local_trade_date, trade_at, id LIMIT ?`,
       [userId, run.portfolioId, asOfDate, maxFacts],
     );
+    // Same BRK-012B review predicate as the count query above -- both must
+    // agree or priceCount/priceRows.length could diverge.
     const priceRows = await sql.all<Record<string, unknown>>(
       `SELECT po.* FROM price_observations po
        JOIN portfolio_securities ps ON ps.security_id = po.security_id
        WHERE ps.user_id = ? AND ps.portfolio_id = ?
          AND po.market_date BETWEEN ? AND ? AND po.ingested_at <= ?
-         AND po.adjustment_state = 'raw'
+         AND po.adjustment_state = 'raw' AND po.provider_id <> 'sharesight'
          AND (po.access_scope = 'deployment' OR (po.access_scope = 'user' AND po.scope_user_id = ?))
        ORDER BY po.security_id, po.market_date, po.observation_at, po.id LIMIT ?`,
       [
