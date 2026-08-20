@@ -802,10 +802,11 @@ export function createHistoricalSnapshotRepository(
     // provider_id = 'sharesight' rows -- this snapshot rebuild already
     // reads both deployment- and user-scoped rows (the access_scope OR
     // clause is pre-existing), so a Sharesight accretion row would
-    // otherwise reach it. BRK-012B is pure storage; snapshot valuation must
-    // keep selecting the Yahoo-compatible EOD feed until BRK-012C
-    // deliberately wires delayed prices in with its own docs/CALCULATIONS.md
-    // update -- remove this predicate only as part of that task.
+    // otherwise reach it. BRK-012C ruling (BINDING, 2026-08-20): this
+    // predicate STAYS -- historical/snapshot valuation keeps EOD semantics
+    // (Yahoo-compatible feed only); only `app/owned-holdings.ts`'s CURRENT-
+    // value read lifted its equivalent predicate. Do not remove this one
+    // without a separate, dedicated ruling.
     const priceCount = await sql.get<{ count: number }>(
       `SELECT COUNT(*) AS count FROM price_observations po
        JOIN portfolio_securities ps ON ps.security_id = po.security_id

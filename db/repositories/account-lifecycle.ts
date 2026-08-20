@@ -72,6 +72,13 @@ const OWNED_TABLES = [
   // BRK-004: owner-scoped Sharesight sync cursor (no token material -- see
   // db/schema.ts's header comment on `sharesightSyncState`).
   "sharesight_sync_state",
+  // BRK-012C: owner-scoped delayed-price cache/freshness-gate row, one per
+  // (user, security) -- see db/schema.ts's header comment on
+  // `sharesightDelayedPrices`. Keyed directly by `user_id` (not
+  // `scope_user_id`), so it belongs in this "owned" list rather than the
+  // `price_observations`/`fx_rate_observations` "user-scoped-observation"
+  // special-cases below.
+  "sharesight_delayed_prices",
   "import_batches",
   "import_commit_chunks",
   "import_rows",
@@ -316,6 +323,10 @@ const PURGE_TABLES_IN_FK_ORDER = [
   // BRK-004: sync cursor references only portfolios (no other table
   // references it), so any position before `portfolios` is FK-safe.
   "sharesight_sync_state",
+  // BRK-012C: delayed-price cache references only users/securities/
+  // currencies (all shared reference data or deleted last), so any
+  // position before `users` is FK-safe. No other table references it.
+  "sharesight_delayed_prices",
   "transactions",
   "portfolio_securities",
   "portfolio_settings",

@@ -1,6 +1,10 @@
 import type { SqlClient } from "../db/repositories/sql-client.ts";
 import { createOwnedManualOverrideRepository } from "../db/repositories/market-data.ts";
 import {
+  ensureSharesightPriceFreshness,
+  type SharesightPriceGateOptions,
+} from "./sharesight-price-gate-service.ts";
+import {
   calculateCashConversion,
   calculateDailyMovement,
   calculateNativeHomeHolding,
@@ -23,6 +27,7 @@ import {
   selectPriceObservation,
   type FxSelection,
   type PriceSelection,
+  type SelectedPrice,
 } from "../domain/market-data/selection.ts";
 import type {
   FxObservation,
@@ -194,6 +199,21 @@ function money(
     ? unavailable(currencyCode, reason)
     : available(currencyCode, value);
 }
+// BRK-012C: honest, explicit source labelling for a selected price's
+// `interval` -- required so a Sharesight-sourced current price is ALWAYS
+// identifiable as "Delayed (Sharesight)" with its own quote timestamp
+// (`observationAt`, Sharesight's `current_price_updated_at` normalized to
+// UTC -- see `domain/sharesight/price-accretion.ts`), never merely
+// "provider sharesight" buried in generic wording, and NEVER "live" (AGENTS
+// non-negotiable -- `tests/brk-012c.test.ts` greps this file's rendered
+// explanation text for that word). `eod`/`intraday`/`manual` keep their
+// existing plain interval name -- this labelling is additive, not a
+// reinterpretation of any other provider's data.
+function priceIntervalLabel(selected: SelectedPrice): string {
+  return selected.interval === "delayed"
+    ? `Delayed (Sharesight) as of ${selected.observationAt ?? "not supplied"}`
+    : selected.interval;
+}
 function evidence(selection: PriceSelection | FxSelection): FxEvidence | null {
   const selected = selection.selected;
   if (!selected) return null;
@@ -358,6 +378,11 @@ export async function loadOwnedHoldings(
   userId: string,
   portfolioId: string,
   now = new Date(),
+  // BRK-012C test-only seam: lets tests inject a fake Sharesight
+  // integration/clock/lease-owner into the read gate below without needing
+  // the `cloudflare:workers` env import a plain node:sqlite test cannot
+  // use. Production callers never pass this.
+  sharesightGateOptions: SharesightPriceGateOptions = {},
 ): Promise<{
   status: "complete" | "partial" | "empty" | "unavailable";
   homeCurrencyCode: string;
@@ -483,6 +508,26 @@ export async function loadOwnedHoldings(
   }));
   if (identities.length !== heldCount)
     throw new Error("invalid_held_security_count");
+  // BRK-012C read-time gate: before reading price_observations below, make
+  // sure this owner's Sharesight delayed-price data (if any) is no more
+  // than 10 minutes stale for their CURRENT holdings -- see
+  // `app/sharesight-price-gate-service.ts`'s module doc comment for the
+  // full four-gate design (credentials -> enabled link -> cache staleness
+  // -> single-flight lease). Best-effort, exactly like CALC-003's
+  // `advanceCalculationRuns(...).catch(() => undefined)` immediately below:
+  // a fetch failure, a lost lease race, or a genuine DB error here must
+  // never block this read -- the existing price selection below simply
+  // sees whatever data already exists, honestly.
+  await ensureSharesightPriceFreshness(
+    client,
+    userId,
+    identities.map((identity) => identity.securityId),
+    // The gate's own clock defaults to this SAME request's `nowIso` (not a
+    // fresh `new Date()`) so its 10-minute staleness comparison is anchored
+    // to the read's own "now", not real wall-clock time -- a caller-
+    // supplied `now` override (test-only) still wins via spread order.
+    { now: () => nowIso, ...sharesightGateOptions },
+  ).catch(() => undefined);
   const projectionRows = await client.all<Row>(
     `SELECT id, portfolio_security_id, quantity_decimal, native_open_basis_decimal, base_open_basis_decimal, completeness, status, calculation_run_id, calculation_version, last_ledger_high_water FROM holding_projections WHERE user_id = ? AND portfolio_id = ? AND calculation_run_id = ? AND status = 'ready' ORDER BY portfolio_security_id LIMIT ?`,
     [userId, portfolioId, runId, MAX_PROJECTIONS + 1],
@@ -530,27 +575,31 @@ export async function loadOwnedHoldings(
   )
     throw new Error("projection_identity_mismatch");
   const priceCountRow = await client.get<Row>(
-    // BRK-012B review B1/B3 (2026-08-20): this SELECT genuinely reads BOTH
-    // deployment- and user-scoped rows (the `access_scope` OR clause below
-    // is pre-existing, not new) -- so it is exactly the read path a
-    // user-scoped Sharesight accretion row would otherwise reach. That row
-    // is EXPLICITLY excluded here (`po.provider_id <> 'sharesight'`) for
-    // THIS slice: BRK-012B is pure storage, and valuation/holdings behavior
-    // must not change until BRK-012C deliberately wires delayed prices in
-    // with its own docs/CALCULATIONS.md update and freshness/labelling
-    // rules. Remove this predicate only as part of that dedicated task, not
-    // incidentally.
-    `SELECT count(*) AS count FROM price_observations po WHERE po.adjustment_state = 'raw' AND po.provider_id <> 'sharesight' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?)) AND EXISTS (SELECT 1 FROM portfolio_securities ps WHERE ps.security_id = po.security_id AND ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held')`,
+    // BRK-012B review B1/B3 (2026-08-20) originally excluded
+    // `provider_id = 'sharesight'` rows here ("this slice is pure
+    // storage"). BRK-012C deliberately LIFTS that exclusion: a user-scoped
+    // Sharesight accretion row is now a legitimate valuation input for
+    // CURRENT holdings, ranked by the EXISTING selection semantics
+    // (`domain/market-data/selection.ts`'s `providerRank` already ranks
+    // `interval = 'delayed'` ahead of `'eod'` for the same market date --
+    // no selection-logic change was needed, only removing this predicate).
+    // Freshness is bounded by the read gate immediately above
+    // (`ensureSharesightPriceFreshness`), which piggybacks the SAME
+    // accretion write this query now reads. The snapshot/historical path
+    // (`db/repositories/snapshots.ts`) keeps its OWN identical predicate --
+    // that exclusion is untouched by this task (EOD semantics for
+    // historical valuations, per TASKS.md's BRK-012C ruling).
+    `SELECT count(*) AS count FROM price_observations po WHERE po.adjustment_state = 'raw' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?)) AND EXISTS (SELECT 1 FROM portfolio_securities ps WHERE ps.security_id = po.security_id AND ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held')`,
     [asOf, asOf, nowIso, nowIso, userId, userId, portfolioId],
   );
   const priceCount = integer(priceCountRow ?? {}, "count");
   if (priceCount > MAX_OBSERVATIONS)
     throw new Error("too_many_price_observations");
   const prices = await client.all<Row>(
-    // See the count query above for why `provider_id <> 'sharesight'` is
-    // here -- same BRK-012B review ruling, same predicate, both queries
-    // must agree or `priceCount`/`prices.length` could diverge.
-    `SELECT po.* FROM price_observations po WHERE po.adjustment_state = 'raw' AND po.provider_id <> 'sharesight' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?)) AND EXISTS (SELECT 1 FROM portfolio_securities ps WHERE ps.security_id = po.security_id AND ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held') ORDER BY po.security_id, po.market_date DESC, po.observation_at DESC LIMIT ?`,
+    // See the count query above -- BRK-012C lifted the `provider_id <>
+    // 'sharesight'` exclusion here too; both queries must agree or
+    // `priceCount`/`prices.length` could diverge.
+    `SELECT po.* FROM price_observations po WHERE po.adjustment_state = 'raw' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?)) AND EXISTS (SELECT 1 FROM portfolio_securities ps WHERE ps.security_id = po.security_id AND ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held') ORDER BY po.security_id, po.market_date DESC, po.observation_at DESC LIMIT ?`,
     [
       asOf,
       asOf,
@@ -850,6 +899,25 @@ export async function loadOwnedHoldings(
         : holding?.facts.homeMarketValue.status === "available"
           ? holding.facts.homeMarketValue.valueDecimal
           : null;
+      // BRK-012C review round (2026-08-20, B3 fix): `priceClassComparable`
+      // stays STRICT (unchanged) -- a cross-basis delta (e.g. today's price
+      // from Sharesight-delayed, yesterday's from the Yahoo-compatible EOD
+      // feed) is genuinely not a comparable movement and must never be
+      // computed. The HONESTY fix is the REASON label: this specific cause
+      // (both days' prices are known, just on different bases) is distinct
+      // from a genuinely missing previous price/FX -- `!priceClassComparable`
+      // alone is NOT sufficient here, since it is equally true when the
+      // PRICE side is comparable but the previous FX observation is the one
+      // genuinely missing/mismatched (that case correctly keeps the
+      // pre-existing "missing_previous_fx"/"zero_previous_value" reasons
+      // below). Requiring both selections to actually exist excludes the
+      // separate "missing_previous" actionStatus case, which already has
+      // its own honest handling.
+      const priceBasisChanged =
+        !zero &&
+        !priceClassComparable &&
+        Boolean(priceSelection.selected) &&
+        Boolean(previousSelection.selected);
       const dailyResult = zero
         ? null
         : !priceClassComparable || !fxClassComparable
@@ -911,10 +979,10 @@ export async function loadOwnedHoldings(
       const nativeCurrency = identity.currencyCode;
       const fxDetail = holding?.explanation.fx.explanation;
       const priceDetail = priceSelection.selected
-        ? `current price source ${priceSelection.explanation.source} ${priceSelection.explanation.providerId ?? "identity"}, source ID ${priceSelection.selected.observation?.mappingId ?? "not supplied"}, value ${priceSelection.selected.closeDecimal}, market date ${priceSelection.selected.marketDate}, observation ${priceSelection.selected.observationAt ?? "not supplied"}, quality ${priceSelection.selected.quality}, selector ${priceSelection.status}, fallback ${priceSelection.explanation.fallback}, reason ${priceSelection.explanation.reason}`
+        ? `current price source ${priceSelection.explanation.source} ${priceSelection.explanation.providerId ?? "identity"}, source ID ${priceSelection.selected.observation?.mappingId ?? "not supplied"}, value ${priceSelection.selected.closeDecimal}, market date ${priceSelection.selected.marketDate}, observation ${priceSelection.selected.observationAt ?? "not supplied"}, interval ${priceIntervalLabel(priceSelection.selected)}, quality ${priceSelection.selected.quality}, selector ${priceSelection.status}, fallback ${priceSelection.explanation.fallback}, reason ${priceSelection.explanation.reason}`
         : `price unavailable: ${priceSelection.explanation.reason}`;
       const previousPriceDetail = previousSelection.selected
-        ? `previous price source ${previousSelection.explanation.source} ${previousSelection.explanation.providerId ?? "identity"}, source ID ${previousSelection.selected.observation?.mappingId ?? "not supplied"}, value ${previousSelection.selected.closeDecimal}, market date ${previousSelection.selected.marketDate}, observation ${previousSelection.selected.observationAt ?? "not supplied"}, quality ${previousSelection.selected.quality}, selector ${previousSelection.status}, fallback ${previousSelection.explanation.fallback}, reason ${previousSelection.explanation.reason}`
+        ? `previous price source ${previousSelection.explanation.source} ${previousSelection.explanation.providerId ?? "identity"}, source ID ${previousSelection.selected.observation?.mappingId ?? "not supplied"}, value ${previousSelection.selected.closeDecimal}, market date ${previousSelection.selected.marketDate}, observation ${previousSelection.selected.observationAt ?? "not supplied"}, interval ${priceIntervalLabel(previousSelection.selected)}, quality ${previousSelection.selected.quality}, selector ${previousSelection.status}, fallback ${previousSelection.explanation.fallback}, reason ${previousSelection.explanation.reason}`
         : `previous price unavailable, selector unavailable, reason ${previousSelection.explanation.reason}, actionability action_required`;
       const previousFxDetail = previousFx
         ? `previous FX source ${previousFx.source} ${previousFx.sourceId ?? "identity"}, supplied direction ${previousFx.baseCurrencyCode}/${previousFx.quoteCurrencyCode}, requested native→home ${nativeCurrency}/${homeCurrencyCode}, supplied rate ${previousFx.rateDecimal}, market date ${previousFx.marketDate}, observation ${previousFx.observedAt ?? "not supplied"}, inverted ${homeCurrencyCode === nativeCurrency ? "false" : previousFx.baseCurrencyCode === homeCurrencyCode && previousFx.quoteCurrencyCode === nativeCurrency ? "true" : "false"}, selector ${previousFxSelection.status}, quality ${previousFx.quality ?? "none"}, fallback ${previousFx.fallback}, reason ${previousFx.selectionReason ?? "none"}, actionability ${previousFxSelection.status === "stale" || previousFxSelection.status === "fallback" || previousFxSelection.selected?.source === "manual" || previousFx.quality === "indicative" || previousFx.quality === "corrected" || previousFx.quality === "stale_candidate" ? "explanation" : "none"}`
@@ -938,8 +1006,16 @@ export async function loadOwnedHoldings(
         nativeValue: money(nativeValue, nativeCurrency, "missing_price"),
         homePrice: money(homePrice, homeCurrencyCode, "missing_fx"),
         homeValue: money(homeValue, homeCurrencyCode, "missing_fx"),
-        dailyMovement: money(daily, homeCurrencyCode, "missing_previous_fx"),
-        dailyPercent: money(dailyPercent, "%", "zero_previous_value"),
+        dailyMovement: money(
+          daily,
+          homeCurrencyCode,
+          priceBasisChanged ? "price_basis_changed" : "missing_previous_fx",
+        ),
+        dailyPercent: money(
+          dailyPercent,
+          "%",
+          priceBasisChanged ? "price_basis_changed" : "zero_previous_value",
+        ),
         unrealisedGain: money(gain, homeCurrencyCode, "missing_basis"),
         unrealisedPercent: money(gainPercent, "%", "zero_basis"),
         dailyTone: tone(daily),

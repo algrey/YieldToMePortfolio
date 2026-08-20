@@ -776,7 +776,7 @@ test("BRK-012B x UI-003 regression (B1 drill): a REAL Sharesight accretion write
   db.close();
 });
 
-test("BRK-012B x UI-003 regression (B1(b)): a Sharesight row with a newer/better-looking observation than the Yahoo-compatible one is still never selected for the holdings view", async () => {
+test("BRK-012C x UI-003: a user-scoped Sharesight observation on the SAME market date as the deployment-scoped Yahoo one is now selected (exclusion lifted) -- inverts the old BRK-012B B1(b) baseline deliberately", async () => {
   const db = await holdingsDatabase();
   db.exec(`
     INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
@@ -790,10 +790,75 @@ test("BRK-012B x UI-003 regression (B1(b)): a Sharesight row with a newer/better
     "portfolio-a",
     new Date("2026-08-03T08:00:00Z"),
   );
-  // Unchanged from the baseline `holdingsDatabase()` fixture's own
-  // established Yahoo-compatible result -- the wildly different Sharesight
-  // close_decimal ('5000') never appears.
-  assert.equal(result.rows[0]?.homeValue.value, "8");
+  // BRK-012C deliberately lifted the `provider_id <> 'sharesight'`
+  // exclusion for current-holding selection: this owner-scoped Sharesight
+  // observation (same market_date, delayed interval) is now a legitimate
+  // selection candidate and wins -- `choosePrice`'s user-vs-deployment merge
+  // prefers the user-scoped observation whenever its market date is at
+  // least as recent as the deployment-scoped one, so the '5000' close
+  // (not Yahoo's '8') feeds nativeValue/homeValue, labelled honestly as
+  // delayed in the explanation text.
+  assert.equal(result.rows[0]?.nativePrice, "5000");
+  assert.equal(result.rows[0]?.nativeValue.value, "10000");
+  assert.equal(result.rows[0]?.homeValue.value, "5000");
+  assert.match(result.rows[0]?.explanation ?? "", /Delayed \(Sharesight\)/);
+  assert.doesNotMatch(result.rows[0]?.explanation ?? "", /\blive\b/i);
+  // BRK-012C review round (B3, restored/corrected form of the assertion
+  // this test previously dropped): today's price is Sharesight-delayed,
+  // yesterday's (price-prev) is Yahoo-compatible EOD -- a genuine cross-
+  // basis mismatch. `priceClassComparable` stays STRICT (the movement is
+  // never computed), but the reason must be the honest, distinct
+  // `price_basis_changed` -- never the generic `missing_previous_fx` that
+  // would falsely imply the previous price/FX itself is missing (it is
+  // not: both days' prices are known, only their bases differ).
+  assert.equal(result.rows[0]?.dailyMovement.status, "unavailable");
+  assert.equal(result.rows[0]?.dailyMovement.reason, "price_basis_changed");
+  assert.equal(result.rows[0]?.dailyPercent.status, "unavailable");
+  assert.equal(result.rows[0]?.dailyPercent.reason, "price_basis_changed");
+  db.close();
+});
+
+test("BRK-012C review round (B3): the baseline pure-Yahoo case is unaffected -- daily movement stays a real, comparable value", async () => {
+  const db = await holdingsDatabase();
+  const result = await loadOwnedHoldings(
+    createSqliteSqlClient(db),
+    "owner-a",
+    "portfolio-a",
+    new Date("2026-08-03T08:00:00Z"),
+  );
+  // Restores/confirms the pre-existing baseline this review round must not
+  // regress: no Sharesight data at all, both days Yahoo-compatible EOD --
+  // priceClassComparable is true, the real movement computes normally.
+  assert.equal(result.rows[0]?.dailyMovement.status, "available");
   assert.equal(result.rows[0]?.dailyMovement.value, "1");
+  assert.equal(result.rows[0]?.dailyMovement.reason, null);
+  db.close();
+});
+
+test("BRK-012C review round (B3): movement self-heals once Sharesight has accreted a SECOND daily observation -- day-2 sharesight-vs-sharesight movement computes for real", async () => {
+  const db = await holdingsDatabase();
+  db.exec(`
+    INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+      VALUES ('mapping-sharesight-a', 'security-a', 'sharesight', 'NYSE', 'AAA', '2026-01-01', 'candidate');
+    INSERT INTO price_observations (id,provider_id,access_scope,scope_user_id,scope_key,mapping_id,security_id,interval,observation_at,market_date,market_timezone,currency_code,close_decimal,previous_close_decimal,adjustment_state,quality,ingested_at)
+    VALUES
+      ('price-sharesight-day1','sharesight','user','owner-a','owner-a','mapping-sharesight-a','security-a','delayed','2026-08-03T05:00:00.000Z','2026-08-03','+10:00','USD','5000','4999','raw','observed','2026-08-03T05:01:00.000Z'),
+      ('price-sharesight-day2','sharesight','user','owner-a','owner-a','mapping-sharesight-a','security-a','delayed','2026-08-04T05:00:00.000Z','2026-08-04','+10:00','USD','5200','5000','raw','observed','2026-08-04T05:01:00.000Z');
+  `);
+  const result = await loadOwnedHoldings(
+    createSqliteSqlClient(db),
+    "owner-a",
+    "portfolio-a",
+    new Date("2026-08-04T08:00:00Z"),
+  );
+  // Both today (08-04) and yesterday (08-03) now select a Sharesight-
+  // delayed observation from the SAME mapping -- priceClassComparable is
+  // true again, purely because both days share the same selection class,
+  // no new code path. The movement is a REAL computed value, not the
+  // day-1 basis-changed placeholder.
+  assert.equal(result.rows[0]?.nativePrice, "5200");
+  assert.equal(result.rows[0]?.dailyMovement.status, "available");
+  assert.notEqual(result.rows[0]?.dailyMovement.reason, "price_basis_changed");
+  assert.equal(result.rows[0]?.dailyPercent.status, "available");
   db.close();
 });

@@ -3272,6 +3272,22 @@ export const sharesightSyncState = sqliteTable(
     lastPriceRefreshAt: text("last_price_refresh_at"),
     lastPriceRefreshStatus: text("last_price_refresh_status"),
     lastPriceRefreshErrorKind: text("last_price_refresh_error_kind"),
+    // BRK-012C: single-flight lease for the 10-minute delayed-price read
+    // gate (`app/sharesight-price-gate-service.ts`). Reuses this existing
+    // per-(user, portfolio, sharesightPortfolioId) row rather than a new
+    // lease table -- the same "adapt an existing owner-scoped row" pattern
+    // BRK-012B's `lastPriceRefreshAt` trio already established on this same
+    // table. The gate claims the lease on the owner's FIRST enabled row
+    // (deterministic `ORDER BY id ASC LIMIT 1`, mirroring
+    // `recordSharesightPriceRefreshWatermark`'s "one attempt, broadcast to
+    // every enabled row" model) via the SAME conditional-UPDATE CAS pattern
+    // `calculation_runs.claim()` uses (`db/repositories/calculation-runs.ts`)
+    // -- `changes = 1` means this invocation won the race; any concurrent
+    // loader that loses the race serves the (possibly still-stale-by-a-hair)
+    // cache rather than double-fetching. Plain ADD COLUMN, no rebuild, no
+    // trigger-hazard (same disclosure as the trio above).
+    priceRefreshLeaseOwner: text("price_refresh_lease_owner"),
+    priceRefreshLeaseExpiresAt: text("price_refresh_lease_expires_at"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     version: integer("version").notNull().default(1),
@@ -3300,5 +3316,89 @@ export const sharesightSyncState = sqliteTable(
       table.userId,
       table.portfolioId,
     ),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// BRK-012C: the delayed-price CACHE + 10-minute read-gate store, one row per
+// (user, security) -- the latest Sharesight `current_price` this owner's
+// account has observed, plus WHEN it was fetched (`fetched_at`, ingestion
+// time). This is deliberately NOT `price_observations`: that table already
+// receives the SAME data via BRK-012B's accretion path (one row per
+// security per TRADING DAY, converging toward the close); this table is a
+// single-row-per-security freshness/audit store the read gate
+// (`app/sharesight-price-gate-service.ts`) can check with ONE cheap query
+// ("is any held security's row missing or `fetched_at` > 10 minutes old?")
+// without scanning `price_observations`' potentially-multi-row-per-day
+// history. Freshness is unambiguous from the row alone, per the ruling:
+// `fetched_at` is this cache row's own ingestion time, independent of
+// `quote_at` (Sharesight's own `current_price_updated_at`, which can stay
+// unchanged across several fetches when the market hasn't moved -- that is
+// not staleness, it is an honest unchanged quote).
+//
+// Display: holdings/overview do NOT read this table directly for current
+// value -- see `app/owned-holdings.ts`'s BRK-012C comment on the lifted
+// `provider_id <> 'sharesight'` predicate. The read gate's refresh call
+// piggybacks the SAME accretion write BRK-012B's hourly cron already makes
+// (`domain/sharesight/price-accretion.ts` +
+// `db/repositories/sharesight-price-refresh.ts`'s
+// `upsertSharesightPriceObservations`), so `price_observations` -- which
+// DOES feed the existing selection machinery
+// (`domain/market-data/selection.ts`) -- is refreshed as a side effect of
+// this table's own gate-triggered fetch. This table's SOLE job is the
+// freshness gate and an honest "latest quote" record a future surface could
+// read directly; it is not itself a valuation input. See
+// `docs/MARKET_DATA_STRATEGY.md` and `docs/ARCHITECTURE.md` §8.2 for the
+// full design note.
+export const sharesightDelayedPrices = sqliteTable(
+  "sharesight_delayed_prices",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    securityId: text("security_id").notNull(),
+    priceDecimal: text("price_decimal").notNull(),
+    currencyCode: text("currency_code").notNull(),
+    // Sharesight's own `current_price_updated_at`, normalized to UTC `...Z`
+    // -- same discipline as `price-accretion.ts`'s `normalizeTimestampToUtcIso`
+    // (BRK-012B). Nullable: "when supplied" per the ruling -- Sharesight's
+    // wire shape has never been observed to omit it (BRK-012A/B evidence),
+    // but this cache never fabricates a quote timestamp it wasn't given.
+    quoteAt: text("quote_at"),
+    // Ingestion time -- THIS is the column the 10-minute gate compares
+    // against, never `quoteAt` (see this table's header comment).
+    fetchedAt: text("fetched_at").notNull(),
+    // Source metadata. Fixed to 'sharesight' today (the only delayed-price
+    // source this codebase has); kept as a real column rather than an
+    // assumed constant so a future second delayed-price source does not
+    // require a schema rebuild.
+    providerId: text("provider_id").notNull().default("sharesight"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "sharesight_delayed_prices_user_id_users_id_fk",
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "sharesight_delayed_prices_security_id_securities_id_fk",
+      columns: [table.securityId],
+      foreignColumns: [securities.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "sharesight_delayed_prices_currency_code_currencies_code_fk",
+      columns: [table.currencyCode],
+      foreignColumns: [currencies.code],
+    }).onDelete("restrict"),
+    check(
+      "sharesight_delayed_prices_provider_check",
+      sql`${table.providerId} = 'sharesight'`,
+    ),
+    uniqueIndex("sharesight_delayed_prices_user_security_unique").on(
+      table.userId,
+      table.securityId,
+    ),
+    index("sharesight_delayed_prices_user_idx").on(table.userId),
   ],
 );

@@ -317,3 +317,36 @@ export async function recordSharesightPriceRefreshWatermark(
     [input.now, input.status, input.errorKind, input.now, input.userId],
   );
 }
+
+/**
+ * BRK-012C review round (2026-08-20, B1 fix): reads this SAME watermark back
+ * -- BRK-012B never needed to (only the cron WROTE it); the read gate
+ * (`app/sharesight-price-gate-service.ts`) now uses it as its OWN per-owner
+ * staleness fact instead of a per-security cache scan (a held security
+ * Sharesight never matches can never have a cache row, so a per-security
+ * check reported "stale" forever for a mixed portfolio -- the reviewer's B1
+ * finding). Deliberately reads the EXISTING `last_price_refresh_at` column
+ * rather than adding a second, near-duplicate "gate watermark" column set:
+ * both the hourly cron and the read gate represent the identical fact
+ * ("when did we last attempt a Sharesight price fetch for this owner, and
+ * did it succeed"), and sharing one column means an hourly cron sweep
+ * automatically "resets the gate clock" for free (review follow-up 2) --
+ * with no second field to keep in sync or ever risk drifting from the
+ * first. Reads the FIRST enabled row (`ORDER BY id ASC LIMIT 1`) -- every
+ * enabled row for an owner is written identically by
+ * `recordSharesightPriceRefreshWatermark` above (its own `WHERE user_id = ?
+ * AND enabled = 1`, no `id` filter), so any one of them carries the same
+ * value. Returns `null` when this owner has no enabled link at all (the
+ * caller checks that separately) or has never had an attempt recorded.
+ */
+export async function loadSharesightPriceRefreshWatermark(
+  client: SqlClient,
+  userId: string,
+): Promise<string | null> {
+  const row = await client.get<{ last_price_refresh_at: string | null }>(
+    `SELECT last_price_refresh_at FROM sharesight_sync_state
+      WHERE user_id = ? AND enabled = 1 ORDER BY id ASC LIMIT 1`,
+    [userId],
+  );
+  return row?.last_price_refresh_at ?? null;
+}

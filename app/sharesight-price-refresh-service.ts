@@ -5,6 +5,16 @@ import {
   resolveScopedSharesightInstrumentSecurities,
   upsertSharesightPriceObservations,
 } from "../db/repositories/sharesight-price-refresh.ts";
+// BRK-012C review follow-up 2 (2026-08-20): the hourly cron ALSO upserts the
+// delayed-price cache (`sharesight_delayed_prices`) from the SAME candidate
+// list it already derives for `price_observations` -- same data, cheap
+// (already-chunked batch upsert, no extra Sharesight call). Combined with
+// `recordSharesightPriceRefreshWatermark` below (already shared with the
+// read gate -- see `app/sharesight-price-gate-service.ts`'s Gate 3 comment),
+// this means an hourly cron run "resets the gate clock": the very next
+// portfolio load after a cron sweep sees a fresh watermark and serves
+// `price_observations`/the cache with zero Sharesight requests.
+import { upsertSharesightDelayedPriceCache } from "../db/repositories/sharesight-delayed-price-cache.ts";
 import {
   buildSharesightPriceAccretionPlan,
   type SharesightClient,
@@ -144,6 +154,19 @@ export async function runSharesightPriceRefresh(
       );
       const plan = buildSharesightPriceAccretionPlan(result.value, scopeMap);
       const write = await upsertSharesightPriceObservations(deps.client, {
+        userId,
+        candidates: plan.candidates,
+        now: nowIso,
+      });
+      // BRK-012C review follow-up 2: same candidates, same cheap chunked
+      // upsert, into the read gate's cache table -- see this file's header
+      // import comment. Not surfaced as a new field on
+      // `SharesightPriceRefreshRunResult` (kept byte-identical to avoid
+      // churning every existing BRK-012B exact-shape result assertion for a
+      // side-write that has no distinct failure mode of its own: it shares
+      // this same try/catch, so any write failure here is already counted
+      // via `usersFailed` exactly like the `price_observations` write is).
+      await upsertSharesightDelayedPriceCache(deps.client, {
         userId,
         candidates: plan.candidates,
         now: nowIso,

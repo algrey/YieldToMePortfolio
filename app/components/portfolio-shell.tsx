@@ -382,6 +382,24 @@ function signPrefixed(formatted: string, signed: boolean): string {
   return `+${formatted}`;
 }
 
+// BRK-012C review round (2026-08-20, B3 fix): a cross-basis daily-movement
+// comparison (e.g. today's price from Sharesight-delayed, yesterday's from
+// the Yahoo-compatible EOD feed) is genuinely NOT comparable -- deliberately
+// left `priceClassComparable`-gated (STRICT) in `app/owned-holdings.ts`
+// rather than computed anyway, since a delayed-vs-EOD delta can be
+// misleading. The honesty defect was the LABEL: falling through to the
+// generic "Price unavailable" branch below falsely implied no price data
+// exists at all, when the real, current price IS known -- only the
+// MOVEMENT comparison isn't. `reason === "price_basis_changed"` (set by
+// `app/owned-holdings.ts`'s `dailyMovement`/`dailyPercent` fields) now
+// renders its own honest, distinct text instead.
+function ownedHoldingUnavailableText(reason: string | null | undefined) {
+  if (reason === "missing_basis") return "Basis unavailable";
+  if (reason === "price_basis_changed")
+    return "Movement unavailable (price basis changed)";
+  return "Price unavailable";
+}
+
 function ownedHoldingAmount(
   value: {
     status: "available" | "unavailable";
@@ -393,9 +411,7 @@ function ownedHoldingAmount(
   signed = false,
 ) {
   if (value.status !== "available" || value.value === null)
-    return value.reason === "missing_basis"
-      ? "Basis unavailable"
-      : "Price unavailable";
+    return ownedHoldingUnavailableText(value.reason);
   try {
     const formatted = signPrefixed(
       groupThousands(
@@ -405,9 +421,7 @@ function ownedHoldingAmount(
     );
     return `${value.currencyCode} ${formatted}`;
   } catch {
-    return value.reason === "missing_basis"
-      ? "Basis unavailable"
-      : "Price unavailable";
+    return ownedHoldingUnavailableText(value.reason);
   }
 }
 function ownedHoldingDecimal(value: string | null, scale = 2): string {
