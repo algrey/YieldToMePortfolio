@@ -57,6 +57,13 @@ export type OwnedDividendListRow = {
   notPaid: boolean;
   cashDecimal: string | null;
   frankingTotalDecimal: string | null;
+  /** DIV-007: `true` when `frankingTotalDecimal` above is an INFERRED $0
+   * (the imported Sharesight fact omitted its franking field entirely),
+   * never a Sharesight-supplied explicit zero -- see
+   * `DerivedDividendRow.frankingDerivedZero`'s doc comment. Rendered as a
+   * "none reported" note so the owner can distinguish it from a real
+   * confirmed-unfranked payout. */
+  frankingDerivedZero: boolean;
   grossDecimal: string | null;
   source: DerivedDividendRowSource;
   /** Review finding B2: an owner-excluded row (event-override `exclude: true`) must not render identically to a counted one -- carried through and rendered as the security tab's own "· excluded" marker so the list never silently disagrees with the totals. */
@@ -132,6 +139,7 @@ export async function loadOwnedDividendList(
     notPaid: row.status === "declared_pending",
     cashDecimal: row.cashDecimal,
     frankingTotalDecimal: row.frankingTotalDecimal,
+    frankingDerivedZero: row.frankingDerivedZero,
     grossDecimal: row.grossDecimal,
     source: row.source,
     excluded: row.excluded,

@@ -127,6 +127,14 @@ export function OwnedDividendList({
                         row.currencyCode,
                         row.frankingTotalDecimal,
                       )}
+                      {row.frankingDerivedZero ? (
+                        <>
+                          <br />
+                          <span className="dividend-franking-provenance">
+                            none reported
+                          </span>
+                        </>
+                      ) : null}
                     </td>
                     <td className="numeric">
                       {formatIncomeMoney(row.currencyCode, row.grossDecimal)}

@@ -1443,7 +1443,7 @@ test("BRK-010: SMALL-1 -- a zero, negative, or over-24dp-precision raw exchange_
 // B2: franking on foreign-currency payouts (product ruling)
 // ---------------------------------------------------------------------------
 
-test("BRK-010: a foreign-currency payout with ZERO/absent franking is unaffected -- no warning, franking stays as recorded", () => {
+test("BRK-010: a foreign-currency payout with ZERO/absent franking never warns; DIV-007 derives absent franking to a known $0", () => {
   const result = transformSharesightSync({
     portfolioName: "Main",
     portfolioBaseCurrencyCode: "AUD",
@@ -1480,7 +1480,12 @@ test("BRK-010: a foreign-currency payout with ZERO/absent franking is unaffected
     "an explicit zero franking total must not warn either",
   );
 
-  // Read time: franking (null here) is simply carried through unaffected.
+  // Read time: DIV-007 (owner ruling 2026-08-20, superseding this test's
+  // original title/behaviour) -- an ABSENT franking field on an imported
+  // totals-mode fact derives to $0 (an inference from Sharesight's own
+  // demonstrated explicit-zero behaviour), never left as "Unavailable".
+  // This is a DIFFERENT case from the nonzero-foreign-unverified guard
+  // below, which stays completely untouched (see the next test).
   const rows = deriveDividendHistoryForSecurity({
     portfolioSecurityId: "ps-zero-frank",
     securityCurrencyCode: "AUD",
@@ -1508,7 +1513,8 @@ test("BRK-010: a foreign-currency payout with ZERO/absent franking is unaffected
     today: "2026-08-19",
   });
   assert.equal(rows[0]?.cashDecimal, "20"); // still converts normally
-  assert.equal(rows[0]?.frankingTotalDecimal, null);
+  assert.equal(rows[0]?.frankingTotalDecimal, "0"); // DIV-007: derived, not unknown
+  assert.equal(rows[0]?.frankingDerivedZero, true);
 });
 
 test("BRK-010: a foreign-currency payout with NONZERO franking stages a warning (never blocking) and its franking becomes unknown at read time; cash still converts", () => {

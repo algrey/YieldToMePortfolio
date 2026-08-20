@@ -88,6 +88,55 @@ export function frankingCell(
 }
 
 /**
+ * DIV-007: a BRK-005 totals-mode row (`dividendPerShareDecimal === null`,
+ * only ever an imported Sharesight payout -- see `DerivedDividendRow`'s
+ * header note) carries no per-share franking fact at all, so `row.franking`
+ * (a PER-SHARE resolution) is `{ source: "unknown" }` unless a franking-only
+ * override/receipt/manual fact was recorded directly against it -- reading
+ * it via `frankingCell` above would otherwise render "Unknown" even when
+ * `frankingTotalDecimal` holds a real reported (or DIV-007-derived) TOTAL
+ * figure. This wraps `frankingCell` to read the row's TOTAL in that case
+ * instead (mirroring `owned-dividend-list.tsx`'s equivalent display).
+ *
+ * Review round 1 fixes:
+ * - **F1**: the totals-vs-per-share branch is NOT simply
+ *   `dividendPerShareDecimal === null` -- a franking-only override/receipt/
+ *   manual fact can exist on a row whose OWN `dividendPerShareDecimal` is
+ *   null (e.g. an "edited" row where the dividend-per-share amount itself
+ *   is unknown but the owner separately entered a franking-per-share
+ *   credit); `row.franking.source !== "unknown"` in that case, and the
+ *   per-share path must still win (`frankingCell` renders the owner's real
+ *   "AUD 0.42 (override)" figure) rather than regressing to this totals
+ *   branch's "Unavailable"/derived-zero handling.
+ * - **B1**: a TOTAL must be labelled distinctly from a PER-SHARE figure in
+ *   the same "Franking/share" column header (security-dividends-tab.tsx) --
+ *   otherwise a real franked AUD payout's dollar total silently reads as if
+ *   it were a per-share credit, misstating the unit basis on a real tax
+ *   figure. Appends " total", mirroring `dividend-assumptions-editor.tsx`'s
+ *   existing totals-mode-dominated-imported-fact precedent
+ *   (`${formatIncomeMoney(...)} total`), then the "none reported"
+ *   provenance note for a DIV-007-derived $0 (an inference from
+ *   Sharesight's absent field, never a Sharesight-supplied explicit zero --
+ *   see `DerivedDividendRow.frankingDerivedZero`'s doc comment).
+ * - **B2**: a genuinely unknown TOTAL renders the identical "Unknown" text
+ *   the per-share path uses for the same meaning (no usable franking figure
+ *   at all) -- `docs/CALCULATIONS.md`'s BRK-010 paragraph documents this
+ *   reading "Unknown", so the two paths must never silently diverge on
+ *   wording for one concept.
+ */
+export function frankingDisplay(row: DerivedDividendRow): string {
+  if (
+    row.dividendPerShareDecimal !== null ||
+    row.franking.source !== "unknown"
+  ) {
+    return frankingCell(row.franking, row.currencyCode);
+  }
+  if (row.frankingTotalDecimal === null) return "Unknown";
+  const amount = `${formatIncomeMoney(row.currencyCode, row.frankingTotalDecimal)} total`;
+  return row.frankingDerivedZero ? `${amount} (none reported)` : amount;
+}
+
+/**
  * UI-014 part 4 (BRK-010 provenance rendering): a compact display form of a
  * stored FX rate for the "converted from" disclosure below -- the stored
  * rate itself (`DerivedDividendRow.fxRateToPortfolioDecimal`) is kept at a

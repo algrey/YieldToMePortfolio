@@ -866,7 +866,7 @@ test("BRK-005: DIV-001 derivation uses totals directly for a totals-only importe
   );
 });
 
-test("BRK-005: a totals-only fact with unknown franking still reports a known cash total and an unknown franking total", () => {
+test("BRK-005/DIV-007: a totals-only imported fact with an ABSENT franking total derives a known $0 (owner ruling 2026-08-20, superseding this test's original 'stays unknown' behaviour)", () => {
   const derived = deriveDividendHistoryForSecurity({
     portfolioSecurityId: "membership-a",
     securityCurrencyCode: "AUD",
@@ -891,9 +891,16 @@ test("BRK-005: a totals-only fact with unknown franking still reports a known ca
   });
   const row = derived[0]!;
   assert.equal(row.cashDecimal, "2.50");
-  assert.equal(row.frankingTotalDecimal, null);
-  assert.equal(row.grossDecimal, "2.50");
-  assert.equal(row.grossIncludesFranking, false);
+  // DIV-007: an absent franking total on an imported totals-mode fact
+  // derives to a known $0 (inferred from Sharesight's demonstrated
+  // explicit-zero behaviour) rather than staying unknown -- see
+  // `domain/dividends/history.ts`'s `deriveAbsentImportedFranking`.
+  assert.equal(row.frankingTotalDecimal, "0");
+  assert.equal(row.frankingDerivedZero, true);
+  // Numerically 2.50 -- now computed via cash + franking (addDecimal's exact
+  // formatting drops the trailing zero) rather than passed through verbatim.
+  assert.equal(row.grossDecimal, "2.5");
+  assert.equal(row.grossIncludesFranking, true);
   assert.equal(row.amountUnknown, false);
 });
 

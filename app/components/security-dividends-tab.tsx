@@ -22,7 +22,7 @@ import {
   foldedInReceiptCount,
   formatFxRate,
   formatShares,
-  frankingCell,
+  frankingDisplay,
   freshEntryPrefill,
   SOURCE_LABEL,
   type DialogPrefill,
@@ -536,9 +536,7 @@ export function SecurityDividendsTab({
                         </>
                       ) : null}
                     </td>
-                    <td className="numeric">
-                      {frankingCell(row.franking, row.currencyCode)}
-                    </td>
+                    <td className="numeric">{frankingDisplay(row)}</td>
                     <td className="numeric">
                       {formatIncomeMoney(row.currencyCode, row.cashDecimal)}
                       {fxProvenance ? (
