@@ -89,7 +89,12 @@ export async function getAuthenticatedSqlContext(portfolioId?: string) {
       userId: context.context.user.id,
       requestId: principal.requestId,
     };
-  } catch {
+  } catch (error) {
+    // UI-023B follow-up: this catch deliberately collapses every failure
+    // into one honest 503 message, but the silent version made a local
+    // schema-drift outage (missing migration column) undiagnosable without
+    // editing code. Log server-side; the response payload stays generic.
+    console.error("getAuthenticatedSqlContext failed", error);
     return {
       ok: false as const,
       status: 503 as const,

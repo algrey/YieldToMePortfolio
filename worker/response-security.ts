@@ -8,6 +8,11 @@ function createContentSecurityPolicy(nonce: string): string {
     "font-src 'self'",
     "form-action 'self'",
     "frame-ancestors 'none'",
+    // UI-023B (owner directive 2026-08-22): the per-holding News tab embeds
+    // the owner's own news site in an <iframe>. `frame-src` governs what THIS
+    // app may embed -- the inverse `frame-ancestors 'none'` (nobody may embed
+    // this app) is unchanged. Exactly one external origin, no wildcards.
+    "frame-src 'self' https://greeninvestments.au",
     "img-src 'self' data:",
     "manifest-src 'self'",
     "object-src 'none'",

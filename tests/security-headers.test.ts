@@ -96,6 +96,13 @@ test("security policy applies restrictive headers and private caching", async ()
     privateResponse.headers.get("content-security-policy") ?? "",
     /frame-ancestors 'none'/,
   );
+  // UI-023B: frame-src allows exactly the owner's news-embed origin (what
+  // this app may embed); frame-ancestors above stays 'none' (nobody may
+  // embed this app).
+  assert.match(
+    privateResponse.headers.get("content-security-policy") ?? "",
+    /frame-src 'self' https:\/\/greeninvestments\.au(;|$)/,
+  );
   assert.equal(
     cspAuthorizesNonce(
       privateResponse.headers.get("content-security-policy") ?? "",

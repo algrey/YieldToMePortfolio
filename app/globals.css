@@ -3890,6 +3890,33 @@ dd {
   font-size: 0.72rem;
 }
 
+/* UI-023B: the per-holding News tab's embedded news site. The frame takes
+   the remaining viewport below the sub-nav (maximum screen space, per the
+   holding area's owner directive); a fine divider border, no rounding,
+   matching the app's visual language. The muted source line beneath keeps
+   the content attributed and offers a way out if the embed fails. */
+.holding-news-embed {
+  display: grid;
+  gap: 8px;
+}
+
+.holding-news-frame {
+  width: 100%;
+  height: calc(100dvh - 250px);
+  min-height: 420px;
+  border: 1px solid var(--divider);
+  background: var(--forest);
+}
+
+.holding-news-source {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.holding-news-source a {
+  color: var(--green-bright);
+}
+
 .income-headline {
   display: grid;
   gap: 4px;

@@ -171,7 +171,9 @@ configuration, and non-data-bearing 401/403 responses.
   seven mutation routes were missing this gate — see §6.
 - **Security headers** (`worker/response-security.ts`): every response gets
   `content-security-policy` (`default-src 'self'`, per-request nonce on
-  `script-src`, `frame-ancestors 'none'`, `object-src 'none'`),
+  `script-src`, `frame-ancestors 'none'`, `object-src 'none'`, and — the
+  one deliberate widening — `frame-src 'self' https://greeninvestments.au`
+  for the per-holding News embed, UI-023B),
   `permissions-policy` (camera/geolocation/microphone/payment/usb denied),
   `referrer-policy: no-referrer`, `x-content-type-options: nosniff`,
   `x-frame-options: DENY`. Verified by `tests/security-headers.test.ts`

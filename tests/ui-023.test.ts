@@ -385,7 +385,38 @@ test("UI-023: all three holding pages are force-dynamic, owner-guarded, and reje
   for (const source of [transactions, news]) {
     assert.match(source, /portfolioId === "preview"/);
   }
-  assert.match(news, /is not connected/);
+});
+
+test("UI-023B: the News tab embeds the owner's news site in a sandboxed, no-referrer iframe with visible source attribution, and the Worker CSP allows exactly that origin", async () => {
+  const [news, csp] = await Promise.all([
+    readFile(
+      new URL(
+        "../app/portfolio/[portfolioId]/[section]/[holdingId]/news/page.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    readFile(
+      new URL("../worker/response-security.ts", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  assert.match(
+    news,
+    /const HOLDING_NEWS_EMBED_URL = "https:\/\/greeninvestments\.au\/\?embed=1";/,
+  );
+  assert.match(news, /<iframe/);
+  assert.match(news, /src=\{HOLDING_NEWS_EMBED_URL\}/);
+  assert.match(news, /sandbox="/);
+  // Portfolio URLs carry portfolio/security ids -- they must never reach
+  // the news site's logs via the Referer header.
+  assert.match(news, /referrerPolicy="no-referrer"/);
+  // Attribution stays visible outside the frame.
+  assert.match(news, /greeninvestments\.au\s*<\/a>/);
+  // The CSP widening is exactly one origin, and the inverse directive
+  // (nobody may embed THIS app) is untouched.
+  assert.match(csp, /"frame-src 'self' https:\/\/greeninvestments\.au"/);
+  assert.match(csp, /"frame-ancestors 'none'"/);
 });
 
 test("UI-023: HoldingNav and IncomeNav both render through the single shared SubNav, so the two sub-areas cannot drift apart", async () => {

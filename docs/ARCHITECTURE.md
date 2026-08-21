@@ -136,6 +136,7 @@ It must fail closed in preview and production. Tests use signed fixture JWTs or 
 - Require idempotency keys for import commit, reversal, provider refresh, and deletion jobs.
 - Set private pages/API responses to `Cache-Control: private, no-store`.
 - Use a restrictive Content Security Policy, `frame-ancestors 'none'`, `Referrer-Policy`, MIME sniffing protection, and a permissions policy.
+- Deliberate CSP exception (UI-023B, owner directive 2026-08-22): `frame-src 'self' https://greeninvestments.au` so the per-holding News tab can embed the owner's own news site. This widens only what the app may embed; `frame-ancestors 'none'` (nobody may embed the app) is unchanged, the allowance is a single explicit origin with no wildcards, and the iframe itself is sandboxed with `referrerpolicy="no-referrer"` so portfolio URLs never reach the embedded site's logs.
 
 ## 5. Tenant isolation pattern
 

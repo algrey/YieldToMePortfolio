@@ -208,7 +208,12 @@ export async function loadAuthenticatedWorkspace(
               ? "partial"
               : "populated",
     };
-  } catch {
+  } catch (error) {
+    // UI-023B follow-up: same rationale as getAuthenticatedSqlContext's
+    // catch -- keep the user-facing message generic, but never swallow the
+    // underlying error silently (a missing local migration column produced
+    // an undiagnosable blanket outage here).
+    console.error("loadAuthenticatedWorkspace failed", error);
     return unavailableWorkspace("Portfolio data is temporarily unavailable.");
   }
 }
