@@ -894,6 +894,15 @@ Status: DONE (2026-08-14).
 
 Status: PROMOTED 2026-08-14 by owner instruction — split into CGT-001A/B below; retention-guarantee constraint remains standing.
 
+### UI-019/UI-020/UI-021 — Import-review navigation, committed feedback, empty-state create (owner-reported batch)
+
+Status: DONE (2026-08-16). Three owner-reported UI fixes in one cycle:
+
+- UI-019: "Open in review" after a Sharesight sync now arms the same scroll ref the history path uses (the code comment had claimed parity that did not exist) and focuses the review heading (tabIndex −1, preventScroll) so keyboard/screen-reader users land in the section too.
+- UI-020: the review header could never say anything but "Ready to review" (it never consulted isCommittedOrReversed) and the bottom slot went empty after commit. Header now reads Committed/Reversed; bottom renders committedConfirmationText with a business date sourced only from this batch's own history entry (never the last-viewed detail — the UI-013 staleness class), honest dateless fallback when history has not refreshed.
+- UI-021: the shared EmptyState gained a real gated action (disabled = actionPending || !isOnline per the shell convention — review round 1 caught an offline dialog mouse-trap) wired on "No portfolios yet" across all five sections to the same create-portfolio dialog with self-as-opener focus restore; the inert "Preview add menu" placeholder was removed from all five call sites that silently rendered it (removal Orchestrator-approved; rationale-of-record comments corrected after review caught a false "no call site affected" claim); the 1rem sizing scoped to the new action class so the account-recovery button is untouched.
+- Review round 1 PASS on UI-019/020, FAIL on UI-021 (offline gate; false premise) → corrections applied per prescription with pinned tests. `npm run check` exit 0 (1623 pass, 10 gated skips).
+
 ### UI-010 — Render dominated-evidence counts in the dividends tab
 
 Status: DONE (2026-08-15); from DIV-005 review — `additionalReceiptsCount`/`additionalImportedCount` (and dominated evidence generally) are type-level disclosures with no UI consumer, so the "disclosed, not silently dropped" guarantee is invisible to the owner. Surface them on UI-006C's rows/detail (e.g. "+1 additional receipt folded in") when non-zero.

@@ -731,10 +731,20 @@ test("BRK-005B follow-up 6: loadReviewByBatchId targets /api/import/preview/:bat
   assert.match(block, /setCommit\(null\);/);
   assert.match(block, /setCommitConfirmed\(false\);/);
   assert.match(block, /setCommitKey\(null\);/);
-  assert.match(
-    source,
-    /onOpenBatch=\{\(batchId\) => void loadReviewByBatchId\(batchId\)\}/,
+  // UI-019 (owner-reported): onOpenBatch must arm the SAME
+  // scroll-into-view/focus request `resumeReviewFromHistory` arms -- a bare
+  // `void loadReviewByBatchId(batchId)` reproduces the "review renders under
+  // the Import Historical Data section, no scroll" defect (see
+  // tests/ui-019.test.ts for the full repro and fix assertions).
+  const onOpenBatchMatch = source.match(
+    /onOpenBatch=\{\(batchId\) => \{([\s\S]*?)\n {10}\}\}/,
   );
+  assert.ok(onOpenBatchMatch, "expected an onOpenBatch handler body");
+  assert.match(
+    onOpenBatchMatch![1]!,
+    /pendingReviewScrollBatchIdRef\.current = batchId;/,
+  );
+  assert.match(onOpenBatchMatch![1]!, /void loadReviewByBatchId\(batchId\);/);
 });
 
 // ---------------------------------------------------------------------------

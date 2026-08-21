@@ -2018,6 +2018,19 @@ dd {
   font-size: 0.76rem;
 }
 
+/* UI-021 (owner-reported): "decent sized font" -- matches the other
+   prominent-but-not-huge outline-button convention (e.g. `.import-upload-form
+   button`) at the inherited 1rem body size, not the smaller 0.76rem
+   `.empty-state > button` uses by default. Review follow-up: scoped to this
+   own class rather than widening `.empty-state > button` itself, which is
+   also the base rule for OTHER `.empty-state` action buttons unrelated to
+   this one -- e.g. account-lifecycle-recovery.tsx's "Continue export
+   processing" button, which must keep its existing size. */
+.empty-state > button.empty-state-primary-action {
+  padding: 0 16px;
+  font-size: 1rem;
+}
+
 .brand-mark {
   width: 27px;
   height: 24px;

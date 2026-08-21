@@ -125,6 +125,40 @@ export function deriveCommittedStatusLine(
     : `Import committed. ${sentence} See import history for details.`;
 }
 
+/** The minimal shape `committedConfirmationText` needs from a history-list
+ * entry (`HistoryBatch` in `import-review.tsx`) -- kept structural here, same
+ * reasoning as `ReviewBatchSummary` above, so this module has no import-time
+ * dependency on the component file. */
+export type CommittedHistoryEntry = {
+  committedAt: string | null;
+  reversedAt: string | null;
+};
+
+/**
+ * UI-020 (owner-reported): after committing/accepting a Sharesight batch,
+ * the header status pill kept reading "Ready to review" and the bottom of
+ * the "Review securities" section (where the now-hidden "Accept Import"
+ * button used to sit) gave no confirmation at all. This is that
+ * confirmation's text -- a real, business-relevant date when this batch's
+ * own history-list entry has one, honestly omitted (never fabricated) when
+ * it has not loaded yet. `historyEntry` must already be scoped to THIS
+ * batch by its caller (matched by id in the `history` list, never the
+ * last-viewed `historyDetail` -- see `import-review.tsx`'s own header note
+ * on `reviewHistoryEntry`, the same cross-batch staleness class
+ * `scopeCommitToBatch` guards against for `commit`).
+ */
+export function committedConfirmationText(
+  batchStatus: string,
+  historyEntry: CommittedHistoryEntry | null,
+): string {
+  const reversed = batchStatus === "reversed";
+  const at = reversed ? historyEntry?.reversedAt : historyEntry?.committedAt;
+  const dateSuffix = at ? ` on ${at.slice(0, 10)}` : "";
+  return reversed
+    ? `This batch was reversed${dateSuffix}.`
+    : `This batch was committed${dateSuffix}.`;
+}
+
 /** The real "N of M rows" denominator for the accept loop's progress text
  * -- `processed` (committed + skipped so far) out of `total` (processed +
  * still-`staged`), both derived from the commit machinery's OWN response

@@ -2,7 +2,14 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import {
   historyBars,
   overviewRows,
@@ -353,11 +360,37 @@ function StatusBanner({
 function EmptyState({
   title = "No holdings yet",
   message = "Add a quote or import transactions to start this portfolio.",
-  showAction = true,
+  action,
 }: {
   title?: string;
   message?: string;
-  showAction?: boolean;
+  // UI-021 (owner-reported): every empty state used to offer nothing
+  // actionable at all -- this optional slot lets a specific call site (only
+  // the "no portfolios yet" state, so far) supply a real, wired action.
+  // Review B2 (correction): the OLD `showAction`/"Preview add menu" slot had
+  // no `onClick` at all -- it was always inert, never wired to anything --
+  // but it DID render at every call site that omitted the prop (its
+  // default was `true`): the owned-mode `OwnedHoldingsScreen` empty state,
+  // plus the prototype `OverviewScreen`, `HoldingsScreen`, `QuotesScreen`,
+  // and `DetailsScreen` empty states (five call sites in total; only the
+  // four call sites that explicitly passed `showAction={false}` suppressed
+  // it). Its removal here is an intentional, orchestrator-approved cleanup
+  // of that dead placeholder everywhere, not a claim that no call site was
+  // affected.
+  action?: {
+    label: string;
+    onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+    // Review B1 (BLOCKING): every other mutating control in this shell is
+    // disabled while a mutation is in flight or the shell is offline
+    // (`actionPending || !isOnline` -- see the portfolio dialog's own
+    // Save/Cancel buttons). This action button had no such gate, so an
+    // offline click could open the create dialog while every OTHER control
+    // in this shell already treats offline as blocking -- Save/Cancel both
+    // disabled, `submitPortfolioAction` early-returns on `!isOnline`
+    // silently, leaving Escape as the only way out. Optional so a future
+    // action-bearing call site that has no such state to report can omit it.
+    disabled?: boolean;
+  };
 }) {
   return (
     <section className="empty-state" aria-labelledby="empty-title">
@@ -367,7 +400,16 @@ function EmptyState({
       <p className="eyebrow">Empty state</p>
       <h2 id="empty-title">{title}</h2>
       <p>{message}</p>
-      {showAction ? <button type="button">Preview add menu</button> : null}
+      {action ? (
+        <button
+          type="button"
+          className="empty-state-primary-action"
+          onClick={action.onClick}
+          disabled={action.disabled}
+        >
+          {action.label}
+        </button>
+      ) : null}
     </section>
   );
 }
@@ -554,7 +596,6 @@ function OwnedHoldingsScreen({
       <EmptyState
         title="Holdings unavailable"
         message="The published holdings projection is temporarily unavailable. No values were substituted."
-        showAction={false}
       />
     );
   }
@@ -923,9 +964,21 @@ function OwnedHoldingsScreen({
 function OwnedWorkspaceScreen({
   activeSection,
   workspace,
+  onCreatePortfolio,
+  createPortfolioDisabled,
 }: {
   activeSection: PortfolioSection;
   workspace: OwnedWorkspace;
+  // UI-021 (owner-reported): every section's empty state offered no way out when no
+  // portfolio exists yet -- this is the SAME create-portfolio dialog the
+  // header dropdown's "Create portfolio" item opens (see
+  // `portfolioDialogOpenerRef`'s header note), never a second dialog.
+  onCreatePortfolio: (event: MouseEvent<HTMLButtonElement>) => void;
+  // Review B1: mirrors every other mutating control's
+  // `actionPending || !isOnline` gate -- that state lives in the enclosing
+  // `PortfolioShell`, not here, so it is passed down rather than
+  // re-derived.
+  createPortfolioDisabled: boolean;
 }) {
   if (workspace.status === "unavailable") {
     return (
@@ -964,7 +1017,11 @@ function OwnedWorkspaceScreen({
         <EmptyState
           title="No portfolios yet"
           message="Create a portfolio to begin tracking holdings and history."
-          showAction={false}
+          action={{
+            label: "Create a new portfolio",
+            onClick: onCreatePortfolio,
+            disabled: createPortfolioDisabled,
+          }}
         />
         <AccountLifecycleControls />
       </>
@@ -991,7 +1048,6 @@ function OwnedWorkspaceScreen({
     <EmptyState
       title={titles[activeSection]}
       message={messages[activeSection]}
-      showAction={false}
     />
   );
 }
@@ -1143,7 +1199,6 @@ function OwnedOverviewScreen({
       <EmptyState
         title="No valuation history yet"
         message="Add posted transactions and validated market observations to publish portfolio value."
-        showAction={false}
       />
     );
   }
@@ -3542,6 +3597,19 @@ export function PortfolioShell({
             <OwnedWorkspaceScreen
               activeSection={activeSection}
               workspace={ownedWorkspace}
+              // UI-021 (owner-reported): mirrors the header dropdown's "Create
+              // portfolio" item exactly (`portfolioDialogOpenerRef.current =
+              // ...; setPortfolioDialog("create")`) -- one dialog, two
+              // openers. Unlike the dropdown item (which unmounts the
+              // instant its popover closes, forcing it to capture a
+              // DIFFERENT surviving node), this empty-state button itself
+              // stays mounted while the dialog is open, so it captures
+              // itself as the opener.
+              onCreatePortfolio={(event) => {
+                portfolioDialogOpenerRef.current = event.currentTarget;
+                setPortfolioDialog("create");
+              }}
+              createPortfolioDisabled={actionPending || !isOnline}
             />
           )
         ) : null}

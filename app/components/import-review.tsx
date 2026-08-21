@@ -17,6 +17,7 @@ import {
 } from "../sharesight-sync-panel-helpers.ts";
 import {
   acceptLoopProgress,
+  committedConfirmationText,
   deriveCommittedStatusLine,
   isCommittedOrReversed as deriveIsCommittedOrReversed,
   runAcceptCommitLoop,
@@ -460,12 +461,23 @@ export function ImportReview({
   // therefore needs to scroll the now-populated review section into view --
   // otherwise the owner's "no errors or ability to commit" report repeats,
   // since the restored resolution cards render off-screen above where they
-  // clicked. Only the resume-from-history path arms this ref (set right
-  // before the load call); a fresh CSV-upload preview or the Sharesight
-  // sync panel's own `onOpenBatch` already render the review section next
-  // to where the owner is looking, so those paths leave it unset and this
-  // effect is a no-op for them.
+  // clicked.
+  // UI-019 (owner-reported): the Sharesight sync panel's own "Open in
+  // review" affordance (`onOpenBatch` below) has the SAME defect --
+  // this component renders `<HistoricalDataPanel />` between the sync panel
+  // and this review section, so the loaded review lands well below where
+  // the owner clicked, "under the Import Historical Data section" in the
+  // owner's own words, leaving them looking at the wrong place. There is
+  // only ONE review section (never a separate CSV vs. sync render target --
+  // see `loadReviewByBatchId`'s own header comment), so the fix is simply to
+  // arm this same scroll request from `onOpenBatch` too, exactly as
+  // `resumeReviewFromHistory` already does.
   const reviewSectionRef = useRef<HTMLElement | null>(null);
+  // UI-019: focus target for the same scroll-into-view moment -- a
+  // keyboard/screen-reader user gets no benefit from a visual scroll alone
+  // (QA-001B). `tabIndex={-1}` on the heading below makes it
+  // programmatically focusable without adding it to the normal Tab order.
+  const reviewHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const pendingReviewScrollBatchIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -511,20 +523,24 @@ export function ImportReview({
     void loadHistory();
   }, []);
 
-  // UI-012: fires once the review that `resumeReviewFromHistory` requested
-  // has actually landed in state (matched by batch id, not just "any
-  // review changed") -- see the ref's own header note above. Review
-  // finding: no explicit `behavior: "smooth"` here -- passing it would
-  // override the CSS `scroll-behavior` property entirely (including
-  // globals.css's `@media (prefers-reduced-motion: reduce)` rule that
-  // forces `scroll-behavior: auto !important`), reintroducing motion for a
-  // reader who asked their OS to suppress it. Omitting `behavior` leaves
-  // the browser to follow that CSS property, so the reduced-motion
-  // override already applies unchanged.
+  // UI-012/UI-019: fires once the review that `resumeReviewFromHistory` (or
+  // the Sharesight sync panel's `onOpenBatch`) requested has actually landed
+  // in state (matched by batch id, not just "any review changed") -- see the
+  // ref's own header note above. Review finding: no explicit
+  // `behavior: "smooth"` here -- passing it would override the CSS
+  // `scroll-behavior` property entirely (including globals.css's
+  // `@media (prefers-reduced-motion: reduce)` rule that forces
+  // `scroll-behavior: auto !important`), reintroducing motion for a reader
+  // who asked their OS to suppress it. Omitting `behavior` leaves the
+  // browser to follow that CSS property, so the reduced-motion override
+  // already applies unchanged. `preventScroll: true` on the focus call stops
+  // the browser's own default "scroll the newly focused element into view"
+  // behaviour from firing a SECOND, redundant scroll right after the first.
   useEffect(() => {
     if (review && pendingReviewScrollBatchIdRef.current === review.batch.id) {
       pendingReviewScrollBatchIdRef.current = null;
       reviewSectionRef.current?.scrollIntoView({ block: "start" });
+      reviewHeadingRef.current?.focus({ preventScroll: true });
     }
   }, [review]);
 
@@ -1495,6 +1511,12 @@ export function ImportReview({
           review.commitProgress ?? EMPTY_COMMIT_PROGRESS,
         )
       : null;
+  // UI-020: this batch's own persisted history-list entry, matched by id --
+  // see `committedConfirmationText`'s header note for why this, and never
+  // `historyDetail`.
+  const reviewHistoryEntry = review
+    ? (history.find((batch) => batch.id === review.batch.id) ?? null)
+    : null;
   // UI-013 (one blessed path per batch type): a `sharesight_sync` batch's
   // pre-commit path is Accept Import ALONE -- it collapses resolve
   // securities -> mark ready -> commit (BRK-009B) into one action, and its
@@ -1562,7 +1584,19 @@ export function ImportReview({
               },
             }))
           }
-          onOpenBatch={(batchId) => void loadReviewByBatchId(batchId)}
+          // UI-019 (owner-reported): "Open in review" after a Sharesight
+          // sync used to reuse `loadReviewByBatchId` alone, WITHOUT arming
+          // the scroll-into-view/focus request `resumeReviewFromHistory`
+          // arms below -- so the loaded review rendered silently below the
+          // `HistoricalDataPanel` just underneath, "under the Import
+          // Historical Data section" in the owner's words, leaving the
+          // owner right where they clicked. Mirrors
+          // `resumeReviewFromHistory` exactly: arm the same ref with this
+          // batch id, then reuse the same load.
+          onOpenBatch={(batchId) => {
+            pendingReviewScrollBatchIdRef.current = batchId;
+            void loadReviewByBatchId(batchId);
+          }}
         />
       ) : null}
 
@@ -1592,14 +1626,36 @@ export function ImportReview({
           <div className="section-heading compact">
             <div>
               <p className="eyebrow">Server-issued preview</p>
-              <h2 id="review-title">{review.batch.filename}</h2>
+              <h2 id="review-title" ref={reviewHeadingRef} tabIndex={-1}>
+                {review.batch.filename}
+              </h2>
             </div>
+            {/* UI-020 (owner-reported): this pill used to read
+                "Ready to review"/"Needs resolution" forever, even after the
+                batch was actually committed or reversed -- it never checked
+                `isCommittedOrReversed` at all. Reversed is only ever known
+                from the PERSISTED `review.batch.status` (never a live
+                same-session commit result, which can only ever report
+                "committed") -- see `deriveCommittedStatusLine`'s identical
+                distinction. */}
             <span
               className={
-                review.preview.ready ? "status-ready" : "status-blocked"
+                isCommittedOrReversed
+                  ? review.batch.status === "reversed"
+                    ? "status-blocked"
+                    : "status-ready"
+                  : review.preview.ready
+                    ? "status-ready"
+                    : "status-blocked"
               }
             >
-              {review.preview.ready ? "Ready to review" : "Needs resolution"}
+              {isCommittedOrReversed
+                ? review.batch.status === "reversed"
+                  ? "Reversed"
+                  : "Committed"
+                : review.preview.ready
+                  ? "Ready to review"
+                  : "Needs resolution"}
             </span>
           </div>
           <p className="import-preview-version">
@@ -1842,7 +1898,20 @@ export function ImportReview({
                     Accept Import
                   </button>
                 </div>
-              ) : null}
+              ) : (
+                // UI-020 (owner-reported): the Accept Import button that used
+                // to sit here disappears once the batch is committed --
+                // this is the text-level confirmation that replaces it, so
+                // the bottom of the section (where the owner was just
+                // looking, having clicked the button that was there) never
+                // goes silent.
+                <p className="import-commit-status complete" role="status">
+                  {committedConfirmationText(
+                    review.batch.status,
+                    reviewHistoryEntry,
+                  )}
+                </p>
+              )}
             </section>
           ) : null}
 
