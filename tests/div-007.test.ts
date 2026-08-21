@@ -407,7 +407,6 @@ test("DIV-007: the all-dividends list renders '$0.00' with a 'none reported' not
     "../app/components/owned-dividend-list.tsx",
     {
       portfolioId: "pa",
-      landingHref: "/portfolio/pa/income",
       today: "2026-08-19",
       truncated: false,
       totalCount: 1,

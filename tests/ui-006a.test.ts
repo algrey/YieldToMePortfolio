@@ -105,8 +105,6 @@ const landingProps = {
   portfolioId: "portfolio-a",
   multiYearHref: "/portfolio/portfolio-a/income/multi-year",
   assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
-  // CGT-001B: the third tab's target, added alongside the existing two.
-  gainsHref: "/portfolio/portfolio-a/gains",
   // UI-016: the portfolio-wide individual-dividends list link.
   dividendsHref: "/portfolio/portfolio-a/income/dividends",
 };
@@ -214,10 +212,10 @@ const baselineMultiYear = {
 };
 
 const populatedMultiYearProps = {
-  landingHref: "/portfolio/portfolio-a/income",
+  // UI-022: the Income sub-tab hrefs are derived from `portfolioId` inside
+  // the shared `IncomeNav`, so the screen no longer takes per-tab hrefs.
+  portfolioId: "portfolio-a",
   assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
-  // CGT-001B: the third tab's target, added alongside the existing two.
-  gainsHref: "/portfolio/portfolio-a/gains",
   baseCurrencyCode: "AUD",
   pastFinancialYears: { ok: true, rows: pastFinancialYearRows },
   currentFinancialYear: { ok: true, row: currentFinancialYearRow },

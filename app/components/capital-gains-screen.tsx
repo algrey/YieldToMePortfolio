@@ -61,6 +61,7 @@ import {
   type FyCarriedCapitalGains,
 } from "../../domain/gains/index.ts";
 import { formatIncomeMoney, formatQuantity } from "../income-format.ts";
+import { IncomeNav } from "./income-nav.tsx";
 
 /** Human-readable label for each `CapitalGainEligibilityLabel` -- never the raw enum value, and "unknown" is spelled out rather than implying a fabricated zero. */
 const ELIGIBILITY_LABELS: Record<CapitalGainEligibilityLabel, string> = {
@@ -86,22 +87,6 @@ export type CapitalGainsScreenResult =
        */
       reason: "unpublished" | "missing_dates" | "error";
     };
-
-function GainsTabs({
-  incomeHref,
-  multiYearHref,
-}: {
-  incomeHref: string;
-  multiYearHref: string;
-}) {
-  return (
-    <nav className="income-view-tabs" aria-label="Income views">
-      <Link href={incomeHref}>Next 12 months</Link>
-      <Link href={multiYearHref}>Multi-year</Link>
-      <span aria-current="page">Capital gains</span>
-    </nav>
-  );
-}
 
 function GainsDisclaimer() {
   return (
@@ -383,13 +368,11 @@ export function FyDetailDialog({
 }
 
 export function CapitalGainsScreen({
-  incomeHref,
-  multiYearHref,
+  portfolioId,
   holdingsHref,
   result,
 }: {
-  incomeHref: string;
-  multiYearHref: string;
+  portfolioId: string;
   holdingsHref: string;
   result: CapitalGainsScreenResult;
 }) {
@@ -431,8 +414,7 @@ export function CapitalGainsScreen({
             };
     return (
       <main className="income-screen">
-        <p className="eyebrow">Income</p>
-        <GainsTabs incomeHref={incomeHref} multiYearHref={multiYearHref} />
+        <IncomeNav portfolioId={portfolioId} active="gains" />
         <section
           className="empty-state"
           aria-labelledby="gains-unavailable-title"
@@ -452,8 +434,7 @@ export function CapitalGainsScreen({
   if (history.disposalCount === 0) {
     return (
       <main className="income-screen">
-        <p className="eyebrow">Income</p>
-        <GainsTabs incomeHref={incomeHref} multiYearHref={multiYearHref} />
+        <IncomeNav portfolioId={portfolioId} active="gains" />
         <section className="empty-state" aria-labelledby="gains-empty-title">
           <h1 id="gains-empty-title">No disposals yet</h1>
           <p>
@@ -490,8 +471,7 @@ export function CapitalGainsScreen({
 
   return (
     <main className="income-screen">
-      <p className="eyebrow">Income</p>
-      <GainsTabs incomeHref={incomeHref} multiYearHref={multiYearHref} />
+      <IncomeNav portfolioId={portfolioId} active="gains" />
 
       <div className="income-fy-table-wrap">
         <table className="income-fy-table">

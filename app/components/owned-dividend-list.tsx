@@ -23,6 +23,7 @@ import {
 import { SOURCE_LABEL, formatFxRate } from "../dividend-history-prefill.ts";
 import { formatIncomeMoney } from "../income-format.ts";
 import { groupThousands } from "../../domain/calculations/index.ts";
+import { IncomeNav } from "./income-nav.tsx";
 
 function dateLabel(row: OwnedDividendListRow): string {
   if (row.paymentDate) return row.paymentDate;
@@ -37,7 +38,6 @@ const DEFAULT_FILTER: DividendListFilter = {
 
 export function OwnedDividendList({
   portfolioId,
-  landingHref,
   allYearsHref,
   today,
   rows,
@@ -47,7 +47,6 @@ export function OwnedDividendList({
   undatedRowCount = 0,
 }: {
   portfolioId: string;
-  landingHref: string;
   /** UI-017: link back to the unfiltered list -- omitted (no back link
    * rendered) when the caller has no filtered view to return from,
    * matching the pre-UI-017 all-dividends-only callers. */
@@ -86,7 +85,13 @@ export function OwnedDividendList({
 
   return (
     <main className="income-screen">
-      <p className="eyebrow">Income</p>
+      {/* UI-022: this list is a peer Income sub-tab, not a leaf page --
+          it renders the SAME four-tab bar as every other Income view
+          (owner-reported: "All dividends should be equal to the other
+          Income sub-tabs. The list of dividends should have the sub-tab
+          bar at the top."). The old "Back to Income" text link below the
+          heading is gone: the "Next 12 months" tab is that link now. */}
+      <IncomeNav portfolioId={portfolioId} active="dividends" />
       <h1>{heading}</h1>
       {filter.mode === "fy" ? (
         <p>
@@ -136,15 +141,11 @@ export function OwnedDividendList({
           </span>
         </p>
       ) : null}
-      <p>
-        <Link href={landingHref}>Back to Income</Link>
-        {allYearsHref && filter.mode !== "all" ? (
-          <>
-            {" · "}
-            <Link href={allYearsHref}>All years</Link>
-          </>
-        ) : null}
-      </p>
+      {allYearsHref && filter.mode !== "all" ? (
+        <p>
+          <Link href={allYearsHref}>All years</Link>
+        </p>
+      ) : null}
 
       {truncated && filter.mode === "all" ? (
         <p className="status-banner warning" role="status">

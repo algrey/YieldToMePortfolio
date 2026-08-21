@@ -24,6 +24,7 @@
 // row-detail dialog.
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { IncomeNav } from "./income-nav.tsx";
 import {
   projectMultiYearIncomeWhatIf,
   type ComputeCurrentFinancialYearRowResult,
@@ -182,9 +183,8 @@ function ValueCell({
 }
 
 export function IncomeMultiYear({
-  landingHref,
+  portfolioId,
   assumptionsHref,
-  gainsHref,
   dividendsHref,
   baseCurrencyCode,
   pastFinancialYears,
@@ -196,9 +196,8 @@ export function IncomeMultiYear({
   yearsBack,
   yearsForward,
 }: {
-  landingHref: string;
+  portfolioId: string;
   assumptionsHref: string;
-  gainsHref: string;
   dividendsHref: string;
   baseCurrencyCode: string;
   pastFinancialYears: ComputePastFinancialYearRowsResult;
@@ -337,12 +336,7 @@ export function IncomeMultiYear({
 
   return (
     <main className="income-screen">
-      <p className="eyebrow">Income</p>
-      <nav className="income-view-tabs" aria-label="Income views">
-        <Link href={landingHref}>Next 12 months</Link>
-        <span aria-current="page">Multi-year</span>
-        <Link href={gainsHref}>Capital gains</Link>
-      </nav>
+      <IncomeNav portfolioId={portfolioId} active="multi-year" />
 
       {!multiYear.ok ? (
         <p className="status-banner warning" role="status">

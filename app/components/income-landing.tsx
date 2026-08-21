@@ -19,6 +19,7 @@ import {
   formatIncomeMoney,
   formatIncomePercent,
 } from "../income-format.ts";
+import { IncomeNav } from "./income-nav.tsx";
 
 // UI-016: compact source-status text for the past-FY table -- literal,
 // honest labels only (never collapses `no_evidence`/`unavailable` into a
@@ -46,14 +47,12 @@ export function IncomeLanding({
   portfolioId,
   multiYearHref,
   assumptionsHref,
-  gainsHref,
   dividendsHref,
 }: {
   projection: OwnedIncomeProjection;
   portfolioId: string;
   multiYearHref: string;
   assumptionsHref: string;
-  gainsHref: string;
   dividendsHref: string;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -78,7 +77,7 @@ export function IncomeLanding({
   if (projection.status === "empty") {
     return (
       <main className="income-screen">
-        <p className="eyebrow">Income</p>
+        <IncomeNav portfolioId={portfolioId} active="next12" />
         <section className="empty-state" aria-labelledby="income-empty-title">
           <h1 id="income-empty-title">No holdings yet</h1>
           <p>
@@ -99,13 +98,7 @@ export function IncomeLanding({
 
   return (
     <main className="income-screen">
-      <p className="eyebrow">Income</p>
-      <nav className="income-view-tabs" aria-label="Income views">
-        <span aria-current="page">Next 12 months</span>
-        <Link href={multiYearHref}>Multi-year</Link>
-        <Link href={gainsHref}>Capital gains</Link>
-        <Link href={dividendsHref}>All dividends</Link>
-      </nav>
+      <IncomeNav portfolioId={portfolioId} active="next12" />
 
       {breakdown.status === "no_coverage" ? (
         <section

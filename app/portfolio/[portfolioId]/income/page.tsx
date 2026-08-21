@@ -3,6 +3,7 @@ import { loadAuthenticatedWorkspace } from "../../../authenticated-workspace";
 import { getAuthenticatedSqlContext } from "../../../portfolio-actions";
 import { loadOwnedIncomeProjection } from "../../../owned-income-projection";
 import { IncomeLanding } from "../../../components/income-landing";
+import { IncomeNav } from "../../../components/income-nav";
 
 // UI-006A: owner-scoped, read-only Income landing (next 12 months). Every
 // request under `/portfolio/*` already gets `cache-control: private,
@@ -16,11 +17,20 @@ type IncomePageProps = {
   params: Promise<{ portfolioId: string }>;
 };
 
-function IncomeUnavailable({ message }: { message: string }) {
+// UI-022: even the degraded states render the Income chrome -- an owner
+// who lands here must still have the back control out of the Income area
+// (and the sibling sub-tabs), never a dead-end page.
+function IncomeUnavailable({
+  portfolioId,
+  message,
+}: {
+  portfolioId: string;
+  message: string;
+}) {
   return (
     <main className="income-screen">
+      <IncomeNav portfolioId={portfolioId} active="next12" />
       <section className="empty-state" aria-labelledby="income-unavailable">
-        <p className="eyebrow">Income</p>
         <h1 id="income-unavailable">Income is unavailable</h1>
         <p>{message}</p>
       </section>
@@ -35,6 +45,7 @@ export default async function IncomePage({ params }: IncomePageProps) {
   if (workspace.status === "unavailable") {
     return (
       <IncomeUnavailable
+        portfolioId={portfolioId}
         message={
           workspace.message ?? "The owned portfolio could not be verified."
         }
@@ -46,7 +57,10 @@ export default async function IncomePage({ params }: IncomePageProps) {
   const context = await getAuthenticatedSqlContext(portfolioId);
   if (!context.ok) {
     return (
-      <IncomeUnavailable message="Portfolio data is temporarily unavailable." />
+      <IncomeUnavailable
+        portfolioId={portfolioId}
+        message="Portfolio data is temporarily unavailable."
+      />
     );
   }
 
@@ -72,7 +86,10 @@ export default async function IncomePage({ params }: IncomePageProps) {
     );
   } catch {
     return (
-      <IncomeUnavailable message="The income projection could not be loaded." />
+      <IncomeUnavailable
+        portfolioId={portfolioId}
+        message="The income projection could not be loaded."
+      />
     );
   }
 
@@ -82,7 +99,6 @@ export default async function IncomePage({ params }: IncomePageProps) {
       portfolioId={portfolioId}
       multiYearHref={`/portfolio/${portfolioId}/income/multi-year`}
       assumptionsHref={`/portfolio/${portfolioId}/income/assumptions`}
-      gainsHref={`/portfolio/${portfolioId}/gains`}
       dividendsHref={`/portfolio/${portfolioId}/income/dividends`}
     />
   );

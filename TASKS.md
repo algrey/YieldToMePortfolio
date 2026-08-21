@@ -894,6 +894,17 @@ Status: DONE (2026-08-14).
 
 Status: PROMOTED 2026-08-14 by owner instruction — split into CGT-001A/B below; retention-guarantee constraint remains standing.
 
+### UI-022 — Income area navigation: back to the primary tabs, four equal sub-tabs (owner-reported)
+
+Status: DONE (2026-08-21). Two owner-reported navigation defects in the Income area:
+
+- No way back. The Income routes render their own `<main className="income-screen">` WITHOUT `PortfolioShell`, so opening Income replaced the whole app chrome: no top bar, no `overview/news/quotes/holdings/details/income` primary tab strip, and no link back to any of them. Only the browser's own Back got out. Every Income view now renders a back control (thin-line chevron, 44x44, green-on-dark per the style guide's Iconography section) at the top left, targeting `/portfolio/:id/overview` — the shell's default section, so the owner lands back on the primary tab strip.
+- Sub-tabs were not peers. The four Income views hand-wrote their own `.income-view-tabs` markup and had drifted: "All dividends" existed only on the landing view (so it vanished on Multi-year and Capital gains), and the dividends list rendered no tab bar at all (only a "Back to Income" text link), so every other tab vanished once the owner opened it. All four tabs now come from ONE list in the new `app/components/income-nav.tsx`, rendered by all four screens plus their degraded/unavailable states, so they cannot diverge again.
+
+- Files: new `app/components/income-nav.tsx` (`IncomeNav`, the four-tab list, `incomeBackHref`); `income-landing.tsx`, `income-multi-year.tsx`, `capital-gains-screen.tsx`, `owned-dividend-list.tsx` and their four pages now render it. The per-tab href props those components took (`landingHref`/`gainsHref`/`incomeHref`/`multiYearHref`) are gone — the nav derives all four from `portfolioId`, which is what made the drift possible in the first place. `owned-dividend-list.tsx` drops its redundant "Back to Income" text link (the "Next 12 months" tab is that link now) and keeps the filtered view's "All years" reset link.
+- Layout defect found while verifying in the browser: with four tabs the row was wider than a phone viewport, and because `.income-screen`'s implicit grid column is `auto` (min-content..max-content) the track sized to the tab row and scrolled the whole PAGE sideways. Fixed with an explicit `grid-template-columns: minmax(0, 1fr)` on `.income-screen`; the tab row then wraps to a second line rather than scrolling, so no tab sits off-screen behind a scroll the owner has to discover.
+- CGT-001B's two per-screen source-string assertions are superseded by assertions on the single shared source of truth plus a check that no screen renders its own `.income-view-tabs` markup. Verified in the running local app at each of the four tabs and the back control.
+
 ### UI-019/UI-020/UI-021 — Import-review navigation, committed feedback, empty-state create (owner-reported batch)
 
 Status: DONE (2026-08-16). Three owner-reported UI fixes in one cycle:

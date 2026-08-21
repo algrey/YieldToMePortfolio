@@ -3728,12 +3728,75 @@ dd {
   margin: 0 auto;
   padding: 20px 16px 60px;
   display: grid;
+  /* UI-022: an explicit `minmax(0, 1fr)` column -- the implicit `auto`
+     column is min-content..max-content, so a wide child (the four-tab
+     Income nav at phone widths) sized the TRACK past the viewport and
+     scrolled the whole page sideways. Every direct child here is a
+     full-width block, so pinning one column changes nothing else. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 20px;
+}
+
+/* UI-022: the Income area's own top chrome -- back control + eyebrow above
+   the shared sub-tab bar. Rendered by `app/components/income-nav.tsx` on
+   every Income view. */
+.income-nav {
+  display: grid;
+  gap: 12px;
+  /* Grid items default to `min-width: auto`, which let the tab row below
+     size to its content and push the whole PAGE sideways instead of
+     staying inside `.income-screen`'s column. */
+  min-width: 0;
+}
+
+.income-nav-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.income-nav-heading .eyebrow {
+  margin-bottom: 0;
+}
+
+/* 44x44 touch target (QA-001B), pulled left by the icon's own optical slack
+   so the glyph aligns with `.income-screen`'s 16px content edge instead of
+   sitting indented from it. */
+.income-back {
+  width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  margin-left: -12px;
+  color: var(--green);
+}
+
+.income-back svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.income-back:hover {
+  color: var(--green-bright);
 }
 
 .income-view-tabs {
   display: flex;
-  gap: 4px;
+  /* UI-022: four tabs no longer fit on one line at phone widths. They WRAP
+     rather than scroll horizontally -- the owner-reported defect was tabs
+     being invisible from a given view, so no tab may sit off-screen behind
+     a scroll the owner has to discover. `column-gap` only: wrapped rows sit
+     flush so the row reads as one control against the bottom divider. */
+  flex-wrap: wrap;
+  column-gap: 4px;
+  min-width: 0;
   border-bottom: 1px solid var(--divider);
 }
 
@@ -3741,8 +3804,10 @@ dd {
 .income-view-tabs span {
   min-height: 44px;
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   padding: 0 10px;
+  white-space: nowrap;
   border-bottom: 2px solid transparent;
   color: var(--muted);
   font-size: 0.72rem;

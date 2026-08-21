@@ -6,6 +6,7 @@ import {
   CapitalGainsScreen,
   type CapitalGainsScreenResult,
 } from "../../../components/capital-gains-screen";
+import { IncomeNav } from "../../../components/income-nav";
 
 // CGT-001B: owner-scoped, read-only Capital gains screen -- the Income
 // area's third tab. Every request under `/portfolio/*` already gets
@@ -18,14 +19,23 @@ type GainsPageProps = {
   params: Promise<{ portfolioId: string }>;
 };
 
-function GainsUnavailable({ message }: { message: string }) {
+// UI-022: even the degraded states render the Income chrome -- an owner
+// who lands here must still have the back control out of the Income area
+// (and the sibling sub-tabs), never a dead-end page.
+function GainsUnavailable({
+  portfolioId,
+  message,
+}: {
+  portfolioId: string;
+  message: string;
+}) {
   return (
     <main className="income-screen">
+      <IncomeNav portfolioId={portfolioId} active="gains" />
       <section
         className="empty-state"
         aria-labelledby="gains-workspace-unavailable"
       >
-        <p className="eyebrow">Income</p>
         <h1 id="gains-workspace-unavailable">Capital gains are unavailable</h1>
         <p>{message}</p>
       </section>
@@ -69,6 +79,7 @@ export default async function GainsPage({ params }: GainsPageProps) {
   if (workspace.status === "unavailable") {
     return (
       <GainsUnavailable
+        portfolioId={portfolioId}
         message={
           workspace.message ?? "The owned portfolio could not be verified."
         }
@@ -80,7 +91,10 @@ export default async function GainsPage({ params }: GainsPageProps) {
   const context = await getAuthenticatedSqlContext(portfolioId);
   if (!context.ok) {
     return (
-      <GainsUnavailable message="Portfolio data is temporarily unavailable." />
+      <GainsUnavailable
+        portfolioId={portfolioId}
+        message="Portfolio data is temporarily unavailable."
+      />
     );
   }
 
@@ -99,8 +113,7 @@ export default async function GainsPage({ params }: GainsPageProps) {
 
   return (
     <CapitalGainsScreen
-      incomeHref={`/portfolio/${portfolioId}/income`}
-      multiYearHref={`/portfolio/${portfolioId}/income/multi-year`}
+      portfolioId={portfolioId}
       holdingsHref={`/portfolio/${portfolioId}/holdings`}
       result={result}
     />

@@ -8,6 +8,7 @@ import {
   filterRowsForNext12,
 } from "../../../../dividend-list-query";
 import { OwnedDividendList } from "../../../../components/owned-dividend-list";
+import { IncomeNav } from "../../../../components/income-nav";
 
 // UI-016: owner-scoped, read-only, portfolio-wide list of INDIVIDUAL
 // dividends (owner clarification 2026-08-20: "I see the yearly aggregate
@@ -28,11 +29,20 @@ type DividendsPageProps = {
   searchParams: Promise<{ fy?: string; window?: string }>;
 };
 
-function DividendsUnavailable({ message }: { message: string }) {
+// UI-022: even the degraded states render the Income chrome -- an owner
+// who lands here must still have the back control out of the Income area
+// (and the sibling sub-tabs), never a dead-end page.
+function DividendsUnavailable({
+  portfolioId,
+  message,
+}: {
+  portfolioId: string;
+  message: string;
+}) {
   return (
     <main className="income-screen">
+      <IncomeNav portfolioId={portfolioId} active="dividends" />
       <section className="empty-state" aria-labelledby="dividends-unavailable">
-        <p className="eyebrow">Income</p>
         <h1 id="dividends-unavailable">Dividend list is unavailable</h1>
         <p>{message}</p>
       </section>
@@ -51,6 +61,7 @@ export default async function DividendsListPage({
   if (workspace.status === "unavailable") {
     return (
       <DividendsUnavailable
+        portfolioId={portfolioId}
         message={
           workspace.message ?? "The owned portfolio could not be verified."
         }
@@ -62,7 +73,10 @@ export default async function DividendsListPage({
   const context = await getAuthenticatedSqlContext(portfolioId);
   if (!context.ok) {
     return (
-      <DividendsUnavailable message="Portfolio data is temporarily unavailable." />
+      <DividendsUnavailable
+        portfolioId={portfolioId}
+        message="Portfolio data is temporarily unavailable."
+      />
     );
   }
 
@@ -76,7 +90,10 @@ export default async function DividendsListPage({
     );
   } catch {
     return (
-      <DividendsUnavailable message="The dividend list could not be loaded." />
+      <DividendsUnavailable
+        portfolioId={portfolioId}
+        message="The dividend list could not be loaded."
+      />
     );
   }
 
@@ -104,7 +121,6 @@ export default async function DividendsListPage({
   return (
     <OwnedDividendList
       portfolioId={portfolioId}
-      landingHref={`/portfolio/${portfolioId}/income`}
       allYearsHref={`/portfolio/${portfolioId}/income/dividends`}
       today={list.today}
       rows={rows}

@@ -523,7 +523,6 @@ function renderList(
     "../app/components/owned-dividend-list.tsx",
     {
       portfolioId: "pa",
-      landingHref: "/portfolio/pa/income",
       allYearsHref: "/portfolio/pa/income/dividends",
       today: "2026-08-13",
       rows: [baseListRow],
@@ -627,7 +626,6 @@ test("UI-017: the default filter prop (omitted entirely) keeps pre-UI-017 caller
     "../app/components/owned-dividend-list.tsx",
     {
       portfolioId: "pa",
-      landingHref: "/portfolio/pa/income",
       today: "2026-08-13",
       rows: [baseListRow],
       truncated: false,
@@ -792,7 +790,6 @@ const landingProps = {
   portfolioId: "portfolio-a",
   multiYearHref: "/portfolio/portfolio-a/income/multi-year",
   assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
-  gainsHref: "/portfolio/portfolio-a/gains",
   dividendsHref: "/portfolio/portfolio-a/income/dividends",
 };
 
@@ -925,9 +922,10 @@ const baselineMultiYear = {
 };
 
 const populatedMultiYearProps = {
-  landingHref: "/portfolio/portfolio-a/income",
+  // UI-022: the Income sub-tab hrefs are derived from `portfolioId` inside
+  // the shared `IncomeNav`, so the screen no longer takes per-tab hrefs.
+  portfolioId: "portfolio-a",
   assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
-  gainsHref: "/portfolio/portfolio-a/gains",
   dividendsHref: "/portfolio/portfolio-a/income/dividends",
   baseCurrencyCode: "AUD",
   pastFinancialYears: { ok: true, rows: pastFinancialYearRows },

@@ -198,7 +198,6 @@ const landingProps = {
   portfolioId: "portfolio-a",
   multiYearHref: "/portfolio/portfolio-a/income/multi-year",
   assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
-  gainsHref: "/portfolio/portfolio-a/gains",
   dividendsHref: "/portfolio/portfolio-a/income/dividends",
 };
 
@@ -611,7 +610,6 @@ function renderList(overrides: Record<string, unknown> = {}) {
     "../app/components/owned-dividend-list.tsx",
     {
       portfolioId: "pa",
-      landingHref: "/portfolio/pa/income",
       today: "2026-08-13",
       rows: dividendListRows,
       truncated: false,

@@ -516,8 +516,9 @@ function cleanHistory(historyCompleteFrom: string | null) {
 }
 
 const screenProps = {
-  incomeHref: "/portfolio/portfolio-a/income",
-  multiYearHref: "/portfolio/portfolio-a/income/multi-year",
+  // UI-022: the Income sub-tab hrefs are derived from `portfolioId` inside
+  // the shared `IncomeNav`, so the screen no longer takes per-tab hrefs.
+  portfolioId: "portfolio-a",
   holdingsHref: "/portfolio/portfolio-a/holdings",
 };
 

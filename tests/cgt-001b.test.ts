@@ -184,8 +184,9 @@ const populatedHistory = {
 };
 
 const screenProps = {
-  incomeHref: "/portfolio/portfolio-a/income",
-  multiYearHref: "/portfolio/portfolio-a/income/multi-year",
+  // UI-022: the Income sub-tab hrefs are derived from `portfolioId` inside
+  // the shared `IncomeNav`, so the screen no longer takes per-tab hrefs.
+  portfolioId: "portfolio-a",
   holdingsHref: "/portfolio/portfolio-a/holdings",
   result: { status: "ok", history: populatedHistory },
 };
@@ -503,55 +504,52 @@ test("CGT-001B: the FY detail dialog actually RENDERS honest eligibility labels,
   );
 });
 
-// --- Tab row on all three income-area pages --------------------------------
+// --- Income sub-tab row ----------------------------------------------------
 
-test("CGT-001B: 'Capital gains' appears as the third tab, alongside 'Next 12 months'/'Multi-year', on all three income-area screens", async () => {
-  const [landingSource, multiYearSource, gainsHtml] = await Promise.all([
-    readFile(
-      new URL("../app/components/income-landing.tsx", import.meta.url),
-      "utf8",
-    ),
-    readFile(
-      new URL("../app/components/income-multi-year.tsx", import.meta.url),
-      "utf8",
-    ),
-    Promise.resolve(renderScreen()),
-  ]);
-  assert.match(landingSource, /<Link href=\{gainsHref\}>Capital gains<\/Link>/);
-  assert.match(
-    multiYearSource,
-    /<Link href=\{gainsHref\}>Capital gains<\/Link>/,
+// UI-022 supersedes CGT-001B's original per-screen source assertions: the
+// four Income sub-tabs are now rendered from ONE list in
+// `app/components/income-nav.tsx`, so "Capital gains" cannot be present on
+// one screen and absent from another. These assertions now pin that single
+// source of truth plus this screen's own rendered output.
+test("CGT-001B/UI-022: 'Capital gains' is one of the four shared Income sub-tabs, pointing at /portfolio/:id/gains", async () => {
+  const navSource = await readFile(
+    new URL("../app/components/income-nav.tsx", import.meta.url),
+    "utf8",
   );
-  assert.match(gainsHtml, /Next 12 months/);
-  assert.match(gainsHtml, /Multi-year/);
-  assert.match(gainsHtml, /aria-current="page">Capital gains<\/span>/);
+  assert.match(navSource, /label: "Capital gains"/);
+  assert.match(navSource, /href: \(id\) => `\/portfolio\/\$\{id\}\/gains`/);
+  for (const label of [
+    "Next 12 months",
+    "Multi-year",
+    "Capital gains",
+    "All dividends",
+  ]) {
+    assert.match(navSource, new RegExp(`label: "${label}"`));
+  }
 });
 
-test("CGT-001B: both existing Income pages pass a gainsHref pointing at /portfolio/:id/gains", async () => {
-  const [landingPage, multiYearPage] = await Promise.all([
-    readFile(
-      new URL(
-        "../app/portfolio/[portfolioId]/income/page.tsx",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-    readFile(
-      new URL(
-        "../app/portfolio/[portfolioId]/income/multi-year/page.tsx",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  ]);
-  assert.match(
-    landingPage,
-    /gainsHref=\{`\/portfolio\/\$\{portfolioId\}\/gains`\}/,
+test("CGT-001B/UI-022: the Capital gains screen renders the shared tab row with itself current", () => {
+  const gainsHtml = renderScreen();
+  assert.match(gainsHtml, /Next 12 months/);
+  assert.match(gainsHtml, /Multi-year/);
+  assert.match(gainsHtml, /All dividends/);
+  assert.match(gainsHtml, /aria-current="page">Capital gains<\/span>/);
+  assert.match(gainsHtml, /href="\/portfolio\/portfolio-a\/income\/dividends"/);
+});
+
+test("UI-022: every Income screen renders the shared IncomeNav rather than its own tab markup", async () => {
+  const sources = await Promise.all(
+    [
+      "../app/components/income-landing.tsx",
+      "../app/components/income-multi-year.tsx",
+      "../app/components/capital-gains-screen.tsx",
+      "../app/components/owned-dividend-list.tsx",
+    ].map((path) => readFile(new URL(path, import.meta.url), "utf8")),
   );
-  assert.match(
-    multiYearPage,
-    /gainsHref=\{`\/portfolio\/\$\{portfolioId\}\/gains`\}/,
-  );
+  for (const source of sources) {
+    assert.match(source, /<IncomeNav\b/);
+    assert.doesNotMatch(source, /className="income-view-tabs"/);
+  }
 });
 
 // --- Route ownership / no-store --------------------------------------------

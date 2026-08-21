@@ -3,6 +3,7 @@ import { loadAuthenticatedWorkspace } from "../../../../authenticated-workspace"
 import { getAuthenticatedSqlContext } from "../../../../portfolio-actions";
 import { loadOwnedIncomeProjection } from "../../../../owned-income-projection";
 import { IncomeMultiYear } from "../../../../components/income-multi-year";
+import { IncomeNav } from "../../../../components/income-nav";
 import {
   clampYears,
   DEFAULT_YEARS_BACK,
@@ -18,11 +19,20 @@ type IncomeMultiYearPageProps = {
   searchParams: Promise<{ yearsBack?: string; yearsForward?: string }>;
 };
 
-function IncomeUnavailable({ message }: { message: string }) {
+// UI-022: even the degraded states render the Income chrome -- an owner
+// who lands here must still have the back control out of the Income area
+// (and the sibling sub-tabs), never a dead-end page.
+function IncomeUnavailable({
+  portfolioId,
+  message,
+}: {
+  portfolioId: string;
+  message: string;
+}) {
   return (
     <main className="income-screen">
+      <IncomeNav portfolioId={portfolioId} active="multi-year" />
       <section className="empty-state" aria-labelledby="income-unavailable">
-        <p className="eyebrow">Income</p>
         <h1 id="income-unavailable">Income is unavailable</h1>
         <p>{message}</p>
       </section>
@@ -43,6 +53,7 @@ export default async function IncomeMultiYearPage({
   if (workspace.status === "unavailable") {
     return (
       <IncomeUnavailable
+        portfolioId={portfolioId}
         message={
           workspace.message ?? "The owned portfolio could not be verified."
         }
@@ -54,7 +65,10 @@ export default async function IncomeMultiYearPage({
   const context = await getAuthenticatedSqlContext(portfolioId);
   if (!context.ok) {
     return (
-      <IncomeUnavailable message="Portfolio data is temporarily unavailable." />
+      <IncomeUnavailable
+        portfolioId={portfolioId}
+        message="Portfolio data is temporarily unavailable."
+      />
     );
   }
 
@@ -69,7 +83,10 @@ export default async function IncomeMultiYearPage({
     );
   } catch {
     return (
-      <IncomeUnavailable message="The income projection could not be loaded." />
+      <IncomeUnavailable
+        portfolioId={portfolioId}
+        message="The income projection could not be loaded."
+      />
     );
   }
 
@@ -79,9 +96,8 @@ export default async function IncomeMultiYearPage({
   // degraded forward `multiYear` for these too.
   return (
     <IncomeMultiYear
-      landingHref={`/portfolio/${portfolioId}/income`}
+      portfolioId={portfolioId}
       assumptionsHref={`/portfolio/${portfolioId}/income/assumptions`}
-      gainsHref={`/portfolio/${portfolioId}/gains`}
       dividendsHref={`/portfolio/${portfolioId}/income/dividends`}
       baseCurrencyCode={projection.baseCurrencyCode}
       pastFinancialYears={projection.pastFinancialYears}
