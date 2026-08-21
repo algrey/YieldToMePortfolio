@@ -21,6 +21,7 @@ import { BrandMark } from "./brand-mark";
 import { AccountLifecycleRecovery } from "./account-lifecycle-recovery";
 import { AccountLifecycleControls } from "./account-lifecycle-controls";
 import { OwnedPortfolioDetails } from "./portfolio-details";
+import { HoldingPriceChart } from "./holding-price-chart";
 import { ServiceWorkerRegistration } from "./service-worker-registration";
 import { subtractCalendarMonths } from "../overview-range";
 import { sampleOverviewChartPoints } from "../overview-chart";
@@ -860,6 +861,14 @@ function OwnedHoldingsScreen({
               </dd>
             </div>
           </dl>
+          {portfolioId ? (
+            <HoldingPriceChart
+              key={selectedHolding.id}
+              portfolioId={portfolioId}
+              portfolioSecurityId={selectedHolding.id}
+              symbol={selectedHolding.symbol}
+            />
+          ) : null}
           <p className="detail-explanation">{selectedHolding.explanation}</p>
           {portfolioId ? (
             <p>

@@ -1187,6 +1187,58 @@ dd {
   font-size: 0.68rem;
 }
 
+/* UI-018: per-holding price-history chart (holding-detail sheet, under
+   "Average cost x quantity"). Reuses `.range-controls`/`.chart-coverage`
+   as-is (see above); these rules cover only the new SVG line itself. */
+.price-history-chart {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--divider);
+}
+
+.price-history-svg {
+  width: 100%;
+  height: auto;
+  margin-top: 8px;
+}
+
+.price-history-baseline {
+  stroke: var(--divider);
+  stroke-width: 1;
+}
+
+.price-history-line {
+  fill: none;
+  stroke: var(--green-bright);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.price-history-line.price-history-gap {
+  stroke: var(--muted-dark);
+  stroke-dasharray: 4 3;
+  opacity: 0.75;
+}
+
+.price-history-dot {
+  fill: var(--green-bright);
+}
+
+.price-history-dot.price-history-latest {
+  fill: var(--cream);
+  stroke: var(--green-bright);
+  stroke-width: 1.5;
+}
+
+.price-history-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.66rem;
+}
+
 .chart-table-details {
   margin-top: 12px;
   color: var(--muted);
