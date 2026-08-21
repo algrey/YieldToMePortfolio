@@ -40,7 +40,9 @@ export {
 } from "./aggregations.ts";
 export {
   computeSecurityDividendForecast,
+  deriveHistoryTrailingTwelveMonthDividend,
   type ComputeSecurityForecastInput,
   type ForecastCoverageStatus,
+  type HistoryTtmDividendResult,
   type SecurityDividendForecast,
 } from "./forecast.ts";

@@ -823,6 +823,8 @@ function forecast(
     totalFrankingKnownDecimal: "0",
     totalFrankingIncomplete: false,
     totalGrossDecimal: "0",
+    ttmSource: null,
+    ttmIncomplete: false,
     ...overrides,
   };
 }
@@ -908,6 +910,76 @@ test("income breakdown: insufficient-history and foreign-currency securities are
     (entry) => entry.portfolioSecurityId === "psd",
   )!;
   assert.equal(foreign.reason, "foreign_currency");
+});
+
+test("DIV-006 review follow-up: a security whose history TTM is only partially determinable is INCLUDED (not excluded) but the breakdown discloses the incompleteness", () => {
+  const result = computeIncomeBreakdown({
+    baseCurrencyCode: "AUD",
+    currentPortfolioValueDecimal: "100000",
+    currentPortfolioValueStatus: "available",
+    securities: [
+      {
+        portfolioSecurityId: "psa",
+        symbol: "A",
+        currencyCode: "AUD",
+        forecast: forecast({
+          totalCashDecimal: "1200",
+          totalFrankingKnownDecimal: "360",
+          totalGrossDecimal: "1560",
+        }),
+      },
+      {
+        portfolioSecurityId: "psb",
+        symbol: "B",
+        currencyCode: "AUD",
+        forecast: forecast({
+          status: "declared_plus_ttm",
+          totalCashDecimal: "500",
+          totalFrankingKnownDecimal: "0",
+          totalGrossDecimal: "500",
+          ttmSource: "history_ttm",
+          ttmIncomplete: true,
+        }),
+      },
+    ],
+  });
+  // Included -- contributes its real (possibly understated) figure, never
+  // excluded/dropped a second time.
+  assert.equal(result.includedSecurityCount, 2);
+  assert.equal(result.excludedSecurities.length, 0);
+  assert.equal(result.totalGrossDecimal, "2060"); // 1560 + 500, both counted
+  // But the aggregate is honestly flagged partial, and the affected security
+  // is named -- never silently presented as a complete total.
+  assert.equal(result.status, "partial");
+  assert.equal(result.partialTtmSecurities.length, 1);
+  assert.equal(result.partialTtmSecurities[0]!.portfolioSecurityId, "psb");
+  assert.match(result.method, /partially determinable/);
+});
+
+test("DIV-006 review follow-up: every included security's TTM fully determinable keeps status 'ok', with an empty partialTtmSecurities list", () => {
+  const result = computeIncomeBreakdown({
+    baseCurrencyCode: "AUD",
+    currentPortfolioValueDecimal: "100000",
+    currentPortfolioValueStatus: "available",
+    securities: [
+      {
+        portfolioSecurityId: "psa",
+        symbol: "A",
+        currencyCode: "AUD",
+        forecast: forecast({
+          status: "declared_plus_ttm",
+          totalCashDecimal: "1200",
+          totalFrankingKnownDecimal: "360",
+          totalGrossDecimal: "1560",
+          ttmSource: "history_ttm",
+          ttmIncomplete: false, // fully determinable -- not partial
+        }),
+      },
+    ],
+  });
+  assert.equal(result.status, "ok");
+  assert.equal(result.partialTtmSecurities.length, 0);
+  assert.equal(result.totalGrossDecimal, "1560");
 });
 
 test("income breakdown: a zero-current-holding forecast (a real fact) is included as an honest 0, not excluded", () => {

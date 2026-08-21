@@ -95,6 +95,7 @@ const populatedProjection = {
     incomePercentOfValueStatus: "available",
     includedSecurityCount: 2,
     excludedSecurities: [],
+    partialTtmSecurities: [],
     method:
       "sum of every held security's 12-month baseline forecast (gross, includes franking credits)",
   },
@@ -293,6 +294,7 @@ test("UI-006A: no dividend-forecast coverage is disclosed explicitly, never pres
             reason: "insufficient_history",
           },
         ],
+        partialTtmSecurities: [],
         method: "no held security has a usable 12-month forecast",
       },
     },

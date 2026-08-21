@@ -369,6 +369,25 @@ export function IncomeLanding({
               ))}
             </ul>
           ) : null}
+          {/* DIV-006 review follow-up: these securities ARE included in the
+              total above (unlike excludedSecurities) but their history-TTM
+              figure is only partially known -- named so the owner can see
+              the total may understate their true income, never silently
+              presented as a complete sum. */}
+          {breakdown.partialTtmSecurities.length > 0 ? (
+            <>
+              <p className="unavailable">
+                The trailing-twelve-month figure is only partially known for
+                these included securities -- the total above may understate true
+                income:
+              </p>
+              <ul className="income-exclusions">
+                {breakdown.partialTtmSecurities.map((item) => (
+                  <li key={item.portfolioSecurityId}>{item.symbol}</li>
+                ))}
+              </ul>
+            </>
+          ) : null}
           {breakdown.totalFrankingIncomplete ? (
             <p className="unavailable">
               Franking credits are not fully known for every included dividend.

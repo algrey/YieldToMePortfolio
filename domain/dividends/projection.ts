@@ -1295,6 +1295,26 @@ export type IncomeBreakdownExclusion = {
   reason: IncomeBreakdownExclusionReason;
 };
 
+/**
+ * DIV-006 review follow-up (MATERIAL): a security whose forecast's history-
+ * derived TTM leg is only PARTIALLY determinable (`SecurityDividendForecast.ttmIncomplete
+ * === true` -- some trailing-window history rows had no determinable
+ * per-share rate, see `forecast.ts`'s `deriveHistoryTrailingTwelveMonthDividend`)
+ * still has a real, non-null `totalGrossDecimal` and so is INCLUDED in the
+ * sums below (never excluded/dropped a second time -- the row-level
+ * incompleteness is already honestly disclosed by not fabricating the
+ * missing rows' contribution as 0). Pre-DIV-006 there was no such
+ * in-between state: a security either had a full, complete TTM figure or
+ * was excluded outright as `insufficient_history`. Named here (mirroring
+ * `excludedSecurities`'s own disclosure convention) so a consumer can warn
+ * that the aggregate total may UNDERSTATE true income for these securities,
+ * rather than silently presenting the partial sum as a complete one.
+ */
+export type IncomeBreakdownPartialTtmSecurity = {
+  portfolioSecurityId: string;
+  symbol: string;
+};
+
 export type IncomeBreakdownResult = {
   status: IncomeBreakdownStatus;
   currencyCode: string;
@@ -1318,6 +1338,8 @@ export type IncomeBreakdownResult = {
   incomePercentOfValueStatus: "available" | "partial" | "unavailable";
   includedSecurityCount: number;
   excludedSecurities: IncomeBreakdownExclusion[];
+  /** DIV-006 review follow-up: INCLUDED securities (not excluded -- see `excludedSecurities`) whose contribution to the totals above is only partially known. `status` is `"partial"` whenever this is non-empty, even if `excludedSecurities` is empty. */
+  partialTtmSecurities: IncomeBreakdownPartialTtmSecurity[];
   method: string;
 };
 
@@ -1351,6 +1373,7 @@ export function computeIncomeBreakdown(input: {
   securities: readonly IncomeBreakdownSecurityInput[];
 }): IncomeBreakdownResult {
   const excludedSecurities: IncomeBreakdownExclusion[] = [];
+  const partialTtmSecurities: IncomeBreakdownPartialTtmSecurity[] = [];
   let includedCount = 0;
   let grossTotal = ZERO;
   let cashTotal = ZERO;
@@ -1389,6 +1412,16 @@ export function computeIncomeBreakdown(input: {
       );
     }
     if (security.forecast.totalFrankingIncomplete) frankingIncomplete = true;
+    // DIV-006 review follow-up: this security IS included above (it has a
+    // real `totalGrossDecimal`), but that figure's history-TTM leg may be
+    // understated -- disclose it distinctly from `excludedSecurities`
+    // rather than silently presenting the partial sum as complete.
+    if (security.forecast.ttmIncomplete) {
+      partialTtmSecurities.push({
+        portfolioSecurityId: security.portfolioSecurityId,
+        symbol: security.symbol,
+      });
+    }
   }
 
   if (includedCount === 0) {
@@ -1405,6 +1438,7 @@ export function computeIncomeBreakdown(input: {
       incomePercentOfValueStatus: "unavailable",
       includedSecurityCount: 0,
       excludedSecurities,
+      partialTtmSecurities: [],
       method: "no held security has a usable 12-month forecast",
     };
   }
@@ -1455,8 +1489,14 @@ export function computeIncomeBreakdown(input: {
         : input.currentPortfolioValueStatus
       : "unavailable";
 
+  // DIV-006 review follow-up: a security with a partially-determinable
+  // history TTM is INCLUDED (not excluded), but its contribution to the
+  // totals above may understate true income -- `status` must reflect that
+  // exactly like an exclusion does, even when nothing was excluded outright.
+  const hasPartialCoverage =
+    excludedSecurities.length > 0 || partialTtmSecurities.length > 0;
   return {
-    status: excludedSecurities.length === 0 ? "ok" : "partial",
+    status: hasPartialCoverage ? "partial" : "ok",
     currencyCode: input.baseCurrencyCode,
     totalGrossDecimal,
     totalCashDecimal,
@@ -1468,9 +1508,23 @@ export function computeIncomeBreakdown(input: {
     incomePercentOfValueStatus,
     includedSecurityCount: includedCount,
     excludedSecurities,
-    method:
-      excludedSecurities.length === 0
-        ? "sum of every held security's 12-month baseline forecast (gross, includes franking credits)"
-        : `sum of ${includedCount} of ${includedCount + excludedSecurities.length} held securities' 12-month forecasts; ${excludedSecurities.length} excluded (named) for insufficient history or a foreign currency`,
+    partialTtmSecurities,
+    method: (() => {
+      if (!hasPartialCoverage) {
+        return "sum of every held security's 12-month baseline forecast (gross, includes franking credits)";
+      }
+      const clauses: string[] = [];
+      if (excludedSecurities.length > 0) {
+        clauses.push(
+          `${excludedSecurities.length} excluded (named) for insufficient history or a foreign currency`,
+        );
+      }
+      if (partialTtmSecurities.length > 0) {
+        clauses.push(
+          `${partialTtmSecurities.length} included but with an only partially determinable trailing-twelve-month figure (named) -- may understate true income`,
+        );
+      }
+      return `sum of ${includedCount} of ${includedCount + excludedSecurities.length} held securities' 12-month forecasts; ${clauses.join("; ")}`;
+    })(),
   };
 }

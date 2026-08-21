@@ -105,7 +105,7 @@ export async function loadOwnedDividendHistory(
   now = new Date(),
 ): Promise<OwnedDividendHistory> {
   const portfolio = await client.get<Row>(
-    `SELECT id, base_currency_code FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
+    `SELECT id, base_currency_code, history_complete_from FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
     [portfolioId, userId],
   );
   if (!portfolio) throw new Error("not_owned");
@@ -113,6 +113,15 @@ export async function loadOwnedDividendHistory(
   // below so it can assert a stored FX rate is only ever applied toward the
   // portfolio's own base currency, never an arbitrary security's currency.
   const portfolioBaseCurrencyCode = String(portfolio.base_currency_code);
+  // DIV-006: threaded into `computeSecurityDividendForecast`'s history-TTM
+  // fallback so it can gate a BRK-005 totals-mode row's shares-held-at-
+  // payment-date derivation on the portfolio's declared history-complete
+  // boundary -- mirrors `app/owned-capital-gains.ts`'s identical read.
+  const historyCompleteFrom =
+    typeof portfolio.history_complete_from === "string" &&
+    portfolio.history_complete_from.length > 0
+      ? portfolio.history_complete_from
+      : null;
 
   const settings = await createOwnedUserSettingsRepository(client).get(userId);
   if (!settings) throw new Error("missing_user_settings");
@@ -383,6 +392,7 @@ export async function loadOwnedDividendHistory(
         ttmEvents,
         transactions,
         defaultFrankingPercentDecimal,
+        historyCompleteFrom,
         today,
       });
 
