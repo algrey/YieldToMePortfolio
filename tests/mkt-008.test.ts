@@ -297,6 +297,134 @@ test("MKT-008 price-csv encoding: the misleading 'must start with DateTime' head
 });
 
 // ---------------------------------------------------------------------------
+// Second owner-reported bug (2026-08-21, `docs/FMG.csv` -- the owner's REAL
+// file, never staged/committed): the earlier UTF-16 paste turned out to be a
+// viewer-rendering artifact. The real export is UTF-8+BOM, COMMA-delimited,
+// RFC-4180-style QUOTED: `"DateTime","FMG","divFlag",...` /
+// `"1998-03-12 00:00:00",0.07852,,,,,` (quoted dates, bare prices, bare
+// trailing empty cells). A plain `.split(",")` left literal quote
+// characters in the header, producing the same misleading MISSING_HEADER
+// error for a different root cause.
+// ---------------------------------------------------------------------------
+
+// The real file's exact first-3-lines shape, reproduced verbatim.
+const REAL_FILE_FIXTURE_TEXT =
+  '"DateTime","FMG","divFlag","recFlagBuy","recFlagSell","recFlagHold","divAnnouncements"\r\n' +
+  '"1998-03-12 00:00:00",0.07852,,,,,\r\n' +
+  '"1998-03-13 00:00:00",0.07852,,,,,\r\n';
+
+function assertRealFileFixtureParsed(result: ReturnType<typeof parsePriceCsv>) {
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.ticker, "FMG");
+  assert.equal(result.delimiter, ",");
+  assert.equal(result.malformed.length, 0);
+  assert.deepEqual(
+    result.rows.map((row) => [row.marketDate, row.priceDecimal]),
+    [
+      ["1998-03-12", "0.07852"],
+      ["1998-03-13", "0.07852"],
+    ],
+  );
+}
+
+test("MKT-008 price-csv quoting: the real file's exact shape -- quoted header, quoted dates, bare prices, bare trailing empty cells -- parses correctly (the exact owner repro)", () => {
+  assertRealFileFixtureParsed(
+    parsePriceCsv(utf8BomBytesOf(REAL_FILE_FIXTURE_TEXT)),
+  );
+});
+
+test("MKT-008 price-csv quoting: the misleading 'must start with DateTime' header error is dead for the real quoted-comma shape too", () => {
+  // The bug produced `{ ok: false, code: "MISSING_HEADER" }` because
+  // `headerColumns[0]` was literally `"DateTime"` (with quote characters)
+  // after a plain split -- asserting `ok === true` is the proof.
+  const result = parsePriceCsv(utf8BomBytesOf(REAL_FILE_FIXTURE_TEXT));
+  assert.equal(result.ok, true);
+});
+
+test("MKT-008 price-csv quoting: fully-quoted rows (every field wrapped, including the price) parse identically", () => {
+  const text =
+    '"DateTime","FMG"\r\n' +
+    '"1998-03-12 00:00:00","0.07852"\r\n' +
+    '"1998-03-13 00:00:00","0.08"\r\n';
+  const result = parsePriceCsv(bytesOf(text));
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.ticker, "FMG");
+  assert.deepEqual(
+    result.rows.map((row) => [row.marketDate, row.priceDecimal]),
+    [
+      ["1998-03-12", "0.07852"],
+      ["1998-03-13", "0.08"],
+    ],
+  );
+});
+
+test("MKT-008 price-csv quoting: a quoted field containing the delimiter does not break the column split", () => {
+  // A quoted ticker header containing a literal comma -- contrived (real
+  // tickers never do this), but proves the split itself is quote-aware,
+  // not just quote-STRIPPING.
+  const text = '"DateTime","F,MG","ignored"\r\n"1998-03-12",1.00\r\n';
+  const result = parsePriceCsv(bytesOf(text));
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  // "F,MG" fails TICKER_PATTERN (contains a comma) -- proving the comma
+  // survived INSIDE the field (a quote-blind split would instead have
+  // produced a 4-column header with ticker "F" and an extra "MG" column,
+  // which would incorrectly pass as ticker "F").
+  assert.equal(result.code, "TICKER_INVALID");
+});
+
+test('MKT-008 price-csv quoting: a doubled "" inside a quoted field unescapes to a literal quote', () => {
+  const text = '"DateTime","FMG"\r\n"1998-03-12 ""noon""",1.00\r\n';
+  const result = parsePriceCsv(bytesOf(text));
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  // The date value itself is malformed (contains literal quote text after
+  // unescaping), but the point is it unescaped to `1998-03-12 "noon"`
+  // rather than terminating the field early or leaving stray quotes --
+  // proven by this failing DATE validation (not column-count/shape
+  // corruption).
+  assert.equal(result.malformed.length, 1);
+  assert.equal(result.malformed[0]!.reason, "invalid_date");
+});
+
+test("MKT-008 price-csv quoting: mixed quoted/bare fields in the SAME row parse correctly", () => {
+  const text =
+    '"DateTime",FMG\r\n"1998-03-12 00:00:00",0.07852\r\n1998-03-13,0.08\r\n';
+  const result = parsePriceCsv(bytesOf(text));
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.ticker, "FMG");
+  assert.deepEqual(
+    result.rows.map((row) => [row.marketDate, row.priceDecimal]),
+    [
+      ["1998-03-12", "0.07852"],
+      ["1998-03-13", "0.08"],
+    ],
+  );
+});
+
+test("MKT-008 price-csv quoting + encoding: all six previously-tested encoding variants STILL parse the quoted real-file shape correctly (composed fix)", () => {
+  assertRealFileFixtureParsed(
+    parsePriceCsv(utf16BytesOf(REAL_FILE_FIXTURE_TEXT, "le", false)),
+  );
+  assertRealFileFixtureParsed(
+    parsePriceCsv(utf16BytesOf(REAL_FILE_FIXTURE_TEXT, "le", true)),
+  );
+  assertRealFileFixtureParsed(
+    parsePriceCsv(utf16BytesOf(REAL_FILE_FIXTURE_TEXT, "be", true)),
+  );
+  assertRealFileFixtureParsed(
+    parsePriceCsv(utf16BytesOf(REAL_FILE_FIXTURE_TEXT, "be", false)),
+  );
+  assertRealFileFixtureParsed(parsePriceCsv(bytesOf(REAL_FILE_FIXTURE_TEXT)));
+  assertRealFileFixtureParsed(
+    parsePriceCsv(utf8BomBytesOf(REAL_FILE_FIXTURE_TEXT)),
+  );
+});
+
+// ---------------------------------------------------------------------------
 // (2) domain/market-data/exchange-timezone.ts
 // ---------------------------------------------------------------------------
 

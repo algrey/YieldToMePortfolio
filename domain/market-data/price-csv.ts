@@ -1,13 +1,6 @@
 // MKT-008: a NEW, deliberately simpler, standalone parser for the "Historical
 // Data" section's per-security price-history CSVs (owner directive:
-// Intelligent Investor exports). This is NOT the ledger CSV parser
-// (`domain/imports/strict-versioned-parser.ts`) -- that format is a
-// multi-column transaction feed with quoted-field/escaping support this
-// format never needs (Intelligent Investor's export is two plain columns:
-// a date and a decimal price, comma- or tab-separated, no embedded
-// delimiters or quotes ever appear in either). A hand-rolled quote-aware
-// state machine would be unused complexity here, so this module does a
-// plain delimiter split instead -- documented, not an oversight.
+// Intelligent Investor exports).
 //
 // Header shape (owner-supplied example): `DateTime<TAB>FMG` or
 // `DateTime,FMG` -- the SECOND header column's name IS the ticker (the
@@ -25,8 +18,98 @@
 // owner-reported UTF-16 bug this guards against (Excel-style "Unicode
 // Text" TSV exports) -- rather than a copy local to this parser, so
 // `price-backup-csv.ts` gets the identical detection for free.
+//
+// Second owner-reported bug (2026-08-21, `docs/FMG.csv` -- the owner's real
+// file, never staged/committed): this header comment previously claimed "no
+// embedded delimiters or quotes ever appear" and did a PLAIN delimiter
+// split -- WRONG. The owner's real Intelligent Investor export is
+// RFC-4180-style: UTF-8+BOM, COMMA-delimited, with QUOTED fields --
+// `"DateTime","FMG","divFlag",...` / `"1998-03-12 00:00:00",0.07852,,,,,`
+// (dates quoted, prices and trailing empty cells bare). A plain
+// `.split(",")` left the literal quote characters in `headerColumns[0]`
+// (`"DateTime"` with quotes, never equal to the bare string `"DateTime"`),
+// producing the exact same misleading MISSING_HEADER error the earlier
+// UTF-16 fix addressed for a different root cause. `splitCsvFields` below
+// is a MINIMAL, deliberately non-full-RFC4180 quote-aware splitter (strips
+// surrounding quotes, unescapes doubled `""`, and -- critically -- makes
+// the delimiter split itself quote-aware so a quoted comma/tab can never
+// wrongly break a column) -- not a full CSV library, but enough for this
+// format's real shape: no embedded newlines inside quoted fields are
+// handled (this format's fields are dates/tickers/prices, none of which
+// legitimately contain a newline; a hostile/malformed file with one simply
+// gets split mid-field like before, producing a malformed row rather than
+// silent corruption -- fail-closed, not a data-integrity risk).
 
 import { decodeText, stripBom } from "./text-encoding.ts";
+
+/**
+ * Splits one line into fields, honoring RFC-4180-lite double-quoting: a
+ * field beginning with `"` (ignoring any leading whitespace) runs until its
+ * CLOSING `"` -- a doubled `""` inside is unescaped to a literal `"`, and
+ * the delimiter itself is inert while inside quotes (so a quoted field may
+ * contain the delimiter without breaking the column split). Every returned
+ * field is trimmed, matching this parser's pre-existing whitespace
+ * tolerance for bare (unquoted) fields.
+ */
+function splitCsvFields(line: string, delimiter: string): string[] {
+  const fields: string[] = [];
+  let field = "";
+  let inQuotes = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index]!;
+    if (inQuotes) {
+      if (char === '"') {
+        if (line[index + 1] === '"') {
+          field += '"';
+          index += 1;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += char;
+      }
+      continue;
+    }
+    if (char === '"' && field.trim().length === 0) {
+      // An opening quote: only recognised at the START of a field (any
+      // whitespace accumulated so far is discarded, matching the final
+      // trim every field already gets) -- a quote appearing mid-field
+      // (never produced by this format's real data) is treated as literal
+      // content instead of re-entering quote mode.
+      field = "";
+      inQuotes = true;
+      continue;
+    }
+    if (char === delimiter) {
+      fields.push(field.trim());
+      field = "";
+      continue;
+    }
+    field += char;
+  }
+  fields.push(field.trim());
+  return fields;
+}
+
+/** True when `needle` (a single character) appears OUTSIDE any quoted
+ * field on `line` -- used so delimiter detection never mistakes a
+ * delimiter character that only ever appears INSIDE a quoted value. */
+function hasUnquotedChar(line: string, needle: string): boolean {
+  let inQuotes = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index]!;
+    if (char === '"') {
+      if (inQuotes && line[index + 1] === '"') {
+        index += 1;
+        continue;
+      }
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (!inQuotes && char === needle) return true;
+  }
+  return false;
+}
 
 export type PriceCsvLimits = Readonly<{ maxBytes: number; maxRows: number }>;
 
@@ -106,10 +189,14 @@ function isValidCalendarDate(value: string): boolean {
 
 function detectDelimiter(headerLine: string): "," | "\t" {
   // Tab takes priority when both are present -- Intelligent Investor's own
-  // export is tab-separated; a comma inside a free-text column (there are
-  // none in this format) could never legitimately coexist with tabs, so tab
-  // presence is the more specific signal.
-  return headerLine.includes("\t") ? "\t" : ",";
+  // tab-separated export is one real shape this parser reads; the owner's
+  // OTHER real export (`docs/FMG.csv`) is comma-delimited with quoted
+  // fields, so detection must be quote-aware (2026-08-21 fix): a tab
+  // character that only ever appears INSIDE a quoted value (never
+  // observed in real data, but a quoted field could in principle contain
+  // one) must not wrongly select tab over the file's actual comma
+  // delimiter.
+  return hasUnquotedChar(headerLine, "\t") ? "\t" : ",";
 }
 
 export function parsePriceCsv(
@@ -158,9 +245,7 @@ export function parsePriceCsv(
 
   const headerLine = lines[0]!;
   const delimiter = detectDelimiter(headerLine);
-  const headerColumns = headerLine
-    .split(delimiter)
-    .map((column) => column.trim());
+  const headerColumns = splitCsvFields(headerLine, delimiter);
   if (headerColumns.length < 2 || headerColumns[0] !== "DateTime") {
     return {
       ok: false,
@@ -184,7 +269,7 @@ export function parsePriceCsv(
     const line = lines[index]!;
     const physicalRowNumber = index + 1;
     if (line.trim().length === 0) continue;
-    const columns = line.split(delimiter).map((column) => column.trim());
+    const columns = splitCsvFields(line, delimiter);
     if (columns.length < 2) {
       malformed.push({ physicalRowNumber, reason: "wrong_column_count" });
       continue;
