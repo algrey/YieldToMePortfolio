@@ -54,6 +54,11 @@ export type PriceHistoryFetchState =
       provenance: PriceHistoryProvenance;
       latestDelayed: PriceHistoryPoint | null;
       invalidRangeRequested: boolean;
+      // MKT-011B: today's intraday overlay -- see
+      // `app/owned-price-history.ts`'s `PriceHistorySuccess` doc comments
+      // for the honesty/dedupe rules these carry.
+      todayMarketDate: string | null;
+      todayPoints: readonly PriceHistoryPoint[];
     }
   | { status: "error"; message: string };
 
@@ -138,6 +143,8 @@ export function HoldingPriceChart({
               provenance: PriceHistoryProvenance;
               latestDelayed: PriceHistoryPoint | null;
               invalidRangeRequested: boolean;
+              todayMarketDate: string | null;
+              todayPoints: PriceHistoryPoint[];
             }
           | { ok: false; message: string };
         if (cancelled) return;
@@ -158,6 +165,8 @@ export function HoldingPriceChart({
           provenance: result.provenance,
           latestDelayed: result.latestDelayed,
           invalidRangeRequested: result.invalidRangeRequested,
+          todayMarketDate: result.todayMarketDate,
+          todayPoints: result.todayPoints,
         });
       } catch (error) {
         if (cancelled) return;
@@ -253,8 +262,15 @@ export function ChartBody({
   const plottable = state.points.filter((point) =>
     isPlottableDecimal(point.priceDecimal),
   );
+  // MKT-011B: today's intraday overlay -- defensively defaulted (`?? []`)
+  // rather than assumed present, so a caller/older cached state shape
+  // without these fields degrades to "no overlay" instead of crashing.
+  const todayPlottable = (state.todayPoints ?? []).filter((point) =>
+    isPlottableDecimal(point.priceDecimal),
+  );
+  const todayMarketDate = state.todayMarketDate ?? null;
 
-  if (plottable.length === 0) {
+  if (plottable.length === 0 && todayPlottable.length === 0) {
     return (
       <p className="muted-copy" role="status">
         No price history in this range.
@@ -262,7 +278,14 @@ export function ChartBody({
     );
   }
 
-  const scaled = scalePriceHistoryPoints(plottable, {
+  // MKT-011B: scale the historical series AND today's intraday overlay
+  // together so both share ONE price/date domain -- the axis reflects the
+  // true combined min/max, and today's ticks land in the correct calendar
+  // column. Reuses `scalePriceHistoryPoints` UNMODIFIED (it already maps
+  // by calendar date, never index) rather than inventing separate overlay
+  // geometry; the two halves are split back out below by array position
+  // (order is preserved by that function).
+  const scaled = scalePriceHistoryPoints([...plottable, ...todayPlottable], {
     width: CHART_WIDTH,
     height: CHART_HEIGHT,
     paddingX: CHART_PADDING_X,
@@ -275,6 +298,8 @@ export function ChartBody({
       </p>
     );
   }
+  const historicalScaled = scaled.points.slice(0, plottable.length);
+  const todayScaled = scaled.points.slice(plottable.length);
   // Review round-2 fix: gap classification must know the sampling cadence
   // (`bucketSize`) -- a downsampled series' NORMAL point spacing is itself
   // roughly `bucketSize` observations apart and must not be mistaken for a
@@ -283,8 +308,29 @@ export function ChartBody({
     plottable,
     state.provenance.bucketSize,
   );
-  const byDate = new Map(scaled.points.map((point) => [point.date, point]));
+  const byDate = new Map(historicalScaled.map((point) => [point.date, point]));
   const bucketSize = state.provenance.bucketSize;
+  // MKT-011B: the "continuing" polyline -- the last SETTLED historical
+  // point (if any) plus every intraday tick in chronological order, so the
+  // line visually continues from the last close into today's session. All
+  // of today's ticks share ONE x column (today's calendar date -- see
+  // `scalePriceHistoryPoints`'s date-offset x-axis); the vertical spread
+  // across that column is today's REAL observed price range, never a
+  // fabricated sub-day time axis.
+  const todayLinePoints =
+    historicalScaled.length > 0
+      ? [historicalScaled[historicalScaled.length - 1]!, ...todayScaled]
+      : todayScaled;
+  const todayProviders = [
+    ...new Set(todayPlottable.map((point) => point.providerId)),
+  ].sort();
+  const lastTodayPoint =
+    todayPlottable.length > 0
+      ? todayPlottable[todayPlottable.length - 1]!
+      : null;
+  const ariaFromDate = state.provenance.fromDate ?? todayMarketDate;
+  const ariaToDate = state.provenance.toDate ?? todayMarketDate;
+  const totalPointCount = plottable.length + todayPlottable.length;
 
   return (
     <>
@@ -292,10 +338,12 @@ export function ChartBody({
         className="price-history-svg"
         viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
         role="img"
-        aria-label={`${symbol} price history in ${state.currencyCode}; ${plottable.length} point${
-          plottable.length === 1 ? "" : "s"
-        }, ${state.provenance.fromDate ?? "unknown"} to ${
-          state.provenance.toDate ?? "unknown"
+        aria-label={`${symbol} price history in ${state.currencyCode}; ${totalPointCount} point${
+          totalPointCount === 1 ? "" : "s"
+        }, ${ariaFromDate ?? "unknown"} to ${ariaToDate ?? "unknown"}${
+          todayPlottable.length > 0
+            ? " (includes today's intraday capture, delayed, not a close)"
+            : ""
         }.`}
       >
         <line
@@ -355,12 +403,51 @@ export function ChartBody({
             </polyline>
           );
         })}
-        <circle
-          className="price-history-dot price-history-latest"
-          cx={scaled.points[scaled.points.length - 1]!.x}
-          cy={scaled.points[scaled.points.length - 1]!.y}
-          r={3}
-        />
+        {/* MKT-011B: when today's intraday overlay has data, ITS latest
+            tick (below) is the true "most recent known value" marker;
+            the plain historical "latest" dot only applies when there is
+            no overlay -- this branch is mathematically identical to the
+            pre-MKT-011B behaviour in that case (`historicalScaled` alone
+            is `scaled.points` when `todayScaled` is empty). */}
+        {historicalScaled.length > 0 && todayScaled.length === 0 ? (
+          <circle
+            className="price-history-dot price-history-latest"
+            cx={historicalScaled[historicalScaled.length - 1]!.x}
+            cy={historicalScaled[historicalScaled.length - 1]!.y}
+            r={3}
+          />
+        ) : null}
+        {todayScaled.length > 0 ? (
+          <g className="price-history-intraday-group">
+            {todayLinePoints.length >= 2 ? (
+              <polyline
+                className="price-history-intraday-line"
+                points={todayLinePoints
+                  .map((point) => `${point.x},${point.y}`)
+                  .join(" ")}
+              >
+                <title>
+                  {`Today${todayMarketDate ? ` (${todayMarketDate})` : ""}: intraday capture, delayed -- not a close. ${todayScaled.length} point${todayScaled.length === 1 ? "" : "s"} captured${todayProviders.length > 0 ? ` (${todayProviders.map(providerDisplayLabel).join(", ")})` : ""}.`}
+                </title>
+              </polyline>
+            ) : null}
+            {todayScaled.map((point, index) => (
+              <rect
+                key={`today-${point.date}-${index}`}
+                className={
+                  index === todayScaled.length - 1
+                    ? "price-history-intraday-dot price-history-intraday-latest"
+                    : "price-history-intraday-dot"
+                }
+                x={point.x - 2.5}
+                y={point.y - 2.5}
+                width={5}
+                height={5}
+                transform={`rotate(45 ${point.x} ${point.y})`}
+              />
+            ))}
+          </g>
+        ) : null}
       </svg>
       <div className="price-history-axis">
         <span>
@@ -393,6 +480,42 @@ export function ChartBody({
           {priceText(state.latestDelayed.priceDecimal)}{" "}
           {state.latestDelayed.currencyCode} as of{" "}
           {chartDate(state.latestDelayed.date)}.
+        </p>
+      ) : null}
+      {/* B1 fix (MKT-011B review): this paragraph must render whenever there
+          is EITHER a surviving today point OR a today exclusion to
+          disclose -- gating the whole paragraph on `lastTodayPoint` alone
+          made an all-excluded day (every tick off-currency or malformed)
+          render pixel-identical to "nothing captured today", hiding a
+          real data problem behind an honest-looking empty state. */}
+      {lastTodayPoint ||
+      state.provenance.todayExcludedCurrencyCount > 0 ||
+      state.provenance.todayExcludedMalformedCount > 0 ? (
+        <p className="muted-copy">
+          {lastTodayPoint ? (
+            <>
+              Today{todayMarketDate ? ` (${chartDate(todayMarketDate)})` : ""},
+              intraday, delayed
+              {todayProviders.length > 0
+                ? ` (${todayProviders.map(providerDisplayLabel).join(", ")})`
+                : ""}
+              : last {priceText(lastTodayPoint.priceDecimal)}{" "}
+              {lastTodayPoint.currencyCode}; {todayPlottable.length} point
+              {todayPlottable.length === 1 ? "" : "s"} captured -- not a close.
+            </>
+          ) : (
+            <>
+              Today
+              {todayMarketDate ? ` (${chartDate(todayMarketDate)})` : ""}: no
+              plottable intraday points captured.
+            </>
+          )}
+          {state.provenance.todayExcludedCurrencyCount > 0
+            ? ` ${state.provenance.todayExcludedCurrencyCount} other-currency row${state.provenance.todayExcludedCurrencyCount === 1 ? "" : "s"} excluded.`
+            : ""}
+          {state.provenance.todayExcludedMalformedCount > 0
+            ? ` ${state.provenance.todayExcludedMalformedCount} malformed row${state.provenance.todayExcludedMalformedCount === 1 ? "" : "s"} skipped.`
+            : ""}
         </p>
       ) : null}
       {state.invalidRangeRequested ? (

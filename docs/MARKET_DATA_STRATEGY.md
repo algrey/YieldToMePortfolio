@@ -540,3 +540,71 @@ ONE row rather than accumulating duplicates — enforced by the partial
 unique index itself, not an application-level check.`sharesight` rollups
 stay user-scoped (`access_scope = 'user'`, fetched with the owner's own
   > credentials, BRK-012B precedent).
+
+## 22. Today graph from the intraday cache (MKT-011B, 2026-08-22)
+
+Extends §19's per-holding price-history chart with a today-series read from
+§21's `intraday_price_points` cache (`app/owned-price-history.ts`,
+`app/components/holding-price-chart.tsx`, repository read in
+`db/repositories/intraday-price-capture.ts`'s
+`listOwnedIntradayPricePointsForDate`).
+
+**"Today" is the SECURITY's own market timezone, not the portfolio's.** The
+range-window math (§19) already resolves "today" from the portfolio's
+timezone for day/week/YTD/etc. window boundaries; the intraday overlay
+deliberately uses a SEPARATE derivation — `exchanges.timezone` via
+`resolveSecurityMarketTimezones` and
+`domain/market-data/daily-capture-window.ts`'s `resolveDailyCaptureWindowStatus`
+— the SAME timezone source the capture/rollup sweep itself uses, so the
+overlay's "today" always matches what the sweep considers "today" for that
+security. An unresolvable exchange timezone (no exchange linked) means the
+overlay stays empty rather than guessing a date.
+
+**Honest empty state.** Zero cached intraday rows for today (market closed,
+capture not yet run this tick, or the owner's capture source disabled) all
+read identically from `listOwnedIntradayPricePointsForDate` as an empty
+array — the chart simply renders the historical series with no today
+overlay and no fabricated point. A FOURTH cause reaches the same empty
+`todayPoints` array by a different path: rows WERE cached, but every one
+was excluded (off-currency or malformed) — `loadOwnedPriceHistory` still
+discloses this via `provenance.todayExcludedCurrencyCount`/
+`todayExcludedMalformedCount`, and the component renders that disclosure
+even with zero surviving points (review round-1 fix, B1, BLOCKING:
+gating the whole today-provenance paragraph on "at least one surviving
+point" made an all-excluded day render pixel-identical to "nothing
+captured today" — an exclusion count silently discarded is exactly the
+kind of real data problem AGENTS.md's disclosure discipline exists to
+surface). The component adds no "0" or synthetic PRICE value in any of
+these four cases; when it says anything about today at all, it is either
+a real captured count/price or an honest exclusion count, never an
+invented one.
+
+**Same-day dedupe (the coexistence case the task called out).** The window
+between a successful rollup and its purge (§21), or a crash-recovery rollup
+racing this exact read, can briefly leave a `price_observations` row AND
+`intraday_price_points` rows for the SAME (security, market_date). DECISION:
+the intraday series wins — `loadOwnedPriceHistory` drops any historical
+winner sharing `todayMarketDate` from the plotted series whenever
+`todayPoints` is non-empty, rather than the reverse (dropping the intraday
+points in favour of the rolled-up daily value). Rationale: the intraday
+series is strictly more current and more granular than the single value it
+would otherwise duplicate; once the purge actually runs, the intraday series
+naturally disappears and the daily point reappears with no special-casing
+needed on either side.
+
+**Rendering.** Reuses `scalePriceHistoryPoints` (§19) UNMODIFIED: historical
+and today points are scaled together as one array so both share one
+price/date domain, then split back out by array position. Every intraday
+tick for today shares ONE x-axis column (today's calendar date — the
+existing date-offset x-axis, never a fabricated sub-day time axis); the
+vertical spread across that column is today's real observed price range.
+Rendered as diamond markers (`<rect>` rotated 45°) on a dashed line, visually
+distinct from the historical series' circular markers/solid line by SHAPE
+and dash pattern, not color alone (QA-001B non-color-distinction
+convention) — CSS in `app/globals.css` (`.price-history-intraday-*`).
+Provenance is disclosed compactly beneath the chart ("Today (…), intraday,
+delayed (…): last N.NN CCY; k points captured — not a close.") mirroring
+the existing `latestDelayed` line's style; the SVG's accessible `<title>`
+on the overlay polyline carries the same explanation for assistive tech.
+The label NEVER says "live" or "close" (AGENTS.md) — intraday captures are
+always `interval: 'intraday'`, delayed, unsettled data.

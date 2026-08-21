@@ -28,6 +28,7 @@ import {
 } from "../app/price-history-chart-geometry.ts";
 import { loadOwnedPriceHistory } from "../app/owned-price-history.ts";
 import { currentFyWindow } from "../domain/calculations/financial-year.ts";
+import { listOwnedIntradayPricePointsForDate } from "../db/repositories/intraday-price-capture.ts";
 
 function renderComponent(
   componentName: string,
@@ -1454,4 +1455,378 @@ test("UI-018: MARKET_DATA_STRATEGY documents the chart's selection/downsampling 
   );
   assert.ok(doc.includes("UI-018"));
   assert.ok(doc.toLowerCase().includes("downsampl"));
+});
+
+// ---------------------------------------------------------------------------
+// Part 10 (MKT-011B): today graph from the intraday cache.
+// ---------------------------------------------------------------------------
+
+/** Links `security-a` to an ASX exchange row (`Australia/Sydney`) -- the
+ * fixture's securities have no exchange linked by default (UI-018 never
+ * needed one), but MKT-011B's "today" derivation for the intraday overlay
+ * specifically requires `exchanges.timezone` (see
+ * `domain/market-data/daily-capture-window.ts`). */
+const LINK_ASX_EXCHANGE_SQL = `
+  INSERT INTO exchanges (id, mic, name, country_code, timezone, default_currency_code, calendar_code, is_active)
+  VALUES ('exchange-asx', 'XASX', 'ASX', 'AU', 'Australia/Sydney', 'AUD', 'ASX', 1);
+  UPDATE securities SET exchange_id = 'exchange-asx' WHERE id = 'security-a';
+`;
+
+test("MKT-011B: loadOwnedPriceHistory returns today's cached intraday ticks as an ordered 'intraday' series, and DROPS the same-day historical winner (dedupe)", async () => {
+  const db = await priceHistoryFixture();
+  db.exec(LINK_ASX_EXCHANGE_SQL);
+  // Two intraday ticks for TODAY (2026-08-20, matching FIXTURE_NOW =
+  // 16:00 Sydney) -- coexisting with the fixture's OWN sharesight
+  // 'delayed' price_observations row for the SAME date (price-delayed-20),
+  // exactly the "rollup hasn't purged yet" hazard the dedupe rule exists
+  // for.
+  db.exec(`
+    INSERT INTO intraday_price_points (id, user_id, security_id, provider_id, price_decimal, currency_code, market_date, market_timezone, observed_at, captured_at, delayed_minutes, quality, provider_revision_id)
+    VALUES
+      ('intraday-1', 'user-a', 'security-a', 'sharesight', '20.10', 'AUD', '2026-08-20', '+10:00', '2026-08-20T04:00:00.000Z', '2026-08-20T04:00:05.000Z', NULL, 'observed', NULL),
+      ('intraday-2', 'user-a', 'security-a', 'sharesight', '20.30', 'AUD', '2026-08-20', '+10:00', '2026-08-20T05:30:00.000Z', '2026-08-20T05:30:05.000Z', NULL, 'observed', NULL);
+  `);
+  const client = createSqliteSqlClient(db);
+  const result = await loadOwnedPriceHistory(
+    client,
+    "user-a",
+    "portfolio-a",
+    "membership-a",
+    "week",
+    FIXTURE_NOW,
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.todayMarketDate, "2026-08-20");
+  assert.deepEqual(
+    result.todayPoints.map((point) => [point.priceDecimal, point.interval]),
+    [
+      ["20.10", "intraday"],
+      ["20.30", "intraday"],
+    ],
+    "today's ticks must be ordered by observation time, tagged 'intraday'",
+  );
+  // Dedupe: the historical winner series must NEVER include 2026-08-20 --
+  // it is now represented exclusively by `todayPoints`.
+  assert.ok(
+    !result.points.some((point) => point.date === "2026-08-20"),
+    "the same-day historical point must be dropped once intraday data exists for that date",
+  );
+  assert.deepEqual(
+    result.points.map((point) => point.date),
+    ["2026-08-14", "2026-08-19"],
+  );
+  assert.equal(result.provenance.todayExcludedCurrencyCount, 0);
+  assert.equal(result.provenance.todayExcludedMalformedCount, 0);
+});
+
+test("MKT-011B: an empty intraday day renders the historical series unchanged -- no fabricated today point, honest empty overlay", async () => {
+  const db = await priceHistoryFixture();
+  db.exec(LINK_ASX_EXCHANGE_SQL);
+  // No `intraday_price_points` rows inserted at all -- market closed,
+  // capture not yet run, or the source disabled all read identically as
+  // "nothing cached".
+  const client = createSqliteSqlClient(db);
+  const result = await loadOwnedPriceHistory(
+    client,
+    "user-a",
+    "portfolio-a",
+    "membership-a",
+    "week",
+    FIXTURE_NOW,
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.todayMarketDate, "2026-08-20");
+  assert.deepEqual(result.todayPoints, []);
+  // The historical series is UNCHANGED from the plain "week" range
+  // baseline (no dedupe triggers when there is nothing to dedupe against)
+  // -- including the fixture's own same-day sharesight delayed row.
+  assert.deepEqual(
+    result.points.map((point) => point.date),
+    ["2026-08-14", "2026-08-19", "2026-08-20"],
+  );
+});
+
+test("MKT-011B: an unresolvable security market timezone (no exchange linked) leaves todayMarketDate honestly null, never a guessed date", async () => {
+  const db = await priceHistoryFixture();
+  // Deliberately NOT linking an exchange -- `security-a.exchange_id` stays
+  // NULL, matching this fixture's default shape.
+  const client = createSqliteSqlClient(db);
+  const result = await loadOwnedPriceHistory(
+    client,
+    "user-a",
+    "portfolio-a",
+    "membership-a",
+    "week",
+    FIXTURE_NOW,
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.todayMarketDate, null);
+  assert.deepEqual(result.todayPoints, []);
+});
+
+test("MKT-011B: loadOwnedPriceHistory's intraday overlay is owner-scoped -- another user's cached intraday tick for the SAME security never appears in this owner's today series", async () => {
+  const db = await priceHistoryFixture();
+  db.exec(LINK_ASX_EXCHANGE_SQL);
+  db.exec(`
+    INSERT INTO intraday_price_points (id, user_id, security_id, provider_id, price_decimal, currency_code, market_date, market_timezone, observed_at, captured_at, delayed_minutes, quality, provider_revision_id)
+    VALUES
+      ('intraday-owner', 'user-a', 'security-a', 'sharesight', '20.10', 'AUD', '2026-08-20', '+10:00', '2026-08-20T04:00:00.000Z', '2026-08-20T04:00:05.000Z', NULL, 'observed', NULL),
+      ('intraday-cross-user', 'user-b', 'security-a', 'sharesight', '999.99', 'AUD', '2026-08-20', '+10:00', '2026-08-20T04:05:00.000Z', '2026-08-20T04:05:05.000Z', NULL, 'observed', NULL);
+  `);
+  const client = createSqliteSqlClient(db);
+  const result = await loadOwnedPriceHistory(
+    client,
+    "user-a",
+    "portfolio-a",
+    "membership-a",
+    "week",
+    FIXTURE_NOW,
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(
+    result.todayPoints.map((point) => point.priceDecimal),
+    ["20.10"],
+    "user-b's cached intraday tick must never appear in user-a's today series",
+  );
+
+  // Pin the SAME guarantee directly at the repository boundary.
+  const directForUserA = await listOwnedIntradayPricePointsForDate(client, {
+    userId: "user-a",
+    securityId: "security-a",
+    marketDate: "2026-08-20",
+  });
+  assert.ok(directForUserA);
+  assert.equal(directForUserA.points.length, 1);
+  assert.equal(directForUserA.points[0]!.priceDecimal, "20.10");
+  const directForUserB = await listOwnedIntradayPricePointsForDate(client, {
+    userId: "user-b",
+    securityId: "security-a",
+    marketDate: "2026-08-20",
+  });
+  assert.ok(directForUserB);
+  assert.equal(directForUserB.points.length, 1);
+  assert.equal(directForUserB.points[0]!.priceDecimal, "999.99");
+});
+
+test("MKT-011B: an intraday price decimal string round-trips through the loader EXACTLY -- no float drift on a value beyond the usual 2-decimal precision", async () => {
+  const db = await priceHistoryFixture();
+  db.exec(LINK_ASX_EXCHANGE_SQL);
+  db.exec(`
+    INSERT INTO intraday_price_points (id, user_id, security_id, provider_id, price_decimal, currency_code, market_date, market_timezone, observed_at, captured_at, delayed_minutes, quality, provider_revision_id)
+    VALUES ('intraday-precise', 'user-a', 'security-a', 'sharesight', '20.123456', 'AUD', '2026-08-20', '+10:00', '2026-08-20T04:00:00.000Z', '2026-08-20T04:00:05.000Z', NULL, 'observed', NULL);
+  `);
+  const client = createSqliteSqlClient(db);
+  const result = await loadOwnedPriceHistory(
+    client,
+    "user-a",
+    "portfolio-a",
+    "membership-a",
+    "week",
+    FIXTURE_NOW,
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.todayPoints[0]!.priceDecimal, "20.123456");
+});
+
+test("MKT-011B: a today intraday row in a DIFFERENT currency is excluded from the overlay and disclosed, never mixed onto the historical-currency line", async () => {
+  const db = await priceHistoryFixture();
+  db.exec(LINK_ASX_EXCHANGE_SQL);
+  db.exec(`
+    INSERT INTO currencies (code, numeric_code, name, minor_unit_digits, is_active)
+    VALUES ('USD', 840, 'US dollar', 2, 1);
+    INSERT INTO intraday_price_points (id, user_id, security_id, provider_id, price_decimal, currency_code, market_date, market_timezone, observed_at, captured_at, delayed_minutes, quality, provider_revision_id)
+    VALUES ('intraday-usd', 'user-a', 'security-a', 'sharesight', '13.00', 'USD', '2026-08-20', '+10:00', '2026-08-20T04:00:00.000Z', '2026-08-20T04:00:05.000Z', NULL, 'observed', NULL);
+  `);
+  const client = createSqliteSqlClient(db);
+  const result = await loadOwnedPriceHistory(
+    client,
+    "user-a",
+    "portfolio-a",
+    "membership-a",
+    "week",
+    FIXTURE_NOW,
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(result.todayPoints, []);
+  assert.equal(result.provenance.todayExcludedCurrencyCount, 1);
+});
+
+test("MKT-011B review follow-up F6: a malformed intraday price row is excluded from today's overlay and disclosed via todayExcludedMalformedCount, never silently dropped", async () => {
+  const db = await priceHistoryFixture();
+  db.exec(LINK_ASX_EXCHANGE_SQL);
+  // '13e1' is valid SQLite TEXT (no CHECK constrains price_decimal's shape)
+  // but fails this repository's own decimal-string validation (exponent
+  // form) -- the same "passes the DB, fails the app boundary" case as the
+  // historical series' F4 test above.
+  db.exec(`
+    INSERT INTO intraday_price_points (id, user_id, security_id, provider_id, price_decimal, currency_code, market_date, market_timezone, observed_at, captured_at, delayed_minutes, quality, provider_revision_id)
+    VALUES ('intraday-malformed', 'user-a', 'security-a', 'sharesight', '13e1', 'AUD', '2026-08-20', '+10:00', '2026-08-20T04:00:00.000Z', '2026-08-20T04:00:05.000Z', NULL, 'observed', NULL);
+  `);
+  const client = createSqliteSqlClient(db);
+  const result = await loadOwnedPriceHistory(
+    client,
+    "user-a",
+    "portfolio-a",
+    "membership-a",
+    "week",
+    FIXTURE_NOW,
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(result.todayPoints, []);
+  assert.equal(result.provenance.todayExcludedMalformedCount, 1);
+});
+
+const TODAY_OVERLAY_LOADED_PROPS = {
+  symbol: "FMG",
+  range: "week",
+  state: {
+    status: "loaded",
+    currencyCode: "AUD",
+    points: [
+      {
+        date: "2026-08-19",
+        priceDecimal: "19.90",
+        currencyCode: "AUD",
+        providerId: "owner-import",
+        interval: "eod",
+      },
+    ],
+    provenance: {
+      providers: ["owner-import"],
+      fromDate: "2026-08-19",
+      toDate: "2026-08-19",
+      pointCountRaw: 1,
+      pointCountReturned: 1,
+      bucketSize: 1,
+      excludedCurrencyCount: 0,
+      excludedMalformedCount: 0,
+      todayExcludedCurrencyCount: 0,
+      todayExcludedMalformedCount: 0,
+    },
+    latestDelayed: null,
+    invalidRangeRequested: false,
+    todayMarketDate: "2026-08-20",
+    todayPoints: [
+      {
+        date: "2026-08-20",
+        priceDecimal: "20.10",
+        currencyCode: "AUD",
+        providerId: "sharesight",
+        interval: "intraday",
+      },
+      {
+        date: "2026-08-20",
+        priceDecimal: "20.30",
+        currencyCode: "AUD",
+        providerId: "sharesight",
+        interval: "intraday",
+      },
+    ],
+  },
+  onRangeChange: () => {},
+};
+
+test("MKT-011B: PriceHistoryChartView renders today's intraday overlay as delineated diamond markers on a dashed line, distinct from the historical series, with accessible delayed provenance and never a 'live'/'close' claim", () => {
+  const html = renderComponent(
+    "PriceHistoryChartView",
+    CHART_COMPONENT_PATH,
+    TODAY_OVERLAY_LOADED_PROPS,
+  );
+  assert.ok(html.includes("price-history-intraday-line"));
+  assert.ok(html.includes("price-history-intraday-dot"));
+  assert.ok(html.includes("price-history-intraday-latest"));
+  assert.ok(
+    html.includes("intraday capture, delayed -- not a close"),
+    "the overlay's accessible <title> must explain what the series is, not a close",
+  );
+  assert.ok(html.includes("not a close"));
+  assert.ok(!html.toLowerCase().includes("live"));
+  // React escapes the apostrophe in "today's" to `&#x27;` in the rendered
+  // attribute value (same escaping precedent as the gap-title text-node
+  // assertions elsewhere in this file).
+  assert.ok(html.includes("includes today&#x27;s intraday capture"));
+});
+
+test("MKT-011B: PriceHistoryChartView renders NO intraday overlay when today's series is empty -- historical-only, no fabricated today text", () => {
+  const html = renderComponent(
+    "PriceHistoryChartView",
+    CHART_COMPONENT_PATH,
+    ALL_RANGE_LOADED_PROPS, // no todayPoints field at all -- defaults to empty
+  );
+  assert.ok(!html.includes("price-history-intraday-dot"));
+  assert.ok(!html.includes("price-history-intraday-line"));
+  assert.ok(!html.includes("captured -- not a close"));
+});
+
+test("MKT-011B (review round-1 fix, B1, BLOCKING): PriceHistoryChartView discloses today's exclusion counts even when EVERY intraday tick was excluded -- an all-excluded day must NOT render pixel-identical to 'nothing captured today'", () => {
+  const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
+    symbol: "FMG",
+    range: "week",
+    state: {
+      status: "loaded",
+      currencyCode: "AUD",
+      points: [
+        {
+          date: "2026-08-19",
+          priceDecimal: "19.90",
+          currencyCode: "AUD",
+          providerId: "owner-import",
+          interval: "eod",
+        },
+      ],
+      provenance: {
+        providers: ["owner-import"],
+        fromDate: "2026-08-19",
+        toDate: "2026-08-19",
+        pointCountRaw: 1,
+        pointCountReturned: 1,
+        bucketSize: 1,
+        excludedCurrencyCount: 0,
+        excludedMalformedCount: 0,
+        // Every cached tick for today was excluded (off-currency and/or
+        // malformed) -- `todayPoints` is empty (no surviving point), but
+        // these counts must still surface.
+        todayExcludedCurrencyCount: 2,
+        todayExcludedMalformedCount: 1,
+      },
+      latestDelayed: null,
+      invalidRangeRequested: false,
+      todayMarketDate: "2026-08-20",
+      todayPoints: [],
+    },
+    onRangeChange: () => {},
+  });
+  // No plottable overlay (nothing survived to plot) -- but the paragraph
+  // itself, and both exclusion counts, must still render.
+  assert.ok(!html.includes("price-history-intraday-dot"));
+  assert.ok(html.includes("no plottable intraday points captured"));
+  assert.ok(html.includes("2 other-currency rows excluded"));
+  assert.ok(html.includes("1 malformed row skipped"));
+});
+
+test("MKT-011B: the intraday overlay CSS is distinguished by SHAPE and dash pattern, not color alone", async () => {
+  const css = await readFile(
+    new URL("../app/globals.css", import.meta.url),
+    "utf8",
+  );
+  assert.ok(css.includes(".price-history-intraday-dot"));
+  assert.ok(css.includes(".price-history-intraday-line"));
+  assert.match(css, /\.price-history-intraday-line\s*{[^}]*stroke-dasharray/);
+});
+
+test("MKT-011B: MARKET_DATA_STRATEGY documents the intraday overlay's today-derivation, empty-state honesty, and same-day dedupe choice", async () => {
+  const doc = await readFile(
+    new URL("../docs/MARKET_DATA_STRATEGY.md", import.meta.url),
+    "utf8",
+  );
+  assert.ok(doc.includes("MKT-011B"));
+  assert.ok(doc.toLowerCase().includes("dedupe"));
+  assert.ok(doc.toLowerCase().includes("intraday"));
 });

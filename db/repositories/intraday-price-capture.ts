@@ -535,6 +535,105 @@ export async function rollupIntradayPricePoint(
   return { ok: true, written: rows.length > 0 };
 }
 
+const MARKET_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const PRICE_DECIMAL_PATTERN = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
+
+/**
+ * F5 (MKT-011B review follow-up): mirrors `app/owned-price-history.ts`'s
+ * `fetchObservations`/`MAX_RAW_OBSERVATIONS` fail-closed-on-overflow
+ * pattern -- this read had no such bound at all, an asymmetry with every
+ * other owner-scoped price read in this codebase. In practice a single
+ * (owner, security, day) is bounded by the capture cadence itself (the
+ * `daily_capture_interval_minutes` setting is 30 or 60 over a fixed
+ * 10:25-16:25 window, so even a hypothetical 1-minute cadence yields only
+ * ~360 ticks) -- 1000 is a generously wide ceiling that should never be
+ * reached by legitimate data, kept purely to close the asymmetry and fail
+ * closed rather than silently truncate on a corrupted/pathological row
+ * count.
+ */
+const MAX_INTRADAY_POINTS_PER_DAY = 1000;
+
+export type OwnedTodayIntradayPoint = Readonly<{
+  providerId: string;
+  priceDecimal: string;
+  currencyCode: string;
+  marketDate: string;
+  observedAt: string;
+}>;
+
+export type OwnedTodayIntradayReadResult = Readonly<{
+  points: readonly OwnedTodayIntradayPoint[];
+  /** Rows that failed row-shape validation at this external boundary
+   * (AGENTS.md) -- counted, never silently dropped, mirroring
+   * `app/owned-price-history.ts`'s own `mapRow` disclosure discipline. */
+  excludedMalformedCount: number;
+}>;
+
+/**
+ * MKT-011B: this owner's cached intraday ticks for ONE security on ONE
+ * market day, ordered by observation time ascending -- the today-series
+ * read path for the UI-018 price-history chart's intraday overlay. Owner-
+ * scoped by `user_id` at the SQL boundary (never a caller-supplied scope --
+ * AGENTS.md "constrain every portfolio-scoped query... by authenticated
+ * internal user_id"). A security with zero cached points for this day
+ * returns an empty `points` array -- an HONEST "nothing captured yet"
+ * state (market closed, capture not yet run, or the capture source
+ * disabled all read identically as "nothing cached" from this read alone;
+ * the caller must never turn that into a fabricated zero-value point).
+ *
+ * Returns `null` (never truncates silently) when this (owner, security,
+ * day) has MORE than `MAX_INTRADAY_POINTS_PER_DAY` cached rows -- the same
+ * MAX+1-probe, fail-closed shape `app/owned-price-history.ts`'s
+ * `fetchObservations` uses for the historical series (F5, MKT-011B review
+ * follow-up).
+ */
+export async function listOwnedIntradayPricePointsForDate(
+  client: SqlClient,
+  input: Readonly<{ userId: string; securityId: string; marketDate: string }>,
+): Promise<OwnedTodayIntradayReadResult | null> {
+  const rows = await client.all<Record<string, unknown>>(
+    `SELECT provider_id, price_decimal, currency_code, market_date, observed_at
+       FROM intraday_price_points
+      WHERE user_id = ? AND security_id = ? AND market_date = ?
+      ORDER BY observed_at ASC
+      LIMIT ?`,
+    [
+      input.userId,
+      input.securityId,
+      input.marketDate,
+      MAX_INTRADAY_POINTS_PER_DAY + 1,
+    ],
+  );
+  if (rows.length > MAX_INTRADAY_POINTS_PER_DAY) return null; // unbounded -- caller fails closed
+  const points: OwnedTodayIntradayPoint[] = [];
+  let excludedMalformedCount = 0;
+  for (const row of rows) {
+    const providerId = String(row.provider_id ?? "");
+    const priceDecimal = String(row.price_decimal ?? "");
+    const currencyCode = String(row.currency_code ?? "");
+    const marketDate = String(row.market_date ?? "");
+    const observedAt = String(row.observed_at ?? "");
+    if (
+      !providerId ||
+      !PRICE_DECIMAL_PATTERN.test(priceDecimal) ||
+      !currencyCode ||
+      !MARKET_DATE_PATTERN.test(marketDate) ||
+      !observedAt
+    ) {
+      excludedMalformedCount += 1;
+      continue;
+    }
+    points.push({
+      providerId,
+      priceDecimal,
+      currencyCode,
+      marketDate,
+      observedAt,
+    });
+  }
+  return { points, excludedMalformedCount };
+}
+
 /** Deletes every cached tick for this (owner, provider, security,
  * market_date) -- called ONLY after `rollupIntradayPricePoint` reports
  * success (the "purge only after successful rollup" ruling). */

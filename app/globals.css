@@ -1239,6 +1239,30 @@ dd {
   font-size: 0.66rem;
 }
 
+/* MKT-011B: today's intraday overlay -- deliberately distinct from
+   `.price-history-line`/`.price-history-dot` by SHAPE (diamond markers,
+   not circles) and dash pattern, not color alone, so the "still moving
+   today, not a settled close" distinction survives without relying on
+   color perception. */
+.price-history-intraday-line {
+  fill: none;
+  stroke: var(--warning);
+  stroke-width: 1.5;
+  stroke-dasharray: 2 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.price-history-intraday-dot {
+  fill: var(--warning);
+}
+
+.price-history-intraday-dot.price-history-intraday-latest {
+  fill: var(--cream);
+  stroke: var(--warning);
+  stroke-width: 1.5;
+}
+
 .chart-table-details {
   margin-top: 12px;
   color: var(--muted);

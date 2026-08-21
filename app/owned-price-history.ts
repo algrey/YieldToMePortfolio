@@ -27,6 +27,11 @@
  */
 import type { SqlClient } from "../db/repositories/sql-client.ts";
 import { currentFyWindow } from "../domain/calculations/financial-year.ts";
+import { resolveDailyCaptureWindowStatus } from "../domain/market-data/daily-capture-window.ts";
+import {
+  listOwnedIntradayPricePointsForDate,
+  resolveSecurityMarketTimezones,
+} from "../db/repositories/intraday-price-capture.ts";
 import {
   downsamplePriceHistoryPoints,
   parsePriceHistoryRangeParam,
@@ -134,6 +139,13 @@ export type PriceHistoryProvenance = Readonly<{
    * counted, never silently dropped, mirroring MKT-008's malformed-row
    * disclosure discipline. */
   excludedMalformedCount: number;
+  /** MKT-011B: today's intraday overlay's OWN exclusion counts -- kept
+   * separate from `excludedCurrencyCount`/`excludedMalformedCount` above
+   * because they describe a DIFFERENT read (`intraday_price_points`, a
+   * single market day) rather than folding into the historical series'
+   * counts and implying they came from the same query. */
+  todayExcludedCurrencyCount: number;
+  todayExcludedMalformedCount: number;
 }>;
 
 export type PriceHistorySuccess = Readonly<{
@@ -147,6 +159,29 @@ export type PriceHistorySuccess = Readonly<{
   points: readonly PriceHistoryPoint[];
   provenance: PriceHistoryProvenance;
   latestDelayed: PriceHistoryPoint | null;
+  /** MKT-011B: the security's OWN market-day date (its exchange
+   * timezone -- `domain/market-data/daily-capture-window.ts`'s own
+   * derivation, the SAME timezone source the capture/rollup sweep uses),
+   * or `null` when that timezone cannot be resolved -- an honest "cannot
+   * evaluate today for this security" state, never a guessed date. This
+   * is DELIBERATELY separate from the range window's own "today" used
+   * above (portfolio timezone, for day/week/ytd/... range math) -- the
+   * intraday overlay must match the capture sweep's own notion of "today"
+   * for this security, not the portfolio's. */
+  todayMarketDate: string | null;
+  /** MKT-011B: today's cached intraday ticks (`interval: 'intraday'`),
+   * ordered by observation time ascending -- empty when nothing has been
+   * captured yet today (market closed, capture not yet run, or the
+   * source disabled all read identically as "nothing cached"; NEVER a
+   * fabricated point). Dedupe ruling (TASKS.md MKT-011B): when this is
+   * non-empty, any SAME-DATE historical winner is dropped from `points`
+   * below so a transient daily-rollup-plus-not-yet-purged-intraday
+   * overlap (a crash-recovery rollup racing this read, or the ordinary
+   * end-of-day window between rollup and purge) never double-plots the
+   * same day -- the intraday series is preferred as the more granular,
+   * more current representation of today.
+   */
+  todayPoints: readonly PriceHistoryPoint[];
 }>;
 
 export type PriceHistoryFailure = Readonly<{
@@ -315,6 +350,62 @@ export async function loadOwnedPriceHistory(
   let excludedCurrencyCount = windowed.excludedCurrencyCount;
   let excludedMalformedCount = windowed.excludedMalformedCount;
 
+  // MKT-011B: resolve "today" for the INTRADAY overlay using the
+  // SECURITY'S OWN market timezone (`exchanges.timezone`), the same
+  // derivation `domain/market-data/daily-capture-window.ts` and the
+  // capture/rollup sweep use -- deliberately NOT the portfolio timezone
+  // `todayLocal` above (which only drives the range-window math). An
+  // unresolvable timezone (no exchange linked) means "today" cannot be
+  // evaluated for this security at all -- the overlay stays honestly
+  // empty rather than guessing.
+  const marketTimezones = await resolveSecurityMarketTimezones(client, [
+    securityId,
+  ]);
+  const marketTimezone = marketTimezones.get(securityId) ?? null;
+  const windowStatus = marketTimezone
+    ? resolveDailyCaptureWindowStatus(now.toISOString(), marketTimezone)
+    : null;
+  const todayMarketDate = windowStatus?.localDate ?? null;
+
+  const todayPoints: PriceHistoryPoint[] = [];
+  let todayExcludedCurrencyCount = 0;
+  let todayExcludedMalformedCount = 0;
+  if (todayMarketDate) {
+    const intraday = await listOwnedIntradayPricePointsForDate(client, {
+      userId,
+      securityId,
+      marketDate: todayMarketDate,
+    });
+    // F5 (MKT-011B review follow-up): mirrors `windowed === null` below --
+    // an unbounded row count fails the request closed rather than
+    // silently truncating today's overlay.
+    if (intraday === null) {
+      return {
+        ok: false,
+        status: 503,
+        message:
+          "Today's intraday price cache has too many points to chart safely.",
+      };
+    }
+    todayExcludedMalformedCount = intraday.excludedMalformedCount;
+    for (const point of intraday.points) {
+      // Same B1 discipline as the historical series: a row sharing this
+      // security_id in a DIFFERENT currency is excluded, never mixed onto
+      // one line.
+      if (point.currencyCode !== currencyCode) {
+        todayExcludedCurrencyCount += 1;
+        continue;
+      }
+      todayPoints.push({
+        date: point.marketDate,
+        priceDecimal: point.priceDecimal,
+        currencyCode: point.currencyCode,
+        providerId: point.providerId,
+        interval: "intraday",
+      });
+    }
+  }
+
   // "Day" ruling (TASKS.md UI-018): a dailies-dominated series usually has
   // at most one point for "today" -- show the latest available point PLUS
   // the previous close for context, honest about sparsity, never a
@@ -358,6 +449,19 @@ export async function loadOwnedPriceHistory(
     }
   }
 
+  // MKT-011B dedupe ruling: when today's intraday overlay has real data,
+  // it wins the plot for that date -- drop any historical winner sharing
+  // `todayMarketDate` so the chart never double-plots today (the ordinary
+  // window between a successful rollup and its purge, or a crash-recovery
+  // rollup racing this exact read, can otherwise leave a `price_observations`
+  // row AND `intraday_price_points` rows coexisting briefly for the same
+  // day). Chosen over an alternative "drop the intraday points instead"
+  // because the intraday series is strictly MORE current and MORE granular
+  // than the single rolled-up daily point it would otherwise duplicate.
+  if (todayMarketDate && todayPoints.length > 0) {
+    winners = winners.filter((point) => point.marketDate !== todayMarketDate);
+  }
+
   const { points: downsampledRaw, bucketSize } =
     downsamplePriceHistoryPoints(winners);
 
@@ -371,6 +475,8 @@ export async function loadOwnedPriceHistory(
     bucketSize,
     excludedCurrencyCount,
     excludedMalformedCount,
+    todayExcludedCurrencyCount,
+    todayExcludedMalformedCount,
   };
 
   const latestDelayedRow = await client.get<Row>(
@@ -395,6 +501,8 @@ export async function loadOwnedPriceHistory(
     points: downsampledRaw.map(toApiPoint),
     provenance,
     latestDelayed: latestDelayedPoint ? toApiPoint(latestDelayedPoint) : null,
+    todayMarketDate,
+    todayPoints,
   };
 }
 
