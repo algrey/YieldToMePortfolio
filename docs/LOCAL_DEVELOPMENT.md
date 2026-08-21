@@ -61,17 +61,53 @@ stays unmodified.
 
 ### One-time / when you want a clean database
 
-With the dev server **stopped**, reset and migrate the local D1:
+With the dev server **stopped**:
 
 ```sh
 node scripts/setup-local-db.mjs
 ```
 
-This wipes the local Miniflare D1
-(`.wrangler/state/v3/d1/miniflare-D1DatabaseObject/<hash>.sqlite`), applies every
-migration in `drizzle/`, and seeds reference currencies. The database persists in
-`.wrangler/`, so you only need to rerun this to start fresh — skip it to keep
-your data.
+**The bare command now refuses to run against a database that holds real
+owner data.** Before touching anything, it opens the existing Miniflare D1
+file (`.wrangler/state/v3/d1/miniflare-D1DatabaseObject/<hash>.sqlite`)
+read-only and counts rows in `portfolios`, `transactions`, `import_batches`,
+and `dividend_manual_records`. If any of those are non-zero, it prints exactly
+what it would destroy and exits `1` **without touching the file** — no wipe,
+no backup needed because nothing happened. An empty or absent database
+proceeds with no friction, exactly like before.
+
+Pick one of the two flags depending on what you actually want:
+
+- **`--apply-pending`** — migrate the existing database **in place**, without
+  wiping it. Use this after `git pull` brings new files into `drizzle/` and
+  you want to keep your local portfolios/transactions/imports. It tracks
+  which migrations have already run in a local-only bookkeeping table
+  (`_local_dev_migrations`, never part of the reviewed schema); a database
+  from before this table existed gets it backfilled from a small set of
+  recent structural landmarks (see `scripts/setup-local-db-lib.mjs`'s
+  `BACKFILL_LANDMARKS`). If your database's state doesn't match any known
+  landmark, the script refuses rather than guess — fall back to `--force` in
+  that case.
+
+  ```sh
+  node scripts/setup-local-db.mjs --apply-pending
+  ```
+
+- **`--force`** — a genuine reset: wipe the database and rebuild it from
+  every migration, seeding reference currencies. Use this when you actually
+  want to throw your local data away (e.g. it's corrupted, or you want a
+  known-clean baseline). When the database being wiped holds any user data,
+  the script copies the sqlite file (plus `-wal`/`-shm` if present) to
+  `<name>.<ISO-timestamp>.backup` in the same directory **first**, and prints
+  the backup path.
+
+  ```sh
+  node scripts/setup-local-db.mjs --force
+  ```
+
+The database persists in `.wrangler/`, so you only need to rerun this to
+change its state — skip it entirely to keep working against what's already
+there.
 
 > `setup-local-db.mjs` applies migrations with `node:sqlite`, not
 > `wrangler d1 execute`. `wrangler d1 execute` wraps each file in a transaction,
@@ -145,8 +181,9 @@ empty "No portfolios yet" state. From there you can:
 
 ### Local dev files
 
-| File                           | Purpose                                                  |
-| ------------------------------ | -------------------------------------------------------- |
-| `.dev.vars`                    | Local Access issuer/audience + Workers plan (gitignored) |
-| `scripts/setup-local-db.mjs`   | Reset, migrate, and seed the local D1                    |
-| `scripts/dev-auth-gateway.mjs` | JWKS + token-injecting proxy in front of `vinext dev`    |
+| File                             | Purpose                                                                          |
+| -------------------------------- | -------------------------------------------------------------------------------- |
+| `.dev.vars`                      | Local Access issuer/audience + Workers plan (gitignored)                         |
+| `scripts/setup-local-db.mjs`     | Guards, migrates (`--apply-pending`), or resets+seeds (`--force`) the local D1   |
+| `scripts/setup-local-db-lib.mjs` | Pure guard/backfill/pending-migration decision logic behind `setup-local-db.mjs` |
+| `scripts/dev-auth-gateway.mjs`   | JWKS + token-injecting proxy in front of `vinext dev`                            |
