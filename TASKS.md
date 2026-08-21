@@ -607,6 +607,30 @@ Status: DEFERRED (2026-08-14); Sharesight is not a quote provider under our cont
 - Acceptance: a quote never reaches a user/session outside its connection's entitlement scope; provenance (source, observation time, ingestion time) is recorded per `AGENTS.md`.
 - Risks: redistribution restrictions in the selected broker's terms (see BRK-002).
 
+#### MKT-009A — Yahoo authenticated-session evidence spike
+
+Status: READY (2026-08-21, owner directive: "add a login for Yahoo Finance — I suspect YF will work better with a login"). Yahoo has NO official public API; the current `yahoo-compatible` adapter uses anonymous best-effort endpoints. Evidence-first, BRK-008/BRK-012A pattern: establish what an authenticated Yahoo session actually buys BEFORE any integration code.
+
+- Deliver a dated evidence note (docs/MARKET_DATA_STRATEGY.md): (1) the practical auth mechanism for a headless Worker (Yahoo login is interactive with 2FA/captcha — the realistic path is owner-exported browser cookies + the crumb handshake; document the exact cookie names NEEDED, never values, lifetime/expiry behaviour, and the refresh story when cookies rot); (2) which endpoints/fields change with auth vs anonymous (rate limits, entitlement differences, real-time vs delayed) with concrete observed evidence, inference labelled as inference; (3) ToS/redistribution observations, honestly stated; (4) failure modes (cookie expiry mid-session must degrade to the anonymous path or explicit unavailability — never fabricated data, never a hard-down provider).
+- Secrets discipline: any owner-supplied cookie material lives ONLY in `.dev.vars`/Worker secrets, is never printed, logged, committed, or echoed in reports (env var NAMES only). Spike scripts follow the sharesight-spike output discipline.
+- Acceptance: a written go/no-go recommendation for MKT-009B with evidence; no provider behaviour change in this task.
+
+#### MKT-009B — Authenticated Yahoo session in the market-data provider
+
+Status: PLANNED; blocked on MKT-009A evidence and an Orchestrator/owner go decision. Wire optional authenticated-session support into the existing `yahoo-compatible` adapter (same `MarketDataProvider` abstraction, no parallel provider): cookie/crumb material from Worker secrets, graceful degradation to today's anonymous behaviour when auth material is absent/expired (explicit provenance distinguishing authenticated vs anonymous observations), no new Cloudflare products. Provenance/freshness rules per AGENTS.md; never label a price `live` without timestamp/contract evidence.
+
+#### BRK-013A — Yahoo Finance portfolio read/write endpoint evidence spike
+
+Status: PLANNED; owner directive 2026-08-21 ("bonus point": on-demand two-way portfolio sync with YF). Yahoo portfolio endpoints are fully undocumented/unofficial; evidence spike before ANY design: whether an authenticated session can (1) READ a YF portfolio/watchlist (shape, identifiers, lot granularity) and (2) WRITE positions/lots, with what semantics (create/update/delete granularity, idempotency, failure modes). Output discipline as always: field names/shapes/presence, never owner position values in reports. Deliverable: dated evidence note + go/no-go + risk statement (fragility of unofficial write endpoints; account-lockout/abuse-detection risk of scripted writes to a consumer Yahoo account — state it plainly for the owner's decision).
+
+#### BRK-013B — Yahoo portfolio inbound sync (on demand)
+
+Status: PLANNED; blocked on BRK-013A. Direction YF → app through the EXISTING staged import pipeline (preview/validated/idempotent/batch-attributable/reversible), owner-initiated only, never scheduled. Reuses the BRK-005 sync architecture; securities resolve through the BRK-009 resolver; no direct ledger writes.
+
+#### BRK-013C — Yahoo portfolio outbound push (on demand, explicit confirm)
+
+Status: PLANNED; blocked on BRK-013A evidence and an explicit owner go decision AFTER reading the risk statement. THIS IS THE PRODUCT'S FIRST OUTBOUND EXTERNAL WRITE — architecture decision required (docs/ARCHITECTURE.md note) before implementation. Binding safety frame: owner-initiated per push, never automatic/scheduled; a mandatory preview diff (exactly what would be created/changed on the YF side) with explicit confirmation per push; writes go through a dedicated Yahoo write module that is structurally separate from — and can never be imported by — the Sharesight package (the Sharesight GET-only non-negotiable is untouched: no code path may write to Sharesight, and the Yahoo write client must not weaken that seal or share transport with it); every push audited (what was sent, when, outcome); YF remains a non-authoritative mirror — pushes never mutate our ledger.
+
 ## Identity and core persistence
 
 ### AUTH-001 — Verify Cloudflare Access JWT
