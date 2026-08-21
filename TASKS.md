@@ -652,6 +652,14 @@ Orchestrator architecture rulings:
 - Docs: MARKET_DATA_STRATEGY (capture pipeline + honesty labels), DATA_MODEL (new table + settings columns), ARCHITECTURE (cron + retention decision), CALCULATIONS only if any read path's selection semantics change (rollup rows enter the existing ranking as ordinary observations — they should NOT need selection changes; if they do, stop and report).
 - Tests: window gating (timezone/DST boundaries — Sydney AEST/AEDT both land :25 wall-clock; weekday gate), idempotent rollup (re-run same day, crash-then-next-day recovery), one-row-per-day invariant, purge-after-rollup, zero-points day stores nothing, settings validation/ownership, provenance labels, request-budget bound, migration triggers.
 
+#### MKT-012 — Provider ranking: delayed capture vs owner-uploaded official close
+
+Status: DEFERRED (2026-08-22, from MKT-011A review F1). The existing selection ranking prefers `delayed` (rank 0) over `eod` (rank 2) at equal date age, so a 16:25 delayed rollup row outranks an owner-uploaded OFFICIAL close for the same date. Pre-existing behaviour (BRK-012B already wrote delayed rows for past dates) but MKT-011A makes it systematic for every trading day. Decide whether an owner-uploaded eod close should outrank a delayed capture for the same market date (probably yes — it is better data) and change `providerRank`/interval ranking with tests + CALCULATIONS §2 update. Disclosed normatively in MARKET_DATA_STRATEGY §21 meanwhile.
+
+#### MKT-013 — Daily-capture source action-required state
+
+Status: DEFERRED (2026-08-22, from MKT-011A review F3). The "Daily capture source" setting lets the owner select `yahoo_authenticated` when cookies are unconfigured, or a Yahoo source when `MARKET_DATA_PROVIDER` is disabled; the sweep then silently no-ops. Surface a visible action-required state per the MKT-009B `actionStatus` precedent (distinguish not-configured vs disabled vs expired).
+
 #### MKT-011B — Today graph from the intraday cache
 
 Status: PLANNED; blocked on MKT-011A. Extend the UI-018 per-holding price-history graph with a today-series from `intraday_price_points` (clearly delineated from the historical daily series; delayed-provenance visible per compact-view rules; empty intraday state honest). After rollup+purge the today-series naturally disappears into the daily point.
