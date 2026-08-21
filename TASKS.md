@@ -894,6 +894,17 @@ Status: DONE (2026-08-14).
 
 Status: PROMOTED 2026-08-14 by owner instruction — split into CGT-001A/B below; retention-guarantee constraint remains standing.
 
+### UI-023 — Standalone per-holding detail area: News / Details / Transactions (owner-directed)
+
+Status: DONE (2026-08-21). Owner directive with competitor screenshots (01: tabbed holdings list; 05: holding screen whose own tabs REPLACE the main tabs, prominent back arrow top-left, maximum space for the holding): clicking an owned holding must open a full-screen sub-tab area, not a popup.
+
+- Routes: owned mode now serves `/portfolio/:id/holdings/:portfolioSecurityId` (Details, the landing tab), `/transactions`, and `/news` under it — the previously preview-only `[section]/[holdingId]` route tree extended with two static tab segments. All three pages are force-dynamic, owner-scoped (workspace + `getAuthenticatedSqlContext`), guard `section === "holdings"`, and the tab pages reject the preview fixture. Preview keeps its existing fixture sheet at the bare route.
+- Navigation: `app/components/sub-nav.tsx` generalises UI-022's back-control + sub-tab chrome into one shared `SubNav` (CSS renamed `.income-*` → `.subnav*`); `income-nav.tsx` and the new `holding-nav.tsx` both render through it so the two sub-areas cannot drift. The holding heading is the compact identity line: symbol prominent, name · exchange · currency muted beside it. Back control targets the Holdings primary tab.
+- Details: `holding-detail.tsx` carries the old dialog sheet's content — facts dl (quantity, price, value, signed gain/percents, average cost × quantity), the foreign-currency display-values select, UI-018's price-history chart, the explanation, and the Dividends link (now a plain anchor; the dialog-close onClick guard retired with the dialog). A holding absent from the published valuation (fully exited) renders an honest "No published valuation" state — never zeros — with chart/dividends still reachable. Shared formatters extracted verbatim to `app/owned-holding-format.tsx`.
+- Transactions: new owner-scoped loader `app/owned-holding-transactions.ts` (`loadOwnedHoldingIdentity` — DB-resolved identity with the holdings loader's COALESCE fallbacks, so sold-out and unresolved holdings stay reachable; `loadOwnedHoldingTransactions` — all types/statuses newest-first, bounded at 500 with a separate COUNT for honest truncation). Screen reuses the `.income-fy-table` visual system; unknown gross renders "Unavailable" never zero; reversal/supersession and status disclosed as text; fees/tax as micro-notes.
+- News: declared placeholder mirroring the portfolio-level News tab's "route reserved" copy.
+- Holdings list: owned rows are real `<Link>`s to the detail route; the in-place `<dialog>` sheet, its per-row currency-view state, and `aria-haspopup` are gone. Tests that pinned the dialog (ui-003, ui-016, ui-018 part 8, qa-001b, brk-012c) were repointed at the new modules; `tests/ui-023.test.ts` adds 12 tests incl. migrated-schema ownership drills (cross-user/cross-portfolio null), honest null-amount rendering, and shared-nav wiring. Verified in the running local app across all three tabs, the back control, and the holdings-row entry. `npm run check` exit 0 (1635 pass, 10 gated skips).
+
 ### UI-022 — Income area navigation: back to the primary tabs, four equal sub-tabs (owner-reported)
 
 Status: DONE (2026-08-21). Two owner-reported navigation defects in the Income area:

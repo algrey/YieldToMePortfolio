@@ -2,14 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type MouseEvent,
-  type ReactNode,
-} from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
   historyBars,
   overviewRows,
@@ -28,7 +21,6 @@ import { BrandMark } from "./brand-mark";
 import { AccountLifecycleRecovery } from "./account-lifecycle-recovery";
 import { AccountLifecycleControls } from "./account-lifecycle-controls";
 import { OwnedPortfolioDetails } from "./portfolio-details";
-import { HoldingPriceChart } from "./holding-price-chart";
 import { ServiceWorkerRegistration } from "./service-worker-registration";
 import { subtractCalendarMonths } from "../overview-range";
 import { sampleOverviewChartPoints } from "../overview-chart";
@@ -46,14 +38,14 @@ import {
   type OwnedHoldingRow,
 } from "../owned-holdings-contract";
 import {
-  formatDecimalFixed,
-  formatDecimalTrimmed,
-  groupThousands,
-} from "../preview-decimal";
+  ownedHoldingAmount,
+  ownedHoldingDecimal,
+  ownedHoldingPercent,
+  ownedHoldingTrimmed,
+} from "../owned-holding-format";
 import {
   currentFyWindow,
   lastFyWindow,
-  parseDecimalResult,
 } from "../../domain/calculations/index.ts";
 
 export const portfolioSections = [
@@ -414,110 +406,6 @@ function EmptyState({
   );
 }
 
-// Gain/movement figures must carry an explicit +/− sign so the direction
-// does not depend on colour alone (UI_SPEC §10, QUAL-001). Negative values
-// already come back "-"-prefixed from formatDecimalFixed/Trimmed; this only
-// adds the missing "+" for positive, non-zero values.
-function signPrefixed(formatted: string, signed: boolean): string {
-  if (!signed) return formatted;
-  if (formatted.startsWith("-") || formatted.startsWith("−")) return formatted;
-  if (/^0(?:\.0+)?$/.test(formatted)) return formatted;
-  return `+${formatted}`;
-}
-
-// BRK-012C review round (2026-08-20, B3 fix): a cross-basis daily-movement
-// comparison (e.g. today's price from Sharesight-delayed, yesterday's from
-// the Yahoo-compatible EOD feed) is genuinely NOT comparable -- deliberately
-// left `priceClassComparable`-gated (STRICT) in `app/owned-holdings.ts`
-// rather than computed anyway, since a delayed-vs-EOD delta can be
-// misleading. The honesty defect was the LABEL: falling through to the
-// generic "Price unavailable" branch below falsely implied no price data
-// exists at all, when the real, current price IS known -- only the
-// MOVEMENT comparison isn't. `reason === "price_basis_changed"` (set by
-// `app/owned-holdings.ts`'s `dailyMovement`/`dailyPercent` fields) now
-// renders its own honest, distinct text instead.
-function ownedHoldingUnavailableText(reason: string | null | undefined) {
-  if (reason === "missing_basis") return "Basis unavailable";
-  if (reason === "price_basis_changed")
-    return "Movement unavailable (price basis changed)";
-  return "Price unavailable";
-}
-
-function ownedHoldingAmount(
-  value: {
-    status: "available" | "unavailable";
-    currencyCode: string;
-    value: string | null;
-    reason?: string | null;
-  },
-  scale = 2,
-  signed = false,
-) {
-  if (value.status !== "available" || value.value === null)
-    return ownedHoldingUnavailableText(value.reason);
-  try {
-    const formatted = signPrefixed(
-      groupThousands(
-        formatDecimalFixed(parseDecimalResult(value.value), scale),
-      ),
-      signed,
-    );
-    return `${value.currencyCode} ${formatted}`;
-  } catch {
-    return ownedHoldingUnavailableText(value.reason);
-  }
-}
-function ownedHoldingDecimal(value: string | null, scale = 2): string {
-  if (value === null) return "—";
-  try {
-    return groupThousands(formatDecimalFixed(parseDecimalResult(value), scale));
-  } catch {
-    return "—";
-  }
-}
-function ownedHoldingTrimmed(value: string | null, scale = 6): string {
-  if (value === null) return "—";
-  try {
-    return groupThousands(
-      formatDecimalTrimmed(parseDecimalResult(value), scale, {
-        trimTrailingZeros: true,
-      }),
-    );
-  } catch {
-    return "—";
-  }
-}
-function ownedHoldingPercent(
-  value: OwnedHoldingRow["dailyPercent"],
-  signed = false,
-): ReactNode {
-  return value.status === "available" && value.value !== null ? (
-    (() => {
-      try {
-        const formatted = signPrefixed(
-          formatDecimalTrimmed(parseDecimalResult(value.value), 2, {
-            trimTrailingZeros: true,
-          }),
-          signed,
-        );
-        return `${formatted}%`;
-      } catch {
-        return (
-          <>
-            <span aria-hidden="true">—</span>
-            <span className="sr-only">Percentage unavailable</span>
-          </>
-        );
-      }
-    })()
-  ) : (
-    <>
-      <span aria-hidden="true">—</span>
-      <span className="sr-only">Percentage unavailable</span>
-    </>
-  );
-}
-
 function OwnedHoldingsScreen({
   rows,
   homeCurrencyCode,
@@ -533,25 +421,22 @@ function OwnedHoldingsScreen({
   state: "complete" | "partial" | "empty" | "unavailable";
   cash?: OwnedCashSummary;
   coverage?: OwnedHoldingCoverage;
-  /** UI-006C: builds the "Dividends" link in each holding's detail sheet. Optional so preview/prototype callers of this screen (none currently pass owned rows without a real portfolio id, but the type stays defensive) never need a fabricated id. */
-  portfolioId?: string;
+  /** UI-023: builds each row's link to the standalone per-holding detail
+   * route (`/portfolio/:id/holdings/:portfolioSecurityId`) -- the owned
+   * in-place detail `<dialog>` sheet is gone (owner decision, competitor
+   * layout precedent: full-screen sub-tabs with a back control instead of
+   * a popup). Always present: the single call site renders only when
+   * `activePortfolio` exists. */
+  portfolioId: string;
 }) {
   const [sortKey, setSortKey] = useState<"ticker" | "value" | "daily" | "gain">(
     "daily",
   );
   const [direction, setDirection] = useState<Direction>("descending");
-  const [selectedHolding, setSelectedHolding] =
-    useState<OwnedHoldingRow | null>(null);
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  const openerRef = useRef<HTMLButtonElement | null>(null);
-  const [holdingViews, setHoldingViews] = useState<
-    Record<string, "native" | "home">
-  >({});
   const sortableRows = useMemo(
     () =>
       rows.map((row) => {
-        const rowView = holdingViews[row.id] ?? view;
-        const home = rowView === "home" && row.homeValue.status === "available";
+        const home = view === "home" && row.homeValue.status === "available";
         return {
           ...row,
           sort: {
@@ -562,23 +447,12 @@ function OwnedHoldingsScreen({
           },
         };
       }),
-    [holdingViews, rows, view],
+    [rows, view],
   );
   const sortedRows = useMemo(
     () => sortOwnedHoldings(sortableRows, sortKey, direction),
     [direction, sortableRows, sortKey],
   );
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (selectedHolding && dialog && !dialog.open) {
-      dialog.showModal();
-      dialog.querySelector<HTMLButtonElement>(".sheet-close")?.focus();
-    }
-    if (!selectedHolding && openerRef.current) {
-      openerRef.current.focus();
-      openerRef.current = null;
-    }
-  }, [selectedHolding]);
 
   function handleSort(nextKey: "ticker" | "value" | "daily" | "gain") {
     if (nextKey === sortKey) {
@@ -642,7 +516,7 @@ function OwnedHoldingsScreen({
         </div>
         <div className="holding-rows">
           {sortedRows.map((holding) => {
-            const rowView = holdingViews[holding.id] ?? view;
+            const rowView = view;
             const homeAvailable =
               holding.homeValue.status === "available" &&
               holding.homePrice.status === "available";
@@ -691,16 +565,15 @@ function OwnedHoldingsScreen({
                             : "comparison unavailable"
                   }`;
             return (
-              <button
+              // UI-023: a real link to the standalone per-holding detail
+              // route, replacing the in-place <dialog> sheet -- URL-
+              // addressable, works with JS disabled, and mirrors the
+              // preview path's existing holdingDetailHref link rows.
+              <Link
                 className="holding-row holdings-grid"
-                type="button"
                 key={holding.id}
+                href={`/portfolio/${portfolioId}/holdings/${holding.id}`}
                 aria-label={`${holding.symbol}, ${holding.name}, open details`}
-                aria-haspopup="dialog"
-                onClick={(event) => {
-                  openerRef.current = event.currentTarget;
-                  setSelectedHolding(holding);
-                }}
               >
                 <span className="row-primary symbol">{holding.symbol}</span>
                 <span className="row-primary numeric">
@@ -742,7 +615,7 @@ function OwnedHoldingsScreen({
                   {holding.name} · {holding.exchange} · {holding.currencyCode}
                 </span>
                 <span className="sr-only">{holding.explanation}</span>
-              </button>
+              </Link>
             );
           })}
         </div>
@@ -782,181 +655,6 @@ function OwnedHoldingsScreen({
           </p>
         ) : null}
       </aside>
-      {selectedHolding ? (
-        <dialog
-          ref={dialogRef}
-          className="holding-sheet"
-          aria-labelledby="owned-holding-sheet-title"
-          onCancel={(event) => {
-            event.preventDefault();
-            dialogRef.current?.close();
-            setSelectedHolding(null);
-          }}
-          onClose={() => setSelectedHolding(null)}
-        >
-          <button
-            className="sheet-close"
-            type="button"
-            onClick={() => dialogRef.current?.close()}
-          >
-            Close
-          </button>
-          <p className="eyebrow">Holding detail</p>
-          <h2 id="owned-holding-sheet-title">{selectedHolding.symbol}</h2>
-          <p>
-            {selectedHolding.name} · {selectedHolding.exchange} ·{" "}
-            {selectedHolding.currencyCode}
-          </p>
-          {selectedHolding.currencyCode !== homeCurrencyCode ? (
-            <label className="menu-field">
-              <span>Display values</span>
-              <select
-                value={holdingViews[selectedHolding.id] ?? view}
-                aria-label={`Display ${selectedHolding.symbol} values in native or home currency`}
-                onChange={(event) =>
-                  setHoldingViews((current) => ({
-                    ...current,
-                    [selectedHolding.id]: event.target.value as
-                      "native" | "home",
-                  }))
-                }
-              >
-                <option value="native">Native currency</option>
-                <option value="home">Home currency</option>
-              </select>
-            </label>
-          ) : null}
-          <dl className="detail-facts">
-            <div>
-              <dt>Quantity</dt>
-              <dd>{ownedHoldingDecimal(selectedHolding.quantity, 4)}</dd>
-            </div>
-            <div>
-              <dt>Price</dt>
-              <dd>
-                {(() => {
-                  const selectedView = holdingViews[selectedHolding.id] ?? view;
-                  const home =
-                    selectedView === "home" &&
-                    selectedHolding.homePrice.status === "available";
-                  const price = home
-                    ? selectedHolding.homePrice
-                    : selectedHolding.nativePrice === null
-                      ? {
-                          status: "unavailable" as const,
-                          value: null,
-                          currencyCode: selectedHolding.currencyCode,
-                        }
-                      : {
-                          status: "available" as const,
-                          value: selectedHolding.nativePrice,
-                          currencyCode: selectedHolding.currencyCode,
-                        };
-                  if (price.status !== "available" || price.value === null)
-                    return selectedHolding.nativePrice === null
-                      ? "Price unavailable"
-                      : `${selectedHolding.currencyCode} native fallback`;
-                  try {
-                    return `${price.currencyCode} ${ownedHoldingTrimmed(price.value)}${selectedView === "home" && !home ? " · native fallback" : ""}`;
-                  } catch {
-                    return "Price unavailable";
-                  }
-                })()}
-              </dd>
-            </div>
-            <div>
-              <dt>Value</dt>
-              <dd>
-                {ownedHoldingAmount(
-                  (holdingViews[selectedHolding.id] ?? view) === "home" &&
-                    selectedHolding.homeValue.status === "available"
-                    ? selectedHolding.homeValue
-                    : selectedHolding.nativeValue,
-                )}
-              </dd>
-            </div>
-            <div>
-              <dt>Gain</dt>
-              <dd className={`tone-${selectedHolding.gainTone}`}>
-                {ownedHoldingAmount(selectedHolding.unrealisedGain, 2, true)}
-              </dd>
-            </div>
-            <div>
-              <dt>Daily %</dt>
-              <dd className={`tone-${selectedHolding.dailyTone}`}>
-                {ownedHoldingPercent(selectedHolding.dailyPercent, true)}
-              </dd>
-            </div>
-            <div>
-              <dt>Unrealised %</dt>
-              <dd className={`tone-${selectedHolding.gainTone}`}>
-                {ownedHoldingPercent(selectedHolding.unrealisedPercent, true)}
-              </dd>
-            </div>
-            <div>
-              <dt>Average cost × quantity</dt>
-              <dd>
-                {selectedHolding.averageNativeCost === null
-                  ? "Basis unavailable"
-                  : `${selectedHolding.currencyCode} ${ownedHoldingTrimmed(selectedHolding.averageNativeCost)} × ${ownedHoldingDecimal(selectedHolding.quantity, 4)}`}
-              </dd>
-            </div>
-          </dl>
-          {portfolioId ? (
-            <HoldingPriceChart
-              key={selectedHolding.id}
-              portfolioId={portfolioId}
-              portfolioSecurityId={selectedHolding.id}
-              symbol={selectedHolding.symbol}
-            />
-          ) : null}
-          <p className="detail-explanation">{selectedHolding.explanation}</p>
-          {portfolioId ? (
-            <p>
-              {/* UI-016: the sheet is a real showModal() top-layer dialog
-                  (see the `.sheet-back`/QuotesScreen precedent above) --
-                  leaving it open while the client router's async RSC
-                  transition swaps in the dividends page left the new page
-                  rendering underneath a still-open top-layer element, so
-                  the click looked dead. Close the dialog synchronously on
-                  activation (before Link's own async navigate runs) and
-                  keep a real `href` so the anchor still works with JS
-                  disabled. Styled as a visible action (`.sheet-back`),
-                  not a trailing word.
-
-                  Review follow-up (c): a modified click (cmd/ctrl/shift/
-                  alt, or a non-primary button such as a middle click) is
-                  the browser's own "open in a new tab/window" gesture --
-                  Link's OWN handler already skips its SPA navigate for
-                  exactly this case (`vinext/dist/shims/link.js`'s
-                  `e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey ||
-                  e.altKey` guard) and lets the native browser action open a
-                  second tab while THIS tab's sheet stays put. Mirror the
-                  identical guard here so this dialog does not close (and
-                  the sheet does not vanish) out from under an owner who
-                  never left the current tab. */}
-              <Link
-                className="sheet-back"
-                href={`/portfolio/${portfolioId}/securities/${selectedHolding.id}/dividends`}
-                onClick={(event) => {
-                  if (
-                    event.button !== 0 ||
-                    event.metaKey ||
-                    event.ctrlKey ||
-                    event.shiftKey ||
-                    event.altKey
-                  ) {
-                    return;
-                  }
-                  dialogRef.current?.close();
-                }}
-              >
-                View dividends
-              </Link>
-            </p>
-          ) : null}
-        </dialog>
-      ) : null}
     </div>
   );
 }

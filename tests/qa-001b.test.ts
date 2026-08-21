@@ -296,22 +296,19 @@ test("QA-001B: positive and negative holding gain/movement/percent figures carry
   assert.match(html, /tone-negative/);
 });
 
-test("QA-001B: the owned holding-detail dialog also signs its gain/percent figures (source-verified; dialog is closed on initial static render)", async () => {
+test("QA-001B: the standalone holding Details screen also signs its gain/percent figures (source-verified; UI-023 replaced the in-place dialog)", async () => {
   const source = await readFile(
-    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    new URL("../app/components/holding-detail.tsx", import.meta.url),
     "utf8",
   );
   assert.match(
     source,
-    /ownedHoldingAmount\(selectedHolding\.unrealisedGain, 2, true\)/,
+    /ownedHoldingAmount\(holding\.unrealisedGain, 2, true\)/,
   );
+  assert.match(source, /ownedHoldingPercent\(holding\.dailyPercent, true\)/);
   assert.match(
     source,
-    /ownedHoldingPercent\(selectedHolding\.dailyPercent, true\)/,
-  );
-  assert.match(
-    source,
-    /ownedHoldingPercent\(selectedHolding\.unrealisedPercent, true\)/,
+    /ownedHoldingPercent\(holding\.unrealisedPercent, true\)/,
   );
 });
 

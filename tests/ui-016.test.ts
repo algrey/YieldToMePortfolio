@@ -40,42 +40,25 @@ function renderComponent(
 // established convention) -- mirrored here.
 // ---------------------------------------------------------------------------
 
-test("UI-016: the holding-sheet Dividends link closes the top-layer dialog on activation (before the client router navigates), keeps a real href, and is styled as a visible action, not a trailing word", async () => {
+test("UI-016/UI-023: the holding Details screen keeps a real Dividends href, styled as a visible action, not a trailing word", async () => {
+  // UI-023 replaced the owned holdings <dialog> sheet with the standalone
+  // Details screen -- there is no top-layer dialog left to close, so the
+  // link is a plain anchor again: real href (works with JS disabled), no
+  // onClick, same visible `.sheet-back` action styling.
   const source = await readFile(
-    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    new URL("../app/components/holding-detail.tsx", import.meta.url),
     "utf8",
   );
-  // The link block: a real href (works with JS disabled) alongside an
-  // onClick that closes the dialog synchronously, styled via the same
-  // button-like `.sheet-back` class already used elsewhere in this sheet.
   const linkBlockMatch = source.match(
-    /<Link\s+className="sheet-back"\s+href=\{`\/portfolio\/\$\{portfolioId\}\/securities\/\$\{selectedHolding\.id\}\/dividends`\}\s+onClick=\{\(event\) => \{[\s\S]{0,400}?dialogRef\.current\?\.close\(\);\s*\}\}\s*>\s*View dividends\s*<\/Link>/,
+    /<Link\s+className="sheet-back"\s+href=\{`\/portfolio\/\$\{portfolioId\}\/securities\/\$\{portfolioSecurityId\}\/dividends`\}\s*>\s*View dividends\s*<\/Link>/,
   );
   assert.ok(
     linkBlockMatch,
-    "expected the Dividends link to close the dialog via dialogRef.current?.close() in its own onClick, keep a real href, and render as a visible .sheet-back action",
+    "expected the Details screen's Dividends link to keep a real href and render as a visible .sheet-back action",
   );
-});
-
-test("UI-016 (review follow-up c): the Dividends link's onClick skips closing the dialog for a modified click (cmd/ctrl/shift/alt or a non-primary button), matching Link's own new-tab guard", async () => {
-  const source = await readFile(
-    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
-    "utf8",
-  );
-  const linkBlockMatch = source.match(
-    /<Link\s+className="sheet-back"[\s\S]{0,900}?<\/Link>/,
-  );
-  assert.ok(linkBlockMatch, "expected to find the Dividends link block");
-  const block = linkBlockMatch![0];
-  assert.match(block, /event\.button !== 0/);
-  assert.match(block, /event\.metaKey/);
-  assert.match(block, /event\.ctrlKey/);
-  assert.match(block, /event\.shiftKey/);
-  assert.match(block, /event\.altKey/);
-  // The guard must return BEFORE closing the dialog, not after.
-  const guardIndex = block.indexOf("return;");
-  const closeIndex = block.indexOf("dialogRef.current?.close();");
-  assert.ok(guardIndex > -1 && closeIndex > -1 && guardIndex < closeIndex);
+  // The dialog-closing onClick guard (review follow-up c) is retired WITH
+  // the dialog -- a plain page link must not carry a stray click handler.
+  assert.doesNotMatch(source, /dialogRef/);
 });
 
 test("UI-016: the .sheet-back class used for the Dividends link is the existing 44px button-styled link, not new one-off styling", async () => {

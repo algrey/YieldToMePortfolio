@@ -5,8 +5,8 @@
 // Owner-reported (2026-08-21): the Income routes render their own `<main>`
 // WITHOUT `PortfolioShell`, so once an owner opens Income there is no
 // primary-tab strip and no way back to `overview/holdings/quotes/details`
-// except the browser's own Back. The `.income-back` control below is that
-// way back, and it is rendered by every Income view including the
+// except the browser's own Back. The back control below is that way back,
+// and it is rendered by every Income view including the
 // degraded/unavailable ones (being stranded matters most there).
 //
 // Second owner report: the four sub-tabs were hand-written separately in
@@ -14,7 +14,10 @@
 // had drifted -- "All dividends" existed only on the landing view, and the
 // dividends list rendered no tab bar at all. Every view now renders THIS
 // list, so the four sub-tabs cannot diverge again.
-import Link from "next/link";
+//
+// UI-023 generalised the markup into `sub-nav.tsx`'s `SubNav` (shared with
+// the per-holding detail area); the Income tab list itself stays here.
+import { SubNav } from "./sub-nav";
 
 export type IncomeView = "next12" | "multi-year" | "gains" | "dividends";
 
@@ -62,44 +65,23 @@ export function IncomeNav({
   active,
 }: {
   portfolioId: string;
+  // Note the dividends list marks itself current for its filtered `?fy=`/
+  // `?window=next12` variants too -- the filtered view is still this
+  // section; its own "All years" link clears the filter.
   active: IncomeView;
 }) {
   return (
-    <div className="income-nav">
-      <div className="income-nav-heading">
-        <Link
-          className="income-back"
-          href={incomeBackHref(portfolioId)}
-          aria-label="Back to portfolio"
-        >
-          {/* Style guide -- Iconography: thin-line, geometric, consistent
-              stroke weight, green on dark. Stroke colour/width come from
-              `.income-back svg` in globals.css. */}
-          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M14.5 5 7.5 12l7 7" />
-          </svg>
-        </Link>
-        <p className="eyebrow">Income</p>
-      </div>
-      <nav className="income-view-tabs" aria-label="Income views">
-        {INCOME_VIEWS.map((view) =>
-          view.key === active ? (
-            // The current view is a non-link `<span aria-current="page">`,
-            // matching the pre-existing tab markup the CSS and the
-            // CGT-001B/UI-006A tests already assert on. Note the dividends
-            // list marks itself current for its filtered `?fy=`/
-            // `?window=next12` variants too -- the filtered view is still
-            // this section; its own "All years" link clears the filter.
-            <span key={view.key} aria-current="page">
-              {view.label}
-            </span>
-          ) : (
-            <Link key={view.key} href={view.href(portfolioId)}>
-              {view.label}
-            </Link>
-          ),
-        )}
-      </nav>
-    </div>
+    <SubNav
+      backHref={incomeBackHref(portfolioId)}
+      backLabel="Back to portfolio"
+      heading={<p className="eyebrow">Income</p>}
+      tabs={INCOME_VIEWS.map((view) => ({
+        key: view.key,
+        label: view.label,
+        href: view.href(portfolioId),
+      }))}
+      active={active}
+      tabsLabel="Income views"
+    />
   );
 }

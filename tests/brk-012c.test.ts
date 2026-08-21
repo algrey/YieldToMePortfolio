@@ -1109,7 +1109,17 @@ test("BRK-012C: the word 'live' never describes Sharesight price data in any act
   );
   assert.match(holdings, /Delayed \(Sharesight\)/);
   // B3 fix: the honest cross-basis daily-movement label actually renders.
-  assert.match(shell, /Movement unavailable \(price basis changed\)/);
+  // UI-023 moved the shared value formatters (including this label) out of
+  // the shell into owned-holding-format.tsx; the shell still renders it
+  // through that import, and the extracted module obeys the same
+  // never-say-live rule.
+  const format = await readFile(
+    new URL("../app/owned-holding-format.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(format, /Movement unavailable \(price basis changed\)/);
+  assert.doesNotMatch(stripLineComments(format), /\blive\b/i);
+  assert.match(shell, /from "\.\.\/owned-holding-format"/);
 });
 
 // ---------------------------------------------------------------------------

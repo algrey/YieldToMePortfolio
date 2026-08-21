@@ -148,13 +148,26 @@ test("UI-003 source keeps authenticated holdings owner-scoped and responsive", a
   assert.match(loader, /supplied rate unavailable/);
   assert.doesNotMatch(contract, /db\/repositories|node:crypto|SqlClient/);
   assert.doesNotMatch(shell, /parseDecimal\(/);
-  assert.match(shell, /parseDecimalResult/);
   assert.match(shell, /native fallback/);
   assert.match(shell, /OwnedHoldingsScreen/);
-  assert.match(shell, /<dialog[\s\S]*onCancel=/);
-  assert.match(shell, /Display .* values in native or home currency/);
   assert.match(shell, /Price unavailable/);
   assert.match(shell, /Cash separate/);
+  // UI-023: the decimal formatting and the per-holding currency-view select
+  // moved out of the shell with the standalone detail screen -- the honest
+  // parse path and the labelled select are pinned where they now live.
+  const [format, detail] = await Promise.all([
+    readFile(
+      new URL("../app/owned-holding-format.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../app/components/holding-detail.tsx", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  assert.doesNotMatch(format, /parseDecimal\(/);
+  assert.match(format, /parseDecimalResult/);
+  assert.match(detail, /Display .* values in native or home currency/);
   assert.match(styles, /\.holdings-grid\s*\{/);
   assert.match(styles, /\.holding-row\s*\{/);
 });
@@ -569,7 +582,10 @@ test("UI-003 narrow layout and dialog semantics retain overflow and keyboard hoo
   ]);
   assert.match(shell, /showModal\(\)/);
   assert.match(shell, /onCancel=/);
-  assert.match(shell, /openerRef/);
+  // UI-023: the owned holding sheet (and its lowercase `openerRef`) is
+  // gone -- rows link to the standalone detail route instead. The shell's
+  // remaining dialogs keep the opener-restore pattern under their own refs.
+  assert.match(shell, /OpenerRef/);
   assert.match(styles, /\.row-secondary[\s\S]*overflow: hidden/);
   assert.match(styles, /max-width: 350px/);
   assert.match(styles, /text-overflow: ellipsis/);

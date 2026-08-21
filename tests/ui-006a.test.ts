@@ -688,7 +688,7 @@ test("UI-006A: Income interactive controls meet the 44x44 CSS-pixel touch-target
     "utf8",
   );
   for (const selector of [
-    ".income-view-tabs a,\n.income-view-tabs span",
+    ".subnav-tabs a,\n.subnav-tabs span",
     ".income-explain-link",
     ".income-coverage-link",
     ".income-row-trigger",

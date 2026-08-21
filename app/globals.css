@@ -3737,10 +3737,11 @@ dd {
   gap: 20px;
 }
 
-/* UI-022: the Income area's own top chrome -- back control + eyebrow above
-   the shared sub-tab bar. Rendered by `app/components/income-nav.tsx` on
-   every Income view. */
-.income-nav {
+/* UI-022/UI-023: the shared chrome for full-screen sub-areas that replace
+   the primary tab strip (the Income area, the per-holding detail area) --
+   back control + heading above the sub-tab bar. Rendered by
+   `app/components/sub-nav.tsx`. */
+.subnav {
   display: grid;
   gap: 12px;
   /* Grid items default to `min-width: auto`, which let the tab row below
@@ -3749,20 +3750,42 @@ dd {
   min-width: 0;
 }
 
-.income-nav-heading {
+.subnav-heading {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 
-.income-nav-heading .eyebrow {
+.subnav-heading .eyebrow {
   margin-bottom: 0;
+}
+
+/* UI-023: compact holding identity in the heading row -- symbol prominent,
+   name/exchange/currency muted beside it, truncating rather than wrapping
+   so the row stays one line (style guide: strong grid alignment, minimal
+   decoration). */
+.subnav-title {
+  flex: 0 0 auto;
+  color: var(--cream);
+  font-size: 1.05rem;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+}
+
+.subnav-subtitle {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 44x44 touch target (QA-001B), pulled left by the icon's own optical slack
    so the glyph aligns with `.income-screen`'s 16px content edge instead of
    sitting indented from it. */
-.income-back {
+.subnav-back {
   width: 44px;
   min-height: 44px;
   display: inline-flex;
@@ -3773,7 +3796,7 @@ dd {
   color: var(--green);
 }
 
-.income-back svg {
+.subnav-back svg {
   width: 20px;
   height: 20px;
   fill: none;
@@ -3783,11 +3806,11 @@ dd {
   stroke-linejoin: round;
 }
 
-.income-back:hover {
+.subnav-back:hover {
   color: var(--green-bright);
 }
 
-.income-view-tabs {
+.subnav-tabs {
   display: flex;
   /* UI-022: four tabs no longer fit on one line at phone widths. They WRAP
      rather than scroll horizontally -- the owner-reported defect was tabs
@@ -3800,8 +3823,8 @@ dd {
   border-bottom: 1px solid var(--divider);
 }
 
-.income-view-tabs a,
-.income-view-tabs span {
+.subnav-tabs a,
+.subnav-tabs span {
   min-height: 44px;
   display: inline-flex;
   flex: 0 0 auto;
@@ -3816,10 +3839,55 @@ dd {
   text-transform: uppercase;
 }
 
-.income-view-tabs a[aria-current="page"],
-.income-view-tabs span[aria-current="page"] {
+.subnav-tabs a[aria-current="page"],
+.subnav-tabs span[aria-current="page"] {
   border-color: var(--green);
   color: var(--cream);
+}
+
+/* UI-023: the per-holding detail area (News / Details / Transactions).
+   Compact per the style guide: fine dividers rather than card borders,
+   label-left/value-right fact rows (the `.sheet-facts`/`.metric-list`
+   pattern), muted micro-notes. `.detail-facts` had no styling of its own
+   when it lived inside the old holding <dialog>; these rules are scoped to
+   the standalone screen so the income dialogs that also use the class are
+   untouched. */
+.holding-screen .detail-facts div {
+  min-height: 43px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  border-bottom: 1px solid var(--divider);
+}
+
+.holding-screen .detail-facts dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.holding-screen .detail-facts dd {
+  font-size: 0.78rem;
+  text-align: right;
+}
+
+.holding-screen .detail-explanation {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+/* Reuses `.menu-field`'s label+select styling outside the popover context:
+   no popover padding, and don't stretch the select across the whole
+   content column. */
+.holding-view-field {
+  max-width: 260px;
+  padding: 0;
+}
+
+.transaction-costs-note {
+  color: var(--muted);
+  font-size: 0.72rem;
 }
 
 .income-headline {
@@ -4109,7 +4177,7 @@ dd {
 
 /* CGT-001B: Capital gains screen -- deliberately reuses the Income tab's
    dark-token table/dialog/tab-row/empty-state classes
-   (`.income-fy-table*`, `.income-dialog`, `.income-view-tabs`,
+   (`.income-fy-table*`, `.income-dialog`, `.subnav-tabs`,
    `.empty-state`, `.income-row-trigger`, `.sheet-close`, `.unavailable`,
    `.numeric`, `.tone-positive`/`.tone-negative`) so the screen reads as the
    same visual system rather than a bespoke one; only what's genuinely new
