@@ -87,6 +87,9 @@ export default async function SecurityDividendsPage({
       lifetimeTotals={detail.lifetimeTotals}
       overridesByEventId={detail.overridesByEventId}
       manualRecordsById={detail.manualRecordsById}
+      frankingOverridesByManualRecordId={
+        detail.frankingOverridesByManualRecordId
+      }
       assumptions={detail.assumptions}
       portfolioAssumptions={detail.portfolioAssumptions}
       holdingsHref={`/portfolio/${portfolioId}/holdings`}

@@ -23,7 +23,9 @@ import {
   formatFxRate,
   formatShares,
   frankingDisplay,
+  frankingOverrideManualRecordId,
   freshEntryPrefill,
+  shouldOfferFrankingOverride,
   SOURCE_LABEL,
   type DialogPrefill,
   type ManualFact,
@@ -61,6 +63,7 @@ export function SecurityDividendsTab({
   lifetimeTotals,
   overridesByEventId,
   manualRecordsById,
+  frankingOverridesByManualRecordId,
   assumptions,
   portfolioAssumptions,
   holdingsHref,
@@ -79,6 +82,14 @@ export function SecurityDividendsTab({
   lifetimeTotals: LifetimeDividendTotals;
   overridesByEventId: Record<string, OverrideFact>;
   manualRecordsById: Record<string, ManualFact>;
+  /** BRK-011: the owner's persisted franking-currency override, keyed by
+   * `dividend_manual_records` id, when one already exists -- lets the
+   * inline entry point pre-fill and send the correct `expectedVersion` (an
+   * update, never a stray create). */
+  frankingOverridesByManualRecordId: Record<
+    string,
+    { id: string; version: number; frankingTotalDecimal: string }
+  >;
   assumptions: {
     dividendYieldPercentDecimal: string | null;
     frankingPercentDecimal: string | null;
@@ -138,6 +149,62 @@ export function SecurityDividendsTab({
     | { status: "saved" }
     | { status: "partial"; message: string }
   >({ status: "idle" });
+
+  // BRK-011: inline franking-currency override entry, keyed by
+  // `dividend_manual_records` id -- at most one row's form is open at a
+  // time. Kept separate from `recordDialogOpen`'s modal (a per-share
+  // concept) since this is a TOTALS-mode concept for a standalone imported
+  // row -- see `shouldOfferFrankingOverride`'s doc comment.
+  const [frankingOverrideOpenRecordId, setFrankingOverrideOpenRecordId] =
+    useState<string | null>(null);
+  const [frankingOverrideInput, setFrankingOverrideInput] = useState("");
+  const [frankingOverrideState, setFrankingOverrideState] = useState<
+    | { status: "idle" }
+    | { status: "saving" }
+    | { status: "error"; message: string }
+  >({ status: "idle" });
+
+  function openFrankingOverride(recordId: string) {
+    setFrankingOverrideOpenRecordId(recordId);
+    setFrankingOverrideInput(
+      frankingOverridesByManualRecordId[recordId]?.frankingTotalDecimal ?? "",
+    );
+    setFrankingOverrideState({ status: "idle" });
+  }
+
+  async function saveFrankingOverride(recordId: string) {
+    setFrankingOverrideState({ status: "saving" });
+    try {
+      const response = await fetch(
+        `/api/portfolios/${portfolioId}/dividend-franking-override`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            portfolioSecurityId,
+            dividendManualRecordId: recordId,
+            frankingTotalDecimal: frankingOverrideInput.trim(),
+            expectedVersion:
+              frankingOverridesByManualRecordId[recordId]?.version ?? null,
+          }),
+        },
+      );
+      const result = (await response.json()) as
+        { ok: true } | { ok: false; message: string };
+      if (result.ok) {
+        setFrankingOverrideOpenRecordId(null);
+        router.refresh();
+        return;
+      }
+      setFrankingOverrideState({ status: "error", message: result.message });
+    } catch {
+      setFrankingOverrideState({
+        status: "error",
+        message:
+          "The franking figure could not be saved. Check your connection and retry.",
+      });
+    }
+  }
 
   useEffect(() => {
     const dialog = recordDialogRef.current;
@@ -536,7 +603,84 @@ export function SecurityDividendsTab({
                         </>
                       ) : null}
                     </td>
-                    <td className="numeric">{frankingDisplay(row)}</td>
+                    <td className="numeric">
+                      {frankingDisplay(row)}
+                      {shouldOfferFrankingOverride(row)
+                        ? (() => {
+                            const recordId =
+                              frankingOverrideManualRecordId(row)!;
+                            const isOpen =
+                              frankingOverrideOpenRecordId === recordId;
+                            return (
+                              <>
+                                <br />
+                                <button
+                                  type="button"
+                                  className="dividend-franking-override-toggle"
+                                  onClick={() =>
+                                    isOpen
+                                      ? setFrankingOverrideOpenRecordId(null)
+                                      : openFrankingOverride(recordId)
+                                  }
+                                >
+                                  {frankingOverridesByManualRecordId[recordId]
+                                    ? "Edit entered franking"
+                                    : "Enter franking"}
+                                </button>
+                                {isOpen ? (
+                                  <div className="dividend-franking-override-form">
+                                    <p className="dividend-franking-override-instructions">
+                                      This dividend&apos;s franking credit is
+                                      not reported by Sharesight in a currency
+                                      this app can trust automatically. Enter
+                                      the franking credit in {row.currencyCode},
+                                      converted using the exchange rate on the
+                                      payment date (
+                                      {row.paymentDate ?? "unknown"}).
+                                    </p>
+                                    <label>
+                                      Franking credit ({row.currencyCode})
+                                      <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        value={frankingOverrideInput}
+                                        onChange={(event) =>
+                                          setFrankingOverrideInput(
+                                            event.target.value,
+                                          )
+                                        }
+                                      />
+                                    </label>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        saveFrankingOverride(recordId)
+                                      }
+                                      disabled={
+                                        frankingOverrideState.status ===
+                                        "saving"
+                                      }
+                                    >
+                                      {frankingOverrideState.status === "saving"
+                                        ? "Saving…"
+                                        : "Save"}
+                                    </button>
+                                    {frankingOverrideState.status ===
+                                    "error" ? (
+                                      <span
+                                        role="alert"
+                                        className="unavailable"
+                                      >
+                                        {frankingOverrideState.message}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+                              </>
+                            );
+                          })()
+                        : null}
+                    </td>
                     <td className="numeric">
                       {formatIncomeMoney(row.currencyCode, row.cashDecimal)}
                       {fxProvenance ? (

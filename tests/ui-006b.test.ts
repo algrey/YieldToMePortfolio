@@ -101,6 +101,9 @@ const MUTATION_ROUTES = [
   "../app/api/portfolios/[portfolioId]/dividend-assumptions/route.ts",
   "../app/api/portfolios/[portfolioId]/dividend-entries/route.ts",
   "../app/api/portfolios/[portfolioId]/dividend-fy-overrides/route.ts",
+  // BRK-011: added later than this task -- covered here too since this is
+  // the established generic CSRF-route registry, not re-duplicated per task.
+  "../app/api/portfolios/[portfolioId]/dividend-franking-override/route.ts",
 ];
 
 test("UI-006B: every mutation handler in the new dividend routes rejects cross-site requests before reading the body", async () => {

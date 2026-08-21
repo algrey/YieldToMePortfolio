@@ -62,6 +62,7 @@ function row(overrides: Partial<DerivedDividendRow>): DerivedDividendRow {
     fxRateToPortfolioDecimal: null,
     fxRateSource: null,
     frankingDerivedZero: false,
+    frankingCurrencySource: null,
     ...overrides,
   };
 }
@@ -84,6 +85,7 @@ const sampleDominatedImported = {
   fxRateToPortfolioDecimal: null,
   fxRateSource: null,
   frankingDerivedZero: false,
+  frankingCurrencySource: null,
 };
 
 test("UI-010: foldedInReceiptCount is 0 for a row with no dominated receipt and no additional count", () => {

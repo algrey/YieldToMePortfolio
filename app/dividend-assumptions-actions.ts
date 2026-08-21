@@ -33,6 +33,7 @@ import {
   createDividendAssumptionsRepository,
   createDividendEventOverrideRepository,
   createDividendFyOverrideRepository,
+  createDividendImportFrankingOverrideRepository,
   createDividendManualRecordRepository,
   createDividendReceiptRepository,
   type SqlClient,
@@ -773,6 +774,104 @@ export async function deleteDividendManualRecordAction(
   const context = await authenticatedContext(portfolioId);
   if (!("client" in context)) return context;
   return deleteDividendManualRecordWithContext(context, portfolioId, value);
+}
+
+// ---------------------------------------------------------------------------
+// BRK-011: owner-entered franking-currency override for a foreign-currency
+// Sharesight payout -- tier 3 of the owner's BINDING resolution cascade
+// (see docs/CALCULATIONS.md section 11). `db/repositories/dividends.ts`'s
+// `createDividendImportFrankingOverrideRepository` already enforces the
+// imported-row precondition (`ownedImportedManualRecord`: the target must
+// be a Sharesight-sourced, `import_batch_id`-attributed row); this layer
+// only validates the request shape, mirroring `saveDividendFyOverrideWithContext`'s
+// structure exactly (a single required decimal field, `expectedVersion`
+// null-or-number for create-or-update).
+// ---------------------------------------------------------------------------
+
+export type DividendFrankingOverrideActionResult =
+  { ok: true; id: string; version: number } | ActionFailure;
+
+export async function saveDividendFrankingOverrideWithContext(
+  context: DividendActionContext,
+  portfolioId: string,
+  value: unknown,
+): Promise<DividendFrankingOverrideActionResult> {
+  const input = record(value);
+  const portfolioSecurityId =
+    typeof input.portfolioSecurityId === "string" &&
+    input.portfolioSecurityId.length > 0
+      ? input.portfolioSecurityId
+      : null;
+  const dividendManualRecordId =
+    typeof input.dividendManualRecordId === "string" &&
+    input.dividendManualRecordId.length > 0
+      ? input.dividendManualRecordId
+      : null;
+  if (!portfolioSecurityId || !dividendManualRecordId) {
+    return {
+      ok: false,
+      status: 400,
+      message: "A security and dividend record are required.",
+    };
+  }
+  const frankingTotalDecimal = input.frankingTotalDecimal;
+  if (
+    typeof frankingTotalDecimal !== "string" ||
+    !isNonNegativeDecimalString(frankingTotalDecimal)
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      message: "Franking credits must be a non-negative amount.",
+    };
+  }
+  const expectedVersion = expectedVersionOf(input.expectedVersion);
+  if (expectedVersion === undefined) {
+    return { ok: false, status: 400, message: "A valid version is required." };
+  }
+
+  const result = await createDividendImportFrankingOverrideRepository(
+    context.client,
+  ).save(
+    context.userId,
+    portfolioId,
+    portfolioSecurityId,
+    dividendManualRecordId,
+    {
+      frankingTotalDecimal,
+      expectedVersion,
+      requestId: context.requestId,
+    },
+  );
+  if (!result.ok) {
+    return {
+      ok: false,
+      status:
+        result.reason === "version_conflict"
+          ? 409
+          : result.reason === "not_found"
+            ? 404
+            : result.reason === "invalid_input"
+              ? 400
+              : 503,
+      message:
+        result.reason === "version_conflict"
+          ? "This override changed elsewhere -- reload and retry."
+          : result.reason === "not_found"
+            ? "That dividend record was not found, or is not an imported foreign-currency payout."
+            : "The franking override could not be saved.",
+    };
+  }
+  return { ok: true, id: result.override.id, version: result.override.version };
+}
+
+export async function saveDividendFrankingOverrideAction(
+  portfolioId: string,
+  value: unknown,
+): Promise<DividendFrankingOverrideActionResult> {
+  const context = await authenticatedContext(portfolioId);
+  if (!("client" in context)) return context;
+  return saveDividendFrankingOverrideWithContext(context, portfolioId, value);
 }
 
 // ---------------------------------------------------------------------------

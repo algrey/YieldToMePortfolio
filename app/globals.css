@@ -4457,6 +4457,66 @@ dd {
   font-size: 0.72rem;
 }
 
+/* BRK-011 (review follow-up F2): the inline franking-currency override
+   entry point on a standalone imported row's Franking/share cell -- a
+   small text-link-styled toggle (never colour alone; the label text itself
+   changes between "Enter franking"/"Edit entered franking") that reveals a
+   compact form. */
+.dividend-franking-override-toggle {
+  display: inline-block;
+  margin-top: 2px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--green-bright);
+  font-size: 0.72rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* The revealed form -- a small bordered owner-entry surface inside a table
+   cell, matching `.dividend-dominated-evidence`'s established
+   bordered-box convention below (and reset to left-aligned text, since the
+   surrounding `.numeric` cell is right-aligned). */
+.dividend-franking-override-form {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--divider);
+  border-radius: 3px;
+  text-align: left;
+  white-space: normal;
+}
+
+.dividend-franking-override-form label {
+  display: block;
+  font-size: 0.8rem;
+  margin-bottom: 6px;
+}
+
+.dividend-franking-override-form input {
+  display: block;
+  margin-top: 2px;
+}
+
+.dividend-franking-override-form button {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--green-bright);
+  font: inherit;
+  cursor: pointer;
+}
+
+/* Instructions text inside the form -- muted micro-label treatment, same
+   convention as `.dividend-provider-note`/`.dividend-fx-provenance` above. */
+.dividend-franking-override-instructions {
+  color: var(--muted);
+  font-size: 0.72rem;
+  margin: 0 0 6px;
+}
+
 /* UI-010: the record/override dialog's read-only "superseded by this row"
    evidence panel -- honest provenance for a dominated receipt/imported
    record, clearly separated from the editable form fields above it. */

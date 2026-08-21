@@ -78,6 +78,15 @@ export async function fixture(): Promise<DatabaseSync> {
     INSERT INTO sharesight_sync_state(id,user_id,portfolio_id,sharesight_portfolio_id,enabled,last_synced_at,last_trade_watermark,created_at,updated_at,version) VALUES
       ('ssa','a','pa','101',1,NULL,NULL,'2026-07-01','2026-07-01',1),
       ('ssb','b','pb','202',1,NULL,NULL,'2026-07-01','2026-07-01',1);
+    -- BRK-011: one owner row per owner in the new franking-override table,
+    -- same purpose as the BRK-004 rows above -- referencing the existing
+    -- dmra/dmrb dividend_manual_records rows (the repository layer's own
+    -- "must be an imported row" business rule is not a DB constraint, so a
+    -- direct-SQL seed row against these per-share rows is a valid FK target
+    -- for export/purge coverage purposes).
+    INSERT INTO dividend_import_franking_overrides(id,user_id,portfolio_id,portfolio_security_id,dividend_manual_record_id,franking_total_decimal,created_at,updated_at,version) VALUES
+      ('difoa','a','pa','psa','dmra','1','2026-07-01','2026-07-01',1),
+      ('difob','b','pb','psb','dmrb','2','2026-07-01','2026-07-01',1);
   `);
   return db;
 }

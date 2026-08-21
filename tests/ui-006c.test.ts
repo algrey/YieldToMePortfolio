@@ -881,6 +881,7 @@ function row(overrides: Partial<DerivedDividendRow>): DerivedDividendRow {
     fxRateToPortfolioDecimal: null,
     fxRateSource: null,
     frankingDerivedZero: false,
+    frankingCurrencySource: null,
     ...overrides,
   };
 }

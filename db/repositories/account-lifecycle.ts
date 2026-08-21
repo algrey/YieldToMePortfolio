@@ -69,6 +69,10 @@ const OWNED_TABLES = [
   "dividend_fy_overrides",
   "dividend_event_overrides",
   "dividend_manual_records",
+  // BRK-011: owner-entered franking-currency override for a foreign-currency
+  // Sharesight payout, keyed to a dividend_manual_records row -- see
+  // db/schema.ts's header comment on `dividendImportFrankingOverrides`.
+  "dividend_import_franking_overrides",
   // BRK-004: owner-scoped Sharesight sync cursor (no token material -- see
   // db/schema.ts's header comment on `sharesightSyncState`).
   "sharesight_sync_state",
@@ -321,6 +325,10 @@ const PURGE_TABLES_IN_FK_ORDER = [
   // they are deleted before both.
   "dividend_receipts",
   "dividend_event_overrides",
+  // BRK-011: references dividend_manual_records with ON DELETE RESTRICT, so
+  // it must be purged before that table (child-before-parent, same FK-order
+  // convention as every other table in this list).
+  "dividend_import_franking_overrides",
   "dividend_manual_records",
   "dividend_security_assumptions",
   "dividend_fy_overrides",

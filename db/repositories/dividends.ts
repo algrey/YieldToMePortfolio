@@ -2811,3 +2811,247 @@ export function createDividendManualRecordRepository(
 
   return { get, list, create, update, remove };
 }
+
+// ---------------------------------------------------------------------------
+// Owner-scoped: dividend_import_franking_overrides (BRK-011).
+//
+// A sparse, one-row-per-imported-record overlay for a FOREIGN-CURRENCY
+// Sharesight payout's franking credit total -- see db/schema.ts's header
+// comment on `dividendImportFrankingOverrides` for the full ledger-
+// immutability/tier-cascade rationale. Unlike `dividend_event_overrides`,
+// every field here is REQUIRED (there is nothing sparse to partially update
+// -- an override either states a known franking total or does not exist),
+// so `save()` is a plain create-or-update keyed by
+// `(userId, portfolioId, dividendManualRecordId)`, mirroring
+// `dividend_event_overrides.save()`'s expectedVersion convention
+// (`null` = create, a number = update) without that function's tri-state
+// machinery.
+// ---------------------------------------------------------------------------
+
+export type DividendImportFrankingOverrideRecord = {
+  id: string;
+  userId: string;
+  portfolioId: string;
+  portfolioSecurityId: string;
+  dividendManualRecordId: string;
+  frankingTotalDecimal: string;
+  createdAt: string;
+  updatedAt: string;
+  version: number;
+};
+
+export type SaveDividendImportFrankingOverrideInput = {
+  frankingTotalDecimal: string;
+  expectedVersion: number | null;
+  requestId: string;
+};
+
+const DIVIDEND_IMPORT_FRANKING_OVERRIDE_COLUMNS = `
+  id, user_id, portfolio_id, portfolio_security_id, dividend_manual_record_id,
+  franking_total_decimal, created_at, updated_at, version
+`;
+
+function mapDividendImportFrankingOverride(
+  row: Record<string, unknown>,
+): DividendImportFrankingOverrideRecord {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    portfolioId: String(row.portfolio_id),
+    portfolioSecurityId: String(row.portfolio_security_id),
+    dividendManualRecordId: String(row.dividend_manual_record_id),
+    frankingTotalDecimal: String(row.franking_total_decimal),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    version: Number(row.version),
+  };
+}
+
+/**
+ * Verifies `dividendManualRecordId` is an IMPORTED (`import_batch_id IS NOT
+ * NULL`) row belonging to `userId`/`portfolioId`/`portfolioSecurityId` --
+ * an owner override only ever makes sense against a Sharesight-sourced
+ * totals-mode fact (see this table's schema.ts header note); an owner-typed
+ * manual record's franking is already directly editable through
+ * `dividendManualRecords.update()` and must never gain a second, competing
+ * override path.
+ */
+async function ownedImportedManualRecord(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  portfolioSecurityId: string,
+  dividendManualRecordId: string,
+): Promise<boolean> {
+  const row = await client.get<{ id: string }>(
+    `SELECT id FROM dividend_manual_records
+     WHERE id = ? AND user_id = ? AND portfolio_id = ? AND portfolio_security_id = ?
+       AND import_batch_id IS NOT NULL
+     LIMIT 1`,
+    [dividendManualRecordId, userId, portfolioId, portfolioSecurityId],
+  );
+  return Boolean(row);
+}
+
+export function createDividendImportFrankingOverrideRepository(
+  client: SqlClient,
+  now: () => string = () => new Date().toISOString(),
+) {
+  async function get(
+    userId: string,
+    portfolioId: string,
+    dividendManualRecordId: string,
+  ): Promise<DividendImportFrankingOverrideRecord | null> {
+    const row = await client.get<Record<string, unknown>>(
+      `SELECT ${DIVIDEND_IMPORT_FRANKING_OVERRIDE_COLUMNS}
+       FROM dividend_import_franking_overrides
+       WHERE user_id = ? AND portfolio_id = ? AND dividend_manual_record_id = ?
+       LIMIT 1`,
+      [userId, portfolioId, dividendManualRecordId],
+    );
+    return row ? mapDividendImportFrankingOverride(row) : null;
+  }
+
+  async function list(
+    userId: string,
+    portfolioId: string,
+    portfolioSecurityId?: string,
+  ): Promise<DividendImportFrankingOverrideRecord[]> {
+    const predicate = portfolioSecurityId
+      ? "AND portfolio_security_id = ?"
+      : "";
+    const params = portfolioSecurityId
+      ? [userId, portfolioId, portfolioSecurityId]
+      : [userId, portfolioId];
+    const rows = await client.all<Record<string, unknown>>(
+      `SELECT ${DIVIDEND_IMPORT_FRANKING_OVERRIDE_COLUMNS}
+       FROM dividend_import_franking_overrides
+       WHERE user_id = ? AND portfolio_id = ? ${predicate}`,
+      params,
+    );
+    return rows.map(mapDividendImportFrankingOverride);
+  }
+
+  async function save(
+    userId: string,
+    portfolioId: string,
+    portfolioSecurityId: string,
+    dividendManualRecordId: string,
+    input: SaveDividendImportFrankingOverrideInput,
+  ): Promise<
+    | { ok: true; override: DividendImportFrankingOverrideRecord }
+    | DividendOwnerMutationFailure
+  > {
+    if (!isNonNegativeDecimalString(input.frankingTotalDecimal)) {
+      return { ok: false, reason: "invalid_input" };
+    }
+    if (
+      !(await ownedImportedManualRecord(
+        client,
+        userId,
+        portfolioId,
+        portfolioSecurityId,
+        dividendManualRecordId,
+      ))
+    )
+      return { ok: false, reason: "not_found" };
+    const updatedAt = now();
+    if (input.expectedVersion === null) {
+      const id = randomUUID();
+      const statements: SqlStatement[] = [
+        {
+          sql: `INSERT INTO dividend_import_franking_overrides (
+            id, user_id, portfolio_id, portfolio_security_id,
+            dividend_manual_record_id, franking_total_decimal, created_at,
+            updated_at, version
+          )
+          SELECT ?, ?, ?, ?, ?, ?, ?, ?, 1
+          WHERE NOT EXISTS (
+            SELECT 1 FROM dividend_import_franking_overrides
+            WHERE user_id = ? AND portfolio_id = ? AND dividend_manual_record_id = ?
+          )`,
+          params: [
+            id,
+            userId,
+            portfolioId,
+            portfolioSecurityId,
+            dividendManualRecordId,
+            input.frankingTotalDecimal,
+            updatedAt,
+            updatedAt,
+            userId,
+            portfolioId,
+            dividendManualRecordId,
+          ],
+        },
+        createConditionalAuditInsertStatement(
+          {
+            actorUserId: userId,
+            targetOwnerUserId: userId,
+            action: "dividend.import_franking_override.create",
+            targetType: "dividend_import_franking_override",
+            targetId: id,
+            requestId: input.requestId,
+            result: "success",
+            occurredAt: updatedAt,
+          },
+          "EXISTS (SELECT 1 FROM dividend_import_franking_overrides WHERE id = ?)",
+          [id],
+          now,
+        ),
+      ];
+      try {
+        await client.batch(statements);
+      } catch {
+        return { ok: false, reason: "atomic_failure" };
+      }
+      const override = await get(userId, portfolioId, dividendManualRecordId);
+      return override && override.id === id
+        ? { ok: true, override }
+        : { ok: false, reason: "version_conflict" };
+    }
+    const statements: SqlStatement[] = [
+      createConditionalAuditInsertStatement(
+        {
+          actorUserId: userId,
+          targetOwnerUserId: userId,
+          action: "dividend.import_franking_override.update",
+          targetType: "dividend_import_franking_override",
+          targetId: `${portfolioSecurityId}:${dividendManualRecordId}`,
+          requestId: input.requestId,
+          result: "success",
+          occurredAt: updatedAt,
+        },
+        "EXISTS (SELECT 1 FROM dividend_import_franking_overrides WHERE user_id = ? AND portfolio_id = ? AND dividend_manual_record_id = ? AND version = ?)",
+        [userId, portfolioId, dividendManualRecordId, input.expectedVersion],
+        now,
+      ),
+      {
+        sql: `UPDATE dividend_import_franking_overrides SET
+          franking_total_decimal = ?, updated_at = ?, version = version + 1
+        WHERE user_id = ? AND portfolio_id = ? AND dividend_manual_record_id = ?
+          AND version = ?
+        RETURNING ${DIVIDEND_IMPORT_FRANKING_OVERRIDE_COLUMNS}`,
+        params: [
+          input.frankingTotalDecimal,
+          updatedAt,
+          userId,
+          portfolioId,
+          dividendManualRecordId,
+          input.expectedVersion,
+        ],
+      },
+    ];
+    const rows = await client.batch(statements);
+    const row = rows[rows.length - 1]?.results[0];
+    if (!row)
+      return await resolveOwnerMutationFailure(
+        client,
+        "SELECT id FROM dividend_import_franking_overrides WHERE user_id = ? AND portfolio_id = ? AND dividend_manual_record_id = ?",
+        [userId, portfolioId, dividendManualRecordId],
+      );
+    return { ok: true, override: mapDividendImportFrankingOverride(row) };
+  }
+
+  return { get, list, save };
+}

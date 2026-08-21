@@ -223,6 +223,39 @@ export type DividendManualRecordFact = {
   // known and passes through unchanged) or for the BRK-010 unverified-
   // nonzero-foreign guard's nulling (that stays genuinely unknown).
   frankingDerivedZero?: boolean;
+  // BRK-011: EXTERNAL input -- the owner's persisted
+  // `dividend_import_franking_overrides` figure for THIS specific imported
+  // record, when one exists (`db/schema.ts`'s header note; only ever
+  // meaningful for an `importBatchId !== null` totals-mode fact). `null`/
+  // `undefined` on every record with no override. Consumed once, at the
+  // very start of the imported-tier pipeline, by `applyFrankingCurrencyOverride`
+  // below -- never read again downstream (the resulting
+  // `frankingCurrencySource` flag is what the rest of this module tests).
+  frankingOverrideTotalDecimal?: string | null;
+  // BRK-011: INTERNAL bookkeeping flag, set ONLY by this module's own
+  // `applyFrankingCurrencyOverride` pre-pass (never by any external caller,
+  // mirroring `convertedToSecurityCurrency`/`frankingDerivedZero`'s
+  // established convention) -- `"owner_manual"` exactly when
+  // `frankingOverrideTotalDecimal` above was applied. The tier-1
+  // (Sharesight-supplied AUD franking) and tier-2 (automatic payment-date
+  // FX conversion) values this field's type reserves are NOT produced by
+  // any code path today, both left UNCONFIRMED rather than disproven --
+  // `scripts/sharesight-franking-fx-spike.mjs`'s live evidence (see
+  // `docs/ARCHITECTURE.md` §8.2) found the documented tier-1-shaped
+  // `tax_credit` field absent from all 10 of the owner's foreign (USD)
+  // payouts AND all 61 of their franked native (AUD) payouts -- evidence
+  // it does not populate on this account's wire, but the untested
+  // foreign+franked combination stops short of proof; tier 2 stays
+  // INCONCLUSIVE for the separate, simpler reason that no franked foreign
+  // payout exists to confirm franking's own-currency denomination against.
+  // Both tiers stay documented-but-unimplemented rather than guessing.
+  // Once set, this SUPPRESSES `resolveImportedRecordCurrency`'s
+  // unverified-nonzero-foreign guard (the override IS the owner's trusted,
+  // deliberate resolution of exactly that uncertainty) and, because
+  // `totalFrankingDecimal` is already non-null by the time
+  // `deriveAbsentImportedFranking` runs, that function's absent-value
+  // derivation naturally never fires for an overridden record either.
+  frankingCurrencySource?: "owner_manual" | null;
 };
 
 export type DerivedDividendRowSource =
@@ -262,6 +295,9 @@ export type DominatedImported = {
   /** DIV-007: mirrors `DerivedDividendRow.frankingDerivedZero` for a
    * dominated imported fact -- see that field's doc comment. */
   frankingDerivedZero: boolean;
+  /** BRK-011: mirrors `DerivedDividendRow.frankingCurrencySource` for a
+   * dominated imported fact -- see that field's doc comment. */
+  frankingCurrencySource: "owner_manual" | null;
 };
 
 export type DerivedDividendRow = {
@@ -326,6 +362,21 @@ export type DerivedDividendRow = {
    * unrelated and untouched -- that case stays `frankingTotalDecimal: null`
    * (genuinely unknown), never reaching this flag at all. */
   frankingDerivedZero: boolean;
+  /** BRK-011: non-null exactly `"owner_manual"` when this row's
+   * `frankingTotalDecimal` came from an owner-entered
+   * `dividend_import_franking_overrides` figure (tier 3 of the owner's
+   * BINDING resolution cascade -- see `docs/CALCULATIONS.md` section 11).
+   * `null` for every other source, including a Sharesight-reported figure
+   * (whether an explicit value or DIV-007's inferred absent-field zero) and
+   * the BRK-010 unverified-currency guard's null. The owner's cascade also
+   * names tier-1 (`"sharesight"`) and tier-2 (`"sharesight_rate"`)
+   * provenance, but neither is implemented by any code path today -- this
+   * field's type stays a plain `"owner_manual" | null` rather than a wider
+   * union with unreachable members; widening it is the natural extension
+   * point if a future evidence-backed implementation adds either tier. See
+   * `DividendManualRecordFact.frankingCurrencySource`'s doc comment for the
+   * live-spike evidence this reflects. */
+  frankingCurrencySource: "owner_manual" | null;
 };
 
 export type DeriveDividendHistoryInput = {
@@ -562,6 +613,29 @@ function isNonZeroStoredDecimal(value: string | null): boolean {
   }
 }
 
+/**
+ * BRK-011 tier 3 (owner-entered conversion, the only tier this task's live
+ * evidence lets it implement -- see `DividendManualRecordFact.frankingCurrencySource`'s
+ * doc comment): applied as the VERY FIRST step of the imported-tier
+ * pipeline, before `resolveImportedRecordCurrency`'s unverified-nonzero-
+ * foreign guard or `deriveAbsentImportedFranking`'s absent-value inference
+ * ever run, so the owner's deliberate figure is never re-nulled by either.
+ * A record with no override (`frankingOverrideTotalDecimal` absent/null) is
+ * returned completely unchanged -- every pre-BRK-011 fixture/caller keeps
+ * behaving byte-identically.
+ */
+function applyFrankingCurrencyOverride(
+  record: DividendManualRecordFact,
+): DividendManualRecordFact {
+  const overrideTotal = record.frankingOverrideTotalDecimal ?? null;
+  if (overrideTotal === null) return record;
+  return {
+    ...record,
+    totalFrankingDecimal: overrideTotal,
+    frankingCurrencySource: "owner_manual",
+  };
+}
+
 function resolveImportedRecordCurrency(
   record: DividendManualRecordFact,
   securityCurrencyCode: string,
@@ -582,8 +656,16 @@ function resolveImportedRecordCurrency(
   // (case B) or degrades (case C, below). A zero/absent franking total --
   // the overwhelmingly common shape, since foreign-currency dividends are
   // typically unfranked -- is left completely unaffected either way.
+  //
+  // BRK-011: this guard is SUPPRESSED when `applyFrankingCurrencyOverride`
+  // already applied an owner-entered figure (`frankingCurrencySource ===
+  // "owner_manual"`) -- the owner's deliberate conversion IS the trusted
+  // resolution of exactly the uncertainty this guard exists to protect
+  // against, so it must never re-null the value it just set.
   const rawTotalFranking = record.totalFrankingDecimal ?? null;
-  const frankingUnverified = isNonZeroStoredDecimal(rawTotalFranking);
+  const frankingOverridden = record.frankingCurrencySource === "owner_manual";
+  const frankingUnverified =
+    !frankingOverridden && isNonZeroStoredDecimal(rawTotalFranking);
   const totalFrankingDecimal = frankingUnverified ? null : rawTotalFranking;
 
   if (securityCurrencyCode !== portfolioBaseCurrencyCode) {
@@ -808,6 +890,7 @@ function toDominatedImported(
       : null,
     fxRateSource: converted ? (record.fxRateSource ?? null) : null,
     frankingDerivedZero: record.frankingDerivedZero === true,
+    frankingCurrencySource: record.frankingCurrencySource ?? null,
   };
 }
 
@@ -977,6 +1060,7 @@ export function deriveDividendHistoryForSecurity(
   // silently assuming every imported fact is already security-native.
   const importedRecords = input.manualRecords
     .filter((record) => record.importBatchId !== null)
+    .map((record) => applyFrankingCurrencyOverride(record))
     .map((record) =>
       deriveAbsentImportedFranking(
         record,
@@ -1064,6 +1148,9 @@ export function deriveDividendHistoryForSecurity(
     // DIV-007: non-null only meaningfully `true` when `source === "imported"`
     // -- see `DerivedDividendRow.frankingDerivedZero`'s doc comment.
     frankingDerivedZero: boolean;
+    // BRK-011: non-null only when `source === "imported"` -- see
+    // `DerivedDividendRow.frankingCurrencySource`'s doc comment.
+    frankingCurrencySource: "owner_manual" | null;
   } | null {
     if (manual) {
       return {
@@ -1084,6 +1171,7 @@ export function deriveDividendHistoryForSecurity(
         fxRateToPortfolioDecimal: null,
         fxRateSource: null,
         frankingDerivedZero: false,
+        frankingCurrencySource: null,
       };
     }
     if (receiptResolution) {
@@ -1105,6 +1193,7 @@ export function deriveDividendHistoryForSecurity(
         fxRateToPortfolioDecimal: null,
         fxRateSource: null,
         frankingDerivedZero: false,
+        frankingCurrencySource: null,
       };
     }
     if (imported) {
@@ -1125,6 +1214,7 @@ export function deriveDividendHistoryForSecurity(
         fxRateToPortfolioDecimal: display.fxRateToPortfolioDecimal,
         fxRateSource: display.fxRateSource,
         frankingDerivedZero: imported.frankingDerivedZero === true,
+        frankingCurrencySource: imported.frankingCurrencySource ?? null,
       };
     }
     return null;
@@ -1237,6 +1327,7 @@ export function deriveDividendHistoryForSecurity(
     let fxRateSource: string | null = null;
     let currencyCodeOverride: string | null = null;
     let frankingDerivedZero = false;
+    let frankingCurrencySource: "owner_manual" | null = null;
 
     if (override) {
       source = "edited";
@@ -1264,6 +1355,7 @@ export function deriveDividendHistoryForSecurity(
       fxRateSource = ownerFact.fxRateSource;
       currencyCodeOverride = ownerFact.currencyCodeOverride;
       frankingDerivedZero = ownerFact.frankingDerivedZero;
+      frankingCurrencySource = ownerFact.frankingCurrencySource;
       // DIV-005 Round A: an imported row that missed this event's own
       // window but is within window of the WINNING manual/receipt fact's
       // own date chains in here instead of surfacing as a second row.
@@ -1332,6 +1424,7 @@ export function deriveDividendHistoryForSecurity(
       fxRateToPortfolioDecimal,
       fxRateSource,
       frankingDerivedZero,
+      frankingCurrencySource,
     });
   }
 
@@ -1526,6 +1619,10 @@ export function deriveDividendHistoryForSecurity(
     // whose franking total was derived from an absent stored value -- see
     // `DerivedDividendRow.frankingDerivedZero`'s doc comment.
     frankingDerivedZero?: boolean;
+    // BRK-011: only ever set for a `source === "imported"` field whose
+    // franking total came from an owner override -- see
+    // `DerivedDividendRow.frankingCurrencySource`'s doc comment.
+    frankingCurrencySource?: "owner_manual" | null;
   }): void {
     const franking = resolveFrankingPerShare(
       fields.overrideFrankingPerShare,
@@ -1574,6 +1671,7 @@ export function deriveDividendHistoryForSecurity(
       fxRateToPortfolioDecimal: fields.fxRateToPortfolioDecimal ?? null,
       fxRateSource: fields.fxRateSource ?? null,
       frankingDerivedZero: fields.frankingDerivedZero ?? false,
+      frankingCurrencySource: fields.frankingCurrencySource ?? null,
     });
   }
 
@@ -1683,6 +1781,7 @@ export function deriveDividendHistoryForSecurity(
           fxRateToPortfolioDecimal: display.fxRateToPortfolioDecimal,
           fxRateSource: display.fxRateSource,
           frankingDerivedZero: record.frankingDerivedZero === true,
+          frankingCurrencySource: record.frankingCurrencySource ?? null,
         });
       }
       continue;
@@ -1755,6 +1854,8 @@ export function deriveDividendHistoryForSecurity(
         fxRateToPortfolioDecimal: display.fxRateToPortfolioDecimal,
         fxRateSource: display.fxRateSource,
         frankingDerivedZero: importedPick.winner.frankingDerivedZero === true,
+        frankingCurrencySource:
+          importedPick.winner.frankingCurrencySource ?? null,
       });
     }
   }
@@ -1841,6 +1942,7 @@ export function deriveDividendHistoryForSecurity(
       fxRateToPortfolioDecimal: ownerFact.fxRateToPortfolioDecimal,
       fxRateSource: ownerFact.fxRateSource,
       frankingDerivedZero: ownerFact.frankingDerivedZero,
+      frankingCurrencySource: ownerFact.frankingCurrencySource,
     });
   }
 

@@ -82,6 +82,7 @@ import type { SqlClient } from "../db/repositories/sql-client.ts";
 import {
   createDividendAssumptionsRepository,
   createDividendEventOverrideRepository,
+  createDividendImportFrankingOverrideRepository,
   createDividendManualRecordRepository,
 } from "../db/repositories/dividends.ts";
 import { loadOwnedDividendHistory } from "./owned-dividend-history.ts";
@@ -124,6 +125,17 @@ export type OwnedSecurityDividendManualFact = {
   importBatchId: string | null;
 };
 
+/** BRK-011: the owner's persisted franking-currency override for one
+ * imported record, when one exists -- keyed by `dividendManualRecordId` in
+ * `OwnedSecurityDividendDetail.frankingOverridesByManualRecordId` so the
+ * tab's entry point can pre-fill an ALREADY-overridden row's edit form with
+ * the correct `expectedVersion` (an update, never a stray create). */
+export type OwnedSecurityDividendFrankingOverrideFact = {
+  id: string;
+  version: number;
+  frankingTotalDecimal: string;
+};
+
 export type OwnedSecurityDividendAssumptions = {
   dividendYieldPercentDecimal: string | null;
   frankingPercentDecimal: string | null;
@@ -154,6 +166,12 @@ export type OwnedSecurityDividendDetail = {
   lifetimeTotals: LifetimeDividendTotals;
   overridesByEventId: Record<string, OwnedSecurityDividendOverrideFact>;
   manualRecordsById: Record<string, OwnedSecurityDividendManualFact>;
+  /** BRK-011: keyed by `dividendManualRecordId` -- see
+   * `OwnedSecurityDividendFrankingOverrideFact`'s doc comment. */
+  frankingOverridesByManualRecordId: Record<
+    string,
+    OwnedSecurityDividendFrankingOverrideFact
+  >;
   assumptions: OwnedSecurityDividendAssumptions;
   portfolioAssumptions: OwnedSecurityDividendPortfolioAssumptions;
 };
@@ -189,6 +207,7 @@ export async function loadOwnedSecurityDividendDetail(
     eventRows,
     overrideRecords,
     manualRecords,
+    frankingOverrideRecords,
     securityAssumptions,
     portfolioAssumptions,
   ] = await Promise.all([
@@ -207,6 +226,11 @@ export async function loadOwnedSecurityDividendDetail(
       portfolioSecurityId,
     ),
     createDividendManualRecordRepository(client).list(
+      userId,
+      portfolioId,
+      portfolioSecurityId,
+    ),
+    createDividendImportFrankingOverrideRepository(client).list(
       userId,
       portfolioId,
       portfolioSecurityId,
@@ -285,6 +309,18 @@ export async function loadOwnedSecurityDividendDetail(
     };
   }
 
+  const frankingOverridesByManualRecordId: Record<
+    string,
+    OwnedSecurityDividendFrankingOverrideFact
+  > = {};
+  for (const override of frankingOverrideRecords) {
+    frankingOverridesByManualRecordId[override.dividendManualRecordId] = {
+      id: override.id,
+      version: override.version,
+      frankingTotalDecimal: override.frankingTotalDecimal,
+    };
+  }
+
   // Orchestrator ruling (follow-up 1): drop post-exit "no new dividend"
   // artifacts from the TAB's view and recompute lifetime totals from the
   // filtered set -- see the module header.
@@ -307,6 +343,7 @@ export async function loadOwnedSecurityDividendDetail(
     lifetimeTotals,
     overridesByEventId,
     manualRecordsById,
+    frankingOverridesByManualRecordId,
     assumptions: {
       dividendYieldPercentDecimal:
         securityAssumptions?.dividendYieldPercentDecimal ?? null,

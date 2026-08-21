@@ -38,6 +38,7 @@ import {
   createDividendAssumptionsRepository,
   createDividendEventOverrideRepository,
   createDividendFyOverrideRepository,
+  createDividendImportFrankingOverrideRepository,
   createDividendManualRecordRepository,
   createDividendReceiptRepository,
 } from "../db/repositories/dividends.ts";
@@ -231,6 +232,22 @@ export async function loadOwnedDividendHistory(
     userId,
     portfolioId,
   );
+  // BRK-011: owner-entered franking-currency overrides, one per imported
+  // record at most -- see db/schema.ts's header comment on
+  // `dividendImportFrankingOverrides`. Keyed by `dividendManualRecordId` so
+  // the loop below can attach each record's own override (if any) as it
+  // builds `DividendManualRecordFact`.
+  const frankingOverrides =
+    await createDividendImportFrankingOverrideRepository(client).list(
+      userId,
+      portfolioId,
+    );
+  const frankingOverrideByRecordId = new Map(
+    frankingOverrides.map((override) => [
+      override.dividendManualRecordId,
+      override.frankingTotalDecimal,
+    ]),
+  );
   const manualBySecurity = new Map<string, DividendManualRecordFact[]>();
   for (const record of manualRecords) {
     const list = manualBySecurity.get(record.portfolioSecurityId) ?? [];
@@ -254,6 +271,10 @@ export async function loadOwnedDividendHistory(
       currencyCode: record.currencyCode,
       fxRateToPortfolioDecimal: record.fxRateToPortfolioDecimal,
       fxRateSource: record.fxRateSource,
+      // BRK-011: this record's own owner override, when one exists -- see
+      // domain/dividends/history.ts's `applyFrankingCurrencyOverride`.
+      frankingOverrideTotalDecimal:
+        frankingOverrideByRecordId.get(record.id) ?? null,
     });
     manualBySecurity.set(record.portfolioSecurityId, list);
   }

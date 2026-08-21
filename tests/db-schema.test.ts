@@ -102,6 +102,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "dividend_event_overrides",
     "dividend_events",
     "dividend_fy_overrides",
+    "dividend_import_franking_overrides",
     "dividend_manual_records",
     "dividend_portfolio_assumptions",
     "dividend_receipts",

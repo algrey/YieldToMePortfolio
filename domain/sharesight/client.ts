@@ -392,6 +392,25 @@ export type SharesightClient = Readonly<{
     portfolioId: string,
     params?: Readonly<{ balanceDate?: string }>,
   ): Promise<SharesightResult<unknown>>;
+  /**
+   * BRK-011 evidence probe (2026-08-21) -- same discipline as
+   * `getPortfolioValuation` above: RAW parsed JSON, no `parse.ts` domain
+   * contract, requested against the identical endpoint `listPayouts`
+   * already uses (`payoutsBaseUrl`, `/portfolios/:id/payouts.json`). Exists
+   * SOLELY so `scripts/sharesight-franking-fx-spike.mjs` can inspect a
+   * payout's full raw field SHAPE (via the pure, values-safe
+   * `deriveShapeEvidence`) without `parse.ts`'s typed `listPayouts` silently
+   * dropping an undocumented/unparsed field (e.g. `tax_credit`) before the
+   * spike ever sees it existed. Never promoted to a typed contract, never
+   * consumed by any production code path -- this is the "explicitly
+   * spike-only hook INSIDE domain/sharesight/" AGENTS.md's Sharesight
+   * read-only rule requires in place of an out-of-module `fetch` (BRK-011
+   * review finding B1).
+   */
+  getPayoutsRaw?(
+    portfolioId: string,
+    params?: SharesightListParams,
+  ): Promise<SharesightResult<unknown>>;
 }>;
 
 async function sha256Hex(value: string): Promise<string> {
@@ -829,6 +848,20 @@ export function createSharesightClient(
         "getPortfolioValuation",
         `/portfolios/${encodeURIComponent(portfolioId)}/valuation.json`,
         params?.balanceDate ? { balance_date: params.balanceDate } : undefined,
+        payoutsBaseUrl,
+      );
+    },
+    // BRK-011 evidence probe (2026-08-21), UNPROMOTED -- RAW passthrough, no
+    // domain parsing (see `SharesightClient.getPayoutsRaw`'s doc comment
+    // above). Identical endpoint/params/host to `listPayouts` -- never a
+    // second host, never a different route -- this is purely "same request,
+    // skip the typed parse" so a spike script can see fields `parse.ts`
+    // doesn't capture.
+    async getPayoutsRaw(portfolioId, params) {
+      return getJson(
+        "getPayoutsRaw",
+        `/portfolios/${encodeURIComponent(portfolioId)}/payouts.json`,
+        toSearchParams(params),
         payoutsBaseUrl,
       );
     },

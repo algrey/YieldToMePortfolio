@@ -3244,6 +3244,100 @@ export const dividendManualRecords = sqliteTable(
   ],
 );
 
+/**
+ * BRK-011: sparse, one-row-per-imported-record owner override for a
+ * FOREIGN-CURRENCY Sharesight payout's franking credit total, mirroring
+ * `dividend_event_overrides`' sparse-override shape (DB-005 extension c)
+ * but keyed to a `dividend_manual_records` row instead of a
+ * `dividend_events` row -- an imported totals-mode payout has no event id
+ * of its own to key against for a franking-only figure the OWNER, not
+ * Sharesight, supplies (see this table's own header note's tier-1/tier-2
+ * evidence: tier 1 -- a Sharesight-supplied AUD-converted franking figure
+ * -- is UNCONFIRMED, not disproven: the owner's data has no franked FOREIGN
+ * payout to test, and a live 2026-08-21 check (`scripts/sharesight-franking-fx-spike.mjs`,
+ * routed through the sealed client) found the documented `tax_credit` field
+ * absent from all 10 (unfranked) foreign payouts AND all 61 franked native
+ * (AUD) payouts -- evidence the field never populates on this account's
+ * wire, but the untested foreign+franked combination stops short of proof.
+ * Tier 2 (automatic FX conversion) is separately INCONCLUSIVE for the same
+ * no-franked-foreign-payout reason. See `docs/ARCHITECTURE.md` §8.2.
+ *
+ * Ledger-immutability (AGENTS.md): `dividend_manual_records` itself is
+ * NEVER mutated by this table -- `db/repositories/dividends.ts`'s
+ * `dividendManualRecords.update()` already structurally rejects any
+ * imported row (`import_batch_id IS NOT NULL`). This table is a pure
+ * OVERLAY: `domain/dividends/history.ts`'s read-time derivation applies its
+ * `frankingTotalDecimal` on top of (never in place of) the immutable
+ * imported fact, with `frankingCurrencySource: "owner_manual"` provenance
+ * so the row is never confused with a Sharesight-reported figure. The
+ * underlying Sharesight-sourced (possibly absent, possibly guard-nulled)
+ * franking total is preserved exactly as received, unaffected by this
+ * table's existence.
+ *
+ * At most one override row per (owner, portfolio, imported record) --
+ * `dividend_import_franking_overrides_target_unique` below. `frankingTotalDecimal`
+ * is REQUIRED (unlike `dividend_event_overrides`' sparse nullable columns):
+ * this table's only purpose is recording a known conversion, so a row with
+ * nothing to say has no reason to exist -- clearing an override means
+ * deleting the row, not writing a null one.
+ */
+export const dividendImportFrankingOverrides = sqliteTable(
+  "dividend_import_franking_overrides",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    portfolioSecurityId: text("portfolio_security_id").notNull(),
+    dividendManualRecordId: text("dividend_manual_record_id").notNull(),
+    frankingTotalDecimal: text("franking_total_decimal").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    foreignKey({
+      name: "dividend_import_franking_overrides_portfolio_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "dividend_import_franking_overrides_security_id_user_id_portfolio_id_fk",
+      columns: [table.portfolioSecurityId, table.userId, table.portfolioId],
+      foreignColumns: [
+        portfolioSecurities.id,
+        portfolioSecurities.userId,
+        portfolioSecurities.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    // `dividend_manual_records_id_user_portfolio_unique` (that table's own
+    // composite unique index) is what this FK targets -- an override can
+    // only ever reference a manual record the SAME owner/portfolio already
+    // owns, never another owner's row.
+    foreignKey({
+      name: "dividend_import_franking_overrides_record_id_user_id_portfolio_id_fk",
+      columns: [table.dividendManualRecordId, table.userId, table.portfolioId],
+      foreignColumns: [
+        dividendManualRecords.id,
+        dividendManualRecords.userId,
+        dividendManualRecords.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    uniqueIndex(
+      "dividend_import_franking_overrides_id_user_portfolio_unique",
+    ).on(table.id, table.userId, table.portfolioId),
+    uniqueIndex("dividend_import_franking_overrides_target_unique").on(
+      table.userId,
+      table.portfolioId,
+      table.dividendManualRecordId,
+    ),
+    index("dividend_import_franking_overrides_owner_portfolio_security_idx").on(
+      table.userId,
+      table.portfolioId,
+      table.portfolioSecurityId,
+    ),
+  ],
+);
+
 // ---------------------------------------------------------------------------
 // BRK-004: Sharesight sync-cursor schema.
 //

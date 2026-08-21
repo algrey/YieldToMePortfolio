@@ -133,7 +133,75 @@ export function frankingDisplay(row: DerivedDividendRow): string {
   }
   if (row.frankingTotalDecimal === null) return "Unknown";
   const amount = `${formatIncomeMoney(row.currencyCode, row.frankingTotalDecimal)} total`;
-  return row.frankingDerivedZero ? `${amount} (none reported)` : amount;
+  if (row.frankingDerivedZero) return `${amount} (none reported)`;
+  // BRK-011: an owner-entered franking-currency override (tier 3 of the
+  // owner's BINDING cascade -- see docs/CALCULATIONS.md section 11) is
+  // labelled distinctly from a Sharesight-reported figure, mirroring
+  // `frankingDerivedZero`'s "none reported" precedent -- the owner must
+  // always be able to tell their own entered figure apart from a provider
+  // fact.
+  if (row.frankingCurrencySource === "owner_manual") {
+    return `${amount} (owner-entered)`;
+  }
+  return amount;
+}
+
+/**
+ * BRK-011: the underlying `dividend_manual_records` id for a row eligible
+ * to receive a franking-currency override -- non-null ONLY for a
+ * STANDALONE imported row (`source === "imported" && dividendEventId ===
+ * null`, the `imported:<id>` row-id shape `buildDialogPrefill`'s second
+ * branch already parses identically), never for an imported fact that
+ * proximity-matched a provider event (that row's `id` is the EVENT id, not
+ * the manual record id -- out of this feature's scope for now, matching the
+ * existing `importedReadOnly` boundary the per-share edit dialog already
+ * draws at exactly this same line).
+ */
+export function frankingOverrideManualRecordId(
+  row: DerivedDividendRow,
+): string | null {
+  if (row.source !== "imported" || row.dividendEventId !== null) return null;
+  const separatorIndex = row.id.indexOf(":");
+  if (separatorIndex < 0 || row.id.slice(0, separatorIndex) !== "imported") {
+    return null;
+  }
+  return row.id.slice(separatorIndex + 1);
+}
+
+/**
+ * BRK-011: whether the Dividends tab should offer the franking-override
+ * entry point for this row -- only ever a standalone imported row (see
+ * `frankingOverrideManualRecordId`) whose franking is either genuinely
+ * UNKNOWN (BRK-010's unverified-nonzero-foreign guard, or a cash-conversion
+ * failure -- both only ever reachable on a foreign-currency imported fact,
+ * since a native fact's absent franking is always resolved to a known $0 by
+ * DIV-007 regardless of currency) or ALREADY carries an owner override
+ * (offered again so the owner can revise a previous entry).
+ *
+ * Review finding F1 (silent no-effect override): `row.amountUnknown` -- the
+ * row's CASH conversion itself failed closed (a missing/malformed BRK-010
+ * rate) -- is excluded here even though its `frankingTotalDecimal` also
+ * reads `null`. `domain/dividends/history.ts`'s `resolveImportedRecordCurrency`
+ * unconditionally nulls `totalFrankingDecimal` on that fail-closed path,
+ * REGARDLESS of an owner override having just set it (`applyFrankingCurrencyOverride`
+ * runs first, but its result is discarded the moment cash conversion itself
+ * fails) -- so offering entry on such a row would let the owner save
+ * repeatedly with no visible effect, ever. This mirrors DIV-007's own
+ * established principle (`deriveAbsentImportedFranking`'s doc comment):
+ * never surface a lone franking figure beside an unavailable cash amount.
+ * An owner who already has a stored override on such a row (rare -- see
+ * that function's doc comment) sees it silently stop being offered too,
+ * rather than a misleading "no effect" entry point; deleting/clearing a
+ * stranded override is an explicit, documented backlog item, not solved
+ * here.
+ */
+export function shouldOfferFrankingOverride(row: DerivedDividendRow): boolean {
+  if (frankingOverrideManualRecordId(row) === null) return false;
+  if (row.amountUnknown) return false;
+  return (
+    row.frankingTotalDecimal === null ||
+    row.frankingCurrencySource === "owner_manual"
+  );
 }
 
 /**
