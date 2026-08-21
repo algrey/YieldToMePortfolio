@@ -86,6 +86,40 @@ export const userSettings = sqliteTable(
     priceSourcePreference: text("price_source_preference")
       .notNull()
       .default("sharesight_delayed"),
+    // MKT-011A: which source the daily intraday-capture sweep uses for THIS
+    // owner (`sharesight` | `yahoo_anonymous` | `yahoo_authenticated`) --
+    // separate from `priceSourcePreference` above (that is a READ-path
+    // preference among already-written observations; this is a WRITE-path
+    // choice of which provider `app/daily-price-capture-service.ts` fetches
+    // from for this owner's intraday sweep/rollup). Defaults to `sharesight`
+    // per the owner's ruling (TASKS.md MKT-011A).
+    //
+    // Deliberately a plain nullable-free ADD COLUMN with NO `CHECK`
+    // constraint, unlike `priceSourcePreference` immediately above --
+    // `priceSourcePreference`'s own CHECK forced drizzle-kit into a full
+    // table REBUILD (0048_mkt_009b_price_source_preference.sql), which in
+    // turn required hand-recreating this table's
+    // `account_purge_lock_user_settings_*` triggers (see that migration's
+    // own disclosure comment). MKT-011A's owner/orchestrator ruling
+    // explicitly prefers a plain `ADD COLUMN` here to avoid repeating that
+    // rebuild for two more columns: the enum is validated at the request
+    // boundary instead (`app/portfolio-action-contract.ts`'s
+    // `validateDailyCaptureSource`), same trust boundary discipline as every
+    // other request-shaped input, just enforced in code rather than SQL.
+    // Trade-off, honestly stated: a direct SQL write that bypasses the
+    // action layer (a hand-run migration, a future admin tool) is NOT
+    // rejected by the database itself the way `priceSourcePreference` is --
+    // only the application boundary enforces the enum here.
+    dailyCaptureSource: text("daily_capture_source")
+      .notNull()
+      .default("sharesight"),
+    // MKT-011A: sweep cadence for this owner's intraday capture -- 30 or 60
+    // minutes (default 60, owner ruling). Same ADD-COLUMN/no-CHECK
+    // trade-off as `dailyCaptureSource` immediately above; validated at the
+    // boundary via `validateDailyCaptureIntervalMinutes`.
+    dailyCaptureIntervalMinutes: integer("daily_capture_interval_minutes")
+      .notNull()
+      .default(60),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     version: integer("version").notNull().default(1),
@@ -1371,6 +1405,61 @@ export const priceObservations = sqliteTable(
         table.adjustmentState,
       )
       .where(sql`${table.providerId} = 'sharesight'`),
+    // MKT-011A review round 2 (2026-08-22, B2 REVERSAL): a THIRD unique
+    // index, same index-only/no-rebuild/no-trigger-hazard shape as the
+    // `sharesight` partial index immediately above. The Orchestrator's
+    // original MKT-011A ruling assumed a pre-existing multi-row-per-day
+    // `yahoo-compatible` `delayed` writer (the ordinary hourly refresh) that
+    // an application-level "insert only if newer" check would need to
+    // coexist with; the reviewer traced the actual write path and
+    // disproved that premise -- the hourly refresh
+    // (`domain/market-data/ingestion.ts`) calls ONLY `getDailyPrices`,
+    // whose observations are hardcoded `interval = 'eod'`
+    // (`yahoo-compatible.ts`'s `getDailyPrices` call site). `getLatestObservation`
+    // is the ONLY producer of a `yahoo-compatible` `delayed` row, and its
+    // sole call site in this codebase is MKT-011A's own sweep
+    // (`app/daily-price-capture-service.ts`). There is therefore no
+    // legitimate multi-row-per-day `delayed` pattern to protect for this
+    // provider (unlike Sharesight's own accretion history, and unlike this
+    // SAME provider's `eod` rows -- see the correction pattern documented
+    // on the index above), so the one-row-per-day invariant can and should
+    // be enforced STRUCTURALLY here too, exactly like the `sharesight`
+    // index does.
+    //
+    // Scoped `WHERE provider_id = 'yahoo-compatible' AND interval =
+    // 'delayed'` -- narrower than the `sharesight` index above (which only
+    // needs `provider_id`, since Sharesight never writes `eod` rows at
+    // all). The extra `interval = 'delayed'` predicate is REQUIRED here: a
+    // `yahoo-compatible` `eod` row (from `getDailyPrices`) can legitimately
+    // receive a same-day correction at a later `observation_at` (the exact
+    // pattern the comment on the FIRST unique index above documents) --
+    // without this predicate, this new index would ALSO constrain `eod`
+    // rows to one-per-`market_date`, silently breaking that pre-existing,
+    // unrelated correction capability for this provider's `eod` history.
+    // Scoping to `interval = 'delayed'` leaves every `eod` row, for every
+    // provider, completely untouched by this index (verified reasoning,
+    // not merely asserted -- see `tests/mkt-011a.test.ts`'s
+    // "eod rows ... coexist untouched" pin).
+    //
+    // Safe to add against existing data (verified reasoning): this index
+    // can only ever reject a SECOND `yahoo-compatible`/`delayed` row for
+    // the same (scope_key, mapping_id, market_date, adjustment_state) --
+    // per the trace above, no such row has ever been written by any
+    // deployed code path (MKT-011A's rollup, the only writer, is
+    // uncommitted at the time this migration is authored), so no existing
+    // row can violate it.
+    uniqueIndex("price_observations_yahoo_scope_mapping_date_unique")
+      .on(
+        table.providerId,
+        table.scopeKey,
+        table.mappingId,
+        table.interval,
+        table.marketDate,
+        table.adjustmentState,
+      )
+      .where(
+        sql`${table.providerId} = 'yahoo-compatible' AND ${table.interval} = 'delayed'`,
+      ),
     index("price_observations_security_date_idx").on(
       table.securityId,
       table.adjustmentState,
@@ -3554,6 +3643,139 @@ export const sharesightDelayedPrices = sqliteTable(
       table.securityId,
     ),
     index("sharesight_delayed_prices_user_idx").on(table.userId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// MKT-011A: the daily-price-capture INTRADAY cache -- owner-scoped, one row
+// per (user, security, provider, observed_at) captured tick, gathered by the
+// `25,55 * * * *` sweep (`app/daily-price-capture-service.ts`) across each
+// security's own market-timezone 10:25-16:25 local-wall-clock window. THIS
+// is where the multi-point-per-day series `MKT-011B`'s "today" graph reads
+// from -- deliberately NOT `price_observations` (Orchestrator ruling): that
+// table's job is ONE durable, honestly-labelled closing observation per
+// (security, market_date, provider), never a same-day intraday tick series.
+// Every row here is provisional/ephemeral by design -- the end-of-day rollup
+// (the SAME service, `rollupAndPurgeDailyCapture`) promotes exactly the
+// day's LAST captured point per security into `price_observations` (never
+// labelled an official close -- honest "last delayed observation of the
+// day"), then PURGES every row for that (user, security, provider,
+// market_date) -- retention is "today only", per the owner's ruling. A
+// crashed/missed 16:25 tick is not lost: the SAME rollup function runs on
+// every sweep tick regardless of the current window state, so the first
+// sweep of a LATER day still finds and promotes the previous day's
+// abandoned points before purging them (see that function's own comment).
+//
+// No FK to `security_provider_mappings`/`mapping_id` here (unlike
+// `price_observations`): resolving the mapping only matters at ROLLUP time,
+// and by construction a row can only exist here if a usable mapping already
+// existed at CAPTURE time (Yahoo: the capture query itself requires an
+// existing verified `security_provider_mappings` row to build the request;
+// Sharesight: the capture step performs the SAME guarded
+// `security_provider_mappings` insert BRK-012B's accretion write does,
+// before writing this row -- see `db/repositories/intraday-price-capture.ts`).
+export const intradayPricePoints = sqliteTable(
+  "intraday_price_points",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    securityId: text("security_id").notNull(),
+    providerId: text("provider_id").notNull(),
+    priceDecimal: text("price_decimal").notNull(),
+    currencyCode: text("currency_code").notNull(),
+    // The trading day this observation belongs to, per the SOURCE's own
+    // reported date (never re-derived from a UTC conversion -- same
+    // discipline as `domain/sharesight/price-accretion.ts`'s
+    // `deriveMarketDateFromTimestamp`). The capture step only ever inserts a
+    // row when this equals TODAY in the security's own market timezone
+    // (honest "today" data only -- a stale prior-close observation returned
+    // outside a trading day is never captured as an intraday point).
+    marketDate: text("market_date").notNull(),
+    // Whatever timezone identifier the SOURCE itself reported for this
+    // observation (Yahoo: an IANA zone name; Sharesight: a UTC offset
+    // suffix, mirroring `price_observations.market_timezone`'s existing
+    // per-provider convention) -- provenance only. The capture/rollup
+    // WINDOW-GATING decision itself uses this app's OWN stored
+    // `exchanges.timezone` for the security (joined via
+    // `securities.exchange_id`), never this column -- see
+    // `domain/market-data/daily-capture-window.ts`.
+    marketTimezone: text("market_timezone").notNull(),
+    // The source's own observation instant, UTC `...Z` ISO. Paired with
+    // (user_id, security_id, provider_id) in this table's unique index below
+    // so a re-captured, UNCHANGED tick (the source had nothing new to say)
+    // is a harmless no-op insert, never a duplicate row.
+    observedAt: text("observed_at").notNull(),
+    // Ingestion time -- when THIS sweep tick wrote this row. Distinct from
+    // `observedAt` exactly like every other provenance pair in this schema
+    // (e.g. `sharesightDelayedPrices.fetchedAt` vs `.quoteAt`).
+    capturedAt: text("captured_at").notNull(),
+    // Mirrors `price_observations.delayed_minutes`/`.quality` -- carried
+    // through from the source adapter's own observation (Yahoo:
+    // `exchangeDataDelayedBy`; Sharesight never supplies a delay figure, so
+    // this is NULL for sharesight-sourced rows, never fabricated).
+    delayedMinutes: integer("delayed_minutes"),
+    quality: text("quality").notNull().default("observed"),
+    // Carried through verbatim from the capturing observation's OWN
+    // `PriceObservation.providerRevisionId` -- for `yahoo-compatible` this is
+    // MKT-009B's `session:authenticated`/`session:anonymous`/`null` tag
+    // (`domain/market-data/yahoo-compatible.ts`), which
+    // `app/owned-holdings.ts`'s `yahooAuthPreferenceUnmet`/
+    // `yahooAuthActionStatus` logic reads to decide whether to show the
+    // owner an "Action required: re-export cookies" banner. A rollup write
+    // that dropped this tag would make a perfectly-authenticated capture
+    // read back as "not configured" -- so the end-of-day rollup
+    // (`db/repositories/intraday-price-capture.ts`) copies this column's
+    // value verbatim into `price_observations.provider_revision_id`, never
+    // re-deriving or discarding it. Always NULL for `sharesight` captures
+    // (that provider never sets this field -- BRK-012B precedent).
+    providerRevisionId: text("provider_revision_id"),
+  },
+  (table) => [
+    foreignKey({
+      name: "intraday_price_points_user_id_users_id_fk",
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "intraday_price_points_security_id_securities_id_fk",
+      columns: [table.securityId],
+      foreignColumns: [securities.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "intraday_price_points_currency_code_currencies_code_fk",
+      columns: [table.currencyCode],
+      foreignColumns: [currencies.code],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "intraday_price_points_provider_id_market_data_providers_id_fk",
+      columns: [table.providerId],
+      foreignColumns: [marketDataProviders.id],
+    }).onDelete("restrict"),
+    check(
+      "intraday_price_points_provider_check",
+      sql`${table.providerId} IN ('sharesight', 'yahoo-compatible')`,
+    ),
+    check(
+      "intraday_price_points_quality_check",
+      sql`${table.quality} IN ('observed', 'corrected', 'indicative', 'stale_candidate')`,
+    ),
+    check(
+      "intraday_price_points_delayed_minutes_check",
+      sql`${table.delayedMinutes} IS NULL OR ${table.delayedMinutes} >= 0`,
+    ),
+    uniqueIndex(
+      "intraday_price_points_user_security_provider_observed_unique",
+    ).on(table.userId, table.securityId, table.providerId, table.observedAt),
+    // Rollup/purge query shape: "every (security, market_date) this owner
+    // has cached for this provider" -- see
+    // `db/repositories/intraday-price-capture.ts`'s
+    // `resolveDailyCaptureRollupCandidates`.
+    index("intraday_price_points_user_provider_date_idx").on(
+      table.userId,
+      table.providerId,
+      table.marketDate,
+      table.securityId,
+    ),
   ],
 );
 

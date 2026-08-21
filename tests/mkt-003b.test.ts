@@ -651,12 +651,15 @@ test("scheduled handler is durable and does not use waitUntil for refresh work",
     new URL("../worker/index.ts", import.meta.url),
     "utf8",
   );
-  assert.match(source, /async scheduled\(_controller, env\)/);
+  // MKT-011A: the handler now reads `controller.cron`/`.scheduledTime` to
+  // dispatch the intraday-capture sweep on its own cron pattern -- see
+  // `worker/index.ts`'s own comment on `DAILY_PRICE_CAPTURE_CRON`.
+  assert.match(source, /async scheduled\(controller, env\)/);
   assert.doesNotMatch(source, /scheduled[\s\S]{0,700}waitUntil/);
   const wrangler = JSON.parse(
     await readFile(new URL("../wrangler.json", import.meta.url), "utf8"),
   ) as { triggers?: { crons?: string[] } };
-  assert.deepEqual(wrangler.triggers?.crons, ["0 * * * *"]);
+  assert.deepEqual(wrangler.triggers?.crons, ["0 * * * *", "25,55 * * * *"]);
   assert.deepEqual(
     await runScheduledMarketDataRefresh({
       ASSETS: { fetch: async () => new Response() },

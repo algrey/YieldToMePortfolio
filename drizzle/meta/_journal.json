@@ -344,6 +344,20 @@
       "when": 1787312682588,
       "tag": "0048_mkt_009b_price_source_preference",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "6",
+      "when": 1787349169831,
+      "tag": "0049_mkt_011a_daily_price_capture",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "6",
+      "when": 1787352156058,
+      "tag": "0050_mkt_011a_yahoo_rollup_index",
+      "breakpoints": true
     }
   ]
 }

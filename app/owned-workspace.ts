@@ -45,6 +45,8 @@ export function createOwnedWorkspace(
       holdingCurrencyView: "native",
       financialYearStartMonth: 7,
       priceSourcePreference: "sharesight_delayed",
+      dailyCaptureSource: "sharesight",
+      dailyCaptureIntervalMinutes: 60,
       settingsVersion: 1,
       quotes: [],
       quoteViewState: "empty",

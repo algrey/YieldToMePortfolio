@@ -104,6 +104,8 @@ export async function loadAuthenticatedWorkspace(
           holdingCurrencyView: settings.defaultHoldingCurrencyView,
           financialYearStartMonth: settings.financialYearStartMonth,
           priceSourcePreference: settings.priceSourcePreference,
+          dailyCaptureSource: settings.dailyCaptureSource,
+          dailyCaptureIntervalMinutes: settings.dailyCaptureIntervalMinutes,
           timezone: settings.timezone,
           settingsVersion: settings.version,
           nowInstant,

@@ -136,6 +136,16 @@ export type OwnedWorkspace = {
   // `sharesight_delayed` default the settings column carries.
   priceSourcePreference?:
     "yahoo_authenticated" | "yahoo_anonymous" | "sharesight_delayed";
+  // MKT-011A: which source the daily intraday-capture sweep fetches from for
+  // this owner -- a WRITE-path choice, distinct from `priceSourcePreference`
+  // above (a READ-path preference among already-written observations).
+  // `undefined` (prototype/empty states) falls back to the same
+  // `sharesight` default the settings column carries.
+  dailyCaptureSource?: "sharesight" | "yahoo_anonymous" | "yahoo_authenticated";
+  // MKT-011A: intraday-capture sweep cadence in minutes (30 or 60).
+  // `undefined` falls back to the same `60` default the settings column
+  // carries.
+  dailyCaptureIntervalMinutes?: 30 | 60;
   // The user's settings-level IANA timezone (user_settings.timezone). FY
   // window math (FY-001C) must key off this, not `activePortfolio.timezone`
   // -- see AGENTS.md and domain/calculations/financial-year.ts.
@@ -2853,6 +2863,78 @@ export function PortfolioShell({
     }
   }
 
+  // MKT-011A: mirrors `changePriceSourcePreference` exactly.
+  async function changeDailyCaptureSource(
+    value: "sharesight" | "yahoo_anonymous" | "yahoo_authenticated",
+  ) {
+    if (!ownedWorkspace?.settingsVersion || !isOnline) return;
+    setActionPending(true);
+    setActionMessage(null);
+    try {
+      const response = await fetch("/api/settings/daily-capture-source", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          dailyCaptureSource: value,
+          expectedVersion: ownedWorkspace.settingsVersion,
+        }),
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(
+          result.message ?? "Daily-capture source could not be changed.",
+        );
+      setOpenMenu(null);
+      router.refresh();
+    } catch (error) {
+      setActionMessage(
+        error instanceof Error
+          ? error.message
+          : "Daily-capture source could not be changed.",
+      );
+    } finally {
+      setActionPending(false);
+    }
+  }
+
+  // MKT-011A: mirrors `changePriceSourcePreference` exactly.
+  async function changeDailyCaptureIntervalMinutes(value: 30 | 60) {
+    if (!ownedWorkspace?.settingsVersion || !isOnline) return;
+    setActionPending(true);
+    setActionMessage(null);
+    try {
+      const response = await fetch("/api/settings/daily-capture-interval", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          dailyCaptureIntervalMinutes: value,
+          expectedVersion: ownedWorkspace.settingsVersion,
+        }),
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(
+          result.message ?? "Daily-capture interval could not be changed.",
+        );
+      setOpenMenu(null);
+      router.refresh();
+    } catch (error) {
+      setActionMessage(
+        error instanceof Error
+          ? error.message
+          : "Daily-capture interval could not be changed.",
+      );
+    } finally {
+      setActionPending(false);
+    }
+  }
+
   async function archiveActivePortfolio() {
     const active = ownedWorkspace?.activePortfolio;
     if (!active || !isOnline) return;
@@ -3251,6 +3333,72 @@ export function PortfolioShell({
                       >
                         Preferred source for prices, with honest fallback when
                         it has none.
+                      </span>
+                    </div>
+                    <div className="menu-field">
+                      <label htmlFor="daily-capture-source-select">
+                        Daily capture source
+                      </label>
+                      <select
+                        id="daily-capture-source-select"
+                        value={
+                          ownedWorkspace.dailyCaptureSource ?? "sharesight"
+                        }
+                        onChange={(event) =>
+                          void changeDailyCaptureSource(
+                            event.target.value as
+                              | "sharesight"
+                              | "yahoo_anonymous"
+                              | "yahoo_authenticated",
+                          )
+                        }
+                        disabled={actionPending || !isOnline}
+                        aria-describedby="daily-capture-source-helper"
+                      >
+                        <option value="sharesight">Sharesight</option>
+                        <option value="yahoo_anonymous">
+                          Yahoo (not logged in)
+                        </option>
+                        <option value="yahoo_authenticated">
+                          Yahoo (logged in)
+                        </option>
+                      </select>
+                      {/* Outside the label, same FY-001B/MKT-009B fix as the
+                          two fields above -- see those comments. */}
+                      <span
+                        className="menu-note"
+                        id="daily-capture-source-helper"
+                      >
+                        Source for the daily intraday price sweep that closes
+                        each trading day&apos;s history.
+                      </span>
+                    </div>
+                    <div className="menu-field">
+                      <label htmlFor="daily-capture-interval-select">
+                        Daily capture cadence
+                      </label>
+                      <select
+                        id="daily-capture-interval-select"
+                        value={ownedWorkspace.dailyCaptureIntervalMinutes ?? 60}
+                        onChange={(event) =>
+                          void changeDailyCaptureIntervalMinutes(
+                            Number(event.target.value) as 30 | 60,
+                          )
+                        }
+                        disabled={actionPending || !isOnline}
+                        aria-describedby="daily-capture-interval-helper"
+                      >
+                        <option value={30}>Every 30 minutes</option>
+                        <option value={60}>Every 60 minutes</option>
+                      </select>
+                      {/* Outside the label, same FY-001B/MKT-009B fix as the
+                          fields above -- see those comments. */}
+                      <span
+                        className="menu-note"
+                        id="daily-capture-interval-helper"
+                      >
+                        How often the intraday sweep captures a price during
+                        market hours.
                       </span>
                     </div>
                   </>

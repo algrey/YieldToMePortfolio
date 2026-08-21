@@ -83,6 +83,12 @@ const OWNED_TABLES = [
   // `price_observations`/`fx_rate_observations` "user-scoped-observation"
   // special-cases below.
   "sharesight_delayed_prices",
+  // MKT-011A: owner-scoped intraday capture cache, one row per captured
+  // tick -- see db/schema.ts's header comment on `intradayPricePoints`.
+  // Keyed directly by `user_id` like `sharesight_delayed_prices` above, not
+  // a "user-scoped-observation" special case: every row here is this
+  // owner's OWN provisional capture, never a shared/deployment-scope fact.
+  "intraday_price_points",
   // MKT-008: owner-uploaded price-history batch attribution -- keyed
   // directly by `user_id` like `sharesight_delayed_prices` above, not a
   // "user-scoped-observation" special case (this row IS the owner's upload
@@ -340,6 +346,11 @@ const PURGE_TABLES_IN_FK_ORDER = [
   // currencies (all shared reference data or deleted last), so any
   // position before `users` is FK-safe. No other table references it.
   "sharesight_delayed_prices",
+  // MKT-011A: intraday capture cache references only users/securities/
+  // currencies/market_data_providers (all shared reference data or deleted
+  // last), same FK-safety as `sharesight_delayed_prices` immediately above.
+  // No other table references it.
+  "intraday_price_points",
   "transactions",
   "portfolio_securities",
   "portfolio_settings",

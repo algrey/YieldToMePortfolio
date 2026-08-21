@@ -1161,6 +1161,9 @@ test("BRK-012B migration: the date-keyed unique index exists on price_observatio
     "price_observations_provider_scope_mapping_unique",
     "price_observations_security_date_idx",
     "price_observations_upload_batch_idx",
+    // MKT-011A (migration 0050): the symmetric yahoo-compatible partial
+    // index -- see that migration's own comment.
+    "price_observations_yahoo_scope_mapping_date_unique",
   ]);
 });
 

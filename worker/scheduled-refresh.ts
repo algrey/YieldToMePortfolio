@@ -12,6 +12,10 @@ import {
   sweepCalculationRuns,
 } from "../app/calculation-executor-service.ts";
 import { runSharesightPriceRefresh } from "../app/sharesight-price-refresh-service.ts";
+import {
+  runDailyPriceCapture,
+  type RollupFailureKind,
+} from "../app/daily-price-capture-service.ts";
 import { createSharesightIntegrationConfig } from "./sharesight-config.ts";
 import { createYahooAuthConfig } from "./yahoo-auth-config.ts";
 
@@ -20,6 +24,20 @@ const CORPORATE_ACTION_PROVIDER_ID = "yahoo-compatible";
 export type ScheduledRefreshResult =
   | { ok: true; skipped: boolean; jobs: number; providerRequests: number }
   | { ok: false; reason: "configuration" | "database" | "refresh" };
+
+function resolveYahooProviderSymbol(
+  client: Awaited<ReturnType<typeof getSqlClient>>,
+) {
+  return async (mappingId: string) => {
+    const mapping = await client.get<{ provider_symbol: string }>(
+      `SELECT provider_symbol FROM security_provider_mappings
+       WHERE id = ? AND provider_id = 'yahoo-compatible'
+         AND status = 'verified' LIMIT 1`,
+      [mappingId],
+    );
+    return mapping?.provider_symbol ?? null;
+  };
+}
 
 function buildProvider(
   client: Awaited<ReturnType<typeof getSqlClient>>,
@@ -35,16 +53,44 @@ function buildProvider(
     providerId: CORPORATE_ACTION_PROVIDER_ID,
     fetcher: fetch,
     auth: authConfig.enabled ? authConfig.credentials : null,
-    resolveSymbol: async (mappingId) => {
-      const mapping = await client.get<{ provider_symbol: string }>(
-        `SELECT provider_symbol FROM security_provider_mappings
-         WHERE id = ? AND provider_id = 'yahoo-compatible'
-           AND status = 'verified' LIMIT 1`,
-        [mappingId],
-      );
-      return mapping?.provider_symbol ?? null;
-    },
+    resolveSymbol: resolveYahooProviderSymbol(client),
   });
+}
+
+/**
+ * MKT-011A: two DISTINCT provider instances, mirroring MKT-009B's read-path
+ * preference semantics (`combineScopedPriceSelections`) for the write side --
+ * `yahoo_authenticated` owners get the login-cookie jar attached when
+ * configured (the adapter still gracefully degrades per-request on a 401,
+ * same as every other authenticated call site); `yahoo_anonymous` owners
+ * NEVER get the cookie jar, even when the deployment has one configured,
+ * since that owner explicitly opted out of the authenticated session.
+ * Building an adapter instance is a pure closure (no request happens until a
+ * capability method is actually called), so constructing both unconditionally
+ * costs nothing when a deployment has zero yahoo-source owners.
+ */
+function buildYahooCaptureProviders(
+  client: Awaited<ReturnType<typeof getSqlClient>>,
+  env: Env,
+) {
+  const authConfig = createYahooAuthConfig(
+    env as unknown as Parameters<typeof createYahooAuthConfig>[0],
+  );
+  const resolveSymbol = resolveYahooProviderSymbol(client);
+  return {
+    yahooAuthenticatedProvider: createYahooCompatibleProvider({
+      providerId: CORPORATE_ACTION_PROVIDER_ID,
+      fetcher: fetch,
+      auth: authConfig.enabled ? authConfig.credentials : null,
+      resolveSymbol,
+    }),
+    yahooAnonymousProvider: createYahooCompatibleProvider({
+      providerId: CORPORATE_ACTION_PROVIDER_ID,
+      fetcher: fetch,
+      auth: null,
+      resolveSymbol,
+    }),
+  };
 }
 
 export async function runScheduledMarketDataRefresh(
@@ -172,6 +218,81 @@ export async function runScheduledSharesightPriceRefresh(
     const result = await runSharesightPriceRefresh({
       client,
       sharesightClient: integration.enabled ? integration.client : null,
+    });
+    return result;
+  } catch {
+    return { ok: false, reason: "database" };
+  }
+}
+
+export type ScheduledDailyPriceCaptureResult =
+  | {
+      ok: true;
+      usersProcessed: number;
+      sharesightRequests: number;
+      yahooRequests: number;
+      intradayPointsCaptured: number;
+      rolledUp: number;
+      purged: number;
+      skippedNoMapping: number;
+      /** Review round B3: nonzero means a rollup pair genuinely THREW this
+       * tick (never the honest `no_mapping` outcome, already counted via
+       * `skippedNoMapping`) -- `worker/index.ts` logs a degraded (non-
+       * "success") result when this is nonzero, so a wedged pipeline stays
+       * operationally visible instead of reading as a routine success. */
+      rollupsFailed: number;
+      /** Free-text diagnostic -- kept on this result for callers/tests that
+       * want it, but `worker/index.ts`'s structured log emits ONLY
+       * `firstRollupErrorKind` (review round F5). */
+      firstRollupError: string | null;
+      firstRollupErrorKind: RollupFailureKind | null;
+    }
+  | { ok: false; reason: "database" };
+
+/**
+ * MKT-011A trigger: the intraday-capture/rollup sweep, fired by the SECOND
+ * cron pattern (`25,55 * * * *`, `wrangler.json`'s `triggers.crons`) --
+ * distinct from every other scheduled job in this file, which all run on
+ * the existing `0 * * * *` pattern. `worker/index.ts`'s `scheduled` handler
+ * dispatches on `controller.cron` to call this ONLY for the intraday
+ * pattern, never on the hourly tick (see that handler's own comment).
+ *
+ * `isSecondaryTick` is derived from the ACTUAL fired minute
+ * (`controller.scheduledTime`), not merely "this is the second cron
+ * pattern": both `:25` and `:55` share the SAME pattern string, so the
+ * handler must look at the real fire time to know which slot this is (see
+ * `app/daily-price-capture-service.ts`'s cadence-gating doc comment).
+ * Builds the Sharesight client (optional, BRK-012B/012C precedent)
+ * unconditionally -- Sharesight capture has no `MARKET_DATA_PROVIDER`
+ * dependency (BRK-012B/012C precedent). Yahoo capture, by contrast, DOES
+ * respect that deployment-wide kill switch: when
+ * `resolveRuntimeConfig(env).config.marketDataProvider === 'disabled'`, both
+ * Yahoo provider instances are passed as `null` (never constructed), so a
+ * `yahoo_authenticated`/`yahoo_anonymous` capture setting can never bypass
+ * the same gate MKT-009B's read-path preference already respects.
+ */
+export async function runScheduledDailyPriceCapture(
+  env: Env,
+  options: Readonly<{ isSecondaryTick: boolean }>,
+): Promise<ScheduledDailyPriceCaptureResult> {
+  try {
+    const client = await getSqlClient();
+    const integration = createSharesightIntegrationConfig(
+      env as unknown as Parameters<typeof createSharesightIntegrationConfig>[0],
+    );
+    const runtimeConfig = resolveRuntimeConfig(env);
+    const yahooEnabled =
+      runtimeConfig.ok &&
+      runtimeConfig.config.marketDataProvider !== "disabled";
+    const { yahooAuthenticatedProvider, yahooAnonymousProvider } = yahooEnabled
+      ? buildYahooCaptureProviders(client, env)
+      : { yahooAuthenticatedProvider: null, yahooAnonymousProvider: null };
+    const result = await runDailyPriceCapture({
+      client,
+      sharesightClient: integration.enabled ? integration.client : null,
+      yahooAuthenticatedProvider,
+      yahooAnonymousProvider,
+      isSecondaryTick: options.isSecondaryTick,
     });
     return result;
   } catch {

@@ -395,3 +395,148 @@ Owner rulings closed both open questions from MKT-009A's go/no-go: no paid Yahoo
 3. **Provenance**: recorded per observation in the existing `providerRevisionId` free-text field (no new `price_observations` column/migration — same technique this file's FX rows already use for direct/inverted tagging) as `session:authenticated` or `session:anonymous`, but ONLY when `auth` is actually configured; an unconfigured deployment keeps `providerRevisionId: null` for prices, byte-for-byte unchanged from before this task. Because Yahoo prices accrete one row per provider/mapping/date (last write wins), there is no separate stored "authenticated" and "anonymous" row to choose between at read time — the tag simply records what the LAST successful write actually was. Every price remains labelled with whatever `exchangeDataDelayedBy` says (`null`/unknown, or a real delay in minutes) exactly as before; this task adds no new "live" claim of any kind.
 4. **Price-source preference** (`user_settings.price_source_preference`, migration `0048_mkt_009b_price_source_preference.sql`, FY-001 precedent): three owner-facing options, `yahoo_authenticated` / `yahoo_anonymous` / `sharesight_delayed`. This is a READ-TIME PREFERENCE over `domain/market-data/selection.ts`'s existing freshest-wins ranking (`selectPriceObservation`'s new `preferredProviderIds`), not a second activation gate — `MARKET_DATA_PROVIDER` remains the sole deployment-level kill switch for Yahoo, unaffected by this column. Both Yahoo options prefer the same `providerId` (`yahoo-compatible`) since, per point 3 above, there is no separately stored authenticated/anonymous row; `yahoo_authenticated` additionally surfaces an explicit, accessible "action required: re-export cookies" note (`app/owned-holdings.ts`'s `yahooAuthPreferenceUnmet`) whenever the selected Yahoo observation is NOT tagged `session:authenticated` — never silent anonymous data presented as satisfying the login preference. `sharesight_delayed` prefers `providerId = 'sharesight'` (BRK-012C's delayed-price cache/gate pipeline). In every case, a preferred source with zero usable (freshness/currency/scope-filtered) candidates falls through, honestly, to the best candidate from ANY source — never `Price unavailable` merely because the PREFERRED source is silent while another source has a valid observation. **Default: `sharesight_delayed`** — a deliberate choice to avoid silently regressing an existing linked owner's price freshness the day this column ships (BRK-012C's whole purpose is keeping Sharesight ≤10-minutes fresh at read time, so preferring it changes nothing material for that owner) while remaining a complete no-op for an owner with no Sharesight link at all (Sharesight never writes a row for them, so selection falls straight through to Yahoo — identical to this task's pre-existing behaviour). See `docs/ARCHITECTURE.md`'s decision note for the full reasoning and rejected alternative (defaulting to `yahoo_anonymous`, rejected as a real behaviour regression for linked owners).
 5. **Out of scope, explicitly**: BRK-013A/B/C (Yahoo portfolio read/write) remain untouched by this task; this task adds no crumb dependency, no new Cloudflare product, and no change to `MARKET_DATA_PROVIDER`'s deployment-gate semantics.
+
+## 21. Daily price capture: intraday sweep + end-of-day rollup (MKT-011A, 2026-08-22)
+
+Owner-uploaded price CSVs (MKT-008) seed history up to the upload day; without
+a daily mechanism the gap between "last upload" and "today" grows forever.
+MKT-011A closes it: a NEW cron sweep (`25,55 * * * *`, alongside the existing
+`0 * * * *` — `wrangler.json`'s `triggers.crons`, dispatched by
+`controller.cron` in `worker/index.ts`) captures an intraday price for every
+owner's held securities during their market's own 10:25–16:25 local
+wall-clock trading window, then promotes the day's LAST captured point per
+security into `price_observations` once that window closes.
+
+**Two tables, two lifetimes.** `intraday_price_points` (migration
+`0049_mkt_011a_daily_price_capture.sql`) is a NEW, small, owner-scoped cache
+— one row per captured tick, retained ONLY for the current trading day and
+purged immediately after a successful rollup. It is deliberately NOT
+`price_observations`: that table's job stays "one durable, honestly-labelled
+observation per (security, market_date, provider)"; the intraday cache exists
+so `MKT-011B`'s "today" graph has something to draw from before the day's
+close. The rollup write into `price_observations` uses `interval = 'delayed'`
+and `adjustment_state = 'raw'` — it is the LAST delayed observation the
+configured source gave for that trading day, NEVER labelled an official
+exchange close (AGENTS.md).
+
+**Source is a per-owner setting**, `user_settings.daily_capture_source`
+(`sharesight` | `yahoo_anonymous` | `yahoo_authenticated`, default
+`sharesight`) — distinct from MKT-009B's `price_source_preference` (a
+READ-path preference among already-written observations); this is a
+WRITE-path choice of which provider the sweep fetches FROM for this owner.
+Cadence is a second per-owner setting, `daily_capture_interval_minutes` (30 or
+60, default 60) — the cron fires every `:25`/`:55`, and a 60-minute owner's
+captures are gated to the `:25` tick only (`app/daily-price-capture-service.ts`'s
+`isCaptureTickEligible`); the actual fired minute is read from
+`controller.scheduledTime`, since both ticks share one cron pattern string.
+**Honest scope caveat (review round, 2026-08-22)**: the `:25`/`:55` cron
+minutes are fixed in UTC, and this only aligns cleanly with a WHOLE-HOUR-offset
+market's own local `:25`/`:55` wall clock — verified for the owner's actual
+market, `Australia/Sydney` (ASX), across both of 2026's DST transitions
+(AEST `UTC+10:00`, AEDT `UTC+11:00`, both whole-hour offsets). A
+HALF-HOUR-offset market (e.g. `Asia/Kolkata`, `UTC+5:30`) would need its own
+cron pattern before onboarding — this codebase has not verified what tick
+alignment (and `isSecondaryTick` cadence-gating correctness) such a market
+would actually get from the current fixed `:25`/`:55` schedule.
+
+**Provider-ranking disclosure (round-2 correction, 2026-08-22 — the mechanism
+below was mis-stated in an earlier version of this note)**: the EXISTING
+freshest-wins provider ranking (`domain/market-data/selection.ts`'s
+`providerRank`, unchanged by this task) decides purely by INTERVAL CLASS,
+never by `observation_at` granularity or recency: `intervalRank` is `0` for
+`delayed`, `1` for `intraday`, `2` for `eod` (lower wins), plus a quality
+penalty (`stale_candidate` +4, `indicative` +2, `observed` +0). A rollup row
+is written `interval = 'delayed'`, `quality = 'observed'` (rank `0`); an
+owner-uploaded EOD close is `interval = 'eod'`, `quality = 'observed'` (rank
+`2`) — so a rollup observation for a given date now systematically outranks
+an owner-uploaded EOD close of the SAME date whenever both exist, purely
+because `delayed` structurally outranks `eod` in this table, regardless of
+which one is actually more recent or more precise. This is PRE-EXISTING
+selection behaviour (the same rule already governed BRK-012B's own hourly
+Sharesight accretion against an uploaded EOD close) — MKT-011A does not
+change the ranking, only makes this outcome systematic for every trading day
+going forward rather than an occasional BRK-012B-only case. Recorded as a
+backlog item to reconsider (TASKS.md), not fixed here.
+
+**Sharesight capture** reuses BRK-012B/012C's candidate machinery exactly:
+one shared `listUserInstruments()` fetch per sweep tick (never one call per
+owner), `resolveScopedSharesightInstrumentSecurities` +
+`buildSharesightPriceAccretionPlan` to resolve this owner's scope, and the
+SAME guarded `security_provider_mappings` insert BRK-012B's accretion write
+uses — performed here at CAPTURE time (not deferred to rollup), so that by
+construction any cached `sharesight` row already has a resolvable mapping by
+the time rollup runs. **Yahoo capture** (`yahoo_anonymous`/`yahoo_authenticated`)
+resolves the owner's already-verified `security_provider_mappings` rows and
+calls the existing `yahoo-compatible` adapter's `getLatestObservation` per
+security, budget-bounded across the WHOLE sweep tick
+(`DAILY_CAPTURE_LIMITS.maxYahooRequestsPerSweep`) — `yahoo_authenticated`
+owners get the login-cookie jar attached when configured (MKT-009B), the
+adapter still degrades per-request on a 401; `yahoo_anonymous` owners never
+get it, even when the deployment has one configured. A captured Yahoo
+observation's `providerRevisionId` (`session:authenticated`/`session:anonymous`)
+is carried through verbatim into the rollup row, so `app/owned-holdings.ts`'s
+existing MKT-009B session-state labelling never regresses for a
+rollup-sourced price.
+
+**Honesty rules, all enforced structurally, not by convention**: a captured
+point is only ever stored when the source's own `marketDate` equals TODAY in
+the security's market timezone (a stale/prior-close observation, e.g. on a
+public holiday with no calendar, is never captured — "the sweep stores
+nothing new" beats a fabricated point); the window/DST/weekday gate
+(`domain/market-data/daily-capture-window.ts`) derives local wall-clock time
+via `Intl.DateTimeFormat` against the security's OWN stored `exchanges.timezone`
+(never a fixed UTC offset — Sydney's AEST/AEDT both fire their capture ticks
+at local `:25`); purge only ever follows a successful rollup, so a crash
+between write and purge leaves the intraday cache intact for the next tick
+to retry, and a genuinely abandoned day (a missed 16:25 close) is rolled up
+by the FIRST sweep tick of a LATER day, before that day's own window logic
+even applies (`isDailyCaptureRollupEligible`).
+
+**Rollup idempotency is provider-specific, not one shared mechanism (review
+round correction, 2026-08-22)** — price observations are a CONVERGING CACHE
+here, not immutable ledger facts:
+
+- `sharesight` rollups target BRK-012B's own PARTIAL unique index
+  (`price_observations_provider_scope_mapping_date_unique`, scoped to
+  `provider_id = 'sharesight'`) with `ON CONFLICT ... DO UPDATE`, converging
+  the row to the sweep's own last-captured (16:25) value. This is
+  deliberate, not accidental: BRK-012B's hourly refresh already writes/
+  overwrites the SAME row all day through that identical index, so any
+  Sharesight intraday point this sweep captures has a near-certain colliding
+  same-day row already there — targeting the plain exact-`observation_at`
+  index instead throws on that collision (review finding B1, reproduced
+  live: the whole rollup loop wedges on the oldest unrolled day, and every
+  LATER day for that owner silently stops rolling up too, forever, since
+  intraday purge never runs on a thrown rollup). `DO UPDATE` is correct here
+  specifically because the sweep's own end-of-window value is MORE
+  authoritative than BRK-012B's earlier same-day write — a bare
+  `DO NOTHING` would perversely keep the hourly job's stale intraday value
+  over the sweep's own close-of-window observation.
+- `yahoo-compatible` rollups target a NEW, symmetric partial index,
+  `price_observations_yahoo_scope_mapping_date_unique` (migration
+  `0050_mkt_011a_yahoo_rollup_index.sql`, `WHERE provider_id =
+'yahoo-compatible' AND interval = 'delayed'`). An earlier draft of this
+  task incorrectly assumed a pre-existing multi-row-per-day
+  `yahoo-compatible` `delayed` writer that a DB uniqueness rule would
+  collide with; tracing the actual write paths found NONE exists — the
+  ordinary hourly Yahoo refresh writes only `interval = 'eod'` rows
+  (`getDailyPrices`, hardcoded), and `getLatestObservation` (the only
+  producer of a `delayed` yahoo row) has no call site anywhere in this
+  codebase except MKT-011A's own sweep. The index is therefore scoped to
+  `interval = 'delayed'` (narrower than the `sharesight` index, which needs
+  only `provider_id` since Sharesight never writes `eod` rows) specifically
+  so `yahoo-compatible`'s OWN `eod` same-day-correction pattern (two rows,
+  same `market_date`, different `observation_at` — the ORIGINAL unique
+  index's whole reason for existing) stays completely untouched. The
+  rollup's `ON CONFLICT ... DO UPDATE SET ... WHERE excluded.observation_at
+  > price_observations.observation_at`guard makes an out-of-order arrival
+(an older capture landing after a newer one) a safe no-op — SQLite's
+upsert`RETURNING`reports zero affected rows when the`WHERE`guard
+suppresses the update — while a genuinely newer arrival converges the SAME
+row. Since`yahoo-compatible`rollups are`access_scope = 'deployment'`(the same public market data regardless of which owner's sweep captured
+it, MKT-007/009B precedent), this same guard is ALSO what makes two
+different owners' Yahoo captures for the same security+day converge onto
+ONE row rather than accumulating duplicates — enforced by the partial
+unique index itself, not an application-level check.`sharesight` rollups
+stay user-scoped (`access_scope = 'user'`, fetched with the owner's own
+  > credentials, BRK-012B precedent).

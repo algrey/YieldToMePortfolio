@@ -11,6 +11,8 @@ import {
 } from "../db/repositories/owned-portfolios";
 import { VERIFIED_PRINCIPAL_HEADER } from "../domain/auth/verified-principal-header";
 import {
+  validateDailyCaptureIntervalMinutes,
+  validateDailyCaptureSource,
   validateFinancialYearStartMonth,
   validateHomeCurrency,
   validateHoldingCurrencyView,
@@ -433,6 +435,104 @@ export async function changePriceSourcePreferenceAction(value: unknown) {
       ok: false as const,
       status: 409 as const,
       message: "Price-source preference could not be changed.",
+    };
+  }
+}
+
+// MKT-011A: mirrors `changePriceSourcePreferenceAction` exactly.
+export async function changeDailyCaptureSourceAction(value: unknown) {
+  const input = value as Record<string, unknown>;
+  const dailyCaptureSource = validateDailyCaptureSource(
+    input?.dailyCaptureSource,
+  );
+  const expectedVersion = input?.expectedVersion;
+  if (
+    !dailyCaptureSource ||
+    typeof expectedVersion !== "number" ||
+    !Number.isInteger(expectedVersion)
+  ) {
+    return {
+      ok: false as const,
+      status: 400 as const,
+      message:
+        "A valid daily-capture source and settings version are required.",
+    };
+  }
+  const context = await getAuthenticatedSqlContext();
+  if (!context.ok) return context;
+  try {
+    const result = await createOwnedUserSettingsRepository(
+      context.client,
+      undefined,
+      { requestId: context.requestId },
+    ).setDailyCaptureSource(context.userId, {
+      dailyCaptureSource,
+      expectedVersion,
+    });
+    return result.ok
+      ? result
+      : {
+          ...result,
+          status:
+            result.reason === "version_conflict"
+              ? (409 as const)
+              : (404 as const),
+          message: "Daily-capture source could not be changed.",
+        };
+  } catch {
+    return {
+      ok: false as const,
+      status: 409 as const,
+      message: "Daily-capture source could not be changed.",
+    };
+  }
+}
+
+// MKT-011A: mirrors `changePriceSourcePreferenceAction` exactly.
+export async function changeDailyCaptureIntervalMinutesAction(value: unknown) {
+  const input = value as Record<string, unknown>;
+  const dailyCaptureIntervalMinutes = validateDailyCaptureIntervalMinutes(
+    input?.dailyCaptureIntervalMinutes,
+  );
+  const expectedVersion = input?.expectedVersion;
+  if (
+    !dailyCaptureIntervalMinutes ||
+    typeof expectedVersion !== "number" ||
+    !Number.isInteger(expectedVersion)
+  ) {
+    return {
+      ok: false as const,
+      status: 400 as const,
+      message:
+        "A valid daily-capture interval and settings version are required.",
+    };
+  }
+  const context = await getAuthenticatedSqlContext();
+  if (!context.ok) return context;
+  try {
+    const result = await createOwnedUserSettingsRepository(
+      context.client,
+      undefined,
+      { requestId: context.requestId },
+    ).setDailyCaptureIntervalMinutes(context.userId, {
+      dailyCaptureIntervalMinutes,
+      expectedVersion,
+    });
+    return result.ok
+      ? result
+      : {
+          ...result,
+          status:
+            result.reason === "version_conflict"
+              ? (409 as const)
+              : (404 as const),
+          message: "Daily-capture interval could not be changed.",
+        };
+  } catch {
+    return {
+      ok: false as const,
+      status: 409 as const,
+      message: "Daily-capture interval could not be changed.",
     };
   }
 }

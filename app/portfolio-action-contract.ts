@@ -83,3 +83,24 @@ export function validatePriceSourcePreference(
 export function validateFinancialYearStartMonth(value: unknown): number | null {
   return isValidFinancialYearStartMonth(value) ? value : null;
 }
+
+// MKT-011A: `user_settings.daily_capture_source`/`.daily_capture_interval_minutes`
+// are plain `ADD COLUMN`s with NO database `CHECK` (see db/schema.ts's
+// `dailyCaptureSource` doc comment for the documented rebuild trade-off) --
+// these two validators are therefore the ONLY enforcement of their enums,
+// mirroring `validatePriceSourcePreference`'s closed-enum discipline exactly.
+export function validateDailyCaptureSource(
+  value: unknown,
+): "sharesight" | "yahoo_anonymous" | "yahoo_authenticated" | null {
+  return value === "sharesight" ||
+    value === "yahoo_anonymous" ||
+    value === "yahoo_authenticated"
+    ? value
+    : null;
+}
+
+export function validateDailyCaptureIntervalMinutes(
+  value: unknown,
+): 30 | 60 | null {
+  return value === 30 || value === 60 ? value : null;
+}

@@ -5,7 +5,7 @@
   "compatibility_date": "2026-07-29",
   "compatibility_flags": ["nodejs_compat"],
   "triggers": {
-    "crons": ["0 * * * *"]
+    "crons": ["0 * * * *", "25,55 * * * *"]
   },
   "assets": {
     "directory": "./dist/client",

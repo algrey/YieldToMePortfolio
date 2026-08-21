@@ -20,9 +20,16 @@ import {
 import {
   runScheduledCalculationSweep,
   runScheduledCorporateActionRefresh,
+  runScheduledDailyPriceCapture,
   runScheduledMarketDataRefresh,
   runScheduledSharesightPriceRefresh,
 } from "./scheduled-refresh";
+
+// MKT-011A: the intraday-capture sweep's own cron pattern (`wrangler.json`'s
+// `triggers.crons`) -- distinct from every other scheduled job's `0 * * * *`.
+// `scheduled` below dispatches on `controller.cron` so the hourly jobs never
+// run twice as often and the intraday sweep never runs on the hourly tick.
+const DAILY_PRICE_CAPTURE_CRON = "25,55 * * * *";
 
 const accessJwtVerifier = createAccessJwtVerifier();
 
@@ -127,7 +134,58 @@ const worker: ExportedHandler<Env> = {
     return await respond(await handler.fetch(authenticatedRequest, env, ctx));
   },
 
-  async scheduled(_controller, env) {
+  async scheduled(controller, env) {
+    // MKT-011A: the intraday-capture cron pattern fires on its OWN schedule
+    // slot, never alongside the hourly jobs below -- see
+    // `DAILY_PRICE_CAPTURE_CRON`'s comment and
+    // `runScheduledDailyPriceCapture`'s doc comment for why `isSecondaryTick`
+    // is derived from the REAL fired minute rather than the pattern string
+    // (`:25` and `:55` share one pattern).
+    if (controller.cron === DAILY_PRICE_CAPTURE_CRON) {
+      const isSecondaryTick =
+        new Date(controller.scheduledTime).getUTCMinutes() === 55;
+      const captureResult = await runScheduledDailyPriceCapture(env, {
+        isSecondaryTick,
+      });
+      // Review round B3: `captureResult.ok` alone is not enough to call this
+      // "success" -- a nonzero `rollupsFailed` means at least one
+      // (owner, security, market_date) pair genuinely threw and its
+      // intraday cache was deliberately left unpurged for retry. The
+      // `StructuredLogInput.result` union has no third "degraded" state, so
+      // this logs as `"failure"`/`"warn"` (never `"success"`/`"info"`) --
+      // the closest honest fit -- rather than letting a wedged pipeline read
+      // as routine success.
+      const degraded = captureResult.ok && captureResult.rollupsFailed > 0;
+      emitStructuredLog({
+        level: !captureResult.ok ? "error" : degraded ? "warn" : "info",
+        event: "market.refresh",
+        action: "market.refresh.daily_price_capture.scheduled",
+        result: captureResult.ok && !degraded ? "success" : "failure",
+        requestId: "scheduled",
+        metadata: captureResult.ok
+          ? {
+              isSecondaryTick,
+              usersProcessed: captureResult.usersProcessed,
+              sharesightRequests: captureResult.sharesightRequests,
+              yahooRequests: captureResult.yahooRequests,
+              intradayPointsCaptured: captureResult.intradayPointsCaptured,
+              rolledUp: captureResult.rolledUp,
+              purged: captureResult.purged,
+              skippedNoMapping: captureResult.skippedNoMapping,
+              rollupsFailed: captureResult.rollupsFailed,
+              // Review round F5: the structured log emits ONLY the closed
+              // `firstRollupErrorKind` enum, never the free-text
+              // `firstRollupError` message -- an unbounded DB error string
+              // is not a safe/stable thing to ship into log metadata (the
+              // full message stays on `captureResult` itself for
+              // tests/deeper debugging, just never logged here).
+              firstRollupErrorKind: captureResult.firstRollupErrorKind,
+            }
+          : { reason: captureResult.reason },
+      });
+      return;
+    }
+
     const result = await runScheduledMarketDataRefresh(env);
     emitStructuredLog({
       level: result.ok ? "info" : "error",

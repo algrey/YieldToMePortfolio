@@ -23,6 +23,13 @@ export type OwnedPortfolioRecord = {
 export type PriceSourcePreference =
   "yahoo_authenticated" | "yahoo_anonymous" | "sharesight_delayed";
 
+// MKT-011A: which source the daily intraday-capture sweep fetches from for
+// this owner -- see db/schema.ts's `dailyCaptureSource` doc comment for how
+// this differs from `PriceSourcePreference` above (a read-path preference).
+export type DailyCaptureSource =
+  "sharesight" | "yahoo_anonymous" | "yahoo_authenticated";
+export type DailyCaptureIntervalMinutes = 30 | 60;
+
 export type OwnedUserSettingsRecord = {
   userId: string;
   homeCurrencyCode: string;
@@ -30,6 +37,8 @@ export type OwnedUserSettingsRecord = {
   defaultHoldingCurrencyView: "native" | "home";
   financialYearStartMonth: number;
   priceSourcePreference: PriceSourcePreference;
+  dailyCaptureSource: DailyCaptureSource;
+  dailyCaptureIntervalMinutes: DailyCaptureIntervalMinutes;
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -74,6 +83,16 @@ export type PriceSourcePreferenceChangeInput = {
   priceSourcePreference: PriceSourcePreference;
 };
 
+export type DailyCaptureSourceChangeInput = {
+  expectedVersion: number;
+  dailyCaptureSource: DailyCaptureSource;
+};
+
+export type DailyCaptureIntervalMinutesChangeInput = {
+  expectedVersion: number;
+  dailyCaptureIntervalMinutes: DailyCaptureIntervalMinutes;
+};
+
 export type PortfolioMutationFailure =
   | { ok: false; reason: "not_found" }
   | { ok: false; reason: "version_conflict" };
@@ -106,6 +125,12 @@ export type FinancialYearStartMonthChangeResult =
   { ok: true; settings: OwnedUserSettingsRecord } | PortfolioMutationFailure;
 
 export type PriceSourcePreferenceChangeResult =
+  { ok: true; settings: OwnedUserSettingsRecord } | PortfolioMutationFailure;
+
+export type DailyCaptureSourceChangeResult =
+  { ok: true; settings: OwnedUserSettingsRecord } | PortfolioMutationFailure;
+
+export type DailyCaptureIntervalMinutesChangeResult =
   { ok: true; settings: OwnedUserSettingsRecord } | PortfolioMutationFailure;
 
 export type PortfolioListOptions = {
@@ -174,6 +199,10 @@ function createUserSettingsRecord(
     priceSourcePreference: String(
       row.price_source_preference,
     ) as PriceSourcePreference,
+    dailyCaptureSource: String(row.daily_capture_source) as DailyCaptureSource,
+    dailyCaptureIntervalMinutes: Number(
+      row.daily_capture_interval_minutes,
+    ) as DailyCaptureIntervalMinutes,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     version: Number(row.version),
@@ -499,7 +528,8 @@ export function createOwnedUserSettingsRepository(
         `
           SELECT user_id, home_currency_code, timezone,
             default_holding_currency_view, financial_year_start_month,
-            price_source_preference, created_at, updated_at, version
+            price_source_preference, daily_capture_source,
+            daily_capture_interval_minutes, created_at, updated_at, version
           FROM user_settings
           WHERE user_id = ?
           LIMIT 1
@@ -530,7 +560,8 @@ export function createOwnedUserSettingsRepository(
           WHERE user_id = ? AND version = ?
           RETURNING user_id, home_currency_code, timezone,
             default_holding_currency_view, financial_year_start_month,
-            price_source_preference, created_at, updated_at, version
+            price_source_preference, daily_capture_source,
+            daily_capture_interval_minutes, created_at, updated_at, version
         `,
         params: [
           input.homeCurrencyCode,
@@ -602,7 +633,8 @@ export function createOwnedUserSettingsRepository(
           WHERE user_id = ? AND version = ?
           RETURNING user_id, home_currency_code, timezone,
             default_holding_currency_view, financial_year_start_month,
-            price_source_preference, created_at, updated_at, version
+            price_source_preference, daily_capture_source,
+            daily_capture_interval_minutes, created_at, updated_at, version
         `,
         params: [input.view, updatedAt, userId, input.expectedVersion],
       };
@@ -641,7 +673,8 @@ export function createOwnedUserSettingsRepository(
           WHERE user_id = ? AND version = ?
           RETURNING user_id, home_currency_code, timezone,
             default_holding_currency_view, financial_year_start_month,
-            price_source_preference, created_at, updated_at, version
+            price_source_preference, daily_capture_source,
+            daily_capture_interval_minutes, created_at, updated_at, version
         `,
         params: [
           input.financialYearStartMonth,
@@ -688,7 +721,8 @@ export function createOwnedUserSettingsRepository(
           WHERE user_id = ? AND version = ?
           RETURNING user_id, home_currency_code, timezone,
             default_holding_currency_view, financial_year_start_month,
-            price_source_preference, created_at, updated_at, version
+            price_source_preference, daily_capture_source,
+            daily_capture_interval_minutes, created_at, updated_at, version
         `,
         params: [
           input.priceSourcePreference,
@@ -704,6 +738,98 @@ export function createOwnedUserSettingsRepository(
         auditMutationStatement({
           actorUserId: userId,
           action: "settings.price_source_preference_change",
+          targetType: "user_settings",
+          targetId: userId,
+          requestId,
+          occurredAt: updatedAt,
+          condition:
+            "EXISTS (SELECT 1 FROM user_settings WHERE user_id = ? AND version = ?)",
+          conditionParams: [userId, input.expectedVersion],
+        }),
+        updateStatement,
+      ]);
+      const row = rows[rows.length - 1]?.results[0];
+      return row
+        ? { ok: true, settings: createUserSettingsRecord(row) }
+        : await resolveMutationFailure(client, "user_settings", userId, userId);
+    },
+
+    // MKT-011A: mirrors `setPriceSourcePreference` exactly.
+    async setDailyCaptureSource(
+      userId: string,
+      input: DailyCaptureSourceChangeInput,
+    ): Promise<DailyCaptureSourceChangeResult> {
+      const updatedAt = nowIso(now);
+      const updateStatement: SqlStatement = {
+        sql: `
+          UPDATE user_settings
+          SET daily_capture_source = ?, updated_at = ?, version = version + 1
+          WHERE user_id = ? AND version = ?
+          RETURNING user_id, home_currency_code, timezone,
+            default_holding_currency_view, financial_year_start_month,
+            price_source_preference, daily_capture_source,
+            daily_capture_interval_minutes, created_at, updated_at, version
+        `,
+        params: [
+          input.dailyCaptureSource,
+          updatedAt,
+          userId,
+          input.expectedVersion,
+        ],
+      };
+      // See the pre-state-guard note in `requestHomeCurrencyRebase` above:
+      // the audit INSERT runs first, guarded on the batch's PRE-state
+      // (version = expectedVersion), with the version-bumping UPDATE last.
+      const rows = await client.batch([
+        auditMutationStatement({
+          actorUserId: userId,
+          action: "settings.daily_capture_source_change",
+          targetType: "user_settings",
+          targetId: userId,
+          requestId,
+          occurredAt: updatedAt,
+          condition:
+            "EXISTS (SELECT 1 FROM user_settings WHERE user_id = ? AND version = ?)",
+          conditionParams: [userId, input.expectedVersion],
+        }),
+        updateStatement,
+      ]);
+      const row = rows[rows.length - 1]?.results[0];
+      return row
+        ? { ok: true, settings: createUserSettingsRecord(row) }
+        : await resolveMutationFailure(client, "user_settings", userId, userId);
+    },
+
+    // MKT-011A: mirrors `setPriceSourcePreference` exactly.
+    async setDailyCaptureIntervalMinutes(
+      userId: string,
+      input: DailyCaptureIntervalMinutesChangeInput,
+    ): Promise<DailyCaptureIntervalMinutesChangeResult> {
+      const updatedAt = nowIso(now);
+      const updateStatement: SqlStatement = {
+        sql: `
+          UPDATE user_settings
+          SET daily_capture_interval_minutes = ?, updated_at = ?, version = version + 1
+          WHERE user_id = ? AND version = ?
+          RETURNING user_id, home_currency_code, timezone,
+            default_holding_currency_view, financial_year_start_month,
+            price_source_preference, daily_capture_source,
+            daily_capture_interval_minutes, created_at, updated_at, version
+        `,
+        params: [
+          input.dailyCaptureIntervalMinutes,
+          updatedAt,
+          userId,
+          input.expectedVersion,
+        ],
+      };
+      // See the pre-state-guard note in `requestHomeCurrencyRebase` above:
+      // the audit INSERT runs first, guarded on the batch's PRE-state
+      // (version = expectedVersion), with the version-bumping UPDATE last.
+      const rows = await client.batch([
+        auditMutationStatement({
+          actorUserId: userId,
+          action: "settings.daily_capture_interval_minutes_change",
           targetType: "user_settings",
           targetId: userId,
           requestId,

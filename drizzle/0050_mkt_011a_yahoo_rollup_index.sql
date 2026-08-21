@@ -1,0 +1,24 @@
+-- MKT-011A review round 2 (2026-08-22, B2 REVERSAL): pure `CREATE UNIQUE
+-- INDEX` -- index creation only, NO table rebuild, NO trigger hazard
+-- (`CREATE INDEX` never drops `price_observations`'
+-- `account_purge_lock_price_observations_*` triggers; see db/schema.ts's
+-- identical disclosure on the `sharesight` partial index this mirrors).
+--
+-- Verified reasoning (safe against existing/deployed data): this index can
+-- only reject a SECOND row sharing (provider_id = 'yahoo-compatible',
+-- scope_key, mapping_id, interval = 'delayed', market_date,
+-- adjustment_state). Traced against the actual write paths in this
+-- codebase at migration-authoring time: the ordinary hourly Yahoo refresh
+-- (`domain/market-data/ingestion.ts`, driven by `getDailyPrices`) writes
+-- ONLY `interval = 'eod'` rows (hardcoded at the `getDailyPrices` call site
+-- in `domain/market-data/yahoo-compatible.ts`) -- untouched by this index,
+-- which is scoped to `interval = 'delayed'` specifically so `eod` rows
+-- (including their own legitimate same-day-correction pattern -- see
+-- db/schema.ts's comment on the FIRST `price_observations` unique index)
+-- are never constrained by it. `getLatestObservation` is the ONLY producer
+-- of a `yahoo-compatible` `delayed` row anywhere in this codebase, and its
+-- sole call site is MKT-011A's own sweep
+-- (`app/daily-price-capture-service.ts`), which is uncommitted (and this
+-- migration ships in the SAME task) at the time this index is created --
+-- so no existing/deployed row can violate it.
+CREATE UNIQUE INDEX `price_observations_yahoo_scope_mapping_date_unique` ON `price_observations` (`provider_id`,`scope_key`,`mapping_id`,`interval`,`market_date`,`adjustment_state`) WHERE "price_observations"."provider_id" = 'yahoo-compatible' AND "price_observations"."interval" = 'delayed';

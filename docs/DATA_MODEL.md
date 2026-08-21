@@ -87,6 +87,8 @@ One-to-one with user:
 - default native/home holding-price view;
 - `financial_year_start_month` (integer, CHECK 1–12, default 7): the configurable financial-year start month (day is always the 1st). Per-user only — there is no per-portfolio override. The same `timezone` column on this row decides where the FY boundary falls everywhere (see `docs/CALCULATIONS.md` and requirement FY-001). Existing rows default to 7 (the Australian financial year) with no data rewrite;
 - `price_source_preference` (text, CHECK IN `('yahoo_authenticated', 'yahoo_anonymous', 'sharesight_delayed')`, default `'sharesight_delayed'`, migration `0048_mkt_009b_price_source_preference.sql` — MKT-009B): which quote source `app/owned-holdings.ts`'s selection PREFERS, read through to `domain/market-data/selection.ts`'s `preferredProviderIds`. A preference, not a hard filter — a preferred source with no usable observation for a given security falls back honestly to whatever the existing freshest-wins ranking actually has. `MARKET_DATA_PROVIDER` (Worker env, `worker/runtime-config.ts`) remains the deployment-level activation gate for Yahoo entirely independent of this column. Default `sharesight_delayed` is deliberate, not arbitrary: it is a no-op for an owner with no Sharesight link (Sharesight never writes a `price_observations` row for them, so selection falls straight through to Yahoo, unchanged from before this column existed) and matches BRK-012C's existing intent for an owner who does have one — see `docs/MARKET_DATA_STRATEGY.md` §20 and `docs/ARCHITECTURE.md`'s decision note for the full reasoning. This is a genuine table rebuild (a new CHECK-constrained column, same drizzle-kit limitation FY-001A's `0029_bouncy_virginia_dare.sql` hit) — the migration hand-restores the `account_purge_lock_user_settings_*` triggers after the rebuild, following that same precedent exactly;
+- `daily_capture_source` (text, default `'sharesight'`, migration `0049_mkt_011a_daily_price_capture.sql` — MKT-011A): which provider the daily intraday-capture sweep (`app/daily-price-capture-service.ts`) fetches FROM for this owner — `sharesight` | `yahoo_anonymous` | `yahoo_authenticated`. A WRITE-path choice, distinct from `price_source_preference` above (a READ-path preference among already-written observations). Deliberately a PLAIN `ADD COLUMN` with NO `CHECK` (owner/orchestrator ruling, explicitly trading off the `price_source_preference` rebuild precedent immediately above to avoid a second trigger-recreating rebuild for two more columns) — the enum is validated at the request boundary instead (`app/portfolio-action-contract.ts`'s `validateDailyCaptureSource`), same trust-boundary discipline enforced in code rather than SQL. Honest trade-off: a direct SQL write bypassing the action layer is not rejected by the database itself the way `price_source_preference` is;
+- `daily_capture_interval_minutes` (integer, default `60`, same migration): sweep cadence in minutes, `30` or `60` (same ADD-COLUMN/no-CHECK trade-off, validated via `validateDailyCaptureIntervalMinutes`). The cron fires every `:25`/`:55`; a 60-minute owner's captures are gated to the `:25` tick only;
 - timestamps/version.
 
 Home currency is the canonical reporting currency. Changing it is an explicit recalculation event, not a cosmetic database update.
@@ -764,6 +766,27 @@ FKs: `user_id → users(id)`, `security_id → securities(id)`, `currency_code �
 
 **Review round correction (2026-08-20, B1, BLOCKING): this table is no longer what the read gate's 10-minute staleness check reads.** An earlier version of the gate scanned this cache per-security -- a held security Sharesight never matches (no `sharesight_instrument` identifier) can structurally never have a row here, so that check reported "stale" on every single load of a mixed portfolio, collapsing the whole 10-minute window down to just the 2-minute single-flight lease's own bound. The gate's staleness decision now reads a single-row PER-OWNER watermark instead (`sharesight_sync_state.last_price_refresh_at`, see that table's entry below) -- this table's row shape/purpose is otherwise unchanged; a held-but-unmatched security simply never gets a row here, exactly as documented above.
 
+### `intraday_price_points` (MKT-011A)
+
+The daily-price-capture INTRADAY cache: one row per (user, security, provider, observed_at) captured tick, gathered by the `25,55 * * * *` sweep (`app/daily-price-capture-service.ts`) across each security's own market-timezone 10:25–16:25 local-wall-clock window. This is where `MKT-011B`'s "today" price graph reads from -- deliberately NOT `price_observations` (Orchestrator ruling): that table's job stays ONE durable, honestly-labelled closing observation per (security, market_date, provider), never a same-day intraday tick series. Retention is "today only" -- the end-of-day rollup promotes exactly the day's LAST captured point per security into `price_observations` (`interval = 'delayed'`, never `'eod'`), then PURGES every cached row for that (user, security, provider, market_date). A crashed/missed 16:25 tick is not lost: the SAME rollup function runs on every sweep tick regardless of the current window state, so the first sweep of a LATER day still finds and promotes the previous day's abandoned points before purging them.
+
+- `id`, `user_id`, `security_id`, `provider_id` (`'sharesight'` | `'yahoo-compatible'`, CHECK-constrained -- a fresh `CREATE TABLE`, so unlike the `user_settings` columns above, a `CHECK` here costs nothing), `price_decimal` (validated decimal string), `currency_code`;
+- `market_date` (text -- the SOURCE's own reported trading day; the capture step only ever inserts a row when this equals TODAY in the security's own market timezone, never a stale/future date);
+- `market_timezone` (text -- whatever timezone identifier the SOURCE itself reported, provenance only; the window-GATING decision uses this app's OWN stored `exchanges.timezone` instead, joined via `securities.exchange_id`, never this column -- see `domain/market-data/daily-capture-window.ts`);
+- `observed_at` (text, UTC `...Z` ISO -- the source's own observation instant; paired with `(user_id, security_id, provider_id)` in this table's unique index so a re-captured, UNCHANGED tick is a harmless no-op, never a duplicate row);
+- `captured_at` (text -- this row's own ingestion time, distinct from `observed_at`, same provenance-pair discipline as `sharesight_delayed_prices.fetched_at`/`.quote_at`);
+- `delayed_minutes` (nullable integer, CHECK `>= 0` when present) and `quality` (text, CHECK-constrained to the same enum `price_observations.quality` uses, default `'observed'`) -- carried through from the source adapter's own observation (Yahoo: `exchangeDataDelayedBy`; Sharesight never supplies a delay figure, so this is NULL for sharesight-sourced rows, never fabricated);
+- `provider_revision_id` (nullable text) -- carried through VERBATIM from the capturing observation's own `PriceObservation.providerRevisionId`. For `yahoo-compatible` this is MKT-009B's `session:authenticated`/`session:anonymous`/`null` tag, which `app/owned-holdings.ts`'s session-state action-required logic reads; the end-of-day rollup copies this column's value verbatim into `price_observations.provider_revision_id` so a perfectly-authenticated capture never reads back as "not configured". Always NULL for `sharesight` captures (BRK-012B precedent).
+
+No FK to `security_provider_mappings`/`mapping_id` (unlike `price_observations`): resolving the mapping only matters at ROLLUP time, and by construction a row can only exist here if a usable mapping already existed at CAPTURE time (Yahoo: the capture query itself requires an existing verified `security_provider_mappings` row to build the request; Sharesight: the capture step performs the SAME guarded `security_provider_mappings` insert BRK-012B's accretion write does, before writing this row). FKs: `user_id → users(id)`, `security_id → securities(id)`, `currency_code → currencies(code)`, `provider_id → market_data_providers(id)`, all `ON DELETE RESTRICT`. Unique `(user_id, security_id, provider_id, observed_at)` (the idempotent-capture key). Index on `(user_id, provider_id, market_date, security_id)` for the rollup/purge query shape. CREATE-only migration (`drizzle/0049_mkt_011a_daily_price_capture.sql`) with hand-appended `account_purge_lock_*` triggers in the SAME migration, following `sharesight_delayed_prices`'s (`0045`) established precedent exactly. Classified `owned` (ownerColumn `user_id`) for export/purge.
+
+**Rollup idempotency is enforced STRUCTURALLY for BOTH providers (review round 2 correction, 2026-08-22 -- an earlier version of this note described an application-level convergence check for `yahoo-compatible` that a round-2 review traced and disproved the premise of)** -- price observations are a CONVERGING CACHE here, not immutable ledger facts, and both providers now converge through a dedicated PARTIAL unique index with `ON CONFLICT ... DO UPDATE`:
+
+- `sharesight` rollups target BRK-012B's own partial date-scoped unique index (`price_observations_provider_scope_mapping_date_unique`, `WHERE provider_id = 'sharesight'`) -- required because BRK-012B's hourly refresh already writes/overwrites the SAME row through that SAME index all day, so targeting the plain exact-`observation_at` index instead throws on that near-certain collision and wedges the whole rollup loop (review finding B1).
+- `yahoo-compatible` rollups target a NEW, symmetric partial index, `price_observations_yahoo_scope_mapping_date_unique` (migration `0050_mkt_011a_yahoo_rollup_index.sql`, `WHERE provider_id = 'yahoo-compatible' AND interval = 'delayed'`). Round-1 of this task's review incorrectly assumed a pre-existing multi-row-per-day `yahoo-compatible` `delayed` writer that this new index would collide with; round-2 traced the actual write paths and found NONE exists -- the ordinary hourly Yahoo refresh writes only `interval = 'eod'` rows (`getDailyPrices`, hardcoded), and `getLatestObservation` (the only producer of a `delayed` yahoo row) has no call site anywhere in this codebase except MKT-011A's own sweep. The index is therefore scoped to `interval = 'delayed'` (narrower than the `sharesight` index, which needs only `provider_id` since Sharesight never writes `eod` rows) specifically so `yahoo-compatible`'s OWN pre-existing `eod` same-day-correction pattern (two rows, same `market_date`, different `observation_at` -- the ORIGINAL unique index's whole reason for existing, see this table's §6 entry above) stays completely untouched.
+
+The `DO UPDATE ... WHERE excluded.observation_at > price_observations.observation_at` guard on the `yahoo-compatible` branch makes an out-of-order arrival (an older capture landing after a newer one) a safe no-op (SQLite's upsert `RETURNING` reports zero affected rows when the `WHERE` guard suppresses the update) while a genuinely newer arrival converges the SAME row -- this is also what makes two different owners' Yahoo captures for the same security+day converge onto ONE row rather than accumulating duplicates, since both are `access_scope = 'deployment'`. See `docs/MARKET_DATA_STRATEGY.md` §21 for the full mechanism.
+
 ## 9. Snapshots, overrides, jobs, and audit
 
 ### `portfolio_daily_snapshots`
@@ -1102,10 +1125,35 @@ CREATE TABLE user_settings (
     CHECK (price_source_preference IN (
       'yahoo_authenticated', 'yahoo_anonymous', 'sharesight_delayed'
     )),
+  -- MKT-011A: no CHECK here (unlike price_source_preference above) --
+  -- validated at the request boundary instead; see this table's §3 entry.
+  daily_capture_source TEXT NOT NULL DEFAULT 'sharesight',
+  daily_capture_interval_minutes INTEGER NOT NULL DEFAULT 60,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   version INTEGER NOT NULL DEFAULT 1,
   UNIQUE (user_id, home_currency_code)
+);
+
+-- MKT-011A: owner-scoped intraday capture cache; see this table's §8 entry
+-- for full column rationale.
+CREATE TABLE intraday_price_points (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  security_id TEXT NOT NULL REFERENCES securities(id) ON DELETE RESTRICT,
+  provider_id TEXT NOT NULL REFERENCES market_data_providers(id) ON DELETE RESTRICT
+    CHECK (provider_id IN ('sharesight', 'yahoo-compatible')),
+  price_decimal TEXT NOT NULL,
+  currency_code TEXT NOT NULL REFERENCES currencies(code) ON DELETE RESTRICT,
+  market_date TEXT NOT NULL,
+  market_timezone TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  captured_at TEXT NOT NULL,
+  delayed_minutes INTEGER CHECK (delayed_minutes IS NULL OR delayed_minutes >= 0),
+  quality TEXT NOT NULL DEFAULT 'observed'
+    CHECK (quality IN ('observed', 'corrected', 'indicative', 'stale_candidate')),
+  provider_revision_id TEXT,
+  UNIQUE (user_id, security_id, provider_id, observed_at)
 );
 
 CREATE TABLE user_identities (
@@ -1579,6 +1627,17 @@ CREATE UNIQUE INDEX price_observations_provider_scope_mapping_date_unique
     adjustment_state
   )
   WHERE provider_id = 'sharesight';
+-- MKT-011A (migration 0050): the SAME convergence pattern for
+-- yahoo-compatible's own `delayed`-interval rollup rows, scoped ALSO by
+-- `interval = 'delayed'` (narrower than the Sharesight index above) so this
+-- provider's pre-existing `eod` same-day-correction pattern stays
+-- untouched -- see this section's narrative note above.
+CREATE UNIQUE INDEX price_observations_yahoo_scope_mapping_date_unique
+  ON price_observations(
+    provider_id, scope_key, mapping_id, interval, market_date,
+    adjustment_state
+  )
+  WHERE provider_id = 'yahoo-compatible' AND interval = 'delayed';
 
 CREATE TABLE fx_rate_observations (
   id TEXT PRIMARY KEY,
