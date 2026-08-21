@@ -631,6 +631,10 @@ Status: READY (2026-08-21). Owner rulings: no premium subscription (live-confirm
 
 Original scope: Wire optional authenticated-session support into the existing `yahoo-compatible` adapter (same `MarketDataProvider` abstraction, no parallel provider): cookie/crumb material from Worker secrets, graceful degradation to today's anonymous behaviour when auth material is absent/expired (explicit provenance distinguishing authenticated vs anonymous observations), no new Cloudflare products. Provenance/freshness rules per AGENTS.md; never label a price `live` without timestamp/contract evidence.
 
+#### MKT-010 — Price-source preference on the quotes list (cross-surface consistency)
+
+Status: DEFERRED (2026-08-22, from MKT-009B review F3). MKT-009B wires the owner's price-source preference into the holdings read path only; `app/owned-quotes.ts` is deliberately deployment-scope-only by design, so the quotes list and the holdings list can show the same security at different sources/prices for the same owner. Decide whether the quotes surface should honour the preference (and how Sharesight user-scope rows would enter a deployment-scope surface honestly) or whether the divergence should be disclosed in place. Not a defect — both surfaces label provenance honestly today.
+
 #### BRK-013A — Yahoo Finance portfolio read/write endpoint evidence spike
 
 Status: PLANNED; owner directive 2026-08-21 ("bonus point": on-demand two-way portfolio sync with YF). Yahoo portfolio endpoints are fully undocumented/unofficial; evidence spike before ANY design: whether an authenticated session can (1) READ a YF portfolio/watchlist (shape, identifiers, lot granularity) and (2) WRITE positions/lots, with what semantics (create/update/delete granularity, idempotency, failure modes). Output discipline as always: field names/shapes/presence, never owner position values in reports. Deliverable: dated evidence note + go/no-go + risk statement (fragility of unofficial write endpoints; account-lockout/abuse-detection risk of scripted writes to a consumer Yahoo account — state it plainly for the owner's decision).
