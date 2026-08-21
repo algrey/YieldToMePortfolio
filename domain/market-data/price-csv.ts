@@ -19,6 +19,14 @@
 // and returned to the caller for disclosure in the preview, per this task's
 // binding ruling and the money-honesty rule (a bad price row must fail that
 // ROW, never coerce to a fabricated value).
+//
+// Text decoding (UTF-8/UTF-16 detection) lives in the shared
+// `./text-encoding.ts` module -- see that file's header comment for the
+// owner-reported UTF-16 bug this guards against (Excel-style "Unicode
+// Text" TSV exports) -- rather than a copy local to this parser, so
+// `price-backup-csv.ts` gets the identical detection for free.
+
+import { decodeText, stripBom } from "./text-encoding.ts";
 
 export type PriceCsvLimits = Readonly<{ maxBytes: number; maxRows: number }>;
 
@@ -96,18 +104,6 @@ function isValidCalendarDate(value: string): boolean {
   );
 }
 
-function stripBom(value: string): string {
-  return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;
-}
-
-function decodeUtf8(bytes: Uint8Array): string | null {
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    return null;
-  }
-}
-
 function detectDelimiter(headerLine: string): "," | "\t" {
   // Tab takes priority when both are present -- Intelligent Investor's own
   // export is tab-separated; a comma inside a free-text column (there are
@@ -130,12 +126,12 @@ export function parsePriceCsv(
       message: "The file exceeded the configured size limit.",
     };
   }
-  const decoded = decodeUtf8(bytes);
+  const decoded = decodeText(bytes);
   if (decoded === null) {
     return {
       ok: false,
       code: "DECODE_FAILED",
-      message: "The file is not valid UTF-8 text.",
+      message: "The file could not be decoded as UTF-8 or UTF-16 text.",
     };
   }
   const text = stripBom(decoded);

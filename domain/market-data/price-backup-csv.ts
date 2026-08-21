@@ -22,6 +22,14 @@
 // field simply produces a MALFORMED row (extra columns shift every field
 // right, which then fails a downstream typed check) rather than a security
 // issue -- fail-closed, per this format's own honesty rules.
+//
+// Text decoding shares `./text-encoding.ts`'s UTF-8/UTF-16 detection with
+// `price-csv.ts` (own exports are always UTF-8, but a backup file re-saved
+// by a spreadsheet application before re-import could plausibly pick up
+// the same UTF-16 re-encoding that module's header comment documents --
+// this is free correctness from not duplicating the decode logic).
+
+import { decodeText, stripBom } from "./text-encoding.ts";
 
 export const PRICE_BACKUP_FORMAT_VERSION = "yieldtome-price-backup-v1";
 
@@ -188,18 +196,6 @@ function isIsoInstant(value: string): boolean {
   );
 }
 
-function stripBom(value: string): string {
-  return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;
-}
-
-function decodeUtf8(bytes: Uint8Array): string | null {
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    return null;
-  }
-}
-
 export function parsePriceBackupCsv(
   bytes: Uint8Array,
   limits: PriceBackupLimits = DEFAULT_PRICE_BACKUP_LIMITS,
@@ -214,12 +210,12 @@ export function parsePriceBackupCsv(
       message: "The file exceeded the configured size limit.",
     };
   }
-  const decoded = decodeUtf8(bytes);
+  const decoded = decodeText(bytes);
   if (decoded === null) {
     return {
       ok: false,
       code: "DECODE_FAILED",
-      message: "The file is not valid UTF-8 text.",
+      message: "The file could not be decoded as UTF-8 or UTF-16 text.",
     };
   }
   const text = stripBom(decoded);

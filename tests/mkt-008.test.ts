@@ -65,6 +65,42 @@ function bytesOf(text: string): Uint8Array {
   return new TextEncoder().encode(text);
 }
 
+function utf8BomBytesOf(text: string): Uint8Array {
+  const body = bytesOf(text);
+  const withBom = new Uint8Array(body.length + 3);
+  withBom.set([0xef, 0xbb, 0xbf], 0);
+  withBom.set(body, 3);
+  return withBom;
+}
+
+/** BMP-only UTF-16 encoder (sufficient for this file's pure-ASCII fixtures)
+ * -- `bom: true` prepends U+FEFF as the first code unit, which encodes to
+ * the EXACT standard BOM byte pair for the given order (LE: FF FE, BE: FE
+ * FF), matching real spreadsheet-exported files byte-for-byte. */
+function utf16BytesOf(
+  text: string,
+  order: "le" | "be",
+  bom: boolean,
+): Uint8Array {
+  const units = [
+    ...(bom ? [0xfeff] : []),
+    ...[...text].map((char) => char.charCodeAt(0)),
+  ];
+  const bytes = new Uint8Array(units.length * 2);
+  units.forEach((unit, index) => {
+    const hi = (unit >> 8) & 0xff;
+    const lo = unit & 0xff;
+    if (order === "le") {
+      bytes[index * 2] = lo;
+      bytes[index * 2 + 1] = hi;
+    } else {
+      bytes[index * 2] = hi;
+      bytes[index * 2 + 1] = lo;
+    }
+  });
+  return bytes;
+}
+
 // ---------------------------------------------------------------------------
 // (1) domain/market-data/price-csv.ts
 // ---------------------------------------------------------------------------
@@ -175,6 +211,89 @@ test("MKT-008 price-csv: caps are enforced -- oversized bytes and oversized row 
   });
   assert.equal(oversizedRows.ok, false);
   if (!oversizedRows.ok) assert.equal(oversizedRows.code, "ROW_LIMIT_EXCEEDED");
+});
+
+// ---------------------------------------------------------------------------
+// Owner-reported bug (post-commit, HEAD 566a2cd): the owner's real
+// Intelligent Investor export is UTF-16 (Excel's default TSV encoding),
+// with a shape resembling the owner's actual pasted fixture -- 7
+// tab-separated columns (DateTime, ticker, 5 trailing empty cells). Every
+// encoding shape reproduced (UTF-16LE +/- BOM, UTF-16BE, UTF-8 +/- BOM)
+// must parse this identically; a genuinely undecodable file stays an
+// honest DECODE_FAILED; the old misleading "must start with DateTime"
+// header error must never fire for a well-formed UTF-16 file (proof the
+// mojibake bug is dead).
+// ---------------------------------------------------------------------------
+
+const OWNER_FIXTURE_TEXT =
+  "DateTime\tFMG\t\t\t\t\t\r\n" +
+  "1998-03-12 00:00:00\t0.07852\t\t\t\t\t\r\n" +
+  "1998-03-13 00:00:00\t0.08\t\t\t\t\t\r\n";
+
+function assertOwnerFixtureParsed(result: ReturnType<typeof parsePriceCsv>) {
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.ticker, "FMG");
+  assert.equal(result.delimiter, "\t");
+  assert.equal(result.malformed.length, 0);
+  assert.deepEqual(
+    result.rows.map((row) => [row.marketDate, row.priceDecimal]),
+    [
+      ["1998-03-12", "0.07852"],
+      ["1998-03-13", "0.08"],
+    ],
+  );
+}
+
+test("MKT-008 price-csv encoding: UTF-16LE WITHOUT a BOM (the exact owner repro -- previously mojibake'd into a misleading header error) parses correctly", () => {
+  const result = parsePriceCsv(utf16BytesOf(OWNER_FIXTURE_TEXT, "le", false));
+  assertOwnerFixtureParsed(result);
+});
+
+test("MKT-008 price-csv encoding: UTF-16LE WITH a BOM (the exact owner repro -- previously DECODE_FAILED as invalid UTF-8) parses correctly", () => {
+  const result = parsePriceCsv(utf16BytesOf(OWNER_FIXTURE_TEXT, "le", true));
+  assertOwnerFixtureParsed(result);
+});
+
+test("MKT-008 price-csv encoding: UTF-16BE WITH a BOM parses correctly", () => {
+  const result = parsePriceCsv(utf16BytesOf(OWNER_FIXTURE_TEXT, "be", true));
+  assertOwnerFixtureParsed(result);
+});
+
+test("MKT-008 price-csv encoding: UTF-16BE WITHOUT a BOM (null-byte heuristic, even-offset parity) parses correctly", () => {
+  const result = parsePriceCsv(utf16BytesOf(OWNER_FIXTURE_TEXT, "be", false));
+  assertOwnerFixtureParsed(result);
+});
+
+test("MKT-008 price-csv encoding: UTF-8 without a BOM parses correctly (baseline, unaffected by the fix)", () => {
+  const result = parsePriceCsv(bytesOf(OWNER_FIXTURE_TEXT));
+  assertOwnerFixtureParsed(result);
+});
+
+test("MKT-008 price-csv encoding: UTF-8 WITH a BOM parses correctly", () => {
+  const result = parsePriceCsv(utf8BomBytesOf(OWNER_FIXTURE_TEXT));
+  assertOwnerFixtureParsed(result);
+});
+
+test("MKT-008 price-csv encoding: genuine binary garbage still fails as an honest DECODE_FAILED, never silently reinterpreted", () => {
+  const garbage = new Uint8Array([
+    0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01,
+    0x01, 0x01, 0x00, 0x48, 0x00, 0x48, 0x00, 0x00, 0xff, 0xdb,
+  ]);
+  const result = parsePriceCsv(garbage);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.code, "DECODE_FAILED");
+});
+
+test("MKT-008 price-csv encoding: the misleading 'must start with DateTime' header error is dead for a well-formed UTF-16LE (no BOM) file -- it parses successfully instead", () => {
+  // This is the EXACT shape that previously mojibake'd ("D\0a\0t\0e...")
+  // past UTF-8 decode and failed the header check with a misleading
+  // message that never hinted at the real (encoding) problem.
+  const result = parsePriceCsv(utf16BytesOf(OWNER_FIXTURE_TEXT, "le", false));
+  // The bug produced `{ ok: false, code: "MISSING_HEADER", message: 'The
+  // header must start with "DateTime"...' }` for this exact input --
+  // asserting `ok === true` is itself the proof that path is dead.
+  assert.equal(result.ok, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -376,6 +495,18 @@ test("MKT-008 backup-csv: caps are enforced", () => {
   });
   assert.equal(oversized.ok, false);
   if (!oversized.ok) assert.equal(oversized.code, "BYTE_LIMIT_EXCEEDED");
+});
+
+test("MKT-008 backup-csv encoding: shares price-csv.ts's UTF-16 detection (free from the shared text-encoding.ts helper) -- a UTF-16LE-without-BOM backup file parses correctly", () => {
+  const backupText =
+    "format_version,provider_id,source_label,provider_symbol,provider_exchange,currency_code,market_date,price_decimal,observation_at,market_timezone,interval,quality,adjustment_state,delayed_minutes\r\n" +
+    `${PRICE_BACKUP_FORMAT_VERSION},owner-import,intelligent-investor,FMG,ASX,AUD,1998-03-12,0.07852,1998-03-11T13:00:00.000Z,Australia/Sydney,eod,observed,raw,\r\n`;
+  const result = parsePriceBackupCsv(utf16BytesOf(backupText, "le", false));
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.malformed.length, 0);
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0]!.providerSymbol, "FMG");
 });
 
 // ---------------------------------------------------------------------------
