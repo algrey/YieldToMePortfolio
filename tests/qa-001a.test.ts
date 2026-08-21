@@ -38,6 +38,8 @@ test("QA-001A: rejectCrossSiteMutation blocks cross-site origin/Sec-Fetch-Site c
     "https://app.example/api/portfolios/portfolio-a/restore",
     "https://app.example/api/settings/holding-currency-view",
     "https://app.example/api/settings/home-currency",
+    "https://app.example/api/settings/financial-year",
+    "https://app.example/api/settings/price-source-preference",
     "https://app.example/api/import/preview",
     "https://app.example/api/import/preview/batch-a/mappings",
   ];
@@ -65,6 +67,8 @@ test("QA-001A: fixed routes call rejectCrossSiteMutation before any other work",
     "../app/api/portfolios/[portfolioId]/restore/route.ts",
     "../app/api/settings/holding-currency-view/route.ts",
     "../app/api/settings/home-currency/route.ts",
+    "../app/api/settings/financial-year/route.ts",
+    "../app/api/settings/price-source-preference/route.ts",
     "../app/api/import/preview/route.ts",
     "../app/api/import/preview/[batchId]/mappings/route.ts",
   ];

@@ -131,6 +131,11 @@ export type OwnedWorkspace = {
   homeCurrencyCode?: string | null;
   holdingCurrencyView?: "native" | "home";
   financialYearStartMonth?: number;
+  // MKT-009B: which quote source owner-facing read paths PREFER --
+  // `undefined` (prototype/empty states) falls back to the same
+  // `sharesight_delayed` default the settings column carries.
+  priceSourcePreference?:
+    "yahoo_authenticated" | "yahoo_anonymous" | "sharesight_delayed";
   // The user's settings-level IANA timezone (user_settings.timezone). FY
   // window math (FY-001C) must key off this, not `activePortfolio.timezone`
   // -- see AGENTS.md and domain/calculations/financial-year.ts.
@@ -562,7 +567,11 @@ function OwnedHoldingsScreen({
                           ? "FX unavailable"
                           : holding.actionStatus === "missing_previous"
                             ? "previous comparison unavailable"
-                            : "comparison unavailable"
+                            : holding.actionStatus === "incomparable"
+                              ? "comparison unavailable"
+                              : holding.actionStatus === "yahoo_auth_expired"
+                                ? "Yahoo login expired"
+                                : "Yahoo login not configured"
                   }`;
             return (
               // UI-023: a real link to the standalone per-holding detail
@@ -2808,6 +2817,42 @@ export function PortfolioShell({
     }
   }
 
+  async function changePriceSourcePreference(
+    value: "yahoo_authenticated" | "yahoo_anonymous" | "sharesight_delayed",
+  ) {
+    if (!ownedWorkspace?.settingsVersion || !isOnline) return;
+    setActionPending(true);
+    setActionMessage(null);
+    try {
+      const response = await fetch("/api/settings/price-source-preference", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          priceSourcePreference: value,
+          expectedVersion: ownedWorkspace.settingsVersion,
+        }),
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(
+          result.message ?? "Price-source preference could not be changed.",
+        );
+      setOpenMenu(null);
+      router.refresh();
+    } catch (error) {
+      setActionMessage(
+        error instanceof Error
+          ? error.message
+          : "Price-source preference could not be changed.",
+      );
+    } finally {
+      setActionPending(false);
+    }
+  }
+
   async function archiveActivePortfolio() {
     const active = ownedWorkspace?.activePortfolio;
     if (!active || !isOnline) return;
@@ -3156,6 +3201,56 @@ export function PortfolioShell({
                         {financialYearWindowHelperText(
                           ownedWorkspace.financialYearStartMonth ?? 7,
                         )}
+                      </span>
+                    </div>
+                    <div className="menu-field">
+                      <label htmlFor="price-source-preference-select">
+                        Price source
+                      </label>
+                      <select
+                        id="price-source-preference-select"
+                        value={
+                          ownedWorkspace.priceSourcePreference ??
+                          "sharesight_delayed"
+                        }
+                        onChange={(event) =>
+                          void changePriceSourcePreference(
+                            event.target.value as
+                              | "yahoo_authenticated"
+                              | "yahoo_anonymous"
+                              | "sharesight_delayed",
+                          )
+                        }
+                        disabled={actionPending || !isOnline}
+                        aria-describedby="price-source-preference-helper"
+                      >
+                        <option value="yahoo_authenticated">
+                          Yahoo (logged in)
+                        </option>
+                        <option value="yahoo_anonymous">
+                          Yahoo (not logged in)
+                        </option>
+                        <option value="sharesight_delayed">Sharesight</option>
+                      </select>
+                      {/* Outside the label (B5, mirrors FY-001B's identical
+                          fix directly above): a helper span inside the
+                          label becomes part of the select's accessible name
+                          AND gets re-announced via aria-describedby -- a
+                          double announcement. htmlFor/id association keeps
+                          the label-select link explicit without wrapping
+                          the note text into the name. Honest about what
+                          this control does NOT guarantee: it is a
+                          preference the read path tries first, with honest
+                          fallback to whatever is actually usable -- never a
+                          promise of real-time data or a login that may not
+                          even be configured (see
+                          docs/MARKET_DATA_STRATEGY.md §20). */}
+                      <span
+                        className="menu-note"
+                        id="price-source-preference-helper"
+                      >
+                        Preferred source for prices, with honest fallback when
+                        it has none.
                       </span>
                     </div>
                   </>

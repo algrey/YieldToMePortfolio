@@ -13,6 +13,7 @@ import {
 } from "../app/calculation-executor-service.ts";
 import { runSharesightPriceRefresh } from "../app/sharesight-price-refresh-service.ts";
 import { createSharesightIntegrationConfig } from "./sharesight-config.ts";
+import { createYahooAuthConfig } from "./yahoo-auth-config.ts";
 
 const CORPORATE_ACTION_PROVIDER_ID = "yahoo-compatible";
 
@@ -20,10 +21,20 @@ export type ScheduledRefreshResult =
   | { ok: true; skipped: boolean; jobs: number; providerRequests: number }
   | { ok: false; reason: "configuration" | "database" | "refresh" };
 
-function buildProvider(client: Awaited<ReturnType<typeof getSqlClient>>) {
+function buildProvider(
+  client: Awaited<ReturnType<typeof getSqlClient>>,
+  env: Env,
+) {
+  // MKT-009B: optional login-cookie jar, inert (`enabled: false`) when
+  // `YAHOO_COOKIE_T`/`YAHOO_COOKIE_Y` are absent -- see
+  // `worker/yahoo-auth-config.ts`'s doc comment.
+  const authConfig = createYahooAuthConfig(
+    env as unknown as Parameters<typeof createYahooAuthConfig>[0],
+  );
   return createYahooCompatibleProvider({
     providerId: CORPORATE_ACTION_PROVIDER_ID,
     fetcher: fetch,
+    auth: authConfig.enabled ? authConfig.credentials : null,
     resolveSymbol: async (mappingId) => {
       const mapping = await client.get<{ provider_symbol: string }>(
         `SELECT provider_symbol FROM security_provider_mappings
@@ -47,7 +58,7 @@ export async function runScheduledMarketDataRefresh(
 
   try {
     const client = await getSqlClient();
-    const provider = buildProvider(client);
+    const provider = buildProvider(client, env);
     const service = createMarketDataRefreshService({
       repository: createMarketDataRefreshRepository(client),
       provider,
@@ -97,7 +108,7 @@ export async function runScheduledCorporateActionRefresh(
 
   try {
     const client = await getSqlClient();
-    const provider = buildProvider(client);
+    const provider = buildProvider(client, env);
     const summary = await runDueCorporateActionRefresh({
       client,
       provider,

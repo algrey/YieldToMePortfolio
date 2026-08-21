@@ -25,6 +25,7 @@ import {
   resolveRuntimeConfig,
   type RuntimeEnvInput,
 } from "../worker/runtime-config.ts";
+import { createYahooAuthConfig } from "../worker/yahoo-auth-config.ts";
 
 // Exported (not just module-private) so `app/dividend-history-refresh-actions.ts`
 // (UI-006C's owner-initiated "Refresh historical" re-pull) can reuse the
@@ -178,9 +179,15 @@ export async function resolveConfiguredProvider(
     ) {
       return createDisabledMarketDataProvider();
     }
+    // MKT-009B: optional login-cookie jar, inert when
+    // `YAHOO_COOKIE_T`/`YAHOO_COOKIE_Y` are absent.
+    const authConfig = createYahooAuthConfig(
+      env as unknown as Parameters<typeof createYahooAuthConfig>[0],
+    );
     return createYahooCompatibleProvider({
       providerId: PROVIDER_ID,
       fetcher: fetch,
+      auth: authConfig.enabled ? authConfig.credentials : null,
       resolveSymbol: async (mappingId) => {
         const mapping = await client.get<{ provider_symbol: string }>(
           `SELECT provider_symbol FROM security_provider_mappings

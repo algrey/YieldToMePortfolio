@@ -25,6 +25,24 @@ import {
 
 type Fetcher = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
+// MKT-009B: the owner's exported Yahoo login cookies (`T`/`Y`, per MKT-009A's
+// dated evidence -- docs/MARKET_DATA_STRATEGY.md §20). Built by
+// `worker/yahoo-auth-config.ts`'s `createYahooAuthConfig` from
+// `YAHOO_COOKIE_T`/`YAHOO_COOKIE_Y`; this module never reads env directly.
+export type YahooAuthCredentials = {
+  cookieT: string;
+  cookieY: string;
+};
+
+// Per-observation session provenance, recorded in `providerRevisionId` (an
+// existing free-text provenance field, already repurposed per-request for
+// FX direction below -- see `normalizeChartFx`) rather than a new column,
+// so no `price_observations` migration is needed for this. Only set when
+// `options.auth` is actually configured; a deployment with no cookies
+// configured keeps today's exact `providerRevisionId: null` shape for price
+// observations (zero behaviour change for the common case).
+export type YahooSessionState = "authenticated" | "anonymous";
+
 export type YahooCompatibleAdapterOptions = {
   baseUrl?: string;
   providerId?: string;
@@ -37,6 +55,14 @@ export type YahooCompatibleAdapterOptions = {
   circuitFailureThreshold?: number;
   circuitCooldownMs?: number;
   timeoutMs?: number;
+  /**
+   * Optional login-cookie jar (MKT-009B). Attached ONLY to this adapter's
+   * pre-existing crumb-free chart/search calls -- no new dependency on the
+   * `/v1/test/getcrumb` handshake, per MKT-009A's "safest scope"
+   * recommendation. `null`/`undefined` (the default) is today's fully
+   * anonymous behaviour, byte-for-byte unchanged.
+   */
+  auth?: YahooAuthCredentials | null;
 };
 
 type YahooChartMeta = {
@@ -343,6 +369,22 @@ export function createYahooCompatibleProvider(
   const cachedLatest = new Map<string, CachedLatest>();
   let consecutiveFailures = 0;
   let circuitOpenedAt = 0;
+  // MKT-009B: sticky per-instance flag -- once an authenticated request
+  // comes back 401 (login cookie invalid/expired), every later call in this
+  // adapter's lifetime skips the authenticated attempt entirely rather than
+  // repeatedly resending a cookie jar Yahoo has already rejected. There is
+  // no refresh path for these cookies (docs/MARKET_DATA_STRATEGY.md §20) --
+  // the only fix is the owner re-exporting them, which means constructing a
+  // fresh provider instance (a new Worker invocation/isolate).
+  let authInvalid = false;
+
+  function authHeaders(): Record<string, string> | undefined {
+    if (!options.auth || authInvalid) return undefined;
+    // Cookie value discipline: this header is sent to Yahoo only, over the
+    // adapter's own `fetcher`. It is never logged, never included in any
+    // `MarketDataError`, and never returned from this module.
+    return { cookie: `T=${options.auth.cookieT}; Y=${options.auth.cookieY}` };
+  }
 
   function circuitOpen(): boolean {
     if (circuitOpenedAt === 0) {
@@ -368,7 +410,10 @@ export function createYahooCompatibleProvider(
     }
   }
 
-  async function fetchJson(url: URL): Promise<MarketDataResult<unknown>> {
+  async function fetchJson(
+    url: URL,
+    extraHeaders?: Record<string, string>,
+  ): Promise<MarketDataResult<unknown>> {
     if (circuitOpen()) {
       return error(
         "transient_upstream",
@@ -395,7 +440,7 @@ export function createYahooCompatibleProvider(
       try {
         response = await Promise.race([
           fetcher(url, {
-            headers: { accept: "application/json" },
+            headers: { accept: "application/json", ...extraHeaders },
             signal: controller.signal,
           }),
           timeoutPromise,
@@ -474,6 +519,42 @@ export function createYahooCompatibleProvider(
       }
     }
     return lastError;
+  }
+
+  /**
+   * MKT-009B: the auth-aware entry point every chart/search call site below
+   * uses in place of a bare `fetchJson(url)`. When no login cookie is
+   * configured (or a prior call already invalidated one -- `authInvalid`),
+   * this is IDENTICAL to `fetchJson(url)` -- zero behaviour change.
+   *
+   * When a cookie jar is attached: a clean `401` is the only signal this
+   * spike-evidenced design treats as "the login session is invalid" (per
+   * docs/MARKET_DATA_STRATEGY.md §20's binding failure-mode requirement) --
+   * on that specific outcome, and ONLY that outcome, this degrades to a
+   * second, anonymous attempt against the SAME url and marks the cookie
+   * jar invalid for the rest of this adapter's lifetime (no repeated
+   * hammering with cookies Yahoo has already rejected). A `429` (or any
+   * other outcome) is returned exactly as `fetchJson` produced it --
+   * `fetchJson`'s own retry loop and circuit breaker already own that path,
+   * and this function never reinterprets a rate limit as a login failure.
+   */
+  async function fetchJsonAuthAware(url: URL): Promise<{
+    result: MarketDataResult<unknown>;
+    sessionState: YahooSessionState;
+  }> {
+    const headers = authHeaders();
+    if (!headers) {
+      return { result: await fetchJson(url), sessionState: "anonymous" };
+    }
+    const authedResult = await fetchJson(url, headers);
+    if (!authedResult.ok && authedResult.error.kind === "authentication") {
+      authInvalid = true;
+      return {
+        result: await fetchJson(url),
+        sessionState: "anonymous",
+      };
+    }
+    return { result: authedResult, sessionState: "authenticated" };
   }
 
   async function symbolFor(
@@ -569,7 +650,7 @@ export function createYahooCompatibleProvider(
         false,
       );
     }
-    const response = await fetchJson(
+    const { result: response } = await fetchJsonAuthAware(
       chartUrl(symbol.value, {
         period1: String(Math.floor(from / 1000)),
         period2: String(Math.floor(to / 1000) + 86_400),
@@ -599,6 +680,10 @@ export function createYahooCompatibleProvider(
       timezone: string;
       delayedMinutes: number | null;
     },
+    // MKT-009B: only ever set (non-undefined) when `options.auth` is
+    // configured -- see the type's own doc comment for why an unconfigured
+    // deployment keeps today's exact `providerRevisionId: null` shape.
+    sessionState?: YahooSessionState,
   ): MarketDataResult<PriceObservation> {
     const observationAt = isoFromUnixSeconds(timestamp);
     const closeDecimal = positiveDecimal(close);
@@ -635,6 +720,8 @@ export function createYahooCompatibleProvider(
         adjustmentState: "raw",
         quality: "observed",
         delayedMinutes: metadata.delayedMinutes,
+        providerRevisionId:
+          sessionState === undefined ? null : `session:${sessionState}`,
       },
       {
         providerId,
@@ -732,7 +819,7 @@ export function createYahooCompatibleProvider(
       const url = new URL(`${baseUrl}/v1/finance/search`);
       url.searchParams.set("q", query.text);
       if (query.exchangeId) url.searchParams.set("quotesCount", "20");
-      const response = await fetchJson(url);
+      const { result: response } = await fetchJsonAuthAware(url);
       if (!response.ok) return response;
       const root = asRecord(response.value);
       const quotes = root?.quotes;
@@ -811,7 +898,7 @@ export function createYahooCompatibleProvider(
           false,
         );
       }
-      const response = await fetchJson(
+      const { result: response, sessionState } = await fetchJsonAuthAware(
         chartUrl(symbol.value, {
           period1: String(Math.floor(from / 1000)),
           period2: String(Math.floor(to / 1000) + 86_400),
@@ -852,6 +939,7 @@ export function createYahooCompatibleProvider(
           null,
           "eod",
           metadata.value,
+          options.auth ? sessionState : undefined,
         );
         if (!normalized.ok) return normalized;
         if (
@@ -870,7 +958,7 @@ export function createYahooCompatibleProvider(
       const symbol = await symbolFor(request.mappingId);
       if (!symbol.ok) return symbol;
       const key = requestKey(request, symbol.value);
-      const response = await fetchJson(
+      const { result: response, sessionState } = await fetchJsonAuthAware(
         chartUrl(symbol.value, {
           range: "1d",
           interval: "1d",
@@ -921,6 +1009,7 @@ export function createYahooCompatibleProvider(
         previousClose,
         metadata.value.delayedMinutes === null ? "eod" : "delayed",
         metadata.value,
+        options.auth ? sessionState : undefined,
       );
       if (!normalized.ok) return staleFallback(key) ?? normalized;
       cachedLatest.set(key, { key, value: normalized.value });
@@ -951,7 +1040,12 @@ export function createYahooCompatibleProvider(
       ) {
         return error("invalid_response", "FX date range is invalid.", false);
       }
-      const response = await fetchJson(
+      // FX provenance keeps its existing direct/inverted `providerRevisionId`
+      // encoding (see `normalizeChartFx` below) rather than also carrying
+      // session state -- see this call's own note; cookies are still
+      // attached (this is an existing crumb-free chart call), but FX
+      // observations are out of MKT-009B's provenance scope.
+      const { result: response } = await fetchJsonAuthAware(
         chartUrl(mapping.providerSymbol, {
           period1: String(Math.floor(from / 1000)),
           period2: String(Math.floor(to / 1000) + 86_400),

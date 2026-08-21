@@ -15,6 +15,7 @@ import {
   validateHomeCurrency,
   validateHoldingCurrencyView,
   validatePortfolioActionInput,
+  validatePriceSourcePreference,
 } from "./portfolio-action-contract";
 
 type ActionFailure = {
@@ -378,6 +379,55 @@ export async function changeFinancialYearStartMonthAction(value: unknown) {
       ok: false as const,
       status: 409 as const,
       message: "Financial-year start month could not be changed.",
+    };
+  }
+}
+
+// MKT-009B: mirrors `changeFinancialYearStartMonthAction` exactly.
+export async function changePriceSourcePreferenceAction(value: unknown) {
+  const input = value as Record<string, unknown>;
+  const priceSourcePreference = validatePriceSourcePreference(
+    input?.priceSourcePreference,
+  );
+  const expectedVersion = input?.expectedVersion;
+  if (
+    !priceSourcePreference ||
+    typeof expectedVersion !== "number" ||
+    !Number.isInteger(expectedVersion)
+  ) {
+    return {
+      ok: false as const,
+      status: 400 as const,
+      message:
+        "A valid price-source preference and settings version are required.",
+    };
+  }
+  const context = await getAuthenticatedSqlContext();
+  if (!context.ok) return context;
+  try {
+    const result = await createOwnedUserSettingsRepository(
+      context.client,
+      undefined,
+      { requestId: context.requestId },
+    ).setPriceSourcePreference(context.userId, {
+      priceSourcePreference,
+      expectedVersion,
+    });
+    return result.ok
+      ? result
+      : {
+          ...result,
+          status:
+            result.reason === "version_conflict"
+              ? (409 as const)
+              : (404 as const),
+          message: "Price-source preference could not be changed.",
+        };
+  } catch {
+    return {
+      ok: false as const,
+      status: 409 as const,
+      message: "Price-source preference could not be changed.",
     };
   }
 }

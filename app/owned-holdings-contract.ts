@@ -48,7 +48,13 @@ export type OwnedHoldingRow = {
     | "missing_price"
     | "missing_fx"
     | "missing_previous"
-    | "incomparable";
+    | "incomparable"
+    // MKT-009B (review round-1 fix, B2): the `yahoo_authenticated`
+    // price-source preference is not currently satisfied -- see
+    // `app/owned-holdings.ts`'s `yahooAuthActionStatus` for the exact
+    // not-configured-vs-expired distinction (F2).
+    | "yahoo_auth_not_configured"
+    | "yahoo_auth_expired";
   explanation: string;
   sort: {
     ticker: string;

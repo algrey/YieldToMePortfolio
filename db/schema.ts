@@ -66,6 +66,26 @@ export const userSettings = sqliteTable(
     financialYearStartMonth: integer("financial_year_start_month")
       .notNull()
       .default(7),
+    // MKT-009B: which quote source the owner-facing read paths PREFER --
+    // `yahoo_authenticated` (Yahoo, only counted as authenticated when the
+    // configured login cookies actually produced a `session:authenticated`
+    // observation -- see `domain/market-data/yahoo-compatible.ts`),
+    // `yahoo_anonymous` (Yahoo regardless of session state), or
+    // `sharesight_delayed` (BRK-012C's delayed-price cache/gate pipeline).
+    // This is a PREFERENCE, not a hard filter: `app/owned-holdings.ts`'s
+    // selection still falls back HONESTLY to whatever observation is
+    // actually usable when the preferred source has none (never
+    // `Price unavailable` merely because the preferred source is silent
+    // while another source has a valid observation). Defaults to
+    // `sharesight_delayed`: for an owner with no Sharesight link this is a
+    // no-op (Sharesight never writes a row, so selection falls straight
+    // through to Yahoo, matching today's behaviour byte-for-byte); for an
+    // owner WITH a link it matches BRK-012C's existing intent (a
+    // <=10-minute-fresh delayed price) rather than silently regressing an
+    // existing user's price freshness the day this column is introduced.
+    priceSourcePreference: text("price_source_preference")
+      .notNull()
+      .default("sharesight_delayed"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     version: integer("version").notNull().default(1),
@@ -88,6 +108,10 @@ export const userSettings = sqliteTable(
     check(
       "user_settings_financial_year_start_month_check",
       sql`${table.financialYearStartMonth} BETWEEN 1 AND 12`,
+    ),
+    check(
+      "user_settings_price_source_preference_check",
+      sql`${table.priceSourcePreference} IN ('yahoo_authenticated', 'yahoo_anonymous', 'sharesight_delayed')`,
     ),
     uniqueIndex("user_settings_user_home_currency_unique").on(
       table.userId,

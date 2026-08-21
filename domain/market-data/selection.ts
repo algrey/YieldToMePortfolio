@@ -89,6 +89,23 @@ export type PriceSelectionInput = SelectionOptions & {
   observations: readonly PriceObservation[];
   overrides?: readonly ManualOverride[];
   now?: string;
+  /**
+   * MKT-009B: an ordered owner preference over `providerId` (e.g.
+   * `["sharesight"]` or `["yahoo-compatible"]`). `undefined`/empty is
+   * today's exact freshest-wins behaviour -- unchanged. When present, this
+   * is a PREFERENCE, not a hard filter: candidates are first narrowed to
+   * this list (still ranked freshest-first among themselves); only when
+   * NONE of the preferred providers has a single usable candidate does
+   * selection fall back, honestly, to the best candidate from ANY provider
+   * -- see `docs/CALCULATIONS.md` §2's "MKT-009B: price-source preference
+   * deliberately outranks freshness within the existing fallback window"
+   * note for the Orchestrator's binding ruling (review round-1 F1) that a
+   * configured preference wins OUTRIGHT over a fresher non-preferred
+   * observation, not merely on a tie, and for why "preferred has nothing"
+   * must never become `Price unavailable` while another source has a
+   * valid observation.
+   */
+  preferredProviderIds?: readonly string[] | null;
 };
 
 export type FxSelectionInput = SelectionOptions & {
@@ -346,34 +363,46 @@ export function selectPriceObservation(
     }
   }
 
-  const candidates = input.observations
-    .filter((observation) => {
-      const age = dayAge(input.asOf, observation.marketDate);
-      return (
-        age !== null &&
-        age >= 0 &&
-        age <= (input.maxPriorCalendarDays ?? DEFAULT_MAX_PRIOR_DAYS) &&
-        scopeMatches(observation, input.scope) &&
-        isPositive(observation.closeDecimal) &&
-        availableByPortfolioCutoff(
-          observation.observationAt,
-          input.asOf,
-          input.portfolioTimezone,
-        ) &&
-        (!input.currencyCode || observation.currencyCode === input.currencyCode)
-      );
-    })
-    .sort((left, right) => {
-      const ageDifference =
-        (dayAge(input.asOf, left.marketDate) ?? Infinity) -
-        (dayAge(input.asOf, right.marketDate) ?? Infinity);
-      return (
-        ageDifference ||
-        providerRank(left.interval, left.quality) -
-          providerRank(right.interval, right.quality) ||
-        right.observationAt.localeCompare(left.observationAt)
-      );
-    });
+  const sortByFreshness = (left: PriceObservation, right: PriceObservation) => {
+    const ageDifference =
+      (dayAge(input.asOf, left.marketDate) ?? Infinity) -
+      (dayAge(input.asOf, right.marketDate) ?? Infinity);
+    return (
+      ageDifference ||
+      providerRank(left.interval, left.quality) -
+        providerRank(right.interval, right.quality) ||
+      right.observationAt.localeCompare(left.observationAt)
+    );
+  };
+  const validCandidates = input.observations.filter((observation) => {
+    const age = dayAge(input.asOf, observation.marketDate);
+    return (
+      age !== null &&
+      age >= 0 &&
+      age <= (input.maxPriorCalendarDays ?? DEFAULT_MAX_PRIOR_DAYS) &&
+      scopeMatches(observation, input.scope) &&
+      isPositive(observation.closeDecimal) &&
+      availableByPortfolioCutoff(
+        observation.observationAt,
+        input.asOf,
+        input.portfolioTimezone,
+      ) &&
+      (!input.currencyCode || observation.currencyCode === input.currencyCode)
+    );
+  });
+  // MKT-009B: narrow to the preferred provider(s) first, but only when that
+  // narrowing leaves at least one candidate -- an empty preferred subset
+  // falls back, honestly, to the full candidate set below rather than ever
+  // reporting `unavailable` merely because the PREFERRED source is silent.
+  const preferredCandidates =
+    input.preferredProviderIds && input.preferredProviderIds.length > 0
+      ? validCandidates.filter((observation) =>
+          input.preferredProviderIds!.includes(observation.providerId),
+        )
+      : [];
+  const candidates = (
+    preferredCandidates.length > 0 ? preferredCandidates : validCandidates
+  ).sort(sortByFreshness);
   const observation = candidates[0];
   if (!observation) {
     return {

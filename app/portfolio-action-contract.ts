@@ -66,6 +66,18 @@ export function validateHoldingCurrencyView(
   return value === "native" || value === "home" ? value : null;
 }
 
+// MKT-009B: mirrors `validateHoldingCurrencyView` exactly -- a closed enum,
+// never a silent default for a malformed value.
+export function validatePriceSourcePreference(
+  value: unknown,
+): "yahoo_authenticated" | "yahoo_anonymous" | "sharesight_delayed" | null {
+  return value === "yahoo_authenticated" ||
+    value === "yahoo_anonymous" ||
+    value === "sharesight_delayed"
+    ? value
+    : null;
+}
+
 /** Validates a financial-year start month at the request boundary: an
  * integer 1-12, never a silent default when the input is malformed. */
 export function validateFinancialYearStartMonth(value: unknown): number | null {

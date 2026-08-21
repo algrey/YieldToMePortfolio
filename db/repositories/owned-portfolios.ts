@@ -20,12 +20,16 @@ export type OwnedPortfolioRecord = {
   homeCurrencyCode: string;
 };
 
+export type PriceSourcePreference =
+  "yahoo_authenticated" | "yahoo_anonymous" | "sharesight_delayed";
+
 export type OwnedUserSettingsRecord = {
   userId: string;
   homeCurrencyCode: string;
   timezone: string;
   defaultHoldingCurrencyView: "native" | "home";
   financialYearStartMonth: number;
+  priceSourcePreference: PriceSourcePreference;
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -65,6 +69,11 @@ export type FinancialYearStartMonthChangeInput = {
   financialYearStartMonth: number;
 };
 
+export type PriceSourcePreferenceChangeInput = {
+  expectedVersion: number;
+  priceSourcePreference: PriceSourcePreference;
+};
+
 export type PortfolioMutationFailure =
   | { ok: false; reason: "not_found" }
   | { ok: false; reason: "version_conflict" };
@@ -94,6 +103,9 @@ export type HoldingCurrencyViewChangeResult =
   { ok: true; settings: OwnedUserSettingsRecord } | PortfolioMutationFailure;
 
 export type FinancialYearStartMonthChangeResult =
+  { ok: true; settings: OwnedUserSettingsRecord } | PortfolioMutationFailure;
+
+export type PriceSourcePreferenceChangeResult =
   { ok: true; settings: OwnedUserSettingsRecord } | PortfolioMutationFailure;
 
 export type PortfolioListOptions = {
@@ -159,6 +171,9 @@ function createUserSettingsRecord(
     defaultHoldingCurrencyView: String(row.default_holding_currency_view) as
       "native" | "home",
     financialYearStartMonth: Number(row.financial_year_start_month),
+    priceSourcePreference: String(
+      row.price_source_preference,
+    ) as PriceSourcePreference,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     version: Number(row.version),
@@ -483,7 +498,8 @@ export function createOwnedUserSettingsRepository(
       const row = await client.get<Record<string, unknown>>(
         `
           SELECT user_id, home_currency_code, timezone,
-            default_holding_currency_view, financial_year_start_month, created_at, updated_at, version
+            default_holding_currency_view, financial_year_start_month,
+            price_source_preference, created_at, updated_at, version
           FROM user_settings
           WHERE user_id = ?
           LIMIT 1
@@ -513,7 +529,8 @@ export function createOwnedUserSettingsRepository(
           SET home_currency_code = ?, updated_at = ?, version = version + 1
           WHERE user_id = ? AND version = ?
           RETURNING user_id, home_currency_code, timezone,
-            default_holding_currency_view, financial_year_start_month, created_at, updated_at, version
+            default_holding_currency_view, financial_year_start_month,
+            price_source_preference, created_at, updated_at, version
         `,
         params: [
           input.homeCurrencyCode,
@@ -584,7 +601,8 @@ export function createOwnedUserSettingsRepository(
           SET default_holding_currency_view = ?, updated_at = ?, version = version + 1
           WHERE user_id = ? AND version = ?
           RETURNING user_id, home_currency_code, timezone,
-            default_holding_currency_view, financial_year_start_month, created_at, updated_at, version
+            default_holding_currency_view, financial_year_start_month,
+            price_source_preference, created_at, updated_at, version
         `,
         params: [input.view, updatedAt, userId, input.expectedVersion],
       };
@@ -622,7 +640,8 @@ export function createOwnedUserSettingsRepository(
           SET financial_year_start_month = ?, updated_at = ?, version = version + 1
           WHERE user_id = ? AND version = ?
           RETURNING user_id, home_currency_code, timezone,
-            default_holding_currency_view, financial_year_start_month, created_at, updated_at, version
+            default_holding_currency_view, financial_year_start_month,
+            price_source_preference, created_at, updated_at, version
         `,
         params: [
           input.financialYearStartMonth,
@@ -638,6 +657,53 @@ export function createOwnedUserSettingsRepository(
         auditMutationStatement({
           actorUserId: userId,
           action: "settings.financial_year_start_month_change",
+          targetType: "user_settings",
+          targetId: userId,
+          requestId,
+          occurredAt: updatedAt,
+          condition:
+            "EXISTS (SELECT 1 FROM user_settings WHERE user_id = ? AND version = ?)",
+          conditionParams: [userId, input.expectedVersion],
+        }),
+        updateStatement,
+      ]);
+      const row = rows[rows.length - 1]?.results[0];
+      return row
+        ? { ok: true, settings: createUserSettingsRecord(row) }
+        : await resolveMutationFailure(client, "user_settings", userId, userId);
+    },
+
+    // MKT-009B: mirrors `setFinancialYearStartMonth` exactly (own settings
+    // repository precedent, itself following FY-001's own precedent) --
+    // owner-scoped, optimistic-version-guarded, single audited batch.
+    async setPriceSourcePreference(
+      userId: string,
+      input: PriceSourcePreferenceChangeInput,
+    ): Promise<PriceSourcePreferenceChangeResult> {
+      const updatedAt = nowIso(now);
+      const updateStatement: SqlStatement = {
+        sql: `
+          UPDATE user_settings
+          SET price_source_preference = ?, updated_at = ?, version = version + 1
+          WHERE user_id = ? AND version = ?
+          RETURNING user_id, home_currency_code, timezone,
+            default_holding_currency_view, financial_year_start_month,
+            price_source_preference, created_at, updated_at, version
+        `,
+        params: [
+          input.priceSourcePreference,
+          updatedAt,
+          userId,
+          input.expectedVersion,
+        ],
+      };
+      // See the pre-state-guard note in `requestHomeCurrencyRebase` above:
+      // the audit INSERT runs first, guarded on the batch's PRE-state
+      // (version = expectedVersion), with the version-bumping UPDATE last.
+      const rows = await client.batch([
+        auditMutationStatement({
+          actorUserId: userId,
+          action: "settings.price_source_preference_change",
           targetType: "user_settings",
           targetId: userId,
           requestId,

@@ -86,6 +86,7 @@ One-to-one with user:
 - IANA timezone and locale/display defaults;
 - default native/home holding-price view;
 - `financial_year_start_month` (integer, CHECK 1–12, default 7): the configurable financial-year start month (day is always the 1st). Per-user only — there is no per-portfolio override. The same `timezone` column on this row decides where the FY boundary falls everywhere (see `docs/CALCULATIONS.md` and requirement FY-001). Existing rows default to 7 (the Australian financial year) with no data rewrite;
+- `price_source_preference` (text, CHECK IN `('yahoo_authenticated', 'yahoo_anonymous', 'sharesight_delayed')`, default `'sharesight_delayed'`, migration `0048_mkt_009b_price_source_preference.sql` — MKT-009B): which quote source `app/owned-holdings.ts`'s selection PREFERS, read through to `domain/market-data/selection.ts`'s `preferredProviderIds`. A preference, not a hard filter — a preferred source with no usable observation for a given security falls back honestly to whatever the existing freshest-wins ranking actually has. `MARKET_DATA_PROVIDER` (Worker env, `worker/runtime-config.ts`) remains the deployment-level activation gate for Yahoo entirely independent of this column. Default `sharesight_delayed` is deliberate, not arbitrary: it is a no-op for an owner with no Sharesight link (Sharesight never writes a `price_observations` row for them, so selection falls straight through to Yahoo, unchanged from before this column existed) and matches BRK-012C's existing intent for an owner who does have one — see `docs/MARKET_DATA_STRATEGY.md` §20 and `docs/ARCHITECTURE.md`'s decision note for the full reasoning. This is a genuine table rebuild (a new CHECK-constrained column, same drizzle-kit limitation FY-001A's `0029_bouncy_virginia_dare.sql` hit) — the migration hand-restores the `account_purge_lock_user_settings_*` triggers after the rebuild, following that same precedent exactly;
 - timestamps/version.
 
 Home currency is the canonical reporting currency. Changing it is an explicit recalculation event, not a cosmetic database update.
@@ -1097,6 +1098,10 @@ CREATE TABLE user_settings (
     CHECK (default_holding_currency_view IN ('native', 'home')),
   financial_year_start_month INTEGER NOT NULL DEFAULT 7
     CHECK (financial_year_start_month BETWEEN 1 AND 12),
+  price_source_preference TEXT NOT NULL DEFAULT 'sharesight_delayed'
+    CHECK (price_source_preference IN (
+      'yahoo_authenticated', 'yahoo_anonymous', 'sharesight_delayed'
+    )),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   version INTEGER NOT NULL DEFAULT 1,

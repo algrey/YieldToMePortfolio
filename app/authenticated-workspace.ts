@@ -103,6 +103,7 @@ export async function loadAuthenticatedWorkspace(
           ...workspace,
           holdingCurrencyView: settings.defaultHoldingCurrencyView,
           financialYearStartMonth: settings.financialYearStartMonth,
+          priceSourcePreference: settings.priceSourcePreference,
           timezone: settings.timezone,
           settingsVersion: settings.version,
           nowInstant,

@@ -1,6 +1,10 @@
 import type { SqlClient } from "../db/repositories/sql-client.ts";
 import { createOwnedManualOverrideRepository } from "../db/repositories/market-data.ts";
 import {
+  createOwnedUserSettingsRepository,
+  type PriceSourcePreference,
+} from "../db/repositories/owned-portfolios.ts";
+import {
   ensureSharesightPriceFreshness,
   type SharesightPriceGateOptions,
 } from "./sharesight-price-gate-service.ts";
@@ -244,6 +248,72 @@ function evidence(selection: PriceSelection | FxSelection): FxEvidence | null {
     selectionReason: selection.explanation.reason,
   };
 }
+// MKT-009B: maps the owner's PRICE-SOURCE PREFERENCE setting to the
+// `providerId`(s) `selectPriceObservation` should try first (see that
+// function's own `preferredProviderIds` doc comment for the honest-fallback
+// semantics). Both Yahoo options prefer the SAME `providerId` --
+// `price_observations` accretes one row per provider/mapping/date (last
+// write wins), so there is no separately-stored "authenticated" vs
+// "anonymous" Yahoo row to choose between; the distinction instead surfaces
+// as the `yahooAuthPreferenceUnmet` note built alongside `priceDetail`
+// below, using the SAME observation's `providerRevisionId` session tag.
+function providerIdsForPreference(
+  preference: PriceSourcePreference,
+): readonly string[] {
+  switch (preference) {
+    case "yahoo_authenticated":
+    case "yahoo_anonymous":
+      return ["yahoo-compatible"];
+    case "sharesight_delayed":
+      return ["sharesight"];
+  }
+}
+// MKT-009B (review round-1 fix, B1 -- BLOCKING): the ORIGINAL combiner below
+// hardcoded "the user-scoped (Sharesight/owner-import) selection wins any
+// market-date tie against the deployment-scoped (Yahoo) one", with no
+// knowledge of `preferredProviderIds` at all -- `preferredProviderIds` was
+// only ever applied WITHIN each of the two scope-restricted
+// `selectPriceObservation` calls (narrowing deployment-scope down to
+// nothing-but-Yahoo, or user-scope down to Sharesight over owner-import),
+// never across them. Reproduced by the reviewer: a same-date Yahoo + a
+// same-date Sharesight row selected Sharesight under EVERY preference,
+// including `yahoo_authenticated`/`yahoo_anonymous` -- the feature was a
+// no-op for two of its three settings. Fixed by making the CROSS-scope
+// choice preference-aware too: whichever scope's own selection actually
+// matches the preferred provider(s) wins outright over the other scope,
+// with no date comparison at all -- per the Orchestrator's F1 ruling
+// (docs/CALCULATIONS.md §2), a configured preference deliberately outranks
+// freshness within the existing fallback window; that IS what "prefer this
+// source" means. The original recency tie-break is preserved verbatim as
+// the fallback path for the no-preference case and for the (structurally
+// impossible today, but not assumed away) case where neither or both
+// scopes match the preference.
+function combineScopedPriceSelections(
+  deployment: PriceSelection,
+  user: PriceSelection,
+  preferredProviderIds: readonly string[] | null | undefined,
+): PriceSelection {
+  if (preferredProviderIds && preferredProviderIds.length > 0) {
+    const deploymentPreferred =
+      deployment.selected !== null &&
+      deployment.selected.providerId !== null &&
+      preferredProviderIds.includes(deployment.selected.providerId);
+    const userPreferred =
+      user.selected !== null &&
+      user.selected.providerId !== null &&
+      preferredProviderIds.includes(user.selected.providerId);
+    if (deploymentPreferred && !userPreferred) return deployment;
+    if (userPreferred && !deploymentPreferred) return user;
+    // Neither (or, structurally impossible today, both) scope's selection
+    // matches the preference -- honest fallback to the ORIGINAL recency
+    // tie-break below, identical to the no-preference case.
+  }
+  return user.selected &&
+    (!deployment.selected ||
+      user.selected.marketDate >= deployment.selected.marketDate)
+    ? user
+    : deployment;
+}
 function choosePrice(
   input: Parameters<typeof selectPriceObservation>[0],
   userId: string,
@@ -252,11 +322,7 @@ function choosePrice(
     selectPriceObservation(input),
     selectPriceObservation({ ...input, scope: { kind: "user", userId } }),
   ]).then(([deployment, user]) =>
-    user.selected &&
-    (!deployment.selected ||
-      user.selected.marketDate >= deployment.selected.marketDate)
-      ? user
-      : deployment,
+    combineScopedPriceSelections(deployment, user, input.preferredProviderIds),
   );
 }
 function chooseFx(
@@ -730,6 +796,16 @@ export async function loadOwnedHoldings(
       "reversed",
     ]),
   }));
+  // MKT-009B: one PK lookup, reused for every held security below rather
+  // than re-queried per row. Missing settings (should not happen for an
+  // owner with a live portfolio) fails HONEST, not silent -- the same
+  // `sharesight_delayed` default the column itself carries, never a thrown
+  // error over a preference lookup alone.
+  const userSettings =
+    await createOwnedUserSettingsRepository(client).get(userId);
+  const priceSourcePreference: PriceSourcePreference =
+    userSettings?.priceSourcePreference ?? "sharesight_delayed";
+  const preferredProviderIds = providerIdsForPreference(priceSourcePreference);
   const rows = await Promise.all(
     identities.map(async (identity): Promise<OwnedHoldingRow> => {
       const projection = projectionBySecurity.get(identity.id);
@@ -755,6 +831,7 @@ export async function loadOwnedHoldings(
               row.targetKey === identity.securityId &&
               (row.portfolioId === null || row.portfolioId === portfolioId),
           ),
+          preferredProviderIds,
         },
         userId,
       );
@@ -777,6 +854,7 @@ export async function loadOwnedHoldings(
               row.targetKey === identity.securityId &&
               (row.portfolioId === null || row.portfolioId === portfolioId),
           ),
+          preferredProviderIds,
         },
         userId,
       );
@@ -978,6 +1056,47 @@ export async function loadOwnedHoldings(
           : null;
       const nativeCurrency = identity.currencyCode;
       const fxDetail = holding?.explanation.fx.explanation;
+      // MKT-009B (review round-1 fix, B2): an owner who picked
+      // `yahoo_authenticated` gets an explicit, FIRST-CLASS action-required
+      // state (surfaced through the SAME `actionStatus` mechanism every
+      // other action-required condition on this row uses -- see below --
+      // not merely an sr-only explanation string) whenever the selected
+      // price is NOT tagged `session:authenticated`. This must fire in
+      // BOTH failing shapes: (a) a yahoo-compatible observation WAS
+      // selected but isn't authenticated (absent/expired cookies, or the
+      // adapter's own 401 degrade -- see `domain/market-data/
+      // yahoo-compatible.ts`), and (b) the preferred provider supplied NO
+      // price at all for this security, so some OTHER source's price is
+      // being shown via honest fallback -- `selectedYahoo` is `null` in
+      // that case, which the `!== "session:authenticated"` check below
+      // already treats as unmet.
+      const selectedYahoo =
+        priceSelection.selected?.providerId === "yahoo-compatible"
+          ? (priceSelection.selected.observation ?? null)
+          : null;
+      const yahooAuthPreferenceUnmet =
+        priceSourcePreference === "yahoo_authenticated" &&
+        selectedYahoo?.providerRevisionId !== "session:authenticated";
+      // F2 (folded review follow-up): distinguish "cookies never
+      // configured on this deployment" from "configured, but the current
+      // session is anonymous" (expired/invalid cookies or a 401 degrade) --
+      // never tell the owner to re-export a cookie pair that was never
+      // configured. `session:anonymous` is ONLY ever recorded when
+      // `options.auth` was actually configured for that write (see
+      // `yahoo-compatible.ts`'s `normalizeChartPrice` call sites) so it is
+      // a precise "was configured, now degraded" signal; `null` (or no
+      // Yahoo observation at all) is the honest default bucket -- it
+      // cannot distinguish "never configured" from "an old accretion row
+      // predating a very recent config change", so it reads as the
+      // less alarming, more broadly-true "not configured" message rather
+      // than falsely implying the owner once had a working session.
+      const yahooAuthActionStatus:
+        "yahoo_auth_not_configured" | "yahoo_auth_expired" | null =
+        !yahooAuthPreferenceUnmet
+          ? null
+          : selectedYahoo?.providerRevisionId === "session:anonymous"
+            ? "yahoo_auth_expired"
+            : "yahoo_auth_not_configured";
       const priceDetail = priceSelection.selected
         ? `current price source ${priceSelection.explanation.source} ${priceSelection.explanation.providerId ?? "identity"}, source ID ${priceSelection.selected.observation?.mappingId ?? "not supplied"}, value ${priceSelection.selected.closeDecimal}, market date ${priceSelection.selected.marketDate}, observation ${priceSelection.selected.observationAt ?? "not supplied"}, interval ${priceIntervalLabel(priceSelection.selected)}, quality ${priceSelection.selected.quality}, selector ${priceSelection.status}, fallback ${priceSelection.explanation.fallback}, reason ${priceSelection.explanation.reason}`
         : `price unavailable: ${priceSelection.explanation.reason}`;
@@ -990,7 +1109,16 @@ export async function loadOwnedHoldings(
       const fxDetailText = fxDetail
         ? `FX source ${fxDetail.source} ${fxDetail.sourceId ?? "identity"}, supplied ${fxDetail.suppliedBaseCurrencyCode ?? homeCurrencyCode}/${fxDetail.suppliedQuoteCurrencyCode ?? nativeCurrency} ${fxDetail.suppliedRateDecimal ?? "supplied rate unavailable"}, market date ${fxDetail.marketDate ?? marketDate}, observation ${fxDetail.observedAt ?? "not supplied"}, inverted ${fxDetail.inverted}, selector ${fxDetail.selectionState}, quality ${fxDetail.quality ?? "none"}, fallback ${fxDetail.fallback}, reason ${fxDetail.selectionReason ?? "none"}, actionability ${fxDetail.actionability}`
         : `FX unavailable: supplied rate unavailable, inversion unavailable/not applicable, selector unavailable, reason ${fxSelection.explanation.reason}, actionability action_required`;
-      const explanation = `${priceDetail}; ${previousPriceDetail}; ${fxDetailText}; ${previousFxDetail}. ${priceSelection.status === "stale" || fxSelection.status === "stale" ? "Action required: stale data." : ""}`;
+      // F2/B2: a clean trailing sentence per action-required condition,
+      // matching the established "Action required: …" convention (never a
+      // mid-string clause woven into `priceDetail` above).
+      const yahooAuthActionSentence =
+        yahooAuthActionStatus === "yahoo_auth_expired"
+          ? "Action required: the Yahoo login session is anonymous -- re-export YAHOO_COOKIE_T/YAHOO_COOKIE_Y."
+          : yahooAuthActionStatus === "yahoo_auth_not_configured"
+            ? "Action required: no Yahoo login is configured for this deployment."
+            : "";
+      const explanation = `${priceDetail}; ${previousPriceDetail}; ${fxDetailText}; ${previousFxDetail}. ${priceSelection.status === "stale" || fxSelection.status === "stale" ? "Action required: stale data." : ""}${yahooAuthActionSentence}`;
       return {
         id: identity.id,
         securityId: identity.securityId,
@@ -1035,7 +1163,9 @@ export async function loadOwnedHoldings(
                       !fxClassComparable ||
                       quantityTiming === "incomplete"
                     ? "incomparable"
-                    : "none",
+                    : yahooAuthActionStatus !== null
+                      ? yahooAuthActionStatus
+                      : "none",
         explanation,
         sort: {
           ticker: identity.symbol,

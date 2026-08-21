@@ -264,12 +264,15 @@ The v1 adapter is one source plus manual override, not a multi-provider aggregat
 Selection is deterministic:
 
 1. active user manual override for the requested instant/date;
-2. approved validated best-effort/delayed observation within its applicable staleness window;
-3. approved EOD observation matching adjustment mode and security mapping;
-4. prior valid trading-day observation within the permitted staleness window;
-5. unavailable.
+2. **(MKT-009B, `user_settings.price_source_preference`)** narrow candidates to the owner's preferred provider(s), but ONLY when that narrowing leaves at least one candidate — an empty preferred subset falls straight through to step 3 against the full candidate set, never `unavailable` merely because the preferred source is silent while another source has a valid observation;
+3. approved validated best-effort/delayed observation within its applicable staleness window;
+4. approved EOD observation matching adjustment mode and security mapping;
+5. prior valid trading-day observation within the permitted staleness window;
+6. unavailable.
 
 The chosen observation and fallback reason are included in the calculation explanation. Compact views generally suppress timestamps and routine source/fallback labels; the explanation remains available on demand, and inline status is reserved for action-required conditions.
+
+**MKT-009B decision note (2026-08-21): price-source preference is a read-time RANKING INPUT, not a second activation gate.** `domain/market-data/selection.ts`'s `selectPriceObservation` gained an optional `preferredProviderIds` parameter (backward compatible — `undefined` is the exact pre-existing behaviour, exercised by every call site that does not pass it). `app/owned-holdings.ts` is the only wired call site (per its own "single choke point" design, `owned-income-projection.ts`/`owned-dividend-assumptions.ts` build on its output rather than calling selection independently); `app/owned-quotes.ts` is deliberately NOT wired — it already excludes Sharesight entirely (deployment-scope-only reads, pre-dating BRK-012C) and extending the preference there would be a separate, unscoped decision. `MARKET_DATA_PROVIDER` (`worker/runtime-config.ts`) remains the ONLY deployment-level kill switch for Yahoo; the preference cannot re-enable a disabled provider. **Default value `sharesight_delayed`, rejected alternative `yahoo_anonymous`**: the column must default to something for every existing row (the owner explicitly wants exactly three choices, no "none"/"auto" option), and `yahoo_anonymous` was rejected because it would have been a real, silent behaviour regression for any owner with an existing Sharesight link — BRK-012C's entire purpose is keeping a Sharesight observation ≤10 minutes fresh at read time specifically so it wins today's freshest-wins ranking, and a hard Yahoo preference would override that even when Sharesight is fresher. `sharesight_delayed` is a no-op for an owner with no link (Sharesight never writes a row, so selection falls straight through to Yahoo, identical to pre-MKT-009B behaviour) and reinforces, rather than fights, BRK-012C's existing intent for an owner who does have one.
 
 ### Security-master verification write path
 
