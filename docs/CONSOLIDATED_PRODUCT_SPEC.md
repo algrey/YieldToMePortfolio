@@ -113,7 +113,7 @@ V1 supports a small, administrator-invited group of independent users in one dep
 
 ### Trust before decoration
 
-Every material figure has a stored definition, currency, as-of time, and state. Compact views do not add routine market-data metadata; `Price unavailable` is shown when no usable quote exists.
+Every material figure has a stored definition, currency, as-of time, and state. Compact views do not add routine market-data metadata; `unavailable` is shown when no usable quote exists.
 
 User-facing summaries and lists generally suppress exact timestamps. Show a business-relevant date when it helps interpret a transaction, import, or calculation; keep the exact timestamp in the adjacent detail/audit explanation when provenance requires it.
 
@@ -127,7 +127,7 @@ Users can fix mappings, transactions, prices, and import decisions. Corrections 
 
 ### Useful under imperfect data
 
-One missing quote must not erase an entire portfolio. The application excludes unavailable market value from known totals and shows `Price unavailable` for the affected holding without adding routine stale badges.
+One missing quote must not erase an entire portfolio. The application excludes unavailable market value from known totals and shows `unavailable` for the affected holding without adding routine stale badges.
 
 ### Familiar reference vocabulary
 
@@ -166,7 +166,7 @@ Use Overview, Holdings, Quotes, Details, News, Quantity, Average Cost, Market Va
 ### Quotes
 
 - Portfolio watch/quote table.
-- Prefer the freshest validated observation allowed by the configured source; otherwise use the selected EOD/manual fallback. Generally suppress timestamps, provider, delay, and fallback text in the compact row. A manual, stale, indicative, or fallback value remains discoverable through an adjacent explanation, and only an action-required state is surfaced inline. `Price unavailable` appears when there is no usable value.
+- Prefer the freshest validated observation allowed by the configured source; otherwise use the selected EOD/manual fallback. Generally suppress timestamps, provider, delay, and fallback text in the compact row. A manual, stale, indicative, or fallback value remains discoverable through an adjacent explanation, and only an action-required state is surfaced inline. `unavailable` appears when there is no usable value.
 - Manual refresh subject to rate limits.
 - Manual price override workflow with reason and effective time.
 - Per-holding native/home-currency display toggle using the selected observation date’s FX rate; the toggle changes presentation only.
@@ -254,10 +254,10 @@ Every route and workflow must specify these states, not just its populated “ha
 | Background refresh        | Keep the last valid value visible; generally suppress timestamps and use a non-intrusive refresh state only while user action is relevant      |
 | Empty user                | Explain that no portfolio exists and offer create/import once those actions are implemented                                                    |
 | Empty portfolio           | Show base currency/settings plus manual-entry/import next steps; value metrics are unavailable, not `0` unless an explicit zero balance exists |
-| Missing quote             | Retain position/basis; exclude unavailable market value from known total; show `Price unavailable`                                             |
+| Missing quote             | Retain position/basis; exclude unavailable market value from known total; show `unavailable`                                                   |
 | Missing FX                | Show native values; base value and dependent gain are unavailable                                                                              |
 | Partial history           | Draw/label only supported range and explain missing ledger/market/FX coverage                                                                  |
-| Provider failure          | Keep last valid observation where available and expose its stale/fallback state on demand; otherwise show `Price unavailable`; back off/retry  |
+| Provider failure          | Keep last valid observation where available and expose its stale/fallback state on demand; otherwise show `unavailable`; back off/retry        |
 | Validation error          | Associate stable message with row/field/control, preserve user input, and block only unsafe commit                                             |
 | Authorization failure     | Return a non-data-bearing denial and no cached private response                                                                                |
 | Import commit failure     | Preserve staged batch and resumable/idempotent state; never imply uncommitted rows changed totals                                              |
@@ -293,7 +293,7 @@ The normative formulas are in `CALCULATIONS.md`. Product-level meanings:
 
 The first release caches only versioned public shell assets and an offline information page. It does not cache authenticated HTML, API responses, CSVs, or portfolio data in the service worker. A network loss during an already loaded session may leave current in-memory content visible, but reload shows the offline page and mutations are disabled.
 
-Market-derived provenance, timestamps, quality, and coverage remain stored and available to calculations/operations. Compact user views generally suppress timestamps, provider, delay, and fallback labels. Manual, stale, indicative, or fallback state remains available through an adjacent explanation, and only an action-required state is surfaced inline. `Price unavailable` appears when no usable price exists.
+Market-derived provenance, timestamps, quality, and coverage remain stored and available to calculations/operations. Compact user views generally suppress timestamps, provider, delay, and fallback labels. Manual, stale, indicative, or fallback state remains available through an adjacent explanation, and only an action-required state is surfaced inline. `unavailable` appears when no usable price exists.
 
 Later offline private-data support would require a separate threat model, encrypted local storage decision, data-expiry rules, and conflict-safe mutation outbox.
 

@@ -1529,7 +1529,7 @@ export function formatOwnedHoldingDecimal(
 }
 export function formatOwnedHoldingPrice(value: string | null): string {
   return value === null
-    ? "Price unavailable"
+    ? "unavailable"
     : formatDecimalTrimmed(parseDecimalResult(value), 6, {
         trimTrailingZeros: true,
       });

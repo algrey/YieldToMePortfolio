@@ -216,7 +216,7 @@ Details/import history, PWA offline safety, recovery/deletion, accessibility/sec
 5. Backfill only securities, FX pairs, and date ranges owned by an active portfolio.
 6. Refresh no faster than the source/rate budget permits; coalesce canonical requests and collect bounded daily correction windows.
 7. Add Queues only if measured refresh/backfill cannot be reliably bounded by D1 jobs and Cron.
-8. Keep normal quote/holding views compact: generally suppress timestamps and routine source/delay/fallback labels; keep explanation data on demand; show inline status only when action is required and `Price unavailable` when no usable value exists.
+8. Keep normal quote/holding views compact: generally suppress timestamps and routine source/delay/fallback labels; keep explanation data on demand; show inline status only when action is required and `unavailable` when no usable value exists.
 9. Keep genuine real-time data as a separate entitlement; do not call best-effort polling live.
 
 External provider-use decisions are handled separately by the operator. The product implements no source-specific user-count, owner-binding, deployment-mode, monetization, redistribution, or external-use gate.
@@ -278,17 +278,17 @@ Network data is never required for deterministic calculation/import tests.
 
 ## 9. Risks and mitigations
 
-| Risk                                          | Impact                            | Mitigation / owner task                                                                                                              |
-| --------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| Yahoo endpoints are unavailable or unsuitable | Best-effort valuation unavailable | Circuit breaker, `Price unavailable`, manual fallback; add a second source only through a measured-need task (`MKT-002`, `MKT-003B`) |
-| Incomplete cash/split history                 | Misleading returns/history        | Completeness boundary and partial metrics (`IMP-002B`, `CALC-002`)                                                                   |
-| Access treated as full user system            | Tenant/account flaws              | Internal identity/status and owned repos (`AUTH-001/002`)                                                                            |
-| Ticker changes/delistings                     | Mispriced historical holdings     | Canonical security + validity mappings (`DB-002`)                                                                                    |
-| D1 write/job limits                           | Refresh/import failures           | Bounded chunks, idempotency, measured Queue trigger (`IMP-003A`, `MKT-003B`)                                                         |
-| Decimal/rounding drift                        | Financial mismatch                | Decimal domain + fixtures (`CALC-001A`)                                                                                              |
-| Service worker leaks private data             | Shared-device exposure            | Public allowlist only (`PWA-001`, `QA-001A`)                                                                                         |
-| Destructive correction/deletion               | Lost audit/history                | Reversals, Time Travel, exports (`IMP-003B`, `OPS-002`, `OPS-003A/B`)                                                                |
-| Mobile desktop-table copy                     | Poor iPhone usability             | Distinct card hierarchy and device UAT (`UI-003`, `QA-002`)                                                                          |
+| Risk                                          | Impact                            | Mitigation / owner task                                                                                                        |
+| --------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Yahoo endpoints are unavailable or unsuitable | Best-effort valuation unavailable | Circuit breaker, `unavailable`, manual fallback; add a second source only through a measured-need task (`MKT-002`, `MKT-003B`) |
+| Incomplete cash/split history                 | Misleading returns/history        | Completeness boundary and partial metrics (`IMP-002B`, `CALC-002`)                                                             |
+| Access treated as full user system            | Tenant/account flaws              | Internal identity/status and owned repos (`AUTH-001/002`)                                                                      |
+| Ticker changes/delistings                     | Mispriced historical holdings     | Canonical security + validity mappings (`DB-002`)                                                                              |
+| D1 write/job limits                           | Refresh/import failures           | Bounded chunks, idempotency, measured Queue trigger (`IMP-003A`, `MKT-003B`)                                                   |
+| Decimal/rounding drift                        | Financial mismatch                | Decimal domain + fixtures (`CALC-001A`)                                                                                        |
+| Service worker leaks private data             | Shared-device exposure            | Public allowlist only (`PWA-001`, `QA-001A`)                                                                                   |
+| Destructive correction/deletion               | Lost audit/history                | Reversals, Time Travel, exports (`IMP-003B`, `OPS-002`, `OPS-003A/B`)                                                          |
+| Mobile desktop-table copy                     | Poor iPhone usability             | Distinct card hierarchy and device UAT (`UI-003`, `QA-002`)                                                                    |
 
 ## 10. Deferred backlog triggers
 

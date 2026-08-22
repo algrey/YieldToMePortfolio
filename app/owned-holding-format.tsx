@@ -55,14 +55,15 @@ export function signPrefixed(formatted: string, signed: boolean): string {
 //
 // UI-028 (owner ruling, 2026-08-22, one-off product wording change,
 // AGENTS.md non-negotiable updated to match): the generic fallback below
-// reads "unavailable", not "Price unavailable" -- scoped to THIS function,
-// not a blanket app-wide relabel. WLT-001's review (B6) separately adopted
-// the SAME "unavailable" wording for the watchlist's NEW strings
-// (`app/owned-watchlist.ts`, `app/watchlist-contract.ts`), so this function
-// and the watchlist now agree. Other, PRE-EXISTING surfaces still render
-// the literal "Price unavailable" string (e.g. `holding-detail.tsx`'s own
-// Price row, `app/quote-contract.ts`'s preview-mode quotes) -- aligning
-// those is the Orchestrator's tracked follow-up, `UI-029`, not done here.
+// reads "unavailable", not "Price unavailable" -- scoped to THIS function
+// when first introduced, not a blanket app-wide relabel at the time.
+// WLT-001's review (B6) separately adopted the SAME "unavailable" wording
+// for the watchlist's NEW strings (`app/owned-watchlist.ts`,
+// `app/watchlist-contract.ts`). UI-029 (2026-08-23) has since aligned every
+// other PRE-EXISTING surface that still rendered the literal
+// "Price unavailable" string (e.g. `holding-detail.tsx`'s own Price row,
+// `app/quote-contract.ts`'s preview-mode quotes) to the same "unavailable"
+// wording, so the app is no longer in a transition state between the two.
 export function ownedHoldingUnavailableText(reason: string | null | undefined) {
   if (reason === "missing_basis") return "Basis unavailable";
   if (reason === "price_basis_changed")

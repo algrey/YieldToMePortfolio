@@ -150,7 +150,10 @@ test("UI-003 source keeps authenticated holdings owner-scoped and responsive", a
   assert.doesNotMatch(shell, /parseDecimal\(/);
   assert.match(shell, /native fallback/);
   assert.match(shell, /OwnedHoldingsScreen/);
-  assert.match(shell, /Price unavailable/);
+  // UI-029: legacy "Price unavailable" display strings were realigned to
+  // AGENTS.md's "unavailable" wording; this pins the standalone-cell shape
+  // rather than the retired literal.
+  assert.match(shell, /unavailable \? "unavailable" :/);
   assert.match(shell, /Cash separate/);
   // UI-023: the decimal formatting and the per-holding currency-view select
   // moved out of the shell with the standalone detail screen -- the honest

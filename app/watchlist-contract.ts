@@ -38,9 +38,9 @@ export type WatchlistRow = {
    * Column 2, line 1: "CCY 12.34", a bare FX rate, or "unavailable" (WLT-001
    * review B6: the owner's one-off "Price unavailable" -> "unavailable"
    * wording change, AGENTS.md non-negotiable; NEW watchlist strings adopt
-   * it directly). The remaining legacy "Price unavailable" strings
-   * elsewhere in the app are Orchestrator-tracked follow-up work, not
-   * aligned by this change.
+   * it directly). UI-029 has since aligned every remaining legacy
+   * "Price unavailable" display string elsewhere in the app to the same
+   * "unavailable" wording, so this is no longer a transition state.
    */
   price: string;
   /**

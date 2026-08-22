@@ -59,7 +59,7 @@ function formatSignedCurrency(amount: string | null, currency: string): string {
 
 function formatPrice(amount: string | null, currency: string): string {
   if (amount === null) {
-    return "Price unavailable";
+    return "unavailable";
   }
 
   const sign = amount.startsWith("-") ? "−" : amount.startsWith("+") ? "+" : "";
@@ -164,7 +164,7 @@ function holdingToDisplay(holding: PreviewHoldingValuation): Holding {
     cost: formatUnsignedCurrency(holding.openBasis, baseCurrency),
     quantityLine:
       averageCost === null
-        ? `Price unavailable × ${quantity} shares`
+        ? `Average cost unavailable × ${quantity} shares`
         : `${formatPrice(averageCost, priceCurrency)} × ${quantity} shares`,
     dailyAmount: formatSignedCurrency(holding.dailyMovement, baseCurrency),
     dailyPercent: percentFromTotals(

@@ -122,7 +122,7 @@ The Unrealised label is left aligned. At 390 px, the first-line portfolio value 
 - Two-line 60 px rows.
 - Company names ellipsize; prices and changes never wrap.
 - Routine source, provider, delay, and exact timestamp are absent from the compact row. A business-relevant date is retained.
-- Each row has an adjacent accessible explanation for current, fallback, stale, partial, or unavailable state; `Price unavailable` is used only when no usable price exists.
+- Each row has an adjacent accessible explanation for current, fallback, stale, partial, or unavailable state; `unavailable` is used only when no usable price exists.
 - Refresh queues a durable, coalesced server job and leaves displayed values unchanged until validated observations complete. Corrections use an owner-scoped, reasoned, reversible workflow outside the compact row.
 
 ### Details
@@ -197,7 +197,7 @@ The authenticated Quotes route loads owner-constrained held/watch securities and
 The overflow state menu is a review aid and is not a proposed production control.
 
 - **Empty portfolio:** no fabricated zero totals; shows next-step guidance.
-- **Partial pricing:** one holding displays `Price unavailable`; its value and dependent movement/gain are unavailable; the summary changes to `Known value`, reduces the included totals, and names priced coverage.
+- **Partial pricing:** one holding displays `unavailable`; its value and dependent movement/gain are unavailable; the summary changes to `Known value`, reduces the included totals, and names priced coverage.
 - **Partial quotes:** availability is attached to the durable security target before sorting; changing ticker, price, or change order cannot move the unavailable state to another quote.
 - **Provider unavailable:** retains last-known values and displays one specific banner; it does not blank the table or replace values with zero.
 - **Populated portfolio:** default fixture state.

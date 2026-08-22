@@ -54,7 +54,7 @@ export function quoteExplanation(quote: QuoteRow): string {
   const details = `Source: ${source}; observation timestamp: ${timestamp}; ${delay}; scope: ${provenance.scope}; quality: ${quality}; fallback: ${provenance.fallbackReason}.`;
 
   if (state === "unavailable") {
-    return `Price unavailable: no usable price exists for this quote. ${details}`;
+    return `Unavailable: no usable price exists for this quote. ${details}`;
   }
   if (state === "stale") {
     return `Last-known quote dated ${marketDate}; the observation is stale. ${details}`;

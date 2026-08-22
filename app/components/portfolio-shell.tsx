@@ -581,13 +581,13 @@ function OwnedHoldingsScreen({
             const basis = holding.homeBasis;
             const priceLabel = usedNativeFallback
               ? holding.nativePrice === null
-                ? "Price unavailable"
+                ? "unavailable"
                 : `${currencyDisplayPrefix(holding.currencyCode, homeCurrencyCode)}${ownedHoldingTrimmed(holding.nativePrice)} · native fallback`
               : selectedPrice.status === "available" &&
                   selectedPrice.value !== null
                 ? `${currencyDisplayPrefix(selectedPrice.currencyCode, homeCurrencyCode)}${ownedHoldingTrimmed(selectedPrice.value)}`
                 : holding.nativePrice === null
-                  ? "Price unavailable"
+                  ? "unavailable"
                   : `${currencyDisplayPrefix(holding.currencyCode, homeCurrencyCode)}${ownedHoldingTrimmed(holding.nativePrice)}`;
             const statusLabel =
               holding.actionStatus === "none"
@@ -2290,7 +2290,7 @@ function HoldingsScreen({
                 </span>
                 {priceUnavailable ? (
                   <span className="row-primary numeric unavailable">
-                    Price unavailable
+                    unavailable
                   </span>
                 ) : (
                   <ToneValue
@@ -2814,7 +2814,7 @@ function QuotesScreen({
               >
                 <span className="row-primary symbol">{quote.symbol}</span>
                 <span className="row-primary numeric">
-                  {unavailable ? "Price unavailable" : quote.price}
+                  {unavailable ? "unavailable" : quote.price}
                 </span>
                 <ToneValue
                   tone={unavailable ? "neutral" : quote.tone}
@@ -3327,7 +3327,7 @@ function HoldingSheet({
           </button>
         </div>
         <div className="sheet-quote">
-          <strong>{unavailable ? "Price unavailable" : holding.price}</strong>
+          <strong>{unavailable ? "unavailable" : holding.price}</strong>
           {unavailable ? (
             <span className="unavailable">Daily movement unavailable</span>
           ) : (
@@ -3339,7 +3339,7 @@ function HoldingSheet({
         <dl className="sheet-facts">
           <div>
             <dt>Market value</dt>
-            <dd>{unavailable ? "Price unavailable" : holding.value}</dd>
+            <dd>{unavailable ? "unavailable" : holding.value}</dd>
           </div>
           <div>
             <dt>Open cost</dt>
@@ -3353,7 +3353,7 @@ function HoldingSheet({
               }
             >
               {unavailable
-                ? "Price unavailable"
+                ? "unavailable"
                 : `${holding.totalAmount} · ${holding.totalPercent}`}
             </dd>
           </div>

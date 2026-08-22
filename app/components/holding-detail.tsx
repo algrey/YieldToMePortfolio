@@ -369,12 +369,12 @@ export function HoldingDetailScreen({
                         };
                   if (price.status !== "available" || price.value === null)
                     return holding.nativePrice === null
-                      ? "Price unavailable"
+                      ? "unavailable"
                       : `${currencyDisplayPrefix(holding.currencyCode, homeCurrencyCode)} native fallback`;
                   try {
                     return `${currencyDisplayPrefix(price.currencyCode, homeCurrencyCode)}${ownedHoldingTrimmed(price.value)}${view === "home" && !home ? " · native fallback" : ""}`;
                   } catch {
-                    return "Price unavailable";
+                    return "unavailable";
                   }
                 })()}
               </dd>

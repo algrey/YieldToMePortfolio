@@ -278,7 +278,7 @@ Acceptance:
 
 - The chosen observation and its actual/unknown delay, timestamp, source scope, quality, and fallback reason are retained in the domain explanation; it is never called real-time without evidence.
 - EOD and manual values remain explicit fallbacks when a fresh observation is unavailable, stale, malformed, or over rate budget.
-- Compact price views show `Price unavailable` when no usable value exists. They generally suppress timestamps, provider, delay, and fallback labels; anomalous manual/stale/indicative/fallback state remains accessible, with inline status reserved for an action-required condition.
+- Compact price views show `unavailable` when no usable value exists. They generally suppress timestamps, provider, delay, and fallback labels; anomalous manual/stale/indicative/fallback state remains accessible, with inline status reserved for an action-required condition.
 - Provider-unavailable behavior preserves the last valid observation with stale state and never substitutes zero.
 
 ## Calculations and history
