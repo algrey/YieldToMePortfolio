@@ -2370,6 +2370,192 @@ function HoldingsScreen({
   );
 }
 
+// MKT-014: extracted from QuotesScreen's own inline "Correction history"
+// panel so the owned-mode per-holding detail sheet
+// (`app/components/holding-detail.tsx`, whose refresh/correction entry
+// points died with the old owned QuotesScreen when WLT-001 retired it) can
+// reuse the exact same fetch/revoke logic and markup instead of forking a
+// second copy -- the Orchestrator's MKT-014 placement ruling requires
+// reuse, not a duplicate implementation. Behaviour for the preview-mode
+// QuotesScreen call site below is unchanged (still no `targetKey`, so the
+// full portfolio's history loads); the new owned call site passes
+// `targetKey` (the holding's `securityId` -- the same value
+// `saveManualOverrideForContext` requires a price correction's `targetKey`
+// to equal) to scope the list to this one holding.
+export function QuoteCorrectionHistory({
+  portfolioId,
+  targetKey,
+  readOnly,
+  onClose,
+  onMessage,
+}: {
+  portfolioId: string;
+  targetKey?: string;
+  readOnly: boolean;
+  onClose: () => void;
+  onMessage: (message: string | null) => void;
+}) {
+  const [historyPending, setHistoryPending] = useState(false);
+  const [history, setHistory] = useState<
+    Array<{
+      id: string;
+      type: "price" | "fx_rate" | "security_mapping" | "transaction_fx";
+      targetKey: string;
+      effectiveFrom: string;
+      effectiveTo: string | null;
+      reason: string;
+      status: "active" | "superseded" | "revoked";
+    }>
+  >([]);
+  // Bumped after a successful revoke to re-run the load effect below --
+  // keeps the fetch logic itself inline in ONE effect (mount AND
+  // post-revoke reload) instead of a second component-scope function the
+  // effect would call indirectly (react-hooks/set-state-in-effect flags
+  // exactly that indirection; a direct inline fetch, as `holding-price-
+  // chart.tsx` also does, is the sanctioned pattern).
+  const [reloadToken, setReloadToken] = useState(0);
+
+  useEffect(() => {
+    if (readOnly) {
+      onMessage("Preview data has no correction history to display.");
+      return;
+    }
+    let cancelled = false;
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      DIALOG_FETCH_TIMEOUT_MS,
+    );
+    (async () => {
+      setHistoryPending(true);
+      try {
+        const query = new URLSearchParams({ portfolioId });
+        if (targetKey) query.set("targetKey", targetKey);
+        const response = await fetch(`/api/market-data/overrides?${query}`, {
+          signal: controller.signal,
+        });
+        const result = (await response.json()) as {
+          ok: boolean;
+          overrides?: typeof history;
+          message?: string;
+        };
+        if (cancelled) return;
+        if (!response.ok || !result.ok)
+          throw new Error(
+            result.message ?? "Correction history is unavailable.",
+          );
+        setHistory(result.overrides ?? []);
+      } catch (error) {
+        if (cancelled) return;
+        // A read has no retry-safety ambiguity (nothing was written), so
+        // this gets its own honest wording rather than the mutation-submit
+        // DIALOG_TIMEOUT_MESSAGE below.
+        onMessage(
+          isAbortError(error)
+            ? "The request timed out. Retry when ready."
+            : error instanceof Error
+              ? error.message
+              : "Correction history is unavailable.",
+        );
+      } finally {
+        clearTimeout(timeout);
+        if (!cancelled) setHistoryPending(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [portfolioId, targetKey, readOnly, onMessage, reloadToken]);
+
+  async function revokeCorrection(id: string) {
+    setHistoryPending(true);
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      DIALOG_FETCH_TIMEOUT_MS,
+    );
+    try {
+      const response = await fetch("/api/market-data/overrides", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ overrideId: id }),
+        signal: controller.signal,
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(
+          result.message ?? "The correction could not be removed.",
+        );
+      onMessage(
+        "Correction revoked; the underlying provider value can be selected again.",
+      );
+      setReloadToken((token) => token + 1);
+    } catch (error) {
+      // Revoke is a real mutation, not idempotently retry-safe from the
+      // client's perspective -- a timed-out request may still have gone
+      // through, matching every other mutation-submit convention in this
+      // file.
+      onMessage(
+        isAbortError(error)
+          ? DIALOG_TIMEOUT_MESSAGE
+          : error instanceof Error
+            ? error.message
+            : "The correction could not be removed.",
+      );
+      setHistoryPending(false);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  return (
+    <section className="quote-history" aria-labelledby="quote-history-title">
+      <div className="quote-history-heading">
+        <h2 id="quote-history-title">Correction history</h2>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close correction history"
+        >
+          Close
+        </button>
+      </div>
+      {historyPending ? <p role="status">Loading correction history…</p> : null}
+      {!historyPending && history.length === 0 ? (
+        <p className="muted-copy">No owner-entered corrections are recorded.</p>
+      ) : null}
+      <ul>
+        {history.map((item) => (
+          <li key={item.id}>
+            <span>
+              <strong>{item.type === "fx_rate" ? "FX rate" : "Price"}</strong>
+              <span>
+                {item.targetKey} · effective {item.effectiveFrom}
+              </span>
+              <span>
+                {item.reason} · {item.status}
+              </span>
+            </span>
+            {item.status === "active" && !readOnly ? (
+              <button
+                type="button"
+                onClick={() => void revokeCorrection(item.id)}
+                disabled={historyPending}
+              >
+                Revoke
+              </button>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 function QuotesScreen({
   portfolio,
   ownedQuotes,
@@ -2392,18 +2578,8 @@ function QuotesScreen({
   const correctionButtonRef = useRef<HTMLButtonElement>(null);
   const correctionOpenerRef = useRef<HTMLButtonElement | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [historyPending, setHistoryPending] = useState(false);
-  const [history, setHistory] = useState<
-    Array<{
-      id: string;
-      type: "price" | "fx_rate" | "security_mapping" | "transaction_fx";
-      targetKey: string;
-      effectiveFrom: string;
-      effectiveTo: string | null;
-      reason: string;
-      status: "active" | "superseded" | "revoked";
-    }>
-  >([]);
+  const historyButtonRef = useRef<HTMLButtonElement>(null);
+  const historyOpenerRef = useRef<HTMLButtonElement | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   // UI-007: mirrors the portfolio-dialog / drawer opener-restore pattern.
@@ -2418,6 +2594,16 @@ function QuotesScreen({
       correctionOpenerRef.current = null;
     }
   }, [correctionOpen]);
+
+  // MKT-014 (F6): the "Correction history" panel gets the SAME
+  // opener-restore treatment as the correction dialog above -- Close
+  // shouldn't drop focus to <body>.
+  useEffect(() => {
+    if (!historyOpen && historyOpenerRef.current) {
+      historyOpenerRef.current.focus();
+      historyOpenerRef.current = null;
+    }
+  }, [historyOpen]);
 
   const quoteRows = useMemo<QuoteRow[]>(() => {
     if (ownedQuotes) return ownedQuotes;
@@ -2523,66 +2709,6 @@ function QuotesScreen({
     }
   }
 
-  async function loadHistory() {
-    setHistoryOpen(true);
-    if (readOnly) {
-      setActionMessage("Preview data has no correction history to display.");
-      return;
-    }
-    setHistoryPending(true);
-    try {
-      const query = new URLSearchParams({ portfolioId });
-      const response = await fetch(`/api/market-data/overrides?${query}`);
-      const result = (await response.json()) as {
-        ok: boolean;
-        overrides?: typeof history;
-        message?: string;
-      };
-      if (!response.ok || !result.ok)
-        throw new Error(result.message ?? "Correction history is unavailable.");
-      setHistory(result.overrides ?? []);
-    } catch (error) {
-      setActionMessage(
-        error instanceof Error
-          ? error.message
-          : "Correction history is unavailable.",
-      );
-    } finally {
-      setHistoryPending(false);
-    }
-  }
-
-  async function revokeCorrection(id: string) {
-    setHistoryPending(true);
-    try {
-      const response = await fetch("/api/market-data/overrides", {
-        method: "DELETE",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ overrideId: id }),
-      });
-      const result = (await response.json()) as {
-        ok: boolean;
-        message?: string;
-      };
-      if (!response.ok || !result.ok)
-        throw new Error(
-          result.message ?? "The correction could not be removed.",
-        );
-      setActionMessage(
-        "Correction revoked; the underlying provider value can be selected again.",
-      );
-      await loadHistory();
-    } catch (error) {
-      setActionMessage(
-        error instanceof Error
-          ? error.message
-          : "The correction could not be removed.",
-      );
-    } finally {
-      setHistoryPending(false);
-    }
-  }
-
   return (
     <section className="quotes-screen" aria-label="Portfolio quotes">
       <div className="quote-actions" aria-label="Quote actions">
@@ -2608,7 +2734,14 @@ function QuotesScreen({
           >
             Correct a quote
           </button>
-          <button type="button" onClick={() => void loadHistory()}>
+          <button
+            ref={historyButtonRef}
+            type="button"
+            onClick={() => {
+              historyOpenerRef.current = historyButtonRef.current;
+              setHistoryOpen(true);
+            }}
+          >
             Correction history
           </button>
         </div>
@@ -2631,55 +2764,12 @@ function QuotesScreen({
         ) : null}
       </div>
       {historyOpen ? (
-        <section
-          className="quote-history"
-          aria-labelledby="quote-history-title"
-        >
-          <div className="quote-history-heading">
-            <h2 id="quote-history-title">Correction history</h2>
-            <button
-              type="button"
-              onClick={() => setHistoryOpen(false)}
-              aria-label="Close correction history"
-            >
-              Close
-            </button>
-          </div>
-          {historyPending ? (
-            <p role="status">Loading correction history…</p>
-          ) : null}
-          {!historyPending && history.length === 0 ? (
-            <p className="muted-copy">
-              No owner-entered corrections are recorded.
-            </p>
-          ) : null}
-          <ul>
-            {history.map((item) => (
-              <li key={item.id}>
-                <span>
-                  <strong>
-                    {item.type === "fx_rate" ? "FX rate" : "Price"}
-                  </strong>
-                  <span>
-                    {item.targetKey} · effective {item.effectiveFrom}
-                  </span>
-                  <span>
-                    {item.reason} · {item.status}
-                  </span>
-                </span>
-                {item.status === "active" && !readOnly ? (
-                  <button
-                    type="button"
-                    onClick={() => void revokeCorrection(item.id)}
-                    disabled={historyPending}
-                  >
-                    Revoke
-                  </button>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        </section>
+        <QuoteCorrectionHistory
+          portfolioId={portfolioId}
+          readOnly={readOnly}
+          onClose={() => setHistoryOpen(false)}
+          onMessage={setActionMessage}
+        />
       ) : null}
       {viewState === "empty" ? (
         <EmptyState
@@ -2776,7 +2866,7 @@ function QuotesScreen({
   );
 }
 
-function QuoteCorrectionDialog({
+export function QuoteCorrectionDialog({
   portfolioId,
   quoteTargets,
   portfolioBaseCurrency,

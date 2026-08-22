@@ -6,6 +6,7 @@ import { loadPreviewValuationFixture } from "../../../../preview-valuation";
 import { loadAuthenticatedWorkspace } from "../../../../authenticated-workspace";
 import { getAuthenticatedSqlContext } from "../../../../portfolio-actions";
 import { loadOwnedHoldingIdentity } from "../../../../owned-holding-transactions";
+import { marketDataProviderEnabled } from "../../../../market-data-provider-status";
 import { HoldingDetailScreen } from "../../../../components/holding-detail";
 import { HoldingAreaUnavailable } from "../../../../components/holding-nav";
 import { holdingSubtitle } from "../../../../holding-subtitle";
@@ -79,6 +80,11 @@ export default async function HoldingDetailPage({
     const holding =
       (workspace.holdings ?? []).find((row) => row.id === holdingId) ?? null;
 
+    // MKT-014: read-only, no side effects -- see
+    // `app/market-data-provider-status.ts` for why this stays separate from
+    // `requestMarketDataRefreshForContext` itself.
+    const providerEnabled = await marketDataProviderEnabled();
+
     return (
       <HoldingDetailScreen
         portfolioId={portfolioId}
@@ -91,6 +97,7 @@ export default async function HoldingDetailPage({
           workspace.activePortfolio.baseCurrencyCode
         }
         initialView={workspace.holdingCurrencyView ?? "native"}
+        marketDataProviderEnabled={providerEnabled}
       />
     );
   }
