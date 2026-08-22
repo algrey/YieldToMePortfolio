@@ -341,7 +341,7 @@ Alert on sustained provider failure, entitlement changes, high staleness, rate-b
 - **Scope: the owner's OWN `portfolio_securities`, any status.** Resolved through `security_identifiers(scheme = 'sharesight_instrument')` (BRK-009A) — never ticker text. An instrument Sharesight returns that matches none of the owner's identifiers is ignored, with the count disclosed in the refresh result, never guessed onto a nearest-ticker security.
 - **Provenance completeness.** Every write carries `provider_id = 'sharesight'`, `access_scope`/`scope_user_id`, `observation_at`, `market_date` (derived from Sharesight's original timestamp's OWN offset, not a UTC conversion), `market_timezone` (the observed numeric offset, e.g. `+10:00` — Sharesight supplies no IANA zone name, and none is invented from `market_code`), `currency_code`, `ingested_at`, `adjustment_state = 'raw'`, `quality = 'observed'`. **`observation_at` CORRECTION (BRK-012B review finding B1(a), 2026-08-20, BLOCKING):** an earlier version of this note claimed `observation_at` retained Sharesight's raw offset string; that was WRONG and blanked the owner's holdings view on the very first hourly write (`app/owned-holdings.ts`'s `mapPrice` validates `observation_at` against a Z-only ISO regex, which a `+10:00`-suffixed string fails, silently caught into an "unavailable" state). `observation_at` is now normalized to a UTC `...Z` ISO string at write time (`domain/sharesight/price-accretion.ts`'s `normalizeTimestampToUtcIso`) — Sharesight's raw offset-preserving string is not separately retained (`price_observations` has no spare column suited to it); this conversion IS the documented rule. `market_date`'s derivation is UNCHANGED and still reads the ORIGINAL, pre-conversion offset string — the two derivations run independently against the same source string, never chained, so this fix does not reintroduce the UTC-conversion date-shift bug `market_date`'s own derivation exists to avoid.
 - **`security_provider_mappings` requirement.** `price_observations.mapping_id` is a hard FK into `security_provider_mappings`; the write path guard-creates a `status = 'candidate'` mapping (`provider_exchange`/`provider_symbol` = Sharesight's own `market_code`/`code`) on a security's first accretion write, since the identity itself was already durably resolved via `sharesight_instrument` before any price write is attempted — this mapping row is a technical FK anchor, not a fresh unverified candidate awaiting owner review the way a CSV-ticker mapping is.
-- **Selection for CURRENT holdings (BRK-012C, lifted from BRK-012B's storage-only exclusion): wired in, historical/snapshot valuation UNCHANGED.** `app/owned-holdings.ts`'s `loadOwnedHoldings` (the holdings valuation read path — also the shared source `app/owned-income-projection.ts` and `app/owned-dividend-assumptions.ts` both build on) removed its `provider_id <> 'sharesight'` predicate: a Sharesight accretion row now participates in the EXISTING selection machinery (`domain/market-data/selection.ts`) exactly like any other provider's row, unchanged selection logic — `providerRank` already ranked `interval = 'delayed'` ahead of `'eod'` for the same market date, which is now live behavior rather than dead code. `db/repositories/snapshots.ts`'s snapshot-rebuild fact loader (the Overview daily-history chart) KEEPS its identical predicate — historical/snapshot valuation stays on the Yahoo-compatible EOD feed only, a deliberate BRK-012C ruling, not an oversight. `app/owned-quotes.ts`'s Quotes-page read still needs no predicate (it already reads `access_scope = 'deployment'` only). (§19's per-holding price-history chart DELIBERATELY diverges from this exclusion and includes Sharesight rows — see that section for why a historical DISPLAY is not the same honesty problem as a valuation input.)
+- **Selection for CURRENT holdings (BRK-012C, lifted from BRK-012B's storage-only exclusion): wired in, historical/snapshot valuation UNCHANGED.** `app/owned-holdings.ts`'s `loadOwnedHoldings` (the holdings valuation read path — also the shared source `app/owned-income-projection.ts` and `app/owned-dividend-assumptions.ts` both build on) removed its `provider_id <> 'sharesight'` predicate: a Sharesight accretion row now participates in the EXISTING selection machinery (`domain/market-data/selection.ts`) exactly like any other provider's row, unchanged selection logic — `providerRank` ranks `interval = 'delayed'` ahead of `'eod'` for the same market date, and STILL does (§21's MKT-012 note: that ordinary tie-break was never changed). **MKT-012 round 2 (owner ruling, 2026-08-22) adds a NARROWER, separate owner-import precedence tier** (`§21`) ahead of `providerRank`, not a change to `providerRank` itself: a same-or-newer-date owner-uploaded CSV close (`provider_id = 'owner-import'`) now outranks a same-date Sharesight accretion row here — the practical outcome for THIS bullet's worked example is unchanged from a round-1 attempt at this task (CSV still wins), but the mechanism is narrower and does not touch ordinary provider-vs-provider (e.g. Yahoo eod vs Yahoo delayed) same-date ties elsewhere. A same-date Sharesight row still wins against an older owner-import date and against no owner-import row at all. `db/repositories/snapshots.ts`'s snapshot-rebuild fact loader (the Overview daily-history chart) KEEPS its identical predicate — historical/snapshot valuation stays on the Yahoo-compatible EOD feed only, a deliberate BRK-012C ruling, not an oversight. `app/owned-quotes.ts`'s Quotes-page read still needs no predicate (it already reads `access_scope = 'deployment'` only). (§19's per-holding price-history chart DELIBERATELY diverges from this exclusion and includes Sharesight rows — see that section for why a historical DISPLAY is not the same honesty problem as a valuation input.)
 - **The delayed-price cache + 10-minute read gate (BRK-012C).** A new table, `sharesight_delayed_prices` (`db/schema.ts`, migration `0045`), holds ONE row per (user, security): the latest observed price/currency, Sharesight's own quote timestamp (`quote_at`), and the ingestion time (`fetched_at`) — an audit/freshness-display store, kept per-security. `app/owned-holdings.ts` calls `app/sharesight-price-gate-service.ts`'s `ensureSharesightPriceFreshness` before reading `price_observations`: if this owner has an enabled Sharesight link and their PER-OWNER attempt watermark (see below) is missing or older than 10 minutes, it makes ONE bounded `listUserInstruments()` call, then upserts BOTH `sharesight_delayed_prices` (the cache) AND `price_observations` (the SAME accretion write BRK-012B's hourly cron already makes, reusing `buildSharesightPriceAccretionPlan`/`upsertSharesightPriceObservations`) from the identical result — so the table the selection machinery actually reads (`price_observations`) is refreshed as a side effect of the gate's own freshness check, never read directly by the holdings display path itself. **Staleness is a PER-OWNER fact, not per-security (review round B1, 2026-08-20, BLOCKING fix):** one `listUserInstruments()` call refreshes everything fetchable for an owner in one shot, so a held security Sharesight never matches can never have a cache row — an earlier per-security cache scan reported "stale" on every load for any portfolio holding even one such security, defeating the 10-minute window entirely. The gate now reads a single-row watermark (`sharesight_sync_state.last_price_refresh_at`/`_status`/`_error_kind` — the SAME trio BRK-012B's cron already stamps, deliberately reused rather than a second near-duplicate column set) instead; a held-but-unmatched security simply has no cache row and its price stays whatever `price_observations` already offers, honestly. Within the 10-minute window, the gate makes ZERO Sharesight requests (asserted by test, including a mixed matched/unmatched-security portfolio and three simulated call sites in one window). Stampede-safe: a single-flight lease (CAS-claimed on the owner's enabled `sharesight_sync_state` row, `price_refresh_lease_owner`/`price_refresh_lease_expires_at`, mirroring `calculation_runs.claim()`'s conditional-UPDATE pattern) means a losing concurrent request skips the fetch and serves whatever is already there. A fetch failure serves the stale cache/observations with their honest, unchanged age AND stamps the shared watermark with `status = 'failed'` + the error kind (review round B2 fix) — the gate never throws for an ordinary outcome, the page never blocks, and a persistently broken fetch cannot be retried on every render since the failed attempt itself holds the window closed.
 - **Display label: always "Delayed (Sharesight)", never "live".** `app/owned-holdings.ts`'s row explanation text (the accessible detail panel, per AGENTS.md's "compact views may suppress routine labels, explanations must remain accessible" rule) renders `interval = 'delayed'` selections as `Delayed (Sharesight) as of <quote timestamp>` rather than the bare interval name every other provider gets — the quote timestamp is `price_observations.observation_at` (Sharesight's own `current_price_updated_at`, UTC-normalized). The word "live" is never used to describe this data anywhere in the codebase (AGENTS.md non-negotiable, grep-asserted by `tests/brk-012c.test.ts`). A cross-basis daily-movement comparison (today's price from a different selection class than yesterday's, e.g. Sharesight-delayed vs. Yahoo-compatible EOD) renders its own honest "Movement unavailable (price basis changed)" text rather than the generic "Price unavailable" (review round B3 fix, `docs/CALCULATIONS.md` §2) — the CURRENT price is still shown correctly; only the day-over-day comparison is withheld.
 - **Trigger: hourly cron sweep, dual-gated (unchanged from BRK-012B) — the outer freshness bound when nobody is looking.** `worker/index.ts`'s existing `scheduled` handler (cron `0 * * * *`) calls `runScheduledSharesightPriceRefresh` alongside the pre-existing Yahoo/corporate-action/calculation sweeps. Work happens only when BOTH `SHARESIGHT_CLIENT_ID`/`SHARESIGHT_CLIENT_SECRET` are configured AND at least one owner has an ENABLED `sharesight_sync_state` link — either gate absent is a `skipped: true` no-op with zero DB reads and zero Sharesight requests, mirroring the existing Yahoo `marketDataProvider === 'disabled'` skip. `listUserInstruments` is fetched exactly ONCE per run (one Sharesight account covers every owner sharing it); a fetch failure is recorded explicitly (`status = 'failed'` + the error kind) on every enabled link's watermark, never partial-silent; the SAME run also upserts the delayed-price cache from the identical candidates (review follow-up 2). The BRK-012C read gate above is a SEPARATE, per-owner, per-request trigger with its own single-flight lease, but DELIBERATELY SHARES the cron's watermark column (see above) — an hourly cron sweep therefore "resets the gate clock" for free: the very next portfolio load after a cron run sees a fresh watermark and serves cache/`price_observations` with zero Sharesight calls. Either trigger alone keeps `price_observations`/the cache honestly current within its own bound (≤10 minutes while actively viewed, ≤1 hour as the cron backstop otherwise).
@@ -439,24 +439,65 @@ cron pattern before onboarding — this codebase has not verified what tick
 alignment (and `isSecondaryTick` cadence-gating correctness) such a market
 would actually get from the current fixed `:25`/`:55` schedule.
 
-**Provider-ranking disclosure (round-2 correction, 2026-08-22 — the mechanism
-below was mis-stated in an earlier version of this note)**: the EXISTING
+**Provider-ranking disclosure (MKT-012 round 2, Orchestrator ruling,
+2026-08-22 — supersedes a round-1 fix to this task that a review round
+rejected before it reached this document in its final form)**: the
 freshest-wins provider ranking (`domain/market-data/selection.ts`'s
-`providerRank`, unchanged by this task) decides purely by INTERVAL CLASS,
-never by `observation_at` granularity or recency: `intervalRank` is `0` for
-`delayed`, `1` for `intraday`, `2` for `eod` (lower wins), plus a quality
-penalty (`stale_candidate` +4, `indicative` +2, `observed` +0). A rollup row
-is written `interval = 'delayed'`, `quality = 'observed'` (rank `0`); an
-owner-uploaded EOD close is `interval = 'eod'`, `quality = 'observed'` (rank
-`2`) — so a rollup observation for a given date now systematically outranks
-an owner-uploaded EOD close of the SAME date whenever both exist, purely
-because `delayed` structurally outranks `eod` in this table, regardless of
-which one is actually more recent or more precise. This is PRE-EXISTING
-selection behaviour (the same rule already governed BRK-012B's own hourly
-Sharesight accretion against an uploaded EOD close) — MKT-011A does not
-change the ranking, only makes this outcome systematic for every trading day
-going forward rather than an occasional BRK-012B-only case. Recorded as a
-backlog item to reconsider (TASKS.md), not fixed here.
+`providerRank`) decides purely by INTERVAL CLASS, never by `observation_at`
+granularity or recency, and is UNCHANGED by MKT-012 — `intervalRank` is
+still `0` for `delayed`, `1` for `intraday`, `2` for `eod` (lower wins), plus
+a quality penalty (`stale_candidate` +4, `indicative` +2, `observed` +0). A
+round-1 attempt at implementing the owner's ruling ("csv uploads should
+outrank") flipped this table generically (`eod` ranked ahead of `delayed`
+for EVERY provider at equal date age). Review rejected that: it never
+reached the owner's own default configuration (MKT-009B's
+`preferredProviderIds` narrowing ran BEFORE this tie-break and excluded the
+owner-import row whenever a preference was configured, so `sharesight_delayed`
+still selected Sharesight over the owner's own CSV close end-to-end), and it
+silently regressed MKT-011A itself: Yahoo's own same-day PROVISIONAL `eod`
+bar started beating MKT-011A's honest 16:25 `delayed` rollup capture on the
+deployment scope (this section's own capture, read by `app/owned-quotes.ts`/
+`domain/snapshots/history.ts`) — nobody asked for that, and it partially
+defeated the point of this section's own daily-capture rollup.
+
+**The fix (final): a NARROWER, separate owner-import precedence tier, ahead
+of `providerRank`, not a change to it.** An owner-uploaded observation
+(`provider_id = 'owner-import'`, `domain/market-data/selection.ts`'s
+exported `OWNER_IMPORT_PROVIDER_ID` — the rows CSV upload/backup restore
+create, §18) at the SAME market-date age as the best remaining candidate now
+wins outright, regardless of that candidate's own interval — so an
+owner-uploaded EOD close still systematically outranks a same-date
+rollup/accretion observation (this section's own rollup, or BRK-012B's
+hourly Sharesight accretion, `docs/CALCULATIONS.md` §2's MKT-012 note),
+which is the owner's actual stated intent, but an ORDINARY provider-vs-provider
+same-date tie (e.g. this section's own Yahoo `delayed` rollup vs. Yahoo's own
+same-day `eod` bar, neither of which is owner-import) is UNCHANGED from
+before this task: `delayed` still wins. `preferredProviderIds` narrowing
+(MKT-009B, amended after review F6) admits the owner-import row into the
+narrowed set when the configured preference matches at least one candidate,
+and skips narrowing entirely — falling back to the FULL candidate set,
+owner-import included alongside every other provider — when the preference
+matches nothing; an earlier, rejected shape admitted owner-import
+unconditionally even into an empty-match narrowing, which trapped selection
+inside `{owner-import}` alone and let an OLDER owner-import row beat a
+FRESHER non-preferred quote. Either way this tier honestly reaches every
+`price_source_preference` setting, not merely the no-preference default; the
+cross-scope combiner
+(`app/owned-holdings.ts`'s `combineScopedPriceSelections`, since owner-import
+rows are always user-scope) applies the identical rule before its own
+preference-match branch, so a `yahoo_authenticated`/`yahoo_anonymous`
+preference can never hand the deployment scope a win over a valid same-date
+owner-import close purely because that scope's own selection happens to
+match the preferred provider. A same-date owner-import row never beats a
+STRICTLY NEWER market date from another source — the prior `dayAge`
+comparison still runs first — and a non-owner-import observation still wins
+outright when it is the only same-date candidate. Scoped to PRICE selection
+only: no owner-uploaded FX rows exist, so `fx_rate_observations` selection
+(`selectFxObservation`) is entirely unaffected by MKT-012, in either round.
+`intraday` is not written into `price_observations` by any SCHEDULED
+pipeline today (an owner backup restore CAN write an `interval = 'intraday'`
+row, `domain/market-data/price-backup-csv.ts`'s `INTERVALS` set) and its
+`providerRank` slot is unchanged from before this task either way.
 
 **Sharesight capture** reuses BRK-012B/012C's candidate machinery exactly:
 one shared `listUserInstruments()` fetch per sweep tick (never one call per

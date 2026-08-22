@@ -359,10 +359,21 @@ test("MKT-009B selection: a preferred provider with a usable observation wins ev
 
 test("MKT-009B selection: a preferred provider with ZERO usable observations falls back honestly to the best of the rest, never unavailable", () => {
   const yahoo = priceObservation({ providerId: "yahoo-compatible" });
+  // MKT-012 round 2 review F6: an owner-import row is present too, at an
+  // OLDER market date than yahoo's -- pins that the honest fallback still
+  // resolves by `dayAge` (yahoo, the fresher date, wins) rather than ever
+  // trapping selection inside {owner-import} merely because it always
+  // participates in preference narrowing (an earlier, rejected version of
+  // the union bug would have done exactly that).
+  const ownerImport = priceObservation({
+    providerId: "owner-import",
+    marketDate: "2026-07-25",
+    observationAt: "2026-07-25T06:00:00Z",
+  });
   const selection = selectPriceObservation({
     asOf: "2026-07-29",
     targetKey: "security-1",
-    observations: [yahoo],
+    observations: [yahoo, ownerImport],
     preferredProviderIds: ["sharesight"],
   });
   assert.equal(selection.status, "current");
@@ -668,6 +679,65 @@ function insertPriceObservation(
   );
 }
 
+/**
+ * MKT-012 round 2: a single, exact `price_observations` row with explicit
+ * `interval`/`market_date` control -- `insertPriceObservation` above always
+ * writes `interval = 'delayed'` and a fixed current/previous-day pair, which
+ * cannot express an owner-import `eod` row or an intentionally OLDER
+ * market date (the age-precedence test below needs both). Reuses the exact
+ * mapping-guard pattern the write path itself uses
+ * (`db/repositories/sharesight-price-refresh.ts`'s `WHERE NOT EXISTS`), so
+ * repeated calls for the SAME provider never collide, and resolves
+ * `mapping_id` via subquery rather than assuming a specific row id.
+ */
+function insertSingleObservation(
+  db: DatabaseSync,
+  input: {
+    id: string;
+    providerId: "yahoo-compatible" | "sharesight" | "owner-import";
+    scope: "deployment" | "user";
+    interval: "eod" | "delayed";
+    marketDate: string;
+    observationAt: string;
+    closeDecimal: string;
+  },
+): void {
+  const accessScope = input.scope;
+  const scopeUserId = input.scope === "user" ? "owner-1" : null;
+  const scopeKey = input.scope === "user" ? "owner-1" : "deployment";
+  db.prepare(
+    `INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+     SELECT ?, 'security-1', ?, 'ASX', 'ABC', '2026-08-01', 'candidate'
+     WHERE NOT EXISTS (
+       SELECT 1 FROM security_provider_mappings WHERE provider_id = ? AND security_id = 'security-1'
+     )`,
+  ).run(`mapping-${input.providerId}`, input.providerId, input.providerId);
+  db.prepare(
+    `INSERT INTO price_observations (
+      id, provider_id, access_scope, scope_user_id, scope_key, mapping_id,
+      security_id, interval, observation_at, market_date, market_timezone,
+      currency_code, close_decimal, previous_close_decimal, adjustment_state,
+      quality, ingested_at, provider_revision_id
+    ) VALUES (
+      ?, ?, ?, ?, ?,
+      (SELECT id FROM security_provider_mappings WHERE provider_id = ? AND security_id = 'security-1' LIMIT 1),
+      'security-1', ?, ?, ?, '+10:00', 'AUD', ?, NULL, 'raw', 'observed', ?, NULL
+    )`,
+  ).run(
+    `price-${input.id}`,
+    input.providerId,
+    accessScope,
+    scopeUserId,
+    scopeKey,
+    input.providerId,
+    input.interval,
+    input.observationAt,
+    input.marketDate,
+    input.closeDecimal,
+    input.observationAt,
+  );
+}
+
 async function setPreference(
   db: DatabaseSync,
   preference: string,
@@ -860,6 +930,157 @@ test("MKT-009B owned-holdings B2/B3: the yahoo-auth-unmet action-required state 
     srOnlyIndex + 60,
   );
   assert.doesNotMatch(srOnlyContainer, /statusLabel/);
+});
+
+// ---------------------------------------------------------------------------
+// MKT-012 round 2 (Orchestrator ruling, 2026-08-22): owned-holdings-level
+// owner-import precedence, on the same `ownedHoldingsFixture()` this file's
+// own B1 tests above use. Every fixture below makes the LOSING row the
+// fresher-in-time one (later `observationAt`) than the winner, per review
+// finding F5, so the outcome can only be explained by the owner-import
+// tier/reverted interval order, never the incidental final tie-break.
+// ---------------------------------------------------------------------------
+
+test("MKT-012: the owner's exact default scenario -- a same-date CSV eod row beats a same-date Sharesight delayed row under the default sharesight_delayed preference", async () => {
+  const db = await ownedHoldingsFixture();
+  insertSingleObservation(db, {
+    id: "owner-import",
+    providerId: "owner-import",
+    scope: "user",
+    interval: "eod",
+    marketDate: "2026-08-20",
+    observationAt: "2026-08-20T00:00:00.000Z",
+    closeDecimal: "15.00",
+  });
+  insertSingleObservation(db, {
+    id: "sharesight",
+    providerId: "sharesight",
+    scope: "user",
+    interval: "delayed",
+    marketDate: "2026-08-20",
+    observationAt: "2026-08-20T05:00:00.000Z",
+    closeDecimal: "20.00",
+  });
+  await setPreference(db, "sharesight_delayed");
+  const result = await loadFixtureHoldings(db);
+  assert.equal(result.rows[0]?.nativePrice, "15.00");
+  db.close();
+});
+
+for (const preference of ["yahoo_authenticated", "yahoo_anonymous"] as const) {
+  test(`MKT-012: the same CSV-eod-vs-Sharesight-delayed scenario also resolves to the owner's CSV close under ${preference} (owner-import always participates, regardless of preference)`, async () => {
+    const db = await ownedHoldingsFixture();
+    insertSingleObservation(db, {
+      id: "owner-import",
+      providerId: "owner-import",
+      scope: "user",
+      interval: "eod",
+      marketDate: "2026-08-20",
+      observationAt: "2026-08-20T00:00:00.000Z",
+      closeDecimal: "15.00",
+    });
+    insertSingleObservation(db, {
+      id: "sharesight",
+      providerId: "sharesight",
+      scope: "user",
+      interval: "delayed",
+      marketDate: "2026-08-20",
+      observationAt: "2026-08-20T05:00:00.000Z",
+      closeDecimal: "20.00",
+    });
+    await setPreference(db, preference);
+    const result = await loadFixtureHoldings(db);
+    assert.equal(result.rows[0]?.nativePrice, "15.00");
+    db.close();
+  });
+}
+
+test("MKT-012: a FRESHER-dated Sharesight delayed row beats an OLDER owner-import close (date-age precedence unchanged)", async () => {
+  const db = await ownedHoldingsFixture();
+  insertSingleObservation(db, {
+    id: "owner-import",
+    providerId: "owner-import",
+    scope: "user",
+    interval: "eod",
+    marketDate: "2026-08-19",
+    observationAt: "2026-08-19T00:00:00.000Z",
+    closeDecimal: "15.00",
+  });
+  insertSingleObservation(db, {
+    id: "sharesight",
+    providerId: "sharesight",
+    scope: "user",
+    interval: "delayed",
+    marketDate: "2026-08-20",
+    observationAt: "2026-08-20T05:00:00.000Z",
+    closeDecimal: "20.00",
+  });
+  await setPreference(db, "sharesight_delayed");
+  const result = await loadFixtureHoldings(db);
+  assert.equal(result.rows[0]?.nativePrice, "20.00");
+  db.close();
+});
+
+test("MKT-012: a same-day Yahoo eod-vs-delayed tie is UNCHANGED from pre-task -- delayed still outranks eod at equal date age (pins the round-1 flip's revert)", async () => {
+  const db = await ownedHoldingsFixture();
+  insertSingleObservation(db, {
+    id: "yahoo-eod",
+    providerId: "yahoo-compatible",
+    scope: "deployment",
+    interval: "eod",
+    marketDate: "2026-08-20",
+    // The loser (eod) is deliberately the fresher-in-time row (F5).
+    observationAt: "2026-08-20T06:00:00.000Z",
+    closeDecimal: "11.00",
+  });
+  insertSingleObservation(db, {
+    id: "yahoo-delayed",
+    providerId: "yahoo-compatible",
+    scope: "deployment",
+    interval: "delayed",
+    marketDate: "2026-08-20",
+    observationAt: "2026-08-20T00:00:00.000Z",
+    closeDecimal: "12.00",
+  });
+  await setPreference(db, "yahoo_authenticated");
+  const result = await loadFixtureHoldings(db);
+  assert.equal(result.rows[0]?.nativePrice, "12.00");
+  db.close();
+});
+
+// MKT-012 round 2 review F6 (BLOCKING, fixed): a yahoo-shaped preference
+// matches NEITHER owner-import NOR Sharesight in this fixture. An earlier
+// version of the round-2 fix would have collapsed the user-scope candidate
+// set to {owner-import} alone, permanently excluding the fresher Sharesight
+// row from ever competing on `dayAge` -- an OLDER owner-import close then
+// beat a FRESHER quote. Same pin as tests/mkt-003a.test.ts's unit-level F6
+// test, exercised end to end through `loadOwnedHoldings`.
+test("MKT-012 (F6 pin): a yahoo preference must NOT let an older owner-import row beat a fresher Sharesight quote, end to end through loadOwnedHoldings", async () => {
+  const db = await ownedHoldingsFixture();
+  insertSingleObservation(db, {
+    id: "owner-import",
+    providerId: "owner-import",
+    scope: "user",
+    interval: "eod",
+    marketDate: "2026-08-19",
+    observationAt: "2026-08-19T00:00:00.000Z",
+    closeDecimal: "15.00",
+  });
+  insertSingleObservation(db, {
+    id: "sharesight",
+    providerId: "sharesight",
+    scope: "user",
+    interval: "delayed",
+    marketDate: "2026-08-20",
+    observationAt: "2026-08-20T05:00:00.000Z",
+    closeDecimal: "20.00",
+  });
+  // Matches NEITHER row -- the preference itself is a no-op here, and must
+  // not accidentally trap selection inside {owner-import}.
+  await setPreference(db, "yahoo_authenticated");
+  const result = await loadFixtureHoldings(db);
+  assert.equal(result.rows[0]?.nativePrice, "20.00");
+  db.close();
 });
 
 // ---------------------------------------------------------------------------

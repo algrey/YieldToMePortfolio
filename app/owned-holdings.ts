@@ -27,6 +27,7 @@ import {
   subtractDecimal,
 } from "../domain/calculations/index.ts";
 import {
+  OWNER_IMPORT_PROVIDER_ID,
   selectFxObservation,
   selectPriceObservation,
   type FxSelection,
@@ -293,6 +294,25 @@ function combineScopedPriceSelections(
   user: PriceSelection,
   preferredProviderIds: readonly string[] | null | undefined,
 ): PriceSelection {
+  // MKT-012 round 2 (Orchestrator ruling, 2026-08-22, rule 4): an
+  // owner-import row is ALWAYS user-scope (`app/price-upload-service.ts`
+  // writes `access_scope = 'user'` only for CSV upload/backup restore). At
+  // an equal-or-newer market date than whatever the deployment scope itself
+  // selected, it wins this combiner OUTRIGHT -- checked BEFORE the
+  // preference branch below, so a configured `yahoo_authenticated`/
+  // `yahoo_anonymous` preference (which matches the DEPLOYMENT scope's own
+  // selection and would otherwise hand it the win purely on that match)
+  // can never defeat the owner's own uploaded close. A strictly OLDER
+  // owner-import date still loses to a fresher deployment-scope
+  // observation -- date-age precedence is unchanged; this is a same-or-newer
+  // check, not a blanket override.
+  if (
+    user.selected?.providerId === OWNER_IMPORT_PROVIDER_ID &&
+    (!deployment.selected ||
+      user.selected.marketDate >= deployment.selected.marketDate)
+  ) {
+    return user;
+  }
   if (preferredProviderIds && preferredProviderIds.length > 0) {
     const deploymentPreferred =
       deployment.selected !== null &&
@@ -644,11 +664,18 @@ export async function loadOwnedHoldings(
     // BRK-012B review B1/B3 (2026-08-20) originally excluded
     // `provider_id = 'sharesight'` rows here ("this slice is pure
     // storage"). BRK-012C deliberately LIFTS that exclusion: a user-scoped
-    // Sharesight accretion row is now a legitimate valuation input for
-    // CURRENT holdings, ranked by the EXISTING selection semantics
-    // (`domain/market-data/selection.ts`'s `providerRank` already ranks
-    // `interval = 'delayed'` ahead of `'eod'` for the same market date --
-    // no selection-logic change was needed, only removing this predicate).
+    // Sharesight accretion row is a legitimate valuation input for CURRENT
+    // holdings, ranked by the EXISTING selection semantics
+    // (`domain/market-data/selection.ts`'s `providerRank`), under which
+    // `delayed` still outranks `eod` at equal date age. MKT-012 (owner
+    // ruling, 2026-08-22, round 2) does NOT change that ordinary interval
+    // tie-break -- it adds a NARROWER `OWNER_IMPORT_PROVIDER_ID` precedence
+    // tier ahead of it: a same-or-newer-date owner-uploaded CSV close (this
+    // combiner's `combineScopedPriceSelections`, above) now outranks a
+    // same-date Sharesight `delayed` accretion row, but an ordinary
+    // provider-vs-provider `eod`/`delayed` tie (e.g. two live sources, or
+    // owner-import absent) is UNCHANGED from BRK-012C's original ordering
+    // (`docs/CALCULATIONS.md` §2's MKT-012 note).
     // Freshness is bounded by the read gate immediately above
     // (`ensureSharesightPriceFreshness`), which piggybacks the SAME
     // accretion write this query now reads. The snapshot/historical path

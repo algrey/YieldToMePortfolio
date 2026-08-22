@@ -60,6 +60,12 @@ import {
 } from "../app/price-upload-service.ts";
 import { createHistoricalSnapshotRepository } from "../db/repositories/index.ts";
 import { rejectCrossSiteMutation } from "../app/mutation-request.ts";
+// MKT-012 round 2 review F8: `domain/market-data/selection.ts` redeclares
+// its OWN `OWNER_IMPORT_PROVIDER_ID` (domain code does not import from
+// `db/repositories`) rather than importing this file's repository constant
+// -- see that module's own comment for why. The pin below guards against
+// the two literals drifting apart.
+import { OWNER_IMPORT_PROVIDER_ID as SELECTION_OWNER_IMPORT_PROVIDER_ID } from "../domain/market-data/selection.ts";
 
 function bytesOf(text: string): Uint8Array {
   return new TextEncoder().encode(text);
@@ -100,6 +106,10 @@ function utf16BytesOf(
   });
   return bytes;
 }
+
+test("MKT-012 round 2 review F8: domain/market-data/selection.ts's OWNER_IMPORT_PROVIDER_ID is byte-identical to this repository's own constant of the same name", () => {
+  assert.equal(SELECTION_OWNER_IMPORT_PROVIDER_ID, OWNER_IMPORT_PROVIDER_ID);
+});
 
 // ---------------------------------------------------------------------------
 // (1) domain/market-data/price-csv.ts

@@ -266,10 +266,42 @@ function providerRank(
   interval: ObservationInterval,
   quality: ProviderDataQuality,
 ): number {
+  // MKT-012 round 2 (Orchestrator ruling, 2026-08-22): a ROUND-1 attempt at
+  // this task flipped this generic interval tie-break so `eod` always beat
+  // `delayed`. Review found that was the wrong fix: the owner's actual
+  // ruling was "CSV uploads should outrank", not "all eod beats all
+  // delayed" -- the generic flip (a) never reached the owner's own default
+  // configuration, because `preferredProviderIds` narrowing (below) already
+  // ran BEFORE this tie-break and excluded the owner-import row whenever a
+  // preference was configured, and (b) silently regressed MKT-011A: Yahoo's
+  // own same-day PROVISIONAL `eod` bar started beating MKT-011A's honest
+  // 16:25 `delayed` rollup capture on the deployment scope (owned-quotes,
+  // snapshots), which nobody asked for. This function is REVERTED to its
+  // pre-MKT-012 order: `delayed` (rank 0) still outranks `eod` (rank 2) at
+  // equal date age for ordinary provider rows. The owner's real "CSV
+  // uploads should outrank" intent is instead implemented as the NARROWER
+  // `ownerImportRank` precedence below, applied only to
+  // `selectPriceObservation`'s price tie-break (never here, and never for
+  // FX -- no owner-uploaded FX rows exist).
   const intervalRank = interval === "eod" ? 2 : interval === "delayed" ? 0 : 1;
   const qualityRank =
     quality === "stale_candidate" ? 4 : quality === "indicative" ? 2 : 0;
   return intervalRank + qualityRank;
+}
+
+// MKT-012 round 2 (Orchestrator ruling, 2026-08-22): the provider id CSV
+// upload/backup-restore write to `price_observations` (`app/price-upload-service.ts`,
+// `OWNER_IMPORT_PROVIDER_ID` in `db/repositories/price-uploads.ts`). Exported
+// so `app/owned-holdings.ts`'s cross-scope combiner (rule 4 of the ruling)
+// can apply the IDENTICAL precedence check rather than drifting from this
+// module's own definition. Domain code does not import from `db/repositories`
+// (see `price-backup-csv.ts`'s own independent `"owner-import"` literal for
+// the established convention this repeats), so this is redeclared here, not
+// imported, and MUST be kept byte-identical to that constant.
+export const OWNER_IMPORT_PROVIDER_ID = "owner-import";
+
+function ownerImportRank(providerId: string): number {
+  return providerId === OWNER_IMPORT_PROVIDER_ID ? 0 : 1;
 }
 
 function selectionState(
@@ -363,12 +395,22 @@ export function selectPriceObservation(
     }
   }
 
+  // MKT-012 round 2: an owner-import row (the owner's own uploaded/backup-
+  // restored CSV price history, `providerId === OWNER_IMPORT_PROVIDER_ID`)
+  // gets authoritative precedence at the SAME market-date age, ahead of
+  // `providerRank`'s ordinary interval/quality tie-break -- this is the
+  // narrow, targeted implementation of "CSV uploads should outrank", scoped
+  // to PRICE selection only (never FX -- no owner-uploaded FX rows exist).
+  // `ageDifference` still runs first, so a genuinely fresher non-owner-import
+  // date still wins by age; an owner-import row never beats a strictly newer
+  // market date from another source.
   const sortByFreshness = (left: PriceObservation, right: PriceObservation) => {
     const ageDifference =
       (dayAge(input.asOf, left.marketDate) ?? Infinity) -
       (dayAge(input.asOf, right.marketDate) ?? Infinity);
     return (
       ageDifference ||
+      ownerImportRank(left.providerId) - ownerImportRank(right.providerId) ||
       providerRank(left.interval, left.quality) -
         providerRank(right.interval, right.quality) ||
       right.observationAt.localeCompare(left.observationAt)
@@ -394,10 +436,36 @@ export function selectPriceObservation(
   // narrowing leaves at least one candidate -- an empty preferred subset
   // falls back, honestly, to the full candidate set below rather than ever
   // reporting `unavailable` merely because the PREFERRED source is silent.
-  const preferredCandidates =
+  // MKT-012 round 2 (ruling 3, AMENDED after review F6, 2026-08-22): the
+  // owner-import row must be UNIONED into the narrowed set whenever the
+  // preferred provider actually has something -- but NEVER unconditionally.
+  // An earlier version of this union added owner-import regardless of
+  // whether `preferredProviderIds` matched anything, which broke the
+  // honest-fallback path above: with a yahoo preference and neither a
+  // yahoo row nor a preference match, the narrowed set collapsed to
+  // {owner-import} ALONE, permanently excluding a fresher non-preferred
+  // (e.g. Sharesight) row from ever competing on `dayAge` at all -- an
+  // OLDER owner-import close then beat a FRESHER same-scope quote, a
+  // regression from pre-task behaviour. Gating the union on
+  // `preferredMatches.length > 0` restores the honest fallback: when the
+  // preferred provider is silent, narrowing is skipped entirely and
+  // `validCandidates` (owner-import included) competes on `dayAge` first,
+  // exactly as before this task -- `ownerImportRank` below still decides a
+  // genuine same-date tie within that full fallback set. A yahoo
+  // preference must never let an older owner-import row beat a fresher
+  // Sharesight quote merely because a preference happens to be configured.
+  const preferredMatches =
     input.preferredProviderIds && input.preferredProviderIds.length > 0
       ? validCandidates.filter((observation) =>
           input.preferredProviderIds!.includes(observation.providerId),
+        )
+      : [];
+  const preferredCandidates =
+    preferredMatches.length > 0
+      ? validCandidates.filter(
+          (observation) =>
+            input.preferredProviderIds!.includes(observation.providerId) ||
+            observation.providerId === OWNER_IMPORT_PROVIDER_ID,
         )
       : [];
   const candidates = (

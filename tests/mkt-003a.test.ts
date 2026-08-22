@@ -92,6 +92,16 @@ function fx(overrides: Partial<FxObservation> = {}): FxObservation {
   };
 }
 
+// MKT-012 round 2 (Orchestrator ruling, 2026-08-22): this test's ROUND-1
+// name/assertions ("selects EOD over a same-market-date delayed capture...",
+// closeDecimal "40"/interval "eod") implemented a generic eod-vs-delayed
+// flip that review rejected -- the owner's actual ruling was "CSV uploads
+// should outrank", not "all eod beats all delayed", and the generic flip
+// silently regressed MKT-011A's deployment-scope rollup against Yahoo's own
+// same-day provisional eod bar. This ordinary-provider (no owner-import)
+// tie-break is REVERTED to its pre-MKT-012 form -- `delayed` wins, byte-for-
+// byte the original pre-task assertions. The owner's real intent is instead
+// covered by the dedicated owner-import-precedence tests below.
 test("selects delayed/best-effort before EOD, then bounded prior sessions", () => {
   const selected = selectPriceObservation({
     asOf: "2026-08-03",
@@ -128,6 +138,151 @@ test("selects delayed/best-effort before EOD, then bounded prior sessions", () =
   });
   assert.equal(unavailable.status, "unavailable");
   assert.equal(unavailable.display, null);
+});
+
+// MKT-012 round 2: the owner-import precedence tier. Every fixture below
+// deliberately makes the LOSING row the fresher-in-time one (later
+// `observationAt`) than the winner -- review finding F5 -- so a pass can
+// only be explained by the new `ownerImportRank` tier, never by the
+// pre-existing final `observationAt` tie-break riding along coincidentally.
+// Each is also asserted under BOTH candidate insertion orders since
+// `Array.prototype.sort`'s comparator is what must decide it, not
+// incidental input order.
+for (const order of ["owner-import first", "sharesight first"] as const) {
+  test(`MKT-012: an owner-import eod row beats a same-date Sharesight delayed row within user scope (${order})`, () => {
+    const eodImport = price({
+      interval: "eod",
+      providerId: "owner-import",
+      closeDecimal: "40",
+      scope: { kind: "user", userId: "user-a" },
+      // Deliberately the EARLIER observationAt -- the winner is NOT also
+      // the fresher-in-time row (F5).
+      observationAt: "2026-08-03T00:00:00Z",
+    });
+    const delayedSharesight = price({
+      interval: "delayed",
+      providerId: "sharesight",
+      closeDecimal: "42",
+      scope: { kind: "user", userId: "user-a" },
+      // Deliberately the LATER observationAt -- the loser IS the
+      // fresher-in-time row (F5).
+      observationAt: "2026-08-03T05:00:00Z",
+    });
+    const observations =
+      order === "owner-import first"
+        ? [eodImport, delayedSharesight]
+        : [delayedSharesight, eodImport];
+    const selected = selectPriceObservation({
+      asOf: "2026-08-03",
+      targetKey: "security-a",
+      userId: "user-a",
+      scope: { kind: "user", userId: "user-a" },
+      observations,
+    });
+    assert.equal(selected.selected?.closeDecimal, "40");
+    assert.equal(selected.selected?.providerId, "owner-import");
+  });
+}
+
+test("MKT-012: preference narrowing NEVER excludes the owner-import row -- a sharesight_delayed-shaped preference still loses to owner-import at the same date", () => {
+  const eodImport = price({
+    interval: "eod",
+    providerId: "owner-import",
+    closeDecimal: "40",
+    scope: { kind: "user", userId: "user-a" },
+    observationAt: "2026-08-03T00:00:00Z",
+  });
+  const delayedSharesight = price({
+    interval: "delayed",
+    providerId: "sharesight",
+    closeDecimal: "42",
+    scope: { kind: "user", userId: "user-a" },
+    observationAt: "2026-08-03T05:00:00Z",
+  });
+  const selected = selectPriceObservation({
+    asOf: "2026-08-03",
+    targetKey: "security-a",
+    userId: "user-a",
+    scope: { kind: "user", userId: "user-a" },
+    observations: [eodImport, delayedSharesight],
+    // The preference names ONLY sharesight -- if narrowing excluded
+    // owner-import (pre-round-2 bug), this candidate set would drop to
+    // [delayedSharesight] alone and sharesight would win. It must not.
+    preferredProviderIds: ["sharesight"],
+  });
+  assert.equal(selected.selected?.providerId, "owner-import");
+  assert.equal(selected.selected?.closeDecimal, "40");
+});
+
+test("MKT-012: a FRESHER-dated Sharesight delayed row still beats an OLDER owner-import close (date-age precedence unchanged)", () => {
+  const olderEodImport = price({
+    interval: "eod",
+    providerId: "owner-import",
+    closeDecimal: "40",
+    marketDate: "2026-08-03",
+    scope: { kind: "user", userId: "user-a" },
+    observationAt: "2026-08-03T00:00:00Z",
+  });
+  const fresherDelayedSharesight = price({
+    interval: "delayed",
+    providerId: "sharesight",
+    closeDecimal: "42",
+    marketDate: "2026-08-04",
+    scope: { kind: "user", userId: "user-a" },
+    observationAt: "2026-08-04T05:00:00Z",
+  });
+  const selected = selectPriceObservation({
+    asOf: "2026-08-04",
+    targetKey: "security-a",
+    userId: "user-a",
+    scope: { kind: "user", userId: "user-a" },
+    observations: [olderEodImport, fresherDelayedSharesight],
+  });
+  assert.equal(selected.selected?.marketDate, "2026-08-04");
+  assert.equal(selected.selected?.providerId, "sharesight");
+  assert.equal(selected.selected?.closeDecimal, "42");
+});
+
+// MKT-012 round 2 review F6 (BLOCKING, fixed): a yahoo-shaped preference
+// matches NEITHER owner-import NOR Sharesight. An earlier version of the
+// round-2 fix unioned owner-import into the narrowed candidate set
+// UNCONDITIONALLY, so this scenario's narrowed set collapsed to
+// {olderEodImport} alone and permanently excluded the fresher Sharesight
+// row from ever competing on `dayAge` -- an OLDER owner-import close then
+// beat a FRESHER quote. The union is now gated on the preferred provider
+// actually matching something, so a preference match failure honestly
+// falls back to the FULL candidate set (owner-import included), where
+// `dayAge` decides first, exactly as before this task.
+test("MKT-012 (F6 pin): a yahoo preference must NOT let an older owner-import row beat a fresher Sharesight quote", () => {
+  const olderEodImport = price({
+    interval: "eod",
+    providerId: "owner-import",
+    closeDecimal: "40",
+    marketDate: "2026-08-03",
+    scope: { kind: "user", userId: "user-a" },
+    observationAt: "2026-08-03T00:00:00Z",
+  });
+  const fresherDelayedSharesight = price({
+    interval: "delayed",
+    providerId: "sharesight",
+    closeDecimal: "42",
+    marketDate: "2026-08-04",
+    scope: { kind: "user", userId: "user-a" },
+    observationAt: "2026-08-04T05:00:00Z",
+  });
+  const selected = selectPriceObservation({
+    asOf: "2026-08-04",
+    targetKey: "security-a",
+    userId: "user-a",
+    scope: { kind: "user", userId: "user-a" },
+    observations: [olderEodImport, fresherDelayedSharesight],
+    // Matches NEITHER row -- the preference itself is a no-op here, and
+    // must not accidentally trap selection inside {owner-import}.
+    preferredProviderIds: ["yahoo-compatible"],
+  });
+  assert.equal(selected.selected?.marketDate, "2026-08-04");
+  assert.equal(selected.selected?.providerId, "sharesight");
+  assert.equal(selected.selected?.closeDecimal, "42");
 });
 
 test("historical selection stops at the portfolio-local end of day", () => {
