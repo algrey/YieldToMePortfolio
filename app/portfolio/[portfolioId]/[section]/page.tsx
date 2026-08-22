@@ -1,20 +1,13 @@
 import { notFound } from "next/navigation";
+import { PortfolioShell } from "../../../components/portfolio-shell";
 import {
-  PortfolioShell,
+  portfolioSections,
   type PortfolioSection,
-} from "../../../components/portfolio-shell";
+} from "../../../portfolio-sections";
 import { createPreviewPortfolioPrototypes } from "../../../preview-route-data";
 import { loadPreviewValuationFixture } from "../../../preview-valuation";
 import { loadAuthenticatedWorkspace } from "../../../authenticated-workspace";
 import { loadAuthenticatedPortfolioInspection } from "../../../portfolio-inspection";
-
-const portfolioSections = [
-  "overview",
-  "holdings",
-  "quotes",
-  "details",
-  "news",
-] as const;
 
 type PortfolioSectionPageProps = {
   params: Promise<{ portfolioId: string; section: string }>;

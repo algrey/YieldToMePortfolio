@@ -1,8 +1,6 @@
 import { notFound } from "next/navigation";
-import {
-  PortfolioShell,
-  type PortfolioSection,
-} from "../../../../components/portfolio-shell";
+import { PortfolioShell } from "../../../../components/portfolio-shell";
+import { type PortfolioSection } from "../../../../portfolio-sections";
 import { createPreviewPortfolioPrototypes } from "../../../../preview-route-data";
 import { loadPreviewValuationFixture } from "../../../../preview-valuation";
 import { loadAuthenticatedWorkspace } from "../../../../authenticated-workspace";

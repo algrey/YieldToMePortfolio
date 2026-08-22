@@ -47,14 +47,17 @@ import {
   currentFyWindow,
   lastFyWindow,
 } from "../../domain/calculations/index.ts";
+import { type PortfolioSection } from "../portfolio-sections";
 
-export const portfolioSections = [
-  "overview",
-  "holdings",
-  "quotes",
-  "details",
-  "news",
-] as const;
+// Type-only re-export for existing callers (e.g. the holding-detail route)
+// -- safe across the client boundary because types are erased at compile
+// time. The RUNTIME `portfolioSections` array lives in `../portfolio-sections`
+// and is intentionally NOT imported/re-exported here: server components must
+// import it straight from that shared module rather than through this
+// "use client" file, which would turn it back into an opaque client
+// reference (see that module's comment for the concrete failure this
+// caused).
+export { type PortfolioSection };
 
 // UI-008 review: the portfolio create/rename dialog and QuoteCorrectionDialog
 // both disable their Cancel button while a save is pending, and
@@ -124,7 +127,6 @@ function financialYearWindowHelperText(startMonth: number): string {
   return `${FY_MONTH_NAMES[startIndex]}: FY runs 1 ${FY_MONTH_ABBREVIATIONS[startIndex]} – ${FY_MONTH_DAY_COUNTS[endIndex]} ${FY_MONTH_ABBREVIATIONS[endIndex]}`;
 }
 
-export type PortfolioSection = (typeof portfolioSections)[number];
 export type OwnedWorkspace = {
   status: "ready" | "empty" | "unavailable";
   userDisplayName?: string | null;
@@ -265,6 +267,20 @@ function sectionHref(section: PortfolioSection, overviewHref: string) {
   return section === "overview"
     ? overviewHref
     : `/portfolio/preview/${section}`;
+}
+
+// UI-024 (owner-reported): before this existed, EVERY owned-mode tab (not
+// just the button-styled ones -- these are plain `<Link>`s, never
+// `disabled`) hard-coded `href="/"` whenever there was no active portfolio
+// to build a `/portfolio/:id/:section` URL from. Every tab therefore linked
+// to the SAME URL as the current page, so clicking a tab other than
+// Overview was a same-URL no-op navigation -- indistinguishable from a dead
+// click, even though nothing was actually disabled. `/` still has no
+// portfolio id to route through, so this keeps the section choice in a
+// query param `page.tsx` reads back into `activeSection`, giving every tab
+// (News included) a distinct, real navigation target.
+function ownedNoPortfolioHref(section: PortfolioSection) {
+  return section === "overview" ? "/" : `/?section=${section}`;
 }
 
 function compareBigIntStrings(left: string, right: string) {
@@ -3443,7 +3459,7 @@ export function PortfolioShell({
               ownedMode
                 ? ownedWorkspace.activePortfolio
                   ? `/portfolio/${ownedWorkspace.activePortfolio.id}/${section}`
-                  : "/"
+                  : ownedNoPortfolioHref(section)
                 : sectionHref(section, overviewHref)
             }
             aria-current={activeSection === section ? "page" : undefined}
