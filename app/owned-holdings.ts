@@ -932,20 +932,48 @@ export async function loadOwnedHoldings(
       const previousFx = evidence(previousFxSelection);
       const currentPriceObservation = priceSelection.selected?.observation;
       const previousPriceObservation = previousSelection.selected?.observation;
+      // MKT-016 (owner ruling, 2026-08-22, verbatim: "This is actually
+      // fine, the historical prices are closing prices. And if they are
+      // wrong it is a minor and temporary issue."): a previous-day
+      // `eod`-class close is ALWAYS an acceptable baseline for the current
+      // price, regardless of source/provider/quality -- an end-of-day
+      // closing print means the same thing no matter which feed produced
+      // it (owner-import CSV, Yahoo-compatible, or any future EOD
+      // provider), so sharesight-delayed-today vs owner-import-eod-
+      // yesterday now computes a real day change instead of being refused.
+      // The strict same-source/provider/interval/quality/mapping rule
+      // REMAINS for every other pairing -- in particular two different
+      // `delayed` feeds on the same day (cross-provider delayed-vs-delayed)
+      // are still not a genuine movement, since neither side is a settled
+      // closing price. `mappingId` equality is deliberately dropped from
+      // the relaxed eod-baseline branch: an owner-import or other-provider
+      // close necessarily resolves through its OWN provider mapping row
+      // for the same security (see `db/repositories/price-uploads.ts`),
+      // so requiring the same `mappingId` there would silently re-impose
+      // the strict rule and defeat the ruling. `adjustmentState` equality
+      // stays required in BOTH branches -- comparing a raw close against a
+      // split/total-return-adjusted one is never a genuine movement,
+      // whatever the provider basis.
+      const priceClassBasisComparable =
+        previousSelection.selected?.interval === "eod" &&
+        (priceSelection.selected?.interval === "delayed" ||
+          priceSelection.selected?.interval === "eod")
+          ? true
+          : priceSelection.selected?.source ===
+              previousSelection.selected?.source &&
+            priceSelection.selected?.providerId ===
+              previousSelection.selected?.providerId &&
+            priceSelection.selected?.interval ===
+              previousSelection.selected?.interval &&
+            priceSelection.selected?.quality ===
+              previousSelection.selected?.quality &&
+            (currentPriceObservation?.mappingId ?? identity.securityId) ===
+              (previousPriceObservation?.mappingId ?? identity.securityId);
       const priceClassComparable =
         Boolean(priceSelection.selected && previousSelection.selected) &&
-        priceSelection.selected?.source ===
-          previousSelection.selected?.source &&
-        priceSelection.selected?.providerId ===
-          previousSelection.selected?.providerId &&
-        priceSelection.selected?.interval ===
-          previousSelection.selected?.interval &&
-        priceSelection.selected?.quality ===
-          previousSelection.selected?.quality &&
+        priceClassBasisComparable &&
         (currentPriceObservation?.adjustmentState ?? "manual") ===
-          (previousPriceObservation?.adjustmentState ?? "manual") &&
-        (currentPriceObservation?.mappingId ?? identity.securityId) ===
-          (previousPriceObservation?.mappingId ?? identity.securityId);
+          (previousPriceObservation?.adjustmentState ?? "manual");
       const fxClassComparable =
         Boolean(fxSelection.selected && previousFxSelection.selected) &&
         fxSelection.selected?.source === previousFxSelection.selected?.source &&
@@ -1004,20 +1032,33 @@ export async function loadOwnedHoldings(
         : holding?.facts.homeMarketValue.status === "available"
           ? holding.facts.homeMarketValue.valueDecimal
           : null;
-      // BRK-012C review round (2026-08-20, B3 fix): `priceClassComparable`
-      // stays STRICT (unchanged) -- a cross-basis delta (e.g. today's price
-      // from Sharesight-delayed, yesterday's from the Yahoo-compatible EOD
-      // feed) is genuinely not a comparable movement and must never be
-      // computed. The HONESTY fix is the REASON label: this specific cause
-      // (both days' prices are known, just on different bases) is distinct
-      // from a genuinely missing previous price/FX -- `!priceClassComparable`
-      // alone is NOT sufficient here, since it is equally true when the
-      // PRICE side is comparable but the previous FX observation is the one
-      // genuinely missing/mismatched (that case correctly keeps the
-      // pre-existing "missing_previous_fx"/"zero_previous_value" reasons
-      // below). Requiring both selections to actually exist excludes the
-      // separate "missing_previous" actionStatus case, which already has
-      // its own honest handling.
+      // BRK-012C review round (2026-08-20, B3 fix; HISTORY -- superseded in
+      // part by MKT-016 below): `priceClassComparable` was originally kept
+      // fully STRICT -- a cross-basis delta (e.g. today's price from
+      // Sharesight-delayed, yesterday's from the Yahoo-compatible EOD feed)
+      // was treated as genuinely not a comparable movement and never
+      // computed. The HONESTY fix at the time was the REASON label: this
+      // specific cause (both days' prices are known, just on different
+      // bases) is distinct from a genuinely missing previous price/FX --
+      // `!priceClassComparable` alone is NOT sufficient here, since it is
+      // equally true when the PRICE side is comparable but the previous FX
+      // observation is the one genuinely missing/mismatched (that case
+      // correctly keeps the pre-existing "missing_previous_fx"/
+      // "zero_previous_value" reasons below). Requiring both selections to
+      // actually exist excludes the separate "missing_previous" actionStatus
+      // case, which already has its own honest handling.
+      //
+      // MKT-016 (owner ruling, 2026-08-22): the sharesight-delayed-today vs
+      // yahoo/owner-import-eod-yesterday case described above is NO LONGER
+      // refused -- `priceClassComparable` (see its definition above) now
+      // treats a previous-day `eod` close as an acceptable baseline for any
+      // current price, so that pairing computes a real movement. This
+      // `priceBasisChanged`/`price_basis_changed` reason path below is
+      // unchanged in mechanism and still fires whenever both selections
+      // exist but `priceClassComparable` is false -- which, post-MKT-016,
+      // only happens for the pairings the guard still refuses (e.g.
+      // cross-provider `delayed`-vs-`delayed`, or an adjustment-state/
+      // mapping mismatch).
       const priceBasisChanged =
         !zero &&
         !priceClassComparable &&

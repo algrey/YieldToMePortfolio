@@ -24,17 +24,32 @@ export function signPrefixed(formatted: string, signed: boolean): string {
   return `+${formatted}`;
 }
 
-// BRK-012C review round (2026-08-20, B3 fix): a cross-basis daily-movement
-// comparison (e.g. today's price from Sharesight-delayed, yesterday's from
-// the Yahoo-compatible EOD feed) is genuinely NOT comparable -- deliberately
+// BRK-012C review round (2026-08-20, B3 fix; HISTORY -- narrowed by
+// MKT-016 below): a cross-basis daily-movement comparison (e.g. today's
+// price from Sharesight-delayed, yesterday's from the Yahoo-compatible EOD
+// feed) was originally treated as genuinely NOT comparable -- deliberately
 // left `priceClassComparable`-gated (STRICT) in `app/owned-holdings.ts`
-// rather than computed anyway, since a delayed-vs-EOD delta can be
-// misleading. The honesty defect was the LABEL: falling through to the
-// generic unavailable branch below falsely implied no price data exists at
-// all, when the real, current price IS known -- only the MOVEMENT
-// comparison isn't. `reason === "price_basis_changed"` (set by
-// `app/owned-holdings.ts`'s `dailyMovement`/`dailyPercent` fields) now
-// renders its own honest, distinct text instead.
+// rather than computed anyway, since a delayed-vs-EOD delta was judged
+// potentially misleading. The honesty defect from that round was the
+// LABEL: falling through to the generic unavailable branch below falsely
+// implied no price data exists at all, when the real, current price IS
+// known -- only the MOVEMENT comparison wasn't. `reason ===
+// "price_basis_changed"` (set by `app/owned-holdings.ts`'s
+// `dailyMovement`/`dailyPercent` fields) renders its own honest, distinct
+// text instead.
+//
+// MKT-016 (owner ruling, 2026-08-22, verbatim: "This is actually fine, the
+// historical prices are closing prices. And if they are wrong it is a
+// minor and temporary issue."): the EXACT pairing described above --
+// Sharesight-delayed today vs. a previous-day `eod` close from ANY
+// provider (Yahoo-compatible, `owner-import`, or otherwise) -- is no
+// longer refused; `priceClassComparable` now treats a previous-day `eod`
+// close as an acceptable baseline for any current price, so that pairing
+// computes a real movement instead of landing here. This
+// "Movement unavailable (price basis changed)" text still renders for the
+// pairings the guard still refuses (see `app/owned-holdings.ts`'s
+// `priceClassComparable`/`priceClassBasisComparable` for exactly which
+// ones that now is -- e.g. cross-provider `delayed`-vs-`delayed`).
 //
 // UI-028 (owner ruling, 2026-08-22, one-off product wording change,
 // AGENTS.md non-negotiable updated to match): the generic fallback below

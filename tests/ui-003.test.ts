@@ -460,7 +460,7 @@ test("UI-003 identity FX remains non-inverted and fallback provenance is actiona
   fallbackDb.close();
 });
 
-test("UI-003 provider and supplied-direction mismatches invalidate movement", async () => {
+test("MKT-016: a cross-provider EOD-vs-EOD previous close is now an acceptable baseline (owner ruling, 2026-08-22) -- FX mismatch is still refused, unchanged", async () => {
   const priceDb = await holdingsDatabase();
   priceDb.exec(
     "INSERT INTO market_data_providers (id,code,name,status,capabilities_json,rate_limit_json) VALUES ('other-provider','other','Other','enabled','{}','{}'); INSERT INTO security_provider_mappings (id,security_id,provider_id,provider_exchange,provider_symbol,valid_from,status) VALUES ('mapping-other','security-a','other-provider','NYSE','AAA','2026-01-01','verified'); UPDATE price_observations SET provider_id = 'other-provider', mapping_id = 'mapping-other' WHERE id = 'price-prev';",
@@ -471,10 +471,25 @@ test("UI-003 provider and supplied-direction mismatches invalidate movement", as
     "portfolio-a",
     new Date("2026-08-03T08:00:00Z"),
   );
-  assert.equal(priceMismatch.rows[0]?.dailyMovement.status, "unavailable");
-  assert.equal(priceMismatch.rows[0]?.actionStatus, "incomparable");
+  // Both days are `eod`-class (today: yahoo-compatible close 8; yesterday:
+  // now re-attributed to a different provider/mapping, close 7 unchanged)
+  // -- previously refused as a provider mismatch, now allowed because the
+  // owner ruling makes ANY previous-day eod close an acceptable baseline,
+  // regardless of provider. Exact fixture math: quantity 2, native
+  // movement = 2*(8-7) = 2, home movement = 2/2 (AUD/USD=2 both days) = 1;
+  // previous home value = 2*7/2 = 7, so percent = 1/7*100 = 14.2857...%,
+  // half-even rounded to 14.29.
+  assert.equal(priceMismatch.rows[0]?.dailyMovement.status, "available");
+  assert.equal(priceMismatch.rows[0]?.dailyMovement.value, "1");
+  assert.equal(priceMismatch.rows[0]?.dailyMovement.reason, null);
+  assert.equal(priceMismatch.rows[0]?.dailyPercent.status, "available");
+  assert.equal(priceMismatch.rows[0]?.dailyPercent.value, "14.29");
+  assert.equal(priceMismatch.rows[0]?.actionStatus, "none");
   priceDb.close();
 
+  // FX comparability rules are UNCHANGED by MKT-016 -- a previous-day FX
+  // direction/rate mismatch still refuses the movement outright, even
+  // though the price side above is now comparable.
   const fxDb = await holdingsDatabase();
   fxDb.exec(
     "UPDATE fx_rate_observations SET base_currency_code = 'USD', quote_currency_code = 'AUD', rate_decimal = '0.5' WHERE id = 'fx-prev';",
@@ -488,6 +503,80 @@ test("UI-003 provider and supplied-direction mismatches invalidate movement", as
   assert.equal(fxMismatch.rows[0]?.dailyMovement.status, "unavailable");
   assert.equal(fxMismatch.rows[0]?.actionStatus, "incomparable");
   fxDb.close();
+});
+
+test("MKT-016: cross-provider delayed-vs-delayed is still refused -- neither side is a settled closing price", async () => {
+  const db = await holdingsDatabase();
+  // Remove the base fixture's yahoo-compatible eod rows for security-a so
+  // only the two delayed observations below compete for selection.
+  db.exec("DELETE FROM price_observations WHERE security_id = 'security-a';");
+  db.exec(`
+    INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+      VALUES ('mapping-sharesight-a', 'security-a', 'sharesight', 'NYSE', 'AAA', '2026-01-01', 'candidate');
+    INSERT INTO market_data_providers (id,code,name,status,capabilities_json,rate_limit_json)
+      VALUES ('other-provider','other','Other','enabled','{}','{}');
+    INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+      VALUES ('mapping-other-delayed', 'security-a', 'other-provider', 'NYSE', 'AAA', '2026-01-01', 'verified');
+    -- Today: Sharesight-delayed. Yesterday: a DIFFERENT provider's delayed
+    -- feed (not eod) -- neither side is a settled close, so the relaxed
+    -- eod-baseline branch never applies and the strict same-provider rule
+    -- still refuses this pairing.
+    INSERT INTO price_observations (id,provider_id,access_scope,scope_user_id,scope_key,mapping_id,security_id,interval,observation_at,market_date,market_timezone,currency_code,close_decimal,previous_close_decimal,adjustment_state,quality,ingested_at)
+    VALUES
+      ('price-sharesight-a','sharesight','user','owner-a','owner-a','mapping-sharesight-a','security-a','delayed','2026-08-03T05:00:00.000Z','2026-08-03','+10:00','USD','5000','4999','raw','observed','2026-08-03T05:01:00.000Z'),
+      ('price-other-delayed-prev','other-provider','deployment',NULL,'deployment','mapping-other-delayed','security-a','delayed','2026-08-02T05:00:00.000Z','2026-08-02','+10:00','USD','4900','4800','raw','observed','2026-08-02T05:01:00.000Z');
+  `);
+  const result = await loadOwnedHoldings(
+    createSqliteSqlClient(db),
+    "owner-a",
+    "portfolio-a",
+    new Date("2026-08-03T08:00:00Z"),
+  );
+  assert.equal(result.rows[0]?.dailyMovement.status, "unavailable");
+  assert.equal(result.rows[0]?.dailyMovement.reason, "price_basis_changed");
+  assert.equal(result.rows[0]?.dailyPercent.status, "unavailable");
+  assert.equal(result.rows[0]?.dailyPercent.reason, "price_basis_changed");
+  assert.equal(result.rows[0]?.actionStatus, "incomparable");
+  db.close();
+});
+
+test("MKT-016: FMG shape -- Sharesight-delayed today (17.75) vs owner-import EOD close yesterday (17.95) yields an exact -0.20 change, percent half-even rounded", async () => {
+  const db = await holdingsDatabase();
+  // Mirrors the owner's real data shape named in the ruling: same-currency
+  // portfolio (identity FX, no conversion distortion) and quantity 1, so
+  // the home-currency daily movement equals the raw native price delta.
+  db.exec(
+    "UPDATE portfolios SET base_currency_code = 'USD' WHERE id = 'portfolio-a'; UPDATE holding_projections SET quantity_decimal = '1'; DELETE FROM price_observations WHERE security_id = 'security-a';",
+  );
+  db.exec(`
+    INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+      VALUES ('mapping-sharesight-fmg', 'security-a', 'sharesight', 'NYSE', 'AAA', '2026-01-01', 'candidate');
+    INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+      VALUES ('mapping-owner-import-fmg', 'security-a', 'owner-import', 'NYSE', 'AAA', '2026-01-01', 'verified');
+    INSERT INTO price_observations (id,provider_id,access_scope,scope_user_id,scope_key,mapping_id,security_id,interval,observation_at,market_date,market_timezone,currency_code,close_decimal,previous_close_decimal,adjustment_state,quality,ingested_at)
+    VALUES
+      ('price-sharesight-fmg-today','sharesight','user','owner-a','owner-a','mapping-sharesight-fmg','security-a','delayed','2026-08-03T05:00:00.000Z','2026-08-03','+10:00','USD','17.75',NULL,'raw','observed','2026-08-03T05:01:00.000Z'),
+      ('price-owner-import-fmg-prev','owner-import','user','owner-a','owner-a','mapping-owner-import-fmg','security-a','eod','2026-08-02T00:00:00.000Z','2026-08-02','+10:00','USD','17.95',NULL,'raw','observed','2026-08-02T01:00:00.000Z');
+  `);
+  const result = await loadOwnedHoldings(
+    createSqliteSqlClient(db),
+    "owner-a",
+    "portfolio-a",
+    new Date("2026-08-03T08:00:00Z"),
+  );
+  assert.equal(result.rows[0]?.nativePrice, "17.75");
+  // Native movement = quantity 1 * (17.75 - 17.95) = -0.20 exactly; identity
+  // FX (same currency) means the home-currency movement is the same value.
+  assert.equal(result.rows[0]?.dailyMovement.status, "available");
+  assert.equal(result.rows[0]?.dailyMovement.value, "-0.2");
+  assert.equal(result.rows[0]?.dailyMovement.reason, null);
+  // Percent = -0.20 / 17.95 * 100 = -1.11420613...%, half-even rounded to
+  // -1.11 (the third decimal, 4, rounds down).
+  assert.equal(result.rows[0]?.dailyPercent.status, "available");
+  assert.equal(result.rows[0]?.dailyPercent.value, "-1.11");
+  assert.equal(result.rows[0]?.dailyPercent.reason, null);
+  assert.equal(result.rows[0]?.actionStatus, "none");
+  db.close();
 });
 
 test("UI-003 maximum cash cardinality stays inside fixed bind and query budgets", async () => {
@@ -792,7 +881,7 @@ test("BRK-012B x UI-003 regression (B1 drill): a REAL Sharesight accretion write
   db.close();
 });
 
-test("BRK-012C x UI-003: a user-scoped Sharesight observation on the SAME market date as the deployment-scoped Yahoo one is now selected (exclusion lifted) -- inverts the old BRK-012B B1(b) baseline deliberately", async () => {
+test("BRK-012C x UI-003 x MKT-016: a user-scoped Sharesight observation on the SAME market date as the deployment-scoped Yahoo one is now selected (exclusion lifted), and its day change vs the prior day's EOD close now computes for real", async () => {
   const db = await holdingsDatabase();
   db.exec(`
     INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
@@ -819,18 +908,30 @@ test("BRK-012C x UI-003: a user-scoped Sharesight observation on the SAME market
   assert.equal(result.rows[0]?.homeValue.value, "5000");
   assert.match(result.rows[0]?.explanation ?? "", /Delayed \(Sharesight\)/);
   assert.doesNotMatch(result.rows[0]?.explanation ?? "", /\blive\b/i);
-  // BRK-012C review round (B3, restored/corrected form of the assertion
-  // this test previously dropped): today's price is Sharesight-delayed,
-  // yesterday's (price-prev) is Yahoo-compatible EOD -- a genuine cross-
-  // basis mismatch. `priceClassComparable` stays STRICT (the movement is
-  // never computed), but the reason must be the honest, distinct
-  // `price_basis_changed` -- never the generic `missing_previous_fx` that
-  // would falsely imply the previous price/FX itself is missing (it is
-  // not: both days' prices are known, only their bases differ).
-  assert.equal(result.rows[0]?.dailyMovement.status, "unavailable");
-  assert.equal(result.rows[0]?.dailyMovement.reason, "price_basis_changed");
-  assert.equal(result.rows[0]?.dailyPercent.status, "unavailable");
-  assert.equal(result.rows[0]?.dailyPercent.reason, "price_basis_changed");
+  // BRK-012C review round (B3, HISTORY -- superseded by MKT-016 below):
+  // today's price is Sharesight-delayed, yesterday's (price-prev) is
+  // Yahoo-compatible EOD -- this was originally treated as a genuine
+  // cross-basis mismatch, refused with the honest, distinct
+  // `price_basis_changed` reason (never the generic `missing_previous_fx`
+  // that would falsely imply the previous price/FX itself is missing --
+  // it is not: both days' prices are known, only their bases differ).
+  //
+  // MKT-016 (owner ruling, 2026-08-22, verbatim: "This is actually fine,
+  // the historical prices are closing prices. And if they are wrong it is
+  // a minor and temporary issue."): this exact pairing -- Sharesight-
+  // delayed today vs a previous-day `eod` close from ANY provider -- is
+  // now an acceptable baseline, so the movement computes for real. Exact
+  // fixture math: quantity 2, native movement = 2*(5000-7) = 9986, home
+  // movement = 9986/2 (AUD/USD=2 both days) = 4993; previous home value =
+  // 2*7/2 = 7, so percent = 4993/7*100 = 71328.5714...%, half-even rounded
+  // to 71328.57.
+  assert.equal(result.rows[0]?.dailyMovement.status, "available");
+  assert.equal(result.rows[0]?.dailyMovement.value, "4993");
+  assert.equal(result.rows[0]?.dailyMovement.reason, null);
+  assert.equal(result.rows[0]?.dailyPercent.status, "available");
+  assert.equal(result.rows[0]?.dailyPercent.value, "71328.57");
+  assert.equal(result.rows[0]?.dailyPercent.reason, null);
+  assert.equal(result.rows[0]?.actionStatus, "none");
   db.close();
 });
 
