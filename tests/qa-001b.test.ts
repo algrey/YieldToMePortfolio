@@ -798,6 +798,85 @@ test("UI-008: portfolio-shell.tsx's dialog submits (portfolio create/rename, quo
   assert.match(quoteDialogSubmitSource, /clearTimeout\(timeout\);/);
 });
 
+// WLT-001 review (B3, BLOCKING): the watchlist's OwnedWatchlistScreen has
+// FIVE fetch call sites of its own (runSearch, addSecurity, addCurrencyPair,
+// removeEntry, moveEntry) -- none of these are `<dialog>` submits (the
+// watchlist uses an inline expanding panel, not a modal), but the SAME
+// never-hang guarantee applies: `actionPending`/`searchPending` must always
+// clear via a bounded fetch, never wait on a connection that never settles.
+// Tightened enumeration (cheap, per the review's own suggestion): rather
+// than name each of the five functions individually (as the two tests
+// above do for portfolio-shell.tsx's two PRE-EXISTING dialogs), this counts
+// occurrences of each convention element across the WHOLE
+// `OwnedWatchlistScreen` function body.
+//
+// Round-2 review fix (BLOCKING): the round-1 shape of this test counted
+// `AbortController`/`signal`/`isAbortError`/`clearTimeout` occurrences but
+// NEVER counted the fetch call sites themselves -- a sixth, entirely
+// UNGUARDED `fetch(...)` (no controller, no signal, no timeout) left every
+// one of those counts at 5 and passed cleanly, silently defeating the
+// enumeration's whole purpose (reviewer-proved). Fixed by ALSO asserting
+// `await fetch(` itself occurs exactly 5 times, tying the fetch-site count
+// to the convention-element counts -- a 6th fetch (guarded or not) now
+// changes THIS count first and fails the test regardless of whether its
+// author remembered the convention.
+test("UI-008/WLT-001 review (B3, BLOCKING): OwnedWatchlistScreen's five fetch call sites (runSearch, addSecurity, addCurrencyPair, removeEntry, moveEntry) are ALL bounded by the same AbortController timeout convention", async () => {
+  const source = await readFile(
+    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf("function OwnedWatchlistScreen({");
+  assert.ok(start >= 0, "expected to find OwnedWatchlistScreen");
+  const end = source.indexOf("\nfunction OwnedWorkspaceScreen({", start);
+  assert.ok(end > start, "expected to find the next top-level function");
+  const screenSource = source.slice(start, end);
+
+  const names = [
+    "runSearch",
+    "addSecurity",
+    "addCurrencyPair",
+    "removeEntry",
+    "moveEntry",
+  ];
+  for (const name of names) {
+    assert.match(
+      screenSource,
+      new RegExp(`async function ${name}\\(`),
+      `expected to find ${name}`,
+    );
+  }
+
+  const fetchCallCount = (screenSource.match(/await fetch\(/g) ?? []).length;
+  assert.equal(
+    fetchCallCount,
+    5,
+    "expected exactly 5 fetch call sites -- a 6th (guarded or not) must change this count",
+  );
+  const controllerCount = (
+    screenSource.match(/const controller = new AbortController\(\);/g) ?? []
+  ).length;
+  assert.equal(controllerCount, 5);
+  const timeoutSetupCount = (
+    screenSource.match(
+      /const timeout = setTimeout\(\s*\(\) => controller\.abort\(\),\s*DIALOG_FETCH_TIMEOUT_MS,\s*\);/g,
+    ) ?? []
+  ).length;
+  assert.equal(timeoutSetupCount, 5);
+  const signalCount = (screenSource.match(/signal: controller\.signal,/g) ?? [])
+    .length;
+  assert.equal(signalCount, 5);
+  const timeoutMessageUsageCount = (
+    screenSource.match(
+      /isAbortError\(error\)\s*\n\s*\? DIALOG_TIMEOUT_MESSAGE/g,
+    ) ?? []
+  ).length;
+  assert.equal(timeoutMessageUsageCount, 5);
+  const clearTimeoutCount = (
+    screenSource.match(/clearTimeout\(timeout\);/g) ?? []
+  ).length;
+  assert.equal(clearTimeoutCount, 5);
+});
+
 test("UI-008: dividend-assumptions-editor.tsx's dialog submits (record dividend, delete dividend, FY override) are bounded by an AbortController timeout with an in-dialog timeout message", async () => {
   const source = await readFile(
     new URL(

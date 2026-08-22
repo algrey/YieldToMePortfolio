@@ -137,7 +137,11 @@ async function loadImportReview(
   });
 }
 
-function providerFailureMessage(error: MarketDataError): string {
+// Exported so `app/watchlist-actions.ts` (WLT-001's "add a stock" search)
+// can reuse the exact same honest failure-message mapping instead of a
+// second, drifting copy -- both call sites translate the SAME
+// `MarketDataError` shape from the SAME provider machinery.
+export function providerFailureMessage(error: MarketDataError): string {
   switch (error.kind) {
     case "symbol_not_found":
       return "The provider found no security matching this symbol.";

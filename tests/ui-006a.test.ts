@@ -309,34 +309,22 @@ test("UI-006A: no dividend-forecast coverage is disclosed explicitly, never pres
 
 // --- Multi-year -------------------------------------------------------
 
-test("UI-006A: multi-year table maps DIV-003's source labels to the compact wireframe vocabulary and marks the current FY and projected rows distinctly", () => {
+test("UI-006A: multi-year table marks the current FY and projected rows distinctly in the row label itself (owner ruling 2026-08-22: the compact Source column is gone; DIV-003's source label -- actual/estimate/fy to date/projected -- stays accessible only via each row's detail dialog, never as a whole table column)", () => {
   const html = renderMultiYear();
   assert.match(
     html,
     /<caption>Financial-year income and portfolio value<\/caption>/,
   );
-  // actual (closed FY, receipts-derived)
-  assert.match(
-    html,
-    /FY25[\s\S]{0,400}<span class="income-source">actual<\/span>/,
-  );
-  // estimate (provider_estimate)
-  assert.match(
-    html,
-    /FY24[\s\S]{0,400}<span class="income-source">estimate<\/span>/,
-  );
-  // current FY labelled distinctly, never "actual"/"estimate"
-  assert.match(
-    html,
-    /FY26 \(to date\)[\s\S]{0,400}<span class="income-source">fy to date<\/span>/,
-  );
+  assert.doesNotMatch(html, /<th scope="col">Source<\/th>/);
+  assert.doesNotMatch(html, /class="income-source"/);
+  // current FY labelled distinctly in the row label itself, never
+  // "actual"/"estimate", and never colour alone.
+  assert.match(html, />FY26 \(to date\)</);
   // projected, visually distinguished (green class) AND labelled in text
-  // (never colour alone)
+  // (never colour alone) -- "(projected)" is part of the row label now
+  // that the Source column is gone.
   assert.match(html, /class="income-row-projected"/);
-  assert.match(
-    html,
-    /FY27[\s\S]{0,400}<span class="income-source">projected<\/span>/,
-  );
+  assert.match(html, /FY27 \(projected\)/);
 });
 
 test("UI-006A: every row is tappable via a real button (row-detail affordance) and past rows additionally link to an FY override", () => {

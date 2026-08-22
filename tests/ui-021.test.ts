@@ -87,12 +87,14 @@ function renderEmptyWorkspace(activeSection: string): string {
 
 // Renders an owned-mode empty state that has NO create action at all (a
 // portfolio already exists, so it is not the "no portfolios yet" case) --
-// e.g. the "quotes" section, which never gets its own dedicated screen
-// component and always falls through OwnedWorkspaceScreen's per-section
-// empty branch. ("news" used to be this file's example too, but UI-025
-// (owner ruling 2026-08-22) gave News its own real content -- the news
-// embed -- for every workspace state, so it no longer reaches this generic
-// no-action empty branch; see tests/ui-025.test.ts.)
+// `OwnedHoldingsScreen`'s own bare `<EmptyState />` (no active holdings in
+// an otherwise-ready portfolio), one of the five original placeholder call
+// sites named below. ("news" and, as of WLT-001 (owner ruling 2026-08-22),
+// "quotes" used to be viable examples of `OwnedWorkspaceScreen`'s OWN
+// generic per-section empty branch too, but both tabs now render real
+// content -- the news embed, the user-scoped watchlist -- in every owned
+// state, so neither reaches that generic branch any more; see
+// tests/ui-025.test.ts and tests/wlt-001.test.ts.)
 function renderOwnedSectionEmptyStateWithNoAction(): string {
   const componentUrl = new URL(
     "../app/components/portfolio-shell.tsx",
@@ -126,6 +128,8 @@ function renderOwnedSectionEmptyStateWithNoAction(): string {
           version: 1,
         },
       ],
+      holdings: [],
+      holdingsViewState: "empty",
     };
 
     process.stdout.write(
@@ -134,7 +138,7 @@ function renderOwnedSectionEmptyStateWithNoAction(): string {
           AppRouterContext.Provider,
           { value: routerStub },
           createElement(PortfolioShell, {
-            activeSection: "quotes",
+            activeSection: "holdings",
             ownedWorkspace,
           }),
         ),
@@ -151,8 +155,12 @@ function renderOwnedSectionEmptyStateWithNoAction(): string {
 // "news" is deliberately excluded here: UI-025 (owner ruling 2026-08-22)
 // made News the one tab that renders real content -- the news embed --
 // instead of the "No portfolios yet" panel even in a fresh/no-portfolio
-// workspace. See tests/ui-025.test.ts for its dedicated coverage.
-for (const section of ["overview", "holdings", "quotes", "details"]) {
+// workspace. See tests/ui-025.test.ts for its dedicated coverage. "quotes"
+// is excluded for the SAME reason as of WLT-001 (owner ruling
+// 2026-08-22): the watchlist is user-scoped, not portfolio-scoped, so it
+// renders its own real (possibly empty) content instead of the generic
+// "No portfolios yet" panel too. See tests/wlt-001.test.ts.
+for (const section of ["overview", "holdings", "details"]) {
   test(`UI-021: the "no portfolios yet" empty state on the "${section}" tab renders a "Create a new portfolio" button`, () => {
     const html = renderEmptyWorkspace(section);
     assert.match(html, /No portfolios yet/);

@@ -78,6 +78,15 @@ export {
   type SqlRunResult,
 } from "./sql-client.ts";
 export { createAuditRepository } from "./audit.ts";
+export {
+  createOwnedWatchlistRepository,
+  type ReorderWatchlistResult,
+  type WatchlistEntryKind,
+  type WatchlistEntryRecord,
+  type WatchlistEntryResult,
+  type WatchlistMutationFailure,
+  type WatchlistRepository,
+} from "./watchlist.ts";
 export type {
   AppendAuditEventInput,
   AuditEventRecord,
@@ -175,6 +184,7 @@ export {
 } from "./market-data-refresh.ts";
 export {
   createOwnedSecurityVerificationRepository,
+  type SecurityPublishOnlyResult,
   type SecurityVerificationCandidateInput,
   type SecurityVerificationLinkResult,
   type SecurityVerificationRepository,

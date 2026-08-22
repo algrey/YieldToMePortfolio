@@ -131,7 +131,11 @@ function mapProjectedRow(
 ): DisplayRow {
   return {
     key: `projected-${row.yearIndex}`,
-    label: row.label,
+    // UI-006A/AGENTS.md: with the compact Source column removed, the
+    // green `.income-row-projected` styling can no longer be the ONLY
+    // signal that a row is a forecast, not a real result -- the label
+    // itself must say so (never colour alone).
+    label: `${row.label} (projected)`,
     valueDecimal: row.valueDecimal,
     valueStatus,
     grossDecimal: row.grossDividendDecimal,
@@ -386,13 +390,12 @@ export function IncomeMultiYear({
               <th scope="col" className="numeric">
                 Yield
               </th>
-              <th scope="col">Source</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={5}>No financial years in range.</td>
+                <td colSpan={4}>No financial years in range.</td>
               </tr>
             ) : (
               rows.map((row) => (
@@ -441,9 +444,6 @@ export function IncomeMultiYear({
                   </td>
                   <td className="numeric">
                     {formatIncomePercent(row.yieldPercentDecimal)}
-                  </td>
-                  <td>
-                    <span className="income-source">{row.sourceLabel}</span>
                   </td>
                 </tr>
               ))

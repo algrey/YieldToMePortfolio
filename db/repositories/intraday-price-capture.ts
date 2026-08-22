@@ -118,22 +118,52 @@ export type YahooCaptureCandidate = Readonly<{
  * resolved through `security_provider_mappings` (a VERIFIED, currently-valid
  * mapping) instead of a `sharesight_instrument` identifier. Never ticker
  * text (AGENTS.md).
+ *
+ * WLT-001 review (B2b, BLOCKING): the candidate set also includes this
+ * owner's WATCH-ONLY securities (`watchlist_entries.kind = 'security'`,
+ * itself carrying no position -- see that table's own header comment) with
+ * a verified yahoo-compatible mapping, unioned (not concatenated -- plain
+ * SQL `UNION`, so a security that is BOTH held and watched is captured
+ * once, not twice) with the held-security set above. The sweep's own
+ * per-tick request-budget constants (`maxYahooRequestsPerSweep` and its
+ * siblings, `app/daily-price-capture-service.ts`) already bound total
+ * request count across whatever this function returns, so a larger
+ * candidate set never changes the sweep's worst-case cost -- it only
+ * changes WHICH securities compete for the same fixed budget. Deployment-
+ * scope writes exactly like held securities (no separate write path).
+ * Disclosed in `docs/MARKET_DATA_STRATEGY.md` §21.
  */
 export async function resolveScopedYahooCaptureSecurities(
   client: SqlClient,
   userId: string,
 ): Promise<YahooCaptureCandidate[]> {
   const rows = await client.all<{ security_id: string; mapping_id: string }>(
-    `SELECT DISTINCT ps.security_id AS security_id, spm.id AS mapping_id
-       FROM portfolio_securities ps
-       JOIN security_provider_mappings spm
-         ON spm.security_id = ps.security_id
-        AND spm.provider_id = ?
-        AND spm.status = 'verified'
-        AND spm.valid_to IS NULL
-      WHERE ps.user_id = ? AND ps.status <> 'unresolved'
-      ORDER BY ps.security_id ASC`,
-    [YAHOO_COMPATIBLE_CAPTURE_PROVIDER_ID, userId],
+    `SELECT security_id, mapping_id FROM (
+       SELECT ps.security_id AS security_id, spm.id AS mapping_id
+         FROM portfolio_securities ps
+         JOIN security_provider_mappings spm
+           ON spm.security_id = ps.security_id
+          AND spm.provider_id = ?
+          AND spm.status = 'verified'
+          AND spm.valid_to IS NULL
+        WHERE ps.user_id = ? AND ps.status <> 'unresolved'
+       UNION
+       SELECT we.security_id AS security_id, spm.id AS mapping_id
+         FROM watchlist_entries we
+         JOIN security_provider_mappings spm
+           ON spm.security_id = we.security_id
+          AND spm.provider_id = ?
+          AND spm.status = 'verified'
+          AND spm.valid_to IS NULL
+        WHERE we.user_id = ? AND we.kind = 'security'
+     )
+     ORDER BY security_id ASC`,
+    [
+      YAHOO_COMPATIBLE_CAPTURE_PROVIDER_ID,
+      userId,
+      YAHOO_COMPATIBLE_CAPTURE_PROVIDER_ID,
+      userId,
+    ],
   );
   return rows.map((row) => ({
     securityId: row.security_id,
@@ -422,12 +452,27 @@ function priceObservationInsertParams(
  * REVERSAL -- an earlier version of this function converged
  * `yahoo-compatible` at the application level via a read-then-insert check;
  * that design assumed a pre-existing multi-row-per-day `delayed`
- * yahoo-compatible writer that a round-2 review TRACED and DISPROVED --
- * `getLatestObservation`, the only producer of a `delayed` yahoo row, has no
- * call site in this codebase except this sweep, so no such writer to
- * coexist with ever existed): each provider targets its OWN partial
- * date-scoped unique index (db/schema.ts) via `ON CONFLICT ... DO UPDATE`,
- * converging the row to whichever point is genuinely newer.
+ * yahoo-compatible writer that a round-2 review TRACED and DISPROVED, AT THE
+ * TIME: `getLatestObservation` then had no call site in this codebase
+ * except this sweep): each provider targets its OWN partial date-scoped
+ * unique index (db/schema.ts) via `ON CONFLICT ... DO UPDATE`, converging
+ * the row to whichever point is genuinely newer.
+ *
+ * UPDATE (WLT-001 review round 2, correcting the paragraph above -- it is
+ * NO LONGER true that this sweep is the only producer): `getLatestObservation`
+ * now has a SECOND call site, `app/watchlist-actions.ts`'s
+ * `primeWatchlistSecurityPrice` (a watch-only security's best-effort
+ * on-add price fetch). This is safe for exactly the reason this doc
+ * comment describes, not despite it: that second writer targets the SAME
+ * `price_observations_yahoo_scope_mapping_date_unique` partial index with
+ * the IDENTICAL `WHERE excluded.observation_at > price_observations.observation_at`
+ * converge-to-the-newer-point guard this rollup uses below, so the two
+ * writers converge onto ONE row per (security, market_date) instead of
+ * either one throwing on the other's row -- the same-day collision a
+ * naive exact-`observation_at` conflict target would hit (and did, in the
+ * prime's own round-1 shape; fixed in the same review round) is precisely
+ * what this partial index's `market_date` scoping exists to converge, not
+ * merely tolerate.
  *
  * - `sharesight` targets `price_observations_provider_scope_mapping_date_unique`
  *   (`WHERE provider_id = 'sharesight'`, BRK-012B's OWN index -- its hourly

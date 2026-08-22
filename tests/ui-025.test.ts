@@ -14,11 +14,27 @@
  * Fix: both states now render `OwnedNewsScreen`, embedding the SAME owner
  * news site as the per-holding News tab (UI-023B:
  * app/portfolio/[portfolioId]/[section]/[holdingId]/news/page.tsx) in a
- * sandboxed, no-referrer iframe with source attribution -- the Worker CSP's
- * `frame-src` (worker/response-security.ts) already allows exactly this one
- * origin, so no widening was needed. The prototype/preview-mode `NewsScreen`
+ * sandboxed, no-referrer iframe -- the Worker CSP's `frame-src`
+ * (worker/response-security.ts) already allows exactly this one origin, so
+ * no widening was needed. The prototype/preview-mode `NewsScreen`
  * placeholder (reached only when there is no `ownedWorkspace` at all) is
  * unrelated and untouched.
+ *
+ * UI-028 (owner ruling, 2026-08-22, product choice -- reconciled here by
+ * the Orchestrator, who owned the concurrent-session handoff; the owner's
+ * behaviour is binding, not reverted): the PRIMARY tab's embed is now
+ * intentionally CHROME-LESS -- no source-attribution paragraph beneath the
+ * frame, and the frame fills the full viewport left below the sticky app
+ * bar/tabs (`.owned-news-embed .holding-news-frame`'s
+ * `height: calc(100dvh - var(--app-bar) - var(--tabs) -
+ * env(safe-area-inset-top))`, `min-height: 420px`, `border-width: 0`,
+ * `.owned-news-embed { gap: 0 }` -- replacing the earlier `calc(100dvh -
+ * 320px)` attribution-line budget). Attribution remains reachable two other
+ * ways this task did NOT touch: the per-holding News tab (UI-023B,
+ * `holding-news-source`, its own unchanged `calc(100dvh - 250px)` budget --
+ * pinned below, untouched) and the greeninvestments.au site itself. The
+ * `<h1 id="owned-news-title" class="sr-only">` heading is unchanged (already
+ * visually hidden before this reconciliation, kept that way).
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -112,8 +128,15 @@ function assertNewsEmbed(html: string) {
   );
   assert.match(html, /referrerPolicy="no-referrer"/);
   assert.match(html, /title="Green Investments news"/);
-  // Source attribution stays visible outside the frame.
-  assert.match(html, /greeninvestments\.au<\/a>/);
+  // UI-028 (owner ruling, 2026-08-22): the PRIMARY tab is intentionally
+  // chrome-less -- no source-attribution link beneath the frame (unlike the
+  // per-holding embed, which keeps its own attribution unchanged; see
+  // tests/ui-023.test.ts / tests/ui-023b.test.ts). Positively pinned in
+  // both directions so neither the attribution's absence nor the sr-only
+  // heading regresses silently.
+  assert.doesNotMatch(html, /holding-news-source/);
+  assert.doesNotMatch(html, /greeninvestments\.au<\/a>/);
+  assert.match(html, /<h1 id="owned-news-title" class="sr-only">News<\/h1>/);
 }
 
 test("UI-025: the News tab in a fresh/no-portfolio workspace renders the real news embed, not the 'No portfolios yet' panel", () => {
@@ -146,7 +169,12 @@ test("UI-025: the news embed carries no portfolio/security identifiers -- same e
 });
 
 test("UI-025: every other primary tab's 'No portfolios yet' empty state is unchanged -- the create-portfolio action still renders", () => {
-  for (const section of ["overview", "holdings", "quotes", "details"]) {
+  // "quotes" is excluded here as of WLT-001 (owner ruling, 2026-08-22): the
+  // Quotes tab is now the user-scoped watchlist, which renders its own real
+  // (possibly empty) content instead of the generic "No portfolios yet"
+  // panel too -- the SAME treatment this test already gives "news". See
+  // tests/wlt-001.test.ts.
+  for (const section of ["overview", "holdings", "details"]) {
     const html = renderShell(section, FRESH_WORKSPACE);
     assert.match(html, /No portfolios yet/, `expected "${section}" unaffected`);
     assert.match(
@@ -165,18 +193,18 @@ test("UI-025: the Worker CSP already allows exactly the greeninvestments.au orig
   assert.match(csp, /"frame-src 'self' https:\/\/greeninvestments\.au"/);
 });
 
-test("UI-025 review (fold): OwnedWorkspaceScreen's generic per-section empty-state records no longer carry a 'news' entry -- the early return for News means titles/messages are typed Record<Exclude<PortfolioSection, \"news\">, string>, so a stale/false News string can't silently exist there", async () => {
+test("UI-025 review (fold), extended by WLT-001: OwnedWorkspaceScreen's generic per-section empty-state records no longer carry a 'news' OR 'quotes' entry -- the early returns for both mean titles/messages are typed Record<Exclude<PortfolioSection, \"news\" | \"quotes\">, string>, so a stale/false string can't silently exist for either", async () => {
   const source = await readFile(
     new URL("../app/components/portfolio-shell.tsx", import.meta.url),
     "utf8",
   );
   assert.match(
     source,
-    /const titles: Record<Exclude<PortfolioSection, "news">, string> = \{/,
+    /const titles: Record<Exclude<PortfolioSection, "news" \| "quotes">, string> =\s*\{/,
   );
   assert.match(
     source,
-    /const messages: Record<Exclude<PortfolioSection, "news">, string> = \{/,
+    /const messages: Record<\s*Exclude<PortfolioSection, "news" \| "quotes">,\s*string\s*> = \{/,
   );
   // The false News copy is gone from the actual record literals (comments
   // referencing the removed placeholder, for history, are fine and not
@@ -188,16 +216,27 @@ test("UI-025 review (fold): OwnedWorkspaceScreen's generic per-section empty-sta
   );
 });
 
-test("UI-025 review (fold): the primary News tab's embed frame gets its own height rule scoped to .owned-news-embed, distinct from the per-holding embed's unchanged height", async () => {
+test("UI-028 (owner ruling, 2026-08-22): the primary News tab's embed frame fills the full viewport left below the sticky app bar/tabs, chrome-less, distinct from the per-holding embed's unchanged attributed height", async () => {
   const css = await readFile(
     new URL("../app/globals.css", import.meta.url),
     "utf8",
   );
+  // Superseded rule (kept here only as a comment for history, never
+  // re-asserted): `.owned-news-embed .holding-news-frame { height:
+  // calc(100dvh - 320px); }` -- an attribution-line budget that no longer
+  // applies now the primary tab has no attribution line at all.
   assert.match(
     css,
-    /\.owned-news-embed \.holding-news-frame \{\s*\n\s*height: calc\(100dvh - \d+px\);\s*\n\s*\}/,
+    /\.owned-news-embed \{\s*\n\s*gap: 0;\s*\n\s*\}/,
+    "expected the primary embed's own no-gap rule",
   );
-  // The shared per-holding rule's own height declaration is unchanged.
+  assert.match(
+    css,
+    /\.owned-news-embed \.holding-news-frame \{\s*\n\s*height: calc\(\s*\n\s*100dvh - var\(--app-bar\) - var\(--tabs\) - env\(safe-area-inset-top\)\s*\n\s*\);\s*\n\s*min-height: 420px;\s*\n\s*border-width: 0;\s*\n\s*\}/,
+    "expected the full-viewport, borderless, chrome-less primary embed height",
+  );
+  // The shared per-holding rule's own height declaration is UNCHANGED --
+  // that embed keeps its attribution line and its original budget.
   assert.match(
     css,
     /\.holding-news-frame \{\s*\n\s*width: 100%;\s*\n\s*height: calc\(100dvh - 250px\);/,

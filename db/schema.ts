@@ -3851,3 +3851,84 @@ export const priceUploadBatches = sqliteTable(
     ),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// WLT-001: the owner's watchlist -- INTEREST only, never a position. One row
+// per (user, target), where target is either a security or an ISO currency
+// pair. User-scoped (keyed directly by `user_id`, not `portfolio_id`): the
+// watchlist exists independently of any portfolio, so a brand-new owner with
+// zero portfolios can still build one (owner ruling, 2026-08-22, "The
+// Quotes tab is a watch list ... it does not record a position, just an
+// interest"). No quantity/position column exists on this table, and none
+// ever should -- quote data itself is never stored here either: reads join
+// through the SAME `price_observations` (`selectPriceObservation`, MKT-009B
+// preference + MKT-012 owner-import tier) and `fx_rate_observations`
+// selection every other quote surface in this codebase already uses (see
+// `app/owned-watchlist.ts` -- the owned-mode Quotes-tab loader this table
+// backs; the earlier `app/owned-quotes.ts` it replaced no longer exists)
+// -- this table only records WHAT the owner is watching and its display
+// order.
+export const watchlistEntries = sqliteTable(
+  "watchlist_entries",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    kind: text("kind").notNull(),
+    // Exactly one of `securityId` / (`baseCurrencyCode`, `quoteCurrencyCode`)
+    // is set, enforced by the shape CHECK below -- never both, never neither.
+    securityId: text("security_id"),
+    baseCurrencyCode: text("base_currency_code"),
+    quoteCurrencyCode: text("quote_currency_code"),
+    // Owner-controlled row order (drag/move affordance) -- a plain integer,
+    // unique only in intent (not DB-enforced; a duplicate/gap is harmless,
+    // the read path just orders by this then `created_at` for a stable tie
+    // break).
+    displayOrder: integer("display_order").notNull(),
+    createdAt: text("created_at").notNull(),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    foreignKey({
+      name: "watchlist_entries_user_id_users_id_fk",
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "watchlist_entries_security_id_securities_id_fk",
+      columns: [table.securityId],
+      foreignColumns: [securities.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "watchlist_entries_base_currency_code_currencies_code_fk",
+      columns: [table.baseCurrencyCode],
+      foreignColumns: [currencies.code],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "watchlist_entries_quote_currency_code_currencies_code_fk",
+      columns: [table.quoteCurrencyCode],
+      foreignColumns: [currencies.code],
+    }).onDelete("restrict"),
+    check(
+      "watchlist_entries_kind_check",
+      sql`${table.kind} IN ('security', 'currency_pair')`,
+    ),
+    check(
+      "watchlist_entries_shape_check",
+      sql`(${table.kind} = 'security' AND ${table.securityId} IS NOT NULL AND ${table.baseCurrencyCode} IS NULL AND ${table.quoteCurrencyCode} IS NULL)
+          OR (${table.kind} = 'currency_pair' AND ${table.securityId} IS NULL AND ${table.baseCurrencyCode} IS NOT NULL AND ${table.quoteCurrencyCode} IS NOT NULL AND ${table.baseCurrencyCode} <> ${table.quoteCurrencyCode})`,
+    ),
+    // One watch entry per (owner, security) and per (owner, currency pair)
+    // -- partial unique indexes scoped by `kind`, so a security row and a
+    // currency-pair row never collide with each other's NULL columns.
+    uniqueIndex("watchlist_entries_user_security_unique")
+      .on(table.userId, table.securityId)
+      .where(sql`${table.kind} = 'security'`),
+    uniqueIndex("watchlist_entries_user_pair_unique")
+      .on(table.userId, table.baseCurrencyCode, table.quoteCurrencyCode)
+      .where(sql`${table.kind} = 'currency_pair'`),
+    index("watchlist_entries_user_order_idx").on(
+      table.userId,
+      table.displayOrder,
+    ),
+  ],
+);

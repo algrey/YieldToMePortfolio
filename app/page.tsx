@@ -18,8 +18,16 @@ export default async function Home({ searchParams }: HomePageProps) {
   // non-overview tab back to `/?section=<section>` instead of a
   // portfolio-scoped route.
   const requestedSection = resolveSectionSearchParam(section);
+  // WLT-001: the watchlist is the one non-overview section this route can
+  // legitimately render OWNED content for in place (see
+  // `ownedSectionRedirectPath` below -- every other non-overview section
+  // with an active portfolio redirects away before rendering). Without
+  // `includeQuotes` here, a no-portfolio owner with real watch entries would
+  // see a FALSE "No watch entries yet" empty state -- the exact class of bug
+  // UI-024's review caught for overview/holdings/quotes previously.
   const workspace = await loadAuthenticatedWorkspace(undefined, {
     includeOverview: true,
+    includeQuotes: requestedSection === "quotes",
   });
   // UI-024 review (BLOCKING fix): this loader only ever requests overview
   // data, so once an active portfolio exists, rendering a non-overview

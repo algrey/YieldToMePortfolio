@@ -113,6 +113,12 @@ const OWNED_TABLES = [
   "tax_lots",
   "lot_allocations",
   "holding_projections",
+  // WLT-001: owner-scoped watchlist -- interest only, never a position.
+  // Keyed directly by `user_id` like `sharesight_delayed_prices`/
+  // `intraday_price_points` above, not a "user-scoped-observation" special
+  // case: every row here is the owner's own watch entry, never a shared/
+  // deployment-scope fact.
+  "watchlist_entries",
 ];
 const classifications: Record<string, ExportTableClassification> =
   Object.fromEntries(
@@ -351,6 +357,11 @@ const PURGE_TABLES_IN_FK_ORDER = [
   // last), same FK-safety as `sharesight_delayed_prices` immediately above.
   // No other table references it.
   "intraday_price_points",
+  // WLT-001: watchlist entries reference only users/securities/currencies
+  // (all shared reference data or deleted last), same FK-safety as
+  // `intraday_price_points` immediately above. No other table references
+  // it.
+  "watchlist_entries",
   "transactions",
   "portfolio_securities",
   "portfolio_settings",

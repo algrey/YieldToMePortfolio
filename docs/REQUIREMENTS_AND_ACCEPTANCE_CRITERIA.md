@@ -36,12 +36,17 @@ Acceptance:
 
 - Direct URLs are stable and refreshable.
 - Active state is programmatically and visually identifiable.
-- News embeds the owner's attributed news site (per-holding: UI-023B, owner
-  directive 2026-08-22; primary tab: UI-025, owner ruling 2026-08-22 — "A
-  new user should see the news in the news tab. There are plenty of avenues
-  for a new user to create a portfolio."), in both cases with visible source
-  attribution, `referrerpolicy="no-referrer"`, and no portfolio/security
-  identifiers in the embed URL. Supersedes the original "News clearly
+- News embeds the owner's news site (per-holding: UI-023B, owner directive
+  2026-08-22; primary tab: UI-025, owner ruling 2026-08-22 — "A new user
+  should see the news in the news tab. There are plenty of avenues for a
+  new user to create a portfolio."), in both cases with
+  `referrerpolicy="no-referrer"` and no portfolio/security identifiers in
+  the embed URL. Visible source attribution differs by tab (UI-028, owner
+  ruling 2026-08-22, product choice): the per-holding embed keeps its
+  attribution line beneath the frame, unchanged; the PRIMARY tab's embed is
+  intentionally chrome-less (no attribution paragraph, full-viewport frame)
+  — attribution remains reachable via the per-holding tab or the
+  greeninvestments.au site itself. Supersedes the original "News clearly
   indicates unavailable status until implemented" criterion, kept here as
   the record of that earlier decision.
 

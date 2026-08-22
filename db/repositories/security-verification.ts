@@ -21,6 +21,10 @@ export type SecurityVerificationLinkResult =
     }
   | { ok: false; reason: "conflict" | "currency_mismatch" };
 
+export type SecurityPublishOnlyResult =
+  | { ok: true; securityId: string; created: boolean }
+  | { ok: false; reason: "conflict" | "currency_mismatch" };
+
 export type SecurityVerificationRepository = {
   /**
    * Publishes the canonical `securities` row (plus `security_identifiers`
@@ -37,6 +41,22 @@ export type SecurityVerificationRepository = {
     identity: VerifiedSecurityIdentity,
     candidate: SecurityVerificationCandidateInput,
   ): Promise<SecurityVerificationLinkResult>;
+  /**
+   * WLT-001: the same creation-only shared-master resolution `publishAndLink`
+   * performs (dedupe against an existing provider mapping, then an
+   * owner-attested ticker, then a fresh publish -- never a second `securities`
+   * row for an identity that already resolves), WITHOUT touching
+   * `portfolio_securities` at all. Adding a security to the watchlist records
+   * INTEREST only, never a position, so there is no portfolio candidate row
+   * to link here -- this method resolves/publishes the canonical
+   * `securities`/`security_provider_mappings` rows and returns the resolved
+   * `securityId` directly.
+   */
+  publishOnly(
+    userId: string,
+    providerId: string,
+    identity: VerifiedSecurityIdentity,
+  ): Promise<SecurityPublishOnlyResult>;
 };
 
 export function createOwnedSecurityVerificationRepository(
@@ -656,6 +676,176 @@ export function createOwnedSecurityVerificationRepository(
         knownRowId: existingRow?.id,
         insertedId: existingRow ? undefined : linkId,
       });
+    },
+
+    // WLT-001: identical creation-only resolution to `publishAndLink` above
+    // (dedupe by provider mapping, then owner-attested ticker, then a fresh
+    // publish), but never writes/links a `portfolio_securities` row -- see
+    // the interface doc comment. `userId` is retained for symmetry with
+    // `publishAndLink` and future audit attribution, though this method's
+    // shared-master writes are not owner-scoped by column (the same
+    // creation-only discipline every other publish path in this file
+    // follows).
+    async publishOnly(userId, providerId, identity) {
+      const providerExchange = identity.providerExchange ?? "";
+      const providerSymbol = identity.providerSymbol;
+
+      const existing = await existingMapping(
+        providerId,
+        providerExchange,
+        providerSymbol,
+      );
+      if (existing) {
+        const currency = await securityCurrency(existing.security_id);
+        if (currency !== identity.currencyCode) {
+          return { ok: false, reason: "currency_mismatch" };
+        }
+        return { ok: true, securityId: existing.security_id, created: false };
+      }
+
+      const attested = await existingAttestedIdentifier(providerSymbol);
+      if (attested) {
+        const currency = await securityCurrency(attested.security_id);
+        if (currency !== identity.currencyCode) {
+          return { ok: false, reason: "currency_mismatch" };
+        }
+        const attachMappingId = randomUUID();
+        const attachNowIso = now();
+        const attachToday = attachNowIso.slice(0, 10);
+        try {
+          await client.batch([
+            {
+              sql: `INSERT INTO security_provider_mappings (
+                      id, security_id, provider_id, provider_exchange, provider_symbol,
+                      valid_from, valid_to, status, verified_by_user_id, verified_at
+                    )
+                    SELECT ?, ?, ?, ?, ?, ?, NULL, 'verified', ?, ?
+                    WHERE NOT EXISTS (
+                      SELECT 1 FROM security_provider_mappings
+                      WHERE provider_id = ? AND provider_exchange = ? AND provider_symbol = ?
+                    )`,
+              params: [
+                attachMappingId,
+                attested.security_id,
+                providerId,
+                providerExchange,
+                providerSymbol,
+                attachToday,
+                userId,
+                attachNowIso,
+                providerId,
+                providerExchange,
+                providerSymbol,
+              ],
+            },
+          ]);
+        } catch {
+          // Fall through to the unconditional re-read below.
+        }
+        const attachWinner = await existingMapping(
+          providerId,
+          providerExchange,
+          providerSymbol,
+        );
+        if (!attachWinner) return { ok: false, reason: "conflict" };
+        return {
+          ok: true,
+          securityId: attachWinner.security_id,
+          created: false,
+        };
+      }
+
+      const securityId = randomUUID();
+      const identifierId = randomUUID();
+      const mappingId = randomUUID();
+      const nowIso = now();
+      const today = nowIso.slice(0, 10);
+      const statements: SqlStatement[] = [
+        {
+          sql: `INSERT INTO securities (
+                  id, asset_type, exchange_id, primary_currency_code, canonical_name,
+                  isin, status, first_trade_date, last_trade_date, created_at, updated_at
+                )
+                SELECT ?, ?, NULL, ?, ?, NULL, 'active', NULL, NULL, ?, ?
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM security_provider_mappings
+                  WHERE provider_id = ? AND provider_exchange = ? AND provider_symbol = ?
+                )`,
+          params: [
+            securityId,
+            identity.assetType,
+            identity.currencyCode,
+            identity.name,
+            nowIso,
+            nowIso,
+            providerId,
+            providerExchange,
+            providerSymbol,
+          ],
+        },
+        {
+          sql: `INSERT INTO security_identifiers (
+                  id, security_id, scheme, value, exchange_id, valid_from, valid_to, source
+                )
+                SELECT ?, ?, 'ticker', ?, NULL, ?, NULL, ?
+                WHERE EXISTS (SELECT 1 FROM securities WHERE id = ?)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM security_provider_mappings
+                    WHERE provider_id = ? AND provider_exchange = ? AND provider_symbol = ?
+                  )`,
+          params: [
+            identifierId,
+            securityId,
+            providerSymbol,
+            today,
+            providerId,
+            securityId,
+            providerId,
+            providerExchange,
+            providerSymbol,
+          ],
+        },
+        {
+          sql: `INSERT INTO security_provider_mappings (
+                  id, security_id, provider_id, provider_exchange, provider_symbol,
+                  valid_from, valid_to, status, verified_by_user_id, verified_at
+                )
+                SELECT ?, ?, ?, ?, ?, ?, NULL, 'verified', ?, ?
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM security_provider_mappings
+                  WHERE provider_id = ? AND provider_exchange = ? AND provider_symbol = ?
+                )`,
+          params: [
+            mappingId,
+            securityId,
+            providerId,
+            providerExchange,
+            providerSymbol,
+            today,
+            userId,
+            nowIso,
+            providerId,
+            providerExchange,
+            providerSymbol,
+          ],
+        },
+      ];
+      try {
+        await client.batch(statements);
+      } catch {
+        // Fall through to the unconditional re-read below.
+      }
+      const winner = await existingMapping(
+        providerId,
+        providerExchange,
+        providerSymbol,
+      );
+      if (!winner) return { ok: false, reason: "conflict" };
+      return {
+        ok: true,
+        securityId: winner.security_id,
+        created: winner.security_id === securityId,
+      };
     },
   };
 }

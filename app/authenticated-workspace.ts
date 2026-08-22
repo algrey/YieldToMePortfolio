@@ -9,7 +9,7 @@ import { createOwnedPortfolioRepository } from "../db/repositories/owned-portfol
 import { createOwnedUserSettingsRepository } from "../db/repositories/owned-portfolios";
 import { createOwnedWorkspace } from "./owned-workspace";
 import type { OwnedWorkspace } from "./components/portfolio-shell";
-import { loadOwnedQuotes } from "./owned-quotes";
+import { loadOwnedWatchlist } from "./owned-watchlist";
 import { loadOwnedHoldings } from "./owned-holdings";
 import { createHistoricalSnapshotRepository } from "../db/repositories/snapshots.ts";
 import {
@@ -111,13 +111,49 @@ export async function loadAuthenticatedWorkspace(
           nowInstant,
         }
       : { ...workspace, nowInstant };
+    // WLT-001: the watchlist is USER-scoped, not portfolio-scoped (owner
+    // ruling, 2026-08-22) -- it must load whenever a real userId is known
+    // (this point, `result.ok`), regardless of whether an active portfolio
+    // exists. This branch therefore runs BEFORE the `activePortfolio ===
+    // null` early return below, unlike the holdings/overview branches,
+    // which genuinely need one.
+    if (options.includeQuotes) {
+      try {
+        const quotes = await loadOwnedWatchlist(
+          client,
+          result.context.user.id,
+          {
+            now: new Date(nowInstant),
+            priceSourcePreference: configuredWorkspace.priceSourcePreference,
+          },
+        );
+        const unavailable = quotes.filter(
+          (quote) => quote.state === "unavailable",
+        ).length;
+        return {
+          ...configuredWorkspace,
+          quotes,
+          quoteViewState:
+            quotes.length === 0
+              ? "empty"
+              : unavailable === quotes.length
+                ? "provider-error"
+                : unavailable > 0
+                  ? "partial"
+                  : "populated",
+        };
+      } catch (error) {
+        console.error("loadOwnedWatchlist failed", error);
+        return {
+          ...configuredWorkspace,
+          quotes: [],
+          quoteViewState: "provider-error",
+        };
+      }
+    }
     if (configuredWorkspace.activePortfolio === null)
       return configuredWorkspace;
-    if (
-      !options.includeQuotes &&
-      !options.includeOverview &&
-      !options.includeHoldings
-    )
+    if (!options.includeOverview && !options.includeHoldings)
       return configuredWorkspace;
     if (options.includeHoldings) {
       try {
@@ -190,26 +226,7 @@ export async function loadAuthenticatedWorkspace(
         };
       }
     }
-    const quotes = await loadOwnedQuotes(
-      client,
-      result.context.user.id,
-      configuredWorkspace.activePortfolio.id,
-    );
-    const unavailable = quotes.filter(
-      (quote) => quote.state === "unavailable",
-    ).length;
-    return {
-      ...configuredWorkspace,
-      quotes,
-      quoteViewState:
-        quotes.length === 0
-          ? "empty"
-          : unavailable === quotes.length
-            ? "provider-error"
-            : unavailable > 0
-              ? "partial"
-              : "populated",
-    };
+    return configuredWorkspace;
   } catch (error) {
     // UI-023B follow-up: same rationale as getAuthenticatedSqlContext's
     // catch -- keep the user-facing message generic, but never swallow the

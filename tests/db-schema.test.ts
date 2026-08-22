@@ -142,6 +142,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "user_identities",
     "user_settings",
     "users",
+    "watchlist_entries",
   ]);
   assert.deepEqual(indexNames(database, "audit_events"), [
     "audit_events_owner_time_idx",

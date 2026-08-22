@@ -7,12 +7,6 @@ import {
   requestMarketDataRefreshForContext,
   saveManualOverrideForContext,
 } from "../app/market-data-actions.ts";
-import { loadOwnedQuotes } from "../app/owned-quotes.ts";
-import {
-  quoteDisplayState,
-  quoteExplanation,
-  type QuoteRow,
-} from "../app/quote-contract.ts";
 import { POST as refreshPost } from "../app/api/market-data/refresh/route.ts";
 import {
   DELETE as overrideDelete,
@@ -67,74 +61,15 @@ async function database(): Promise<DatabaseSync> {
   return db;
 }
 
-function quote(state: QuoteRow["state"]): QuoteRow {
-  return {
-    targetKey: "security-a",
-    portfolioSecurityId: "holding-a",
-    securityId: "security-a",
-    symbol: "AAA",
-    name: "Security A",
-    currencyCode: "AUD",
-    price: "AUD 42.10",
-    change: "+0.20",
-    percent: "+0.48%",
-    tone: "positive",
-    marketDate: "2026-08-03",
-    state,
-    provenance: {
-      source: "provider",
-      providerId: "yahoo-compatible",
-      observationAt: "2026-08-03T05:00:00Z",
-      delayedMinutes: 20,
-      scope: "deployment",
-      quality: "observed",
-      fallbackReason: "Best validated observation selected.",
-    },
-    sort: { ticker: "AAA", price: "4210", change: "20" },
-  };
-}
-
-test("quote state is row-owned and explanations contain full provenance", () => {
-  assert.equal(quoteDisplayState("current", true), "current");
-  assert.equal(quoteDisplayState("stale", true), "stale");
-  assert.equal(quoteDisplayState("current", false), "unavailable");
-  const explanation = quoteExplanation(quote("fallback"));
-  assert.match(explanation, /provider yahoo-compatible/i);
-  assert.match(explanation, /2026-08-03T05:00:00Z/);
-  assert.match(explanation, /20 minute delay/);
-  assert.match(explanation, /scope: deployment/);
-  assert.match(explanation, /quality: observed/);
-  assert.match(explanation, /fallback: Best validated observation selected/);
-});
-
-test("owner quote loader returns selected data and stable per-target gaps", async () => {
-  const db = await database();
-  const rows = await loadOwnedQuotes(
-    createSqliteSqlClient(db),
-    "user-a",
-    "portfolio-a",
-    new Date("2026-08-03T08:00:00Z"),
-  );
-  assert.equal(rows.length, 2);
-  assert.equal(
-    rows.find((row) => row.securityId === "security-a")?.price,
-    "AUD 42.10",
-  );
-  assert.equal(
-    rows.find((row) => row.securityId === "security-a")?.state,
-    "current",
-  );
-  assert.equal(
-    rows.find((row) => row.securityId === "security-b")?.state,
-    "unavailable",
-  );
-  assert.equal(
-    [...rows].sort((left, right) => right.symbol.localeCompare(left.symbol))[0]
-      ?.state,
-    "unavailable",
-  );
-  db.close();
-});
+// WLT-001 (2026-08-22): the owner-scoped quote loader this file used to
+// pin (`loadOwnedQuotes`/`app/owned-quotes.ts`) and the display-state/
+// explanation helpers it exercised (`quoteDisplayState`/`quoteExplanation`/
+// `QuoteRow`) are retired from OWNED mode -- the Quotes tab is now the
+// user-scoped watchlist (`app/owned-watchlist.ts`, `tests/wlt-001.test.ts`).
+// `app/quote-contract.ts` itself is UNCHANGED and still backs the
+// preview/prototype-mode QuotesScreen, which this task leaves untouched.
+// The remaining tests below (CSRF, refresh bounds, corrections) exercise
+// `app/market-data-actions.ts`, which WLT-001 does not touch.
 
 test("market-data mutation endpoints reject cross-site browser requests", async () => {
   for (const handler of [refreshPost, overridePost, overrideDelete]) {

@@ -978,7 +978,7 @@ test("UI-017 (B2 RULING): a projected row is NEVER linked, even when it has a pe
   // ?fy=2027 (current+1), so this specifically exercises the "the link
   // would have worked" case, not just an out-of-range one.
   const fy27RowMatch = html.match(
-    /<button type="button" class="income-row-trigger">FY27<\/button>([\s\S]{0,80})<\/th>/,
+    /<button type="button" class="income-row-trigger">FY27 \(projected\)<\/button>([\s\S]{0,80})<\/th>/,
   );
   assert.ok(fy27RowMatch, "expected to find the FY27 projected row");
   assert.doesNotMatch(fy27RowMatch![1], /income-fy-year-link/);
@@ -1007,7 +1007,7 @@ test("UI-017 (B2 RULING): a further-out projected row (current+2, which the pars
     },
   });
   const fy28RowMatch = html.match(
-    /<button type="button" class="income-row-trigger">FY28<\/button>([\s\S]{0,80})<\/th>/,
+    /<button type="button" class="income-row-trigger">FY28 \(projected\)<\/button>([\s\S]{0,80})<\/th>/,
   );
   assert.ok(fy28RowMatch, "expected to find the FY28 projected row");
   assert.doesNotMatch(fy28RowMatch![1], /income-fy-year-link/);
@@ -1017,7 +1017,7 @@ test("UI-017 (B2 RULING): a further-out projected row (current+2, which the pars
 test("UI-017: a projected row with NO resolvable ending year renders no dividends link either (never a broken/guessed href)", () => {
   const html = renderMultiYear();
   const yearTwoRowMatch = html.match(
-    /<button type="button" class="income-row-trigger">Year 2<\/button>([\s\S]{0,60})<\/th>/,
+    /<button type="button" class="income-row-trigger">Year 2 \(projected\)<\/button>([\s\S]{0,60})<\/th>/,
   );
   assert.ok(yearTwoRowMatch, "expected to find the 'Year 2' row");
   assert.doesNotMatch(yearTwoRowMatch![1], /income-fy-year-link/);

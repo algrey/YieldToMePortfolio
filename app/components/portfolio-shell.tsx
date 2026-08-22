@@ -16,6 +16,7 @@ import {
   quoteExplanation,
   type QuoteRow,
 } from "../quote-contract";
+import { watchlistExplanation, type WatchlistRow } from "../watchlist-contract";
 import type { PortfolioInspection } from "../../db/repositories/portfolio-inspection";
 import { BrandMark } from "./brand-mark";
 import { AccountLifecycleRecovery } from "./account-lifecycle-recovery";
@@ -40,6 +41,7 @@ import {
 import {
   ownedHoldingAmount,
   ownedHoldingDecimal,
+  ownedHoldingDecimalNeverFakeZero,
   ownedHoldingPercent,
   ownedHoldingTrimmed,
 } from "../owned-holding-format";
@@ -178,7 +180,11 @@ export type OwnedWorkspace = {
     status: string;
     version: number;
   }>;
-  quotes?: QuoteRow[];
+  // WLT-001: the owner's watchlist (USER-scoped -- populated whenever a real
+  // userId is known, regardless of `activePortfolio`; see
+  // `app/authenticated-workspace.ts`). Deliberately `WatchlistRow[]`, not the
+  // portfolio-scoped `QuoteRow[]` the preview-mode `QuotesScreen` still uses.
+  quotes?: WatchlistRow[];
   quoteViewState?: ViewState;
   overview?: OwnedOverviewData;
   holdings?: OwnedHoldingRow[];
@@ -636,15 +642,34 @@ function OwnedHoldingsScreen({
                 <span className="row-secondary numeric">
                   {ownedHoldingPercent(holding.dailyPercent, true)}
                 </span>
-                <span className="row-secondary numeric">
+                <ToneValue
+                  tone={holding.gainTone}
+                  className="row-primary numeric"
+                >
                   {ownedHoldingPercent(holding.unrealisedPercent, true)}
-                </span>
+                </ToneValue>
                 <span className="row-tertiary">
                   Avg{" "}
                   {holding.averageNativeCost === null
                     ? "Basis unavailable"
-                    : `${holding.currencyCode} ${ownedHoldingTrimmed(holding.averageNativeCost)}`}{" "}
-                  × {ownedHoldingDecimal(holding.quantity, 4)}
+                    : /* UI-028 review (B4, BLOCKING): a genuinely non-zero
+                         average cost must never render as "0.00" just
+                         because 2dp rounds it away -- falls back to the
+                         trimmed exact form for that value only (see
+                         `ownedHoldingDecimalNeverFakeZero`'s doc comment). */
+                      `${holding.currencyCode} ${ownedHoldingDecimalNeverFakeZero(holding.averageNativeCost, 2)}`}{" "}
+                  {/* UI-028 review (B4, BLOCKING): whole-unless-fractional
+                      quantity display, delivered at this ONE call site as
+                      TASKS.md's planned UI-027 ("Share quantities display
+                      as whole numbers unless genuinely fractional") will
+                      later centralise -- `ownedHoldingTrimmed` already
+                      guarantees exactly that shape: an INTEGRAL quantity's
+                      trailing ".000..." is stripped entirely (no decimal
+                      point at all), while a genuinely fractional quantity
+                      (e.g. a DRP fractional share) keeps its real trimmed
+                      digits instead of being rounded away to a misleading
+                      whole number. */}
+                  × {ownedHoldingTrimmed(holding.quantity)}
                 </span>
                 <span className="desktop-only holding-name">
                   {holding.name} · {holding.exchange} · {holding.currencyCode}
@@ -715,7 +740,9 @@ function OwnedNewsScreen() {
       className="owned-news-embed holding-news-embed"
       aria-labelledby="owned-news-title"
     >
-      <h1 id="owned-news-title">News</h1>
+      <h1 id="owned-news-title" className="sr-only">
+        News
+      </h1>
       <iframe
         className="holding-news-frame"
         src={PRIMARY_NEWS_EMBED_URL}
@@ -724,17 +751,623 @@ function OwnedNewsScreen() {
         referrerPolicy="no-referrer"
         sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
       />
-      <p className="holding-news-source">
-        Source:{" "}
-        <a
-          href="https://greeninvestments.au/"
-          target="_blank"
-          rel="noreferrer noopener"
+    </section>
+  );
+}
+
+type WatchlistSearchCandidate = {
+  symbol: string;
+  exchangeId: string | null;
+  currencyCode: string | null;
+  name: string;
+  assetType: "equity" | "etf" | "fund";
+};
+
+// WLT-001 (owner directive, 2026-08-22): "The Quotes tab is a watch list,
+// for stocks and currencies ... it does not record a position, just an
+// interest." Renders in EVERY owned state that has a real userId (both
+// `OwnedWorkspaceScreen` call sites below, mirroring UI-025's `OwnedNewsScreen`
+// precedent exactly) -- the watchlist is USER-scoped, not portfolio-scoped,
+// so it works before any portfolio exists. Column spec (owner, verbatim):
+// three columns, two lines per row -- (1) Ticker over company name; (2) Last
+// price over the time of last price (or date if not today); (3) Day change
+// in price over change in percent. Styling reuses the SAME `.quotes-grid`/
+// `.quote-row` two-line dense-row idiom the old portfolio-scoped Quotes
+// surface used (see `globals.css`) -- no new row CSS. Each row is a
+// non-button `role="group"` (not the old single unlabelled `<button>`) so it
+// can host real Move/Remove controls without nesting interactive elements
+// inside a `<button>`.
+function OwnedWatchlistScreen({
+  rows,
+  viewState,
+  isOnline,
+}: {
+  rows: WatchlistRow[];
+  viewState: ViewState;
+  isOnline: boolean;
+}) {
+  const router = useRouter();
+  // WLT-001 review (B1, BLOCKING): `sortKey` starts `null` -- "no column
+  // sort active", rendering `rows` in the SERVER's stored `display_order`
+  // (the owner's own reorder-persisted order). Column sorting is an
+  // OPT-IN view on top of that; while it is active, Move up/down are
+  // disabled (a column-sorted view's adjacency is not the stored order, so
+  // a "move" there would silently reorder relative to the WRONG list).
+  const [sortKey, setSortKey] = useState<QuoteSort | null>(null);
+  const [direction, setDirection] = useState<Direction>("ascending");
+  const [actionPending, setActionPending] = useState(false);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [addMode, setAddMode] = useState<"security" | "currency" | null>(null);
+  const addSecurityButtonRef = useRef<HTMLButtonElement>(null);
+  const addCurrencyButtonRef = useRef<HTMLButtonElement>(null);
+  const addOpenerRef = useRef<HTMLButtonElement | null>(null);
+  const securityInputRef = useRef<HTMLInputElement>(null);
+  const currencyInputRef = useRef<HTMLInputElement>(null);
+  const [searchText, setSearchText] = useState("");
+  const [searchPending, setSearchPending] = useState(false);
+  const [searchResults, setSearchResults] = useState<
+    WatchlistSearchCandidate[]
+  >([]);
+  const [baseCurrencyCode, setBaseCurrencyCode] = useState("");
+  const [quoteCurrencyCode, setQuoteCurrencyCode] = useState("");
+
+  // Mirrors the correction dialog's UI-007 opener-restore pattern: focus
+  // moves into the panel on open, and back to whichever "Add" button opened
+  // it on close.
+  useEffect(() => {
+    if (addMode === "security") securityInputRef.current?.focus();
+    if (addMode === "currency") currencyInputRef.current?.focus();
+    if (!addMode && addOpenerRef.current) {
+      addOpenerRef.current.focus();
+      addOpenerRef.current = null;
+    }
+  }, [addMode]);
+
+  const mutationsDisabled = actionPending || !isOnline;
+  const customOrderActive = sortKey === null;
+  const moveDisabledTitle = customOrderActive
+    ? undefined
+    : "Clear the column sort to reorder the watchlist.";
+
+  // B1: `rows` (the prop) IS the stored order -- `app/owned-watchlist.ts`
+  // already returns it sorted by `display_order`. `sortedRows` is a
+  // DISPLAY-ONLY view; `storedIndexByEntryId` below is derived from `rows`
+  // directly so Move up/down's boundary checks and `moveEntry` itself never
+  // read position from `sortedRows`.
+  const sortedRows = useMemo(() => {
+    if (sortKey === null) return rows;
+    if (sortKey === "ticker") {
+      return [...rows].sort((left, right) => {
+        const compared = left.symbol.localeCompare(right.symbol);
+        return direction === "ascending" ? compared : -compared;
+      });
+    }
+    return sortByExactKey(rows, (row) => row.sort[sortKey], direction);
+  }, [direction, rows, sortKey]);
+
+  const storedIndexByEntryId = useMemo(() => {
+    const map = new Map<string, number>();
+    rows.forEach((row, index) => map.set(row.entryId, index));
+    return map;
+  }, [rows]);
+
+  function handleSort(nextKey: QuoteSort) {
+    if (nextKey === sortKey) {
+      setDirection((current) =>
+        current === "ascending" ? "descending" : "ascending",
+      );
+      return;
+    }
+    setSortKey(nextKey);
+    setDirection(nextKey === "ticker" ? "ascending" : "descending");
+  }
+
+  async function runSearch(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setActionMessage(null);
+    const text = searchText.trim();
+    if (!text) return;
+    setSearchPending(true);
+    // UI-008 convention (WLT-001 review B3): every fetch in this screen
+    // races an AbortController-driven timeout so pending state always
+    // resolves and the owner gets an explicit message instead of a silent
+    // hang -- see DIALOG_FETCH_TIMEOUT_MS's header comment.
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      DIALOG_FETCH_TIMEOUT_MS,
+    );
+    try {
+      const query = new URLSearchParams({ text });
+      const response = await fetch(`/api/watchlist/search?${query}`, {
+        signal: controller.signal,
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        candidates?: WatchlistSearchCandidate[];
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(result.message ?? "Search failed.");
+      setSearchResults(result.candidates ?? []);
+      if (!(result.candidates ?? []).length) {
+        setActionMessage("No matches found.");
+      }
+    } catch (error) {
+      setSearchResults([]);
+      setActionMessage(
+        isAbortError(error)
+          ? DIALOG_TIMEOUT_MESSAGE
+          : error instanceof Error
+            ? error.message
+            : "Search failed.",
+      );
+    } finally {
+      clearTimeout(timeout);
+      setSearchPending(false);
+    }
+  }
+
+  async function addSecurity(candidate: WatchlistSearchCandidate) {
+    setActionMessage(null);
+    setActionPending(true);
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      DIALOG_FETCH_TIMEOUT_MS,
+    );
+    try {
+      const response = await fetch("/api/watchlist/securities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          symbol: candidate.symbol,
+          exchangeAlias: candidate.exchangeId,
+          currencyCode: candidate.currencyCode,
+        }),
+        signal: controller.signal,
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(result.message ?? "Could not add to the watchlist.");
+      setAddMode(null);
+      setSearchResults([]);
+      setSearchText("");
+      router.refresh();
+    } catch (error) {
+      setActionMessage(
+        isAbortError(error)
+          ? DIALOG_TIMEOUT_MESSAGE
+          : error instanceof Error
+            ? error.message
+            : "Could not add to the watchlist.",
+      );
+    } finally {
+      clearTimeout(timeout);
+      setActionPending(false);
+    }
+  }
+
+  async function addCurrencyPair(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setActionMessage(null);
+    const base = baseCurrencyCode.trim().toUpperCase();
+    const quote = quoteCurrencyCode.trim().toUpperCase();
+    if (!/^[A-Z]{3}$/.test(base) || !/^[A-Z]{3}$/.test(quote)) {
+      setActionMessage("Enter two valid 3-letter currency codes.");
+      return;
+    }
+    setActionPending(true);
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      DIALOG_FETCH_TIMEOUT_MS,
+    );
+    try {
+      const response = await fetch("/api/watchlist/currency-pairs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          baseCurrencyCode: base,
+          quoteCurrencyCode: quote,
+        }),
+        signal: controller.signal,
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(result.message ?? "Could not add the currency pair.");
+      setAddMode(null);
+      setBaseCurrencyCode("");
+      setQuoteCurrencyCode("");
+      router.refresh();
+    } catch (error) {
+      setActionMessage(
+        isAbortError(error)
+          ? DIALOG_TIMEOUT_MESSAGE
+          : error instanceof Error
+            ? error.message
+            : "Could not add the currency pair.",
+      );
+    } finally {
+      clearTimeout(timeout);
+      setActionPending(false);
+    }
+  }
+
+  async function removeEntry(row: WatchlistRow) {
+    setActionMessage(null);
+    setActionPending(true);
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      DIALOG_FETCH_TIMEOUT_MS,
+    );
+    try {
+      const response = await fetch("/api/watchlist/entries", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: row.entryId,
+          expectedVersion: row.version,
+        }),
+        signal: controller.signal,
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(result.message ?? "Could not remove this entry.");
+      router.refresh();
+    } catch (error) {
+      setActionMessage(
+        isAbortError(error)
+          ? DIALOG_TIMEOUT_MESSAGE
+          : error instanceof Error
+            ? error.message
+            : "Could not remove this entry.",
+      );
+    } finally {
+      clearTimeout(timeout);
+      setActionPending(false);
+    }
+  }
+
+  // B1: reasons entirely about `rows` (the STORED order), never
+  // `sortedRows` -- `row`'s own position is looked up in `rows` directly,
+  // and the submitted `orderedIds` is `rows` with that one entry moved,
+  // so a persisted reorder can never silently apply against a
+  // column-sorted view instead of the real stored order.
+  async function moveEntry(row: WatchlistRow, offset: -1 | 1) {
+    const storedIndex = storedIndexByEntryId.get(row.entryId);
+    if (storedIndex === undefined) return;
+    const target = storedIndex + offset;
+    if (target < 0 || target >= rows.length) return;
+    const reordered = [...rows];
+    const [moved] = reordered.splice(storedIndex, 1);
+    reordered.splice(target, 0, moved!);
+    setActionMessage(null);
+    setActionPending(true);
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      DIALOG_FETCH_TIMEOUT_MS,
+    );
+    try {
+      const response = await fetch("/api/watchlist/reorder", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          orderedIds: reordered.map((entry) => entry.entryId),
+        }),
+        signal: controller.signal,
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok)
+        throw new Error(result.message ?? "Could not reorder the watchlist.");
+      router.refresh();
+    } catch (error) {
+      setActionMessage(
+        isAbortError(error)
+          ? DIALOG_TIMEOUT_MESSAGE
+          : error instanceof Error
+            ? error.message
+            : "Could not reorder the watchlist.",
+      );
+    } finally {
+      clearTimeout(timeout);
+      setActionPending(false);
+    }
+  }
+
+  return (
+    <section className="quotes-screen" aria-label="Watchlist">
+      <div className="quote-actions" aria-label="Watchlist actions">
+        <p className="data-explanation">
+          Watchlist entries record interest only -- adding a stock or currency
+          pair here never creates a holding or position. Prices come from
+          Yahoo-compatible market data; a Sharesight-delayed price source only
+          ever covers securities actually held in Sharesight, so a watch-only
+          entry prices from Yahoo when available even if Sharesight is the
+          preferred source elsewhere.
+        </p>
+        <div className="quote-action-buttons">
+          <button
+            ref={addSecurityButtonRef}
+            type="button"
+            onClick={() => {
+              addOpenerRef.current = addSecurityButtonRef.current;
+              setAddMode("security");
+              setActionMessage(null);
+            }}
+            disabled={mutationsDisabled}
+          >
+            Add a stock
+          </button>
+          <button
+            ref={addCurrencyButtonRef}
+            type="button"
+            onClick={() => {
+              addOpenerRef.current = addCurrencyButtonRef.current;
+              setAddMode("currency");
+              setActionMessage(null);
+            }}
+            disabled={mutationsDisabled}
+          >
+            Add a currency pair
+          </button>
+        </div>
+        {actionMessage ? (
+          <p className="quote-action-status" role="alert">
+            {actionMessage}
+          </p>
+        ) : null}
+      </div>
+      {addMode === "security" ? (
+        <section
+          className="quote-history"
+          aria-labelledby="watchlist-add-security-title"
         >
-          greeninvestments.au
-        </a>{" "}
-        — use this link if the embedded view does not load.
-      </p>
+          <div className="quote-history-heading">
+            <h2 id="watchlist-add-security-title">Add a stock</h2>
+            <button
+              type="button"
+              onClick={() => setAddMode(null)}
+              aria-label="Close add a stock"
+            >
+              Close
+            </button>
+          </div>
+          <form onSubmit={(event) => void runSearch(event)}>
+            <label>
+              <span>Search by symbol or name</span>
+              <input
+                ref={securityInputRef}
+                type="text"
+                value={searchText}
+                onChange={(event) => setSearchText(event.target.value)}
+                required
+              />
+            </label>
+            <button type="submit" disabled={searchPending}>
+              {searchPending ? "Searching…" : "Search"}
+            </button>
+          </form>
+          {searchPending ? <p role="status">Searching…</p> : null}
+          {!searchPending && searchResults.length > 0 ? (
+            <ul>
+              {searchResults.map((candidate) => (
+                <li key={`${candidate.symbol}-${candidate.exchangeId ?? ""}`}>
+                  <span>
+                    <strong>{candidate.symbol}</strong>
+                    <span>
+                      {candidate.name}
+                      {candidate.exchangeId ? ` · ${candidate.exchangeId}` : ""}
+                      {candidate.currencyCode
+                        ? ` · ${candidate.currencyCode}`
+                        : ""}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void addSecurity(candidate)}
+                    disabled={mutationsDisabled}
+                  >
+                    Add
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </section>
+      ) : null}
+      {addMode === "currency" ? (
+        <section
+          className="quote-history"
+          aria-labelledby="watchlist-add-currency-title"
+        >
+          <div className="quote-history-heading">
+            <h2 id="watchlist-add-currency-title">Add a currency pair</h2>
+            <button
+              type="button"
+              onClick={() => setAddMode(null)}
+              aria-label="Close add a currency pair"
+            >
+              Close
+            </button>
+          </div>
+          <form onSubmit={(event) => void addCurrencyPair(event)}>
+            <label>
+              <span>Base currency (e.g. AUD)</span>
+              <input
+                ref={currencyInputRef}
+                type="text"
+                maxLength={3}
+                value={baseCurrencyCode}
+                onChange={(event) =>
+                  setBaseCurrencyCode(event.target.value.toUpperCase())
+                }
+                required
+              />
+            </label>
+            <label>
+              <span>Quote currency (e.g. USD)</span>
+              <input
+                type="text"
+                maxLength={3}
+                value={quoteCurrencyCode}
+                onChange={(event) =>
+                  setQuoteCurrencyCode(event.target.value.toUpperCase())
+                }
+                required
+              />
+            </label>
+            <button type="submit" disabled={mutationsDisabled}>
+              Add
+            </button>
+          </form>
+        </section>
+      ) : null}
+      {rows.length === 0 ? (
+        <EmptyState
+          title="No watch entries yet"
+          message="Add a stock or a currency pair to start watching it -- this never creates a holding."
+        />
+      ) : (
+        <>
+          <div className="quotes-grid table-heading sticky-heading">
+            <SortButton
+              label="Ticker"
+              sortKey="ticker"
+              activeKey={sortKey}
+              direction={direction}
+              onSort={handleSort}
+            />
+            <SortButton
+              label="Last price"
+              sortKey="price"
+              activeKey={sortKey}
+              direction={direction}
+              onSort={handleSort}
+            />
+            <SortButton
+              label="Change"
+              sortKey="change"
+              activeKey={sortKey}
+              direction={direction}
+              onSort={handleSort}
+            />
+          </div>
+          {/* B1: column sorting is an OPT-IN view over the stored order --
+              this control is the only way back to it once a column has
+              been clicked, since Move up/down are disabled for the
+              duration (see moveDisabledTitle below). */}
+          {!customOrderActive ? (
+            <p className="data-explanation">
+              Sorted by column -- reordering is disabled while a column sort is
+              active.{" "}
+              <button
+                type="button"
+                onClick={() => setSortKey(null)}
+                disabled={mutationsDisabled}
+              >
+                Show stored order
+              </button>
+            </p>
+          ) : null}
+          {sortedRows.map((row) => {
+            const unavailable = row.state === "unavailable";
+            const explanationId = `watchlist-explanation-${row.entryId}`;
+            const storedIndex = storedIndexByEntryId.get(row.entryId) ?? 0;
+            return (
+              <div
+                key={row.entryId}
+                className="quote-row quotes-grid"
+                role="group"
+                aria-label={`${row.symbol} watch entry`}
+                aria-describedby={explanationId}
+              >
+                <span className="row-primary symbol">{row.symbol}</span>
+                <span className="row-primary numeric">
+                  {unavailable ? "unavailable" : row.price}
+                </span>
+                <ToneValue
+                  tone={unavailable ? "neutral" : row.tone}
+                  className="row-primary numeric"
+                >
+                  {unavailable ? "—" : row.change}
+                </ToneValue>
+                <span className="row-secondary ellipsis">{row.name}</span>
+                <span className="row-secondary numeric">{row.timeLine}</span>
+                <ToneValue
+                  tone={
+                    unavailable || row.state === "stale" ? "neutral" : row.tone
+                  }
+                  className="row-secondary numeric"
+                >
+                  {unavailable ? "—" : row.percent}
+                </ToneValue>
+                <div className="watchlist-row-actions quote-action-buttons">
+                  <button
+                    type="button"
+                    onClick={() => void moveEntry(row, -1)}
+                    disabled={
+                      mutationsDisabled ||
+                      !customOrderActive ||
+                      storedIndex === 0
+                    }
+                    title={moveDisabledTitle}
+                    aria-label={`Move ${row.symbol} up`}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void moveEntry(row, 1)}
+                    disabled={
+                      mutationsDisabled ||
+                      !customOrderActive ||
+                      storedIndex === rows.length - 1
+                    }
+                    title={moveDisabledTitle}
+                    aria-label={`Move ${row.symbol} down`}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void removeEntry(row)}
+                    disabled={mutationsDisabled}
+                    aria-label={`Remove ${row.symbol} from your watchlist`}
+                  >
+                    Remove
+                  </button>
+                </div>
+                <span id={explanationId} className="visually-hidden">
+                  {watchlistExplanation(row)}
+                </span>
+              </div>
+            );
+          })}
+          {viewState === "provider-error" &&
+          rows.some((row) => row.state !== "unavailable") ? (
+            <p className="data-explanation">
+              Last known observations remain visible. Exact source and
+              observation times are available in the row explanation, not
+              repeated here.
+            </p>
+          ) : null}
+        </>
+      )}
     </section>
   );
 }
@@ -744,6 +1377,7 @@ function OwnedWorkspaceScreen({
   workspace,
   onCreatePortfolio,
   createPortfolioDisabled,
+  isOnline,
 }: {
   activeSection: PortfolioSection;
   workspace: OwnedWorkspace;
@@ -757,6 +1391,10 @@ function OwnedWorkspaceScreen({
   // `PortfolioShell`, not here, so it is passed down rather than
   // re-derived.
   createPortfolioDisabled: boolean;
+  // WLT-001: threaded to `OwnedWatchlistScreen`'s own mutation gate (its
+  // `actionPending` is local, unlike `createPortfolioDisabled` above which
+  // reuses the shell's).
+  isOnline: boolean;
 }) {
   if (workspace.status === "unavailable") {
     return (
@@ -791,12 +1429,27 @@ function OwnedWorkspaceScreen({
 
   if (workspace.status === "empty" || workspace.activePortfolio === null) {
     // UI-025: News is the one tab that has real content with no portfolio
-    // at all -- see OwnedNewsScreen's comment. Every other tab keeps the
-    // UI-021 "No portfolios yet" panel and its create-portfolio action.
+    // at all -- see OwnedNewsScreen's comment. WLT-001 (owner ruling,
+    // 2026-08-22): the watchlist is the SECOND such tab -- it is USER-scoped
+    // (see `app/owned-watchlist.ts`), not portfolio-scoped, so a brand-new
+    // owner with zero portfolios can still build one. Every other tab keeps
+    // the UI-021 "No portfolios yet" panel and its create-portfolio action.
     if (activeSection === "news") {
       return (
         <>
           <OwnedNewsScreen />
+          <AccountLifecycleControls />
+        </>
+      );
+    }
+    if (activeSection === "quotes") {
+      return (
+        <>
+          <OwnedWatchlistScreen
+            rows={workspace.quotes ?? []}
+            viewState={workspace.quoteViewState ?? "empty"}
+            isOnline={isOnline}
+          />
           <AccountLifecycleControls />
         </>
       );
@@ -819,30 +1472,42 @@ function OwnedWorkspaceScreen({
 
   // UI-025: with an active portfolio, News also renders the real embed
   // instead of falling through to the generic per-section empty state below
-  // (the "News is not connected yet" placeholder this replaces).
+  // (the "News is not connected yet" placeholder this replaces). WLT-001:
+  // the watchlist does the same -- it renders in EVERY "ready" state too,
+  // never the generic per-section empty panel below.
   if (activeSection === "news") {
     return <OwnedNewsScreen />;
   }
+  if (activeSection === "quotes") {
+    return (
+      <OwnedWatchlistScreen
+        rows={workspace.quotes ?? []}
+        viewState={workspace.quoteViewState ?? "empty"}
+        isOnline={isOnline}
+      />
+    );
+  }
 
-  // UI-025 review (fold): "news" is excluded from both records' key type --
-  // the early return above means this generic per-section empty branch
-  // never actually receives activeSection === "news", so there is no longer
-  // a real string to write for it. Narrowing the type (rather than keeping
-  // a now-unreachable "News is not connected yet"/"YieldToMe does not
-  // provide investment news" entry only to satisfy Record<PortfolioSection,
-  // string>) means TypeScript itself -- not a comment -- guarantees this
-  // branch can't silently regress into showing stale, false News copy.
-  const titles: Record<Exclude<PortfolioSection, "news">, string> = {
+  // UI-025 review (fold), extended by WLT-001: "news" and "quotes" are both
+  // excluded from these records' key type -- the early returns above mean
+  // this generic per-section empty branch never actually receives either
+  // section, so there is no longer a real string to write for them.
+  // Narrowing the type (rather than keeping now-unreachable entries only to
+  // satisfy Record<PortfolioSection, string>) means TypeScript itself -- not
+  // a comment -- guarantees this branch can't silently regress into showing
+  // stale, false copy for either tab.
+  const titles: Record<Exclude<PortfolioSection, "news" | "quotes">, string> = {
     overview: "No holdings yet",
     holdings: "No holdings yet",
-    quotes: "No quotes yet",
     details: "No valuation history yet",
   };
-  const messages: Record<Exclude<PortfolioSection, "news">, string> = {
+  const messages: Record<
+    Exclude<PortfolioSection, "news" | "quotes">,
+    string
+  > = {
     overview:
       "This portfolio is ready. Holdings and valuations will appear after ledger data is added.",
     holdings: "Import or add a holding when portfolio entry is available.",
-    quotes: "Validated market observations will appear here when available.",
     details: "Historical valuation data will appear here when available.",
   };
 
@@ -1349,7 +2014,13 @@ function SortButton<T extends string>({
 }: {
   label: string;
   sortKey: T;
-  activeKey: T;
+  // WLT-001 review (B1): `activeKey` accepts `T | null` so a caller with an
+  // opt-in "no column sort active, showing stored order" state (the
+  // watchlist's default) can pass `null` and have every column render as
+  // inactive -- `sortKey === activeKey` is never true for a `null`
+  // `activeKey` since `T` is a non-null string union, so this widening is a
+  // no-op for every other existing caller, which always passes a real `T`.
+  activeKey: T | null;
   direction: Direction;
   onSort: (key: T) => void;
 }) {
@@ -3202,11 +3873,11 @@ export function PortfolioShell({
           ) : null}
         </div>
 
-        <span className="prototype-chip desktop-only">
-          {ownedMode
-            ? `${ownedWorkspace.homeCurrencyCode ?? "AUD"} workspace`
-            : reviewBadgeLabel}
-        </span>
+        {!ownedMode ? (
+          <span className="prototype-chip desktop-only">
+            {reviewBadgeLabel}
+          </span>
+        ) : null}
 
         <div className="app-actions">
           <button
@@ -3514,11 +4185,9 @@ export function PortfolioShell({
         </div>
       </header>
 
-      <p className="prototype-chip mobile-only">
-        {ownedMode
-          ? `${ownedWorkspace.homeCurrencyCode ?? "AUD"} workspace`
-          : reviewBadgeLabel}
-      </p>
+      {!ownedMode ? (
+        <p className="prototype-chip mobile-only">{reviewBadgeLabel}</p>
+      ) : null}
 
       <nav className="primary-tabs" aria-label="Portfolio sections">
         {primaryPortfolioSections.map((section) => (
@@ -3636,6 +4305,7 @@ export function PortfolioShell({
                 setPortfolioDialog("create");
               }}
               createPortfolioDisabled={actionPending || !isOnline}
+              isOnline={isOnline}
             />
           )
         ) : null}
@@ -3672,17 +4342,6 @@ export function PortfolioShell({
             portfolioId={portfolio.id}
             readOnly={!ownedMode}
             viewState={viewState}
-          />
-        ) : null}
-        {ownedMode &&
-        activeSection === "quotes" &&
-        ownedWorkspace.activePortfolio ? (
-          <QuotesScreen
-            portfolio={null}
-            ownedQuotes={ownedWorkspace.quotes ?? []}
-            portfolioId={ownedWorkspace.activePortfolio.id}
-            readOnly={false}
-            viewState={ownedWorkspace.quoteViewState ?? "empty"}
           />
         ) : null}
         {!ownedMode && activeSection === "details" ? (

@@ -143,7 +143,7 @@ Treat each completed repository-changing user prompt and each completed ready `T
 - Store money, price, quantity, and FX values as validated decimal strings; never use JavaScript binary floating point for financial arithmetic.
 - Record market-data currency, timezone, source, observation time, ingestion time, and adjustment status.
 - Ledger facts are immutable; corrections use reversal/supersession or versioned override, never silent history rewrites.
-- Missing quote, FX, cost basis, or dividend data is never zero; show `Price unavailable` when no usable quote exists.
+- Missing quote, FX, cost basis, or dividend data is never zero; show `unavailable` when no usable quote exists.
 - Retain market-data provenance/freshness internally. Compact views may suppress routine source/delay/timestamp/fallback labels, but explanations must remain accessible and action-required states visible.
 - Prefer business-relevant dates in user-facing summaries; retain exact timestamps where audit/provenance requires them.
 - A ticker is not a durable security ID; resolve through `securities`, exchange/MIC, currency, and validity-dated provider mappings.
