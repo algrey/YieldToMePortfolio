@@ -78,6 +78,9 @@ export {
 // `deriveShapeEvidence` is.
 export {
   buildSharesightPriceAccretionPlan,
+  // MKT-015: derives the pre-refresh-cache backfill candidates -- see
+  // that function's doc comment in price-accretion.ts.
+  buildSharesightPriceGateBackfillCandidates,
   deriveMarketDateFromTimestamp,
   extractOffsetSuffix,
   type SharesightPriceAccretionCandidate,

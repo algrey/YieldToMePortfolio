@@ -223,3 +223,128 @@ export function buildSharesightPriceAccretionPlan(
     invalidTimestampInstrumentIds,
   };
 }
+
+/**
+ * MKT-015: the ONLY held source of a market date that rolled over BETWEEN
+ * two gate refreshes is the BRK-012C delayed-price cache's pre-refresh row
+ * -- `listUserInstruments` exposes only Sharesight's CURRENT price, never
+ * history (BRK-012A's dead historical-backfill route), so once a fresh
+ * fetch's candidate overwrites that cache row the prior day's quote is gone
+ * from every reachable source. This pure helper is called by the gate
+ * BEFORE that overwrite (see `app/sharesight-price-gate-service.ts`'s
+ * `refreshAndCache`) and derives, for each freshly-fetched candidate, an
+ * additional accretion candidate for whatever earlier market date the
+ * PREVIOUS cache row still evidences -- covering the classic
+ * Monday-morning-first-read gap: an owner who never opened the app (and no
+ * cron tick landed, e.g. local dev, which runs no cron at all) across a
+ * whole weekend, where the very next fetch already reflects the new
+ * trading day and the prior day's close would otherwise never reach
+ * `price_observations` at all.
+ *
+ * **Review round (2026-08-22, B1, BLOCKING) -- the date now comes from the
+ * cache's OWN stored `marketDate`, never re-derived here.** An earlier
+ * version of this function called `deriveMarketDateFromTimestamp` on the
+ * cache's `quoteAt`, which is already UTC-NORMALIZED -- re-slicing a UTC
+ * instant for a calendar date is EXACTLY the bug that function's own doc
+ * comment forbids: an AEDT `+11:00` Monday-morning quote (e.g.
+ * `10:30+11:00`) UTC-converts to `23:30` the PREVIOUS calendar day, so the
+ * old code silently backfilled a date Sharesight never quoted (Sunday) and
+ * skipped the real prior trading day (Monday) entirely -- a fabrication,
+ * not an honest gap. Migration 0052 fixes this at the source: the cache
+ * table (`db/schema.ts`'s `sharesightDelayedPrices`) now ALSO persists
+ * `marketDate`/`marketTimezone` verbatim at cache-write time, captured from
+ * the SAME correctly-derived-from-the-original-offset-string values every
+ * other candidate uses (`db/repositories/sharesight-delayed-price-cache.ts`'s
+ * `upsertSharesightDelayedPriceCache`). This function now reads those two
+ * columns back VERBATIM -- no re-derivation, no UTC slicing, no
+ * approximation of any kind.
+ *
+ * A candidate is produced only when the cache's stored market date is
+ * STRICTLY EARLIER than the fresh candidate's market date for the SAME
+ * security (plain string comparison -- both are already-validated
+ * `YYYY-MM-DD` values). No date BETWEEN the two is ever invented: if the
+ * cache itself last saw a quote several trading days before the fresh
+ * fetch (e.g. the owner's last read was Wednesday and the very next read
+ * is the following Monday), only that single still-cached date backfills
+ * -- the days in between were never observed by anything and stay honestly
+ * missing (`missing_previous`), never guessed. A security entirely ABSENT
+ * from the fresh plan (e.g. Sharesight's response no longer includes it
+ * this refresh) is never considered at all -- this function only ever
+ * looks up the cache by a security that DID appear in `freshCandidates`,
+ * so a security that drops out of scope simply never backfills until it
+ * reappears in a later fresh fetch.
+ *
+ * A cache row written before migration 0052 has `marketDate === null` (a
+ * legacy row) and is skipped honestly -- NEVER approximated by
+ * re-deriving from `quoteAt` the old, buggy way. The very next ordinary
+ * refresh repopulates both columns together for that security, so the gap
+ * self-heals within one refresh cycle rather than ever risking a
+ * fabricated date.
+ *
+ * `instrumentCode`/`marketCode` are reused from the FRESH candidate for
+ * the SAME security -- stable instrument identity, not a per-day price
+ * fact, so reusing it is not an approximation of anything that changes day
+ * to day. Price, currency, market date, AND market timezone are now ALL
+ * verbatim from the cache's own stored values -- none of them
+ * approximated (the previous version's DST caveat about `marketTimezone`
+ * no longer applies: that field is no longer reused from the fresh
+ * candidate at all, it is the cache's own stored value for that exact
+ * historical day).
+ *
+ * Idempotent by construction: the caller feeds this function's output
+ * through the SAME `upsertSharesightPriceObservations` write
+ * (`price_observations_provider_scope_mapping_date_unique`) every other
+ * candidate uses, so a security with no rollover (the overwhelmingly
+ * common case -- most refreshes land on the SAME day as the cache already
+ * reflects) produces zero backfill candidates, and a re-run after the
+ * cache has already rolled over to the SAME new date produces zero again
+ * (converge, never duplicate). Review round B3 (BLOCKING): the CALLER
+ * additionally guards this write against ever downgrading an
+ * already-newer `price_observations` row for that prior date -- see
+ * `upsertSharesightPriceObservations`'s `noDowngrade` option and
+ * `app/sharesight-price-gate-service.ts`'s call site.
+ */
+export function buildSharesightPriceGateBackfillCandidates(
+  freshCandidates: readonly SharesightPriceAccretionCandidate[],
+  previousCache: ReadonlyMap<
+    string,
+    Readonly<{
+      priceDecimal: string;
+      currencyCode: string;
+      quoteAt: string | null;
+      marketDate: string | null;
+      marketTimezone: string | null;
+    }>
+  >,
+): SharesightPriceAccretionCandidate[] {
+  const backfillCandidates: SharesightPriceAccretionCandidate[] = [];
+  for (const fresh of freshCandidates) {
+    const cached = previousCache.get(fresh.securityId);
+    if (!cached) continue;
+    // A legacy pre-migration-0052 row (or, defensively, any row missing
+    // one of the two fields it should always carry together) has no
+    // trustworthy stored date -- skip honestly rather than ever
+    // re-deriving one from `quoteAt` (the exact B1 bug this fixes).
+    if (
+      cached.quoteAt === null ||
+      cached.marketDate === null ||
+      cached.marketTimezone === null
+    ) {
+      continue;
+    }
+    // Only a genuine, strictly-earlier rollover backfills -- a same-day or
+    // out-of-order cache row (the overwhelmingly common case) is a no-op.
+    if (cached.marketDate >= fresh.marketDate) continue;
+    backfillCandidates.push({
+      securityId: fresh.securityId,
+      instrumentCode: fresh.instrumentCode,
+      marketCode: fresh.marketCode,
+      currencyCode: cached.currencyCode,
+      closeDecimal: cached.priceDecimal,
+      marketDate: cached.marketDate,
+      marketTimezone: cached.marketTimezone,
+      observationAt: cached.quoteAt,
+    });
+  }
+  return backfillCandidates;
+}

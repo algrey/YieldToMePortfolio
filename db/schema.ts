@@ -3607,6 +3607,26 @@ export const sharesightDelayedPrices = sqliteTable(
     // wire shape has never been observed to omit it (BRK-012A/B evidence),
     // but this cache never fabricates a quote timestamp it wasn't given.
     quoteAt: text("quote_at"),
+    // MKT-015 (migration 0052, review round 2026-08-22, BLOCKING fix):
+    // the SAME `market_date`/`market_timezone` a `SharesightPriceAccretionCandidate`
+    // carries, captured VERBATIM at cache-write time -- i.e. derived from
+    // Sharesight's ORIGINAL offset-preserving timestamp
+    // (`deriveMarketDateFromTimestamp`/`extractOffsetSuffix`), never
+    // re-derived later from `quoteAt` above (which is already UTC-converted
+    // -- re-slicing IT for a date is exactly the bug
+    // `deriveMarketDateFromTimestamp`'s own doc comment forbids: an
+    // AEDT/+11:00 morning quote can UTC-convert onto the PREVIOUS calendar
+    // date). `domain/sharesight/price-accretion.ts`'s
+    // `buildSharesightPriceGateBackfillCandidates` reads these two columns
+    // verbatim to recover a still-cached prior trading day -- see that
+    // function's doc comment. ADD COLUMN, nullable, no backfill of
+    // historical rows: a cache row written before this migration has both
+    // NULL, and the backfill mechanism SKIPS a NULL-market-date row
+    // honestly (never guesses) -- the very next ordinary refresh
+    // repopulates both columns together, so the gap self-heals within one
+    // refresh cycle.
+    marketDate: text("market_date"),
+    marketTimezone: text("market_timezone"),
     // Ingestion time -- THIS is the column the 10-minute gate compares
     // against, never `quoteAt` (see this table's header comment).
     fetchedAt: text("fetched_at").notNull(),

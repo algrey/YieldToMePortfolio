@@ -18,6 +18,19 @@ export type SharesightDelayedPriceCacheRow = Readonly<{
   currencyCode: string;
   /** Sharesight's own quote timestamp (UTC `...Z`), when supplied. */
   quoteAt: string | null;
+  /**
+   * MKT-015 (migration 0052, review round 2026-08-22, BLOCKING fix):
+   * verbatim `SharesightPriceAccretionCandidate.marketDate`/`.marketTimezone`
+   * at cache-write time -- derived from Sharesight's ORIGINAL
+   * offset-preserving timestamp, never re-derived later from `quoteAt`
+   * above (which is already UTC-converted; re-slicing it for a date is
+   * exactly the bug `deriveMarketDateFromTimestamp`'s own doc comment
+   * forbids). `null` on a row written before migration 0052 -- a legacy
+   * row, never guessed at read time; see db/schema.ts's identical
+   * disclosure on `sharesightDelayedPrices.marketDate`.
+   */
+  marketDate: string | null;
+  marketTimezone: string | null;
   /** Ingestion time -- the ONLY column the 10-minute gate compares against. */
   fetchedAt: string;
 }>;
@@ -78,7 +91,8 @@ export async function loadSharesightDelayedPriceCache(
   for (const batchIds of chunk(unique, CACHE_READ_CHUNK_SIZE)) {
     const placeholders = batchIds.map(() => "?").join(",");
     const rows = await client.all<Record<string, unknown>>(
-      `SELECT security_id, price_decimal, currency_code, quote_at, fetched_at
+      `SELECT security_id, price_decimal, currency_code, quote_at,
+              market_date, market_timezone, fetched_at
          FROM sharesight_delayed_prices
         WHERE user_id = ? AND security_id IN (${placeholders})`,
       [userId, ...batchIds],
@@ -89,6 +103,9 @@ export async function loadSharesightDelayedPriceCache(
         priceDecimal: String(row.price_decimal),
         currencyCode: String(row.currency_code),
         quoteAt: row.quote_at === null ? null : String(row.quote_at),
+        marketDate: row.market_date === null ? null : String(row.market_date),
+        marketTimezone:
+          row.market_timezone === null ? null : String(row.market_timezone),
         fetchedAt: String(row.fetched_at),
       });
     }
@@ -122,12 +139,15 @@ export async function upsertSharesightDelayedPriceCache(
     const statements: SqlStatement[] = batchCandidates.map((candidate) => ({
       sql: `INSERT INTO sharesight_delayed_prices (
               id, user_id, security_id, price_decimal, currency_code,
-              quote_at, fetched_at, provider_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'sharesight', ?, ?)
+              quote_at, market_date, market_timezone, fetched_at,
+              provider_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sharesight', ?, ?)
             ON CONFLICT (user_id, security_id) DO UPDATE SET
               price_decimal = excluded.price_decimal,
               currency_code = excluded.currency_code,
               quote_at = excluded.quote_at,
+              market_date = excluded.market_date,
+              market_timezone = excluded.market_timezone,
               fetched_at = excluded.fetched_at,
               updated_at = excluded.updated_at
             RETURNING id`,
@@ -138,6 +158,14 @@ export async function upsertSharesightDelayedPriceCache(
         candidate.closeDecimal,
         candidate.currencyCode,
         candidate.observationAt,
+        // MKT-015: `candidate.marketDate`/`.marketTimezone` are ALREADY
+        // correctly derived from Sharesight's original offset string by
+        // `buildSharesightPriceAccretionPlan` -- this write persists them
+        // verbatim so a LATER refresh can recover this exact day from the
+        // cache without ever re-deriving a date from `quoteAt`'s
+        // UTC-converted instant (see this table's schema comment).
+        candidate.marketDate,
+        candidate.marketTimezone,
         input.now,
         input.now,
         input.now,

@@ -54,10 +54,25 @@
 //   B3: a cross-basis daily-movement comparison (see `app/owned-
 //   holdings.ts`'s `dailyUnavailableReason`) is a SEPARATE, unrelated fix
 //   in the same review round -- documented there, not here.
+//
+// MKT-015 (2026-08-22): day-change went dark on any day nobody opened the
+// app AND no cron tick landed for it -- cron never fires at all in local
+// dev (`wrangler dev` delivers no scheduled events by default), and even
+// in production a cron sweep can simply miss the narrow window before
+// Sharesight's own feed rolls its `current_price` over to the next trading
+// day. `refreshAndCache` below now reads the delayed-price cache's
+// PRE-refresh row for every matched security before overwriting it, and
+// backfills any market date it still evidences that never made it into
+// `price_observations` -- see `buildSharesightPriceGateBackfillCandidates`
+// (domain/sharesight/price-accretion.ts) for the honesty/idempotency rules
+// this must follow (never fabricate a date Sharesight didn't quote; only
+// the SINGLE still-cached prior date recovers, never anything guessed
+// between it and today).
 import type { SqlClient } from "../db/repositories/sql-client.ts";
 import {
   claimSharesightPriceGateLease,
   hasEnabledSharesightLink,
+  loadSharesightDelayedPriceCache,
   releaseSharesightPriceGateLease,
   upsertSharesightDelayedPriceCache,
 } from "../db/repositories/sharesight-delayed-price-cache.ts";
@@ -69,6 +84,7 @@ import {
 } from "../db/repositories/sharesight-price-refresh.ts";
 import {
   buildSharesightPriceAccretionPlan,
+  buildSharesightPriceGateBackfillCandidates,
   type SharesightClient,
 } from "../domain/sharesight/index.ts";
 import {
@@ -258,6 +274,27 @@ async function refreshAndCache(
   );
   const plan = buildSharesightPriceAccretionPlan(result.value, scopeMap);
 
+  // MKT-015 (ordering fix): read the PRE-refresh cache for exactly the
+  // securities this fetch just matched BEFORE anything below overwrites
+  // it -- this is the LAST moment a market date that rolled over since the
+  // cache was last written (e.g. an owner who never opened the app across
+  // a whole weekend, with no cron in local dev to have caught it either)
+  // is still recoverable anywhere. See
+  // `buildSharesightPriceGateBackfillCandidates`'s doc comment
+  // (domain/sharesight/price-accretion.ts) for the full honesty/idempotency
+  // rules. Bounded by the SAME chunked read `loadSharesightDelayedPriceCache`
+  // already uses elsewhere (BRK-012C review B2 fix) -- no new unbounded
+  // query.
+  const previousCache = await loadSharesightDelayedPriceCache(
+    client,
+    userId,
+    plan.candidates.map((candidate) => candidate.securityId),
+  );
+  const backfillCandidates = buildSharesightPriceGateBackfillCandidates(
+    plan.candidates,
+    previousCache,
+  );
+
   // Sequential, not `Promise.all` -- both writes share the SAME `client`,
   // and this codebase's other multi-batch write paths (e.g. BRK-012B's
   // per-user loop in `sharesight-price-refresh-service.ts`) never issue
@@ -267,6 +304,28 @@ async function refreshAndCache(
     candidates: plan.candidates,
     now: nowIso,
   });
+  // MKT-015: the backfill write, if any -- SAME idempotent upsert path
+  // (`price_observations_provider_scope_mapping_date_unique`) as the fresh
+  // write above, just a different `market_date` per candidate, so this can
+  // never collide with or duplicate the fresh write. Zero candidates (the
+  // overwhelming common case: no day rolled over since the cache was last
+  // written) costs zero extra statements.
+  const backfillWrite =
+    backfillCandidates.length > 0
+      ? await upsertSharesightPriceObservations(client, {
+          userId,
+          candidates: backfillCandidates,
+          now: nowIso,
+          // MKT-015 review round B3 (BLOCKING): a backfill candidate is
+          // built from a cache snapshot that may be hours/days stale --
+          // never let it downgrade an already-fresher price_observations
+          // row for that SAME prior day (e.g. one the hourly cron wrote
+          // independently, more recently than this gate's own cache read).
+          // The ordinary fresh-day write above deliberately does NOT pass
+          // this -- see `upsertSharesightPriceObservations`'s doc comment.
+          noDowngrade: true,
+        })
+      : { written: 0 };
   const cacheWrite = await upsertSharesightDelayedPriceCache(client, {
     userId,
     candidates: plan.candidates,
@@ -289,6 +348,10 @@ async function refreshAndCache(
     action: "refreshed",
     matchedCount: plan.matchedCount,
     cacheWritten: cacheWrite.written,
-    observationsWritten: observationWrite.written,
+    // MKT-015: includes any backfilled prior-day row(s) -- kept as ONE
+    // combined total (not a new result field) since both writes go to the
+    // SAME `price_observations` table via the SAME idempotent upsert; the
+    // common zero-backfill case leaves this byte-identical to before.
+    observationsWritten: observationWrite.written + backfillWrite.written,
   };
 }

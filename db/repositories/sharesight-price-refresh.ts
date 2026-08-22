@@ -146,9 +146,35 @@ export async function upsertSharesightPriceObservations(
     userId: string;
     candidates: readonly SharesightPriceAccretionCandidate[];
     now: string;
+    /**
+     * MKT-015 (review round 2026-08-22, B3, BLOCKING): when `true`, the
+     * `ON CONFLICT ... DO UPDATE` below is additionally guarded by
+     * `excluded.observation_at > price_observations.observation_at` -- the
+     * SAME never-downgrade pattern `app/watchlist-actions.ts`'s best-effort
+     * priming upsert already uses. ONLY the MKT-015 backfill write path
+     * (`app/sharesight-price-gate-service.ts`'s call for a PRIOR day's row,
+     * built from a delayed-price cache snapshot that may be hours or days
+     * stale by the time it is finally written) passes this. The ORDINARY
+     * refresh path -- writing TODAY's row, deliberately converging toward
+     * the close as the day progresses via repeated same-day intraday
+     * upserts -- is UNCHANGED and must NEVER gain this guard: an ordinary
+     * later-in-the-day observation always legitimately has a LATER
+     * `observation_at` than an earlier one, so the guard is a no-op there
+     * in the common case, but this stays scoped to the one path the review
+     * actually found a real downgrade risk on (a stale cache snapshot
+     * racing an independently-fresher write, e.g. from the hourly cron,
+     * for the SAME prior day) rather than changing behaviour nobody asked
+     * to change. Defaults to `false` (existing unconditional
+     * converge-to-latest semantics, byte-identical SQL when omitted).
+     */
+    noDowngrade?: boolean;
   }>,
 ): Promise<{ written: number }> {
   if (input.candidates.length === 0) return { written: 0 };
+
+  const conflictGuardClause = input.noDowngrade
+    ? "\n                WHERE excluded.observation_at > price_observations.observation_at"
+    : "";
 
   let written = 0;
   for (const batchCandidates of chunk(
@@ -234,7 +260,7 @@ export async function upsertSharesightPriceObservations(
                 market_timezone = excluded.market_timezone,
                 currency_code = excluded.currency_code,
                 close_decimal = excluded.close_decimal,
-                ingested_at = excluded.ingested_at
+                ingested_at = excluded.ingested_at${conflictGuardClause}
               RETURNING id`,
         params: [
           randomUUID(),

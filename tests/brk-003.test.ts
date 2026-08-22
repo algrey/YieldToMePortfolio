@@ -163,6 +163,9 @@ const EXPECTED_BARREL_EXPORT_NAMES = [
   // builder, added to the barrel alongside the typed `listUserInstruments`
   // promotion -- see domain/sharesight/price-accretion.ts.
   "buildSharesightPriceAccretionPlan",
+  // MKT-015: pure pre-refresh-cache backfill candidate derivation, same
+  // module -- see domain/sharesight/price-accretion.ts.
+  "buildSharesightPriceGateBackfillCandidates",
   "createSharesightClient",
   "createSharesightTokenProvider",
   "deriveMarketDateFromTimestamp",

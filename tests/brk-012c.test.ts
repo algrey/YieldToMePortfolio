@@ -819,6 +819,585 @@ test("BRK-012C gate: cross-user isolation -- owner-a's refresh never writes owne
 });
 
 // ---------------------------------------------------------------------------
+// (2b) MKT-015: pre-refresh cache backfill -- day-change must not go dark
+// just because cron never fired (local dev has no cron) or the app wasn't
+// opened on a given day.
+// ---------------------------------------------------------------------------
+
+test("MKT-015 (already-working pin): a Friday quote fetched on Saturday accretes Friday's OWN row -- no backfill mechanism involved, just the existing plan-derived write", async () => {
+  const db = await gateFixture();
+  const client = createSqliteSqlClient(db);
+  // Saturday: nothing has traded since Friday's close, so Sharesight's
+  // `current_price` still honestly reports Friday's own timestamp.
+  const fake = fakeSharesightClient({
+    ok: true,
+    value: [
+      instrument({
+        currentPriceUpdatedAt: "2026-08-21T16:10:00+10:00",
+        currentPriceDecimal: "12.00",
+      }),
+    ],
+  });
+  const result = await ensureSharesightPriceFreshness(
+    client,
+    "owner-a",
+    ["security-a"],
+    {
+      integration: integrationOf(fake),
+      now: () => "2026-08-22T00:00:00.000Z", // Saturday
+      leaseOwner: () => "lease-1",
+    },
+  );
+  assert.equal(result.ok, true);
+  if (result.ok && result.action === "refreshed") {
+    assert.equal(
+      result.observationsWritten,
+      1,
+      "no backfill -- no prior cache row existed",
+    );
+  } else {
+    assert.fail("expected a refresh");
+  }
+  const rows = db
+    .prepare(
+      `SELECT market_date, close_decimal FROM price_observations WHERE security_id = 'security-a' ORDER BY market_date`,
+    )
+    .all()
+    .map((row) => ({ ...(row as Record<string, unknown>) })) as Array<{
+    market_date: string;
+    close_decimal: string;
+  }>;
+  assert.deepEqual(rows, [
+    { market_date: "2026-08-21", close_decimal: "12.00" },
+  ]);
+});
+
+test("MKT-015 ordering fix: a Monday-morning first read backfills Friday's still-cached row BEFORE the cache is overwritten with Monday's quote", async () => {
+  const db = await gateFixture();
+  const client = createSqliteSqlClient(db);
+  // Simulate the gap this task fixes: the owner's app was never opened, and
+  // no cron ran (local dev), across the whole weekend. The delayed-price
+  // cache still honestly holds Friday's last-known quote, but (for
+  // whatever reason -- a missed cron tick, a partial write, or simply
+  // nobody having read since) `price_observations` never got a Friday row.
+  db.exec(`
+    INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+      VALUES ('mapping-sharesight-a', 'security-a', 'sharesight', 'ASX', 'ABC', '2026-08-01', 'candidate');
+    INSERT INTO sharesight_delayed_prices (id, user_id, security_id, price_decimal, currency_code, quote_at, market_date, market_timezone, fetched_at, provider_id, created_at, updated_at)
+      VALUES ('cache-a', 'owner-a', 'security-a', '12.00', 'AUD', '2026-08-21T06:10:00.000Z', '2026-08-21', '+10:00', '2026-08-21T06:15:00.000Z', 'sharesight', '2026-08-21T06:15:00.000Z', '2026-08-21T06:15:00.000Z');
+  `);
+  await recordSharesightPriceRefreshWatermark(client, {
+    userId: "owner-a",
+    status: "ok",
+    errorKind: null,
+    now: "2026-08-21T06:15:00.000Z",
+  });
+  // No price_observations row for security-a at all yet -- the gap.
+  assert.equal(
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM price_observations WHERE security_id = 'security-a'`,
+        )
+        .get() as { n: number }
+    ).n,
+    0,
+  );
+
+  // Monday morning: the first read of the new week. Sharesight's feed has
+  // already moved on to Monday's own quote.
+  const fake = fakeSharesightClient({
+    ok: true,
+    value: [
+      instrument({
+        currentPriceUpdatedAt: "2026-08-24T10:05:00+10:00",
+        currentPriceDecimal: "13.50",
+      }),
+    ],
+  });
+  const result = await ensureSharesightPriceFreshness(
+    client,
+    "owner-a",
+    ["security-a"],
+    {
+      integration: integrationOf(fake),
+      now: () => "2026-08-24T00:10:00.000Z",
+      leaseOwner: () => "lease-1",
+    },
+  );
+  assert.equal(result.ok, true);
+  if (result.ok && result.action === "refreshed") {
+    assert.equal(result.matchedCount, 1);
+    assert.equal(result.cacheWritten, 1);
+    // 1 fresh (Monday) + 1 backfilled (Friday, from the pre-refresh cache).
+    assert.equal(result.observationsWritten, 2);
+  } else {
+    assert.fail("expected a refresh");
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT market_date, close_decimal, currency_code FROM price_observations WHERE security_id = 'security-a' ORDER BY market_date`,
+    )
+    .all()
+    .map((row) => ({ ...(row as Record<string, unknown>) })) as Array<{
+    market_date: string;
+    close_decimal: string;
+    currency_code: string;
+  }>;
+  assert.deepEqual(rows, [
+    { market_date: "2026-08-21", close_decimal: "12.00", currency_code: "AUD" },
+    { market_date: "2026-08-24", close_decimal: "13.50", currency_code: "AUD" },
+  ]);
+
+  // The cache now holds Monday's quote -- the overwrite happened, but only
+  // AFTER Friday's row was safely converged into price_observations.
+  const cacheRow = db
+    .prepare(
+      `SELECT price_decimal, quote_at FROM sharesight_delayed_prices WHERE user_id = 'owner-a'`,
+    )
+    .get() as Record<string, unknown>;
+  assert.deepEqual(
+    { ...cacheRow },
+    { price_decimal: "13.50", quote_at: "2026-08-24T00:05:00.000Z" },
+  );
+});
+
+test("MKT-015 idempotent re-read: a later same-day refresh never duplicates the already-backfilled prior day's row", async () => {
+  const db = await gateFixture();
+  const client = createSqliteSqlClient(db);
+  db.exec(`
+    INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+      VALUES ('mapping-sharesight-a', 'security-a', 'sharesight', 'ASX', 'ABC', '2026-08-01', 'candidate');
+    -- State AFTER a first Monday-morning refresh already backfilled Friday
+    -- and wrote Monday's own row -- see the ordering-fix test above.
+    INSERT INTO price_observations (id,provider_id,access_scope,scope_user_id,scope_key,mapping_id,security_id,interval,observation_at,market_date,market_timezone,currency_code,close_decimal,previous_close_decimal,adjustment_state,quality,ingested_at)
+    VALUES
+      ('price-fri','sharesight','user','owner-a','owner-a','mapping-sharesight-a','security-a','delayed','2026-08-21T06:10:00.000Z','2026-08-21','+10:00','AUD','12.00',NULL,'raw','observed','2026-08-24T00:10:00.000Z'),
+      ('price-mon','sharesight','user','owner-a','owner-a','mapping-sharesight-a','security-a','delayed','2026-08-24T00:05:00.000Z','2026-08-24','+10:00','AUD','13.50',NULL,'raw','observed','2026-08-24T00:10:00.000Z');
+    INSERT INTO sharesight_delayed_prices (id, user_id, security_id, price_decimal, currency_code, quote_at, market_date, market_timezone, fetched_at, provider_id, created_at, updated_at)
+      VALUES ('cache-a', 'owner-a', 'security-a', '13.50', 'AUD', '2026-08-24T00:05:00.000Z', '2026-08-24', '+10:00', '2026-08-24T00:10:00.000Z', 'sharesight', '2026-08-24T00:10:00.000Z', '2026-08-24T00:10:00.000Z');
+  `);
+  await recordSharesightPriceRefreshWatermark(client, {
+    userId: "owner-a",
+    status: "ok",
+    errorKind: null,
+    now: "2026-08-24T00:10:00.000Z",
+  });
+
+  // A later refresh the SAME Monday, prices converging toward the close.
+  const fake = fakeSharesightClient({
+    ok: true,
+    value: [
+      instrument({
+        currentPriceUpdatedAt: "2026-08-24T10:15:00+10:00",
+        currentPriceDecimal: "13.60",
+      }),
+    ],
+  });
+  const result = await ensureSharesightPriceFreshness(
+    client,
+    "owner-a",
+    ["security-a"],
+    {
+      integration: integrationOf(fake),
+      now: () => "2026-08-24T00:20:01.000Z",
+      leaseOwner: () => "lease-2",
+    },
+  );
+  assert.equal(result.ok, true);
+  if (result.ok && result.action === "refreshed") {
+    // The pre-refresh cache's OWN market date (Monday) matches the fresh
+    // fetch's market date (also Monday) -- no rollover, so no backfill
+    // candidate is produced this time.
+    assert.equal(result.observationsWritten, 1);
+  } else {
+    assert.fail("expected a refresh");
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT market_date, close_decimal FROM price_observations WHERE security_id = 'security-a' ORDER BY market_date`,
+    )
+    .all()
+    .map((row) => ({ ...(row as Record<string, unknown>) })) as Array<{
+    market_date: string;
+    close_decimal: string;
+  }>;
+  // Still exactly two rows -- Friday's untouched, Monday's converged to the
+  // latest price. Never a third, duplicate Friday row.
+  assert.deepEqual(rows, [
+    { market_date: "2026-08-21", close_decimal: "12.00" },
+    { market_date: "2026-08-24", close_decimal: "13.60" },
+  ]);
+});
+
+test("MKT-015 honesty: a genuinely-missed multi-day gap backfills ONLY the single date the cache still evidences -- the days between stay honestly missing, never invented", async () => {
+  const db = await gateFixture();
+  const client = createSqliteSqlClient(db);
+  // The cache's last write was Wednesday -- Thursday, Friday, and the
+  // weekend were never observed by anything (no cron, app never opened).
+  db.exec(`
+    INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+      VALUES ('mapping-sharesight-a', 'security-a', 'sharesight', 'ASX', 'ABC', '2026-08-01', 'candidate');
+    INSERT INTO sharesight_delayed_prices (id, user_id, security_id, price_decimal, currency_code, quote_at, market_date, market_timezone, fetched_at, provider_id, created_at, updated_at)
+      VALUES ('cache-a', 'owner-a', 'security-a', '11.00', 'AUD', '2026-08-19T06:00:00.000Z', '2026-08-19', '+10:00', '2026-08-19T06:05:00.000Z', 'sharesight', '2026-08-19T06:05:00.000Z', '2026-08-19T06:05:00.000Z');
+  `);
+  await recordSharesightPriceRefreshWatermark(client, {
+    userId: "owner-a",
+    status: "ok",
+    errorKind: null,
+    now: "2026-08-19T06:05:00.000Z",
+  });
+
+  const fake = fakeSharesightClient({
+    ok: true,
+    value: [
+      instrument({
+        currentPriceUpdatedAt: "2026-08-24T10:05:00+10:00",
+        currentPriceDecimal: "13.50",
+      }),
+    ],
+  });
+  const result = await ensureSharesightPriceFreshness(
+    client,
+    "owner-a",
+    ["security-a"],
+    {
+      integration: integrationOf(fake),
+      now: () => "2026-08-24T00:10:00.000Z",
+      leaseOwner: () => "lease-1",
+    },
+  );
+  assert.equal(result.ok, true);
+  if (result.ok && result.action === "refreshed") {
+    assert.equal(result.observationsWritten, 2);
+  } else {
+    assert.fail("expected a refresh");
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT market_date FROM price_observations WHERE security_id = 'security-a' ORDER BY market_date`,
+    )
+    .all()
+    .map((row) => ({ ...(row as Record<string, unknown>) })) as Array<{
+    market_date: string;
+  }>;
+  // ONLY Wednesday (the single date the cache still evidenced) and Monday
+  // (the fresh fetch) exist -- Thursday/Friday/weekend were never
+  // observed by anything and stay honestly absent, never fabricated.
+  assert.deepEqual(rows, [
+    { market_date: "2026-08-19" },
+    { market_date: "2026-08-24" },
+  ]);
+});
+
+test("MKT-015 review round (B1, BLOCKING): an AEDT +11:00 morning quote backfills the REAL prior trading day, never the UTC-shifted wrong one", async () => {
+  const db = await gateFixture();
+  const client = createSqliteSqlClient(db);
+  // Monday 2026-08-24, 10:30am AEDT (+11:00) -- UTC-converts to Sunday
+  // 2026-08-23T23:30:00Z. The OLD, buggy code re-derived the backfill date
+  // by slicing THIS UTC instant, producing "2026-08-23" (Sunday -- not even
+  // a trading day, a fabricated date Sharesight never quoted). The stored
+  // `market_date` column (migration 0052) instead carries the CORRECT,
+  // originally-derived date verbatim: "2026-08-24" (Monday).
+  db.exec(`
+    INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+      VALUES ('mapping-sharesight-a', 'security-a', 'sharesight', 'ASX', 'ABC', '2026-08-01', 'candidate');
+    INSERT INTO sharesight_delayed_prices (id, user_id, security_id, price_decimal, currency_code, quote_at, market_date, market_timezone, fetched_at, provider_id, created_at, updated_at)
+      VALUES ('cache-a', 'owner-a', 'security-a', '12.00', 'AUD', '2026-08-23T23:30:00.000Z', '2026-08-24', '+11:00', '2026-08-24T00:00:00.000Z', 'sharesight', '2026-08-24T00:00:00.000Z', '2026-08-24T00:00:00.000Z');
+  `);
+  await recordSharesightPriceRefreshWatermark(client, {
+    userId: "owner-a",
+    status: "ok",
+    errorKind: null,
+    now: "2026-08-24T00:00:00.000Z",
+  });
+
+  // Wednesday 2026-08-26, 10:15am AEDT -- the next read, several days later
+  // (nobody opened the app Monday or Tuesday either).
+  const fake = fakeSharesightClient({
+    ok: true,
+    value: [
+      instrument({
+        currentPriceUpdatedAt: "2026-08-26T10:15:00+11:00",
+        currentPriceDecimal: "14.20",
+      }),
+    ],
+  });
+  const result = await ensureSharesightPriceFreshness(
+    client,
+    "owner-a",
+    ["security-a"],
+    {
+      integration: integrationOf(fake),
+      now: () => "2026-08-26T00:00:00.000Z",
+      leaseOwner: () => "lease-1",
+    },
+  );
+  assert.equal(result.ok, true);
+  if (result.ok && result.action === "refreshed") {
+    assert.equal(result.observationsWritten, 2);
+  } else {
+    assert.fail("expected a refresh");
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT market_date, close_decimal, market_timezone FROM price_observations WHERE security_id = 'security-a' ORDER BY market_date`,
+    )
+    .all()
+    .map((row) => ({ ...(row as Record<string, unknown>) })) as Array<{
+    market_date: string;
+    close_decimal: string;
+    market_timezone: string;
+  }>;
+  assert.deepEqual(rows, [
+    {
+      market_date: "2026-08-24",
+      close_decimal: "12.00",
+      market_timezone: "+11:00",
+    },
+    {
+      market_date: "2026-08-26",
+      close_decimal: "14.20",
+      market_timezone: "+11:00",
+    },
+  ]);
+  // Pin the fix negatively too: the wrong, UTC-shifted date the old bug
+  // would have fabricated must never appear.
+  const wrongDateRow = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM price_observations WHERE security_id = 'security-a' AND market_date = '2026-08-23'`,
+    )
+    .get() as { n: number };
+  assert.equal(wrongDateRow.n, 0);
+});
+
+test("MKT-015 review round (B1, BLOCKING): a same-day +11:00 re-read produces ZERO backfill candidates -- the old bug would have fired a spurious one", async () => {
+  const db = await gateFixture();
+  const client = createSqliteSqlClient(db);
+  // The cache's stored market_date and the fresh fetch's market_date are
+  // the SAME trading day ("2026-08-24") even though their UTC-converted
+  // instants fall on DIFFERENT UTC calendar dates (23:35 UTC the day
+  // before vs. 23:45 UTC the day before) -- exactly the shape that would
+  // have fooled the OLD UTC-slicing logic into treating this as a rollover
+  // and firing a spurious backfill onto a fabricated date.
+  db.exec(`
+    INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+      VALUES ('mapping-sharesight-a', 'security-a', 'sharesight', 'ASX', 'ABC', '2026-08-01', 'candidate');
+    INSERT INTO sharesight_delayed_prices (id, user_id, security_id, price_decimal, currency_code, quote_at, market_date, market_timezone, fetched_at, provider_id, created_at, updated_at)
+      VALUES ('cache-a', 'owner-a', 'security-a', '13.00', 'AUD', '2026-08-23T23:35:00.000Z', '2026-08-24', '+11:00', '2026-08-24T00:00:00.000Z', 'sharesight', '2026-08-24T00:00:00.000Z', '2026-08-24T00:00:00.000Z');
+  `);
+  await recordSharesightPriceRefreshWatermark(client, {
+    userId: "owner-a",
+    status: "ok",
+    errorKind: null,
+    now: "2026-08-24T00:00:00.000Z",
+  });
+
+  const fake = fakeSharesightClient({
+    ok: true,
+    value: [
+      instrument({
+        currentPriceUpdatedAt: "2026-08-24T10:45:00+11:00",
+        currentPriceDecimal: "13.10",
+      }),
+    ],
+  });
+  const result = await ensureSharesightPriceFreshness(
+    client,
+    "owner-a",
+    ["security-a"],
+    {
+      integration: integrationOf(fake),
+      now: () => "2026-08-24T00:15:00.000Z",
+      leaseOwner: () => "lease-1",
+    },
+  );
+  assert.equal(result.ok, true);
+  if (result.ok && result.action === "refreshed") {
+    assert.equal(
+      result.observationsWritten,
+      1,
+      "cached market_date === fresh market_date -- zero backfill candidates",
+    );
+  } else {
+    assert.fail("expected a refresh");
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT market_date, close_decimal FROM price_observations WHERE security_id = 'security-a' ORDER BY market_date`,
+    )
+    .all()
+    .map((row) => ({ ...(row as Record<string, unknown>) })) as Array<{
+    market_date: string;
+    close_decimal: string;
+  }>;
+  // Exactly ONE row -- converged to the later same-day price, never a
+  // spurious second row for a neighbouring UTC date.
+  assert.deepEqual(rows, [
+    { market_date: "2026-08-24", close_decimal: "13.10" },
+  ]);
+});
+
+test("MKT-015 review round (B3, BLOCKING): a backfill candidate built from a stale cache snapshot never downgrades a prior-day row that already holds a LATER observation", async () => {
+  const db = await gateFixture();
+  const client = createSqliteSqlClient(db);
+  // price_observations already holds a MORE RECENT write for Monday
+  // (2026-08-24) than the gate's own (stale) cache row -- e.g. the hourly
+  // cron wrote it independently, after this gate's cache was last
+  // refreshed.
+  db.exec(`
+    INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+      VALUES ('mapping-sharesight-a', 'security-a', 'sharesight', 'ASX', 'ABC', '2026-08-01', 'candidate');
+    INSERT INTO price_observations (id,provider_id,access_scope,scope_user_id,scope_key,mapping_id,security_id,interval,observation_at,market_date,market_timezone,currency_code,close_decimal,previous_close_decimal,adjustment_state,quality,ingested_at)
+    VALUES ('price-mon','sharesight','user','owner-a','owner-a','mapping-sharesight-a','security-a','delayed','2026-08-24T05:00:00.000Z','2026-08-24','+10:00','AUD','12.50',NULL,'raw','observed','2026-08-24T05:00:00.000Z');
+    INSERT INTO sharesight_delayed_prices (id, user_id, security_id, price_decimal, currency_code, quote_at, market_date, market_timezone, fetched_at, provider_id, created_at, updated_at)
+      VALUES ('cache-a', 'owner-a', 'security-a', '12.00', 'AUD', '2026-08-24T00:05:00.000Z', '2026-08-24', '+10:00', '2026-08-24T00:10:00.000Z', 'sharesight', '2026-08-24T00:10:00.000Z', '2026-08-24T00:10:00.000Z');
+  `);
+  await recordSharesightPriceRefreshWatermark(client, {
+    userId: "owner-a",
+    status: "ok",
+    errorKind: null,
+    now: "2026-08-24T00:10:00.000Z",
+  });
+
+  // Tuesday's first read -- rolls over from the stale cached Monday row.
+  const fake = fakeSharesightClient({
+    ok: true,
+    value: [
+      instrument({
+        currentPriceUpdatedAt: "2026-08-25T10:05:00+10:00",
+        currentPriceDecimal: "14.00",
+      }),
+    ],
+  });
+  const result = await ensureSharesightPriceFreshness(
+    client,
+    "owner-a",
+    ["security-a"],
+    {
+      integration: integrationOf(fake),
+      now: () => "2026-08-25T00:10:00.000Z",
+      leaseOwner: () => "lease-1",
+    },
+  );
+  assert.equal(result.ok, true);
+  if (result.ok && result.action === "refreshed") {
+    // The fresh Tuesday write counts; the guarded backfill write is
+    // SKIPPED (its RETURNING reports zero rows -- see
+    // `upsertSharesightPriceObservations`'s `noDowngrade` doc comment).
+    assert.equal(result.observationsWritten, 1);
+  } else {
+    assert.fail("expected a refresh");
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT market_date, close_decimal, observation_at FROM price_observations WHERE security_id = 'security-a' ORDER BY market_date`,
+    )
+    .all()
+    .map((row) => ({ ...(row as Record<string, unknown>) })) as Array<{
+    market_date: string;
+    close_decimal: string;
+    observation_at: string;
+  }>;
+  assert.deepEqual(rows, [
+    {
+      // NOT downgraded -- Monday's row keeps its already-later, more
+      // authoritative observation, never overwritten by the stale cache's
+      // earlier snapshot.
+      market_date: "2026-08-24",
+      close_decimal: "12.50",
+      observation_at: "2026-08-24T05:00:00.000Z",
+    },
+    {
+      market_date: "2026-08-25",
+      close_decimal: "14.00",
+      observation_at: "2026-08-25T00:05:00.000Z",
+    },
+  ]);
+});
+
+test("MKT-015 review round (BLOCKING): a legacy cache row with NULL market_date (written before migration 0052) is skipped honestly, never approximated -- self-heals on the very next refresh", async () => {
+  const db = await gateFixture();
+  const client = createSqliteSqlClient(db);
+  db.exec(`
+    INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+      VALUES ('mapping-sharesight-a', 'security-a', 'sharesight', 'ASX', 'ABC', '2026-08-01', 'candidate');
+    -- A cache row exactly as a pre-migration-0052 write would have left it:
+    -- market_date/market_timezone both NULL.
+    INSERT INTO sharesight_delayed_prices (id, user_id, security_id, price_decimal, currency_code, quote_at, market_date, market_timezone, fetched_at, provider_id, created_at, updated_at)
+      VALUES ('cache-a', 'owner-a', 'security-a', '12.00', 'AUD', '2026-08-21T06:10:00.000Z', NULL, NULL, '2026-08-21T06:15:00.000Z', 'sharesight', '2026-08-21T06:15:00.000Z', '2026-08-21T06:15:00.000Z');
+  `);
+  await recordSharesightPriceRefreshWatermark(client, {
+    userId: "owner-a",
+    status: "ok",
+    errorKind: null,
+    now: "2026-08-21T06:15:00.000Z",
+  });
+
+  const fake = fakeSharesightClient({
+    ok: true,
+    value: [
+      instrument({
+        currentPriceUpdatedAt: "2026-08-24T10:05:00+10:00",
+        currentPriceDecimal: "13.50",
+      }),
+    ],
+  });
+  const result = await ensureSharesightPriceFreshness(
+    client,
+    "owner-a",
+    ["security-a"],
+    {
+      integration: integrationOf(fake),
+      now: () => "2026-08-24T00:10:00.000Z",
+      leaseOwner: () => "lease-1",
+    },
+  );
+  assert.equal(result.ok, true);
+  if (result.ok && result.action === "refreshed") {
+    assert.equal(
+      result.observationsWritten,
+      1,
+      "a NULL-market-date cache row is skipped, never re-derived from quote_at",
+    );
+  } else {
+    assert.fail("expected a refresh");
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT market_date, close_decimal FROM price_observations WHERE security_id = 'security-a' ORDER BY market_date`,
+    )
+    .all()
+    .map((row) => ({ ...(row as Record<string, unknown>) })) as Array<{
+    market_date: string;
+    close_decimal: string;
+  }>;
+  // Only the fresh Monday row -- Friday (which the legacy row's OWN
+  // quote_at happens to fall on) is never guessed at, honestly missing.
+  assert.deepEqual(rows, [
+    { market_date: "2026-08-24", close_decimal: "13.50" },
+  ]);
+
+  // Self-heals: the cache row is now fully repopulated for next time.
+  const cacheRow = db
+    .prepare(
+      `SELECT market_date, market_timezone FROM sharesight_delayed_prices WHERE user_id = 'owner-a'`,
+    )
+    .get() as Record<string, unknown>;
+  assert.deepEqual(
+    { ...cacheRow },
+    { market_date: "2026-08-24", market_timezone: "+10:00" },
+  );
+});
+
+// ---------------------------------------------------------------------------
 // (3) app/owned-holdings.ts integration
 // ---------------------------------------------------------------------------
 
@@ -1169,6 +1748,48 @@ test("BRK-012C migration: sharesight_sync_state gained the two lease columns, nu
     "account_purge_lock_sharesight_sync_state_delete",
     "account_purge_lock_sharesight_sync_state_insert",
     "account_purge_lock_sharesight_sync_state_update",
+  ]);
+});
+
+test("MKT-015 migration 0052: sharesight_delayed_prices gained market_date/market_timezone columns, nullable, no rebuild (its unique/owner index and purge-lock triggers survive byte-identical)", async () => {
+  const db = await migratedDatabase();
+  const columns = db
+    .prepare(`PRAGMA table_info('sharesight_delayed_prices')`)
+    .all()
+    .map((row) => (row as { name: string; notnull: number }).name);
+  assert.ok(columns.includes("market_date"));
+  assert.ok(columns.includes("market_timezone"));
+  const marketDateColumn = db
+    .prepare(`PRAGMA table_info('sharesight_delayed_prices')`)
+    .all()
+    .find((row) => (row as { name: string }).name === "market_date") as {
+    notnull: number;
+  };
+  assert.equal(marketDateColumn.notnull, 0, "market_date must be nullable");
+  // Same index/trigger set as the table-creation migration test above --
+  // migration 0052 is a plain `ALTER TABLE ... ADD COLUMN` (verified: no
+  // drizzle-kit table rebuild happened), so there is no drop-and-recreate
+  // hazard for the hand-appended purge-lock triggers or indexes to survive.
+  const indexes = db
+    .prepare(`PRAGMA index_list('sharesight_delayed_prices')`)
+    .all()
+    .map((row) => (row as { name: string }).name)
+    .filter((name) => !name.startsWith("sqlite_"))
+    .sort();
+  assert.deepEqual(indexes, [
+    "sharesight_delayed_prices_user_idx",
+    "sharesight_delayed_prices_user_security_unique",
+  ]);
+  const triggers = db
+    .prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'sharesight_delayed_prices' ORDER BY name`,
+    )
+    .all()
+    .map((row) => (row as { name: string }).name);
+  assert.deepEqual(triggers, [
+    "account_purge_lock_sharesight_delayed_prices_delete",
+    "account_purge_lock_sharesight_delayed_prices_insert",
+    "account_purge_lock_sharesight_delayed_prices_update",
   ]);
 });
 
