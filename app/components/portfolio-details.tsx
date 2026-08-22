@@ -2,7 +2,6 @@ import Link from "next/link";
 import { AccountLifecycleControls } from "./account-lifecycle-controls";
 import {
   formatDecimalFixed,
-  formatDecimalTrimmed,
   groupThousands,
   parseDecimal,
 } from "../../domain/calculations/decimal.ts";
@@ -15,24 +14,12 @@ import type {
   PortfolioInspectionTransaction,
 } from "../../db/repositories/portfolio-inspection.ts";
 import { currencyDisplayPrefix } from "../currency-display.ts";
+import { ownedHoldingQuantity } from "../owned-holding-format";
 
 export type OwnedDetailsProps = Readonly<{
   inspection: PortfolioInspection | null;
   onOpenSettings: () => void;
 }>;
-
-function sourceScale(value: string): number {
-  return value.split(".")[1]?.length ?? 0;
-}
-
-function decimal(value: string | null, empty = "—"): string {
-  if (value === null) return empty;
-  try {
-    return formatDecimalTrimmed(parseDecimal(value), sourceScale(value));
-  } catch {
-    return empty;
-  }
-}
 
 // UI-026: `currency` is the value's OWN currency (a native transaction/cash
 // currency can differ from the portfolio's home currency, see the
@@ -138,7 +125,7 @@ function TransactionRecord({
       <dl className="inspection-facts">
         <div>
           <dt>Quantity</dt>
-          <dd>{decimal(transaction.quantityDecimal)}</dd>
+          <dd>{ownedHoldingQuantity(transaction.quantityDecimal)}</dd>
         </div>
         <div>
           <dt>Unit price</dt>
@@ -238,7 +225,7 @@ function LotRecord({
       <dl className="inspection-facts">
         <div>
           <dt>Open quantity</dt>
-          <dd>{decimal(lot.openQuantityDecimal)}</dd>
+          <dd>{ownedHoldingQuantity(lot.openQuantityDecimal)}</dd>
         </div>
         <div>
           <dt>Open basis</dt>
@@ -246,7 +233,7 @@ function LotRecord({
         </div>
         <div>
           <dt>Original quantity</dt>
-          <dd>{decimal(lot.originalQuantityDecimal)}</dd>
+          <dd>{ownedHoldingQuantity(lot.originalQuantityDecimal)}</dd>
         </div>
         <div>
           <dt>Matched sales</dt>
@@ -265,7 +252,7 @@ function LotRecord({
             {matches.map((match) => (
               <li key={match.id}>
                 Sale {match.sellTransactionId}: matched{" "}
-                {decimal(match.matchedQuantityDecimal)}, basis{" "}
+                {ownedHoldingQuantity(match.matchedQuantityDecimal)}, basis{" "}
                 {money(match.allocatedBaseBasisDecimal, currency, currency)},
                 gain {money(match.baseRealisedGainDecimal, currency, currency)}.
               </li>

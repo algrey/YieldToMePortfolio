@@ -13,6 +13,7 @@ import {
 import { isZero, parseDecimalResult } from "../domain/calculations/index.ts";
 import type { OwnedHoldingRow } from "./owned-holdings-contract";
 import { currencyDisplayPrefix } from "./currency-display.ts";
+import { formatQuantityDisplay } from "./quantity-format.ts";
 
 // Gain/movement figures must carry an explicit +/− sign so the direction
 // does not depend on colour alone (UI_SPEC §10, QUAL-001). Negative values
@@ -162,6 +163,22 @@ export function ownedHoldingTrimmed(value: string | null, scale = 6): string {
   } catch {
     return "—";
   }
+}
+// UI-027: the ONE shared share/unit quantity formatter (whole-unless-
+// fractional, never a fake zero) -- see `app/quantity-format.ts`'s header
+// comment for the full rule and why the trim implementation lives there
+// (a plain, JSX-free `.ts` module) rather than only here. This is a thin
+// re-export under the `ownedHoldingXxx` naming convention every other
+// holding-value formatter in this file already uses, for the `.tsx` call
+// sites that import alongside `ownedHoldingTrimmed`/`ownedHoldingDecimal`
+// (`portfolio-shell.tsx`'s holdings row -- where this rule was originally
+// delivered inline during the UI-028 review -- `holding-detail.tsx`,
+// `holding-transactions.tsx`, `portfolio-details.tsx`). `.ts` call sites
+// that cannot import a `.tsx` file (`income-format.ts`'s `formatQuantity`,
+// `dividend-history-prefill.ts`'s `formatShares`) import
+// `formatQuantityDisplay` directly instead.
+export function ownedHoldingQuantity(value: string | null): string {
+  return formatQuantityDisplay(value, "—");
 }
 export function ownedHoldingPercent(
   value: OwnedHoldingRow["dailyPercent"],

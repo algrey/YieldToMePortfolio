@@ -12,7 +12,7 @@ import {
 import { formatIncomeMoney } from "../income-format.ts";
 import { groupThousands } from "../../domain/calculations/index.ts";
 import {
-  ownedHoldingDecimal,
+  ownedHoldingQuantity,
   ownedHoldingTrimmed,
 } from "../owned-holding-format";
 import { currencyDisplayPrefix } from "../currency-display.ts";
@@ -138,7 +138,7 @@ export function HoldingTransactionsScreen({
                           : ""}
                     </td>
                     <td className="numeric">
-                      {ownedHoldingDecimal(row.quantityDecimal, 4)}
+                      {ownedHoldingQuantity(row.quantityDecimal)}
                     </td>
                     <td className="numeric">
                       {row.unitPriceDecimal === null

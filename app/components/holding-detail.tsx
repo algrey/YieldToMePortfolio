@@ -12,8 +12,8 @@ import { useState } from "react";
 import type { OwnedHoldingRow } from "../owned-holdings-contract";
 import {
   ownedHoldingAmount,
-  ownedHoldingDecimal,
   ownedHoldingPercent,
+  ownedHoldingQuantity,
   ownedHoldingTrimmed,
 } from "../owned-holding-format";
 import { HoldingNav } from "./holding-nav";
@@ -86,7 +86,7 @@ export function HoldingDetailScreen({
           <dl className="detail-facts">
             <div>
               <dt>Quantity</dt>
-              <dd>{ownedHoldingDecimal(holding.quantity, 4)}</dd>
+              <dd>{ownedHoldingQuantity(holding.quantity)}</dd>
             </div>
             <div>
               <dt>Price</dt>
@@ -158,7 +158,7 @@ export function HoldingDetailScreen({
               <dd>
                 {holding.averageNativeCost === null
                   ? "Basis unavailable"
-                  : `${currencyDisplayPrefix(holding.currencyCode, homeCurrencyCode)}${ownedHoldingTrimmed(holding.averageNativeCost)} × ${ownedHoldingDecimal(holding.quantity, 4)}`}
+                  : `${currencyDisplayPrefix(holding.currencyCode, homeCurrencyCode)}${ownedHoldingTrimmed(holding.averageNativeCost)} × ${ownedHoldingQuantity(holding.quantity)}`}
               </dd>
             </div>
           </dl>

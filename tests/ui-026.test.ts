@@ -371,6 +371,8 @@ test("UI-026 sweep: a holding's Details screen (base AUD, a USD holding) never r
   assert.match(html, />\$6,300\.00</);
   // The average-cost line always renders in the security's own NATIVE
   // currency regardless of the home/native view toggle -- stays flagged,
-  // never stripped of its USD identity.
-  assert.match(html, /US\$1\.965 × 1,000\.0000/);
+  // never stripped of its USD identity. UI-027: the integral quantity
+  // ("1000") now renders bare ("1,000"), not the old fixed-4dp
+  // "1,000.0000" -- flipped honestly from the pre-UI-027 expectation.
+  assert.match(html, /US\$1\.965 × 1,000</);
 });

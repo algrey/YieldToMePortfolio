@@ -10,7 +10,6 @@
 import {
   compareDecimal,
   formatDecimalTrimmed,
-  groupThousands,
   parseDecimalResult,
 } from "../domain/calculations/decimal.ts";
 import type {
@@ -18,6 +17,7 @@ import type {
   FrankingResolution,
 } from "../domain/dividends/index.ts";
 import { formatIncomeMoney } from "./income-format.ts";
+import { formatQuantityDisplay } from "./quantity-format.ts";
 
 /** Mirrors `app/owned-security-dividends.ts`'s shapes, defined locally so
  * this client-reachable module never depends on that server-only loader
@@ -46,16 +46,14 @@ export const SOURCE_LABEL: Record<DerivedDividendRow["source"], string> = {
   imported: "imported",
 };
 
+// UI-027: delegates to `app/quantity-format.ts`'s `formatQuantityDisplay`,
+// the ONE shared quantity-trim implementation every quantity-rendering
+// surface in the app now uses (whole-unless-fractional, never a fake
+// zero) -- see that module's header comment for the full rule. Falls back
+// to the raw string on a malformed value, mirroring the previous
+// behaviour (never expected from a validated, DB-sourced decimal).
 export function formatShares(value: string): string {
-  try {
-    return groupThousands(
-      formatDecimalTrimmed(parseDecimalResult(value), 4, {
-        trimTrailingZeros: true,
-      }),
-    );
-  } catch {
-    return value;
-  }
+  return formatQuantityDisplay(value, value);
 }
 
 /**

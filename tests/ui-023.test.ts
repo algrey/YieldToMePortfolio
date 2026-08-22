@@ -194,7 +194,11 @@ test("UI-023: the Transactions screen renders the labelled buy row with quantity
   const html = renderTransactions();
   assert.match(html, /<caption>Ledger transactions for PLS<\/caption>/);
   assert.match(html, /Buy/);
-  assert.match(html, /1,000\.0000/);
+  // UI-027: an integral quantity ("1000") now renders with no decimal
+  // places at all via the shared `ownedHoldingQuantity` formatter, not the
+  // old fixed-4dp "1,000.0000" -- flipped honestly from the pre-UI-027
+  // expectation.
+  assert.match(html, /class="numeric">1,000<\//);
   assert.match(html, /\$1\.965/);
   assert.match(html, /\$1,965\.00/);
   assert.match(html, /fees \$19\.95/);
@@ -310,13 +314,17 @@ test("UI-023: the Details screen renders the sheet's facts (quantity, price, val
   const html = renderDetail();
   assert.match(html, /aria-current="page">Details<\/span>/);
   assert.match(html, /Quantity/);
-  assert.match(html, /1,000\.0000/);
+  // UI-027: an integral quantity ("1000") now renders bare ("1,000"), not
+  // the old fixed-4dp "1,000.0000" -- flipped honestly from the
+  // pre-UI-027 expectation, via the shared `ownedHoldingQuantity`
+  // formatter.
+  assert.match(html, /<dd>1,000<\/dd>/);
   assert.match(html, /US\$4\.26/);
   assert.match(html, /US\$4,260\.00/);
   assert.match(html, /\$\+2,340\.00/);
   assert.match(html, /\+2\.9%/);
   assert.match(html, /\+117\.05%/);
-  assert.match(html, /US\$1\.965 × 1,000\.0000/);
+  assert.match(html, /US\$1\.965 × 1,000</);
   assert.match(
     html,
     /href="\/portfolio\/portfolio-a\/holdings\/holding-pls\/dividends"/,

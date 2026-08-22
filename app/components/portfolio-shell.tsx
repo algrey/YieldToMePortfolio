@@ -43,6 +43,7 @@ import {
   ownedHoldingDecimal,
   ownedHoldingDecimalNeverFakeZero,
   ownedHoldingPercent,
+  ownedHoldingQuantity,
   ownedHoldingTrimmed,
 } from "../owned-holding-format";
 import { currencyDisplayPrefix } from "../currency-display.ts";
@@ -669,18 +670,17 @@ function OwnedHoldingsScreen({
                          trimmed exact form for that value only (see
                          `ownedHoldingDecimalNeverFakeZero`'s doc comment). */
                       `${currencyDisplayPrefix(holding.currencyCode, homeCurrencyCode)}${ownedHoldingDecimalNeverFakeZero(holding.averageNativeCost, 2)}`}{" "}
-                  {/* UI-028 review (B4, BLOCKING): whole-unless-fractional
-                      quantity display, delivered at this ONE call site as
-                      TASKS.md's planned UI-027 ("Share quantities display
-                      as whole numbers unless genuinely fractional") will
-                      later centralise -- `ownedHoldingTrimmed` already
-                      guarantees exactly that shape: an INTEGRAL quantity's
-                      trailing ".000..." is stripped entirely (no decimal
-                      point at all), while a genuinely fractional quantity
-                      (e.g. a DRP fractional share) keeps its real trimmed
-                      digits instead of being rounded away to a misleading
-                      whole number. */}
-                  × {ownedHoldingTrimmed(holding.quantity)}
+                  {/* UI-028 review (B4, BLOCKING) delivered whole-unless-
+                      fractional quantity display at this ONE call site;
+                      UI-027 then centralised it into the shared
+                      `ownedHoldingQuantity` helper (`app/quantity-format.ts`)
+                      every quantity-rendering surface now uses -- an
+                      INTEGRAL quantity's trailing ".000..." is stripped
+                      entirely (no decimal point at all), while a genuinely
+                      fractional quantity (e.g. a DRP fractional share)
+                      keeps its real trimmed digits instead of being
+                      rounded away to a misleading whole number. */}
+                  × {ownedHoldingQuantity(holding.quantity)}
                 </span>
                 <span className="desktop-only holding-name">
                   {holding.name} · {holding.exchange} · {holding.currencyCode}
