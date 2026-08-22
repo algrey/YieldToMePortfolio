@@ -1381,9 +1381,11 @@ test("UI-018: the price-history CSS mirrors gap segments with a dashed line, not
 // Part 8: dialog wiring -- source-level assertions (portfolio-shell.tsx).
 // ---------------------------------------------------------------------------
 
-test("UI-018/UI-023: the holding Details screen mounts HoldingPriceChart under the facts dl, before the dividends link", async () => {
+test("UI-018/UI-023: the holding Details screen mounts HoldingPriceChart under the facts dl, before the explanation", async () => {
   // UI-023 moved the chart's mount point from the shell's holding <dialog>
-  // to the standalone Details screen; ordering and wiring are preserved.
+  // to the standalone Details screen; UI-023C then removed the trailing
+  // "View dividends" link (dividends became the area's fourth sub-tab), so
+  // the explanation paragraph is now the ordering anchor after the chart.
   const source = await readFile(
     new URL("../app/components/holding-detail.tsx", import.meta.url),
     "utf8",
@@ -1395,14 +1397,14 @@ test("UI-018/UI-023: the holding Details screen mounts HoldingPriceChart under t
   );
   const anchor = source.indexOf("Average cost");
   const mountIndex = source.indexOf("<HoldingPriceChart");
-  const dividendsLinkIndex = source.indexOf("View dividends");
+  const explanationIndex = source.indexOf("detail-explanation");
   assert.ok(
     anchor > 0 && mountIndex > anchor,
     "chart must mount after the Average cost dl",
   );
   assert.ok(
-    mountIndex < dividendsLinkIndex,
-    "chart should render before the dividends link",
+    mountIndex < explanationIndex,
+    "chart should render before the explanation",
   );
   assert.ok(source.includes("portfolioSecurityId={portfolioSecurityId}"));
 });

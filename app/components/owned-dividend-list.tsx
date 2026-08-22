@@ -223,7 +223,7 @@ export function OwnedDividendList({
                   >
                     <th scope="row">
                       <Link
-                        href={`/portfolio/${portfolioId}/securities/${row.portfolioSecurityId}/dividends`}
+                        href={`/portfolio/${portfolioId}/holdings/${row.portfolioSecurityId}/dividends`}
                       >
                         {row.symbol}
                       </Link>

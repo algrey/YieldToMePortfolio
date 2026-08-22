@@ -40,25 +40,29 @@ function renderComponent(
 // established convention) -- mirrored here.
 // ---------------------------------------------------------------------------
 
-test("UI-016/UI-023: the holding Details screen keeps a real Dividends href, styled as a visible action, not a trailing word", async () => {
+test("UI-016/UI-023C: dividends are reachable from the holding Details screen via the shared nav's Dividends tab; the old inline link is gone", async () => {
   // UI-023 replaced the owned holdings <dialog> sheet with the standalone
-  // Details screen -- there is no top-layer dialog left to close, so the
-  // link is a plain anchor again: real href (works with JS disabled), no
-  // onClick, same visible `.sheet-back` action styling.
-  const source = await readFile(
-    new URL("../app/components/holding-detail.tsx", import.meta.url),
-    "utf8",
+  // Details screen; UI-023C then promoted the per-security dividends page
+  // to the holding area's FOURTH sub-tab, so the Details screen's own
+  // "View dividends" link became redundant chrome and was removed. The
+  // reachable path is now the shared HoldingNav tab.
+  const [detail, nav] = await Promise.all([
+    readFile(
+      new URL("../app/components/holding-detail.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../app/components/holding-nav.tsx", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  assert.doesNotMatch(detail, /View dividends/);
+  assert.doesNotMatch(detail, /dialogRef/);
+  assert.match(nav, /label: "Dividends"/);
+  assert.match(
+    nav,
+    /href: \(id, sid\) => `\/portfolio\/\$\{id\}\/holdings\/\$\{sid\}\/dividends`/,
   );
-  const linkBlockMatch = source.match(
-    /<Link\s+className="sheet-back"\s+href=\{`\/portfolio\/\$\{portfolioId\}\/securities\/\$\{portfolioSecurityId\}\/dividends`\}\s*>\s*View dividends\s*<\/Link>/,
-  );
-  assert.ok(
-    linkBlockMatch,
-    "expected the Details screen's Dividends link to keep a real href and render as a visible .sheet-back action",
-  );
-  // The dialog-closing onClick guard (review follow-up c) is retired WITH
-  // the dialog -- a plain page link must not carry a stray click handler.
-  assert.doesNotMatch(source, /dialogRef/);
 });
 
 test("UI-016: the .sheet-back class used for the Dividends link is the existing 44px button-styled link, not new one-off styling", async () => {
@@ -606,11 +610,11 @@ test("UI-016: the dividends list renders per-row links to the security's own div
   const html = renderList();
   assert.match(
     html,
-    /<a href="\/portfolio\/pa\/securities\/psa1\/dividends">ALPHA<\/a>/,
+    /<a href="\/portfolio\/pa\/holdings\/psa1\/dividends">ALPHA<\/a>/,
   );
   assert.match(
     html,
-    /<a href="\/portfolio\/pa\/securities\/psa2\/dividends">BETA<\/a>/,
+    /<a href="\/portfolio\/pa\/holdings\/psa2\/dividends">BETA<\/a>/,
   );
   assert.match(html, /class="dividend-row-not-paid"/);
   assert.match(html, /class="dividend-status-not-paid"/);

@@ -1,98 +1,26 @@
-import { notFound } from "next/navigation";
-import { loadAuthenticatedWorkspace } from "../../../../../authenticated-workspace";
-import { getAuthenticatedSqlContext } from "../../../../../portfolio-actions";
-import { loadOwnedSecurityDividendDetail } from "../../../../../owned-security-dividends";
-import { SecurityDividendsTab } from "../../../../../components/security-dividends-tab";
+import { redirect } from "next/navigation";
 
-// UI-006C: the per-security Dividends tab. Owned holdings has no existing
-// per-security detail PAGE to add a tab to -- `portfolio-shell.tsx`'s
-// `holdingDetailHref` per-security route only exists on the read-only
-// prototype/preview path (`/portfolio/preview/holdings/:symbol`); the owned
-// path (`OwnedHoldingsScreen`) opens an in-place detail `<dialog>` sheet, not
-// a page. Mirrors UI-006A/UI-006B's standalone-route pattern instead
-// (`/portfolio/:id/income*`): a new owner-scoped, force-dynamic page, linked
-// from the owned holdings detail sheet (`portfolio-shell.tsx`).
+// UI-023C (owner-reported): this route was the per-security Dividends
+// screen's home (UI-006C) but sat outside the holding area's chrome -- an
+// orphan with no way back to the ticker's other views. The screen now lives
+// as the holding area's fourth sub-tab at
+// `/portfolio/:id/holdings/:portfolioSecurityId/dividends`
+// (`app/portfolio/[portfolioId]/[section]/[holdingId]/dividends/page.tsx`,
+// where all loading and owner-scoping now happens); this route survives
+// only so old links and bookmarks keep working. The redirect embeds nothing
+// but the ids already present in the requested URL, so no ownership check
+// is needed here -- the destination page enforces all of them.
 export const dynamic = "force-dynamic";
 
-type SecurityDividendsPageProps = {
+type LegacySecurityDividendsPageProps = {
   params: Promise<{ portfolioId: string; portfolioSecurityId: string }>;
 };
 
-function DividendsUnavailable({ message }: { message: string }) {
-  return (
-    <main className="income-screen">
-      <section
-        className="empty-state"
-        aria-labelledby="security-dividends-unavailable"
-      >
-        <p className="eyebrow">Dividends</p>
-        <h1 id="security-dividends-unavailable">
-          Dividend history is unavailable
-        </h1>
-        <p>{message}</p>
-      </section>
-    </main>
-  );
-}
-
-export default async function SecurityDividendsPage({
+export default async function LegacySecurityDividendsPage({
   params,
-}: SecurityDividendsPageProps) {
+}: LegacySecurityDividendsPageProps) {
   const { portfolioId, portfolioSecurityId } = await params;
-
-  const workspace = await loadAuthenticatedWorkspace(portfolioId);
-  if (workspace.status === "unavailable") {
-    return (
-      <DividendsUnavailable
-        message={
-          workspace.message ?? "The owned portfolio could not be verified."
-        }
-      />
-    );
-  }
-  if (workspace.activePortfolio === null) notFound();
-
-  const context = await getAuthenticatedSqlContext(portfolioId);
-  if (!context.ok) {
-    return (
-      <DividendsUnavailable message="Portfolio data is temporarily unavailable." />
-    );
-  }
-
-  let detail: Awaited<ReturnType<typeof loadOwnedSecurityDividendDetail>>;
-  try {
-    detail = await loadOwnedSecurityDividendDetail(
-      context.client,
-      context.userId,
-      portfolioId,
-      portfolioSecurityId,
-      new Date(),
-    );
-  } catch (error) {
-    if (error instanceof Error && error.message === "not_found") notFound();
-    return (
-      <DividendsUnavailable message="This security's dividend history could not be loaded." />
-    );
-  }
-
-  return (
-    <SecurityDividendsTab
-      portfolioId={portfolioId}
-      portfolioSecurityId={detail.portfolioSecurityId}
-      symbol={detail.symbol}
-      currencyCode={detail.currencyCode}
-      today={detail.today}
-      rows={detail.rows}
-      filteredArtifactCount={detail.filteredArtifactCount}
-      lifetimeTotals={detail.lifetimeTotals}
-      overridesByEventId={detail.overridesByEventId}
-      manualRecordsById={detail.manualRecordsById}
-      frankingOverridesByManualRecordId={
-        detail.frankingOverridesByManualRecordId
-      }
-      assumptions={detail.assumptions}
-      portfolioAssumptions={detail.portfolioAssumptions}
-      holdingsHref={`/portfolio/${portfolioId}/holdings`}
-    />
+  redirect(
+    `/portfolio/${portfolioId}/holdings/${portfolioSecurityId}/dividends`,
   );
 }

@@ -305,7 +305,7 @@ function renderDetail(overrides: Record<string, unknown> = {}) {
   );
 }
 
-test("UI-023: the Details screen renders the sheet's facts (quantity, price, value, signed gain/percents, average cost) and the dividends link", () => {
+test("UI-023: the Details screen renders the sheet's facts (quantity, price, value, signed gain/percents, average cost) and the Dividends sub-tab", () => {
   const html = renderDetail();
   assert.match(html, /aria-current="page">Details<\/span>/);
   assert.match(html, /Quantity/);
@@ -318,7 +318,7 @@ test("UI-023: the Details screen renders the sheet's facts (quantity, price, val
   assert.match(html, /USD 1\.965 × 1,000\.0000/);
   assert.match(
     html,
-    /href="\/portfolio\/portfolio-a\/securities\/holding-pls\/dividends"/,
+    /href="\/portfolio\/portfolio-a\/holdings\/holding-pls\/dividends"/,
   );
   // Foreign-currency holding in an AUD workspace → the display-values
   // select is offered, exactly as the old sheet did.
@@ -331,7 +331,7 @@ test("UI-023: a holding with no published valuation renders an honest unavailabl
   assert.doesNotMatch(html, /AUD 0\.00/);
   assert.match(
     html,
-    /href="\/portfolio\/portfolio-a\/securities\/holding-pls\/dividends"/,
+    /href="\/portfolio\/portfolio-a\/holdings\/holding-pls\/dividends"/,
   );
 });
 
@@ -352,8 +352,8 @@ test("UI-023: owned holdings rows are real links to the standalone detail route;
   assert.doesNotMatch(shell, /aria-haspopup="dialog"/);
 });
 
-test("UI-023: all three holding pages are force-dynamic, owner-guarded, and reject non-holdings sections; the tab pages reject the preview fixture", async () => {
-  const [details, transactions, news] = await Promise.all([
+test("UI-023: all four holding pages are force-dynamic, owner-guarded, and reject non-holdings sections; the tab pages reject the preview fixture", async () => {
+  const [details, transactions, news, dividends] = await Promise.all([
     readFile(
       new URL(
         "../app/portfolio/[portfolioId]/[section]/[holdingId]/page.tsx",
@@ -375,14 +375,21 @@ test("UI-023: all three holding pages are force-dynamic, owner-guarded, and reje
       ),
       "utf8",
     ),
+    readFile(
+      new URL(
+        "../app/portfolio/[portfolioId]/[section]/[holdingId]/dividends/page.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
   ]);
-  for (const source of [details, transactions, news]) {
+  for (const source of [details, transactions, news, dividends]) {
     assert.match(source, /export const dynamic = "force-dynamic";/);
     assert.match(source, /loadAuthenticatedWorkspace/);
     assert.match(source, /loadOwnedHoldingIdentity/);
     assert.match(source, /section !== "holdings"/);
   }
-  for (const source of [transactions, news]) {
+  for (const source of [transactions, news, dividends]) {
     assert.match(source, /portfolioId === "preview"/);
   }
 });
@@ -434,7 +441,7 @@ test("UI-023: HoldingNav and IncomeNav both render through the single shared Sub
     assert.match(source, /import { SubNav } from ".\/sub-nav"/);
     assert.match(source, /<SubNav/);
   }
-  for (const label of ["News", "Details", "Transactions"]) {
+  for (const label of ["News", "Details", "Transactions", "Dividends"]) {
     assert.match(holdingNav, new RegExp(`label: "${label}"`));
   }
 });

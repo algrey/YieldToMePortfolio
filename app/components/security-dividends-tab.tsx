@@ -1,14 +1,16 @@
 "use client";
 
-// UI-006C: the per-security "Dividends" tab
-// (`/portfolio/:id/securities/:portfolioSecurityId/dividends`). Reuses
+// UI-006C: the per-security "Dividends" tab -- since UI-023C the holding
+// area's fourth sub-tab (`/portfolio/:id/holdings/:portfolioSecurityId/
+// dividends`; the old `/securities/:sid/dividends` route redirects there).
+// Reuses
 // UI-006B's `RecordDividendDialog` unchanged for both "+ Record dividend"
 // and every history row's click-to-edit/override entry point -- this file's
 // job is presenting DIV-001's already-derived rows/lifetime totals in a
 // scrollable table (mirroring `income-multi-year.tsx`'s `.income-fy-table`
 // pattern) and computing each row's correct dialog PRE-FILL (see
 // `buildDialogPrefill` below).
-import Link from "next/link";
+import { HoldingNav } from "./holding-nav";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import type {
@@ -66,7 +68,7 @@ export function SecurityDividendsTab({
   frankingOverridesByManualRecordId,
   assumptions,
   portfolioAssumptions,
-  holdingsHref,
+  subtitle,
 }: {
   portfolioId: string;
   portfolioSecurityId: string;
@@ -101,7 +103,8 @@ export function SecurityDividendsTab({
     portfolioDividendGrowthPercentDecimal: string | null;
     version: number | null;
   };
-  holdingsHref: string;
+  /** UI-023C: muted identity line for the holding-area heading. */
+  subtitle: string;
 }) {
   const router = useRouter();
   const [recordDialogOpen, setRecordDialogOpen] = useState(false);
@@ -394,12 +397,18 @@ export function SecurityDividendsTab({
   }
 
   return (
-    <main className="income-screen">
-      <p className="eyebrow">Dividends</p>
-      <h1>{symbol}</h1>
-      <p className="income-subtitle">
-        <Link href={holdingsHref}>Back to holdings</Link>
-      </p>
+    <main className="income-screen holding-screen">
+      {/* UI-023C: this screen is the holding area's fourth sub-tab, so it
+          renders the SAME shared chrome as News/Details/Transactions --
+          back control plus the four tabs -- instead of its own heading and
+          "Back to holdings" text link. */}
+      <HoldingNav
+        portfolioId={portfolioId}
+        portfolioSecurityId={portfolioSecurityId}
+        symbol={symbol}
+        subtitle={subtitle}
+        active="dividends"
+      />
 
       <div className="dividend-assumptions-actions">
         <button type="button" onClick={openFreshRecordDialog}>

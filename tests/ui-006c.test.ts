@@ -736,20 +736,41 @@ test("UI-006C: the refresh route rejects cross-site requests before reading para
   );
 });
 
+// UI-023C moved the page to the holding area's fourth sub-tab; the title
+// below is kept verbatim (the QA-001A matrix cites it literally) -- the
+// page still loads owner-scoped and force-dynamic, just at its new path,
+// and the old path survives only as a data-free redirect.
 test("UI-006C: the security dividends page loads via the owner-scoped context and is force-dynamic", async () => {
-  const page = await readFile(
-    new URL(
-      "../app/portfolio/[portfolioId]/securities/[portfolioSecurityId]/dividends/page.tsx",
-      import.meta.url,
+  const [page, legacy] = await Promise.all([
+    readFile(
+      new URL(
+        "../app/portfolio/[portfolioId]/[section]/[holdingId]/dividends/page.tsx",
+        import.meta.url,
+      ),
+      "utf8",
     ),
-    "utf8",
-  );
+    readFile(
+      new URL(
+        "../app/portfolio/[portfolioId]/securities/[portfolioSecurityId]/dividends/page.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ]);
   assert.match(page, /export const dynamic = "force-dynamic"/);
   assert.match(page, /loadAuthenticatedWorkspace\(portfolioId\)/);
   assert.match(page, /getAuthenticatedSqlContext\(portfolioId\)/);
   assert.match(page, /loadOwnedSecurityDividendDetail\(/);
   assert.match(page, /workspace\.activePortfolio === null\) notFound\(\)/);
   assert.match(page, /error\.message === "not_found"\) notFound\(\)/);
+  // The legacy route keeps old links/bookmarks working but holds NO data
+  // loading of its own -- everything owner-scoped happens at the new page.
+  assert.match(
+    legacy,
+    /redirect\(\s*`\/portfolio\/\$\{portfolioId\}\/holdings\/\$\{portfolioSecurityId\}\/dividends`,?\s*\)/,
+  );
+  assert.doesNotMatch(legacy, /loadOwnedSecurityDividendDetail/);
+  assert.doesNotMatch(legacy, /getSqlClient|SqlClient/);
 });
 
 test("UI-006C: the QA-001A matrix records the new refresh route and the security dividends page", async () => {
@@ -984,7 +1005,7 @@ const baseTabProps = {
     portfolioDividendGrowthPercentDecimal: null,
     version: null,
   },
-  holdingsHref: "/portfolio/pa/holdings",
+  subtitle: "Alpha Fixture · XASX · AUD",
 };
 
 test("UI-006C: the dividends tab renders every source label including imported, plus 'not paid' text and a distinct styling class", () => {

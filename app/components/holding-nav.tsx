@@ -5,7 +5,7 @@
 // exactly so the two sub-areas cannot drift apart.
 import { SubNav } from "./sub-nav";
 
-export type HoldingView = "news" | "details" | "transactions";
+export type HoldingView = "news" | "details" | "transactions" | "dividends";
 
 const HOLDING_VIEWS: readonly {
   key: HoldingView;
@@ -27,6 +27,15 @@ const HOLDING_VIEWS: readonly {
     key: "transactions",
     label: "Transactions",
     href: (id, sid) => `/portfolio/${id}/holdings/${sid}/transactions`,
+  },
+  {
+    // UI-023C (owner-reported): the per-security dividends page was an
+    // orphan -- reachable from Details/dividend lists but stranded outside
+    // the holding area's chrome. It is now this fourth sub-tab; the old
+    // `/securities/:sid/dividends` route redirects here.
+    key: "dividends",
+    label: "Dividends",
+    href: (id, sid) => `/portfolio/${id}/holdings/${sid}/dividends`,
   },
 ];
 

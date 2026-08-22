@@ -8,7 +8,6 @@
 // Dividends link are carried over from that sheet verbatim in behaviour:
 // unknown money renders its specific unavailable text, never zero, via the
 // shared `owned-holding-format` helpers the holdings list itself uses.
-import Link from "next/link";
 import { useState } from "react";
 import type { OwnedHoldingRow } from "../owned-holdings-contract";
 import {
@@ -168,14 +167,6 @@ export function HoldingDetailScreen({
       {holding ? (
         <p className="detail-explanation">{holding.explanation}</p>
       ) : null}
-      <p>
-        <Link
-          className="sheet-back"
-          href={`/portfolio/${portfolioId}/securities/${portfolioSecurityId}/dividends`}
-        >
-          View dividends
-        </Link>
-      </p>
     </main>
   );
 }
