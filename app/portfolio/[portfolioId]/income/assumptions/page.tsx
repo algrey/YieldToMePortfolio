@@ -85,6 +85,7 @@ export default async function DividendAssumptionsPage({
   return (
     <DividendAssumptionsEditor
       portfolioId={portfolioId}
+      baseCurrencyCode={workspace.activePortfolio.baseCurrencyCode}
       today={assumptions.today}
       securities={assumptions.securities}
       portfolio={assumptions.portfolio}

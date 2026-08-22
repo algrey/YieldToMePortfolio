@@ -112,17 +112,17 @@ function AllocationRow({
       <td>{row.disposedDate}</td>
       <td className="numeric">{formatQuantity(row.quantityDecimal)}</td>
       <td className="numeric">
-        {formatIncomeMoney(currencyCode, row.proceedsDecimal, {
+        {formatIncomeMoney(currencyCode, currencyCode, row.proceedsDecimal, {
           unavailableLabel: "Unknown",
         })}
       </td>
       <td className="numeric">
-        {formatIncomeMoney(currencyCode, row.basisDecimal, {
+        {formatIncomeMoney(currencyCode, currencyCode, row.basisDecimal, {
           unavailableLabel: "Unknown",
         })}
       </td>
       <td className="numeric">
-        {formatIncomeMoney(currencyCode, row.feeDecimal, {
+        {formatIncomeMoney(currencyCode, currencyCode, row.feeDecimal, {
           unavailableLabel: "Unknown",
         })}
       </td>
@@ -135,7 +135,7 @@ function AllocationRow({
               : "numeric tone-positive"
         }
       >
-        {formatIncomeMoney(currencyCode, gainStatus, {
+        {formatIncomeMoney(currencyCode, currencyCode, gainStatus, {
           signed: true,
           unavailableLabel: "Unknown",
         })}
@@ -201,6 +201,7 @@ export function FyDetailDialog({
           <dd>
             {formatIncomeMoney(
               currencyCode,
+              currencyCode,
               fy.totalDiscountableGainsGrossDecimal,
             )}
           </dd>
@@ -210,18 +211,26 @@ export function FyDetailDialog({
           <dd>
             {formatIncomeMoney(
               currencyCode,
+              currencyCode,
               fy.totalNonDiscountableGainsGrossDecimal,
             )}
           </dd>
         </div>
         <div>
           <dt>Losses</dt>
-          <dd>{formatIncomeMoney(currencyCode, fy.totalLossesDecimal)}</dd>
+          <dd>
+            {formatIncomeMoney(
+              currencyCode,
+              currencyCode,
+              fy.totalLossesDecimal,
+            )}
+          </dd>
         </div>
         <div>
           <dt>Loss applied to non-discountable</dt>
           <dd>
             {formatIncomeMoney(
+              currencyCode,
               currencyCode,
               fy.lossAppliedToNonDiscountableDecimal,
             )}
@@ -232,18 +241,29 @@ export function FyDetailDialog({
           <dd>
             {formatIncomeMoney(
               currencyCode,
+              currencyCode,
               fy.lossAppliedToDiscountableDecimal,
             )}
           </dd>
         </div>
         <div>
           <dt>Discount applied ({fy.discountRateDecimal})</dt>
-          <dd>{formatIncomeMoney(currencyCode, fy.discountAppliedDecimal)}</dd>
+          <dd>
+            {formatIncomeMoney(
+              currencyCode,
+              currencyCode,
+              fy.discountAppliedDecimal,
+            )}
+          </dd>
         </div>
         <div>
           <dt>Net capital gain estimate (standalone)</dt>
           <dd>
-            {formatIncomeMoney(currencyCode, fy.netCapitalGainEstimateDecimal)}
+            {formatIncomeMoney(
+              currencyCode,
+              currencyCode,
+              fy.netCapitalGainEstimateDecimal,
+            )}
           </dd>
         </div>
       </dl>
@@ -256,7 +276,12 @@ export function FyDetailDialog({
       {hasUnabsorbedLoss ? (
         <p className="unavailable" role="status">
           Unabsorbed loss this year (standalone):{" "}
-          {formatIncomeMoney(currencyCode, fy.unabsorbedLossDecimal)}.
+          {formatIncomeMoney(
+            currencyCode,
+            currencyCode,
+            fy.unabsorbedLossDecimal,
+          )}
+          .
         </p>
       ) : null}
 
@@ -268,19 +293,28 @@ export function FyDetailDialog({
             <div>
               <dt>Brought forward</dt>
               <dd>
-                {formatIncomeMoney(currencyCode, carried.carryInLossDecimal)}
+                {formatIncomeMoney(
+                  currencyCode,
+                  currencyCode,
+                  carried.carryInLossDecimal,
+                )}
               </dd>
             </div>
             <div>
               <dt>Applied this FY</dt>
               <dd>
-                {formatIncomeMoney(currencyCode, carried.carryInAppliedDecimal)}
+                {formatIncomeMoney(
+                  currencyCode,
+                  currencyCode,
+                  carried.carryInAppliedDecimal,
+                )}
               </dd>
             </div>
             <div>
               <dt>Net capital gain estimate (carried, true)</dt>
               <dd>
                 {formatIncomeMoney(
+                  currencyCode,
                   currencyCode,
                   carried.netCapitalGainEstimateDecimal,
                 )}
@@ -289,7 +323,11 @@ export function FyDetailDialog({
             <div>
               <dt>Carried out to next FY</dt>
               <dd>
-                {formatIncomeMoney(currencyCode, carried.carryOutLossDecimal)}
+                {formatIncomeMoney(
+                  currencyCode,
+                  currencyCode,
+                  carried.carryOutLossDecimal,
+                )}
               </dd>
             </div>
           </dl>
@@ -531,17 +569,20 @@ export function CapitalGainsScreen({
                   <td className="numeric">
                     {formatIncomeMoney(
                       history.baseCurrencyCode,
+                      history.baseCurrencyCode,
                       fy.totalDiscountableGainsGrossDecimal,
                     )}
                   </td>
                   <td className="numeric">
                     {formatIncomeMoney(
                       history.baseCurrencyCode,
+                      history.baseCurrencyCode,
                       fy.totalNonDiscountableGainsGrossDecimal,
                     )}
                   </td>
                   <td className="numeric">
                     {formatIncomeMoney(
+                      history.baseCurrencyCode,
                       history.baseCurrencyCode,
                       fy.totalLossesDecimal,
                     )}
@@ -552,6 +593,7 @@ export function CapitalGainsScreen({
                           ·{" "}
                           {formatIncomeMoney(
                             history.baseCurrencyCode,
+                            history.baseCurrencyCode,
                             fy.unabsorbedLossDecimal,
                           )}{" "}
                           unabsorbed (standalone)
@@ -561,6 +603,7 @@ export function CapitalGainsScreen({
                   </td>
                   <td className="numeric">
                     {formatIncomeMoney(
+                      history.baseCurrencyCode,
                       history.baseCurrencyCode,
                       carried?.netCapitalGainEstimateDecimal ??
                         fy.netCapitalGainEstimateDecimal,
@@ -584,6 +627,7 @@ export function CapitalGainsScreen({
                   <td className="numeric">
                     {formatIncomeMoney(
                       history.baseCurrencyCode,
+                      history.baseCurrencyCode,
                       carried?.carryInLossDecimal ?? "0",
                     )}
                     {tainted ? <span className="unavailable"> *</span> : null}
@@ -591,12 +635,14 @@ export function CapitalGainsScreen({
                   <td className="numeric">
                     {formatIncomeMoney(
                       history.baseCurrencyCode,
+                      history.baseCurrencyCode,
                       carried?.carryInAppliedDecimal ?? "0",
                     )}
                     {tainted ? <span className="unavailable"> *</span> : null}
                   </td>
                   <td className="numeric">
                     {formatIncomeMoney(
+                      history.baseCurrencyCode,
                       history.baseCurrencyCode,
                       carried?.carryOutLossDecimal ?? "0",
                     )}
@@ -617,11 +663,25 @@ export function CapitalGainsScreen({
         </p>
       ) : null}
 
+      {/* UI-026 (B2, Orchestrator ruling): every figure on this screen --
+          the FY table above and the lifetime totals below -- is the
+          portfolio's own base currency (CGT is always computed and
+          reported in it, never a security's native currency), so this ONE
+          screen-level statement covers every bare "$"-style figure on the
+          page, mirroring portfolio-shell.tsx's "{homeCurrencyCode}
+          reporting values" precedent. This is the tax screen, where
+          precision matters most. */}
+      <p className="income-assumption-summary">
+        <strong>{history.baseCurrencyCode} reporting values</strong> -- every
+        figure on this screen is this portfolio&apos;s base currency.
+      </p>
+
       <dl className="income-metric-list" aria-label="Lifetime capital gains">
         <div className="income-metric-row">
           <dt>Lifetime discountable gains</dt>
           <dd>
             {formatIncomeMoney(
+              history.baseCurrencyCode,
               history.baseCurrencyCode,
               lifetime.totalDiscountableGainsGrossDecimal,
             )}
@@ -632,6 +692,7 @@ export function CapitalGainsScreen({
           <dd>
             {formatIncomeMoney(
               history.baseCurrencyCode,
+              history.baseCurrencyCode,
               lifetime.totalNonDiscountableGainsGrossDecimal,
             )}
           </dd>
@@ -640,6 +701,7 @@ export function CapitalGainsScreen({
           <dt>Lifetime losses</dt>
           <dd>
             {formatIncomeMoney(
+              history.baseCurrencyCode,
               history.baseCurrencyCode,
               lifetime.totalLossesDecimal,
             )}
@@ -662,6 +724,7 @@ export function CapitalGainsScreen({
                 ·{" "}
                 {formatIncomeMoney(
                   history.baseCurrencyCode,
+                  history.baseCurrencyCode,
                   carryChain.finalCarryOutLossDecimal,
                 )}{" "}
                 still carrying forward
@@ -674,6 +737,7 @@ export function CapitalGainsScreen({
           <dt>Lifetime net capital gain estimate (true, carried)</dt>
           <dd>
             {formatIncomeMoney(
+              history.baseCurrencyCode,
               history.baseCurrencyCode,
               carryChain.lifetimeNetCapitalGainEstimateDecimal,
             )}

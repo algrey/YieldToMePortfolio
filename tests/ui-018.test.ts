@@ -1034,6 +1034,7 @@ const CHART_COMPONENT_PATH = "../app/components/holding-price-chart.tsx";
 test("UI-018: PriceHistoryChartView renders all eight range buttons with the right labels, in order", () => {
   const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
     symbol: "FMG",
+    baseCurrencyCode: "AUD",
     range: "year",
     state: { status: "loading" },
     onRangeChange: () => {},
@@ -1061,6 +1062,7 @@ test("UI-018: PriceHistoryChartView renders all eight range buttons with the rig
 test("UI-018: PriceHistoryChartView marks the active range with aria-pressed (text-not-color state)", () => {
   const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
     symbol: "FMG",
+    baseCurrencyCode: "AUD",
     range: "5y",
     state: { status: "loading" },
     onRangeChange: () => {},
@@ -1072,6 +1074,7 @@ test("UI-018: PriceHistoryChartView marks the active range with aria-pressed (te
 test("UI-018: PriceHistoryChartView is aria-busy while loading and shows a loading message", () => {
   const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
     symbol: "FMG",
+    baseCurrencyCode: "AUD",
     range: "year",
     state: { status: "loading" },
     onRangeChange: () => {},
@@ -1083,6 +1086,7 @@ test("UI-018: PriceHistoryChartView is aria-busy while loading and shows a loadi
 test("UI-018: PriceHistoryChartView renders an honest empty state for a loaded-but-empty series", () => {
   const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
     symbol: "FMG",
+    baseCurrencyCode: "AUD",
     range: "ytd",
     state: {
       status: "loaded",
@@ -1110,6 +1114,7 @@ test("UI-018: PriceHistoryChartView renders an honest empty state for a loaded-b
 test("UI-018: PriceHistoryChartView renders the error state's message", () => {
   const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
     symbol: "FMG",
+    baseCurrencyCode: "AUD",
     range: "year",
     state: { status: "error", message: "Price history could not be loaded." },
     onRangeChange: () => {},
@@ -1120,6 +1125,7 @@ test("UI-018: PriceHistoryChartView renders the error state's message", () => {
 
 const ALL_RANGE_LOADED_PROPS = {
   symbol: "FMG",
+  baseCurrencyCode: "AUD",
   range: "all",
   state: {
     status: "loaded",
@@ -1184,7 +1190,7 @@ test("UI-018: PriceHistoryChartView renders provenance (date range, point count,
   assert.ok(html.includes("Delayed (Sharesight)"));
 });
 
-test("UI-018 (review round-1 fix, B1): PriceHistoryChartView shows the resolved currency code next to the price axis and the SVG's accessible label", () => {
+test("UI-018 (review round-1 fix, B1): PriceHistoryChartView labels the price axis, and the SVG's accessible label always keeps the full ISO currency code", () => {
   const html = renderComponent(
     "PriceHistoryChartView",
     CHART_COMPONENT_PATH,
@@ -1195,11 +1201,52 @@ test("UI-018 (review round-1 fix, B1): PriceHistoryChartView shows the resolved 
     html,
   );
   assert.ok(axisMatch, "axis block must render");
+  // UI-026: ALL_RANGE_LOADED_PROPS' security (AUD) matches its base
+  // currency (AUD, threaded via `baseCurrencyCode`) -- the axis now renders
+  // the bare base symbol, not a "no currency shown anywhere" code prefix
+  // (that was the ORIGINAL B1 complaint this test pins; UI-026 sweep tests
+  // below cover the foreign/flagged case, where the code genuinely still
+  // shows).
   assert.ok(
-    axisMatch![1]!.includes("AUD"),
-    "axis prices must be labelled with the currency code -- no currency shown anywhere was the B1 complaint",
+    axisMatch![1]!.includes("$"),
+    "axis prices must render the base-currency symbol",
   );
+  assert.ok(
+    !axisMatch![1]!.includes("AUD"),
+    "a base-currency axis price must never show the bare 'AUD' code prefix once a '$' symbol is available for it",
+  );
+  // The SVG's own accessible label is a prose sentence ("price history in
+  // AUD"), not the compact money-symbol convention -- it deliberately KEEPS
+  // the full ISO code for accessibility/precision (UI-026 ruling), same as
+  // this chart's <title> and provenance-line text.
   assert.ok(html.includes("price history in AUD"));
+});
+
+test("UI-026 sweep: PriceHistoryChartView's axis flags a USD security's price against an AUD-base portfolio, never a bare 'AUD <amount>' or a stripped '$'", () => {
+  const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
+    ...ALL_RANGE_LOADED_PROPS,
+    baseCurrencyCode: "AUD",
+    state: {
+      ...ALL_RANGE_LOADED_PROPS.state,
+      currencyCode: "USD",
+    },
+  });
+  const axisMatch = /<div class="price-history-axis">([\s\S]*?)<\/div>/.exec(
+    html,
+  );
+  assert.ok(axisMatch, "axis block must render");
+  assert.ok(
+    axisMatch![1]!.includes("US$"),
+    "a foreign (USD) axis price must render the flagged US$ prefix",
+  );
+  assert.ok(
+    !/AUD [\d,\-+−]/.test(axisMatch![1]!),
+    "the axis must never render the old bare 'AUD <amount>' code-prefix form",
+  );
+  assert.ok(
+    !/(?<!US)\$/.test(axisMatch![1]!),
+    "a foreign amount must never be stripped down to a bare, unflagged '$' -- every '$' on this axis must be part of 'US$'",
+  );
 });
 
 test("UI-018 (review round-1 fix, B1/F4): excluded off-currency and malformed row counts are disclosed in the rendered coverage line", () => {
@@ -1237,6 +1284,7 @@ test("UI-018 (review round-2 fix, BLOCKING): a downsampled (bucketSize>1) gap se
 test("UI-018 (review round-2 fix): an UNDOWNSAMPLED (bucketSize=1) gap segment keeps the 'No observations between' title", () => {
   const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
     symbol: "FMG",
+    baseCurrencyCode: "AUD",
     range: "day",
     state: {
       status: "loaded",
@@ -1279,6 +1327,7 @@ test("UI-018 (review round-2 fix): an UNDOWNSAMPLED (bucketSize=1) gap segment k
 test("UI-018 (review round-1 fix, F2): the delayed-quote label is DERIVED from providerId, never hardcoded to Sharesight", () => {
   const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
     symbol: "FMG",
+    baseCurrencyCode: "AUD",
     range: "year",
     state: {
       status: "loaded",
@@ -1323,6 +1372,7 @@ test("UI-018 (review round-1 fix, F2): the delayed-quote label is DERIVED from p
 test("UI-018: PriceHistoryChartView discloses an invalid-range fallback honestly", () => {
   const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
     symbol: "FMG",
+    baseCurrencyCode: "AUD",
     range: "year",
     state: {
       status: "loaded",
@@ -1694,6 +1744,7 @@ test("MKT-011B review follow-up F6: a malformed intraday price row is excluded f
 
 const TODAY_OVERLAY_LOADED_PROPS = {
   symbol: "FMG",
+  baseCurrencyCode: "AUD",
   range: "week",
   state: {
     status: "loaded",
@@ -1777,6 +1828,7 @@ test("MKT-011B: PriceHistoryChartView renders NO intraday overlay when today's s
 test("MKT-011B (review round-1 fix, B1, BLOCKING): PriceHistoryChartView discloses today's exclusion counts even when EVERY intraday tick was excluded -- an all-excluded day must NOT render pixel-identical to 'nothing captured today'", () => {
   const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
     symbol: "FMG",
+    baseCurrencyCode: "AUD",
     range: "week",
     state: {
       status: "loaded",
@@ -2084,6 +2136,7 @@ const DAY_RANGE_TODAY_POINTS = [
 function todayOnlyChartProps(range: string, todayPoints: unknown[]) {
   return {
     symbol: "FMG",
+    baseCurrencyCode: "AUD",
     range,
     state: {
       status: "loaded",
@@ -2197,6 +2250,7 @@ test("MKT-011C: a 'corrected' tick gets its own textual caveat but keeps the ORD
 test("MKT-011C: on the WEEK range, today's intraday ticks are spread within today's OWN calendar-day column, narrower than the full plot width and never bleeding into a neighbouring day", () => {
   const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
     symbol: "FMG",
+    baseCurrencyCode: "AUD",
     range: "week",
     state: {
       status: "loaded",
@@ -2279,6 +2333,7 @@ test("MKT-011C review round-1 fix (F1, BLOCKING): on the WEEK range, when the co
 test("MKT-011C review round-1 fix (F2, BLOCKING): the DAY range's historical 'previous close' context point renders with its OWN accessible title (naming its date) and lands visibly separate from the window-open tick, never pixel-identical to it", () => {
   const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
     symbol: "FMG",
+    baseCurrencyCode: "AUD",
     range: "day",
     state: {
       status: "loaded",
@@ -2351,6 +2406,7 @@ test("MKT-011C: a today-only chart (no settled historical points in this range) 
 test("MKT-011C: the price axis attributes a min/max that came from TODAY's intraday overlay rather than the historical series", () => {
   const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
     symbol: "FMG",
+    baseCurrencyCode: "AUD",
     range: "day",
     state: {
       status: "loaded",
@@ -2392,6 +2448,7 @@ test("MKT-011C: the price axis attributes a min/max that came from TODAY's intra
 test("MKT-011C: the latest-delayed summary line now carries a market-local TIME (from the plumbed-through observedAt), disambiguating it from the same-date Today line", () => {
   const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
     symbol: "FMG",
+    baseCurrencyCode: "AUD",
     range: "week",
     state: {
       status: "loaded",

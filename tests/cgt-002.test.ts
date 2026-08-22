@@ -540,10 +540,10 @@ test("CGT-002 screen: the FY table gains 'Brought forward'/'Applied this FY'/'Ca
   assert.match(html, /Carried out/);
   // FY24's carried net (400), not its standalone net (500) -- the
   // discriminating value from the domain-level fixture above.
-  assert.match(html, /AUD 400\.00/);
-  assert.doesNotMatch(html, /AUD 500\.00/);
+  assert.match(html, /\$400\.00/);
+  assert.doesNotMatch(html, /\$500\.00/);
   // FY24 brought forward 200, applied 200, carried out 0.
-  assert.match(html, /AUD 200\.00/);
+  assert.match(html, /\$200\.00/);
 });
 
 test("CGT-002 screen: the lifetime line is relabelled to the TRUE, carried whole-period net, not the old standalone-sum wording", () => {
@@ -551,7 +551,7 @@ test("CGT-002 screen: the lifetime line is relabelled to the TRUE, carried whole
   assert.match(html, /Lifetime net capital gain estimate \(true, carried\)/);
   assert.doesNotMatch(html, /sum of each year, standalone/);
   // Lifetime true net = FY23's carried 0 + FY24's carried 400 = 400.
-  assert.match(html, /AUD 400\.00<\/dd>/);
+  assert.match(html, /\$400\.00<\/dd>/);
 });
 
 // Reviewer fix (round 1 BLOCKING): the "Lifetime losses" row (inside the
@@ -581,7 +581,7 @@ test("CGT-002 screen: a loss fully absorbed by a later FY's carry-in renders NO 
   assert.doesNotMatch(summary, /unabsorbed/);
   assert.doesNotMatch(summary, /still carrying forward/i);
   // The lifetime net line is unaffected by this fix -- still the carried 400.
-  assert.match(summary, /AUD 400\.00<\/dd>/);
+  assert.match(summary, /\$400\.00<\/dd>/);
 });
 
 test("CGT-002 screen: complete history renders no incomplete-history disclosure and no '*' taint marker", () => {
@@ -628,9 +628,9 @@ test("CGT-002 screen: the per-FY detail dialog shows BOTH the standalone figures
   assert.match(html, /Carried \(with prior-year losses applied\)/);
   // Standalone net (500) and carried net (400) both appear, distinctly.
   assert.match(html, /Net capital gain estimate \(standalone\)/);
-  assert.match(html, /AUD 500\.00/);
+  assert.match(html, /\$500\.00/);
   assert.match(html, /Net capital gain estimate \(carried, true\)/);
-  assert.match(html, /AUD 400\.00/);
+  assert.match(html, /\$400\.00/);
   assert.match(html, /Brought forward/);
   assert.match(html, /Carried out to next FY/);
   assert.ok(html.includes(CGT_CARRY_FORWARD_NOTE));

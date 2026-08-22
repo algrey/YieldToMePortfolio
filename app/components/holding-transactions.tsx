@@ -15,6 +15,7 @@ import {
   ownedHoldingDecimal,
   ownedHoldingTrimmed,
 } from "../owned-holding-format";
+import { currencyDisplayPrefix } from "../currency-display.ts";
 import { HoldingNav } from "./holding-nav";
 
 // Literal labels for the ledger's closed type/status enums
@@ -46,6 +47,7 @@ export function HoldingTransactionsScreen({
   portfolioSecurityId,
   symbol,
   subtitle,
+  baseCurrencyCode,
   rows,
   truncated,
   totalCount,
@@ -54,6 +56,11 @@ export function HoldingTransactionsScreen({
   portfolioSecurityId: string;
   symbol: string;
   subtitle: string;
+  /** UI-026: the active portfolio's own base currency -- money renders as a
+   * bare symbol when a transaction's own currency matches this (native
+   * ledger transactions can be in a different currency), flagged
+   * otherwise. */
+  baseCurrencyCode: string;
   rows: readonly OwnedHoldingTransactionRow[];
   truncated: boolean;
   totalCount: number;
@@ -111,10 +118,10 @@ export function HoldingTransactionsScreen({
               rows.map((row) => {
                 const costsNote = [
                   isNonZeroDecimal(row.feeAmountDecimal)
-                    ? `fees ${formatIncomeMoney(row.currencyCode, row.feeAmountDecimal)}`
+                    ? `fees ${formatIncomeMoney(row.currencyCode, baseCurrencyCode, row.feeAmountDecimal)}`
                     : null,
                   isNonZeroDecimal(row.taxAmountDecimal)
-                    ? `tax ${formatIncomeMoney(row.currencyCode, row.taxAmountDecimal)}`
+                    ? `tax ${formatIncomeMoney(row.currencyCode, baseCurrencyCode, row.taxAmountDecimal)}`
                     : null,
                 ]
                   .filter(Boolean)
@@ -136,11 +143,12 @@ export function HoldingTransactionsScreen({
                     <td className="numeric">
                       {row.unitPriceDecimal === null
                         ? "—"
-                        : `${row.currencyCode} ${ownedHoldingTrimmed(row.unitPriceDecimal)}`}
+                        : `${currencyDisplayPrefix(row.currencyCode, baseCurrencyCode)}${ownedHoldingTrimmed(row.unitPriceDecimal)}`}
                     </td>
                     <td className="numeric">
                       {formatIncomeMoney(
                         row.currencyCode,
+                        baseCurrencyCode,
                         row.grossAmountDecimal,
                       )}
                       {costsNote ? (

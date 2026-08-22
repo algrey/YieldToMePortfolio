@@ -12,6 +12,7 @@ import {
 } from "./preview-decimal";
 import { isZero, parseDecimalResult } from "../domain/calculations/index.ts";
 import type { OwnedHoldingRow } from "./owned-holdings-contract";
+import { currencyDisplayPrefix } from "./currency-display.ts";
 
 // Gain/movement figures must carry an explicit +/− sign so the direction
 // does not depend on colour alone (UI_SPEC §10, QUAL-001). Negative values
@@ -68,7 +69,13 @@ export function ownedHoldingUnavailableText(reason: string | null | undefined) {
   return "unavailable";
 }
 
+// UI-026: `value.currencyCode` can legitimately be the active portfolio's
+// base currency (home-view figures, gain/movement, basis) OR a security's
+// native currency (native-view figures) -- `baseCurrencyCode` is required
+// so every call site states which portfolio it is comparing against,
+// rather than this shared helper guessing.
 export function ownedHoldingAmount(
+  baseCurrencyCode: string,
   value: {
     status: "available" | "unavailable";
     currencyCode: string;
@@ -87,7 +94,7 @@ export function ownedHoldingAmount(
       ),
       signed,
     );
-    return `${value.currencyCode} ${formatted}`;
+    return `${currencyDisplayPrefix(value.currencyCode, baseCurrencyCode)}${formatted}`;
   } catch {
     return ownedHoldingUnavailableText(value.reason);
   }

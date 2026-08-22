@@ -247,9 +247,9 @@ test("CGT-001B: a discount landing on an exact half-cent rounds the same way eve
   // documented display-rounding decision (capital-gains-screen.tsx header
   // comment / CALCULATIONS.md section 14): no CGT-specific rounding
   // convention is introduced.
-  assert.equal(formatIncomeMoney("AUD", "50.505"), "AUD 50.50");
+  assert.equal(formatIncomeMoney("AUD", "AUD", "50.505"), "$50.50");
   // 1 is odd -- rounds UP to the even 2.
-  assert.equal(formatIncomeMoney("AUD", "50.515"), "AUD 50.52");
+  assert.equal(formatIncomeMoney("AUD", "AUD", "50.515"), "$50.52");
 });
 
 // --- Populated table --------------------------------------------------------
@@ -262,20 +262,20 @@ test("CGT-001B: the FY table renders columns in order (year, discountable, non-d
   );
   assert.match(html, /FY26/);
   assert.match(html, /FY25/);
-  assert.match(html, /AUD 1,000\.00/); // FY26 discountable gross
+  assert.match(html, /\$1,000\.00/); // FY26 discountable gross
   // CGT-002: the "Net estimate" column is now the carried (true) figure --
   // FY26's own standalone net was 500.00, but FY25's $150 unabsorbed loss
   // carries in first (non-discountable gains, then discountable, before
   // the discount): 1000.00 - 150.00 = 850.00 discountable remaining,
   // 50% discount = 425.00.
-  assert.match(html, /AUD 425\.00/); // FY26 net estimate (carried, true)
-  assert.match(html, /AUD 200\.00/); // FY25 non-discountable gross
-  assert.match(html, /AUD 350\.00/); // FY25 losses
+  assert.match(html, /\$425\.00/); // FY26 net estimate (carried, true)
+  assert.match(html, /\$200\.00/); // FY25 non-discountable gross
+  assert.match(html, /\$350\.00/); // FY25 losses
 });
 
 test("CGT-001B: an unabsorbed loss is disclosed on its FY row, and the per-FY detail dialog echoes the carry-forward note (source-verified)", async () => {
   const html = renderScreen();
-  assert.match(html, /AUD 150\.00.*unabsorbed/);
+  assert.match(html, /\$150\.00.*unabsorbed/);
   const source = await readFile(
     new URL("../app/components/capital-gains-screen.tsx", import.meta.url),
     "utf8",
@@ -330,7 +330,7 @@ test("CGT-001B: the lifetime summary sums the fixture's two FYs and names the ex
   // marker -- reviewer fix (follow-up 2): the marker was previously
   // optional in this regex, which would have silently passed even if the
   // taint propagation broke (regression-blind).
-  assert.match(html, /AUD 425\.00<span[^>]*> \*<\/span><\/dd>/); // lifetime net estimate row, tainted
+  assert.match(html, /\$425\.00<span[^>]*> \*<\/span><\/dd>/); // lifetime net estimate row, tainted
   assert.match(html, /4 across 2 financial years/);
   assert.match(html, /Gamma Pty Ltd/);
 });
@@ -372,7 +372,7 @@ test("CGT-001B: a portfolio with zero disposals gets an explicit 'No disposals y
   });
   assert.match(html, /No disposals yet/);
   assert.match(html, /Go to holdings/);
-  assert.doesNotMatch(html, /AUD 0\.00/);
+  assert.doesNotMatch(html, /\$0\.00/);
   assert.doesNotMatch(html, /<table/);
   // The standing disclaimer still appears on the empty state.
   assert.match(html, /Informational only/);
@@ -396,7 +396,7 @@ test("CGT-001B: an unpublished calculation run gets distinct copy from a missing
   assert.notEqual(unpublished, generic);
   // No degraded state ever fabricates a $0 figure.
   for (const html of [unpublished, missingDates, generic]) {
-    assert.doesNotMatch(html, /AUD 0\.00/);
+    assert.doesNotMatch(html, /\$0\.00/);
     assert.doesNotMatch(html, /<table/);
   }
 });
@@ -483,7 +483,7 @@ test("CGT-001B: the FY detail dialog actually RENDERS honest eligibility labels,
   assert.notEqual(gammaIndex, -1);
   const gammaRow = html.slice(gammaIndex, gammaIndex + 600);
   assert.equal((gammaRow.match(/Unknown/g) ?? []).length >= 4, true);
-  assert.doesNotMatch(gammaRow, /AUD 0\.00/);
+  assert.doesNotMatch(gammaRow, /\$0\.00/);
 
   // formatQuantity output for each allocation's real quantity (never a
   // fabricated 0, and no thousands-separator artefact on small numbers).
@@ -497,7 +497,7 @@ test("CGT-001B: the FY detail dialog actually RENDERS honest eligibility labels,
   // renamed from `CGT_CARRY_FORWARD_OUT_OF_SCOPE_NOTE`, since carry-forward
   // is no longer out of scope).
   assert.match(html, /Unabsorbed loss this year \(standalone\):/);
-  assert.match(html, /AUD 150\.00/);
+  assert.match(html, /\$150\.00/);
   assert.ok(
     html.includes(CGT_CARRY_FORWARD_NOTE),
     "expected the exact carry-forward note text inside the dialog",

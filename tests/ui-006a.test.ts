@@ -240,14 +240,14 @@ function renderMultiYear(overrides: Record<string, unknown> = {}) {
 
 test("UI-006A: landing renders the grossed headline with a permanent estimate badge, cash/franking subtitle, dense metric rows, and a coverage link -- never a bare number with no explanation", () => {
   const html = renderLanding();
-  assert.match(html, /AUD 600\.00/); // grossed headline figure
+  assert.match(html, /\$600\.00/); // grossed headline figure
   assert.match(html, /Estimate · includes franking credits/);
-  assert.match(html, /Cash AUD 480\.00 · Franking credits AUD 120\.00/);
+  assert.match(html, /Cash \$480\.00 · Franking credits \$120\.00/);
   assert.match(html, /Explain this estimate/);
   assert.match(html, /Average per month/);
-  assert.match(html, /AUD 50\.00/);
+  assert.match(html, /\$50\.00/);
   assert.match(html, /Average per week/);
-  assert.match(html, /AUD 11\.54/);
+  assert.match(html, /\$11\.54/);
   assert.match(html, /Income % of portfolio value/);
   assert.match(html, />6%</);
   assert.match(html, /Coverage/);
@@ -267,7 +267,7 @@ test("UI-006A: a portfolio with no holdings gets an explicit empty state, never 
   });
   assert.match(html, /No holdings yet/);
   assert.match(html, /Go to holdings/);
-  assert.doesNotMatch(html, /AUD 0\.00/);
+  assert.doesNotMatch(html, /\$0\.00/);
   assert.doesNotMatch(html, /income-headline-figure/);
 });
 
@@ -304,16 +304,19 @@ test("UI-006A: no dividend-forecast coverage is disclosed explicitly, never pres
   assert.match(html, /ABC: insufficient history/);
   assert.match(html, /Set dividend assumptions/);
   assert.doesNotMatch(html, /income-headline-figure/);
-  assert.doesNotMatch(html, /AUD 0\.00/);
+  assert.doesNotMatch(html, /\$0\.00/);
 });
 
 // --- Multi-year -------------------------------------------------------
 
 test("UI-006A: multi-year table marks the current FY and projected rows distinctly in the row label itself (owner ruling 2026-08-22: the compact Source column is gone; DIV-003's source label -- actual/estimate/fy to date/projected -- stays accessible only via each row's detail dialog, never as a whole table column)", () => {
   const html = renderMultiYear();
+  // UI-026 (B2): the caption now folds in the screen-level base-currency
+  // statement ("AUD reporting values"), mirroring portfolio-shell.tsx's
+  // "{homeCurrencyCode} reporting values" precedent.
   assert.match(
     html,
-    /<caption>Financial-year income and portfolio value<\/caption>/,
+    /<caption>Financial-year income and portfolio value \(AUD reporting values\)<\/caption>/,
   );
   assert.doesNotMatch(html, /<th scope="col">Source<\/th>/);
   assert.doesNotMatch(html, /class="income-source"/);

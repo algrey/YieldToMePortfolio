@@ -77,7 +77,7 @@ test("DIV-007: an RMD-shaped imported USD row with absent franking derives $0 wi
   // Provenance label renders the known $0 as a TOTAL (review B1: labelled
   // distinctly from a per-share figure in the same column), distinctly from
   // a real reported figure -- never "Unavailable"/"Unknown".
-  assert.equal(frankingDisplay(row), "AUD 0.00 total (none reported)");
+  assert.equal(frankingDisplay(row, "AUD"), "$0.00 total (none reported)");
 });
 
 test("DIV-007: lifetime and FY totals count the derived $0 as a KNOWN zero, not unknown", () => {
@@ -176,7 +176,7 @@ test("DIV-007: an imported AUD row with an explicit '0' franking total is unaffe
   assert.equal(rows[0]?.frankingTotalDecimal, "0");
   // Distinctly NOT a DIV-007 inference -- a real Sharesight-reported figure.
   assert.equal(rows[0]?.frankingDerivedZero, false);
-  assert.equal(frankingDisplay(rows[0]!), "AUD 0.00 total");
+  assert.equal(frankingDisplay(rows[0]!, "AUD"), "$0.00 total");
 
   const lifetime = computeLifetimeDividendTotals(rows, "AUD");
   assert.equal(lifetime.receivedFrankingUnknownCount, 0);
@@ -407,6 +407,7 @@ test("DIV-007: the all-dividends list renders '$0.00' with a 'none reported' not
     "../app/components/owned-dividend-list.tsx",
     {
       portfolioId: "pa",
+      baseCurrencyCode: "AUD",
       today: "2026-08-19",
       truncated: false,
       totalCount: 1,
@@ -433,7 +434,7 @@ test("DIV-007: the all-dividends list renders '$0.00' with a 'none reported' not
     },
   );
   assert.doesNotMatch(html, /Unavailable/);
-  assert.match(html, /AUD\s*0\.00/);
+  assert.match(html, /\$\s*0\.00/);
   assert.match(html, /none reported/);
 });
 
@@ -495,6 +496,7 @@ test("DIV-007 F2(d): the per-security tab's Franking/share column renders a tota
       portfolioSecurityId: "psa1",
       symbol: "RMD",
       currencyCode: "AUD",
+      baseCurrencyCode: "AUD",
       today: "2026-08-19",
       rows: [derivedZeroRow, reportedPositiveRow],
       filteredArtifactCount: 0,
@@ -534,8 +536,8 @@ test("DIV-007 F2(d): the per-security tab's Franking/share column renders a tota
   // The derived-zero row: a TOTAL (never mistaken for a per-share credit),
   // and honestly marked "none reported" -- an inference, not a Sharesight-
   // confirmed unfranked payout.
-  assert.match(html, /AUD 0\.00 total \(none reported\)/);
+  assert.match(html, /\$0\.00 total \(none reported\)/);
   // The reported positive row: a real TOTAL, never suffixed "none reported".
-  assert.match(html, /AUD 16\.00 total(?! \(none reported\))/);
+  assert.match(html, /\$16\.00 total(?! \(none reported\))/);
   assert.doesNotMatch(html, /total total/);
 });

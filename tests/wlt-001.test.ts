@@ -542,7 +542,7 @@ test("WLT-001 quotes: a security with previous_close_decimal renders an exact si
     now: new Date("2026-08-03T08:00:00Z"),
   });
   assert.equal(rows.length, 1);
-  assert.equal(rows[0]?.price, "AUD 42.10");
+  assert.equal(rows[0]?.price, "$42.10");
   assert.equal(rows[0]?.change, "+0.20");
   assert.equal(rows[0]?.percent, "+0.48%");
   assert.equal(rows[0]?.tone, "positive");
@@ -655,7 +655,7 @@ test("WLT-001 quotes review round 3 (B7, BLOCKING): a malformed previous_close_d
   const malformedRow = rows.find((row) => row.targetKey === "security-a");
   assert.equal(malformedRow?.change, "—");
   assert.equal(malformedRow?.percent, "—");
-  assert.equal(malformedRow?.price, "AUD 42.10");
+  assert.equal(malformedRow?.price, "$42.10");
   const ordinaryRow2 = rows.find((row) => row.targetKey === "security-b");
   assert.equal(ordinaryRow2?.change, "+1.00");
   assert.equal(ordinaryRow2?.percent, "+11.11%");
@@ -699,7 +699,7 @@ test("WLT-001 quotes review round 3 (B7, BLOCKING): a malformed close_decimal ('
   assert.equal(malformedRow?.change, "—");
   assert.equal(malformedRow?.percent, "—");
   const ordinaryRow2 = rows.find((row) => row.targetKey === "security-b");
-  assert.equal(ordinaryRow2?.price, "USD 10.00");
+  assert.equal(ordinaryRow2?.price, "US$10.00");
   assert.equal(ordinaryRow2?.change, "+1.00");
   db.close();
 });
@@ -1132,7 +1132,7 @@ test("WLT-001 actions (B2a, BLOCKING): adding a security primes a first best-eff
     now: new Date("2026-08-03T08:00:00Z"),
   });
   assert.equal(rows.length, 1);
-  assert.equal(rows[0]?.price, "USD 12.34");
+  assert.equal(rows[0]?.price, "US$12.34");
   assert.notEqual(rows[0]?.state, "unavailable");
   db.close();
 });

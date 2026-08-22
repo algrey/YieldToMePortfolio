@@ -31,6 +31,7 @@ import type {
   PriceHistoryPoint,
   PriceHistoryProvenance,
 } from "../owned-price-history.ts";
+import { currencyDisplayPrefix } from "../currency-display.ts";
 
 const FETCH_TIMEOUT_MS = 15_000;
 const CHART_WIDTH = 600;
@@ -166,10 +167,15 @@ export function HoldingPriceChart({
   portfolioId,
   portfolioSecurityId,
   symbol,
+  baseCurrencyCode,
 }: {
   portfolioId: string;
   portfolioSecurityId: string;
   symbol: string;
+  /** UI-026: the active portfolio's own base currency -- the axis prices
+   * render as a bare symbol when the series' own currency matches this,
+   * flagged otherwise. */
+  baseCurrencyCode: string;
 }) {
   const [range, setRange] = useState<PriceHistoryRange>(
     DEFAULT_PRICE_HISTORY_RANGE,
@@ -249,6 +255,7 @@ export function HoldingPriceChart({
       range={range}
       state={state}
       onRangeChange={setRange}
+      baseCurrencyCode={baseCurrencyCode}
     />
   );
 }
@@ -264,11 +271,14 @@ export function PriceHistoryChartView({
   range,
   state,
   onRangeChange,
+  baseCurrencyCode,
 }: {
   symbol: string;
   range: PriceHistoryRange;
   state: PriceHistoryFetchState;
   onRangeChange: (range: PriceHistoryRange) => void;
+  /** UI-026: threaded straight through to `ChartBody`'s axis labels. */
+  baseCurrencyCode: string;
 }) {
   const busy = state.status === "loading";
   return (
@@ -290,7 +300,12 @@ export function PriceHistoryChartView({
           Loading price history…
         </p>
       ) : (
-        <ChartBody symbol={symbol} range={range} state={state} />
+        <ChartBody
+          symbol={symbol}
+          range={range}
+          state={state}
+          baseCurrencyCode={baseCurrencyCode}
+        />
       )}
       <div className="range-controls" aria-label="Price history range">
         {PRICE_HISTORY_RANGES.map((option) => (
@@ -312,10 +327,18 @@ export function ChartBody({
   symbol,
   range,
   state,
+  baseCurrencyCode,
 }: {
   symbol: string;
   range: PriceHistoryRange;
   state: Extract<PriceHistoryFetchState, { status: "loaded" }>;
+  /** UI-026: the active portfolio's own base currency -- the price axis
+   * (the only PLAIN "CODE amount"-shaped money text on this chart) renders
+   * a bare symbol when `state.currencyCode` matches this, flagged
+   * otherwise. The SVG title/provenance lines below the axis deliberately
+   * keep the raw "amount CODE" suffix form -- see the comment at the axis
+   * itself for why those are NOT migrated. */
+  baseCurrencyCode: string;
 }) {
   const plottable = state.points.filter((point) =>
     isPlottableDecimal(point.priceDecimal),
@@ -678,6 +701,13 @@ export function ChartBody({
               ]
                 .filter(Boolean)
                 .join(" ");
+              // UI-026 ruling: this SVG <title> is accessible/provenance
+              // text (a hover/screen-reader tooltip), not the chart's
+              // visible price label -- keeps the exact "amount CODE"
+              // suffix form deliberately, so the full ISO code always
+              // stays reachable here even though the visible axis below
+              // uses the bare/flagged symbol. Never migrated to the
+              // symbol form.
               const titleParts = [
                 time
                   ? `${time} market-local`
@@ -709,11 +739,13 @@ export function ChartBody({
       </svg>
       <div className="price-history-axis">
         <span>
-          {state.currencyCode} {priceText(scaled.maxPriceDecimal)}
+          {currencyDisplayPrefix(state.currencyCode, baseCurrencyCode)}
+          {priceText(scaled.maxPriceDecimal)}
           {maxFromToday ? " (today, intraday)" : ""}
         </span>
         <span>
-          {state.currencyCode} {priceText(scaled.minPriceDecimal)}
+          {currencyDisplayPrefix(state.currencyCode, baseCurrencyCode)}
+          {priceText(scaled.minPriceDecimal)}
           {minFromToday ? " (today, intraday)" : ""}
         </span>
       </div>
@@ -754,6 +786,13 @@ export function ChartBody({
             : ""}
         </p>
       )}
+      {/* UI-026 ruling: the "Delayed" and "Today" provenance lines below
+          deliberately KEEP their existing "amount CODE" suffix form rather
+          than switching to the axis's bare/flagged symbol -- these are
+          provenance/accessibility disclosures (mirroring the SVG <title>
+          text above), not the chart's primary visible price label, so
+          precision (the full ISO code, always spelled out) wins over the
+          compact symbol convention here. */}
       {state.latestDelayed ? (
         <p className="muted-copy">
           Delayed ({providerDisplayLabel(state.latestDelayed.providerId)}):{" "}

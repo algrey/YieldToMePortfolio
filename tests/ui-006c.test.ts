@@ -566,8 +566,8 @@ test("UI-006C: the dividends tab renders the provider's own per-share figure alo
   );
   // sampleRows' first (edited) row: dividendPerShareDecimal "1.50",
   // providerGrossPerShareDecimal "1.00" -- both must appear.
-  assert.match(html, /AUD 1\.50/);
-  assert.match(html, /provider:\s*AUD 1\.00/);
+  assert.match(html, /\$1\.50/);
+  assert.match(html, /provider:\s*\$1\.00/);
 });
 
 test("UI-006C: no provider annotation renders when the provider figure is unknown or matches the winning value", () => {
@@ -988,6 +988,7 @@ const baseTabProps = {
   portfolioSecurityId: "psa1",
   symbol: "ALPHA",
   currencyCode: "AUD",
+  baseCurrencyCode: "AUD",
   today: "2026-08-13",
   rows: sampleRows,
   filteredArtifactCount: 0,

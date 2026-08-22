@@ -45,6 +45,7 @@ import {
   ownedHoldingPercent,
   ownedHoldingTrimmed,
 } from "../owned-holding-format";
+import { currencyDisplayPrefix } from "../currency-display.ts";
 import {
   currentFyWindow,
   lastFyWindow,
@@ -580,13 +581,13 @@ function OwnedHoldingsScreen({
             const priceLabel = usedNativeFallback
               ? holding.nativePrice === null
                 ? "Price unavailable"
-                : `${holding.currencyCode} ${ownedHoldingTrimmed(holding.nativePrice)} · native fallback`
+                : `${currencyDisplayPrefix(holding.currencyCode, homeCurrencyCode)}${ownedHoldingTrimmed(holding.nativePrice)} · native fallback`
               : selectedPrice.status === "available" &&
                   selectedPrice.value !== null
-                ? `${selectedPrice.currencyCode} ${ownedHoldingTrimmed(selectedPrice.value)}`
+                ? `${currencyDisplayPrefix(selectedPrice.currencyCode, homeCurrencyCode)}${ownedHoldingTrimmed(selectedPrice.value)}`
                 : holding.nativePrice === null
                   ? "Price unavailable"
-                  : `${holding.currencyCode} ${ownedHoldingTrimmed(holding.nativePrice)}`;
+                  : `${currencyDisplayPrefix(holding.currencyCode, homeCurrencyCode)}${ownedHoldingTrimmed(holding.nativePrice)}`;
             const statusLabel =
               holding.actionStatus === "none"
                 ? ""
@@ -618,26 +619,36 @@ function OwnedHoldingsScreen({
               >
                 <span className="row-primary symbol">{holding.symbol}</span>
                 <span className="row-primary numeric">
-                  {ownedHoldingAmount(selectedValue)}
+                  {ownedHoldingAmount(homeCurrencyCode, selectedValue)}
                 </span>
                 <ToneValue
                   tone={holding.dailyTone}
                   className="row-primary numeric"
                 >
-                  {ownedHoldingAmount(holding.dailyMovement, 2, true)}
+                  {ownedHoldingAmount(
+                    homeCurrencyCode,
+                    holding.dailyMovement,
+                    2,
+                    true,
+                  )}
                 </ToneValue>
                 <ToneValue
                   tone={holding.gainTone}
                   className="row-primary numeric"
                 >
-                  {ownedHoldingAmount(holding.unrealisedGain, 2, true)}
+                  {ownedHoldingAmount(
+                    homeCurrencyCode,
+                    holding.unrealisedGain,
+                    2,
+                    true,
+                  )}
                 </ToneValue>
                 <span className="row-secondary">
                   {priceLabel}
                   {statusLabel}
                 </span>
                 <span className="row-secondary numeric">
-                  Basis {ownedHoldingAmount(basis)}
+                  Basis {ownedHoldingAmount(homeCurrencyCode, basis)}
                 </span>
                 <span className="row-secondary numeric">
                   {ownedHoldingPercent(holding.dailyPercent, true)}
@@ -657,7 +668,7 @@ function OwnedHoldingsScreen({
                          because 2dp rounds it away -- falls back to the
                          trimmed exact form for that value only (see
                          `ownedHoldingDecimalNeverFakeZero`'s doc comment). */
-                      `${holding.currencyCode} ${ownedHoldingDecimalNeverFakeZero(holding.averageNativeCost, 2)}`}{" "}
+                      `${currencyDisplayPrefix(holding.currencyCode, homeCurrencyCode)}${ownedHoldingDecimalNeverFakeZero(holding.averageNativeCost, 2)}`}{" "}
                   {/* UI-028 review (B4, BLOCKING): whole-unless-fractional
                       quantity display, delivered at this ONE call site as
                       TASKS.md's planned UI-027 ("Share quantities display
@@ -692,15 +703,15 @@ function OwnedHoldingsScreen({
             Securities subtotal:{" "}
             {cash.securitiesSubtotal === null
               ? "Partial"
-              : `${cash.currencyCode} ${ownedHoldingDecimal(cash.securitiesSubtotal)}`}{" "}
+              : `${currencyDisplayPrefix(cash.currencyCode, homeCurrencyCode)}${ownedHoldingDecimal(cash.securitiesSubtotal)}`}{" "}
             · Cash subtotal:{" "}
             {cash.cashSubtotal === null
               ? "Unavailable"
-              : `${cash.currencyCode} ${ownedHoldingDecimal(cash.cashSubtotal)}`}{" "}
+              : `${currencyDisplayPrefix(cash.currencyCode, homeCurrencyCode)}${ownedHoldingDecimal(cash.cashSubtotal)}`}{" "}
             · Known total:{" "}
             {cash.knownTotal === null
               ? "Partial"
-              : `${cash.currencyCode} ${ownedHoldingDecimal(cash.knownTotal)}`}
+              : `${currencyDisplayPrefix(cash.currencyCode, homeCurrencyCode)}${ownedHoldingDecimal(cash.knownTotal)}`}
             <br />
             Coverage: {cash.coverage.converted}/{cash.coverage.nonZero} non-zero
             cash accounts converted ({cash.coverage.zero} zero).

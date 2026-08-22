@@ -14,6 +14,7 @@ import type {
   PortfolioInspectionLotAllocation,
   PortfolioInspectionTransaction,
 } from "../../db/repositories/portfolio-inspection.ts";
+import { currencyDisplayPrefix } from "../currency-display.ts";
 
 export type OwnedDetailsProps = Readonly<{
   inspection: PortfolioInspection | null;
@@ -33,10 +34,19 @@ function decimal(value: string | null, empty = "—"): string {
   }
 }
 
-function money(value: string | null, currency: string): string {
+// UI-026: `currency` is the value's OWN currency (a native transaction/cash
+// currency can differ from the portfolio's home currency, see the
+// "Separate currency ledgers" cash section below); `homeCurrencyCode` is
+// the active portfolio's own base currency this inspection screen always
+// has in scope (`inspection.portfolio.homeCurrencyCode`).
+function money(
+  value: string | null,
+  currency: string,
+  homeCurrencyCode: string,
+): string {
   if (value === null) return "Unavailable";
   try {
-    return `${currency} ${groupThousands(formatDecimalFixed(parseDecimal(value), 2))}`;
+    return `${currencyDisplayPrefix(currency, homeCurrencyCode)}${groupThousands(formatDecimalFixed(parseDecimal(value), 2))}`;
   } catch {
     return "Unavailable";
   }
@@ -109,8 +119,10 @@ function SettingsPanel({
 
 function TransactionRecord({
   transaction,
+  homeCurrencyCode,
 }: {
   transaction: PortfolioInspectionTransaction;
+  homeCurrencyCode: string;
 }) {
   return (
     <article className="inspection-record">
@@ -131,20 +143,37 @@ function TransactionRecord({
         <div>
           <dt>Unit price</dt>
           <dd>
-            {money(transaction.unitPriceDecimal, transaction.currencyCode)}
+            {money(
+              transaction.unitPriceDecimal,
+              transaction.currencyCode,
+              homeCurrencyCode,
+            )}
           </dd>
         </div>
         <div>
           <dt>Gross</dt>
           <dd>
-            {money(transaction.grossAmountDecimal, transaction.currencyCode)}
+            {money(
+              transaction.grossAmountDecimal,
+              transaction.currencyCode,
+              homeCurrencyCode,
+            )}
           </dd>
         </div>
         <div>
           <dt>Fees / tax</dt>
           <dd>
-            {money(transaction.feeAmountDecimal, transaction.currencyCode)} /{" "}
-            {money(transaction.taxAmountDecimal, transaction.currencyCode)}
+            {money(
+              transaction.feeAmountDecimal,
+              transaction.currencyCode,
+              homeCurrencyCode,
+            )}{" "}
+            /{" "}
+            {money(
+              transaction.taxAmountDecimal,
+              transaction.currencyCode,
+              homeCurrencyCode,
+            )}
           </dd>
         </div>
       </dl>
@@ -213,7 +242,7 @@ function LotRecord({
         </div>
         <div>
           <dt>Open basis</dt>
-          <dd>{money(lot.baseBasisDecimal, currency)}</dd>
+          <dd>{money(lot.baseBasisDecimal, currency, currency)}</dd>
         </div>
         <div>
           <dt>Original quantity</dt>
@@ -237,8 +266,8 @@ function LotRecord({
               <li key={match.id}>
                 Sale {match.sellTransactionId}: matched{" "}
                 {decimal(match.matchedQuantityDecimal)}, basis{" "}
-                {money(match.allocatedBaseBasisDecimal, currency)}, gain{" "}
-                {money(match.baseRealisedGainDecimal, currency)}.
+                {money(match.allocatedBaseBasisDecimal, currency, currency)},
+                gain {money(match.baseRealisedGainDecimal, currency, currency)}.
               </li>
             ))}
           </ul>
@@ -252,8 +281,10 @@ function LotRecord({
 
 function CashAccountRecord({
   account,
+  homeCurrencyCode,
 }: {
   account: PortfolioInspectionCashAccount;
+  homeCurrencyCode: string;
 }) {
   return (
     <article className="inspection-record">
@@ -267,7 +298,13 @@ function CashAccountRecord({
               : " · balance unavailable"}
           </span>
         </div>
-        <strong>{money(account.balanceDecimal, account.currencyCode)}</strong>
+        <strong>
+          {money(
+            account.balanceDecimal,
+            account.currencyCode,
+            homeCurrencyCode,
+          )}
+        </strong>
       </div>
       <details className="inspection-evidence">
         <summary>Show cash account provenance</summary>
@@ -292,7 +329,13 @@ function CashAccountRecord({
   );
 }
 
-function CashEntryRecord({ entry }: { entry: PortfolioInspectionCashEntry }) {
+function CashEntryRecord({
+  entry,
+  homeCurrencyCode,
+}: {
+  entry: PortfolioInspectionCashEntry;
+  homeCurrencyCode: string;
+}) {
   return (
     <article className="inspection-record compact">
       <div className="inspection-record-heading">
@@ -307,7 +350,7 @@ function CashEntryRecord({ entry }: { entry: PortfolioInspectionCashEntry }) {
         </time>
       </div>
       <p className="inspection-amount">
-        {money(entry.signedAmountDecimal, entry.currencyCode)}
+        {money(entry.signedAmountDecimal, entry.currencyCode, homeCurrencyCode)}
       </p>
       <details className="inspection-evidence">
         <summary>Show cash entry provenance</summary>
@@ -392,6 +435,7 @@ export function OwnedPortfolioDetails({
               <TransactionRecord
                 key={transaction.id}
                 transaction={transaction}
+                homeCurrencyCode={portfolio.homeCurrencyCode}
               />
             ))}
           </div>
@@ -441,7 +485,11 @@ export function OwnedPortfolioDetails({
         ) : (
           <div className="inspection-record-list">
             {inspection.cashAccounts.map((account) => (
-              <CashAccountRecord key={account.id} account={account} />
+              <CashAccountRecord
+                key={account.id}
+                account={account}
+                homeCurrencyCode={portfolio.homeCurrencyCode}
+              />
             ))}
           </div>
         )}
@@ -451,7 +499,11 @@ export function OwnedPortfolioDetails({
         ) : (
           <div className="inspection-record-list">
             {inspection.cashEntries.map((entry) => (
-              <CashEntryRecord key={entry.id} entry={entry} />
+              <CashEntryRecord
+                key={entry.id}
+                entry={entry}
+                homeCurrencyCode={portfolio.homeCurrencyCode}
+              />
             ))}
           </div>
         )}

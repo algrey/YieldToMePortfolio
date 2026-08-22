@@ -38,6 +38,7 @@ const DEFAULT_FILTER: DividendListFilter = {
 
 export function OwnedDividendList({
   portfolioId,
+  baseCurrencyCode,
   allYearsHref,
   today,
   rows,
@@ -47,6 +48,12 @@ export function OwnedDividendList({
   undatedRowCount = 0,
 }: {
   portfolioId: string;
+  /** UI-026: the active portfolio's own base currency -- `row.currencyCode`
+   * renders as a bare symbol when it matches this, flagged otherwise
+   * (`row.currencyCode` can legitimately differ: a degraded/unconverted
+   * foreign payout keeps its original currency, see
+   * `OwnedDividendListRow.currencyCode`'s doc comment). */
+  baseCurrencyCode: string;
   /** UI-017: link back to the unfiltered list -- omitted (no back link
    * rendered) when the caller has no filtered view to return from,
    * matching the pre-UI-017 all-dividends-only callers. */
@@ -230,7 +237,11 @@ export function OwnedDividendList({
                     </th>
                     <td>{dateLabel(row)}</td>
                     <td className="numeric">
-                      {formatIncomeMoney(row.currencyCode, row.cashDecimal)}
+                      {formatIncomeMoney(
+                        row.currencyCode,
+                        baseCurrencyCode,
+                        row.cashDecimal,
+                      )}
                       {fxProvenance ? (
                         <>
                           <br />
@@ -243,6 +254,7 @@ export function OwnedDividendList({
                     <td className="numeric">
                       {formatIncomeMoney(
                         row.currencyCode,
+                        baseCurrencyCode,
                         row.frankingTotalDecimal,
                       )}
                       {row.frankingDerivedZero ? (
@@ -255,7 +267,11 @@ export function OwnedDividendList({
                       ) : null}
                     </td>
                     <td className="numeric">
-                      {formatIncomeMoney(row.currencyCode, row.grossDecimal)}
+                      {formatIncomeMoney(
+                        row.currencyCode,
+                        baseCurrencyCode,
+                        row.grossDecimal,
+                      )}
                     </td>
                     <td>
                       <span className="income-source">

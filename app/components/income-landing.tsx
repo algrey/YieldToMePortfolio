@@ -124,11 +124,21 @@ export function IncomeLanding({
             className="income-headline"
             aria-labelledby="income-headline-title"
           >
+            {/* UI-026 (B2, Orchestrator ruling): `breakdown.currencyCode` is
+                always the portfolio's own base currency (DIV-003's
+                breakdown converts every figure into it), so ONE
+                screen-level statement here -- folded into the existing
+                eyebrow, mirroring portfolio-shell.tsx's "{homeCurrencyCode}
+                reporting values" precedent -- covers every bare "$"-style
+                figure on this screen (headline, subtitle, and the past-FY
+                table below). */}
             <p className="eyebrow" id="income-headline-title">
-              Projected next 12 months
+              Projected next 12 months · {breakdown.currencyCode} reporting
+              values
             </p>
             <p className="income-headline-figure">
               {formatIncomeMoney(
+                breakdown.currencyCode,
                 breakdown.currencyCode,
                 breakdown.totalGrossDecimal,
               )}
@@ -140,10 +150,12 @@ export function IncomeLanding({
               Cash{" "}
               {formatIncomeMoney(
                 breakdown.currencyCode,
+                breakdown.currencyCode,
                 breakdown.totalCashDecimal,
               )}{" "}
               · Franking credits{" "}
               {formatIncomeMoney(
+                breakdown.currencyCode,
                 breakdown.currencyCode,
                 breakdown.totalFrankingKnownDecimal,
               )}
@@ -184,6 +196,7 @@ export function IncomeLanding({
               <dd>
                 {formatIncomeMoney(
                   breakdown.currencyCode,
+                  breakdown.currencyCode,
                   breakdown.averagePerMonthDecimal,
                 )}
               </dd>
@@ -192,6 +205,7 @@ export function IncomeLanding({
               <dt>Average per week</dt>
               <dd>
                 {formatIncomeMoney(
+                  breakdown.currencyCode,
                   breakdown.currencyCode,
                   breakdown.averagePerWeekDecimal,
                 )}
@@ -292,17 +306,20 @@ export function IncomeLanding({
                       <td className="numeric">
                         {formatIncomeMoney(
                           projection.baseCurrencyCode,
+                          projection.baseCurrencyCode,
                           row.dividendGrossDecimal,
                         )}
                       </td>
                       <td className="numeric">
                         {formatIncomeMoney(
                           projection.baseCurrencyCode,
+                          projection.baseCurrencyCode,
                           row.dividendCashDecimal,
                         )}
                       </td>
                       <td className="numeric">
                         {formatIncomeMoney(
+                          projection.baseCurrencyCode,
                           projection.baseCurrencyCode,
                           row.dividendFrankingKnownDecimal,
                         )}

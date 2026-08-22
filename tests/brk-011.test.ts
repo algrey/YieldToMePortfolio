@@ -928,7 +928,10 @@ test("BRK-011 F2: saving a franking override through the real action/repository 
   // derived, distinctly-labelled $0 -- not "Unknown" (that would require a
   // PRESENT-but-nonzero-and-unverified figure, BRK-010's separate guard).
   assert.equal(beforeRow!.frankingDerivedZero, true);
-  assert.equal(frankingDisplay(beforeRow!), "AUD 0.00 total (none reported)");
+  assert.equal(
+    frankingDisplay(beforeRow!, "AUD"),
+    "$0.00 total (none reported)",
+  );
 
   const saved = await saveDividendFrankingOverrideWithContext(
     { client, userId: "a", requestId: "r1" },
@@ -955,5 +958,5 @@ test("BRK-011 F2: saving a franking override through the real action/repository 
     "expected the imported row to still appear after the save",
   );
   assert.equal(afterRow!.frankingCurrencySource, "owner_manual");
-  assert.match(frankingDisplay(afterRow!), /\(owner-entered\)/);
+  assert.match(frankingDisplay(afterRow!, "AUD"), /\(owner-entered\)/);
 });

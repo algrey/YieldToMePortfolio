@@ -105,7 +105,7 @@ test("FY-001C: Last FY's delta is first-point-to-last-point of the closed window
   const filtered = filterToClosedFyWindow(points, last);
   const change = windowChangeAmount(filtered, "AUD");
   // 1300.00 - 1000.00 = 300.00, not (5000.00 - 1000.00) and not 0.
-  assert.equal(change, "+AUD 300.00");
+  assert.equal(change, "+$300.00");
 });
 
 test("FY-001C: a closed-window loss is signed with an explicit minus, not colour alone", () => {
@@ -113,7 +113,7 @@ test("FY-001C: a closed-window loss is signed with an explicit minus, not colour
     point("2025-07-01", "1000.00"),
     point("2026-06-30", "850.00"),
   ];
-  assert.equal(windowChangeAmount(points, "AUD"), "−AUD 150.00");
+  assert.equal(windowChangeAmount(points, "AUD"), "−$150.00");
 });
 
 test("FY-001C: a flat window of two-or-more points shows no sign, and is a known 0.00 (never a fabricated +0.00)", () => {
@@ -121,7 +121,7 @@ test("FY-001C: a flat window of two-or-more points shows no sign, and is a known
     point("2025-07-01", "1000.00"),
     point("2026-06-30", "1000.00"),
   ];
-  assert.equal(windowChangeAmount(points, "AUD"), "AUD 0.00");
+  assert.equal(windowChangeAmount(points, "AUD"), "$0.00");
 });
 
 test("FY-001C (B3): a single-point window has no knowable change and returns null, not a spuriously-flat 0.00", () => {

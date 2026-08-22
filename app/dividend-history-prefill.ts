@@ -82,9 +82,10 @@ export function decimalsEqual(left: string, right: string): boolean {
 export function frankingCell(
   franking: FrankingResolution,
   currencyCode: string,
+  baseCurrencyCode: string,
 ): string {
   if (franking.source === "unknown") return "Unknown";
-  return `${formatIncomeMoney(currencyCode, franking.perShareDecimal)} (${franking.source})`;
+  return `${formatIncomeMoney(currencyCode, baseCurrencyCode, franking.perShareDecimal)} (${franking.source})`;
 }
 
 /**
@@ -124,15 +125,18 @@ export function frankingCell(
  *   reading "Unknown", so the two paths must never silently diverge on
  *   wording for one concept.
  */
-export function frankingDisplay(row: DerivedDividendRow): string {
+export function frankingDisplay(
+  row: DerivedDividendRow,
+  baseCurrencyCode: string,
+): string {
   if (
     row.dividendPerShareDecimal !== null ||
     row.franking.source !== "unknown"
   ) {
-    return frankingCell(row.franking, row.currencyCode);
+    return frankingCell(row.franking, row.currencyCode, baseCurrencyCode);
   }
   if (row.frankingTotalDecimal === null) return "Unknown";
-  const amount = `${formatIncomeMoney(row.currencyCode, row.frankingTotalDecimal)} total`;
+  const amount = `${formatIncomeMoney(row.currencyCode, baseCurrencyCode, row.frankingTotalDecimal)} total`;
   if (row.frankingDerivedZero) return `${amount} (none reported)`;
   // BRK-011: an owner-entered franking-currency override (tier 3 of the
   // owner's BINDING cascade -- see docs/CALCULATIONS.md section 11) is

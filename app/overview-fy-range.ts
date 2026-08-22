@@ -20,6 +20,7 @@ import {
   fyLabel,
   type FyWindowResult,
 } from "../domain/calculations/financial-year.ts";
+import { currencyDisplayPrefix } from "./currency-display.ts";
 
 export type OverviewHistoryLike = Readonly<{
   date: string;
@@ -71,6 +72,10 @@ export function filterToClosedFyWindow<T extends OverviewHistoryLike>(
  * point window is a known fact, not missing data, and still returns
  * "0.00".
  */
+// UI-026: `currencyCode` here is always the portfolio's own base currency
+// (its one caller passes `OwnedOverviewData.currencyCode`, itself always
+// `model.baseCurrencyCode` -- see `overview-read-model.ts`), so this always
+// renders as the bare base symbol.
 export function windowChangeAmount<T extends OverviewHistoryLike>(
   points: readonly T[],
   currencyCode: string,
@@ -91,7 +96,7 @@ export function windowChangeAmount<T extends OverviewHistoryLike>(
     const negative = !isZero && raw.startsWith("-");
     const absolute = negative ? raw.slice(1) : raw;
     const sign = negative ? "−" : isZero ? "" : "+";
-    return `${sign}${currencyCode} ${groupThousands(absolute)}`;
+    return `${sign}${currencyDisplayPrefix(currencyCode, currencyCode)}${groupThousands(absolute)}`;
   } catch {
     return null;
   }

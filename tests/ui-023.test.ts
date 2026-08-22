@@ -181,6 +181,7 @@ function renderTransactions(overrides: Record<string, unknown> = {}) {
       portfolioSecurityId: "holding-pls",
       symbol: "PLS",
       subtitle: "Pilbara Fixture · XASX · AUD",
+      baseCurrencyCode: "AUD",
       rows: [baseTransactionRow],
       truncated: false,
       totalCount: 1,
@@ -194,9 +195,9 @@ test("UI-023: the Transactions screen renders the labelled buy row with quantity
   assert.match(html, /<caption>Ledger transactions for PLS<\/caption>/);
   assert.match(html, /Buy/);
   assert.match(html, /1,000\.0000/);
-  assert.match(html, /AUD 1\.965/);
-  assert.match(html, /AUD 1,965\.00/);
-  assert.match(html, /fees AUD 19\.95/);
+  assert.match(html, /\$1\.965/);
+  assert.match(html, /\$1,965\.00/);
+  assert.match(html, /fees \$19\.95/);
   assert.match(html, /Posted/);
   assert.match(html, /manual/);
 });
@@ -224,7 +225,7 @@ test("UI-023: an unknown gross amount renders 'Unavailable', never a fabricated 
   });
   assert.match(html, /Opening balance/);
   assert.match(html, /Unavailable/);
-  assert.doesNotMatch(html, /AUD 0\.00<\/td>/);
+  assert.doesNotMatch(html, /\$0\.00<\/td>/);
   assert.match(html, /Sell \(reversal\)/);
 });
 
@@ -310,12 +311,12 @@ test("UI-023: the Details screen renders the sheet's facts (quantity, price, val
   assert.match(html, /aria-current="page">Details<\/span>/);
   assert.match(html, /Quantity/);
   assert.match(html, /1,000\.0000/);
-  assert.match(html, /USD 4\.26/);
-  assert.match(html, /USD 4,260\.00/);
-  assert.match(html, /AUD \+2,340\.00/);
+  assert.match(html, /US\$4\.26/);
+  assert.match(html, /US\$4,260\.00/);
+  assert.match(html, /\$\+2,340\.00/);
   assert.match(html, /\+2\.9%/);
   assert.match(html, /\+117\.05%/);
-  assert.match(html, /USD 1\.965 × 1,000\.0000/);
+  assert.match(html, /US\$1\.965 × 1,000\.0000/);
   assert.match(
     html,
     /href="\/portfolio\/portfolio-a\/holdings\/holding-pls\/dividends"/,
@@ -328,7 +329,7 @@ test("UI-023: the Details screen renders the sheet's facts (quantity, price, val
 test("UI-023: a holding with no published valuation renders an honest unavailable state — never zeros — while history links stay reachable", () => {
   const html = renderDetail({ holding: null });
   assert.match(html, /No published valuation for this holding/);
-  assert.doesNotMatch(html, /AUD 0\.00/);
+  assert.doesNotMatch(html, /\$0\.00/);
   assert.match(
     html,
     /href="\/portfolio\/portfolio-a\/holdings\/holding-pls\/dividends"/,

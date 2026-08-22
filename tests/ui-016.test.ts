@@ -206,9 +206,9 @@ test("UI-016: the Income landing renders past-FY rows with real figures and an '
   assert.match(html, /Recent financial years/);
   assert.match(html, /<caption>Recent financial-year dividends<\/caption>/);
   assert.match(html, />FY25</);
-  assert.match(html, /AUD 550\.00/); // FY25 gross
-  assert.match(html, /AUD 440\.00/); // FY25 cash
-  assert.match(html, /AUD 110\.00/); // FY25 franking
+  assert.match(html, /\$550\.00/); // FY25 gross
+  assert.match(html, /\$440\.00/); // FY25 cash
+  assert.match(html, /\$110\.00/); // FY25 franking
   assert.match(
     html,
     /FY25[\s\S]{0,400}<span class="income-source">actual<\/span>/,
@@ -223,7 +223,7 @@ test("UI-016: a no_evidence past-FY row renders 'Unavailable' figures and an exp
     /FY24[\s\S]{0,400}<span class="income-source">no evidence<\/span>/,
   );
   // Never a $0.00 masquerading as a known figure for the no_evidence year.
-  assert.doesNotMatch(html, /FY24[\s\S]{0,200}AUD 0\.00/);
+  assert.doesNotMatch(html, /FY24[\s\S]{0,200}\$0\.00/);
 });
 
 test("UI-016: a degraded pastFinancialYears result (ok: false) is disclosed with an explicit banner, never a silently empty table", () => {
@@ -597,6 +597,7 @@ function renderList(overrides: Record<string, unknown> = {}) {
     "../app/components/owned-dividend-list.tsx",
     {
       portfolioId: "pa",
+      baseCurrencyCode: "AUD",
       today: "2026-08-13",
       rows: dividendListRows,
       truncated: false,
@@ -621,13 +622,14 @@ test("UI-016: the dividends list renders per-row links to the security's own div
   assert.match(html, />not paid</);
   // The unknown-amount row (row-1) renders the same "Unavailable" text the
   // rest of the Income screens use for a null decimal -- never "0.00".
-  assert.doesNotMatch(html, /AUD 0\.00/);
+  assert.doesNotMatch(html, /\$0\.00/);
   assert.match(html, /Unavailable/);
   // Conversion provenance (BRK-010/UI-014 pattern).
   assert.match(html, /converted from USD @ 1\.5 \(sharesight\)/);
-  assert.match(html, /AUD 30\.00/);
-  // Review B1: row-4 carries its OWN currency (USD), not ALPHA's (AUD).
-  assert.match(html, /USD 12\.00/);
+  assert.match(html, /\$30\.00/);
+  // Review B1: row-4 carries its OWN currency (USD), not ALPHA's (AUD) --
+  // UI-026: a foreign (non-base) amount renders flagged, not bare.
+  assert.match(html, /US\$12\.00/);
   // Review B2: row-4 is owner-excluded -- the marker mirrors the security
   // tab's own "· excluded" text exactly.
   assert.match(html, /manual · excluded/);

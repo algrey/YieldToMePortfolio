@@ -91,6 +91,7 @@ export default async function HoldingTransactionsPage({
       portfolioSecurityId={identity.portfolioSecurityId}
       symbol={identity.symbol}
       subtitle={holdingSubtitle(identity)}
+      baseCurrencyCode={workspace.activePortfolio.baseCurrencyCode}
       rows={transactions.rows}
       truncated={transactions.truncated}
       totalCount={transactions.totalCount}

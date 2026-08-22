@@ -125,6 +125,13 @@ export async function loadAuthenticatedWorkspace(
           {
             now: new Date(nowInstant),
             priceSourcePreference: configuredWorkspace.priceSourcePreference,
+            // UI-026: the watchlist is user-scoped (no portfolio of its
+            // own), but this workspace load already knows whether ONE is
+            // active -- pass its base currency through explicitly rather
+            // than letting the watchlist module fall back to its own
+            // no-portfolio default every time a portfolio genuinely exists.
+            baseCurrencyCode:
+              configuredWorkspace.activePortfolio?.baseCurrencyCode,
           },
         );
         const unavailable = quotes.filter(

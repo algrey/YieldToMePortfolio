@@ -731,6 +731,7 @@ function baseTabProps(rows: DerivedDividendRow[]) {
     portfolioSecurityId: "psa1",
     symbol: "ALPHA",
     currencyCode: "AUD",
+    baseCurrencyCode: "AUD",
     today: "2026-08-19",
     rows,
     filteredArtifactCount: 0,
@@ -817,8 +818,9 @@ test("UI-014 part 4: a mixed-currency (degraded, unconverted) row already shows 
       }),
     ]),
   );
-  assert.match(html, />USD 20\.40</);
+  assert.match(html, />US\$20\.40</);
   assert.doesNotMatch(html, />AUD 20\.40</);
+  assert.doesNotMatch(html, />\$20\.40</);
   // A degraded/unconverted row carries no rate -- must never fabricate one.
   assert.doesNotMatch(html, /dividend-fx-provenance/);
 });

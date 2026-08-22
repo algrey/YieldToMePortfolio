@@ -66,8 +66,8 @@ function model(overrides: Record<string, unknown> = {}) {
 test("UI-002 read model formats a complete overview without timestamps", () => {
   const overview = createOverviewData(model());
   assert.equal(overview.status, "complete");
-  assert.equal(overview.current?.value, "AUD 1,000.25");
-  assert.equal(overview.current?.daily, "+AUD 5.25");
+  assert.equal(overview.current?.value, "$1,000.25");
+  assert.equal(overview.current?.daily, "+$5.25");
   assert.equal(overview.allocation.status, "complete");
   assert.equal(overview.current?.date, "2026-08-08");
   assert.equal("observedAt" in (overview.current ?? {}), false);
@@ -82,9 +82,9 @@ test("UI-002 preserves validated negative cash and total without signed zero", (
     }),
   );
   assert.equal(overview.status, "complete");
-  assert.equal(overview.current?.value, "−AUD 10.00");
-  assert.equal(overview.current?.cash, "−AUD 20.00");
-  assert.equal(overview.current?.daily, "AUD 0.00");
+  assert.equal(overview.current?.value, "−$10.00");
+  assert.equal(overview.current?.cash, "−$20.00");
+  assert.equal(overview.current?.daily, "$0.00");
 });
 
 test("UI-002 read model distinguishes partial and stale coverage", () => {
@@ -381,7 +381,7 @@ test("UI-002 unavailable is distinct from empty and chart math handles negative,
       },
     ],
   });
-  assert.equal(chart.current?.daily, "−GBP 100.00");
+  assert.equal(chart.current?.daily, "−£100.00");
   assert.equal(chart.history[0]?.barHeight, "100.00%");
   assert.equal(chart.history[1]?.barHeight, "20.00%");
 });
@@ -420,7 +420,7 @@ test("UI-002 allocation uses valued holdings even when basis is incomplete", () 
     ],
   });
   assert.equal(overview.allocation.status, "partial");
-  assert.equal(overview.allocation.rows[0]?.value, "AUD 800.00");
+  assert.equal(overview.allocation.rows[0]?.value, "$800.00");
   assert.equal(overview.allocation.rows[1]?.percent, null);
 });
 

@@ -121,6 +121,7 @@ export default async function DividendsListPage({
   return (
     <OwnedDividendList
       portfolioId={portfolioId}
+      baseCurrencyCode={workspace.activePortfolio.baseCurrencyCode}
       allYearsHref={`/portfolio/${portfolioId}/income/dividends`}
       today={list.today}
       rows={rows}

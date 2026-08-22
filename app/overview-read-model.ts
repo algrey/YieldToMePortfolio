@@ -8,6 +8,7 @@ import {
   parseDecimalResult,
   subtractDecimal,
 } from "../domain/calculations/index.ts";
+import { currencyDisplayPrefix } from "./currency-display.ts";
 import type {
   PublishedOverviewReadModel,
   PublishedOverviewSnapshot,
@@ -188,6 +189,10 @@ function validSnapshot(point: PublishedOverviewSnapshot): boolean {
   );
 }
 
+// UI-026: every value this module formats is already in the portfolio's own
+// base currency (`currencyCode` here is always `model.baseCurrencyCode` --
+// see every call site below), so it always renders as the bare base symbol
+// via `currencyDisplayPrefix(currencyCode, currencyCode)`.
 function formatMoney(
   value: string | null,
   currencyCode: string,
@@ -205,7 +210,7 @@ function formatMoney(
       : signed && compareDecimal(parsedValue, parseDecimalResult("0")) > 0
         ? "+"
         : "";
-    return `${sign}${currencyCode} ${groupThousands(formatDecimalFixed(parsed, 2))}`;
+    return `${sign}${currencyDisplayPrefix(currencyCode, currencyCode)}${groupThousands(formatDecimalFixed(parsed, 2))}`;
   } catch {
     return null;
   }

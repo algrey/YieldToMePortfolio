@@ -20,6 +20,10 @@ import {
 } from "./preview-decimal.ts";
 import type { Tone } from "./prototype-data.ts";
 import type { WatchlistRow } from "./watchlist-contract.ts";
+import {
+  currencyDisplayPrefix,
+  WATCHLIST_NO_PORTFOLIO_BASE_CURRENCY,
+} from "./currency-display.ts";
 
 // WLT-001: reads the owner's watchlist (`watchlist_entries`, USER-scoped --
 // no portfolioId anywhere in this module) and resolves each entry's quote
@@ -220,6 +224,16 @@ export type LoadOwnedWatchlistOptions = {
   now?: Date;
   priceSourcePreference?:
     "yahoo_authenticated" | "yahoo_anonymous" | "sharesight_delayed";
+  /**
+   * UI-026: this module deliberately carries no `portfolioId` (see the
+   * header comment) so it has no ACTIVE PORTFOLIO of its own to compare a
+   * quote's currency against. Callers with an active portfolio pass its
+   * `baseCurrencyCode` explicitly; callers with none (or a brand-new user
+   * with no portfolio yet) omit it and get the documented
+   * `WATCHLIST_NO_PORTFOLIO_BASE_CURRENCY` ("AUD") fallback -- an explicit,
+   * stated default per the Orchestrator ruling, never a silent guess.
+   */
+  baseCurrencyCode?: string;
 };
 
 export async function loadOwnedWatchlist(
@@ -232,6 +246,8 @@ export async function loadOwnedWatchlist(
   const preferredProviderIds = providerIdsForPreference(
     options.priceSourcePreference,
   );
+  const baseCurrencyCode =
+    options.baseCurrencyCode ?? WATCHLIST_NO_PORTFOLIO_BASE_CURRENCY;
 
   const securityIdentities = await client.all<Record<string, unknown>>(
     `SELECT we.id AS entry_id, we.version, we.display_order, we.security_id,
@@ -430,7 +446,7 @@ export async function loadOwnedWatchlist(
       name: String(identity.name),
       price:
         selected && closeDecimal
-          ? `${selected.currencyCode} ${selected.closeDecimal}`
+          ? `${currencyDisplayPrefix(selected.currencyCode, baseCurrencyCode)}${selected.closeDecimal}`
           : "unavailable",
       timeLine,
       change: change ? signed(change) : "—",

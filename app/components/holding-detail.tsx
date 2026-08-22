@@ -18,6 +18,7 @@ import {
 } from "../owned-holding-format";
 import { HoldingNav } from "./holding-nav";
 import { HoldingPriceChart } from "./holding-price-chart";
+import { currencyDisplayPrefix } from "../currency-display.ts";
 
 export function HoldingDetailScreen({
   portfolioId,
@@ -109,9 +110,9 @@ export function HoldingDetailScreen({
                   if (price.status !== "available" || price.value === null)
                     return holding.nativePrice === null
                       ? "Price unavailable"
-                      : `${holding.currencyCode} native fallback`;
+                      : `${currencyDisplayPrefix(holding.currencyCode, homeCurrencyCode)} native fallback`;
                   try {
-                    return `${price.currencyCode} ${ownedHoldingTrimmed(price.value)}${view === "home" && !home ? " · native fallback" : ""}`;
+                    return `${currencyDisplayPrefix(price.currencyCode, homeCurrencyCode)}${ownedHoldingTrimmed(price.value)}${view === "home" && !home ? " · native fallback" : ""}`;
                   } catch {
                     return "Price unavailable";
                   }
@@ -122,6 +123,7 @@ export function HoldingDetailScreen({
               <dt>Value</dt>
               <dd>
                 {ownedHoldingAmount(
+                  homeCurrencyCode,
                   view === "home" && holding.homeValue.status === "available"
                     ? holding.homeValue
                     : holding.nativeValue,
@@ -131,7 +133,12 @@ export function HoldingDetailScreen({
             <div>
               <dt>Gain</dt>
               <dd className={`tone-${holding.gainTone}`}>
-                {ownedHoldingAmount(holding.unrealisedGain, 2, true)}
+                {ownedHoldingAmount(
+                  homeCurrencyCode,
+                  holding.unrealisedGain,
+                  2,
+                  true,
+                )}
               </dd>
             </div>
             <div>
@@ -151,7 +158,7 @@ export function HoldingDetailScreen({
               <dd>
                 {holding.averageNativeCost === null
                   ? "Basis unavailable"
-                  : `${holding.currencyCode} ${ownedHoldingTrimmed(holding.averageNativeCost)} × ${ownedHoldingDecimal(holding.quantity, 4)}`}
+                  : `${currencyDisplayPrefix(holding.currencyCode, homeCurrencyCode)}${ownedHoldingTrimmed(holding.averageNativeCost)} × ${ownedHoldingDecimal(holding.quantity, 4)}`}
               </dd>
             </div>
           </dl>
@@ -163,6 +170,7 @@ export function HoldingDetailScreen({
         portfolioId={portfolioId}
         portfolioSecurityId={portfolioSecurityId}
         symbol={symbol}
+        baseCurrencyCode={homeCurrencyCode}
       />
       {holding ? (
         <p className="detail-explanation">{holding.explanation}</p>

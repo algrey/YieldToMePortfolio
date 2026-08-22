@@ -10,6 +10,7 @@ import {
   groupThousands,
   parseDecimalResult,
 } from "../domain/calculations/index.ts";
+import { currencyDisplayPrefix } from "./currency-display.ts";
 
 /** Adds a "+" prefix for signed, non-zero, non-negative formatted figures; negative figures already carry their own "-" from decimal formatting. */
 export function signPrefixed(formatted: string, signed: boolean): string {
@@ -19,9 +20,16 @@ export function signPrefixed(formatted: string, signed: boolean): string {
   return `+${formatted}`;
 }
 
-/** "AUD 1,234.56", or an explicit unavailable label -- never a fabricated "0.00" (AGENTS.md: missing dividend/value data is never zero). */
+/**
+ * "$1,234.56" when `currencyCode` is the portfolio's own `baseCurrencyCode`,
+ * "US$1,234.56" (etc.) when it is foreign -- UI-026 (owner directive): a
+ * bare symbol for the base currency, a flagged/code-bearing form for
+ * anything else. Never a fabricated "0.00" (AGENTS.md: missing
+ * dividend/value data is never zero).
+ */
 export function formatIncomeMoney(
   currencyCode: string,
+  baseCurrencyCode: string,
   valueDecimal: string | null,
   options: { signed?: boolean; unavailableLabel?: string } = {},
 ): string {
@@ -31,7 +39,7 @@ export function formatIncomeMoney(
       groupThousands(formatDecimalFixed(parseDecimalResult(valueDecimal), 2)),
       options.signed ?? false,
     );
-    return `${currencyCode} ${formatted}`;
+    return `${currencyDisplayPrefix(currencyCode, baseCurrencyCode)}${formatted}`;
   } catch {
     return options.unavailableLabel ?? "Unavailable";
   }

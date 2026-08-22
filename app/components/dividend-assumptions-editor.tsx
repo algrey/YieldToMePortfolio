@@ -123,6 +123,7 @@ function safeCents(compute: () => string): string | null {
 
 export function DividendAssumptionsEditor({
   portfolioId,
+  baseCurrencyCode,
   today,
   securities,
   portfolio,
@@ -131,6 +132,9 @@ export function DividendAssumptionsEditor({
   initialOverrideYear,
 }: {
   portfolioId: string;
+  /** UI-026: the active portfolio's own base currency -- money renders as a
+   * bare symbol when its own currency matches this, flagged otherwise. */
+  baseCurrencyCode: string;
   today: string;
   securities: DividendAssumptionsSecurityRowProps[];
   portfolio: DividendAssumptionsPortfolioRowProps;
@@ -568,6 +572,7 @@ export function DividendAssumptionsEditor({
           dialogRef={recordDialogRef}
           portfolioId={portfolioId}
           securities={securityDrafts}
+          baseCurrencyCode={baseCurrencyCode}
           maxDate={today}
           onClose={() => setRecordDialogOpen(false)}
         />
@@ -598,6 +603,7 @@ export function RecordDividendDialog({
   dialogRef,
   portfolioId,
   securities,
+  baseCurrencyCode,
   maxDate,
   onClose,
   initialPortfolioSecurityId = null,
@@ -621,6 +627,9 @@ export function RecordDividendDialog({
     symbol: string;
     currencyCode: string;
   }[];
+  /** UI-026: the active portfolio's own base currency -- money renders as a
+   * bare symbol when its own currency matches this, flagged otherwise. */
+  baseCurrencyCode: string;
   maxDate: string;
   onClose: () => void;
   initialPortfolioSecurityId?: string | null;
@@ -975,12 +984,13 @@ export function RecordDividendDialog({
                 Receipt:{" "}
                 {formatIncomeMoney(
                   currencyCode,
+                  baseCurrencyCode,
                   dominatedReceipt.dividendPerShareDecimal,
                 )}
                 /share × {formatShares(dominatedReceipt.sharesDecimal)} shares,
                 paid {dominatedReceipt.paymentDate}
                 {dominatedReceipt.frankingPerShareDecimal !== null
-                  ? ` · franking ${formatIncomeMoney(currencyCode, dominatedReceipt.frankingPerShareDecimal)}/share`
+                  ? ` · franking ${formatIncomeMoney(currencyCode, baseCurrencyCode, dominatedReceipt.frankingPerShareDecimal)}/share`
                   : ""}
               </li>
             ) : null}
@@ -995,17 +1005,17 @@ export function RecordDividendDialog({
               <li>
                 Imported:{" "}
                 {dominatedImported.dividendPerShareDecimal !== null
-                  ? `${formatIncomeMoney(currencyCode, dominatedImported.dividendPerShareDecimal)}/share × ${
+                  ? `${formatIncomeMoney(currencyCode, baseCurrencyCode, dominatedImported.dividendPerShareDecimal)}/share × ${
                       dominatedImported.sharesDecimal !== null
                         ? formatShares(dominatedImported.sharesDecimal)
                         : "Unknown"
                     } shares`
                   : dominatedImported.totalCashDecimal !== null
-                    ? `${formatIncomeMoney(currencyCode, dominatedImported.totalCashDecimal)} total`
+                    ? `${formatIncomeMoney(currencyCode, baseCurrencyCode, dominatedImported.totalCashDecimal)} total`
                     : "Unknown amount"}
                 , paid {dominatedImported.paymentDate}
                 {dominatedImported.frankingCreditPerShareDecimal !== null
-                  ? ` · franking ${formatIncomeMoney(currencyCode, dominatedImported.frankingCreditPerShareDecimal)}/share`
+                  ? ` · franking ${formatIncomeMoney(currencyCode, baseCurrencyCode, dominatedImported.frankingCreditPerShareDecimal)}/share`
                   : ""}
                 {dominatedImportedFxProvenance ? (
                   <>
@@ -1117,7 +1127,7 @@ export function RecordDividendDialog({
               <dt>Cash</dt>
               <dd>
                 {cashTotal !== null
-                  ? formatIncomeMoney(currencyCode, cashTotal)
+                  ? formatIncomeMoney(currencyCode, baseCurrencyCode, cashTotal)
                   : "—"}
               </dd>
             </div>
@@ -1125,7 +1135,11 @@ export function RecordDividendDialog({
               <dt>Franking credits</dt>
               <dd>
                 {frankingTotal !== null
-                  ? formatIncomeMoney(currencyCode, frankingTotal)
+                  ? formatIncomeMoney(
+                      currencyCode,
+                      baseCurrencyCode,
+                      frankingTotal,
+                    )
                   : "Unknown"}
               </dd>
             </div>
@@ -1133,7 +1147,11 @@ export function RecordDividendDialog({
               <dt>Gross</dt>
               <dd>
                 {grossTotal !== null
-                  ? formatIncomeMoney(currencyCode, grossTotal)
+                  ? formatIncomeMoney(
+                      currencyCode,
+                      baseCurrencyCode,
+                      grossTotal,
+                    )
                   : "—"}
               </dd>
             </div>

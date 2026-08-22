@@ -178,7 +178,7 @@ function ValueCell({
 }) {
   return (
     <>
-      {formatIncomeMoney(currencyCode, valueDecimal)}
+      {formatIncomeMoney(currencyCode, currencyCode, valueDecimal)}
       {valueStatus === "partial" ? (
         <span className="unavailable"> · partial</span>
       ) : null}
@@ -377,7 +377,17 @@ export function IncomeMultiYear({
 
       <div className="income-fy-table-wrap">
         <table className="income-fy-table">
-          <caption>Financial-year income and portfolio value</caption>
+          {/* UI-026 (B2, Orchestrator ruling): every money figure on this
+              screen is `baseCurrencyCode` (ValueCell/the row-detail dialog
+              always pass it through, never a security's own currency), so
+              ONE screen-level statement -- folded into this table's own
+              caption, mirroring portfolio-shell.tsx's "{homeCurrencyCode}
+              reporting values" precedent -- covers every bare "$"-style
+              figure below, including the row-detail dialog. */}
+          <caption>
+            Financial-year income and portfolio value ({baseCurrencyCode}{" "}
+            reporting values)
+          </caption>
           <thead>
             <tr>
               <th scope="col">Year</th>
@@ -440,7 +450,11 @@ export function IncomeMultiYear({
                     />
                   </td>
                   <td className="numeric">
-                    {formatIncomeMoney(baseCurrencyCode, row.grossDecimal)}
+                    {formatIncomeMoney(
+                      baseCurrencyCode,
+                      baseCurrencyCode,
+                      row.grossDecimal,
+                    )}
                   </td>
                   <td className="numeric">
                     {formatIncomePercent(row.yieldPercentDecimal)}
@@ -574,19 +588,28 @@ export function IncomeMultiYear({
             <div>
               <dt>Dividends (gross)</dt>
               <dd>
-                {formatIncomeMoney(baseCurrencyCode, selectedRow.grossDecimal)}
+                {formatIncomeMoney(
+                  baseCurrencyCode,
+                  baseCurrencyCode,
+                  selectedRow.grossDecimal,
+                )}
               </dd>
             </div>
             <div>
               <dt>Cash</dt>
               <dd>
-                {formatIncomeMoney(baseCurrencyCode, selectedRow.cashDecimal)}
+                {formatIncomeMoney(
+                  baseCurrencyCode,
+                  baseCurrencyCode,
+                  selectedRow.cashDecimal,
+                )}
               </dd>
             </div>
             <div>
               <dt>Franking credits</dt>
               <dd>
                 {formatIncomeMoney(
+                  baseCurrencyCode,
                   baseCurrencyCode,
                   selectedRow.frankingDecimal,
                 )}

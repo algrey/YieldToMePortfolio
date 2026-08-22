@@ -282,13 +282,13 @@ test("QA-001B: positive and negative holding gain/movement/percent figures carry
   const html = renderOwnedHoldings();
   // Positive figures must show an explicit "+", matching the already
   // established OverviewFact `signed` convention (colour is supplemental).
-  assert.match(html, /AUD \+12\.34/); // daily movement
-  assert.match(html, /AUD \+10\.00/); // unrealised gain
+  assert.match(html, /\$\+12\.34/); // daily movement
+  assert.match(html, /\$\+10\.00/); // unrealised gain
   assert.match(html, /\+3\.5%/); // daily percent
   assert.match(html, /\+11\.11%/); // unrealised percent
   // Negative figures already carry an explicit "-" from decimal formatting.
-  assert.match(html, /AUD -8\.00/);
-  assert.match(html, /AUD -5\.00/);
+  assert.match(html, /\$-8\.00/);
+  assert.match(html, /\$-5\.00/);
   assert.match(html, /-2\.1%/);
   assert.match(html, /-4\.44%/);
   // Colour classes remain present as a supplemental (not sole) signal.
@@ -303,7 +303,7 @@ test("QA-001B: the standalone holding Details screen also signs its gain/percent
   );
   assert.match(
     source,
-    /ownedHoldingAmount\(holding\.unrealisedGain, 2, true\)/,
+    /ownedHoldingAmount\(\s*homeCurrencyCode,\s*holding\.unrealisedGain,\s*2,\s*true,?\s*\)/,
   );
   assert.match(source, /ownedHoldingPercent\(holding\.dailyPercent, true\)/);
   assert.match(

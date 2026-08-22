@@ -59,6 +59,7 @@ export function SecurityDividendsTab({
   portfolioSecurityId,
   symbol,
   currencyCode,
+  baseCurrencyCode,
   today,
   rows,
   filteredArtifactCount,
@@ -74,6 +75,9 @@ export function SecurityDividendsTab({
   portfolioSecurityId: string;
   symbol: string;
   currencyCode: string;
+  /** UI-026: the active portfolio's own base currency -- money renders as a
+   * bare symbol when its own currency matches this, flagged otherwise. */
+  baseCurrencyCode: string;
   today: string;
   rows: DerivedDividendRow[];
   /** Count of post-exit zero-share auto rows already suppressed from `rows`
@@ -597,6 +601,7 @@ export function SecurityDividendsTab({
                         ? "Unknown"
                         : formatIncomeMoney(
                             row.currencyCode,
+                            baseCurrencyCode,
                             row.dividendPerShareDecimal,
                           )}
                       {providerDiffers ? (
@@ -606,6 +611,7 @@ export function SecurityDividendsTab({
                             provider:{" "}
                             {formatIncomeMoney(
                               row.currencyCode,
+                              baseCurrencyCode,
                               row.providerGrossPerShareDecimal,
                             )}
                           </span>
@@ -613,7 +619,7 @@ export function SecurityDividendsTab({
                       ) : null}
                     </td>
                     <td className="numeric">
-                      {frankingDisplay(row)}
+                      {frankingDisplay(row, baseCurrencyCode)}
                       {shouldOfferFrankingOverride(row)
                         ? (() => {
                             const recordId =
@@ -691,7 +697,11 @@ export function SecurityDividendsTab({
                         : null}
                     </td>
                     <td className="numeric">
-                      {formatIncomeMoney(row.currencyCode, row.cashDecimal)}
+                      {formatIncomeMoney(
+                        row.currencyCode,
+                        baseCurrencyCode,
+                        row.cashDecimal,
+                      )}
                       {fxProvenance ? (
                         <>
                           <br />
@@ -702,7 +712,11 @@ export function SecurityDividendsTab({
                       ) : null}
                     </td>
                     <td className="numeric">
-                      {formatIncomeMoney(row.currencyCode, row.grossDecimal)}
+                      {formatIncomeMoney(
+                        row.currencyCode,
+                        baseCurrencyCode,
+                        row.grossDecimal,
+                      )}
                     </td>
                     <td>
                       <span className="income-source">
@@ -750,6 +764,7 @@ export function SecurityDividendsTab({
           <dd>
             {formatIncomeMoney(
               currencyCode,
+              baseCurrencyCode,
               lifetimeTotals.receivedCashDecimal,
             )}
           </dd>
@@ -759,6 +774,7 @@ export function SecurityDividendsTab({
           <dd>
             {formatIncomeMoney(
               currencyCode,
+              baseCurrencyCode,
               lifetimeTotals.receivedFrankingKnownDecimal,
             )}
             {lifetimeTotals.receivedFrankingUnknownCount > 0
@@ -771,6 +787,7 @@ export function SecurityDividendsTab({
           <dd>
             {formatIncomeMoney(
               currencyCode,
+              baseCurrencyCode,
               lifetimeTotals.receivedGrossDecimal,
             )}
           </dd>
@@ -780,7 +797,7 @@ export function SecurityDividendsTab({
           <dd>
             {lifetimeTotals.pendingCount === 0
               ? "None"
-              : `${formatIncomeMoney(currencyCode, lifetimeTotals.pendingGrossDecimal)} across ${lifetimeTotals.pendingCount} dividend${lifetimeTotals.pendingCount === 1 ? "" : "s"}`}
+              : `${formatIncomeMoney(currencyCode, baseCurrencyCode, lifetimeTotals.pendingGrossDecimal)} across ${lifetimeTotals.pendingCount} dividend${lifetimeTotals.pendingCount === 1 ? "" : "s"}`}
           </dd>
         </div>
       </dl>
@@ -809,6 +826,7 @@ export function SecurityDividendsTab({
           dialogRef={recordDialogRef}
           portfolioId={portfolioId}
           securities={[{ portfolioSecurityId, symbol, currencyCode }]}
+          baseCurrencyCode={baseCurrencyCode}
           maxDate={today}
           onClose={() => setRecordDialogOpen(false)}
           initialPortfolioSecurityId={recordPrefill.initialPortfolioSecurityId}

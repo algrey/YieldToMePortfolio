@@ -97,6 +97,7 @@ export default async function HoldingDividendsPage({
       symbol={detail.symbol}
       subtitle={holdingSubtitle(identity)}
       currencyCode={detail.currencyCode}
+      baseCurrencyCode={workspace.activePortfolio.baseCurrencyCode}
       today={detail.today}
       rows={detail.rows}
       filteredArtifactCount={detail.filteredArtifactCount}
