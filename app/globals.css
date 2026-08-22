@@ -3952,6 +3952,18 @@ dd {
   color: var(--green-bright);
 }
 
+/* UI-025 review (fold): the primary News tab reuses .holding-news-embed's
+   layout/border/attribution styling, but it sits below the app header,
+   the mobile prototype chip, and the primary-tabs row rather than the
+   per-holding sub-nav's single slim bar -- more fixed chrome above the
+   frame than .holding-news-frame's calc(100dvh - 250px) budget assumes.
+   Left as-is, the frame ran past the fold on review. This narrower budget
+   is scoped to .owned-news-embed only -- the per-holding embed (no
+   .owned-news-embed ancestor) keeps its original height untouched. */
+.owned-news-embed .holding-news-frame {
+  height: calc(100dvh - 320px);
+}
+
 .income-headline {
   display: grid;
   gap: 4px;

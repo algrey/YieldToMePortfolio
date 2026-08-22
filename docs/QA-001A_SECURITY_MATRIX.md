@@ -175,7 +175,10 @@ configuration, and non-data-bearing 401/403 responses.
   `content-security-policy` (`default-src 'self'`, per-request nonce on
   `script-src`, `frame-ancestors 'none'`, `object-src 'none'`, and — the
   one deliberate widening — `frame-src 'self' https://greeninvestments.au`
-  for the per-holding News embed, UI-023B),
+  for the owner's attributed news embed, used by both the per-holding News
+  tab (UI-023B) and the primary News tab (UI-025, owner ruling
+  2026-08-22, rendered in every owned workspace state including
+  no-portfolio)),
   `permissions-policy` (camera/geolocation/microphone/payment/usb denied),
   `referrer-policy: no-referrer`, `x-content-type-options: nosniff`,
   `x-frame-options: DENY`. Verified by `tests/security-headers.test.ts`

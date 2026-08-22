@@ -36,7 +36,14 @@ Acceptance:
 
 - Direct URLs are stable and refreshable.
 - Active state is programmatically and visually identifiable.
-- News clearly indicates unavailable status until implemented.
+- News embeds the owner's attributed news site (per-holding: UI-023B, owner
+  directive 2026-08-22; primary tab: UI-025, owner ruling 2026-08-22 — "A
+  new user should see the news in the news tab. There are plenty of avenues
+  for a new user to create a portfolio."), in both cases with visible source
+  attribution, `referrerpolicy="no-referrer"`, and no portfolio/security
+  identifiers in the embed URL. Supersedes the original "News clearly
+  indicates unavailable status until implemented" criterion, kept here as
+  the record of that earlier decision.
 
 ### PRD-004 — Responsive application shell
 

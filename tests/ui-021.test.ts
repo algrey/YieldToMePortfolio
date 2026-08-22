@@ -87,9 +87,12 @@ function renderEmptyWorkspace(activeSection: string): string {
 
 // Renders an owned-mode empty state that has NO create action at all (a
 // portfolio already exists, so it is not the "no portfolios yet" case) --
-// e.g. the "news" section, which never gets its own dedicated screen
+// e.g. the "quotes" section, which never gets its own dedicated screen
 // component and always falls through OwnedWorkspaceScreen's per-section
-// empty branch.
+// empty branch. ("news" used to be this file's example too, but UI-025
+// (owner ruling 2026-08-22) gave News its own real content -- the news
+// embed -- for every workspace state, so it no longer reaches this generic
+// no-action empty branch; see tests/ui-025.test.ts.)
 function renderOwnedSectionEmptyStateWithNoAction(): string {
   const componentUrl = new URL(
     "../app/components/portfolio-shell.tsx",
@@ -131,7 +134,7 @@ function renderOwnedSectionEmptyStateWithNoAction(): string {
           AppRouterContext.Provider,
           { value: routerStub },
           createElement(PortfolioShell, {
-            activeSection: "news",
+            activeSection: "quotes",
             ownedWorkspace,
           }),
         ),
@@ -145,7 +148,11 @@ function renderOwnedSectionEmptyStateWithNoAction(): string {
   );
 }
 
-for (const section of ["overview", "holdings", "quotes", "details", "news"]) {
+// "news" is deliberately excluded here: UI-025 (owner ruling 2026-08-22)
+// made News the one tab that renders real content -- the news embed --
+// instead of the "No portfolios yet" panel even in a fresh/no-portfolio
+// workspace. See tests/ui-025.test.ts for its dedicated coverage.
+for (const section of ["overview", "holdings", "quotes", "details"]) {
   test(`UI-021: the "no portfolios yet" empty state on the "${section}" tab renders a "Create a new portfolio" button`, () => {
     const html = renderEmptyWorkspace(section);
     assert.match(html, /No portfolios yet/);

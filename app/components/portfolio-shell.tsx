@@ -694,6 +694,51 @@ function OwnedHoldingsScreen({
   );
 }
 
+// UI-025 (owner ruling 2026-08-22): "A new user should see the news in the
+// news tab. There are plenty of avenues for a new user to create a
+// portfolio." -- the primary News tab embeds the SAME owner news site as the
+// per-holding News tab (UI-023B: app/portfolio/[portfolioId]/[section]/
+// [holdingId]/news/page.tsx), whether or not a portfolio exists yet, instead
+// of the generic "No portfolios yet"/"News is not connected yet" empty
+// states OwnedWorkspaceScreen otherwise renders for every section. Same
+// origin, same `referrerPolicy="no-referrer"` (portfolio URLs are never at
+// risk here since this route carries no portfolio id at all), and the same
+// Worker CSP `frame-src` allowance (worker/response-security.ts) already
+// covers this one origin -- no widening required. The embed URL carries no
+// portfolio/security identifiers, so it is safe to render before a
+// portfolio exists.
+const PRIMARY_NEWS_EMBED_URL = "https://greeninvestments.au/?embed=1";
+
+function OwnedNewsScreen() {
+  return (
+    <section
+      className="owned-news-embed holding-news-embed"
+      aria-labelledby="owned-news-title"
+    >
+      <h1 id="owned-news-title">News</h1>
+      <iframe
+        className="holding-news-frame"
+        src={PRIMARY_NEWS_EMBED_URL}
+        title="Green Investments news"
+        loading="lazy"
+        referrerPolicy="no-referrer"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+      />
+      <p className="holding-news-source">
+        Source:{" "}
+        <a
+          href="https://greeninvestments.au/"
+          target="_blank"
+          rel="noreferrer noopener"
+        >
+          greeninvestments.au
+        </a>{" "}
+        — use this link if the embedded view does not load.
+      </p>
+    </section>
+  );
+}
+
 function OwnedWorkspaceScreen({
   activeSection,
   workspace,
@@ -745,6 +790,17 @@ function OwnedWorkspaceScreen({
   }
 
   if (workspace.status === "empty" || workspace.activePortfolio === null) {
+    // UI-025: News is the one tab that has real content with no portfolio
+    // at all -- see OwnedNewsScreen's comment. Every other tab keeps the
+    // UI-021 "No portfolios yet" panel and its create-portfolio action.
+    if (activeSection === "news") {
+      return (
+        <>
+          <OwnedNewsScreen />
+          <AccountLifecycleControls />
+        </>
+      );
+    }
     return (
       <>
         <EmptyState
@@ -761,20 +817,33 @@ function OwnedWorkspaceScreen({
     );
   }
 
-  const titles: Record<PortfolioSection, string> = {
+  // UI-025: with an active portfolio, News also renders the real embed
+  // instead of falling through to the generic per-section empty state below
+  // (the "News is not connected yet" placeholder this replaces).
+  if (activeSection === "news") {
+    return <OwnedNewsScreen />;
+  }
+
+  // UI-025 review (fold): "news" is excluded from both records' key type --
+  // the early return above means this generic per-section empty branch
+  // never actually receives activeSection === "news", so there is no longer
+  // a real string to write for it. Narrowing the type (rather than keeping
+  // a now-unreachable "News is not connected yet"/"YieldToMe does not
+  // provide investment news" entry only to satisfy Record<PortfolioSection,
+  // string>) means TypeScript itself -- not a comment -- guarantees this
+  // branch can't silently regress into showing stale, false News copy.
+  const titles: Record<Exclude<PortfolioSection, "news">, string> = {
     overview: "No holdings yet",
     holdings: "No holdings yet",
     quotes: "No quotes yet",
     details: "No valuation history yet",
-    news: "News is not connected yet",
   };
-  const messages: Record<PortfolioSection, string> = {
+  const messages: Record<Exclude<PortfolioSection, "news">, string> = {
     overview:
       "This portfolio is ready. Holdings and valuations will appear after ledger data is added.",
     holdings: "Import or add a holding when portfolio entry is available.",
     quotes: "Validated market observations will appear here when available.",
     details: "Historical valuation data will appear here when available.",
-    news: "YieldToMe does not provide investment news in this release.",
   };
 
   return (

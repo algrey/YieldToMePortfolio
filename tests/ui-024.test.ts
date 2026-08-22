@@ -144,7 +144,7 @@ test("UI-024 (regression pin): in a fresh/no-portfolio workspace, tabs no longer
   assert.equal(new Set(hrefs).size, hrefs.length);
 });
 
-test("UI-024: the News tab is reachable in a fresh/no-portfolio workspace -- aria-current tracks activeSection, and the section renders an honest empty state with the create-portfolio action (not a dead end)", () => {
+test("UI-024: the News tab is reachable in a fresh/no-portfolio workspace -- aria-current tracks activeSection, and the section renders real content (not a dead end)", () => {
   const html = renderShell("news", FRESH_WORKSPACE);
   const nav = extractNav(html);
   const newsLinkMatch = nav.match(
@@ -157,11 +157,15 @@ test("UI-024: the News tab is reachable in a fresh/no-portfolio workspace -- ari
   assert.ok(overviewLinkMatch, "expected an overview tab link");
   assert.doesNotMatch(overviewLinkMatch![0]!, /aria-current/);
 
-  assert.match(html, /No portfolios yet/);
-  assert.match(
-    html,
-    /<button type="button" class="empty-state-primary-action">Create a new portfolio<\/button>/,
-  );
+  // UI-025 (owner ruling 2026-08-22, superseding this test's original
+  // pinned behaviour): "A new user should see the news in the news tab.
+  // There are plenty of avenues for a new user to create a portfolio." The
+  // News tab no longer shows the "No portfolios yet" panel this test used
+  // to assert -- it renders the real news embed instead. See
+  // tests/ui-025.test.ts for the dedicated embed coverage; this test keeps
+  // only the tab-navigation assertions that are still this file's concern.
+  assert.doesNotMatch(html, /No portfolios yet/);
+  assert.match(html, /<iframe/);
 });
 
 test("UI-024: when an active portfolio DOES exist, tabs still link through real /portfolio/:id/:section URLs (unchanged, non-regressed path)", () => {

@@ -43,7 +43,7 @@ The product is a faithful rebuild of the reference workflow, not a literal copy 
 - Cash is a currency-specific ledger, not a synthetic security.
 - The service worker stores no private financial data.
 - Original CSV bytes are not retained; hashes, normalized source rows, mappings, issues, and audit evidence are retained in D1.
-- News is a disabled navigation destination pending an attributable source decision.
+- News embeds the owner's own attributed news site, greeninvestments.au (decision: owner directive 2026-08-22 for the per-holding News tab, UI-023B; extended to the primary News tab by owner ruling 2026-08-22, UI-025). The embed URL carries no portfolio/security identifiers, the iframe is sandboxed with `referrerpolicy="no-referrer"`, and the Worker CSP allows exactly that one origin via `frame-src`.
 
 ### Reference independence and genuine uncertainties
 
@@ -58,7 +58,6 @@ The product is a faithful rebuild of the reference workflow, not a literal copy 
 - Exact source FX direction in every export variant.
 - Whether future income needs Australian franking-credit projections or cash only.
 - Complete external cash-flow and dividend history needed for TWR/XIRR.
-- Whether News is a release requirement and, if so, its attributable source.
 - Account deletion cooling-off/retention policy and final Access invitation/session settings.
 
 ## 3. Problem
@@ -182,7 +181,17 @@ Use Overview, Holdings, Quotes, Details, News, Quantity, Average Cost, Market Va
 
 ### News
 
-A navigation placeholder only until an attributable news source and privacy behavior are chosen. News does not block the first release.
+Resolved (owner directive 2026-08-22, UI-023B; extended by owner ruling
+2026-08-22, UI-025 — "A new user should see the news in the news tab. There
+are plenty of avenues for a new user to create a portfolio."): News embeds
+the owner's own attributed site, greeninvestments.au, in both the
+per-holding News tab and the primary News tab. The primary tab renders the
+embed in every owned workspace state, including before a portfolio exists,
+since the embed is not portfolio-scoped. Privacy behavior: the embed URL
+carries no portfolio/security identifiers, the iframe is sandboxed with
+`referrerpolicy="no-referrer"` so portfolio URLs never reach the embedded
+site's logs, and the Worker CSP's `frame-src` allows exactly this one
+origin (no wildcards).
 
 ## 9. Core workflows
 
@@ -330,7 +339,7 @@ No implementation may depend directly on a provider-shaped symbol or response.
 
 1. Confirm whether the reference’s “all time” percentage excludes income, as assumed.
 2. Decide whether dividend forecasts include Australian franking-credit information or only cash.
-3. Decide if News remains out of scope or requires an attributable source.
+3. ~~Decide if News remains out of scope or requires an attributable source.~~ Resolved 2026-08-22 (UI-023B, extended by UI-025): News embeds the owner's attributed site, greeninvestments.au — see §8 "News" above.
 4. Validate Cloudflare Access session length, allowed identities, and account offboarding policy.
 5. Verify iOS install/offline behavior on physical devices before release.
 6. Evaluate another provider only when measured coverage, reliability, capability, or cost warrants it.
