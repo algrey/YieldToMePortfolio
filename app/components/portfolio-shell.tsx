@@ -44,8 +44,10 @@ import {
   ownedHoldingDecimalNeverFakeZero,
   ownedHoldingPercent,
   ownedHoldingQuantity,
+  ownedHoldingRealisedGainLine,
   ownedHoldingTrimmed,
 } from "../owned-holding-format";
+import type { SecurityRealisedGainTotal } from "../../domain/gains/index.ts";
 import { currencyDisplayPrefix } from "../currency-display.ts";
 import {
   currentFyWindow,
@@ -193,6 +195,15 @@ export type OwnedWorkspace = {
   cash?: OwnedCashSummary;
   holdingCoverage?: OwnedHoldingCoverage;
   holdingsViewState?: "complete" | "partial" | "empty" | "unavailable";
+  // UI-030: CGT-001A's per-security LIFETIME realised-gain rollup, keyed by
+  // `portfolioSecurityId` (matches `OwnedHoldingRow.id`) -- a plain object
+  // (not a `Map`) because this workspace crosses the server/client RSC
+  // boundary as a prop into this "use client" module. `undefined` (as a
+  // whole, or a missing key) means "never sold OR the enrichment failed to
+  // load this request" -- `ownedHoldingRealisedGainLine` treats both the
+  // same way (no fourth line), never a fabricated figure. See
+  // `app/authenticated-workspace.ts` for the best-effort load.
+  realisedGains?: Record<string, SecurityRealisedGainTotal>;
 };
 export type OwnedOverviewData = {
   status:
@@ -453,6 +464,7 @@ function OwnedHoldingsScreen({
   cash,
   coverage,
   portfolioId,
+  realisedGains,
 }: {
   rows: readonly OwnedHoldingRow[];
   homeCurrencyCode: string;
@@ -467,6 +479,10 @@ function OwnedHoldingsScreen({
    * a popup). Always present: the single call site renders only when
    * `activePortfolio` exists. */
   portfolioId: string;
+  /** UI-030: CGT-001A's per-security lifetime realised-gain rollup, keyed
+   * by `portfolioSecurityId` (== `holding.id`) -- see `OwnedWorkspace`'s
+   * own doc comment for why this is a plain object, not a `Map`. */
+  realisedGains?: Record<string, SecurityRealisedGainTotal>;
 }) {
   const [sortKey, setSortKey] = useState<"ticker" | "value" | "daily" | "gain">(
     "daily",
@@ -607,6 +623,10 @@ function OwnedHoldingsScreen({
                                 ? "Yahoo login expired"
                                 : "Yahoo login not configured"
                   }`;
+            const realisedLine = ownedHoldingRealisedGainLine(
+              homeCurrencyCode,
+              realisedGains?.[holding.id],
+            );
             return (
               // UI-023: a real link to the standalone per-holding detail
               // route, replacing the in-place <dialog> sheet -- URL-
@@ -685,6 +705,14 @@ function OwnedHoldingsScreen({
                 <span className="desktop-only holding-name">
                   {holding.name} · {holding.exchange} · {holding.currencyCode}
                 </span>
+                {realisedLine ? (
+                  <ToneValue
+                    tone={realisedLine.tone}
+                    className="row-quaternary"
+                  >
+                    {realisedLine.content}
+                  </ToneValue>
+                ) : null}
                 <span className="sr-only">{holding.explanation}</span>
               </Link>
             );
@@ -4388,6 +4416,7 @@ export function PortfolioShell({
               cash={ownedWorkspace.cash}
               coverage={ownedWorkspace.holdingCoverage}
               portfolioId={ownedWorkspace.activePortfolio.id}
+              realisedGains={ownedWorkspace.realisedGains}
             />
           ) : (
             <OwnedWorkspaceScreen

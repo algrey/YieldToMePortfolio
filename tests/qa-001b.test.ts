@@ -282,13 +282,16 @@ test("QA-001B: positive and negative holding gain/movement/percent figures carry
   const html = renderOwnedHoldings();
   // Positive figures must show an explicit "+", matching the already
   // established OverviewFact `signed` convention (colour is supplemental).
-  assert.match(html, /\$\+12\.34/); // daily movement
-  assert.match(html, /\$\+10\.00/); // unrealised gain
+  // UI-030 review ruling (2026-08-23): the sign now lands BEFORE the
+  // currency symbol ("+$12.34"), not after ("$+12.34") -- matches the
+  // owner's own literal UI-030 examples ("+$15000", "+$333,000").
+  assert.match(html, /\+\$12\.34/); // daily movement
+  assert.match(html, /\+\$10\.00/); // unrealised gain
   assert.match(html, /\+3\.5%/); // daily percent
   assert.match(html, /\+11\.11%/); // unrealised percent
   // Negative figures already carry an explicit "-" from decimal formatting.
-  assert.match(html, /\$-8\.00/);
-  assert.match(html, /\$-5\.00/);
+  assert.match(html, /-\$8\.00/);
+  assert.match(html, /-\$5\.00/);
   assert.match(html, /-2\.1%/);
   assert.match(html, /-4\.44%/);
   // Colour classes remain present as a supplemental (not sole) signal.

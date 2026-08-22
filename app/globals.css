@@ -707,6 +707,28 @@ dd {
   text-overflow: ellipsis;
 }
 
+/* UI-030: the holdings row's optional fourth "Realised:" line -- only
+   present for a security with at least one disposal, so it must not
+   reserve space on every row (a plain fourth grid row, sized by content,
+   like the existing 3-line rows above it). Full-width on both mobile and
+   desktop (unlike `.row-tertiary`, which shares its line with
+   `.holding-name` on desktop) since there is nothing else to share this
+   line with. Colour comes from the shared `.tone-positive`/`.tone-negative`/
+   `.tone-neutral` classes (`ToneValue`); the leading "+"/"-" sign in the
+   text itself is the non-colour signal (AGENTS.md/QUAL-001). */
+.holding-row .row-quaternary {
+  grid-row: 4;
+  grid-column: 1 / -1;
+  align-self: start;
+  min-width: 0;
+  overflow: hidden;
+  padding-top: 2px;
+  font-size: 0.7rem;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: normal;
+}
+
 .holding-row .unavailable.row-primary {
   overflow: hidden;
   font-size: 0.66rem;

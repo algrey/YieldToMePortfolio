@@ -78,26 +78,27 @@ export function isBaseCurrencyDisplay(
  * form keeps its own trailing space, matching the pre-existing "CODE 4.21"
  * rendering byte-for-byte for unknown codes).
  *
- * Sign placement: this codebase pre-dates UI-026 with TWO different
- * existing sign conventions, and this task deliberately preserves each
- * formatter's own convention rather than unifying them (out of scope --
- * see the follow-up note below):
- *   - `app/income-format.ts`'s `formatIncomeMoney` and
- *     `app/owned-holding-format.tsx`'s `ownedHoldingAmount` embed the sign
- *     INSIDE the formatted amount (via `signPrefixed`) and glue this
+ * Sign placement: this codebase still has TWO different sign conventions
+ * for a signed amount, though UI-030's review (2026-08-23) narrowed it to
+ * one holdout:
+ *   - `app/income-format.ts`'s `formatIncomeMoney` alone still embeds the
+ *     sign INSIDE the formatted amount (via `signPrefixed`) and glues this
  *     prefix directly in front of THAT, so the sign lands AFTER the
  *     prefix: `"$" + "+10.00"` -> `"$+10.00"`, `"$" + "-10.00"` ->
- *     `"$-10.00"`.
- *   - `app/overview-read-model.ts`'s `formatMoney` and
- *     `app/overview-fy-range.ts`'s `windowChangeAmount` compute the sign
- *     character separately and put it BEFORE this prefix:
- *     `"+" + "$" + "10.00"` -> `"+$10.00"`, `"−" + "$" + "10.00"` ->
- *     `"−$10.00"`.
- * Follow-up (recorded, not done here): unifying these two sign
- * conventions into one is a separate, larger display-formatting decision
- * outside UI-026's scope (a bare currency-symbol/foreign-flag rule) --
- * flagged for a future task rather than silently changed as a side effect
- * of this one.
+ *     `"$-10.00"`. Recorded follow-up, not done here (out of scope for
+ *     both UI-026 and UI-030): unifying this one holdout with the
+ *     sign-before-prefix convention below.
+ *   - `app/overview-read-model.ts`'s `formatMoney`,
+ *     `app/overview-fy-range.ts`'s `windowChangeAmount`, AND (as of the
+ *     UI-030 review ruling, 2026-08-23 -- the owner's own UI-030 examples,
+ *     "+$15000"/"+$333,000", put the sign before the symbol) `app/owned-
+ *     holding-format.tsx`'s `ownedHoldingAmount` all put the sign BEFORE
+ *     this prefix: `"+" + "$" + "10.00"` -> `"+$10.00"`, `"−"/"-" + "$" +
+ *     "10.00"` -> `"−$10.00"`/`"-$10.00"`. `ownedHoldingAmount` still
+ *     computes ITS sign character via `signPrefixed` internally (same
+ *     rules as before) and then relocates it in front of this prefix,
+ *     rather than computing the sign separately the way the overview
+ *     helpers do -- same visible convention, different internal path.
  */
 export function currencyDisplayPrefix(
   currencyCode: string,

@@ -11,6 +11,7 @@ import { createOwnedWorkspace } from "./owned-workspace";
 import type { OwnedWorkspace } from "./components/portfolio-shell";
 import { loadOwnedWatchlist } from "./owned-watchlist";
 import { loadOwnedHoldings } from "./owned-holdings";
+import { loadOwnedRealisedGainTotals } from "./owned-capital-gains";
 import { createHistoricalSnapshotRepository } from "../db/repositories/snapshots.ts";
 import {
   advanceCalculationRuns,
@@ -169,12 +170,31 @@ export async function loadAuthenticatedWorkspace(
           result.context.user.id,
           configuredWorkspace.activePortfolio.id,
         );
+        // UI-030: the holdings row's "Realised:" fourth line is a
+        // best-effort enrichment on top of the already-working holdings
+        // read above, mirroring `owned-holdings.ts`'s own Sharesight
+        // price-freshness gate (`.catch(() => undefined)`) -- a failure
+        // here (e.g. the CGT domain's calculation run not yet published,
+        // a genuinely rare edge since `loadOwnedHoldings` above already
+        // requires the SAME publication to exist) must never take down the
+        // primary, already-honest holdings figures. `realisedGains` is
+        // simply omitted on failure; `ownedHoldingRealisedGainLine`
+        // (`owned-holding-format.tsx`) then omits the fourth line entirely
+        // rather than rendering a guess.
+        const realised = await loadOwnedRealisedGainTotals(
+          client,
+          result.context.user.id,
+          configuredWorkspace.activePortfolio.id,
+        ).catch(() => undefined);
         return {
           ...configuredWorkspace,
           holdings: holdings.rows,
           holdingsViewState: holdings.status,
           cash: holdings.cash,
           holdingCoverage: holdings.coverage,
+          realisedGains: realised
+            ? Object.fromEntries(realised.bySecurity)
+            : undefined,
         };
       } catch {
         return {

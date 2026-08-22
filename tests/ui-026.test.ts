@@ -366,7 +366,9 @@ test("UI-026 sweep: a holding's Details screen (base AUD, a USD holding) never r
   assertNoBareCodePrefix(html, "AUD");
   // Home-currency (base) figures render bare.
   assert.match(html, /\$6,300\.00/); // home value
-  assert.match(html, /\$\+2,340\.00/); // unrealised gain, signed
+  // UI-030 review ruling (2026-08-23): sign lands BEFORE the currency
+  // symbol -- flipped honestly.
+  assert.match(html, /\+\$2,340\.00/); // unrealised gain, signed
   // Anchored: an actual rendered cell boundary, not a loose substring.
   assert.match(html, />\$6,300\.00</);
   // The average-cost line always renders in the security's own NATIVE

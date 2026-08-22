@@ -321,7 +321,9 @@ test("UI-023: the Details screen renders the sheet's facts (quantity, price, val
   assert.match(html, /<dd>1,000<\/dd>/);
   assert.match(html, /US\$4\.26/);
   assert.match(html, /US\$4,260\.00/);
-  assert.match(html, /\$\+2,340\.00/);
+  // UI-030 review ruling (2026-08-23): sign lands BEFORE the currency
+  // symbol ("+$2,340.00"), not after -- flipped honestly.
+  assert.match(html, /\+\$2,340\.00/);
   assert.match(html, /\+2\.9%/);
   assert.match(html, /\+117\.05%/);
   assert.match(html, /US\$1\.965 × 1,000</);

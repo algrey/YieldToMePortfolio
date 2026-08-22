@@ -28,3 +28,7 @@ export {
   type CapitalGainsCarryChainResult,
   type FyCarriedCapitalGains,
 } from "./carry-forward.ts";
+export {
+  computeSecurityRealisedGainTotals,
+  type SecurityRealisedGainTotal,
+} from "./security-totals.ts";

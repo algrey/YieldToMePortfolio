@@ -5,7 +5,9 @@
 // (dividends) composition pattern: this module owns SqlClient access and
 // owner-scope predicates; every actual eligibility/aggregation rule lives
 // in the pure `domain/gains` modules this file only composes. Read-only --
-// no routes/UI (CGT-001B consumes this later).
+// no writes. UI-030 (the holdings row's "Realised:" line) now also composes
+// this module's shared disposal-row loader via `loadOwnedRealisedGainTotals`
+// below, alongside the Gains tab's `loadOwnedCapitalGains`.
 //
 // Publication-pointer discipline (identical requirement to
 // `app/owned-holdings.ts`): `lot_allocations`/`tax_lots` are written by
@@ -33,10 +35,12 @@ import { currentFyWindow } from "../domain/calculations/financial-year.ts";
 import { parseDecimalResult } from "../domain/calculations/decimal.ts";
 import {
   computeFyCapitalGainsTotals,
+  computeSecurityRealisedGainTotals,
   deriveCapitalGainDisposalRow,
   type CapitalGainAllocationFact,
   type CapitalGainDisposalRow,
   type FyCapitalGainsTotal,
+  type SecurityRealisedGainTotal,
 } from "../domain/gains/index.ts";
 
 const MAX_ALLOCATIONS = 10_000;
@@ -127,12 +131,26 @@ function basisStatusValue(row: Row): CapitalGainAllocationFact["basisStatus"] {
   return value;
 }
 
-export async function loadOwnedCapitalGains(
+// UI-030: shared shape returned by the internal loader below -- both
+// `loadOwnedCapitalGains` (FY-bucketed, for the Gains tab) and
+// `loadOwnedRealisedGainTotals` (security-bucketed, for the holdings row's
+// fourth line) build on the SAME single SQL read/validation pass and the
+// SAME already-derived `rows: CapitalGainDisposalRow[]` list -- neither
+// re-queries the ledger nor re-derives a row.
+type CapitalGainDisposalRowsResult = {
+  today: string;
+  financialYearStartMonth: number;
+  baseCurrencyCode: string;
+  historyCompleteFrom: string | null;
+  rows: CapitalGainDisposalRow[];
+};
+
+async function loadCapitalGainDisposalRows(
   client: SqlClient,
   userId: string,
   portfolioId: string,
-  now = new Date(),
-): Promise<OwnedCapitalGainsHistory> {
+  now: Date,
+): Promise<CapitalGainDisposalRowsResult> {
   const portfolio = await client.get<Row>(
     `SELECT base_currency_code, history_complete_from FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
     [portfolioId, userId],
@@ -173,9 +191,8 @@ export async function loadOwnedCapitalGains(
       today,
       financialYearStartMonth: settings.financialYearStartMonth,
       baseCurrencyCode,
-      disposalCount: 0,
-      fyTotals: [],
       historyCompleteFrom,
+      rows: [],
     };
   }
 
@@ -290,19 +307,74 @@ export async function loadOwnedCapitalGains(
     return result.row;
   });
 
-  const fyResult = computeFyCapitalGainsTotals(
+  return {
+    today,
+    financialYearStartMonth: settings.financialYearStartMonth,
+    baseCurrencyCode,
+    historyCompleteFrom,
     rows,
-    settings.financialYearStartMonth,
+  };
+}
+
+export async function loadOwnedCapitalGains(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  now = new Date(),
+): Promise<OwnedCapitalGainsHistory> {
+  const base = await loadCapitalGainDisposalRows(
+    client,
+    userId,
+    portfolioId,
+    now,
+  );
+
+  const fyResult = computeFyCapitalGainsTotals(
+    base.rows,
+    base.financialYearStartMonth,
   );
   if (!fyResult.ok)
     throw new Error(`invalid_fy_aggregation:${fyResult.reason}`);
 
   return {
-    today,
-    financialYearStartMonth: settings.financialYearStartMonth,
-    baseCurrencyCode,
-    disposalCount: rows.length,
+    today: base.today,
+    financialYearStartMonth: base.financialYearStartMonth,
+    baseCurrencyCode: base.baseCurrencyCode,
+    disposalCount: base.rows.length,
     fyTotals: fyResult.totals,
-    historyCompleteFrom,
+    historyCompleteFrom: base.historyCompleteFrom,
+  };
+}
+
+// UI-030: portfolio-wide, per-security LIFETIME realised-gain rollup for
+// the holdings row's fourth ("Realised:") line -- see
+// `domain/gains/security-totals.ts`'s header for the full design rationale
+// (one batched read, reusable map, no FIFO recomputation). `bySecurity` has
+// no entry at all for a security that was never sold; see
+// `SecurityRealisedGainTotal`'s own doc comments for how a caller should
+// read `partialCoverage`/`knownDisposalCount` before trusting `gainDecimal`
+// or `percentDecimal` as a COMPLETE figure.
+export type OwnedRealisedGainTotals = {
+  baseCurrencyCode: string;
+  historyCompleteFrom: string | null;
+  bySecurity: Map<string, SecurityRealisedGainTotal>;
+};
+
+export async function loadOwnedRealisedGainTotals(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  now = new Date(),
+): Promise<OwnedRealisedGainTotals> {
+  const base = await loadCapitalGainDisposalRows(
+    client,
+    userId,
+    portfolioId,
+    now,
+  );
+  return {
+    baseCurrencyCode: base.baseCurrencyCode,
+    historyCompleteFrom: base.historyCompleteFrom,
+    bySecurity: computeSecurityRealisedGainTotals(base.rows),
   };
 }

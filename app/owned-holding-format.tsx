@@ -14,6 +14,8 @@ import { isZero, parseDecimalResult } from "../domain/calculations/index.ts";
 import type { OwnedHoldingRow } from "./owned-holdings-contract";
 import { currencyDisplayPrefix } from "./currency-display.ts";
 import { formatQuantityDisplay } from "./quantity-format.ts";
+import type { Tone } from "./prototype-data.ts";
+import type { SecurityRealisedGainTotal } from "../domain/gains/index.ts";
 
 // Gain/movement figures must carry an explicit +/− sign so the direction
 // does not depend on colour alone (UI_SPEC §10, QUAL-001). Negative values
@@ -76,6 +78,22 @@ export function ownedHoldingUnavailableText(reason: string | null | undefined) {
 // native currency (native-view figures) -- `baseCurrencyCode` is required
 // so every call site states which portfolio it is comparing against,
 // rather than this shared helper guessing.
+//
+// UI-030 review ruling (2026-08-23, resolving the UI-026 sign-placement
+// follow-up for the holdings surfaces in the owner's direction): the
+// owner's own literal UI-030 examples ("+$15000", "+$333,000") put the SIGN
+// BEFORE the currency symbol, twice. This flips `ownedHoldingAmount`'s
+// signed rendering from "$+10.00"/"$-10.00" to "+$10.00"/"-$10.00" -- every
+// holdings-surface consumer (daily movement, gain cells, and UI-030's
+// Realised line) picks this up together, since they all route through this
+// one function. `signPrefixed` itself is untouched (still used as-is by
+// `ownedHoldingPercent`, which has no currency prefix to reorder around).
+// Deliberately scoped to the holdings surfaces only -- `income-format.ts`'s
+// `formatIncomeMoney` and `overview-read-model.ts`'s `formatMoney` keep
+// their own existing, independent sign conventions (see
+// `currency-display.ts`'s `currencyDisplayPrefix` doc comment for the
+// full two-convention history); unifying those is still a recorded,
+// out-of-scope follow-up.
 export function ownedHoldingAmount(
   baseCurrencyCode: string,
   value: {
@@ -90,13 +108,24 @@ export function ownedHoldingAmount(
   if (value.status !== "available" || value.value === null)
     return ownedHoldingUnavailableText(value.reason);
   try {
+    // `signPrefixed` decides the sign exactly as before (still "-"-only for
+    // a negative amount regardless of `signed`, "+"-prefixed for a
+    // positive non-zero amount only when `signed` is true, and no sign at
+    // all for an exact/display-rounded-to-zero amount) -- only WHERE that
+    // sign character lands relative to the currency prefix changes here.
     const formatted = signPrefixed(
       groupThousands(
         formatDecimalFixed(parseDecimalResult(value.value), scale),
       ),
       signed,
     );
-    return `${currencyDisplayPrefix(value.currencyCode, baseCurrencyCode)}${formatted}`;
+    const hasSign =
+      formatted.startsWith("+") ||
+      formatted.startsWith("-") ||
+      formatted.startsWith("−");
+    const signChar = hasSign ? formatted.slice(0, 1) : "";
+    const magnitude = hasSign ? formatted.slice(1) : formatted;
+    return `${signChar}${currencyDisplayPrefix(value.currencyCode, baseCurrencyCode)}${magnitude}`;
   } catch {
     return ownedHoldingUnavailableText(value.reason);
   }
@@ -210,4 +239,105 @@ export function ownedHoldingPercent(
       <span className="sr-only">Percentage unavailable</span>
     </>
   );
+}
+
+function ownedHoldingToneFromDecimal(value: string): Tone {
+  return /^0(?:\.0*)?$/.test(value)
+    ? "neutral"
+    : value.startsWith("-")
+      ? "negative"
+      : "positive";
+}
+
+// UI-030 (owner directive, verbatim: "In holdings, for any ticker row that
+// has sold shares, there should be a forth line. On the left column on the
+// fourth line it should say 'Realised:' and then have the realised capital
+// followed by the gain expressed as a percent of the basis at the time of
+// the gain. Example: 'Realised: +$15000 (+13.91%)'."). Renders the
+// holdings row's fourth line from CGT-001A's per-security LIFETIME
+// realised-gain rollup (`domain/gains/security-totals.ts`'s
+// `computeSecurityRealisedGainTotals`, composed once per portfolio load by
+// `app/owned-capital-gains.ts`'s `loadOwnedRealisedGainTotals` -- one
+// batched query for the whole portfolio, never a per-row query).
+//
+// `total` is `undefined` for a security that was never sold (no fourth
+// line -- `null` is returned) OR when the realised-gains enrichment itself
+// failed to load for this request (`app/authenticated-workspace.ts` treats
+// that load as best-effort, mirroring `app/owned-holdings.ts`'s Sharesight
+// price-freshness gate, so a rare CGT-side failure never blocks the
+// primary holdings figures). Either way, omitting the line is honest: it
+// never claims "never sold" when the truth is merely "unknown right now."
+//
+// Every realised-gain amount is already in the portfolio's BASE currency
+// (see `disposal-rows.ts`'s header), so `homeCurrencyCode` is always used
+// as BOTH the value's own currency and the comparison base -- the amount
+// always renders as the bare, unflagged base symbol (UI-026), never a
+// foreign-flagged one.
+export function ownedHoldingRealisedGainLine(
+  homeCurrencyCode: string,
+  total: SecurityRealisedGainTotal | undefined,
+): { tone: Tone; content: ReactNode } | null {
+  if (!total || total.disposalCount === 0) return null;
+
+  if (total.knownDisposalCount === 0) {
+    // Every disposal for this security has an incomplete cost basis -- the
+    // known-gain sum would be a fabricated "$0" (AGENTS.md: missing cost
+    // basis is never presented as zero), so the whole figure honestly
+    // reads "unavailable" rather than a misleading amount.
+    return {
+      tone: "neutral",
+      content: (
+        <>
+          Realised: unavailable{" "}
+          <span className="sr-only">
+            — cost basis is incomplete for every lot match of this security.
+          </span>
+        </>
+      ),
+    };
+  }
+
+  const tone = ownedHoldingToneFromDecimal(total.gainDecimal);
+  const amountText = ownedHoldingAmount(
+    homeCurrencyCode,
+    {
+      status: "available",
+      currencyCode: homeCurrencyCode,
+      value: total.gainDecimal,
+      reason: null,
+    },
+    2,
+    true,
+  );
+
+  if (total.partialCoverage) {
+    // Mirrors `capital-gains-screen.tsx`'s own partial-coverage disclosure
+    // convention: show the KNOWN partial sum plus an explicit qualifier
+    // rather than hiding it, but never a percent beside it -- the
+    // denominator itself excludes the same unknown disposals (UI-030
+    // ruling: never a fabricated/partial percent presented as complete).
+    // Built as ONE plain string (rather than several JSX text/expression
+    // children) so the rendered whitespace is exact and unambiguous.
+    // CGT-001A's standing ruling (`capital-gains-screen.tsx`'s own
+    // completion-note comment): `disposalCount` counts ALLOCATIONS (lot
+    // matches), not distinct sale transactions -- never labelled
+    // "disposals" unqualified anywhere in the app.
+    const lotMatchWord =
+      total.disposalCount === 1 ? "lot match" : "lot matches";
+    const qualifier = `partial — ${total.excludedIncompleteCount} of ${total.disposalCount} ${lotMatchWord} excluded, cost basis incomplete`;
+    return {
+      tone,
+      content: `Realised: ${amountText} (${qualifier})`,
+    };
+  }
+
+  const percentText =
+    total.percentDecimal === null
+      ? "percent unavailable" // zero-basis edge (e.g. free shares) -- never a divide-by-zero
+      : `${signPrefixed(total.percentDecimal, true)}%`;
+
+  return {
+    tone,
+    content: `Realised: ${amountText} (${percentText})`,
+  };
 }
