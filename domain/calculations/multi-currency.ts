@@ -1157,3 +1157,155 @@ export function composePortfolioTotals(
     ? { status: "complete", label: "portfolio_value", amounts, coverage }
     : { status: "partial", label: "known_value", amounts, coverage };
 }
+
+// UI-031 (owner directive, verbatim): the holdings summary row's first two
+// lines need the portfolio's total DAILY movement and daily percent --
+// "portfolio-level, NOT an average of row percents" (Orchestrator ruling).
+// A row's own daily percent is `homeMovement ÷ previous-day home value`
+// (`calculateDailyMovement` above); the portfolio figure is `Σ homeMovement
+// ÷ Σ previous-day home value` over the SAME rows, never a mean of the
+// per-row percentages. `calculateDailyMovement` computes but does not
+// expose `previousValue` -- rather than widen that function's return shape
+// (a change CALC-001B/its own callers do not need), this derives
+// previous-day value per holding as `homeMarketValue - homeDailyMovement`,
+// which is EXACT (not an approximation): both figures are built from the
+// same quantity × price × fx decimal arithmetic, so subtraction distributes
+// exactly over decimal strings with no floating-point rounding involved.
+export type PortfolioDailyMovementHoldingInput = Readonly<{
+  id: string;
+  quantityDecimal: string;
+  homeMarketValue: CalculationValue;
+  homeDailyMovement: CalculationValue;
+}>;
+
+export type PortfolioDailyMovementCoverage = Readonly<{
+  totalHoldingCount: number;
+  nonZeroHoldingCount: number;
+  zeroHoldingCount: number;
+  invalidHoldingCount: number;
+  /** Holdings where BOTH `homeMarketValue` and `homeDailyMovement` are usable -- the only ones folded into `amounts` below. */
+  alignedHoldingCount: number;
+  excludedHoldingIds: readonly string[];
+}>;
+
+type AvailablePortfolioDailyMovementAmounts = Readonly<{
+  dailyMovementDecimal: string;
+  /** Derived, not independently sourced -- see this function's header comment. */
+  previousValueDecimal: string;
+  /** `null` only when the (aligned) previous-day value sums to zero -- never a divide-by-zero. */
+  dailyPercentDecimal: string | null;
+}>;
+
+export type PortfolioDailyMovementResult =
+  | Readonly<{
+      status: "complete";
+      amounts: AvailablePortfolioDailyMovementAmounts;
+      coverage: PortfolioDailyMovementCoverage;
+    }>
+  | Readonly<{
+      status: "partial";
+      amounts: AvailablePortfolioDailyMovementAmounts;
+      coverage: PortfolioDailyMovementCoverage;
+    }>
+  | Readonly<{
+      status: "unavailable";
+      amounts: null;
+      coverage: PortfolioDailyMovementCoverage;
+    }>;
+
+export function composePortfolioDailyMovementTotal(
+  input: Readonly<{ holdings: readonly PortfolioDailyMovementHoldingInput[] }>,
+): PortfolioDailyMovementResult {
+  const materiality = new Map(
+    input.holdings.map((holding) => [
+      holding,
+      componentMateriality(holding.quantityDecimal, false),
+    ]),
+  );
+  const zeroHoldings = input.holdings.filter(
+    (holding) => materiality.get(holding) === "zero",
+  );
+  const nonZeroHoldings = input.holdings.filter(
+    (holding) => materiality.get(holding) === "nonzero",
+  );
+  const invalidHoldings = input.holdings.filter(
+    (holding) => materiality.get(holding) === "invalid",
+  );
+  const alignedHoldings = nonZeroHoldings.filter(
+    (holding) =>
+      hasUsableCalculatedValue(holding.homeMarketValue) &&
+      hasUsableCalculatedValue(holding.homeDailyMovement),
+  );
+  const coverage: PortfolioDailyMovementCoverage = {
+    totalHoldingCount: input.holdings.length,
+    nonZeroHoldingCount: nonZeroHoldings.length,
+    zeroHoldingCount: zeroHoldings.length,
+    invalidHoldingCount: invalidHoldings.length,
+    alignedHoldingCount: alignedHoldings.length,
+    excludedHoldingIds: input.holdings
+      .filter(
+        (holding) =>
+          materiality.get(holding) === "invalid" ||
+          (materiality.get(holding) === "nonzero" &&
+            !alignedHoldings.includes(holding)),
+      )
+      .map((holding) => holding.id),
+  };
+  const hasKnownAmount = alignedHoldings.length > 0;
+  const hasExplicitHoldings = input.holdings.length > 0;
+  const allHoldingsAreZero =
+    hasExplicitHoldings &&
+    nonZeroHoldings.length === 0 &&
+    invalidHoldings.length === 0;
+  if (!hasKnownAmount) {
+    if (allHoldingsAreZero) {
+      return {
+        status: "complete",
+        amounts: {
+          dailyMovementDecimal: "0",
+          previousValueDecimal: "0",
+          dailyPercentDecimal: null,
+        },
+        coverage,
+      };
+    }
+    return { status: "unavailable", amounts: null, coverage };
+  }
+  let dailyMovementDecimal: string;
+  let previousValueDecimal: string;
+  let dailyPercentDecimal: string | null;
+  try {
+    const movement = parseDecimalResult(
+      sumAvailable(alignedHoldings.map((holding) => holding.homeDailyMovement)),
+    );
+    const marketValue = parseDecimalResult(
+      sumAvailable(alignedHoldings.map((holding) => holding.homeMarketValue)),
+    );
+    const previousValue = subtractDecimal(marketValue, movement);
+    dailyMovementDecimal = formatDecimalExact(movement);
+    previousValueDecimal = formatDecimalExact(previousValue);
+    dailyPercentDecimal =
+      compareDecimal(previousValue, ZERO) === 0
+        ? null
+        : formatDecimalTrimmed(
+            multiplyDecimal(
+              divideDecimal(movement, absoluteDecimal(previousValue)),
+              fromInteger(100n),
+            ),
+            2,
+          );
+  } catch {
+    return { status: "unavailable", amounts: null, coverage };
+  }
+  const amounts = {
+    dailyMovementDecimal,
+    previousValueDecimal,
+    dailyPercentDecimal,
+  };
+  const complete =
+    coverage.invalidHoldingCount === 0 &&
+    coverage.alignedHoldingCount === coverage.nonZeroHoldingCount;
+  return complete
+    ? { status: "complete", amounts, coverage }
+    : { status: "partial", amounts, coverage };
+}

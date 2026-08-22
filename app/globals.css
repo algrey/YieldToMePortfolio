@@ -640,8 +640,84 @@ dd {
   grid-template-columns: 23% 31% 22% 24%;
 }
 
+.holdings-list {
+  /* UI-031: the summary row's own reserved height -- a deliberately
+     generous estimate for four compact text lines plus an optional
+     qualifier line and padding, used below so the last real holding row
+     never hides underneath the sticky summary (and, on mobile, underneath
+     the summary AND the fixed cash-summary card stacked together). Safe
+     to retune in isolation; nothing else depends on the exact number. */
+  --holdings-summary-h: 118px;
+}
+
 .holding-rows {
-  padding-bottom: calc(122px + env(safe-area-inset-bottom));
+  /* UI-031: was `calc(122px + safe-area)` (reserved for the fixed
+     mobile cash-summary card alone, `.portfolio-summary` below) -- now
+     also reserves the sticky holdings summary's own height, which sits
+     directly above that card on mobile. */
+  padding-bottom: calc(
+    122px + var(--holdings-summary-h) + env(safe-area-inset-bottom)
+  );
+}
+
+/* UI-031 (owner directive, verbatim): "Holdings should have a summary
+   row ... four lines ... static at the bottom of the page (as in the
+   holdings scroll past it) but may later change my mind to have it first
+   or last. It should be shaded to be obviously different from the
+   regular rows." `position: sticky` (not `fixed`) deliberately mirrors
+   the existing `.sticky-heading` (top) precedent immediately above --
+   this is the ONE selector that pins the summary to the BOTTOM of the
+   holdings scroll flow; relocating it first/last later is a JSX reorder
+   plus flipping `bottom` for `top` here, nothing else (placement-
+   agnostic by design, per the Orchestrator ruling).
+   On mobile the fixed cash-summary card (`.portfolio-summary`) still
+   floats at the very bottom of the viewport, so the offset below matches
+   `.holding-rows`'s own `122px` reservation for that same card -- the
+   summary sticks directly above it. On desktop (`min-width: 700px`) the
+   cash card becomes a sticky-TOP sidebar instead (see that breakpoint),
+   so the summary sticks to the true bottom edge there (overridden below). */
+.holdings-summary-footer {
+  position: sticky;
+  z-index: 15;
+  bottom: calc(122px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 10px 8px;
+  border-top: 1px solid var(--divider);
+  /* Shaded to be "obviously different from the regular rows" (which are
+     `background: transparent`) -- reuses the SAME raised-panel token the
+     sticky column heading already uses (`--forest-raised`, the style
+     guide's "Deep forest" card-surface colour), so the summary reads as
+     table chrome/structure, not another data row. The "Unrealised" /
+     "All Time" / "Realised" labels are the NON-colour signal
+     (QUAL-001/QA-001B) -- this shading is a supporting cue only. */
+  background: var(--forest-raised);
+}
+
+.holdings-summary-footer .summary-line {
+  align-items: baseline;
+}
+
+.holdings-summary-footer .summary-line-combined {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.holdings-summary-footer .summary-qualifier {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.64rem;
+  line-height: 14px;
+  /* UI-031 review (B1, QA-001B 320px): overrides `.row-tertiary`'s
+     `white-space: nowrap` -- the combined All Time qualifier (excluded
+     holdings AND excluded lot matches named together) can run well past
+     100 characters, which must wrap onto multiple lines at a 320px
+     viewport rather than clip or force horizontal scroll. */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .holding-row {
@@ -3638,7 +3714,18 @@ dd {
   }
 
   .holding-rows {
-    padding-bottom: 0;
+    /* UI-031: the fixed mobile cash-summary card becomes the sticky-TOP
+       sidebar below at this breakpoint (no longer floating at the
+       bottom), so only the sticky holdings summary's own height still
+       needs reserving here. */
+    padding-bottom: var(--holdings-summary-h);
+  }
+
+  .holdings-summary-footer {
+    /* UI-031: nothing floats at the bottom of the viewport at this
+       breakpoint any more (the cash card is now the sticky-TOP sidebar
+       above), so the summary sticks to the true bottom edge. */
+    bottom: 0;
   }
 
   .holding-row {

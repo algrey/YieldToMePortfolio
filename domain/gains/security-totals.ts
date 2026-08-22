@@ -129,3 +129,67 @@ export function computeSecurityRealisedGainTotals(
   }
   return totals;
 }
+
+// UI-031 (owner directive, verbatim): the holdings summary row's "Realised"
+// (fourth) line, and half of its "All Time" (third) line, need the LIFETIME
+// realised gain for the WHOLE PORTFOLIO -- not per security. Per the
+// Orchestrator ruling ("reuse computeSecurityRealisedGainTotals /
+// loadOwnedRealisedGainTotals, portfolio-wide sum"), this sums the fields
+// `computeSecurityRealisedGainTotals` already produced per security -- it
+// never re-reads a disposal row or re-derives a gain/basis figure, so a
+// security's contribution to the portfolio total is always identical to
+// what its own holdings-row fourth line already shows.
+export type PortfolioRealisedGainTotal = {
+  /** Sum of every security's `disposalCount` -- ALLOCATIONS (lot matches), not distinct sale transactions; see `SecurityRealisedGainTotal`'s own doc comment. */
+  disposalCount: number;
+  knownDisposalCount: number;
+  excludedIncompleteCount: number;
+  /** True when at least one lot match anywhere in the portfolio has an unknown gain/basis -- `gainDecimal`/`basisAtDisposalDecimal` are then a PARTIAL sum, mirroring `SecurityRealisedGainTotal.partialCoverage`. */
+  partialCoverage: boolean;
+  /** Sum of every security's `gainDecimal` (itself already a complete-basis-only sum) -- sign-preserving, exact decimal. Zero when there have been no disposals at all anywhere in the portfolio (a genuine zero, not a missing one). */
+  gainDecimal: string;
+  /** Sum of every security's `basisAtDisposalDecimal` -- always >= 0, exact decimal. */
+  basisAtDisposalDecimal: string;
+  /** `gainDecimal` ÷ `basisAtDisposalDecimal` × 100, trimmed to 2dp (half-even) -- `null` when the basis sum is zero (never a divide-by-zero; covers both "nothing ever sold" and "every disposal's basis is unknown"). */
+  percentDecimal: string | null;
+};
+
+/**
+ * Portfolio-wide rollup over `computeSecurityRealisedGainTotals`'s own
+ * per-security map (or any subset of its values) -- a plain additive sum,
+ * not a second calculation path. An empty input (no securities have ever
+ * been sold) returns an honest all-zero/null-percent total rather than
+ * throwing, matching `computeLifetimeCapitalGainsTotal`'s (CGT-001B) same
+ * empty-input convention.
+ */
+export function computePortfolioRealisedGainTotal(
+  totals: Iterable<SecurityRealisedGainTotal>,
+): PortfolioRealisedGainTotal {
+  let disposalCount = 0;
+  let knownDisposalCount = 0;
+  let excludedIncompleteCount = 0;
+  let gain = ZERO;
+  let basis = ZERO;
+  for (const total of totals) {
+    disposalCount += total.disposalCount;
+    knownDisposalCount += total.knownDisposalCount;
+    excludedIncompleteCount += total.excludedIncompleteCount;
+    gain = addDecimal(gain, parseDecimalResult(total.gainDecimal));
+    basis = addDecimal(basis, parseDecimalResult(total.basisAtDisposalDecimal));
+  }
+  const percentDecimal = isZero(basis)
+    ? null
+    : formatDecimalTrimmed(
+        multiplyDecimal(divideDecimal(gain, basis), HUNDRED),
+        2,
+      );
+  return {
+    disposalCount,
+    knownDisposalCount,
+    excludedIncompleteCount,
+    partialCoverage: excludedIncompleteCount > 0,
+    gainDecimal: formatDecimalExact(gain),
+    basisAtDisposalDecimal: formatDecimalExact(basis),
+    percentDecimal,
+  };
+}

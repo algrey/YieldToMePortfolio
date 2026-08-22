@@ -12,6 +12,7 @@ import type { OwnedWorkspace } from "./components/portfolio-shell";
 import { loadOwnedWatchlist } from "./owned-watchlist";
 import { loadOwnedHoldings } from "./owned-holdings";
 import { loadOwnedRealisedGainTotals } from "./owned-capital-gains";
+import { buildHoldingsSummaryFooter } from "./owned-holdings-summary";
 import { createHistoricalSnapshotRepository } from "../db/repositories/snapshots.ts";
 import {
   advanceCalculationRuns,
@@ -186,15 +187,32 @@ export async function loadAuthenticatedWorkspace(
           result.context.user.id,
           configuredWorkspace.activePortfolio.id,
         ).catch(() => undefined);
+        const realisedGains = realised
+          ? Object.fromEntries(realised.bySecurity)
+          : undefined;
+        // UI-031: the holdings summary row's four lines, composed from
+        // `holdings.unrealisedSummary` (server-computed in
+        // `loadOwnedHoldings` from the SAME rows returned above) and this
+        // SAME `realisedGains` map UI-030 already loads -- no additional
+        // read, no second calculation path. `unrealisedSummary` is
+        // `undefined` only when there are no held securities at all (see
+        // its own doc comment), in which case there is nothing to
+        // summarise and the holdings screen renders no summary row.
+        const holdingsSummary = holdings.unrealisedSummary
+          ? buildHoldingsSummaryFooter(
+              configuredWorkspace.activePortfolio.baseCurrencyCode,
+              holdings.unrealisedSummary,
+              realisedGains,
+            )
+          : undefined;
         return {
           ...configuredWorkspace,
           holdings: holdings.rows,
           holdingsViewState: holdings.status,
           cash: holdings.cash,
           holdingCoverage: holdings.coverage,
-          realisedGains: realised
-            ? Object.fromEntries(realised.bySecurity)
-            : undefined,
+          realisedGains,
+          holdingsSummary,
         };
       } catch {
         return {

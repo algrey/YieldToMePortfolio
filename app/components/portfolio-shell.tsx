@@ -45,9 +45,11 @@ import {
   ownedHoldingPercent,
   ownedHoldingQuantity,
   ownedHoldingRealisedGainLine,
+  ownedHoldingToneFromDecimal,
   ownedHoldingTrimmed,
 } from "../owned-holding-format";
 import type { SecurityRealisedGainTotal } from "../../domain/gains/index.ts";
+import type { HoldingsSummaryFooter } from "../owned-holdings-summary.ts";
 import { currencyDisplayPrefix } from "../currency-display.ts";
 import {
   currentFyWindow,
@@ -204,6 +206,12 @@ export type OwnedWorkspace = {
   // same way (no fourth line), never a fabricated figure. See
   // `app/authenticated-workspace.ts` for the best-effort load.
   realisedGains?: Record<string, SecurityRealisedGainTotal>;
+  // UI-031: the holdings list's four-line summary row, pre-composed
+  // server-side (`app/owned-holdings-summary.ts`'s
+  // `buildHoldingsSummaryFooter`) from `holdings` and `realisedGains` above
+  // -- `undefined` only when there are no held securities at all (nothing
+  // to summarise, mirroring the holdings screen's own empty state).
+  holdingsSummary?: HoldingsSummaryFooter;
 };
 export type OwnedOverviewData = {
   status:
@@ -465,6 +473,7 @@ function OwnedHoldingsScreen({
   coverage,
   portfolioId,
   realisedGains,
+  summary,
 }: {
   rows: readonly OwnedHoldingRow[];
   homeCurrencyCode: string;
@@ -483,6 +492,10 @@ function OwnedHoldingsScreen({
    * by `portfolioSecurityId` (== `holding.id`) -- see `OwnedWorkspace`'s
    * own doc comment for why this is a plain object, not a `Map`. */
   realisedGains?: Record<string, SecurityRealisedGainTotal>;
+  /** UI-031: the four-line portfolio summary, pre-composed server-side --
+   * see `OwnedWorkspace.holdingsSummary`'s own doc comment. `undefined`
+   * whenever there are no held securities at all. */
+  summary?: HoldingsSummaryFooter;
 }) {
   const [sortKey, setSortKey] = useState<"ticker" | "value" | "daily" | "gain">(
     "daily",
@@ -718,6 +731,12 @@ function OwnedHoldingsScreen({
             );
           })}
         </div>
+        {summary && sortedRows.length > 0 ? (
+          <HoldingsSummaryFooterRow
+            summary={summary}
+            homeCurrencyCode={homeCurrencyCode}
+          />
+        ) : null}
       </section>
       <aside className="portfolio-summary" aria-label="Holdings summary">
         <p className="eyebrow">Cash separate</p>
@@ -754,6 +773,124 @@ function OwnedHoldingsScreen({
           </p>
         ) : null}
       </aside>
+    </div>
+  );
+}
+
+// UI-031 (owner directive, verbatim): "Holdings should have a summary
+// row ... four lines ... static at the bottom of the page (as in the
+// holdings scroll past it) but may later change my mind to have it first
+// or last." A DELIBERATELY placement-agnostic, pure presentational
+// component -- it takes already-composed data (`app/owned-holdings-
+// summary.ts`'s `buildHoldingsSummaryFooter`) and knows nothing about
+// where its caller puts it; the ONLY thing pinning it to the bottom of
+// the holdings scroll flow is the `.holdings-summary-footer` CSS class
+// (`app/globals.css`, `position: sticky; bottom: ...`). Moving it first
+// or last later is a JSX reorder at the ONE call site above, nothing in
+// this component or its CSS class needs to change.
+function HoldingsSummaryFooterRow({
+  summary,
+  homeCurrencyCode,
+}: {
+  summary: HoldingsSummaryFooter;
+  homeCurrencyCode: string;
+}) {
+  // UI-030's own tone rule (a plain decimal string's sign), reused
+  // verbatim rather than re-implemented -- "unavailable" figures stay
+  // neutral (no colour claim about a number that isn't shown).
+  const toneOf = (value: {
+    status: "available" | "unavailable";
+    value: string | null;
+  }): Tone =>
+    value.status === "available" && value.value !== null
+      ? ownedHoldingToneFromDecimal(value.value)
+      : "neutral";
+  const dailyTone = toneOf(summary.dailyMovement);
+  const gainTone = toneOf(summary.unrealisedGain);
+  const allTimeTone = toneOf(summary.allTimeGain);
+  const realisedTone = toneOf(summary.realisedGain);
+  const unrealisedQualifiers = [summary.valueQualifier, summary.dailyQualifier]
+    .filter((text): text is string => text !== null)
+    .join("; ");
+
+  return (
+    <div
+      className="holdings-summary-footer"
+      role="group"
+      aria-label="Portfolio totals"
+    >
+      <div
+        className="holdings-grid summary-line"
+        role="group"
+        aria-label="Unrealised total value, daily gain, and total gain"
+      >
+        <span className="row-primary symbol">Unrealised</span>
+        <span className="row-primary numeric">
+          {ownedHoldingAmount(homeCurrencyCode, summary.marketValue)}
+        </span>
+        <ToneValue tone={dailyTone} className="row-primary numeric">
+          {ownedHoldingAmount(homeCurrencyCode, summary.dailyMovement, 2, true)}
+        </ToneValue>
+        <ToneValue tone={gainTone} className="row-primary numeric">
+          {ownedHoldingAmount(
+            homeCurrencyCode,
+            summary.unrealisedGain,
+            2,
+            true,
+          )}
+        </ToneValue>
+      </div>
+      <div
+        className="holdings-grid summary-line"
+        role="group"
+        aria-label="Cost basis, daily percent, and total percent"
+      >
+        <span className="row-secondary" aria-hidden="true" />
+        <span className="row-secondary numeric">
+          {ownedHoldingAmount(homeCurrencyCode, summary.costBasis)}
+        </span>
+        <ToneValue tone={dailyTone} className="row-secondary numeric">
+          {ownedHoldingPercent(summary.dailyPercent, true)}
+        </ToneValue>
+        <ToneValue tone={gainTone} className="row-secondary numeric">
+          {ownedHoldingPercent(summary.totalPercent, true)}
+        </ToneValue>
+      </div>
+      {unrealisedQualifiers ? (
+        <p className="row-tertiary summary-qualifier">{unrealisedQualifiers}</p>
+      ) : null}
+      <div
+        className="summary-line-combined"
+        role="group"
+        aria-label="All time gain"
+      >
+        <span className="row-primary symbol">All Time</span>
+        <ToneValue tone={allTimeTone} className="row-primary numeric">
+          {ownedHoldingAmount(homeCurrencyCode, summary.allTimeGain, 2, true)} (
+          {ownedHoldingPercent(summary.allTimePercent, true)})
+        </ToneValue>
+      </div>
+      {summary.allTimeQualifier ? (
+        <p className="row-tertiary summary-qualifier">
+          {summary.allTimeQualifier}
+        </p>
+      ) : null}
+      <div
+        className="summary-line-combined"
+        role="group"
+        aria-label="Realised gain"
+      >
+        <span className="row-primary symbol">Realised</span>
+        <ToneValue tone={realisedTone} className="row-primary numeric">
+          {ownedHoldingAmount(homeCurrencyCode, summary.realisedGain, 2, true)}{" "}
+          ({ownedHoldingPercent(summary.realisedPercent, true)})
+        </ToneValue>
+      </div>
+      {summary.realisedQualifier ? (
+        <p className="row-tertiary summary-qualifier">
+          {summary.realisedQualifier}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -4417,6 +4554,7 @@ export function PortfolioShell({
               coverage={ownedWorkspace.holdingCoverage}
               portfolioId={ownedWorkspace.activePortfolio.id}
               realisedGains={ownedWorkspace.realisedGains}
+              summary={ownedWorkspace.holdingsSummary}
             />
           ) : (
             <OwnedWorkspaceScreen

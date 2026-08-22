@@ -29,6 +29,8 @@ export {
   type FyCarriedCapitalGains,
 } from "./carry-forward.ts";
 export {
+  computePortfolioRealisedGainTotal,
   computeSecurityRealisedGainTotals,
+  type PortfolioRealisedGainTotal,
   type SecurityRealisedGainTotal,
 } from "./security-totals.ts";

@@ -241,7 +241,11 @@ export function ownedHoldingPercent(
   );
 }
 
-function ownedHoldingToneFromDecimal(value: string): Tone {
+// UI-031: exported so the holdings summary row (`portfolio-shell.tsx`) can
+// derive line tone from a plain decimal string the same way UI-030's
+// "Realised:" line already does, immediately below -- one tone rule for
+// every signed holdings-surface figure, not a second implementation.
+export function ownedHoldingToneFromDecimal(value: string): Tone {
   return /^0(?:\.0*)?$/.test(value)
     ? "neutral"
     : value.startsWith("-")

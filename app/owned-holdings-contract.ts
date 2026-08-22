@@ -1,4 +1,8 @@
 import type { Tone } from "./prototype-data.ts";
+import type {
+  PortfolioDailyMovementResult,
+  PortfolioTotalsResult,
+} from "../domain/calculations/index.ts";
 
 export type OwnedHoldingValue = {
   status: "available" | "unavailable";
@@ -62,6 +66,20 @@ export type OwnedHoldingRow = {
     daily: string | null;
     gain: string | null;
   };
+};
+// UI-031: the holdings summary row's first two lines (market value / daily
+// movement / unrealised gain / cost basis / daily percent / total percent)
+// -- computed server-side, in `loadOwnedHoldings`, from the SAME `rows`
+// this type's siblings render (no second data path that could disagree
+// with the visible rows). `value` (market value / basis / gain) and
+// `daily` (movement / percent) are deliberately two independent portfolio
+// aggregates -- see `domain/calculations/multi-currency.ts`'s
+// `composePortfolioDailyMovementTotal` header comment for why a holding can
+// be excluded from one without being excluded from the other (e.g. known
+// price+basis but an incomparable daily movement).
+export type OwnedHoldingsUnrealisedSummary = {
+  value: PortfolioTotalsResult;
+  daily: PortfolioDailyMovementResult;
 };
 export type OwnedHoldingCoverage = {
   total: number;

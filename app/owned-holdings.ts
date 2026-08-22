@@ -12,7 +12,12 @@ import {
   calculateCashConversion,
   calculateDailyMovement,
   calculateNativeHomeHolding,
+  composePortfolioDailyMovementTotal,
+  composePortfolioTotals,
+  type CalculationValue,
   type FxEvidence,
+  type PortfolioDailyMovementResult,
+  type PortfolioTotalsResult,
 } from "../domain/calculations/index.ts";
 import {
   addDecimal,
@@ -41,6 +46,7 @@ import type {
 import type {
   OwnedCashSummary,
   OwnedHoldingRow,
+  OwnedHoldingsUnrealisedSummary,
   OwnedHoldingValue,
 } from "./owned-holdings-contract.ts";
 import type { Tone } from "./prototype-data.ts";
@@ -203,6 +209,20 @@ function money(
   return value === null
     ? unavailable(currencyCode, reason)
     : available(currencyCode, value);
+}
+// UI-031: adapts a row's already-rendered `OwnedHoldingValue` (this
+// module's own contract shape) into the domain layer's `CalculationValue`
+// (`composePortfolioTotals`/`composePortfolioDailyMovementTotal`'s input
+// shape) for the summary row's totals below. `reason` is deliberately
+// collapsed to a single generic value on the unavailable branch -- neither
+// portfolio-total function inspects `reason` for anything beyond narrowing
+// `status`, so this never needs (and must never invent) a mapping from
+// `OwnedHoldingRow`'s own free-form reason strings to
+// `CalculationUnavailableReason`'s specific literal union.
+function toCalculationValue(value: OwnedHoldingValue): CalculationValue {
+  return value.status === "available" && value.value !== null
+    ? { status: "available", valueDecimal: value.value }
+    : { status: "unavailable", reason: "invalid_input" };
 }
 // BRK-012C: honest, explicit source labelling for a selected price's
 // `interval` -- required so a Sharesight-sourced current price is ALWAYS
@@ -482,6 +502,11 @@ export async function loadOwnedHoldings(
     converted: number;
     basis: number;
   };
+  // UI-031: `undefined` for a portfolio with no held securities at all
+  // (nothing to summarise, mirroring the empty-state short-circuit
+  // immediately below) -- present whenever `rows.length > 0`, even if every
+  // row is a zero-quantity (sold-to-zero) one.
+  unrealisedSummary?: OwnedHoldingsUnrealisedSummary;
 }> {
   const nowIso = now.toISOString();
   const portfolio = await client.get<Row>(
@@ -1305,6 +1330,30 @@ export async function loadOwnedHoldings(
         (row.homeValue.status === "unavailable" ||
           row.homeBasis.status === "unavailable"),
     ) || cash.status !== "complete";
+  // UI-031: the holdings summary row's first two lines, computed from the
+  // SAME `rows` array the holdings list itself renders -- no second read,
+  // no re-derivation of any per-row fact. Cash is deliberately excluded
+  // (`cashAccounts: []`) -- it is already shown separately in the
+  // portfolio-summary aside ("Cash is not included in security rows"), and
+  // the owner's "Unrealised" line is specifically about holdings.
+  const unrealisedSummaryValue: PortfolioTotalsResult = composePortfolioTotals({
+    holdings: rows.map((row) => ({
+      id: row.id,
+      quantityDecimal: row.quantity,
+      homeMarketValue: toCalculationValue(row.homeValue),
+      homeOpenBasis: toCalculationValue(row.homeBasis),
+    })),
+    cashAccounts: [],
+  });
+  const unrealisedSummaryDaily: PortfolioDailyMovementResult =
+    composePortfolioDailyMovementTotal({
+      holdings: rows.map((row) => ({
+        id: row.id,
+        quantityDecimal: row.quantity,
+        homeMarketValue: toCalculationValue(row.homeValue),
+        homeDailyMovement: toCalculationValue(row.dailyMovement),
+      })),
+    });
   return {
     status: coveragePartial ? "partial" : "complete",
     homeCurrencyCode,
@@ -1317,6 +1366,10 @@ export async function loadOwnedHoldings(
         : null,
       knownTotal,
       status: coveragePartial ? "partial" : cash.status,
+    },
+    unrealisedSummary: {
+      value: unrealisedSummaryValue,
+      daily: unrealisedSummaryDaily,
     },
   };
 }
