@@ -1263,6 +1263,17 @@ dd {
   stroke-width: 1.5;
 }
 
+/* MKT-011C: a `stale_candidate`/`indicative` quality-tier tick renders
+   HOLLOW with a dashed outline -- SHAPE/pattern distinct from the ordinary
+   filled diamond above, not color alone (QA-001B); the tick's own
+   accessible `<title>` names the tier in words. */
+.price-history-intraday-dot.price-history-intraday-uncertain {
+  fill: none;
+  stroke: var(--warning);
+  stroke-width: 1.5;
+  stroke-dasharray: 1.5 1;
+}
+
 .chart-table-details {
   margin-top: 12px;
   color: var(--muted);

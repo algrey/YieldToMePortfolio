@@ -12,11 +12,15 @@
 // `domain/sharesight/price-accretion.ts`'s header comment) -- this module
 // deliberately never does offset arithmetic itself.
 
-/** Local market-open capture start, inclusive: 10:25. */
-const WINDOW_OPEN_MINUTES = 10 * 60 + 25;
+/** Local market-open capture start, inclusive: 10:25. Exported (MKT-011C) so
+ * the per-holding chart's day/week-range time-axis geometry
+ * (`app/price-history-chart-geometry.ts`) can position intraday ticks
+ * against the SAME window boundary this module gates capture with, rather
+ * than a second hard-coded 10:25/16:25 pair drifting out of sync with it. */
+export const WINDOW_OPEN_MINUTES = 10 * 60 + 25;
 /** Local market-close capture end, inclusive: 16:25 -- the LAST scheduled
  * capture tick of the trading day (the `25,55 * * * *` cron's :25 slot). */
-const WINDOW_CLOSE_MINUTES = 16 * 60 + 25;
+export const WINDOW_CLOSE_MINUTES = 16 * 60 + 25;
 
 const WEEKEND_DAYS = new Set(["Sat", "Sun"]);
 

@@ -21,14 +21,20 @@ import {
   type RawPricePoint,
 } from "../app/price-history-range.ts";
 import {
+  calendarColumnWidth,
   classifyPriceHistorySegments,
   dateDayOffset,
   isPlottableDecimal,
+  positionTodayPointsByObservedTime,
   scalePriceHistoryPoints,
 } from "../app/price-history-chart-geometry.ts";
 import { loadOwnedPriceHistory } from "../app/owned-price-history.ts";
 import { currentFyWindow } from "../domain/calculations/financial-year.ts";
 import { listOwnedIntradayPricePointsForDate } from "../db/repositories/intraday-price-capture.ts";
+import {
+  WINDOW_CLOSE_MINUTES,
+  WINDOW_OPEN_MINUTES,
+} from "../domain/market-data/daily-capture-window.ts";
 
 function renderComponent(
   componentName: string,
@@ -185,6 +191,7 @@ function rawPoint(overrides: Partial<RawPricePoint>): RawPricePoint {
     providerId: "owner-import",
     interval: "eod",
     observationAt: "2026-08-19T13:00:00.000Z",
+    quality: "observed",
     ...overrides,
   };
 }
@@ -1829,4 +1836,635 @@ test("MKT-011B: MARKET_DATA_STRATEGY documents the intraday overlay's today-deri
   assert.ok(doc.includes("MKT-011B"));
   assert.ok(doc.toLowerCase().includes("dedupe"));
   assert.ok(doc.toLowerCase().includes("intraday"));
+});
+
+// ---------------------------------------------------------------------------
+// Part 11 (MKT-011C): true intraday time axis for the today overlay.
+// ---------------------------------------------------------------------------
+
+/** Builds a UTC `observedAt` ISO instant at `minutes` past midnight on
+ * `date` -- lets these tests express "10:25" / "16:25" (the capture
+ * window's own boundary minutes) directly, using `marketTimezone: "UTC"` so
+ * the local time equals the UTC clock time with no offset arithmetic to get
+ * wrong in the test itself. */
+function isoAtUtcMinutes(date: string, minutes: number): string {
+  const hh = String(Math.floor(minutes / 60)).padStart(2, "0");
+  const mm = String(minutes % 60).padStart(2, "0");
+  return `${date}T${hh}:${mm}:00.000Z`;
+}
+
+test("MKT-011C: positionTodayPointsByObservedTime places the window-OPEN and window-CLOSE ticks at the column's own edges, and a midpoint tick exactly halfway", () => {
+  const midpointMinutes = (WINDOW_OPEN_MINUTES + WINDOW_CLOSE_MINUTES) / 2;
+  const points = [
+    {
+      date: "2026-08-20",
+      priceDecimal: "20.00",
+      observedAt: isoAtUtcMinutes("2026-08-20", WINDOW_OPEN_MINUTES),
+    },
+    {
+      date: "2026-08-20",
+      priceDecimal: "20.10",
+      observedAt: isoAtUtcMinutes("2026-08-20", midpointMinutes),
+    },
+    {
+      date: "2026-08-20",
+      priceDecimal: "20.20",
+      observedAt: isoAtUtcMinutes("2026-08-20", WINDOW_CLOSE_MINUTES),
+    },
+  ];
+  const positioned = positionTodayPointsByObservedTime(
+    points,
+    [50, 60, 70],
+    "UTC",
+    { startX: 100, width: 200 },
+    { minX: 0, maxX: 1000 },
+  );
+  assert.equal(positioned.length, 3);
+  assert.equal(positioned[0]?.x, 100, "10:25 lands at the column start");
+  assert.equal(positioned[0]?.withinCaptureWindow, true);
+  assert.equal(positioned[1]?.x, 200, "the midpoint lands exactly halfway");
+  assert.equal(positioned[2]?.x, 300, "16:25 lands at the column end");
+  assert.equal(positioned[2]?.withinCaptureWindow, true);
+  // The Y values the caller supplies (already derived from the SHARED price
+  // domain elsewhere) pass through untouched -- this function only ever
+  // repositions X.
+  assert.deepEqual(
+    positioned.map((point) => point?.y),
+    [50, 60, 70],
+  );
+});
+
+test("MKT-011C: positionTodayPointsByObservedTime CLAMPS an out-of-window tick to the nearest window edge rather than excluding it -- a real captured observation is never dropped from the chart", () => {
+  const beforeOpen = isoAtUtcMinutes("2026-08-20", WINDOW_OPEN_MINUTES - 30);
+  const afterClose = isoAtUtcMinutes("2026-08-20", WINDOW_CLOSE_MINUTES + 45);
+  const positioned = positionTodayPointsByObservedTime(
+    [
+      { date: "2026-08-20", priceDecimal: "20.00", observedAt: beforeOpen },
+      { date: "2026-08-20", priceDecimal: "20.10", observedAt: afterClose },
+    ],
+    [10, 20],
+    "UTC",
+    { startX: 100, width: 200 },
+    { minX: 0, maxX: 1000 },
+  );
+  assert.equal(
+    positioned.length,
+    2,
+    "both ticks are still returned -- clamped, never excluded",
+  );
+  assert.equal(positioned[0]?.x, 100, "clamped to the window-OPEN edge");
+  assert.equal(positioned[0]?.withinCaptureWindow, false);
+  assert.equal(positioned[1]?.x, 300, "clamped to the window-CLOSE edge");
+  assert.equal(positioned[1]?.withinCaptureWindow, false);
+});
+
+test("MKT-011C: positionTodayPointsByObservedTime returns null (never throws, never guesses) for an unresolvable timezone or a malformed observedAt", () => {
+  const badTimezone = positionTodayPointsByObservedTime(
+    [
+      {
+        date: "2026-08-20",
+        priceDecimal: "20.00",
+        observedAt: isoAtUtcMinutes("2026-08-20", WINDOW_OPEN_MINUTES),
+      },
+    ],
+    [10],
+    "Not/AZone",
+    { startX: 100, width: 200 },
+    { minX: 0, maxX: 1000 },
+  );
+  assert.deepEqual(badTimezone, [null]);
+
+  const badObservedAt = positionTodayPointsByObservedTime(
+    [
+      {
+        date: "2026-08-20",
+        priceDecimal: "20.00",
+        observedAt: "not-a-timestamp",
+      },
+    ],
+    [10],
+    "UTC",
+    { startX: 100, width: 200 },
+    { minX: 0, maxX: 1000 },
+  );
+  assert.deepEqual(badObservedAt, [null]);
+});
+
+test("MKT-011C review round-1 fix (F1/F6, BLOCKING): positionTodayPointsByObservedTime REJECTS a column that does not overlap bounds at all -- returns null for every point rather than bounds-clamping them all onto one misleading pixel with withinCaptureWindow left true", () => {
+  // Reproduces the exact reviewer-caught shape: a caller-side sizing bug
+  // (WEEK's per-day column math applied to a single-date domain) computed
+  // `startX = 8 - 584 = -576`, a column that runs entirely to the LEFT of
+  // the plot's own bounds ([8, 592]) -- the window-open point (fraction 0)
+  // would otherwise land at -576, clamped to 8, and the window-close point
+  // (fraction 1) would ALSO land at 8 (-576 + 584), stacking every tick
+  // onto one pixel while `withinCaptureWindow` stayed `true` for an
+  // ordinary in-window observation (a pixel-bounds clamp is not a
+  // capture-window clamp).
+  const points = [
+    {
+      date: "2026-08-20",
+      priceDecimal: "20.00",
+      observedAt: isoAtUtcMinutes("2026-08-20", WINDOW_OPEN_MINUTES),
+    },
+    {
+      date: "2026-08-20",
+      priceDecimal: "20.10",
+      observedAt: isoAtUtcMinutes("2026-08-20", WINDOW_CLOSE_MINUTES),
+    },
+  ];
+  const nonOverlapping = positionTodayPointsByObservedTime(
+    points,
+    [10, 20],
+    "UTC",
+    { startX: -576, width: 584 },
+    { minX: 8, maxX: 592 },
+  );
+  assert.deepEqual(
+    nonOverlapping,
+    [null, null],
+    "a column entirely outside bounds must be rejected wholesale, never silently clamped",
+  );
+
+  // A column that only PARTIALLY overlaps bounds is not rejected -- only a
+  // column with ZERO overlap is treated as a caller-side sizing bug.
+  const partiallyOverlapping = positionTodayPointsByObservedTime(
+    points,
+    [10, 20],
+    "UTC",
+    { startX: -100, width: 200 },
+    { minX: 8, maxX: 592 },
+  );
+  assert.notEqual(partiallyOverlapping[0], null);
+  assert.notEqual(partiallyOverlapping[1], null);
+});
+
+test("MKT-011C: calendarColumnWidth sizes ONE calendar day within a multi-day date-offset domain, and falls back to the full inner width for a single-day or empty domain", () => {
+  const scale = { width: 600, height: 160, paddingX: 8, paddingY: 10 };
+  assert.equal(
+    calendarColumnWidth(["2026-08-14", "2026-08-20"], scale),
+    (600 - 8 * 2) / 6,
+  );
+  assert.equal(
+    calendarColumnWidth(["2026-08-20"], scale),
+    600 - 8 * 2,
+    "a single-day domain falls back to the full inner width",
+  );
+  assert.equal(
+    calendarColumnWidth([], scale),
+    600 - 8 * 2,
+    "an empty domain falls back to the full inner width, never a division by zero",
+  );
+});
+
+test("MKT-011C: loadOwnedPriceHistory plumbs observedAt/quality through today's points and returns the security's own market timezone", async () => {
+  const db = await priceHistoryFixture();
+  db.exec(LINK_ASX_EXCHANGE_SQL);
+  db.exec(`
+    INSERT INTO intraday_price_points (id, user_id, security_id, provider_id, price_decimal, currency_code, market_date, market_timezone, observed_at, captured_at, delayed_minutes, quality, provider_revision_id)
+    VALUES ('intraday-quality', 'user-a', 'security-a', 'sharesight', '20.10', 'AUD', '2026-08-20', '+10:00', '2026-08-20T05:00:00.000Z', '2026-08-20T05:00:05.000Z', NULL, 'stale_candidate', NULL);
+  `);
+  const client = createSqliteSqlClient(db);
+  const result = await loadOwnedPriceHistory(
+    client,
+    "user-a",
+    "portfolio-a",
+    "membership-a",
+    "week",
+    FIXTURE_NOW,
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.marketTimezone, "Australia/Sydney");
+  assert.equal(result.todayPoints.length, 1);
+  assert.equal(result.todayPoints[0]?.observedAt, "2026-08-20T05:00:00.000Z");
+  assert.equal(result.todayPoints[0]?.quality, "stale_candidate");
+  assert.equal(result.latestDelayed?.observedAt, "2026-08-20T05:55:00.000Z");
+  assert.equal(result.latestDelayed?.quality, "observed");
+});
+
+test("MKT-011C: loadOwnedPriceHistory's marketTimezone is honestly null when the security's exchange is unresolved", async () => {
+  const db = await priceHistoryFixture();
+  const client = createSqliteSqlClient(db);
+  const result = await loadOwnedPriceHistory(
+    client,
+    "user-a",
+    "portfolio-a",
+    "membership-a",
+    "week",
+    FIXTURE_NOW,
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.marketTimezone, null);
+});
+
+const DAY_RANGE_TODAY_POINTS = [
+  {
+    date: "2026-08-20",
+    priceDecimal: "20.10",
+    currencyCode: "AUD",
+    providerId: "sharesight",
+    interval: "intraday",
+    observedAt: isoAtUtcMinutes("2026-08-20", WINDOW_OPEN_MINUTES),
+    quality: "observed",
+  },
+  {
+    date: "2026-08-20",
+    priceDecimal: "20.30",
+    currencyCode: "AUD",
+    providerId: "sharesight",
+    interval: "intraday",
+    observedAt: isoAtUtcMinutes("2026-08-20", WINDOW_CLOSE_MINUTES),
+    quality: "observed",
+  },
+];
+
+function todayOnlyChartProps(range: string, todayPoints: unknown[]) {
+  return {
+    symbol: "FMG",
+    range,
+    state: {
+      status: "loaded",
+      currencyCode: "AUD",
+      points: [],
+      provenance: {
+        providers: [],
+        fromDate: null,
+        toDate: null,
+        pointCountRaw: 0,
+        pointCountReturned: 0,
+        bucketSize: 1,
+        excludedCurrencyCount: 0,
+        excludedMalformedCount: 0,
+        todayExcludedCurrencyCount: 0,
+        todayExcludedMalformedCount: 0,
+      },
+      latestDelayed: null,
+      invalidRangeRequested: false,
+      todayMarketDate: "2026-08-20",
+      todayPoints,
+      marketTimezone: "UTC",
+    },
+    onRangeChange: () => {},
+  };
+}
+
+test("MKT-011C: on the DAY range, today's intraday ticks plot at their real observed time across the FULL plot width (the 10:25-16:25 window)", () => {
+  const html = renderComponent(
+    "PriceHistoryChartView",
+    CHART_COMPONENT_PATH,
+    todayOnlyChartProps("day", DAY_RANGE_TODAY_POINTS),
+  );
+  // CHART_PADDING_X is 8 -- the window-open tick's rect x is 8 - 2.5 = 5.5;
+  // the window-close tick's rect x is (600 - 8) - 2.5 = 589.5 (the FULL
+  // plot width represents the window on the "day" range).
+  assert.ok(html.includes('x="5.5"'), "window-open tick at the left edge");
+  assert.ok(html.includes('x="589.5"'), "window-close tick at the right edge");
+  assert.ok(html.includes("10:25 market-local"));
+  assert.ok(html.includes("16:25 market-local"));
+});
+
+test("MKT-011C: an out-of-window intraday tick on the DAY range is still rendered (clamped, not excluded) and its title discloses the clamp -- honest, never a silently dropped real observation", () => {
+  const clampedPoints = [
+    ...DAY_RANGE_TODAY_POINTS,
+    {
+      date: "2026-08-20",
+      priceDecimal: "20.50",
+      currencyCode: "AUD",
+      providerId: "sharesight",
+      interval: "intraday",
+      observedAt: isoAtUtcMinutes("2026-08-20", WINDOW_CLOSE_MINUTES + 20),
+      quality: "observed",
+    },
+  ];
+  const html = renderComponent(
+    "PriceHistoryChartView",
+    CHART_COMPONENT_PATH,
+    todayOnlyChartProps("day", clampedPoints),
+  );
+  // Three diamonds still render -- nothing was dropped.
+  const dotCount = (html.match(/price-history-intraday-dot/g) ?? []).length;
+  assert.ok(dotCount >= 3, "every captured tick still renders");
+  assert.ok(
+    html.includes(
+      "outside the 10:25-16:25 capture window -- shown at the nearest window edge",
+    ),
+  );
+});
+
+test("MKT-011C: a 'stale_candidate'/'indicative' quality-tier tick renders with a distinct HOLLOW/dashed marker class AND a textual caveat, never color alone (QA-001B) -- an 'observed' tick gets neither", () => {
+  const mixedQualityPoints = [
+    DAY_RANGE_TODAY_POINTS[0]!,
+    {
+      ...DAY_RANGE_TODAY_POINTS[1]!,
+      quality: "stale_candidate",
+    },
+  ];
+  const html = renderComponent(
+    "PriceHistoryChartView",
+    CHART_COMPONENT_PATH,
+    todayOnlyChartProps("day", mixedQualityPoints),
+  );
+  assert.ok(html.includes("price-history-intraday-uncertain"));
+  assert.ok(html.includes("stale candidate -- not a freshly confirmed price"));
+});
+
+test("MKT-011C: a 'corrected' tick gets its own textual caveat but keeps the ORDINARY filled marker -- a correction is more trustworthy than 'observed', not less, so it must not render as 'uncertain'", () => {
+  const correctedPoints = [
+    DAY_RANGE_TODAY_POINTS[0]!,
+    {
+      ...DAY_RANGE_TODAY_POINTS[1]!,
+      quality: "corrected",
+    },
+  ];
+  const html = renderComponent(
+    "PriceHistoryChartView",
+    CHART_COMPONENT_PATH,
+    todayOnlyChartProps("day", correctedPoints),
+  );
+  assert.ok(
+    !html.includes("price-history-intraday-uncertain"),
+    "'corrected' must not get the hollow/dashed 'uncertain' marker class",
+  );
+  assert.ok(
+    html.includes("corrected"),
+    "the 'corrected' tier is still named in the tick's own accessible title",
+  );
+});
+
+test("MKT-011C: on the WEEK range, today's intraday ticks are spread within today's OWN calendar-day column, narrower than the full plot width and never bleeding into a neighbouring day", () => {
+  const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
+    symbol: "FMG",
+    range: "week",
+    state: {
+      status: "loaded",
+      currencyCode: "AUD",
+      points: [
+        {
+          date: "2026-08-14",
+          priceDecimal: "19.40",
+          currencyCode: "AUD",
+          providerId: "owner-import",
+          interval: "eod",
+        },
+      ],
+      provenance: {
+        providers: ["owner-import"],
+        fromDate: "2026-08-14",
+        toDate: "2026-08-14",
+        pointCountRaw: 1,
+        pointCountReturned: 1,
+        bucketSize: 1,
+        excludedCurrencyCount: 0,
+        excludedMalformedCount: 0,
+        todayExcludedCurrencyCount: 0,
+        todayExcludedMalformedCount: 0,
+      },
+      latestDelayed: null,
+      invalidRangeRequested: false,
+      todayMarketDate: "2026-08-20",
+      todayPoints: DAY_RANGE_TODAY_POINTS,
+      marketTimezone: "UTC",
+    },
+    onRangeChange: () => {},
+  });
+  // The combined domain spans 2026-08-14..2026-08-20 (6 calendar days), so
+  // one day's column is (600 - 8*2) / 6 = 97.33333... px, ENDING exactly at
+  // today's own date position (592, the rightmost plot edge -- see
+  // `calendarColumnWidth`'s doc comment). The window-CLOSE tick (16:25)
+  // therefore lands exactly at 592 (rect x = 589.5, the SAME pixel the
+  // pre-MKT-011C shared-column marker used to occupy); the window-OPEN
+  // tick (10:25) lands a full column-width to the LEFT of that, at
+  // 592 - 97.33333... = 494.66666...  (rect x = 492.16666...).
+  assert.ok(
+    html.includes('x="589.5"'),
+    "the window-close tick still lands at today's own date position",
+  );
+  assert.ok(
+    html.includes('x="492.1666666666667"'),
+    "the window-open tick lands one day-column-width to the left, not at the day chart's full-width left edge (5.5)",
+  );
+  assert.ok(
+    !html.includes('x="5.5"'),
+    "the week range must NOT use the day range's full-width left edge",
+  );
+});
+
+test("MKT-011C review round-1 fix (F1, BLOCKING): on the WEEK range, when the combined domain spans a SINGLE calendar date (a brand-new holding, or MKT-011B's dedupe removing the only historical point), today's ticks fall back to the FULL plot width and genuinely SPREAD, instead of collapsing onto one bounds-clamped pixel", () => {
+  const html = renderComponent(
+    "PriceHistoryChartView",
+    CHART_COMPONENT_PATH,
+    todayOnlyChartProps("week", DAY_RANGE_TODAY_POINTS),
+  );
+  // Same expectation as the DAY range's full-width test: the window-open
+  // tick at the left edge (rect x = 5.5) and the window-close tick at the
+  // right edge (rect x = 589.5) -- two DISTINCT x values, not one stacked
+  // pixel.
+  assert.ok(
+    html.includes('x="5.5"'),
+    "the window-open tick spreads to the left edge, matching the DAY range's full-width fallback",
+  );
+  assert.ok(
+    html.includes('x="589.5"'),
+    "the window-close tick spreads to the right edge -- the two ticks are NOT stacked on one pixel",
+  );
+  assert.ok(
+    html.includes("10:25 market-local") && html.includes("16:25 market-local"),
+    "both real observed times are still disclosed, not collapsed into a single ambiguous position",
+  );
+});
+
+test("MKT-011C review round-1 fix (F2, BLOCKING): the DAY range's historical 'previous close' context point renders with its OWN accessible title (naming its date) and lands visibly separate from the window-open tick, never pixel-identical to it", () => {
+  const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
+    symbol: "FMG",
+    range: "day",
+    state: {
+      status: "loaded",
+      currencyCode: "AUD",
+      points: [
+        {
+          date: "2026-08-19",
+          priceDecimal: "19.90",
+          currencyCode: "AUD",
+          providerId: "owner-import",
+          interval: "eod",
+        },
+      ],
+      provenance: {
+        providers: ["owner-import"],
+        fromDate: "2026-08-19",
+        toDate: "2026-08-19",
+        pointCountRaw: 1,
+        pointCountReturned: 1,
+        bucketSize: 1,
+        excludedCurrencyCount: 0,
+        excludedMalformedCount: 0,
+        todayExcludedCurrencyCount: 0,
+        todayExcludedMalformedCount: 0,
+      },
+      latestDelayed: null,
+      invalidRangeRequested: false,
+      todayMarketDate: "2026-08-20",
+      todayPoints: DAY_RANGE_TODAY_POINTS,
+      marketTimezone: "UTC",
+    },
+    onRangeChange: () => {},
+  });
+  // The context point's own accessible title names its real date -- a
+  // pre-existing gap (lone historical points had NO title at all) that
+  // became actively confusing once a same-pixel intraday tick could sit
+  // right where it used to render.
+  assert.ok(html.includes(">2026-08-19 (historical).<"));
+  // The context point (a plain circle, `scalePriceHistoryPoints`'s
+  // UNMODIFIED date-offset x -- the plot's left edge, 8) is visibly
+  // separated from the window-OPEN diamond, which now starts
+  // DAY_CONTEXT_GAP_PX further right (rect x = 8 + 14 - 2.5 = 19.5) rather
+  // than at the SAME pixel (5.5) the context circle itself sits at
+  // (cx=8).
+  assert.ok(
+    html.includes('cx="8"'),
+    "the context point stays at the plot's left edge",
+  );
+  assert.ok(
+    html.includes('x="19.5"'),
+    "the window-open tick starts to the right of a reserved gap, not on top of the context point",
+  );
+  assert.ok(
+    !html.includes('x="5.5"'),
+    "the window-open tick must NOT land at the plain left edge once a context point is present",
+  );
+});
+
+test("MKT-011C: a today-only chart (no settled historical points in this range) discloses that honestly instead of a misleading 'No date range · 0 points · No provider' line while diamonds are visibly plotting", () => {
+  const html = renderComponent(
+    "PriceHistoryChartView",
+    CHART_COMPONENT_PATH,
+    todayOnlyChartProps("day", DAY_RANGE_TODAY_POINTS),
+  );
+  assert.ok(html.includes("No settled historical points in this range"));
+  assert.ok(!html.includes("No date range"));
+  assert.ok(!html.includes("No provider"));
+});
+
+test("MKT-011C: the price axis attributes a min/max that came from TODAY's intraday overlay rather than the historical series", () => {
+  const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
+    symbol: "FMG",
+    range: "day",
+    state: {
+      status: "loaded",
+      currencyCode: "AUD",
+      points: [
+        {
+          date: "2026-08-19",
+          priceDecimal: "19.90",
+          currencyCode: "AUD",
+          providerId: "owner-import",
+          interval: "eod",
+        },
+      ],
+      provenance: {
+        providers: ["owner-import"],
+        fromDate: "2026-08-19",
+        toDate: "2026-08-19",
+        pointCountRaw: 1,
+        pointCountReturned: 1,
+        bucketSize: 1,
+        excludedCurrencyCount: 0,
+        excludedMalformedCount: 0,
+        todayExcludedCurrencyCount: 0,
+        todayExcludedMalformedCount: 0,
+      },
+      latestDelayed: null,
+      invalidRangeRequested: false,
+      todayMarketDate: "2026-08-20",
+      // 20.30 (today) exceeds 19.90 (the only historical point) -- the
+      // displayed MAX must be attributed to today's overlay.
+      todayPoints: DAY_RANGE_TODAY_POINTS,
+      marketTimezone: "UTC",
+    },
+    onRangeChange: () => {},
+  });
+  assert.ok(html.includes("(today, intraday)"));
+});
+
+test("MKT-011C: the latest-delayed summary line now carries a market-local TIME (from the plumbed-through observedAt), disambiguating it from the same-date Today line", () => {
+  const html = renderComponent("PriceHistoryChartView", CHART_COMPONENT_PATH, {
+    symbol: "FMG",
+    range: "week",
+    state: {
+      status: "loaded",
+      currencyCode: "AUD",
+      points: [
+        {
+          date: "2026-08-19",
+          priceDecimal: "19.90",
+          currencyCode: "AUD",
+          providerId: "owner-import",
+          interval: "eod",
+        },
+      ],
+      provenance: {
+        providers: ["owner-import"],
+        fromDate: "2026-08-19",
+        toDate: "2026-08-19",
+        pointCountRaw: 1,
+        pointCountReturned: 1,
+        bucketSize: 1,
+        excludedCurrencyCount: 0,
+        excludedMalformedCount: 0,
+        todayExcludedCurrencyCount: 0,
+        todayExcludedMalformedCount: 0,
+      },
+      latestDelayed: {
+        date: "2026-08-20",
+        priceDecimal: "20.05",
+        currencyCode: "AUD",
+        providerId: "sharesight",
+        interval: "delayed",
+        observedAt: isoAtUtcMinutes("2026-08-20", WINDOW_CLOSE_MINUTES - 30),
+        quality: "observed",
+      },
+      invalidRangeRequested: false,
+      todayMarketDate: "2026-08-20",
+      todayPoints: DAY_RANGE_TODAY_POINTS,
+      marketTimezone: "UTC",
+    },
+    onRangeChange: () => {},
+  });
+  assert.ok(html.includes("15:55 market-local"));
+});
+
+test("MKT-011C: MARKET_DATA_STRATEGY documents the true intraday time axis, the WEEK-range column choice, the clamp-not-exclude decision, and the quality-tier distinction", async () => {
+  const doc = await readFile(
+    new URL("../docs/MARKET_DATA_STRATEGY.md", import.meta.url),
+    "utf8",
+  );
+  assert.ok(doc.includes("MKT-011C"));
+  assert.ok(doc.toLowerCase().includes("clamp"));
+  assert.ok(doc.toLowerCase().includes("stale_candidate"));
+  assert.ok(doc.toLowerCase().includes("week"));
+});
+
+test("MKT-011C: outside the DAY/WEEK ranges, today's ticks keep the pre-existing SHARED calendar-date column x -- the time axis never applies to month/year/etc. ranges even when a market timezone is known", () => {
+  const html = renderComponent(
+    "PriceHistoryChartView",
+    CHART_COMPONENT_PATH,
+    todayOnlyChartProps("month", DAY_RANGE_TODAY_POINTS),
+  );
+  // Both today points share ONE calendar date, so on a non-day/week range
+  // they land on the SAME shared date-offset column (paddingX, the
+  // single-date domain's own left edge -- `scalePriceHistoryPoints`,
+  // unmodified) -- never split across the day range's two distinct
+  // TIME-based x values. Both rects report x="5.5" (not just one), and the
+  // day-range's window-CLOSE x (589.5) is never reached at all.
+  const leftEdgeCount = (html.match(/x="5\.5"/g) ?? []).length;
+  assert.equal(
+    leftEdgeCount,
+    2,
+    "both today ticks share the SAME shared-column x, not distinct time-based positions",
+  );
+  assert.ok(
+    !html.includes('x="589.5"'),
+    "the time axis's window-close x must never appear outside day/week ranges",
+  );
 });

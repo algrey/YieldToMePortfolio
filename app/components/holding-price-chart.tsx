@@ -19,9 +19,13 @@ import {
   type PriceHistoryRange,
 } from "../price-history-range.ts";
 import {
+  calendarColumnWidth,
   classifyPriceHistorySegments,
   isPlottableDecimal,
+  positionTodayPointsByObservedTime,
   scalePriceHistoryPoints,
+  type ChartScale,
+  type PlottedTimeAxisPoint,
 } from "../price-history-chart-geometry.ts";
 import type {
   PriceHistoryPoint,
@@ -33,6 +37,12 @@ const CHART_WIDTH = 600;
 const CHART_HEIGHT = 160;
 const CHART_PADDING_X = 8;
 const CHART_PADDING_Y = 10;
+/** MKT-011C review round-1 fix (F2, BLOCKING): pixel gap reserved before the
+ * DAY range's time axis starts, ONLY when a historical "previous close"
+ * context point is present -- without it, that point's plain date-offset x
+ * (the plot's left edge) is the SAME pixel the window-OPEN tick would
+ * otherwise occupy. See the `range === "day"` branch below. */
+const DAY_CONTEXT_GAP_PX = 14;
 
 const RANGE_LABELS: Record<PriceHistoryRange, string> = {
   day: "Day",
@@ -59,6 +69,10 @@ export type PriceHistoryFetchState =
       // for the honesty/dedupe rules these carry.
       todayMarketDate: string | null;
       todayPoints: readonly PriceHistoryPoint[];
+      // MKT-011C: the security's own market timezone (same source as
+      // `todayMarketDate`) -- lets the day/week-range time axis convert each
+      // today point's `observedAt` into a market-local time client-side.
+      marketTimezone: string | null;
     }
   | { status: "error"; message: string };
 
@@ -108,6 +122,46 @@ function providerDisplayLabel(providerId: string): string {
     .join(" ");
 }
 
+/** MKT-011C: formats a UTC `observedAt` instant as an "HH:MM" market-LOCAL
+ * clock time -- labelled "market-local" everywhere it is shown (never bare,
+ * which could be misread as the viewer's own local time). `null` (never a
+ * guess) when `observedAt`/`marketTimezone` is missing or unparsable -- the
+ * caller falls back to date-only wording in that case. */
+function marketLocalTimeLabel(
+  observedAt: string | null | undefined,
+  marketTimezone: string | null,
+): string | null {
+  if (!observedAt || !marketTimezone) return null;
+  const instant = new Date(observedAt);
+  if (!Number.isFinite(instant.getTime())) return null;
+  try {
+    return new Intl.DateTimeFormat("en-AU", {
+      timeZone: marketTimezone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(instant);
+  } catch {
+    return null;
+  }
+}
+
+/** MKT-011C: a short, human label for a non-`observed` quality tier -- the
+ * overlay's per-tick accessible `<title>` text (never color alone, QA-001B).
+ * `null` for `observed` (the ordinary case needs no caveat) and for any
+ * future/unrecognised value (degrades to no caveat rather than a fabricated
+ * label). */
+function qualityCaveatLabel(quality: string | undefined): string | null {
+  if (quality === "stale_candidate") {
+    return "stale candidate -- not a freshly confirmed price";
+  }
+  if (quality === "indicative") {
+    return "indicative -- not a confirmed trade";
+  }
+  if (quality === "corrected") return "corrected";
+  return null;
+}
+
 export function HoldingPriceChart({
   portfolioId,
   portfolioSecurityId,
@@ -145,6 +199,7 @@ export function HoldingPriceChart({
               invalidRangeRequested: boolean;
               todayMarketDate: string | null;
               todayPoints: PriceHistoryPoint[];
+              marketTimezone: string | null;
             }
           | { ok: false; message: string };
         if (cancelled) return;
@@ -167,6 +222,7 @@ export function HoldingPriceChart({
           invalidRangeRequested: result.invalidRangeRequested,
           todayMarketDate: result.todayMarketDate,
           todayPoints: result.todayPoints,
+          marketTimezone: result.marketTimezone,
         });
       } catch (error) {
         if (cancelled) return;
@@ -234,7 +290,7 @@ export function PriceHistoryChartView({
           Loading price history…
         </p>
       ) : (
-        <ChartBody symbol={symbol} state={state} />
+        <ChartBody symbol={symbol} range={range} state={state} />
       )}
       <div className="range-controls" aria-label="Price history range">
         {PRICE_HISTORY_RANGES.map((option) => (
@@ -254,9 +310,11 @@ export function PriceHistoryChartView({
 
 export function ChartBody({
   symbol,
+  range,
   state,
 }: {
   symbol: string;
+  range: PriceHistoryRange;
   state: Extract<PriceHistoryFetchState, { status: "loaded" }>;
 }) {
   const plottable = state.points.filter((point) =>
@@ -278,19 +336,27 @@ export function ChartBody({
     );
   }
 
+  const SCALE: ChartScale = {
+    width: CHART_WIDTH,
+    height: CHART_HEIGHT,
+    paddingX: CHART_PADDING_X,
+    paddingY: CHART_PADDING_Y,
+  };
+
   // MKT-011B: scale the historical series AND today's intraday overlay
   // together so both share ONE price/date domain -- the axis reflects the
   // true combined min/max, and today's ticks land in the correct calendar
   // column. Reuses `scalePriceHistoryPoints` UNMODIFIED (it already maps
   // by calendar date, never index) rather than inventing separate overlay
   // geometry; the two halves are split back out below by array position
-  // (order is preserved by that function).
-  const scaled = scalePriceHistoryPoints([...plottable, ...todayPlottable], {
-    width: CHART_WIDTH,
-    height: CHART_HEIGHT,
-    paddingX: CHART_PADDING_X,
-    paddingY: CHART_PADDING_Y,
-  });
+  // (order is preserved by that function). MKT-011C keeps this call
+  // completely unchanged -- it still supplies the shared price/Y domain
+  // AND every range's date-based X positions; only the DAY/WEEK ranges'
+  // "today" points get their X overridden below by the true time axis.
+  const scaled = scalePriceHistoryPoints(
+    [...plottable, ...todayPlottable],
+    SCALE,
+  );
   if (!scaled) {
     return (
       <p className="muted-copy" role="status">
@@ -300,6 +366,133 @@ export function ChartBody({
   }
   const historicalScaled = scaled.points.slice(0, plottable.length);
   const todayScaled = scaled.points.slice(plottable.length);
+
+  // MKT-011C: true sub-day time axis, DAY (full plot width = the 10:25-16:25
+  // window) and WEEK (today's own calendar-day column within the multi-day
+  // date-offset axis) ranges only -- every other range keeps today's ticks
+  // on the SAME shared calendar-date column `scalePriceHistoryPoints` above
+  // already put them on (MKT-011B, unchanged). `marketTimezone` unresolved
+  // (no exchange linked) degrades to that same shared-column fallback rather
+  // than guessing a timezone.
+  const marketTimezone = state.marketTimezone ?? null;
+  const timeAxisRange = range === "day" || range === "week";
+  const plotMinX = CHART_PADDING_X;
+  const plotMaxX = CHART_WIDTH - CHART_PADDING_X;
+  let todayTimePositions: readonly (PlottedTimeAxisPoint | null)[] = [];
+  if (timeAxisRange && todayScaled.length > 0 && marketTimezone) {
+    const yValues = todayScaled.map((point) => point.y);
+    const timeInputs = todayPlottable.map((point) => ({
+      date: point.date,
+      priceDecimal: point.priceDecimal,
+      observedAt: point.observedAt ?? "",
+    }));
+    if (range === "day") {
+      // Historical `plottable` on a Day range is EMPTY unless the loader's
+      // own sparse-day supplement (`app/owned-price-history.ts`) found an
+      // earlier "previous close" for context -- when it did, that single
+      // point's UNMODIFIED date-offset x (`scalePriceHistoryPoints` above)
+      // sits at the plot's own left edge (`plotMinX`), the SAME pixel the
+      // window-OPEN tick would otherwise land on. Review round-1 fix (F2,
+      // BLOCKING): the two markers rendered pixel-identical, with the
+      // historical circle's own `<title>` (added below, a pre-existing gap
+      // even before this task) effectively unreachable under the diamond
+      // drawn on top of it -- a different calendar date shown with no
+      // distinguishing mark. Reserving a small gap BEFORE the window
+      // starts keeps that context point visually separate from the window
+      // it precedes, rather than literally inside it. Skipped when there
+      // is no context point to make room for, so an ordinary "day" view
+      // (no historical data at all) still uses the FULL plot width.
+      const hasDayContextPoint = plottable.length > 0;
+      const dayStartX = hasDayContextPoint
+        ? plotMinX + DAY_CONTEXT_GAP_PX
+        : plotMinX;
+      todayTimePositions = positionTodayPointsByObservedTime(
+        timeInputs,
+        yValues,
+        marketTimezone,
+        { startX: dayStartX, width: plotMaxX - dayStartX },
+        { minX: plotMinX, maxX: plotMaxX },
+      );
+    } else {
+      const allDates = [
+        ...plottable.map((point) => point.date),
+        ...todayPlottable.map((point) => point.date),
+      ];
+      if (new Set(allDates).size <= 1) {
+        // Review round-1 fix (F1, BLOCKING): the combined domain can span
+        // a SINGLE calendar date -- a brand-new holding with no historical
+        // observation at all, or MKT-011B's own dedupe rule removing the
+        // only same-day historical winner once intraday data exists (the
+        // ONLY way to reach a single-date domain here, since a historical
+        // point on a DIFFERENT date would make this a genuine 2+-date
+        // domain). There is then no "neighbouring day" for a per-day
+        // column to bleed into at all, and `calendarColumnWidth` cannot
+        // size one sensibly for a one-date domain (it degenerately
+        // returns the FULL inner width, which the branch below would then
+        // subtract from an `anchorX` sitting at the domain's LEFT edge --
+        // not its right -- pushing the whole column far off-screen;
+        // reviewer-rendered proof: every tick collapsed onto one pixel,
+        // with `withinCaptureWindow` still reporting `true` so the
+        // window-clamp disclosure never caught it either). Falls back to
+        // the SAME full plot width the DAY range uses instead -- today
+        // legitimately owns the whole axis when it is the only date on it.
+        todayTimePositions = positionTodayPointsByObservedTime(
+          timeInputs,
+          yValues,
+          marketTimezone,
+          { startX: plotMinX, width: plotMaxX - plotMinX },
+          { minX: plotMinX, maxX: plotMaxX },
+        );
+      } else {
+        // WEEK (genuinely multi-day domain): size today's column to ONE
+        // calendar day's width within the multi-day date-offset axis,
+        // ENDING at today's own already-computed date position (never
+        // centred on it) -- the range window always ends "today"
+        // (`priceHistoryWindow`'s `toDate`), so today is normally the
+        // RIGHTMOST/latest date on this axis; a column centred there
+        // would overflow past the chart's own right edge and clamp every
+        // afternoon tick to the same pixel, destroying exactly the spread
+        // this range is meant to show. Ending at `anchorX` also gives a
+        // pleasing invariant: the window's own LAST tick (16:25) lands
+        // exactly where the plain shared-column marker used to sit.
+        const columnWidth = calendarColumnWidth(allDates, SCALE);
+        const anchorX = todayScaled[0]!.x;
+        todayTimePositions = positionTodayPointsByObservedTime(
+          timeInputs,
+          yValues,
+          marketTimezone,
+          { startX: anchorX - columnWidth, width: columnWidth },
+          { minX: plotMinX, maxX: plotMaxX },
+        );
+      }
+    }
+  }
+  // Final today-point geometry: a TIME-positioned x when one resolved
+  // (day/week ranges with a known market timezone), else the pre-existing
+  // shared-column x from `scaled` above -- a point is NEVER dropped just
+  // because it could not be time-positioned.
+  const todayFinal = todayScaled.map((point, index) => {
+    const sourcePoint = todayPlottable[index]!;
+    const timePoint = todayTimePositions[index] ?? null;
+    return {
+      date: point.date,
+      priceDecimal: point.priceDecimal,
+      x: timePoint ? timePoint.x : point.x,
+      y: point.y,
+      quality: sourcePoint.quality,
+      observedAt: sourcePoint.observedAt,
+      // Only meaningful when this render actually attempted time
+      // positioning -- outside day/week ranges (or without a resolvable
+      // timezone) there is no window to have fallen outside of. Review
+      // round-1 fold (F5): a pre-10:25 `observedAt` is the ORDINARY case
+      // for a day's FIRST capture (the provider's own observation instant
+      // can trail this app's sweep cadence by an unknown delay -- §17/§21),
+      // not an exceptional one -- this flag/its disclosure below exists to
+      // handle that routine outcome honestly, not as a rare edge case.
+      clampedOutsideWindow:
+        timePoint !== null && !timePoint.withinCaptureWindow,
+    };
+  });
   // Review round-2 fix: gap classification must know the sampling cadence
   // (`bucketSize`) -- a downsampled series' NORMAL point spacing is itself
   // roughly `bucketSize` observations apart and must not be mistaken for a
@@ -319,8 +512,8 @@ export function ChartBody({
   // fabricated sub-day time axis.
   const todayLinePoints =
     historicalScaled.length > 0
-      ? [historicalScaled[historicalScaled.length - 1]!, ...todayScaled]
-      : todayScaled;
+      ? [historicalScaled[historicalScaled.length - 1]!, ...todayFinal]
+      : todayFinal;
   const todayProviders = [
     ...new Set(todayPlottable.map((point) => point.providerId)),
   ].sort();
@@ -331,6 +524,24 @@ export function ChartBody({
   const ariaFromDate = state.provenance.fromDate ?? todayMarketDate;
   const ariaToDate = state.provenance.toDate ?? todayMarketDate;
   const totalPointCount = plottable.length + todayPlottable.length;
+  // MKT-011C: axis min/max attribution -- `scaled.min/maxPriceDecimal` come
+  // from the COMBINED historical+today domain (unchanged from MKT-011B), so
+  // an intraday tick CAN legitimately set the displayed extreme. Compared by
+  // exact decimal STRING (never a float re-parse) against every historical
+  // point's own price -- if the extreme's value does not appear among the
+  // historical points at all, it can only have come from today's overlay.
+  const historicalDecimals = new Set(
+    plottable.map((point) => point.priceDecimal),
+  );
+  const maxFromToday =
+    todayPlottable.length > 0 &&
+    !historicalDecimals.has(scaled.maxPriceDecimal);
+  const minFromToday =
+    todayPlottable.length > 0 &&
+    !historicalDecimals.has(scaled.minPriceDecimal);
+  const latestDelayedTimeLabel = state.latestDelayed
+    ? marketLocalTimeLabel(state.latestDelayed.observedAt, marketTimezone)
+    : null;
 
   return (
     <>
@@ -358,6 +569,14 @@ export function ChartBody({
             .map((point) => byDate.get(point.date))
             .filter((point): point is NonNullable<typeof point> => !!point);
           if (coords.length < 2) {
+            // Review round-1 fix (F2, BLOCKING): a lone historical point
+            // (e.g. the DAY range's "previous close" context supplement)
+            // previously rendered with NO accessible title at all -- a
+            // pre-existing gap that became actively harmful once the DAY
+            // range's time axis could place a same-pixel intraday tick
+            // right next to (or, before the F2 gap fix above, literally
+            // on top of) it: a different calendar date with nothing to
+            // distinguish it. Names the point's own date explicitly.
             return coords.length === 1 ? (
               <circle
                 key={`point-${index}`}
@@ -365,7 +584,9 @@ export function ChartBody({
                 cx={coords[0]!.x}
                 cy={coords[0]!.y}
                 r={2.5}
-              />
+              >
+                <title>{`${coords[0]!.date} (historical).`}</title>
+              </circle>
             ) : null;
           }
           return (
@@ -431,55 +652,122 @@ export function ChartBody({
                 </title>
               </polyline>
             ) : null}
-            {todayScaled.map((point, index) => (
-              <rect
-                key={`today-${point.date}-${index}`}
-                className={
-                  index === todayScaled.length - 1
-                    ? "price-history-intraday-dot price-history-intraday-latest"
-                    : "price-history-intraday-dot"
-                }
-                x={point.x - 2.5}
-                y={point.y - 2.5}
-                width={5}
-                height={5}
-                transform={`rotate(45 ${point.x} ${point.y})`}
-              />
-            ))}
+            {todayFinal.map((point, index) => {
+              const caveat = qualityCaveatLabel(point.quality);
+              const time = marketLocalTimeLabel(
+                point.observedAt,
+                marketTimezone,
+              );
+              // MKT-011C: non-color distinction (QA-001B) -- ONLY the two
+              // LOWER-confidence tiers TASKS.md names ('indicative',
+              // 'stale_candidate') render HOLLOW with a dashed outline
+              // (`price-history-intraday-uncertain`); 'corrected' still gets
+              // its own textual caveat below (a correction is worth noting)
+              // but keeps the ordinary FILLED marker -- a correction is MORE
+              // trustworthy than a plain 'observed' tick, not less, so the
+              // "uncertain" visual language would misrepresent it.
+              const isUncertainQuality =
+                point.quality === "indicative" ||
+                point.quality === "stale_candidate";
+              const classNames = [
+                "price-history-intraday-dot",
+                index === todayFinal.length - 1
+                  ? "price-history-intraday-latest"
+                  : "",
+                isUncertainQuality ? "price-history-intraday-uncertain" : "",
+              ]
+                .filter(Boolean)
+                .join(" ");
+              const titleParts = [
+                time
+                  ? `${time} market-local`
+                  : `${chartDate(point.date)} (time unavailable)`,
+                `${priceText(point.priceDecimal)} ${state.currencyCode}`,
+              ];
+              if (caveat) titleParts.push(caveat);
+              if (point.clampedOutsideWindow) {
+                titleParts.push(
+                  "outside the 10:25-16:25 capture window -- shown at the nearest window edge, not its true relative time",
+                );
+              }
+              return (
+                <rect
+                  key={`today-${point.date}-${index}`}
+                  className={classNames}
+                  x={point.x - 2.5}
+                  y={point.y - 2.5}
+                  width={5}
+                  height={5}
+                  transform={`rotate(45 ${point.x} ${point.y})`}
+                >
+                  <title>{`${titleParts.join("; ")}.`}</title>
+                </rect>
+              );
+            })}
           </g>
         ) : null}
       </svg>
       <div className="price-history-axis">
         <span>
           {state.currencyCode} {priceText(scaled.maxPriceDecimal)}
+          {maxFromToday ? " (today, intraday)" : ""}
         </span>
         <span>
           {state.currencyCode} {priceText(scaled.minPriceDecimal)}
+          {minFromToday ? " (today, intraday)" : ""}
         </span>
       </div>
-      <p className="chart-coverage">
-        {state.provenance.fromDate && state.provenance.toDate
-          ? `${chartDate(state.provenance.fromDate)} – ${chartDate(state.provenance.toDate)}`
-          : "No date range"}{" "}
-        · {state.provenance.pointCountRaw} point
-        {state.provenance.pointCountRaw === 1 ? "" : "s"}
-        {state.provenance.pointCountReturned < state.provenance.pointCountRaw
-          ? ` (${state.provenance.pointCountReturned} shown)`
-          : ""}{" "}
-        · {state.provenance.providers.join(", ") || "No provider"}
-        {state.provenance.excludedCurrencyCount > 0
-          ? ` · ${state.provenance.excludedCurrencyCount} other-currency row${state.provenance.excludedCurrencyCount === 1 ? "" : "s"} excluded`
-          : ""}
-        {state.provenance.excludedMalformedCount > 0
-          ? ` · ${state.provenance.excludedMalformedCount} malformed row${state.provenance.excludedMalformedCount === 1 ? "" : "s"} skipped`
-          : ""}
-      </p>
+      {/* MKT-011C: a today-only chart (no settled historical points survive
+          this range, e.g. a brand-new listing on the "Day" view) must not
+          render "No date range · 0 points · No provider" while the
+          intraday diamonds are visibly plotting real data -- that combo
+          reads as "nothing here" when there plainly is something here. The
+          ORDINARY coverage line (below) still applies whenever there IS a
+          historical point to describe. */}
+      {state.provenance.pointCountRaw === 0 && todayPlottable.length > 0 ? (
+        <p className="chart-coverage">
+          No settled historical points in this range -- see today&apos;s
+          intraday capture below.
+          {state.provenance.excludedCurrencyCount > 0
+            ? ` ${state.provenance.excludedCurrencyCount} other-currency row${state.provenance.excludedCurrencyCount === 1 ? "" : "s"} excluded.`
+            : ""}
+          {state.provenance.excludedMalformedCount > 0
+            ? ` ${state.provenance.excludedMalformedCount} malformed row${state.provenance.excludedMalformedCount === 1 ? "" : "s"} skipped.`
+            : ""}
+        </p>
+      ) : (
+        <p className="chart-coverage">
+          {state.provenance.fromDate && state.provenance.toDate
+            ? `${chartDate(state.provenance.fromDate)} – ${chartDate(state.provenance.toDate)}`
+            : "No date range"}{" "}
+          · {state.provenance.pointCountRaw} point
+          {state.provenance.pointCountRaw === 1 ? "" : "s"}
+          {state.provenance.pointCountReturned < state.provenance.pointCountRaw
+            ? ` (${state.provenance.pointCountReturned} shown)`
+            : ""}{" "}
+          · {state.provenance.providers.join(", ") || "No provider"}
+          {state.provenance.excludedCurrencyCount > 0
+            ? ` · ${state.provenance.excludedCurrencyCount} other-currency row${state.provenance.excludedCurrencyCount === 1 ? "" : "s"} excluded`
+            : ""}
+          {state.provenance.excludedMalformedCount > 0
+            ? ` · ${state.provenance.excludedMalformedCount} malformed row${state.provenance.excludedMalformedCount === 1 ? "" : "s"} skipped`
+            : ""}
+        </p>
+      )}
       {state.latestDelayed ? (
         <p className="muted-copy">
           Delayed ({providerDisplayLabel(state.latestDelayed.providerId)}):{" "}
           {priceText(state.latestDelayed.priceDecimal)}{" "}
           {state.latestDelayed.currencyCode} as of{" "}
-          {chartDate(state.latestDelayed.date)}.
+          {chartDate(state.latestDelayed.date)}
+          {/* MKT-011C: this line and the "Today" line below can both name
+              the SAME calendar date -- disambiguated with a market-local
+              TIME now that `observedAt` is plumbed through, so the two are
+              never read as the same unqualified same-day figure. */}
+          {latestDelayedTimeLabel
+            ? `, ${latestDelayedTimeLabel} market-local`
+            : ""}
+          .
         </p>
       ) : null}
       {/* B1 fix (MKT-011B review): this paragraph must render whenever there

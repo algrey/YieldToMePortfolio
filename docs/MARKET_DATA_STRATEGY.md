@@ -649,3 +649,158 @@ the existing `latestDelayed` line's style; the SVG's accessible `<title>`
 on the overlay polyline carries the same explanation for assistive tech.
 The label NEVER says "live" or "close" (AGENTS.md) — intraday captures are
 always `interval: 'intraday'`, delayed, unsettled data.
+
+## 23. True intraday time axis for the today overlay (MKT-011C, 2026-08-22)
+
+Owner ruling: "the day chart should show the hourly values. Optionally
+they could be plotted on the weekly chart." §22's overlay plotted every
+one of today's intraday ticks at ONE shared calendar-date x-column, spread
+vertically by price — honest (the real observed range, explained in the
+accessible text) but visually close to a range wick, and it exaggerated
+the last column's apparent volatility. This section replaces that with a
+true sub-day time axis on the DAY range, and the SAME time axis narrowed
+to today's own column on the WEEK range (implemented, not dropped — the
+owner's "optional" carve-out).
+
+**Contract change: `observedAt`/`quality` are plumbed through.**
+`PriceHistoryPoint` (`app/owned-price-history.ts`) gains two OPTIONAL
+fields — `observedAt` (the point's own UTC observation instant) and
+`quality` (`ProviderDataQuality`) — populated for every point the loader
+returns (historical, today, and `latestDelayed` alike). Review round-1 fact
+correction (F4): this is true of `observedAt` in only ONE sense — the
+historical `price_observations` read already SELECTed `observation_at`
+(§19), it was simply dropped before reaching `toApiPoint`'s returned
+shape — but `quality` was NOT already carried through; this task adds
+`po.quality`/`quality` to BOTH the historical (`fetchObservations`,
+`latestDelayedRow`) and intraday (`listOwnedIntradayPricePointsForDate`)
+SQL selects for the first time. Optional at the TYPE level only for
+backward/forward compatibility with older cached client state or test
+fixtures that predate this field — the loader itself always populates
+both. `PriceHistorySuccess` also gains `marketTimezone` (the SAME
+`exchanges.timezone` §22's `todayMarketDate` was resolved against), so the
+client can convert `observedAt` into a market-local time without a second
+server round-trip.
+
+**Geometry: a separate pure function, `scalePriceHistoryPoints` untouched.**
+`app/price-history-chart-geometry.ts` adds
+`positionTodayPointsByObservedTime` (given today's points, their
+already-Y-scaled values, the market timezone, a pixel column, and plot
+bounds, returns each point's TIME-based x) and `calendarColumnWidth` (one
+calendar day's pixel width within a multi-day date-offset domain) —
+neither changes `scalePriceHistoryPoints` itself, which keeps driving
+every range's shared price/date domain (§22's Y-domain-sharing behaviour
+is unchanged) and every non-day/week range's date-offset x-axis exactly as
+before. Both new functions reuse
+`domain/market-data/daily-capture-window.ts`'s `resolveDailyCaptureWindowStatus`
+and its now-exported `WINDOW_OPEN_MINUTES`/`WINDOW_CLOSE_MINUTES` (10:25/
+16:25) — the EXACT derivation the capture sweep itself gates on — rather
+than a second bespoke time-zone calculation that could drift out of sync.
+
+**DAY range:** the full plot width represents the 10:25–16:25 market-local
+window when there is no historical context point; each intraday tick's x
+is proportional to its own observed time-of-day. A same-day "previous
+close" context point (§19's sparse-day supplement), when present, still
+lands wherever the ordinary date-offset scale puts the earliest date in
+the combined domain — the chart's left edge. Review round-1 fact
+correction (F2, BLOCKING): an earlier version of this section described
+that as reading visually "before market open" — false as shipped: the
+window's own left edge sits at that SAME pixel, so the context point and
+the window-OPEN (10:25) tick rendered pixel-identical, with the context
+point's `<title>` (a pre-existing gap; lone historical points had none)
+effectively unreachable under the diamond drawn on top of it. Fixed by (1)
+giving every lone historical point (not just this case) its own `<title>`
+naming its date, and (2) reserving a small pixel gap before the DAY
+window starts whenever a context point is present, so it renders visibly
+separate from — genuinely before — the window rather than inside it. The
+gap is skipped when there is no context point, so an ordinary "day" view
+with no historical data still uses the full plot width.
+
+**WEEK range (owner's optional carve-out, IMPLEMENTED):** today's ticks
+spread across ONE calendar day's width within the existing multi-day
+date-offset axis, ENDING at today's own already-computed date position
+rather than centred on it — the range window always ends "today," so today
+is normally the rightmost/latest date on the axis, and a column centred
+there would overflow the chart's right edge and clamp every afternoon tick
+to the same pixel. Ending at that position instead gives a clean invariant:
+the window's own last tick (16:25) lands exactly where the pre-MKT-011C
+shared-column marker used to sit. Review round-1 fix (F1, BLOCKING): this
+per-day column math only applies when the combined historical+today domain
+genuinely spans 2+ calendar dates. When it spans exactly ONE date — a
+brand-new holding with no historical observation at all, or §22's own
+dedupe rule removing the only same-day historical winner once intraday
+data exists (the only way to reach a one-date domain here) — the WEEK
+range now falls back to the SAME full plot width the DAY range uses.
+Reviewer-caught: the un-fixed code instead sized the per-day column from
+`calendarColumnWidth`'s own single-date fallback (the full inner width)
+and subtracted it from an anchor sitting at the domain's LEFT edge, not
+its right, pushing the whole column hundreds of pixels off-screen — every
+tick then bounds-clamped onto ONE pixel with `withinCaptureWindow` still
+reporting `true` (a PIXEL-bounds clamp is not a capture-WINDOW clamp, so
+the window-clamp disclosure never caught it). `positionTodayPointsByObservedTime`
+now also independently rejects (returns `null` for every point) any
+`column` that does not overlap the plot's own bounds at all, as a second,
+caller-independent safety net against the same failure shape.
+
+**Out-of-window ticks: CLAMPED, never excluded — and ORDINARY, not
+exceptional.** A tick's `observedAt` is the PROVIDER's own reported
+observation instant, not this app's capture timestamp; the 10:25–16:25
+window only gates WHEN this app's sweep fires a new capture tick
+(§21), and a delayed source's reporting lag relative to that tick is
+unknown (§17). Review round-1 fold (F5): a pre-10:25 `observedAt` on a
+day's FIRST capture is therefore the ROUTINE case, not a rare edge case —
+clamping exists to handle it honestly every day, not as a defensive
+fallback for a corner case. A tick landing outside the window is
+positioned at the nearest window edge rather than dropped from the chart —
+a real captured observation is never hidden for landing outside the window
+this app happens to gate NEW capture ticks on. The returned
+`withinCaptureWindow: false` flag (surfaced in the tick's own accessible
+`<title>`, e.g. "outside the 10:25-16:25 capture window — shown at the
+nearest window edge, not its true relative time") distinguishes a clamp
+from an ordinary in-window tick, so the chart's geometry is never silently
+misleading about a tick's true time.
+
+**Quality-tier ticks visually and textually distinguished (QA-001B).**
+Review round-1 fact correction (F3): only `stale_candidate` is currently
+PRODUCIBLE on the intraday overlay — reachable via the Yahoo-compatible
+capture adapter's cached-fallback path (`domain/market-data/yahoo-compatible.ts`,
+the `quality: "stale_candidate"` cached-fallback branch); every other
+intraday-capture code path hardcodes `quality: "observed"`. `indicative`
+and `corrected` are NOT currently reachable on this overlay — handled
+defensively per the four-value DB enum (`intraday_price_points_quality_check`)
+in case a future capture path or a hand-run write produces one, not
+because either is exercised today. When a `stale_candidate` (or, if it
+ever becomes reachable, `indicative`) tick DOES render, it shows HOLLOW
+with a dashed outline (`.price-history-intraday-uncertain` in
+`app/globals.css`) instead of the ordinary filled diamond — a SHAPE/
+pattern distinction, not color alone — and its own `<title>` names the
+tier in words ("stale candidate — not a freshly confirmed price" /
+"indicative — not a confirmed trade"). A `corrected` tick gets its own
+textual caveat ("corrected") but keeps the ORDINARY filled marker — a
+correction is more trustworthy than a plain `observed` tick, not less, so
+the "uncertain" hollow styling would misrepresent it. An `observed` tick
+(the ordinary case) gets neither a caveat nor a styling change.
+
+**Folded-in residuals from §22's review:**
+
+- **Today-only coverage line.** A today-only chart (no settled historical
+  point survives the range) no longer renders the misleading
+  "No date range · 0 points · No provider" while the intraday diamonds are
+  visibly plotting real data — it renders "No settled historical points in
+  this range" (plus any real historical exclusion counts) instead. The
+  ordinary coverage line is unchanged whenever a historical point exists.
+- **Axis min/max attribution.** `scaled.min/maxPriceDecimal` can be set by
+  an intraday tick (the combined domain is unchanged from §22) — the axis
+  now appends "(today, intraday)" whenever the displayed extreme's exact
+  decimal string does not appear among the historical series at all (i.e.
+  it can only have come from today's overlay).
+- **`latestDelayed` pairing.** The delayed-quote summary line can name the
+  SAME calendar date as the "Today" line below it — now disambiguated with
+  a market-local TIME (from the newly-plumbed `observedAt`), e.g.
+  "…as of 20 Aug 2026, 15:55 market-local." — labelled "market-local"
+  everywhere a time is shown, never a bare clock time that could be
+  misread as the viewer's own local time.
+
+**What did NOT change:** the same-day dedupe rule (§22), the delayed
+provenance wording ("intraday capture, delayed — not a close," never
+"live"/"close"), the honest empty-state paths, and `scalePriceHistoryPoints`
+itself (byte-for-byte unmodified).

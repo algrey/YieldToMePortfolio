@@ -12,6 +12,7 @@
  * directly, without a database, under the plain node test runner.
  */
 import type { FyWindowResult } from "../domain/calculations/financial-year.ts";
+import type { ProviderDataQuality } from "../domain/market-data/contracts.ts";
 import { subtractCalendarMonths } from "./overview-range.ts";
 
 export type PriceHistoryRange =
@@ -154,6 +155,12 @@ export type RawPricePoint = Readonly<{
   providerId: string;
   interval: "eod" | "delayed" | "intraday";
   observationAt: string;
+  /** MKT-011C: carried through so the per-holding chart can plot/label
+   * quality-tier ticks (`stale_candidate`/`indicative`) distinctly --
+   * `selectDailyWinners`/`downsamplePriceHistoryPoints` below already pass
+   * every field of the winning row through verbatim, so this needed no
+   * change to either function, only to the shape itself. */
+  quality: ProviderDataQuality;
 }>;
 
 /**

@@ -28,6 +28,7 @@
 import type { SqlClient } from "../db/repositories/sql-client.ts";
 import { currentFyWindow } from "../domain/calculations/financial-year.ts";
 import { resolveDailyCaptureWindowStatus } from "../domain/market-data/daily-capture-window.ts";
+import type { ProviderDataQuality } from "../domain/market-data/contracts.ts";
 import {
   listOwnedIntradayPricePointsForDate,
   resolveSecurityMarketTimezones,
@@ -52,6 +53,17 @@ const MAX_RAW_OBSERVATIONS = 20_000;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const DECIMAL = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
 const INTERVALS = new Set(["eod", "delayed", "intraday"]);
+// MKT-011C: the same four-value enum `price_observations_quality_check`
+// enforces at the DB layer (db/schema.ts) -- validated again here at this
+// external-boundary read, same defensive discipline as `INTERVALS` above
+// (ingestion should already guarantee a valid value; this read never trusts
+// that blindly).
+const QUALITIES = new Set<string>([
+  "observed",
+  "corrected",
+  "indicative",
+  "stale_candidate",
+]);
 
 function localDate(now: Date, timezone: string): string {
   try {
@@ -86,13 +98,15 @@ function mapRow(row: Row): RawPricePoint | null {
   const providerId = String(row.provider_id ?? "");
   const interval = String(row.interval ?? "");
   const observationAt = String(row.observation_at ?? "");
+  const quality = String(row.quality ?? "");
   if (
     !DATE.test(marketDate) ||
     !DECIMAL.test(priceDecimal) ||
     !currencyCode ||
     !providerId ||
     !INTERVALS.has(interval) ||
-    !observationAt
+    !observationAt ||
+    !QUALITIES.has(quality)
   ) {
     return null;
   }
@@ -103,6 +117,7 @@ function mapRow(row: Row): RawPricePoint | null {
     providerId,
     interval: interval as RawPricePoint["interval"],
     observationAt,
+    quality: quality as ProviderDataQuality,
   };
 }
 
@@ -112,6 +127,19 @@ export type PriceHistoryPoint = Readonly<{
   currencyCode: string;
   providerId: string;
   interval: "eod" | "delayed" | "intraday";
+  /** MKT-011C: the point's own UTC observation instant -- PLUMBED THROUGH so
+   * the day/week-range chart can position an intraday tick by its REAL
+   * time-of-day rather than one shared per-date column (MKT-011B's
+   * geometry). Optional so an older cached client state shape (or a test
+   * fixture that predates this field) degrades to "no time-axis
+   * repositioning for this point" rather than a type error -- the loader
+   * below always populates it for every point it returns. */
+  observedAt?: string;
+  /** MKT-011C: carried through so the overlay can visually/textually
+   * distinguish a `stale_candidate`/`indicative` tick from an ordinarily
+   * `observed` one (TASKS.md MKT-011B residual). Same defensive-optional
+   * rationale as `observedAt` above. */
+  quality?: ProviderDataQuality;
 }>;
 
 function toApiPoint(point: RawPricePoint): PriceHistoryPoint {
@@ -121,6 +149,8 @@ function toApiPoint(point: RawPricePoint): PriceHistoryPoint {
     currencyCode: point.currencyCode,
     providerId: point.providerId,
     interval: point.interval,
+    observedAt: point.observationAt,
+    quality: point.quality,
   };
 }
 
@@ -182,6 +212,16 @@ export type PriceHistorySuccess = Readonly<{
    * more current representation of today.
    */
   todayPoints: readonly PriceHistoryPoint[];
+  /** MKT-011C: the SAME market timezone `todayMarketDate` was resolved
+   * against (`resolveSecurityMarketTimezones`) -- plumbed through so the
+   * chart's day/week-range time-axis geometry can convert each
+   * `todayPoints` entry's `observedAt` into a market-LOCAL time-of-day
+   * client-side, using the identical derivation the loader and the capture
+   * sweep already use. `null` mirrors `todayMarketDate`'s own honest
+   * "cannot resolve this security's market timezone" state -- the chart
+   * then falls back to the pre-existing shared calendar-date x-axis for
+   * today's points rather than guessing a timezone. */
+  marketTimezone: string | null;
 }>;
 
 export type PriceHistoryFailure = Readonly<{
@@ -220,7 +260,7 @@ async function fetchObservations(
   limit: number,
 ): Promise<FetchedObservations | null> {
   const rows = await client.all<Row>(
-    `SELECT po.market_date, po.close_decimal, po.currency_code, po.provider_id, po.interval, po.observation_at
+    `SELECT po.market_date, po.close_decimal, po.currency_code, po.provider_id, po.interval, po.observation_at, po.quality
      FROM price_observations po
      WHERE po.security_id = ?
        AND po.adjustment_state = 'raw'
@@ -402,6 +442,8 @@ export async function loadOwnedPriceHistory(
         currencyCode: point.currencyCode,
         providerId: point.providerId,
         interval: "intraday",
+        observedAt: point.observedAt,
+        quality: point.quality,
       });
     }
   }
@@ -480,7 +522,7 @@ export async function loadOwnedPriceHistory(
   };
 
   const latestDelayedRow = await client.get<Row>(
-    `SELECT po.market_date, po.close_decimal, po.currency_code, po.provider_id, po.interval, po.observation_at
+    `SELECT po.market_date, po.close_decimal, po.currency_code, po.provider_id, po.interval, po.observation_at, po.quality
      FROM price_observations po
      WHERE po.security_id = ?
        AND po.adjustment_state = 'raw'
@@ -503,6 +545,7 @@ export async function loadOwnedPriceHistory(
     latestDelayed: latestDelayedPoint ? toApiPoint(latestDelayedPoint) : null,
     todayMarketDate,
     todayPoints,
+    marketTimezone,
   };
 }
 

@@ -14,6 +14,11 @@
  * approximation of it.
  */
 import { parseDecimalResult } from "../domain/calculations/index.ts";
+import {
+  resolveDailyCaptureWindowStatus,
+  WINDOW_CLOSE_MINUTES,
+  WINDOW_OPEN_MINUTES,
+} from "../domain/market-data/daily-capture-window.ts";
 
 export type ChartInputPoint = Readonly<{
   date: string;
@@ -227,4 +232,184 @@ export function isPlottableDecimal(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * MKT-011C: true sub-day time axis for today's intraday overlay. Deliberately
+ * a SEPARATE pure function rather than a change to `scalePriceHistoryPoints`
+ * above (which stays byte-for-byte unmodified, and keeps driving every
+ * historical range's calendar-date x-axis, plus the Y/price-domain math
+ * shared with today's points -- MKT-011B's precedent) -- this only
+ * REPOSITIONS the x-coordinate of already-Y-scaled "today" points onto a
+ * time-of-day axis spanning the market-local capture window (10:25-16:25,
+ * `domain/market-data/daily-capture-window.ts`'s own boundary constants, so
+ * this can never silently drift out of sync with the window the capture
+ * sweep itself gates on).
+ */
+export type TimeAxisInputPoint = Readonly<{
+  date: string;
+  priceDecimal: string;
+  /** The tick's own UTC observation instant (ISO). */
+  observedAt: string;
+}>;
+
+export type PlottedTimeAxisPoint = Readonly<{
+  date: string;
+  priceDecimal: string;
+  observedAt: string;
+  x: number;
+  y: number;
+  /** False when this tick's local observed time fell OUTSIDE the
+   * 10:25-16:25 capture window and was CLAMPED to the nearest window edge
+   * rather than excluded from the plot. `observedAt` is the PROVIDER's own
+   * reported observation instant, not this app's capture timestamp -- the
+   * window only gates WHEN this app's sweep fires a new capture tick
+   * (`domain/market-data/daily-capture-window.ts`), and §17/§21's delayed
+   * quotes carry an UNKNOWN delay magnitude relative to that tick. A
+   * pre-10:25 `observedAt` on a day's FIRST capture is therefore an
+   * ORDINARY, EXPECTED outcome (a delayed source's most recent price at
+   * 10:25 local can easily have been observed several minutes earlier, or
+   * still be reporting the prior session), not an exceptional edge case --
+   * clamping is the routine path this exists to handle honestly, not a
+   * rare defensive fallback. DOCUMENTED CHOICE: a real captured observation
+   * is never dropped from the chart for landing outside the window -- it
+   * stays visible at the correct RELATIVE end of the session, and this
+   * flag lets the caller mark it distinctly so the clamp is never visually
+   * indistinguishable from an ordinary in-window tick. */
+  withinCaptureWindow: boolean;
+}>;
+
+export type TimeAxisColumn = Readonly<{
+  /** Left pixel edge of the time axis (10:25). */
+  startX: number;
+  /** Pixel width the FULL 10:25-16:25 window spans. */
+  width: number;
+}>;
+
+export type TimeAxisBounds = Readonly<{ minX: number; maxX: number }>;
+
+/**
+ * Positions each point in `points` (parallel-indexed with `yValues`, which
+ * the caller already derived from the SHARED `scalePriceHistoryPoints` price
+ * domain -- untouched here) onto `column`'s pixel span by its OWN
+ * `observedAt`'s local time-of-day in `marketTimezone`, reusing
+ * `resolveDailyCaptureWindowStatus` (the exact derivation the capture sweep
+ * and the loader's own "today" resolution already use, per TASKS.md
+ * MKT-011C) rather than a second bespoke `Intl.DateTimeFormat` call.
+ *
+ * Returns `null` at a given index (never throws, never guesses) when that
+ * point's `observedAt` or `marketTimezone` cannot be resolved to a local
+ * time -- the caller falls back to that point's PRE-EXISTING calendar-date x
+ * (from the shared `scalePriceHistoryPoints` call) rather than losing the
+ * point or fabricating a time.
+ *
+ * `bounds` clamps the final pixel x into the chart's own plot area -- a
+ * defensive floor/ceiling independent of `column`. The two current callers
+ * (`app/components/holding-price-chart.tsx`) each size `column` to stay
+ * within `bounds` in the ORDINARY case (DAY: the full plot width; WEEK: one
+ * calendar-day's width ENDING at today's own date position, never centred
+ * on it, so it cannot overflow the right edge a "today is the latest date"
+ * range normally sits at) -- but a caller-side sizing bug can still produce
+ * a `column` that does not overlap `bounds` AT ALL (review round-1 fix F1,
+ * BLOCKING: WEEK's per-day column math assumed a genuinely multi-day
+ * combined domain; when the domain actually spans a SINGLE calendar date --
+ * a brand-new holding with no historical observation yet, or MKT-011B's own
+ * dedupe rule removing the only same-day historical winner once intraday
+ * data exists -- `calendarColumnWidth` degenerately returns the FULL inner
+ * width, and subtracting that from an `anchorX` sitting at the domain's
+ * LEFT edge, not its right, pushed the whole column far off-screen).
+ * BLINDLY clamping every point's x into `bounds` in that situation is its
+ * own silent failure mode: every tick collapses onto ONE pixel at a bounds
+ * edge, and `withinCaptureWindow` stays `true` for an ordinary in-window
+ * tick (the collapse is a PIXEL-bounds clamp, not a capture-window clamp,
+ * so the window-based disclosure never catches it either) -- reviewer
+ * rendered proof. The guard immediately below instead treats a
+ * NON-OVERLAPPING column exactly like an unresolvable timezone: every point
+ * returns `null`, so the caller falls back to its own PRE-EXISTING
+ * (shared calendar-date) x for all of them rather than a misleading stack.
+ */
+export function positionTodayPointsByObservedTime(
+  points: readonly TimeAxisInputPoint[],
+  yValues: readonly number[],
+  marketTimezone: string,
+  column: TimeAxisColumn,
+  bounds: TimeAxisBounds,
+): readonly (PlottedTimeAxisPoint | null)[] {
+  const columnEndX = column.startX + column.width;
+  // `<=`/`>=`, not `<`/`>`: a column that only TOUCHES a bounds edge (zero
+  // genuine overlap width) is just as degenerate as one that misses
+  // entirely -- only the single fraction landing exactly on that edge maps
+  // inside `bounds` unclamped, every other fraction clamps to the SAME
+  // pixel, which is the exact collapse this guard exists to catch (the
+  // reviewer's reproduction: `startX = 8 - 584 = -576`, `width = 584` gives
+  // `columnEndX = 8`, touching `bounds.minX` exactly rather than missing
+  // it outright).
+  if (columnEndX <= bounds.minX || column.startX >= bounds.maxX) {
+    return points.map(() => null);
+  }
+  const span = WINDOW_CLOSE_MINUTES - WINDOW_OPEN_MINUTES || 1;
+  return points.map((point, index) => {
+    const status = resolveDailyCaptureWindowStatus(
+      point.observedAt,
+      marketTimezone,
+    );
+    if (!status) return null;
+    const withinCaptureWindow =
+      status.localMinutesOfDay >= WINDOW_OPEN_MINUTES &&
+      status.localMinutesOfDay <= WINDOW_CLOSE_MINUTES;
+    const clampedMinutes = Math.min(
+      WINDOW_CLOSE_MINUTES,
+      Math.max(WINDOW_OPEN_MINUTES, status.localMinutesOfDay),
+    );
+    const fraction = (clampedMinutes - WINDOW_OPEN_MINUTES) / span;
+    const rawX = column.startX + fraction * column.width;
+    const x = Math.min(bounds.maxX, Math.max(bounds.minX, rawX));
+    return {
+      date: point.date,
+      priceDecimal: point.priceDecimal,
+      observedAt: point.observedAt,
+      x,
+      y: yValues[index]!,
+      withinCaptureWindow,
+    };
+  });
+}
+
+/**
+ * One calendar day's pixel width within a `scalePriceHistoryPoints`
+ * date-offset domain spanning `dates` -- re-derives that function's own
+ * offset-span math (not exported by it) purely to size "today"'s column on
+ * a MULTI-day range (WEEK) so its intraday spread never bleeds into a
+ * neighbouring day's column.
+ *
+ * Falls back to the full inner width when `dates` spans a single calendar
+ * day, or is empty (defensive; never divides by a computed `Infinity`/`NaN`
+ * span from `Math.min/max` on an empty array). Review round-1 fix (F1,
+ * BLOCKING): an earlier version of this comment claimed that fallback
+ * "matches `scalePriceHistoryPoints`'s own `offsetSpan || 1` fallback" --
+ * true for THAT function (a single-date domain legitimately renders as one
+ * flat line at the plot's left edge), but FALSE as a rationale for THIS
+ * function's only multi-day consumer (WEEK): the caller does not use this
+ * return value as a full-width column, it SUBTRACTS it from an anchor point
+ * to compute where a NARROW one-day column starts, so returning the FULL
+ * inner width there produced a column that ran hundreds of pixels off the
+ * left edge of the chart (the exact bug the reviewer caught). The caller
+ * (`app/components/holding-price-chart.tsx`) now special-cases a
+ * single-calendar-date combined domain itself -- using the SAME full-width
+ * column the DAY range uses instead of calling into this per-day-width
+ * math at all -- and `positionTodayPointsByObservedTime`'s own bounds-
+ * overlap guard is a second, independent safety net if some OTHER caller
+ * ever repeats this mistake.
+ */
+export function calendarColumnWidth(
+  dates: readonly string[],
+  scale: ChartScale,
+): number {
+  const innerWidth = scale.width - scale.paddingX * 2;
+  if (dates.length === 0) return innerWidth;
+  const offsets = dates.map(dateDayOffset);
+  const minOffset = Math.min(...offsets);
+  const maxOffset = Math.max(...offsets);
+  const offsetSpan = maxOffset - minOffset || 1;
+  return innerWidth / offsetSpan;
 }

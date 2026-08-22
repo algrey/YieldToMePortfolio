@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SqlClient } from "./sql-client.ts";
+import type { ProviderDataQuality } from "../../domain/market-data/contracts.ts";
 import { SHARESIGHT_PRICE_PROVIDER_ID } from "./sharesight-price-refresh.ts";
 
 // MKT-011A: repository layer for the daily intraday-price-capture sweep --
@@ -537,6 +538,16 @@ export async function rollupIntradayPricePoint(
 
 const MARKET_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const PRICE_DECIMAL_PATTERN = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
+// MKT-011C: the same four-value enum `intraday_price_points_quality_check`
+// enforces at the DB layer (db/schema.ts) -- validated again at this
+// external-boundary read (F5-style discipline: ingestion should already
+// guarantee a valid value, this read never trusts that blindly).
+const QUALITIES = new Set<string>([
+  "observed",
+  "corrected",
+  "indicative",
+  "stale_candidate",
+]);
 
 /**
  * F5 (MKT-011B review follow-up): mirrors `app/owned-price-history.ts`'s
@@ -559,6 +570,10 @@ export type OwnedTodayIntradayPoint = Readonly<{
   currencyCode: string;
   marketDate: string;
   observedAt: string;
+  /** MKT-011C: carried through so the per-holding chart's today overlay can
+   * visually/textually distinguish a `stale_candidate`/`indicative` tick
+   * from an ordinarily `observed` one. */
+  quality: ProviderDataQuality;
 }>;
 
 export type OwnedTodayIntradayReadResult = Readonly<{
@@ -592,7 +607,7 @@ export async function listOwnedIntradayPricePointsForDate(
   input: Readonly<{ userId: string; securityId: string; marketDate: string }>,
 ): Promise<OwnedTodayIntradayReadResult | null> {
   const rows = await client.all<Record<string, unknown>>(
-    `SELECT provider_id, price_decimal, currency_code, market_date, observed_at
+    `SELECT provider_id, price_decimal, currency_code, market_date, observed_at, quality
        FROM intraday_price_points
       WHERE user_id = ? AND security_id = ? AND market_date = ?
       ORDER BY observed_at ASC
@@ -613,12 +628,14 @@ export async function listOwnedIntradayPricePointsForDate(
     const currencyCode = String(row.currency_code ?? "");
     const marketDate = String(row.market_date ?? "");
     const observedAt = String(row.observed_at ?? "");
+    const quality = String(row.quality ?? "");
     if (
       !providerId ||
       !PRICE_DECIMAL_PATTERN.test(priceDecimal) ||
       !currencyCode ||
       !MARKET_DATE_PATTERN.test(marketDate) ||
-      !observedAt
+      !observedAt ||
+      !QUALITIES.has(quality)
     ) {
       excludedMalformedCount += 1;
       continue;
@@ -629,6 +646,7 @@ export async function listOwnedIntradayPricePointsForDate(
       currencyCode,
       marketDate,
       observedAt,
+      quality: quality as ProviderDataQuality,
     });
   }
   return { points, excludedMalformedCount };
