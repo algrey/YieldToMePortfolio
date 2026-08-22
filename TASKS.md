@@ -979,6 +979,18 @@ Status: DONE (2026-08-14).
 
 Status: PROMOTED 2026-08-14 by owner instruction — split into CGT-001A/B below; retention-guarantee constraint remains standing.
 
+### UI-026 — Currency display: bare symbol for the base currency, flagged symbol for foreign (owner-directed)
+
+Status: READY (2026-08-22, owner directive, verbatim): "Across the GUI it shows 'AUD number' for any dollar amounts. If the currency is set to AUD it should not show 'AUD' it should show $number (eg: $4.21). If amounts are USD, then it should show the USD symbol. Visa versa if the portfolio is set to USD it should only show the currency for AUD." SEQUENCING: must start only after WLT-001 commits (overlapping UI files).
+
+Orchestrator rulings:
+
+- Semantics: formatting is relative to the ACTIVE PORTFOLIO's base currency (per-portfolio, not per-user). Amounts IN the base currency render as a bare symbol ($4.21, £4.21, €4.21, ¥421); amounts in any OTHER currency render with a disambiguating flagged form using the standard AU-style prefixes for dollar-family currencies (US$4.21, A$4.21, NZ$4.21, C$4.21, S$4.21, HK$4.21) and symbol-or-code for the rest (£/€/¥ are unambiguous alone but foreign amounts must still be visually distinct from base amounts — use the symbol; currencies without a well-known symbol keep the "CODE 4.21" form). Never strip the currency identity from a foreign amount; the em-dash/unavailable states are untouched.
+- One symbol table, one helper: extend/replace the shared formatters (app/income-format.ts formatIncomeMoney, app/overview-read-model.ts formatMoney, and every sibling found by tracing call sites — grep for "AUD "-style code-prefix rendering across app/ and components) so the rule lives in ONE module with the currency→symbol map; helpers take the base currency (already available wherever portfolio context flows; surfaces with NO portfolio context — e.g. the user-scoped watchlist once WLT-001 lands — treat the user's display convention as AUD-base unless a portfolio is active, and state that choice in the code comment and docs).
+- Accessibility/honesty: the full ISO code stays available where precision matters (titles/aria or the existing explain surfaces) — a screen-reader user must be able to distinguish US$ from A$; exports/CSV/backup files keep ISO codes untouched (display-only change, no persistence or export format changes — that includes MKT-008 backup CSVs and import previews' stored values; import-review DISPLAY strings may adopt the rule).
+- Tests: base-AUD portfolio renders $ for AUD and US$ for USD; base-USD portfolio renders $ for USD and A$ for AUD; non-dollar currencies; unknown-code fallback; unavailable states unchanged; a sweep test asserting no owned-mode surface still renders the old "AUD 4.21" code-prefix form for base-currency amounts (grep-style over rendered output of the main screens); existing suites' expectation updates made honestly (cite each flip).
+- Docs: CALCULATIONS/ARCHITECTURE only if a normative statement mentions display formatting; otherwise a note in the style/UI conventions if one exists. QA-001A untouched (no routes).
+
 ### WLT-001 — Quotes tab becomes a watchlist (owner-directed)
 
 Status: READY (2026-08-22, owner directive, verbatim): "The Quotes tab is a watch list, for stocks and currencies. It should be styled similar to the holding tab, with the difference being that it does not record a position, just an interest." Three columns, each two lines per row: (1) Ticker over company name; (2) Last price over the time of last price (or date if not today); (3) Day change in price over change in percent.
