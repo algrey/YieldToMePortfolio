@@ -991,6 +991,20 @@ Orchestrator rulings:
 - Tests: base-AUD portfolio renders $ for AUD and US$ for USD; base-USD portfolio renders $ for USD and A$ for AUD; non-dollar currencies; unknown-code fallback; unavailable states unchanged; a sweep test asserting no owned-mode surface still renders the old "AUD 4.21" code-prefix form for base-currency amounts (grep-style over rendered output of the main screens); existing suites' expectation updates made honestly (cite each flip).
 - Docs: CALCULATIONS/ARCHITECTURE only if a normative statement mentions display formatting; otherwise a note in the style/UI conventions if one exists. QA-001A untouched (no routes).
 
+### UI-027 — Share quantities display as whole numbers unless genuinely fractional (owner-directed)
+
+Status: READY (2026-08-22, owner directive, verbatim): "All numbers of stocks held should be displayed as whole numbers with no decimals... if we handle fractional stocks, it should display a whole number, UNLESS the stock is fractional." SEQUENCING: start only after WLT-001 and UI-026 commit (overlapping UI files/formatters).
+
+Orchestrator rulings:
+
+- Display rule (implements the owner's UNLESS clause directly, so it is already future-proof for fractional holdings): a share/unit quantity renders with NO decimals when its exact decimal value is integral ("150", never "150.00000000"); a genuinely fractional quantity renders its exact significant fractional digits (trailing zeros trimmed, e.g. "150.5", "0.3333"), never rounded to a fake whole number — rounding a real fractional position would misstate a financial fact.
+- DISPLAY-ONLY: stored quantities stay exact decimal strings everywhere (ledger, FIFO, CGT, exports, CSV backup/import untouched); the trim lives in one shared quantity-format helper (find every surface rendering quantities: holdings rows/sheet, transactions, dividend per-share forms' auto-populated share counts, CGT screens, import preview — trace call sites; anything doing its own padding/formatting migrates to the helper).
+- Tests: integral renders bare; fractional renders exact trimmed digits; boundary ("150.00000000" → "150", "150.10" → "150.1"); no financial-math change (fixtures recompute identically); expectation updates cited honestly.
+
+### FRAC-001 — Fractional shareholding support (future work)
+
+Status: PLANNED (2026-08-22, owner-requested future work). The ledger/decimal foundations already store exact fractional quantities; this task is the product-level pass to treat them as first-class: audit every path that implicitly assumes integral units (buy/sell forms and their validation, FIFO lot math edge cases, dividend per-share × shares-held derivations incl. DIV-006's shares-at-payment-date, CGT allocation, import validation rules that may reject fractional quantities, Sharesight sync quantities — BRK-008 evidence showed signed/decimal quantities on the wire), decide validation rules (which brokers/instruments allow fractions), and ensure UI-027's display rule (whole unless fractional) holds everywhere. Requires an Orchestrator scoping pass before READY.
+
 ### WLT-001 — Quotes tab becomes a watchlist (owner-directed)
 
 Status: READY (2026-08-22, owner directive, verbatim): "The Quotes tab is a watch list, for stocks and currencies. It should be styled similar to the holding tab, with the difference being that it does not record a position, just an interest." Three columns, each two lines per row: (1) Ticker over company name; (2) Last price over the time of last price (or date if not today); (3) Day change in price over change in percent.
