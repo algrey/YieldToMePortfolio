@@ -1333,9 +1333,12 @@ export async function loadOwnedHoldings(
   // UI-031: the holdings summary row's first two lines, computed from the
   // SAME `rows` array the holdings list itself renders -- no second read,
   // no re-derivation of any per-row fact. Cash is deliberately excluded
-  // (`cashAccounts: []`) -- it is already shown separately in the
-  // portfolio-summary aside ("Cash is not included in security rows"), and
-  // the owner's "Unrealised" line is specifically about holdings.
+  // (`cashAccounts: []`) -- the owner's "Unrealised" line is specifically
+  // about holdings, and cash is never folded into a security-only figure
+  // as a silent zero. (UI-032: the "Cash separate" aside that used to
+  // display this exclusion on-screen was removed by owner directive; the
+  // underlying exclusion itself -- the CONCEPT this comment documents --
+  // is unchanged and still enforced here.)
   const unrealisedSummaryValue: PortfolioTotalsResult = composePortfolioTotals({
     holdings: rows.map((row) => ({
       id: row.id,

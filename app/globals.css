@@ -646,18 +646,41 @@ dd {
      qualifier line and padding, used below so the last real holding row
      never hides underneath the sticky summary (and, on mobile, underneath
      the summary AND the fixed cash-summary card stacked together). Safe
-     to retune in isolation; nothing else depends on the exact number. */
-  --holdings-summary-h: 118px;
+     to retune in isolation; nothing else depends on the exact number.
+     UI-032: bumped 118px -> 138px -- the summary now also carries an
+     unconditional (always-rendered) base-currency statement line above
+     the four owner-directed lines, replacing the ISO identity the
+     retired "Cash separate" aside used to state; the extra budget covers
+     that line wrapping to two lines at a 320px viewport. */
+  --holdings-summary-h: 138px;
 }
 
 .holding-rows {
   /* UI-031: was `calc(122px + safe-area)` (reserved for the fixed
      mobile cash-summary card alone, `.portfolio-summary` below) -- now
      also reserves the sticky holdings summary's own height, which sits
-     directly above that card on mobile. */
+     directly above that card on mobile. Still true here: this base rule
+     is shared with the PREVIEW holdings screen (the prototype
+     `HoldingsScreen` component below), which still renders that fixed
+     `.portfolio-summary` cash card unconditionally. UI-032 retired the
+     fixed card from the OWNED screen only (the "Cash separate" panel) --
+     see the scoped override immediately below, which drops the now-dead
+     122px term there without touching this shared rule. */
   padding-bottom: calc(
     122px + var(--holdings-summary-h) + env(safe-area-inset-bottom)
   );
+}
+
+/* UI-032 (review round-2 fix B2): the owned holdings screen no longer
+   renders the fixed mobile `.portfolio-summary` cash card -- the 122px
+   term in the shared rule above existed solely to keep the last holding
+   row and the sticky summary clear of that card, so on the owned screen
+   specifically it now reserves a dead 122px band under the sticky
+   summary for nothing. Scoped to `.owned-holdings-layout` (the wrapper
+   class `OwnedHoldingsScreen` adds alongside `.holdings-layout`) so the
+   shared rule above stays correct for the still-live preview screen. */
+.owned-holdings-layout .holding-rows {
+  padding-bottom: calc(var(--holdings-summary-h) + env(safe-area-inset-bottom));
 }
 
 /* UI-031 (owner directive, verbatim): "Holdings should have a summary
@@ -670,16 +693,17 @@ dd {
    holdings scroll flow; relocating it first/last later is a JSX reorder
    plus flipping `bottom` for `top` here, nothing else (placement-
    agnostic by design, per the Orchestrator ruling).
-   On mobile the fixed cash-summary card (`.portfolio-summary`) still
-   floats at the very bottom of the viewport, so the offset below matches
-   `.holding-rows`'s own `122px` reservation for that same card -- the
-   summary sticks directly above it. On desktop (`min-width: 700px`) the
-   cash card becomes a sticky-TOP sidebar instead (see that breakpoint),
-   so the summary sticks to the true bottom edge there (overridden below). */
+   This class is exclusive to the OWNED holdings screen (the preview
+   screen never renders a `.holdings-summary-footer`). UI-032 (review
+   round-2 fix B2) retired the fixed mobile `.portfolio-summary` cash
+   card this screen used to float above -- the offset below no longer
+   reserves a 122px band for it, so the summary sticks to the true
+   viewport bottom (minus the safe-area inset) on mobile too, not just at
+   the `min-width: 700px` breakpoint below. */
 .holdings-summary-footer {
   position: sticky;
   z-index: 15;
-  bottom: calc(122px + env(safe-area-inset-bottom));
+  bottom: env(safe-area-inset-bottom);
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -3723,8 +3747,11 @@ dd {
 
   .holdings-summary-footer {
     /* UI-031: nothing floats at the bottom of the viewport at this
-       breakpoint any more (the cash card is now the sticky-TOP sidebar
-       above), so the summary sticks to the true bottom edge. */
+       breakpoint, so the summary sticks to the true bottom edge. (UI-032:
+       this was originally phrased around the now-retired fixed cash card
+       becoming a sticky-TOP sidebar at this breakpoint -- that card is
+       gone from the owned screen entirely now, mobile and desktop alike,
+       so nothing floats at the bottom on EITHER breakpoint any more.) */
     bottom: 0;
   }
 

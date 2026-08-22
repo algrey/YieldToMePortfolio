@@ -205,12 +205,17 @@ export async function loadAuthenticatedWorkspace(
               realisedGains,
             )
           : undefined;
+        // UI-032: the securities-coverage-counts field the retired "Cash
+        // separate" panel displayed is no longer threaded onto the
+        // workspace -- `holdings.coverage` itself stays computed in
+        // `loadOwnedHoldings` (it feeds `owned-income-projection.ts`'s
+        // `portfolioValueCoverage`, a different, still-live consumer),
+        // only this now-unread passthrough went.
         return {
           ...configuredWorkspace,
           holdings: holdings.rows,
           holdingsViewState: holdings.status,
           cash: holdings.cash,
-          holdingCoverage: holdings.coverage,
           realisedGains,
           holdingsSummary,
         };

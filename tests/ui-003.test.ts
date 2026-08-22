@@ -154,7 +154,10 @@ test("UI-003 source keeps authenticated holdings owner-scoped and responsive", a
   // AGENTS.md's "unavailable" wording; this pins the standalone-cell shape
   // rather than the retired literal.
   assert.match(shell, /unavailable \? "unavailable" :/);
-  assert.match(shell, /Cash separate/);
+  // UI-032: the "Cash separate" panel (and its "Cash separate" pin here)
+  // was removed entirely (owner directive) -- the panel-absence pin and
+  // the relocated base-currency-reachability pin now live in
+  // tests/ui-032.test.ts.
   // UI-023: the decimal formatting and the per-holding currency-view select
   // moved out of the shell with the standalone detail screen -- the honest
   // parse path and the labelled select are pinned where they now live.

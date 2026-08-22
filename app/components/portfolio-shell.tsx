@@ -35,12 +35,10 @@ import {
 import {
   sortOwnedHoldings,
   type OwnedCashSummary,
-  type OwnedHoldingCoverage,
   type OwnedHoldingRow,
 } from "../owned-holdings-contract";
 import {
   ownedHoldingAmount,
-  ownedHoldingDecimal,
   ownedHoldingDecimalNeverFakeZero,
   ownedHoldingPercent,
   ownedHoldingQuantity,
@@ -195,7 +193,12 @@ export type OwnedWorkspace = {
   overview?: OwnedOverviewData;
   holdings?: OwnedHoldingRow[];
   cash?: OwnedCashSummary;
-  holdingCoverage?: OwnedHoldingCoverage;
+  // UI-032: the securities-coverage-counts field the retired "Cash
+  // separate" panel displayed was removed from this workspace type --
+  // `loadOwnedHoldings`'s own coverage computation is NOT dead (see
+  // `app/owned-income-projection.ts`'s `portfolioValueCoverage`, a
+  // different, still-live consumer), only this one passthrough field on
+  // the workspace/prop chain that fed the deleted JSX went.
   holdingsViewState?: "complete" | "partial" | "empty" | "unavailable";
   // UI-030: CGT-001A's per-security LIFETIME realised-gain rollup, keyed by
   // `portfolioSecurityId` (matches `OwnedHoldingRow.id`) -- a plain object
@@ -470,7 +473,6 @@ function OwnedHoldingsScreen({
   view,
   state,
   cash,
-  coverage,
   portfolioId,
   realisedGains,
   summary,
@@ -480,7 +482,6 @@ function OwnedHoldingsScreen({
   view: "native" | "home";
   state: "complete" | "partial" | "empty" | "unavailable";
   cash?: OwnedCashSummary;
-  coverage?: OwnedHoldingCoverage;
   /** UI-023: builds each row's link to the standalone per-holding detail
    * route (`/portfolio/:id/holdings/:portfolioSecurityId`) -- the owned
    * in-place detail `<dialog>` sheet is gone (owner decision, competitor
@@ -738,41 +739,6 @@ function OwnedHoldingsScreen({
           />
         ) : null}
       </section>
-      <aside className="portfolio-summary" aria-label="Holdings summary">
-        <p className="eyebrow">Cash separate</p>
-        <strong>{homeCurrencyCode} reporting values</strong>
-        <p>
-          Cash is not included in security rows. Price, FX, and basis gaps
-          remain unavailable rather than zero.
-        </p>
-        {cash ? (
-          <p>
-            Securities subtotal:{" "}
-            {cash.securitiesSubtotal === null
-              ? "Partial"
-              : `${currencyDisplayPrefix(cash.currencyCode, homeCurrencyCode)}${ownedHoldingDecimal(cash.securitiesSubtotal)}`}{" "}
-            · Cash subtotal:{" "}
-            {cash.cashSubtotal === null
-              ? "Unavailable"
-              : `${currencyDisplayPrefix(cash.currencyCode, homeCurrencyCode)}${ownedHoldingDecimal(cash.cashSubtotal)}`}{" "}
-            · Known total:{" "}
-            {cash.knownTotal === null
-              ? "Partial"
-              : `${currencyDisplayPrefix(cash.currencyCode, homeCurrencyCode)}${ownedHoldingDecimal(cash.knownTotal)}`}
-            <br />
-            Coverage: {cash.coverage.converted}/{cash.coverage.nonZero} non-zero
-            cash accounts converted ({cash.coverage.zero} zero).
-            {coverage ? (
-              <>
-                <br />
-                Securities: {coverage.converted}/{coverage.nonZero} non-zero
-                converted, {coverage.basis}/{coverage.nonZero} basis-covered (
-                {coverage.zero} zero).
-              </>
-            ) : null}
-          </p>
-        ) : null}
-      </aside>
     </div>
   );
 }
@@ -819,6 +785,35 @@ function HoldingsSummaryFooterRow({
       role="group"
       aria-label="Portfolio totals"
     >
+      {/* UI-032 (Orchestrator ruling, round 2 review fix B1): the retired
+          "Cash separate" aside (`app/components/portfolio-shell.tsx`,
+          pre-UI-032) carried this screen's only statement of the base
+          currency's ISO identity ("{homeCurrencyCode} reporting values").
+          Per-row labels only name each HOLDING's own currency
+          (`holding.currencyCode`), which is never guaranteed to equal the
+          base currency (a portfolio of entirely foreign-currency holdings
+          would show it nowhere) -- so the statement is restated here,
+          unconditionally, wherever this summary renders. Follows the
+          CGT/income screens' "{code} reporting values" render-pinned
+          precedent (capital-gains-screen.tsx, income-landing.tsx), but
+          describes the REAL rule instead of "every figure is base
+          currency": `view === "native"` can put a held security's own
+          (foreign) currency on its row, so this names the actual bare
+          marker via `currencyDisplayPrefix(homeCurrencyCode,
+          homeCurrencyCode)` rather than claiming amounts render with "no
+          prefix" -- `currencyDisplayPrefix` NEVER returns empty (base
+          amounts still get a bare $/£/€/¥, or the "CODE " fallback for a
+          symbol-less code like CHF), so "no prefix" would be false, and
+          for a CHF-style base it would describe zero figures on the
+          screen. */}
+      <p className="row-tertiary summary-qualifier">
+        <strong>{homeCurrencyCode} reporting values</strong> -- amounts shown as{" "}
+        <strong>
+          {currencyDisplayPrefix(homeCurrencyCode, homeCurrencyCode)}
+        </strong>{" "}
+        are this portfolio&apos;s base currency; other currencies are flagged
+        (e.g. US$).
+      </p>
       <div
         className="holdings-grid summary-line"
         role="group"
@@ -4551,7 +4546,6 @@ export function PortfolioShell({
               view={ownedWorkspace.holdingCurrencyView ?? "native"}
               state={ownedWorkspace.holdingsViewState ?? "empty"}
               cash={ownedWorkspace.cash}
-              coverage={ownedWorkspace.holdingCoverage}
               portfolioId={ownedWorkspace.activePortfolio.id}
               realisedGains={ownedWorkspace.realisedGains}
               summary={ownedWorkspace.holdingsSummary}
