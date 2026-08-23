@@ -43,6 +43,7 @@ import {
   ownedHoldingDecimalNeverFakeZero,
   ownedHoldingPercent,
   ownedHoldingQuantity,
+  ownedHoldingQuantityIsZero,
   ownedHoldingRealisedGainLine,
   ownedHoldingToneFromDecimal,
   ownedHoldingTrimmed,
@@ -647,6 +648,14 @@ function OwnedHoldingsScreen({
               homeCurrencyCode,
               realisedGains?.[holding.id],
             );
+            // UI-036 (owner directive, verbatim, 2026-08-23): a fully sold
+            // holding (current quantity exactly zero) omits the row-
+            // tertiary "avg cost x quantity" line entirely -- regardless
+            // of whether the basis figure itself would render or read
+            // "Basis unavailable" -- leaving three lines (ticker/value,
+            // price/daily, Realised) instead of four. Partially-sold/held
+            // rows (quantity > 0) are unaffected.
+            const isSoldOut = ownedHoldingQuantityIsZero(holding.quantity);
             return (
               // UI-023: a real link to the standalone per-holding detail
               // route, replacing the in-place <dialog> sheet -- URL-
@@ -700,30 +709,32 @@ function OwnedHoldingsScreen({
                 >
                   {ownedHoldingPercent(holding.unrealisedPercent, true)}
                 </ToneValue>
-                <span className="row-tertiary">
-                  {/* UI-034 (owner directive 2026-08-23): the "Avg " prefix
-                      was dropped from this line -- the cost x quantity
-                      composition itself is unchanged. */}
-                  {holding.averageNativeCost === null
-                    ? "Basis unavailable"
-                    : /* UI-028 review (B4, BLOCKING): a genuinely non-zero
-                         average cost must never render as "0.00" just
-                         because 2dp rounds it away -- falls back to the
-                         trimmed exact form for that value only (see
-                         `ownedHoldingDecimalNeverFakeZero`'s doc comment). */
-                      `${currencyDisplayPrefix(holding.currencyCode, homeCurrencyCode)}${ownedHoldingDecimalNeverFakeZero(holding.averageNativeCost, 2)}`}{" "}
-                  {/* UI-028 review (B4, BLOCKING) delivered whole-unless-
-                      fractional quantity display at this ONE call site;
-                      UI-027 then centralised it into the shared
-                      `ownedHoldingQuantity` helper (`app/quantity-format.ts`)
-                      every quantity-rendering surface now uses -- an
-                      INTEGRAL quantity's trailing ".000..." is stripped
-                      entirely (no decimal point at all), while a genuinely
-                      fractional quantity (e.g. a DRP fractional share)
-                      keeps its real trimmed digits instead of being
-                      rounded away to a misleading whole number. */}
-                  × {ownedHoldingQuantity(holding.quantity)}
-                </span>
+                {isSoldOut ? null : (
+                  <span className="row-tertiary">
+                    {/* UI-034 (owner directive 2026-08-23): the "Avg " prefix
+                        was dropped from this line -- the cost x quantity
+                        composition itself is unchanged. */}
+                    {holding.averageNativeCost === null
+                      ? "Basis unavailable"
+                      : /* UI-028 review (B4, BLOCKING): a genuinely non-zero
+                           average cost must never render as "0.00" just
+                           because 2dp rounds it away -- falls back to the
+                           trimmed exact form for that value only (see
+                           `ownedHoldingDecimalNeverFakeZero`'s doc comment). */
+                        `${currencyDisplayPrefix(holding.currencyCode, homeCurrencyCode)}${ownedHoldingDecimalNeverFakeZero(holding.averageNativeCost, 2)}`}{" "}
+                    {/* UI-028 review (B4, BLOCKING) delivered whole-unless-
+                        fractional quantity display at this ONE call site;
+                        UI-027 then centralised it into the shared
+                        `ownedHoldingQuantity` helper (`app/quantity-format.ts`)
+                        every quantity-rendering surface now uses -- an
+                        INTEGRAL quantity's trailing ".000..." is stripped
+                        entirely (no decimal point at all), while a genuinely
+                        fractional quantity (e.g. a DRP fractional share)
+                        keeps its real trimmed digits instead of being
+                        rounded away to a misleading whole number. */}
+                    × {ownedHoldingQuantity(holding.quantity)}
+                  </span>
+                )}
                 <span className="desktop-only holding-name">
                   {holding.name} · {holding.exchange} · {holding.currencyCode}
                 </span>

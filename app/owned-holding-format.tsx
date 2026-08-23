@@ -272,6 +272,26 @@ export function ownedHoldingTrimmed(value: string | null, scale = 6): string {
 export function ownedHoldingQuantity(value: string | null): string {
   return formatQuantityDisplay(value, "—");
 }
+
+// UI-036 (owner directive, verbatim, 2026-08-23): a fully sold holding
+// (current quantity exactly zero) omits the row-tertiary "avg cost x
+// quantity" line entirely rather than rendering "Basis unavailable x 0" --
+// a sold-out position's per-share cost is not a current fact worth a line,
+// and the row-quaternary "Realised:" line (UI-030) already carries the
+// story. Uses the same exact-decimal zero convention as the rest of the
+// owned-holdings zero-quantity handling (`app/owned-holdings.ts`'s
+// `isZero(parseDecimalResult(quantity))`), never string equality with
+// "0" -- `holding.quantity` always arrives as a validated decimal string
+// (see `resultDecimal` in `owned-holdings.ts`), but an unparsable value
+// fails closed to "not zero" so the line stays rather than silently
+// vanishing.
+export function ownedHoldingQuantityIsZero(value: string): boolean {
+  try {
+    return isZero(parseDecimalResult(value));
+  } catch {
+    return false;
+  }
+}
 export function ownedHoldingPercent(
   value: OwnedHoldingRow["dailyPercent"],
   signed = false,
