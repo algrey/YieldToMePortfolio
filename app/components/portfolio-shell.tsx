@@ -620,8 +620,15 @@ function OwnedHoldingsScreen({
                 : holding.nativePrice === null
                   ? "unavailable"
                   : `${currencyDisplayPrefix(holding.currencyCode, homeCurrencyCode)}${ownedHoldingTrimmed(holding.nativePrice)}`;
+            // UI-034 (owner directive 2026-08-23): `missing_previous`
+            // renders NO action label -- the daily cell's em-dash remains
+            // the honest missing-data signal, the state self-heals via
+            // MKT-015's daily accretion, and the owner ruled the label
+            // superfluous ("It does not effect the purchase price").
+            // Every other action-required label is unchanged.
             const statusLabel =
-              holding.actionStatus === "none"
+              holding.actionStatus === "none" ||
+              holding.actionStatus === "missing_previous"
                 ? ""
                 : ` · Action required: ${
                     holding.actionStatus === "stale"
@@ -630,13 +637,11 @@ function OwnedHoldingsScreen({
                         ? "price unavailable"
                         : holding.actionStatus === "missing_fx"
                           ? "FX unavailable"
-                          : holding.actionStatus === "missing_previous"
-                            ? "previous comparison unavailable"
-                            : holding.actionStatus === "incomparable"
-                              ? "comparison unavailable"
-                              : holding.actionStatus === "yahoo_auth_expired"
-                                ? "Yahoo login expired"
-                                : "Yahoo login not configured"
+                          : holding.actionStatus === "incomparable"
+                            ? "comparison unavailable"
+                            : holding.actionStatus === "yahoo_auth_expired"
+                              ? "Yahoo login expired"
+                              : "Yahoo login not configured"
                   }`;
             const realisedLine = ownedHoldingRealisedGainLine(
               homeCurrencyCode,
@@ -696,7 +701,9 @@ function OwnedHoldingsScreen({
                   {ownedHoldingPercent(holding.unrealisedPercent, true)}
                 </ToneValue>
                 <span className="row-tertiary">
-                  Avg{" "}
+                  {/* UI-034 (owner directive 2026-08-23): the "Avg " prefix
+                      was dropped from this line -- the cost x quantity
+                      composition itself is unchanged. */}
                   {holding.averageNativeCost === null
                     ? "Basis unavailable"
                     : /* UI-028 review (B4, BLOCKING): a genuinely non-zero
