@@ -27,11 +27,24 @@
 // partial realised coverage, and the two independent alignment sets
 // (value/basis vs. daily movement).
 //
+// Part 3.5 (pure, no DB, added by UI-031B -- owner directive, verbatim:
+// "For the summary row all amounts should be whole dollars only and
+// percentages should two decimal places as they are"): `app/owned-
+// holding-format.tsx`'s `ownedHoldingAmountWhole` -- half-even 0dp
+// rounding with thousands grouping and sign-before-symbol, scoped to the
+// summary footer only; the never-fake-zero fallback for a genuinely
+// non-zero sub-dollar total.
+//
 // Part 4 (rendered, via the same child-process trick UI-030's own test
 // suite uses): `OwnedHoldingsScreen`'s sticky/shaded summary row --
 // present with sr-labelled four-line structure when `holdingsSummary` is
 // populated, absent for an empty portfolio, and the owner's own
-// "+$333,000 (+33.19%)" format for the All Time / Realised lines.
+// "+$333,000 (+33.19%)" format for the All Time / Realised lines. UI-031B
+// (owner directive, verbatim: "UI-031 has 6 lines not 4, remove the extra
+// explanatory text"): EXACTLY four visible lines now -- the UI-032
+// base-currency statement is sr-only and per-line incompleteness
+// qualifiers compress to a compact inline "partial" marker (title +
+// sr-only text) inside the affected cell, never a fifth visible line.
 //
 // Part 5 (CSS pin, no DB): `app/globals.css`'s `.holdings-summary-footer`
 // rule -- sticky positioning and a distinct background token.
@@ -580,6 +593,137 @@ test("UI-031 summary footer: an entirely unavailable unrealised side blocks the 
 });
 
 // ===========================================================================
+// Part 3.5: ownedHoldingAmountWhole (UI-031B whole-dollar summary money)
+//
+// `app/owned-holding-format.tsx` contains real JSX (`ownedHoldingPercent`'s
+// fallback markup) -- the plain `node --experimental-strip-types` runner
+// this suite otherwise runs under cannot parse that file directly (see
+// tests/ui-027.test.ts's/tests/ui-030.test.ts's own precedent), so this
+// calls the (JSX-free) function through the same child-process `tsx`
+// trick Part 4 below uses for rendering, batched into one subprocess.
+// ===========================================================================
+
+type OwnedHoldingAmountWholeCase = {
+  baseCurrencyCode: string;
+  value: {
+    status: "available" | "unavailable";
+    currencyCode: string;
+    value: string | null;
+    reason?: string | null;
+  };
+  signed?: boolean;
+};
+
+function callOwnedHoldingAmountWhole(
+  cases: OwnedHoldingAmountWholeCase[],
+): string[] {
+  const moduleUrl = new URL("../app/owned-holding-format.tsx", import.meta.url)
+    .href;
+  const script = `
+    import { ownedHoldingAmountWhole } from ${JSON.stringify(moduleUrl)};
+    const cases = ${JSON.stringify(cases)};
+    process.stdout.write(
+      JSON.stringify(
+        cases.map((c) =>
+          ownedHoldingAmountWhole(c.baseCurrencyCode, c.value, c.signed ?? false),
+        ),
+      ),
+    );
+  `;
+  const output = execFileSync(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "--eval", script],
+    { encoding: "utf8" },
+  );
+  return JSON.parse(output);
+}
+
+test("UI-031B ownedHoldingAmountWhole: half-even 0dp rounding with thousands grouping and sign-before-symbol; the exact .5 boundary rounds to even (not always up); never-fake-zero for a genuinely non-zero sub-dollar total (incl. a negative); a genuine zero stays '$0'; unavailable stays honestly unavailable", () => {
+  const [
+    positive,
+    negative,
+    tieDown,
+    tieUp,
+    subDollar,
+    subDollarNegative,
+    tinySubDollar,
+    genuineZero,
+    unavailableText,
+  ] = callOwnedHoldingAmountWhole([
+    {
+      baseCurrencyCode: "AUD",
+      value: { status: "available", currencyCode: "AUD", value: "333000.49" },
+      signed: true,
+    },
+    {
+      baseCurrencyCode: "AUD",
+      value: { status: "available", currencyCode: "AUD", value: "-1204.30" },
+      signed: true,
+    },
+    {
+      baseCurrencyCode: "AUD",
+      value: { status: "available", currencyCode: "AUD", value: "2.50" },
+    },
+    {
+      baseCurrencyCode: "AUD",
+      value: { status: "available", currencyCode: "AUD", value: "3.50" },
+    },
+    {
+      baseCurrencyCode: "AUD",
+      value: { status: "available", currencyCode: "AUD", value: "0.30" },
+    },
+    {
+      baseCurrencyCode: "AUD",
+      value: { status: "available", currencyCode: "AUD", value: "-0.30" },
+      signed: true,
+    },
+    {
+      baseCurrencyCode: "AUD",
+      value: {
+        status: "available",
+        currencyCode: "AUD",
+        value: "0.0000001",
+      },
+    },
+    {
+      baseCurrencyCode: "AUD",
+      value: { status: "available", currencyCode: "AUD", value: "0" },
+    },
+    {
+      baseCurrencyCode: "AUD",
+      value: {
+        status: "unavailable",
+        currencyCode: "AUD",
+        value: null,
+        reason: "missing_basis",
+      },
+    },
+  ]);
+  assert.equal(positive, "+$333,000");
+  assert.equal(negative, "-$1,204");
+  // 2 is even -- ROUND_HALF_EVEN rounds 2.5 DOWN to 2; 3 is odd -- rounds
+  // UP to the even 4 (matches formatDecimalFixed/formatIncomeMoney's
+  // documented convention, see tests/cgt-001b.test.ts).
+  assert.equal(tieDown, "$2");
+  assert.equal(tieUp, "$4");
+  // Never-fake-zero: a genuinely non-zero total under $0.50 must not
+  // render $0 -- falls back to the trimmed exact form (trailing zeros
+  // trimmed, matching `ownedHoldingTrimmed`'s own convention).
+  assert.equal(subDollar, "$0.3");
+  assert.equal(subDollarNegative, "-$0.3");
+  // A tiny non-zero value that even 2dp/6dp trimming rounds away falls
+  // through to the full exact stored precision (matching
+  // `ownedHoldingDecimalNeverFakeZero`'s own final fallback).
+  assert.equal(tinySubDollar, "$0.0000001");
+  // A genuine zero renders "$0" -- only a NON-zero value rounding away is
+  // dishonest, never a real zero.
+  assert.equal(genuineZero, "$0");
+  // Unavailable status/value renders the same honest text as the 2dp
+  // `ownedHoldingAmount`, never a fabricated figure.
+  assert.equal(unavailableText, "Basis unavailable");
+});
+
+// ===========================================================================
 // Part 4: rendered OwnedHoldingsScreen (sticky/shaded summary row)
 // ===========================================================================
 
@@ -715,7 +859,7 @@ const FOOTER_FIXTURE = JSON.stringify({
   realisedQualifier: null,
 });
 
-test("UI-031 render: the sticky/shaded summary row renders with all four lines, in the owner's own '+$333,000 (+33.19%)' format for All Time / Realised", () => {
+test("UI-031B render: the sticky/shaded summary row renders with all four lines, in the owner's own '+$333,000 (+33.19%)' format for All Time / Realised -- whole dollars, no cents", () => {
   const html = renderHoldingsWithSummary(FOOTER_FIXTURE, ONE_HELD_ROW);
   assert.match(html, /class="[^"]*holdings-summary-footer[^"]*"/);
   assert.match(html, /role="group"/);
@@ -723,9 +867,31 @@ test("UI-031 render: the sticky/shaded summary row renders with all four lines, 
   assert.match(html, />Unrealised</);
   assert.match(html, />All Time</);
   assert.match(html, />Realised</);
-  // Owner's literal example shape: sign before the currency symbol.
-  assert.match(html, /\+\$333,000\.00\s*\(\+33\.19%\)/);
-  assert.match(html, /\+\$700\.00\s*\(\+20%\)/);
+  // Owner's literal example shape: sign before the currency symbol, whole
+  // dollars only (UI-031B: "all amounts should be whole dollars only");
+  // percentages stay 2dp exactly as they already were.
+  assert.match(html, /\+\$333,000\s*\(\+33\.19%\)/);
+  assert.doesNotMatch(html, /\$333,000\.00/);
+  assert.match(html, /\+\$700\s*\(\+20%\)/);
+  assert.doesNotMatch(html, /\$700\.00/);
+});
+
+test("UI-031B render: line 1/2 money (market value, daily movement, unrealised gain, cost basis) is whole-dollar too, sub-dollar never-fake-zero and a negative daily movement", () => {
+  const fixture = JSON.parse(FOOTER_FIXTURE);
+  fixture.marketValue = holdingValue("available", "AUD", "10000.60");
+  fixture.costBasis = holdingValue("available", "AUD", "8000.40");
+  // Sub-dollar non-zero daily movement -- must never render "$0" or "-$0".
+  fixture.dailyMovement = holdingValue("available", "AUD", "-0.35");
+  fixture.unrealisedGain = holdingValue("available", "AUD", "2000.10");
+  const html = renderHoldingsWithSummary(JSON.stringify(fixture), ONE_HELD_ROW);
+  assert.match(html, />\$10,001</); // 10000.60 half-even rounds to 10001
+  assert.match(html, />\$8,000</); // 8000.40 rounds to 8000
+  assert.match(html, />\+\$2,000</); // 2000.10 rounds to 2000
+  // Never-fake-zero: -0.35 is genuinely non-zero but rounds to $0 at 0dp
+  // -- falls back to the trimmed exact 2dp form instead of a fake "-$0".
+  assert.match(html, /-\$0\.35/);
+  assert.doesNotMatch(html, /-\$0</);
+  assert.doesNotMatch(html, />\$0</);
 });
 
 test("UI-031 render: sr-labelled line structure -- each of the four sub-groups carries its own reachable aria-label", () => {
@@ -752,7 +918,7 @@ test("UI-031 render: empty portfolio (no held securities at all) renders no summ
   assert.doesNotMatch(html, /holdings-summary-footer/);
 });
 
-test("UI-031 render: a reachable qualifier renders alongside the affected line when the summary data carries one", () => {
+test("UI-031B render: a reachable qualifier stays honest -- title + sr-only text on the affected cell, plus a compact inline 'partial' marker, never a separate visible line", () => {
   const qualified = JSON.parse(FOOTER_FIXTURE);
   qualified.valueQualifier =
     "excludes 1 holding without both a price and a cost basis";
@@ -762,14 +928,80 @@ test("UI-031 render: a reachable qualifier renders alongside the affected line w
     JSON.stringify(qualified),
     ONE_HELD_ROW,
   );
+  // The full explanation is reachable via `title` (pointer/hover) --
+  assert.match(
+    html,
+    /title="excludes 1 holding without both a price and a cost basis"/,
+  );
+  assert.match(
+    html,
+    /title="partial -- excludes 1 of 3 lot matches, cost basis incomplete"/,
+  );
+  // -- AND via a `.sr-only` span (screen reader), independently of the
+  // title attribute. Exactly ONE "partial --" prefix even when the
+  // qualifier text itself already starts with "partial -- " (review
+  // fold: the naive composition stuttered "partial -- partial --
+  // excludes...").
+  assert.match(
+    html,
+    /class="sr-only">\s*--\s*excludes 1 holding without both a price and a cost basis/,
+  );
+  assert.match(
+    html,
+    /class="sr-only">\s*--\s*excludes 1 of 3 lot matches, cost basis incomplete/,
+  );
+  assert.doesNotMatch(html, /partial -- partial --/);
+  // The compact visible marker is the word "partial" (row-tertiary type),
+  // never the full sentence rendered as on-screen text outside the
+  // sr-only span.
+  assert.match(html, /class="row-tertiary partial-marker"/);
+});
+
+test("UI-031B render: EXACTLY four visible lines even with every qualifier populated -- no fifth visible line, sr-only text still present (owner: 'UI-031 has 6 lines not 4, remove the extra explanatory text')", () => {
+  const qualified = JSON.parse(FOOTER_FIXTURE);
+  qualified.valueQualifier =
+    "excludes 1 holding without both a price and a cost basis";
+  qualified.dailyQualifier =
+    "excludes 1 holding without a comparable daily movement";
+  qualified.allTimeQualifier =
+    "partial -- excludes 1 holding without both a price and a cost basis and 1 of 3 lot matches with incomplete cost basis";
+  qualified.realisedQualifier =
+    "partial -- excludes 1 of 3 lot matches, cost basis incomplete";
+  const html = renderHoldingsWithSummary(
+    JSON.stringify(qualified),
+    ONE_HELD_ROW,
+  );
+  // Exactly the four owner-specified visible line groups -- one blank
+  // (aria-hidden) label cell in line 2, no extra qualifier paragraphs.
+  const summaryLineCount = (
+    html.match(/class="holdings-grid summary-line"/g) ?? []
+  ).length;
+  const combinedLineCount = (html.match(/class="summary-line-combined"/g) ?? [])
+    .length;
+  assert.equal(summaryLineCount, 2, "expected exactly 2 .summary-line rows");
+  assert.equal(
+    combinedLineCount,
+    2,
+    "expected exactly 2 .summary-line-combined rows",
+  );
+  // No visible qualifier paragraph of any kind survives -- the class this
+  // feature used to render qualifier text with is gone from the DOM.
+  assert.doesNotMatch(html, /summary-qualifier/);
+  // The base-currency statement and every qualifier's full text are still
+  // present in the markup (reachable to assistive tech / hover), just
+  // never as a rendered line a sighted user scrolls past.
+  assert.match(html, /class="sr-only">\s*<strong>AUD reporting values/);
   assert.match(
     html,
     /excludes 1 holding without both a price and a cost basis/,
   );
-  assert.match(
-    html,
-    /partial -- excludes 1 of 3 lot matches, cost basis incomplete/,
-  );
+  assert.match(html, /excludes 1 holding without a comparable daily movement/);
+  assert.match(html, /partial -- excludes 1 of 3 lot matches/);
+  // Exactly four "partial" markers -- one per qualified cell (market
+  // value, daily movement, All Time, Realised) -- never a fifth.
+  const markerCount = (html.match(/class="row-tertiary partial-marker"/g) ?? [])
+    .length;
+  assert.equal(markerCount, 4);
 });
 
 // ===========================================================================
@@ -792,11 +1024,13 @@ test("UI-031 CSS: .holdings-summary-footer is sticky-positioned and shaded with 
   assert.match(css, /\.holding-row\s*{[^}]*background:\s*transparent/);
 });
 
-test("UI-031 CSS (review B1, QA-001B 320px): the longest real combined qualifier string wraps instead of overflowing -- .summary-qualifier overrides .row-tertiary's white-space: nowrap", async () => {
+test("UI-031B CSS: the longest real combined qualifier no longer needs a wrap override -- it never renders as visible text at all (title + sr-only only); .summary-qualifier is retired, .partial-marker takes its place", async () => {
   // The All Time line's qualifier is the longest real string this feature
   // produces -- it names BOTH an excluded-holdings clause and an excluded-
   // lot-matches clause together (`buildHoldingsSummaryFooter`'s
-  // `allTimeQualifier`, not a hand-typed approximation of it).
+  // `allTimeQualifier`, not a hand-typed approximation of it). Still a
+  // long string -- UI-031B did not shorten what the domain layer
+  // computes, only where it renders (title/sr-only, not a visible line).
   const footer = buildHoldingsSummaryFooter(
     "AUD",
     {
@@ -820,9 +1054,6 @@ test("UI-031 CSS (review B1, QA-001B 320px): the longest real combined qualifier
   );
   assert.ok(footer.allTimeQualifier);
   const qualifier = footer.allTimeQualifier!;
-  // Same order-of-magnitude as the reviewer's own recomputation (~117
-  // chars) -- comfortably longer than a 320px content box (roughly
-  // 40-50 characters at this row's font size) can fit on one line.
   assert.ok(
     qualifier.length > 90,
     `expected a long combined qualifier, got ${qualifier.length} chars: "${qualifier}"`,
@@ -832,17 +1063,17 @@ test("UI-031 CSS (review B1, QA-001B 320px): the longest real combined qualifier
     new URL("../app/globals.css", import.meta.url),
     "utf8",
   );
-  // .row-tertiary (the qualifier's OTHER class) declares nowrap -- the
-  // overflow this pin guards against.
-  assert.match(css, /\.row-tertiary\s*{[^}]*white-space:\s*nowrap/);
-  const qualifierMatch = css.match(
-    /\.holdings-summary-footer \.summary-qualifier\s*{([^}]*)}/,
+  // The old visible-paragraph class (and its wrap override) is gone --
+  // there is no rendered element left for it to style.
+  assert.doesNotMatch(css, /\.summary-qualifier/);
+  const markerMatch = css.match(
+    /\.holdings-summary-footer \.partial-marker\s*{([^}]*)}/,
   );
   assert.ok(
-    qualifierMatch,
-    "expected a .holdings-summary-footer .summary-qualifier rule in globals.css",
+    markerMatch,
+    "expected a .holdings-summary-footer .partial-marker rule in globals.css",
   );
-  const qualifierBlock = qualifierMatch![1];
-  assert.match(qualifierBlock, /white-space:\s*normal/);
-  assert.match(qualifierBlock, /overflow-wrap:\s*anywhere/);
+  // The marker is a fixed short word ("partial"), inheriting
+  // `.row-tertiary`'s `nowrap` -- there is nothing long left to wrap.
+  assert.match(css, /\.row-tertiary\s*{[^}]*white-space:\s*nowrap/);
 });

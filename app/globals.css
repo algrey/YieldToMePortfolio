@@ -641,18 +641,24 @@ dd {
 }
 
 .holdings-list {
-  /* UI-031: the summary row's own reserved height -- a deliberately
-     generous estimate for four compact text lines plus an optional
-     qualifier line and padding, used below so the last real holding row
-     never hides underneath the sticky summary (and, on mobile, underneath
-     the summary AND the fixed cash-summary card stacked together). Safe
-     to retune in isolation; nothing else depends on the exact number.
-     UI-032: bumped 118px -> 138px -- the summary now also carries an
-     unconditional (always-rendered) base-currency statement line above
-     the four owner-directed lines, replacing the ISO identity the
-     retired "Cash separate" aside used to state; the extra budget covers
-     that line wrapping to two lines at a 320px viewport. */
-  --holdings-summary-h: 138px;
+  /* UI-031: the summary row's own reserved height, used below so the last
+     real holding row never hides underneath the sticky summary (and, on
+     mobile, underneath the summary AND the fixed cash-summary card
+     stacked together). Safe to retune in isolation; nothing else depends
+     on the exact number.
+     UI-031B (owner directive: "UI-031 has 6 lines not 4, remove the extra
+     explanatory text"): back to 100px, the genuine four-line budget --
+     the base-currency statement (UI-032) went sr-only and the per-line
+     incompleteness qualifiers collapsed into an inline "partial" marker
+     INSIDE the affected cell (see `HoldingsSummaryFooterRow`'s
+     `PartialMarker`), so neither adds a visible row any more and the
+     138px UI-032 budget (which reserved a whole extra wrapping statement
+     line) is no longer needed. Computed from the four lines' own
+     `line-height`s (.row-primary 19px x3 + .row-secondary 17px = 74px)
+     plus the flex column's 3 inter-line gaps (3px x3 = 9px), the
+     footer's own padding (7px + 8px = 15px), and its 1px top border =
+     99px exactly; rounded up to 100px for a hair of headroom. */
+  --holdings-summary-h: 100px;
 }
 
 .holding-rows {
@@ -730,18 +736,22 @@ dd {
   gap: 8px;
 }
 
-.holdings-summary-footer .summary-qualifier {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.64rem;
-  line-height: 14px;
-  /* UI-031 review (B1, QA-001B 320px): overrides `.row-tertiary`'s
-     `white-space: nowrap` -- the combined All Time qualifier (excluded
-     holdings AND excluded lot matches named together) can run well past
-     100 characters, which must wrap onto multiple lines at a 320px
-     viewport rather than clip or force horizontal scroll. */
-  white-space: normal;
-  overflow-wrap: anywhere;
+/* UI-031B (owner directive: "remove the extra explanatory text"): the
+   full exclusion explanation (which could run well past 100 characters --
+   the combined All Time qualifier names both excluded holdings AND
+   excluded lot matches together) no longer renders as visible text at
+   all -- it moved to `title` (pointer/hover) and a `.sr-only` span
+   (screen reader) on `HoldingsSummaryFooterRow`'s `PartialMarker`. Only
+   this short, fixed "partial" word renders inline inside the affected
+   cell, so the old wrap-instead-of-overflow rule (`white-space: normal;
+   overflow-wrap: anywhere`, review B1) no longer has a long visible
+   string to protect and is retired with it. */
+.holdings-summary-footer .partial-marker {
+  /* Review fold: the leading gap already comes from the marker's own
+     literal `{" "}` text node (`PartialMarker`, portfolio-shell.tsx) --
+     no margin here too, or the two gaps stack. */
+  color: var(--warning);
+  font-style: italic;
 }
 
 .holding-row {

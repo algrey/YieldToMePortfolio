@@ -19,7 +19,10 @@
 //   shows any base-currency dollar figure at all (see the "cash-only
 //   portfolio" test below for the one case where NEITHER the footer NOR
 //   any dollar figure renders, so there is honestly nothing to
-//   disambiguate).
+//   disambiguate). UI-031B (owner directive "UI-031 has 6 lines not 4,
+//   remove the extra explanatory text") since moved this statement
+//   sr-only -- reachable to a screen-reader user, never a fifth visible
+//   summary line. The pins below assert the sr-only wrapper.
 //
 // Rendering uses the same child-process `renderToStaticMarkup` trick
 // tests/ui-031.test.ts and tests/ui-026.test.ts already use for this
@@ -206,9 +209,15 @@ test("UI-032 render: the retired 'Cash separate' panel does not render, even wit
 // summary footer's explain area, unconditional (not gated behind any
 // incompleteness qualifier -- FOOTER_FIXTURE above has every qualifier
 // null, proving it renders regardless of data completeness).
+//
+// UI-031B (Orchestrator ruling, owner directive "UI-031 has 6 lines not
+// 4, remove the extra explanatory text"): this statement is a ROUTINE
+// label under AGENTS.md's compact-view rule, so it went sr-only rather
+// than a fifth visible summary line -- the pins below now assert it
+// renders inside `<p class="sr-only">`, not as visible text.
 // ---------------------------------------------------------------------------
 
-test("UI-032 render: the base-currency ISO identity is reachable in the summary footer, unconditionally", () => {
+test("UI-032 render: the base-currency ISO identity is reachable (sr-only, UI-031B) in the summary footer, unconditionally", () => {
   const html = renderHoldingsScreen({
     homeCurrencyCode: "AUD",
     holdingsJson: ONE_HELD_ROW,
@@ -220,10 +229,12 @@ test("UI-032 render: the base-currency ISO identity is reachable in the summary 
   // Follows the CGT/income "{code} reporting values" render-pinned
   // precedent, but names the REAL rule (the ACTUAL bare marker, derived
   // via currencyDisplayPrefix, not a claim of "no prefix" -- see B1).
+  // UI-031B: wrapped in `sr-only`, not a visible row-tertiary paragraph.
   assert.match(
     html,
-    /<strong>AUD reporting values<\/strong> -- amounts shown as <strong>\$<\/strong> are this portfolio(?:&#x27;|&apos;|')s base currency; other currencies are flagged/,
+    /<p class="sr-only"><strong>AUD reporting values<\/strong> -- amounts shown as <strong>\$<\/strong> are this portfolio(?:&#x27;|&apos;|')s base currency; other currencies are flagged/,
   );
+  assert.doesNotMatch(html, /class="row-tertiary summary-qualifier"/);
 });
 
 test("UI-032 render: the reachability statement names whichever currency is actually the portfolio's base (not hardcoded)", () => {
@@ -244,8 +255,11 @@ test("UI-032 render: the reachability statement names whichever currency is actu
   });
   // A USD-base portfolio's bare marker is ALSO "$" (dollar-family bare
   // rule) -- the code name in the heading is what actually distinguishes
-  // it, not the marker.
-  assert.match(html, /<strong>USD reporting values<\/strong>/);
+  // it, not the marker. UI-031B: sr-only, not visible.
+  assert.match(
+    html,
+    /<p class="sr-only"><strong>USD reporting values<\/strong>/,
+  );
   assert.doesNotMatch(html, /<strong>AUD reporting values<\/strong>/);
 });
 
@@ -265,7 +279,11 @@ test("UI-032 render: a symbol-less base currency (e.g. CHF) still gets a real, n
     summaryJson: JSON.stringify(chfFooter),
     cashJson: null,
   });
-  assert.match(html, /<strong>CHF reporting values<\/strong>/);
+  // UI-031B: sr-only, not visible.
+  assert.match(
+    html,
+    /<p class="sr-only"><strong>CHF reporting values<\/strong>/,
+  );
   // The marker itself falls back to the "CODE " form (never truly empty).
   assert.match(html, /amounts shown as <strong>CHF <\/strong> are/);
 });

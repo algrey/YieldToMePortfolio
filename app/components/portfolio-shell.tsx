@@ -39,6 +39,7 @@ import {
 } from "../owned-holdings-contract";
 import {
   ownedHoldingAmount,
+  ownedHoldingAmountWhole,
   ownedHoldingDecimalNeverFakeZero,
   ownedHoldingPercent,
   ownedHoldingQuantity,
@@ -754,6 +755,36 @@ function OwnedHoldingsScreen({
 // (`app/globals.css`, `position: sticky; bottom: ...`). Moving it first
 // or last later is a JSX reorder at the ONE call site above, nothing in
 // this component or its CSS class needs to change.
+// UI-031B (Orchestrator ruling): when a line's figure is a genuinely
+// partial/incomplete sum, the figure itself keeps its honest "available"
+// (partial) state -- never a fifth visible summary line -- and the full
+// exclusion explanation compresses to accessible text (sr-only for
+// screen readers, `title` for pointer/hover users) plus this minimal
+// visible "partial" marker rendered INSIDE the affected cell, in the same
+// row-tertiary type the rest of the footer's micro-text uses. `null`
+// (no qualifier) renders nothing at all.
+// Review fold: some qualifiers already begin "partial -- " (e.g. the
+// All Time / Realised qualifiers `buildHoldingsSummaryFooter` composes),
+// others don't (the plain value/daily exclusion sentences) -- the sr-only
+// text below supplies exactly ONE "partial -- " prefix regardless of
+// which shape `text` arrives in, so it never stutters "partial --
+// partial -- excludes...".
+function partialDetail(text: string): string {
+  return text.startsWith("partial -- ")
+    ? text.slice("partial -- ".length)
+    : text;
+}
+function PartialMarker({ text }: { text: string | null }) {
+  if (!text) return null;
+  return (
+    <span className="row-tertiary partial-marker" title={text}>
+      {" "}
+      partial
+      <span className="sr-only"> -- {partialDetail(text)}</span>
+    </span>
+  );
+}
+
 function HoldingsSummaryFooterRow({
   summary,
   homeCurrencyCode,
@@ -775,9 +806,6 @@ function HoldingsSummaryFooterRow({
   const gainTone = toneOf(summary.unrealisedGain);
   const allTimeTone = toneOf(summary.allTimeGain);
   const realisedTone = toneOf(summary.realisedGain);
-  const unrealisedQualifiers = [summary.valueQualifier, summary.dailyQualifier]
-    .filter((text): text is string => text !== null)
-    .join("; ");
 
   return (
     <div
@@ -785,28 +813,30 @@ function HoldingsSummaryFooterRow({
       role="group"
       aria-label="Portfolio totals"
     >
-      {/* UI-032 (Orchestrator ruling, round 2 review fix B1): the retired
-          "Cash separate" aside (`app/components/portfolio-shell.tsx`,
-          pre-UI-032) carried this screen's only statement of the base
-          currency's ISO identity ("{homeCurrencyCode} reporting values").
+      {/* UI-031B (owner directive, verbatim: "UI-031 has 6 lines not 4,
+          remove the extra explanatory text"): the footer renders EXACTLY
+          the four owner-specified lines below -- this base-currency
+          statement (UI-032, Orchestrator ruling round 2 review fix B1)
+          is a ROUTINE label under AGENTS.md's compact-view rule (it
+          states the same ISO identity every render, never an action-
+          required fact), so it goes sr-only rather than a fifth visible
+          line: still reachable to a screen-reader user (the honesty
+          guarantee AGENTS.md requires), never rendered as on-screen text.
           Per-row labels only name each HOLDING's own currency
           (`holding.currencyCode`), which is never guaranteed to equal the
           base currency (a portfolio of entirely foreign-currency holdings
           would show it nowhere) -- so the statement is restated here,
-          unconditionally, wherever this summary renders. Follows the
-          CGT/income screens' "{code} reporting values" render-pinned
-          precedent (capital-gains-screen.tsx, income-landing.tsx), but
-          describes the REAL rule instead of "every figure is base
-          currency": `view === "native"` can put a held security's own
-          (foreign) currency on its row, so this names the actual bare
-          marker via `currencyDisplayPrefix(homeCurrencyCode,
-          homeCurrencyCode)` rather than claiming amounts render with "no
-          prefix" -- `currencyDisplayPrefix` NEVER returns empty (base
-          amounts still get a bare $/£/€/¥, or the "CODE " fallback for a
-          symbol-less code like CHF), so "no prefix" would be false, and
-          for a CHF-style base it would describe zero figures on the
-          screen. */}
-      <p className="row-tertiary summary-qualifier">
+          unconditionally, wherever this summary renders. Describes the
+          REAL rule instead of "every figure is base currency": `view ===
+          "native"` can put a held security's own (foreign) currency on
+          its row, so this names the actual bare marker via
+          `currencyDisplayPrefix(homeCurrencyCode, homeCurrencyCode)`
+          rather than claiming amounts render with "no prefix" --
+          `currencyDisplayPrefix` NEVER returns empty (base amounts still
+          get a bare $/£/€/¥, or the "CODE " fallback for a symbol-less
+          code like CHF). tests/ui-032.test.ts asserts the sr-only
+          presence, not visible text. */}
+      <p className="sr-only">
         <strong>{homeCurrencyCode} reporting values</strong> -- amounts shown as{" "}
         <strong>
           {currencyDisplayPrefix(homeCurrencyCode, homeCurrencyCode)}
@@ -821,16 +851,21 @@ function HoldingsSummaryFooterRow({
       >
         <span className="row-primary symbol">Unrealised</span>
         <span className="row-primary numeric">
-          {ownedHoldingAmount(homeCurrencyCode, summary.marketValue)}
+          {ownedHoldingAmountWhole(homeCurrencyCode, summary.marketValue)}
+          <PartialMarker text={summary.valueQualifier} />
         </span>
         <ToneValue tone={dailyTone} className="row-primary numeric">
-          {ownedHoldingAmount(homeCurrencyCode, summary.dailyMovement, 2, true)}
+          {ownedHoldingAmountWhole(
+            homeCurrencyCode,
+            summary.dailyMovement,
+            true,
+          )}
+          <PartialMarker text={summary.dailyQualifier} />
         </ToneValue>
         <ToneValue tone={gainTone} className="row-primary numeric">
-          {ownedHoldingAmount(
+          {ownedHoldingAmountWhole(
             homeCurrencyCode,
             summary.unrealisedGain,
-            2,
             true,
           )}
         </ToneValue>
@@ -842,7 +877,7 @@ function HoldingsSummaryFooterRow({
       >
         <span className="row-secondary" aria-hidden="true" />
         <span className="row-secondary numeric">
-          {ownedHoldingAmount(homeCurrencyCode, summary.costBasis)}
+          {ownedHoldingAmountWhole(homeCurrencyCode, summary.costBasis)}
         </span>
         <ToneValue tone={dailyTone} className="row-secondary numeric">
           {ownedHoldingPercent(summary.dailyPercent, true)}
@@ -851,9 +886,6 @@ function HoldingsSummaryFooterRow({
           {ownedHoldingPercent(summary.totalPercent, true)}
         </ToneValue>
       </div>
-      {unrealisedQualifiers ? (
-        <p className="row-tertiary summary-qualifier">{unrealisedQualifiers}</p>
-      ) : null}
       <div
         className="summary-line-combined"
         role="group"
@@ -861,15 +893,11 @@ function HoldingsSummaryFooterRow({
       >
         <span className="row-primary symbol">All Time</span>
         <ToneValue tone={allTimeTone} className="row-primary numeric">
-          {ownedHoldingAmount(homeCurrencyCode, summary.allTimeGain, 2, true)} (
-          {ownedHoldingPercent(summary.allTimePercent, true)})
+          {ownedHoldingAmountWhole(homeCurrencyCode, summary.allTimeGain, true)}{" "}
+          ({ownedHoldingPercent(summary.allTimePercent, true)})
+          <PartialMarker text={summary.allTimeQualifier} />
         </ToneValue>
       </div>
-      {summary.allTimeQualifier ? (
-        <p className="row-tertiary summary-qualifier">
-          {summary.allTimeQualifier}
-        </p>
-      ) : null}
       <div
         className="summary-line-combined"
         role="group"
@@ -877,15 +905,15 @@ function HoldingsSummaryFooterRow({
       >
         <span className="row-primary symbol">Realised</span>
         <ToneValue tone={realisedTone} className="row-primary numeric">
-          {ownedHoldingAmount(homeCurrencyCode, summary.realisedGain, 2, true)}{" "}
+          {ownedHoldingAmountWhole(
+            homeCurrencyCode,
+            summary.realisedGain,
+            true,
+          )}{" "}
           ({ownedHoldingPercent(summary.realisedPercent, true)})
+          <PartialMarker text={summary.realisedQualifier} />
         </ToneValue>
       </div>
-      {summary.realisedQualifier ? (
-        <p className="row-tertiary summary-qualifier">
-          {summary.realisedQualifier}
-        </p>
-      ) : null}
     </div>
   );
 }

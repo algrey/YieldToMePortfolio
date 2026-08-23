@@ -1031,7 +1031,9 @@ Orchestrator rulings:
 
 ### UI-031B — Summary row: exactly four visible lines, whole-dollar amounts (owner-directed)
 
-Status: READY (2026-08-23, owner directive, verbatim): "UI-031 has 6 lines not 4, remove the extra explanatory text. For the summary row all amounts should be whole dollars only and percentages should two decimal places as they are."
+Status: DONE on 2026-08-23 (worker + one delta review round, PASS; stutter fold applied pre-commit). The footer renders EXACTLY four visible lines: the UI-032 base-currency statement is sr-only (compact-view compression; reachability pins flipped), incompleteness qualifiers compress to an inline amber "partial" word inside the affected cell with the full sentence on title + sr-only (never a fifth line; unavailable tiers keep their visible honest states; contrast 8.8:1, word-not-color). Footer money is whole-dollar via new footer-scoped ownedHoldingAmountWhole — reviewer drilled 24 cases: genuine half-even ($2.50→$2, $3.50→$4), 0.999→$1, sub-|0.5| never-fake-zero fallback ($0.3/-$0.35/full-precision tiny), genuine $0 honest, -$1,204 grouping, foreign still flagged (+US$1,235), malformed → unavailable; percents 2dp and ALL row-level lines unchanged (formatter used at exactly the six footer call sites). Height budget recomputed independently (99px vs 100px reservation; sr-only absolute, no flow impact; no clipping). Stutter ("partial -- partial --") and double gap fixed with pins. npm run check exit 0 (1989/1979/10 env-gated skips). Recorded non-blocking: title on a non-focusable span (sr text independently present); 320px in-cell crowding for 7-figure totals + marker (no page scroll; cheap label-cell relocation if the owner dislikes it); mixed-scale never-fake-zero renders are by design. Original entry follows.
+
+Original scope: (owner directive, verbatim): "UI-031 has 6 lines not 4, remove the extra explanatory text. For the summary row all amounts should be whole dollars only and percentages should two decimal places as they are."
 
 Orchestrator rulings:
 

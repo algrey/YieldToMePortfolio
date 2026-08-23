@@ -130,6 +130,68 @@ export function ownedHoldingAmount(
     return ownedHoldingUnavailableText(value.reason);
   }
 }
+// UI-031B (owner directive, verbatim: "For the summary row all amounts
+// should be whole dollars only"): whole-dollar variant of
+// `ownedHoldingAmount`, used ONLY by the holdings summary footer
+// (`portfolio-shell.tsx`'s `HoldingsSummaryFooterRow`) -- every OTHER
+// money surface (per-row lines incl. UI-030's Realised line, holding
+// detail, transactions, dividends, etc.) keeps its existing 2dp rendering
+// untouched; this is a display-only sibling, not a replacement. Same
+// half-even rounding (`formatDecimalFixed`'s `Decimal.ROUND_HALF_EVEN`),
+// thousands grouping, and sign-before-symbol convention as
+// `ownedHoldingAmount`, but at 0dp. The never-fake-zero guard applies
+// here too, at a coarser threshold than `ownedHoldingDecimalNeverFakeZero`
+// (which guards a 2dp render): a genuinely non-zero total under $0.50
+// rounds to "$0" at 0dp, which would misstate a real non-zero figure as
+// nothing, so it falls back to the trimmed EXACT form (2dp/6dp,
+// trailing zeros trimmed) for that one value instead, matching the same
+// fallback chain `ownedHoldingDecimalNeverFakeZero` already established.
+export function ownedHoldingAmountWhole(
+  baseCurrencyCode: string,
+  value: {
+    status: "available" | "unavailable";
+    currencyCode: string;
+    value: string | null;
+    reason?: string | null;
+  },
+  signed = false,
+) {
+  if (value.status !== "available" || value.value === null)
+    return ownedHoldingUnavailableText(value.reason);
+  try {
+    const parsed = parseDecimalResult(value.value);
+    const whole = groupThousands(formatDecimalFixed(parsed, 0));
+    const rawFormatted = isFakeZeroAmount(whole, parsed)
+      ? neverFakeZeroWholeFallback(value.value, parsed)
+      : whole;
+    const formatted = signPrefixed(rawFormatted, signed);
+    const hasSign =
+      formatted.startsWith("+") ||
+      formatted.startsWith("-") ||
+      formatted.startsWith("−");
+    const signChar = hasSign ? formatted.slice(0, 1) : "";
+    const magnitude = hasSign ? formatted.slice(1) : formatted;
+    return `${signChar}${currencyDisplayPrefix(value.currencyCode, baseCurrencyCode)}${magnitude}`;
+  } catch {
+    return ownedHoldingUnavailableText(value.reason);
+  }
+}
+function isFakeZeroAmount(
+  formatted: string,
+  parsed: ReturnType<typeof parseDecimalResult>,
+): boolean {
+  if (isZero(parsed)) return false;
+  const unsigned = formatted.replace(/^[-−]/, "").replaceAll(",", "");
+  return /^0(?:\.0+)?$/.test(unsigned);
+}
+function neverFakeZeroWholeFallback(
+  value: string,
+  parsed: ReturnType<typeof parseDecimalResult>,
+): string {
+  const trimmed = ownedHoldingTrimmed(value);
+  if (!isFakeZeroAmount(trimmed, parsed)) return trimmed;
+  return groupThousands(formatDecimalExact(parsed));
+}
 export function ownedHoldingDecimal(value: string | null, scale = 2): string {
   if (value === null) return "—";
   try {
