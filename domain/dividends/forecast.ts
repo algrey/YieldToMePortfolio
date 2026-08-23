@@ -376,6 +376,8 @@ export type SecurityDividendForecast = {
   ttmSource: "provider_ttm" | "history_ttm" | null;
   /** DIV-006: `true` when `ttmSource === "history_ttm"` and at least one trailing-window history row's per-share rate could not be established (`deriveHistoryTrailingTwelveMonthDividend`'s `incomplete`) -- the figure is real but may understate the true trailing rate. Always `false` for `"provider_ttm"` (that leg has no partial-row concept) and when `ttmSource` is `null`. */
   ttmIncomplete: boolean;
+  /** DIV-009: the resolved TTM PER-SHARE rate that actually fed this forecast (whichever leg `ttmSource` names), in `currencyCode` -- exposed so a consumer (the income-projection assumption grid/multi-year base) can derive its own per-share yield (rate / current price) from the SAME already-decided figure, rather than re-deriving a trailing yield from raw provider events alone and silently dropping the DIV-008 history fallback. `null` exactly when `ttmSource` is `null` (no leg produced a usable rate). */
+  ttmPerShareDecimal: string | null;
 };
 
 export type ComputeSecurityForecastInput = {
@@ -437,6 +439,7 @@ export function computeSecurityDividendForecast(
       totalGrossDecimal: "0",
       ttmSource: null,
       ttmIncomplete: false,
+      ttmPerShareDecimal: null,
     };
   }
 
@@ -508,6 +511,7 @@ export function computeSecurityDividendForecast(
       ]),
       ttmSource: null,
       ttmIncomplete: false,
+      ttmPerShareDecimal: null,
     };
   }
 
@@ -626,6 +630,7 @@ export function computeSecurityDividendForecast(
         : null,
       ttmSource: null,
       ttmIncomplete,
+      ttmPerShareDecimal: null,
     };
   }
 
@@ -708,5 +713,6 @@ export function computeSecurityDividendForecast(
     ]),
     ttmSource,
     ttmIncomplete,
+    ttmPerShareDecimal: ttmResolution.ttmPerShareDecimal,
   };
 }

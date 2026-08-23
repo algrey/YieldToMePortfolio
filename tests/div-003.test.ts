@@ -86,11 +86,7 @@ test("yield resolution: grossed-yield derivation from cash TTM + franking -- gro
     {
       ok: true,
       trailingYieldPercentDecimal: "10",
-      ttmPerShareDecimal: "1",
-      currencyCode: "AUD",
-      eventCount: 2,
-      windowFromDate: "2025-01-01",
-      windowToDate: "2026-01-01",
+      ttmSource: "provider_ttm",
     },
     franking,
   );
@@ -109,11 +105,7 @@ test("yield resolution: no owner override and no franking assumption set -- prov
     {
       ok: true,
       trailingYieldPercentDecimal: "5",
-      ttmPerShareDecimal: "1",
-      currencyCode: "AUD",
-      eventCount: 1,
-      windowFromDate: "2025-01-01",
-      windowToDate: "2026-01-01",
+      ttmSource: "provider_ttm",
     },
     franking,
   );
@@ -825,6 +817,7 @@ function forecast(
     totalGrossDecimal: "0",
     ttmSource: null,
     ttmIncomplete: false,
+    ttmPerShareDecimal: null,
     ...overrides,
   };
 }

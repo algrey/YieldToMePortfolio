@@ -166,6 +166,56 @@ export type TrailingDividendYieldResult =
         | "currency_mismatch";
     };
 
+type YieldPercentFromPerShareResult =
+  | { ok: true; trailingYieldPercentDecimal: string }
+  | { ok: false; reason: "price_unavailable" | "currency_mismatch" };
+
+/**
+ * Shared "TTM per-share rate + current price -> yield %" arithmetic, factored
+ * out so `deriveTrailingDividendYield` (the provider `dividend_events` leg)
+ * and DIV-009's `deriveYieldFromResolvedTtm` (which feeds in an
+ * ALREADY-RESOLVED per-share rate -- provider or the DIV-008 history
+ * fallback, precedence already decided by `computeSecurityDividendForecast`)
+ * compute the exact same percentage the exact same way -- no parallel/
+ * duplicated division-and-rounding logic for the two source legs.
+ */
+function yieldPercentFromPerShare(
+  ttmPerShareDecimal: string,
+  ttmCurrencyCode: string,
+  price: TrailingPriceReference,
+): YieldPercentFromPerShareResult {
+  let priceDecimal: DecimalFraction;
+  try {
+    priceDecimal = parseDecimal(price.amountDecimal);
+  } catch {
+    return { ok: false, reason: "price_unavailable" };
+  }
+  if (compareDecimal(priceDecimal, fromInteger(0n)) <= 0) {
+    return { ok: false, reason: "price_unavailable" };
+  }
+  if (price.currencyCode !== ttmCurrencyCode) {
+    return { ok: false, reason: "currency_mismatch" };
+  }
+
+  let yieldFraction: DecimalFraction;
+  try {
+    yieldFraction = multiplyDecimal(
+      divideDecimal(parseDecimal(ttmPerShareDecimal), priceDecimal),
+      fromInteger(100n),
+    );
+  } catch {
+    return { ok: false, reason: "price_unavailable" };
+  }
+
+  return {
+    ok: true,
+    trailingYieldPercentDecimal: formatDecimalFixed(
+      yieldFraction,
+      YIELD_DISPLAY_SCALE,
+    ),
+  };
+}
+
 /**
  * Trailing cash yield = TTM per-share dividend / current price, expressed as
  * a percentage. The caller supplies the current price explicitly (per the
@@ -183,39 +233,99 @@ export function deriveTrailingDividendYield(
   if (!price) {
     return { ok: false, reason: "price_unavailable" };
   }
-  let priceDecimal: DecimalFraction;
-  try {
-    priceDecimal = parseDecimal(price.amountDecimal);
-  } catch {
-    return { ok: false, reason: "price_unavailable" };
-  }
-  if (compareDecimal(priceDecimal, fromInteger(0n)) <= 0) {
-    return { ok: false, reason: "price_unavailable" };
-  }
-  if (price.currencyCode !== ttm.currencyCode) {
-    return { ok: false, reason: "currency_mismatch" };
-  }
-
-  let yieldFraction: DecimalFraction;
-  try {
-    yieldFraction = multiplyDecimal(
-      divideDecimal(parseDecimal(ttm.ttmPerShareDecimal), priceDecimal),
-      fromInteger(100n),
-    );
-  } catch {
-    return { ok: false, reason: "price_unavailable" };
-  }
+  const yieldResult = yieldPercentFromPerShare(
+    ttm.ttmPerShareDecimal,
+    ttm.currencyCode,
+    price,
+  );
+  if (!yieldResult.ok) return yieldResult;
 
   return {
     ok: true,
-    trailingYieldPercentDecimal: formatDecimalFixed(
-      yieldFraction,
-      YIELD_DISPLAY_SCALE,
-    ),
+    trailingYieldPercentDecimal: yieldResult.trailingYieldPercentDecimal,
     ttmPerShareDecimal: ttm.ttmPerShareDecimal,
     currencyCode: ttm.currencyCode,
     eventCount: ttm.eventCount,
     windowFromDate: ttm.windowFromDate,
     windowToDate: ttm.windowToDate,
+  };
+}
+
+/** The subset of `SecurityDividendForecast` (`domain/dividends/forecast.ts`)
+ * `deriveYieldFromResolvedTtm` needs -- duck-typed locally rather than
+ * importing that type, so this module (already imported BY `forecast.ts` for
+ * the provider TTM leg) never imports back from it. */
+export type ResolvedForecastTtm = {
+  ttmPerShareDecimal: string | null;
+  ttmSource: "provider_ttm" | "history_ttm" | null;
+  currencyCode: string;
+  /** `SecurityDividendForecast.uncoveredReason` -- the most specific reason the forecast itself already picked when neither TTM leg was usable. */
+  uncoveredReason:
+    | "insufficient_history"
+    | "mixed_currency"
+    | "invalid_input"
+    | "unknown_amount"
+    | "history_gap"
+    | null;
+};
+
+export type ResolvedTtmYieldResult =
+  | {
+      ok: true;
+      trailingYieldPercentDecimal: string;
+      ttmSource: "provider_ttm" | "history_ttm";
+    }
+  | {
+      ok: false;
+      reason:
+        | "insufficient_history"
+        | "mixed_currency"
+        | "invalid_input"
+        | "unknown_amount"
+        | "history_gap"
+        | "price_unavailable"
+        | "currency_mismatch";
+    };
+
+/**
+ * DIV-009: derives a yield % from a security's ALREADY-RESOLVED forecast TTM
+ * (`computeSecurityDividendForecast`'s `ttmPerShareDecimal`/`ttmSource`,
+ * which after DIV-008 carries the history-derived fallback) instead of
+ * re-deriving a trailing yield from raw provider `dividend_events` alone --
+ * the income-projection assumption grid/multi-year base's fix for "provider
+ * events keep precedence exactly as the forecast already decided; a
+ * portfolio with zero provider coverage but real imported dividend history
+ * must not be `no_yield_coverage`". Provenance (`ttmSource`) travels with a
+ * successful result so a consumer can distinguish a provider-derived yield
+ * from a history-derived one, matching DIV-006's disclosure convention.
+ * `resolved.ttmPerShareDecimal`/`ttmSource` being `null` together (the
+ * forecast's own invariant) falls back to `resolved.uncoveredReason` --
+ * itself `null` for a sold-out holding or a fully-declared-covered window,
+ * neither of which is a genuine "no data" gap, so `"insufficient_history"`
+ * is the conservative, most honest label for that residual case.
+ */
+export function deriveYieldFromResolvedTtm(
+  resolved: ResolvedForecastTtm,
+  price: TrailingPriceReference | null,
+): ResolvedTtmYieldResult {
+  if (resolved.ttmPerShareDecimal === null || resolved.ttmSource === null) {
+    return {
+      ok: false,
+      reason: resolved.uncoveredReason ?? "insufficient_history",
+    };
+  }
+  if (!price) {
+    return { ok: false, reason: "price_unavailable" };
+  }
+  const yieldResult = yieldPercentFromPerShare(
+    resolved.ttmPerShareDecimal,
+    resolved.currencyCode,
+    price,
+  );
+  if (!yieldResult.ok) return yieldResult;
+  return {
+    ok: true,
+    trailingYieldPercentDecimal: yieldResult.trailingYieldPercentDecimal,
+    ttmSource: resolved.ttmSource,
   };
 }

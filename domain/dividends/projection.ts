@@ -41,7 +41,7 @@ import type {
   FyDividendTotal,
 } from "./aggregations.ts";
 import type { SecurityDividendForecast } from "./forecast.ts";
-import type { TrailingDividendYieldResult } from "../market-data/dividend-yield.ts";
+import type { ResolvedTtmYieldResult } from "../market-data/dividend-yield.ts";
 
 const ZERO = fromInteger(0n);
 const ONE = fromInteger(1n);
@@ -184,15 +184,27 @@ export function resolvePortfolioDividendGrowth(
   };
 }
 
-export type YieldAssumptionSource = "owner_override" | "provider_ttm" | "none";
+// DIV-009: `"history_ttm"` added -- the DIV-008 history-derived TTM fallback
+// (`SecurityDividendForecast.ttmSource`) can now win the assumption grid's
+// yield resolution exactly as it already wins the forecast, so a consumer
+// must be able to tell the two TTM legs apart, not just "TTM vs none".
+export type YieldAssumptionSource =
+  "owner_override" | "provider_ttm" | "history_ttm" | "none";
 
+// DIV-009: `"unknown_amount" | "history_gap"` added -- `SecurityDividendForecast.uncoveredReason`'s
+// DIV-006/DIV-008 reasons for a forecast whose history TTM leg is unusable;
+// surfaced here (rather than collapsed into "insufficient_history") so a
+// security with a PROVABLE ledger gap (`"history_gap"`) is named as such,
+// never silently blurred into a bare "no data at all" reason.
 export type YieldAssumptionStatus =
   | "ok"
   | "insufficient_history"
   | "price_unavailable"
   | "currency_mismatch"
   | "mixed_currency"
-  | "invalid_input";
+  | "invalid_input"
+  | "unknown_amount"
+  | "history_gap";
 
 export type YieldAssumptionResolution =
   | {
@@ -205,7 +217,7 @@ export type YieldAssumptionResolution =
       method: string;
     }
   | {
-      source: "provider_ttm";
+      source: "provider_ttm" | "history_ttm";
       status: "ok";
       grossedYieldPercentDecimal: string;
       cashYieldPercentDecimal: string;
@@ -229,19 +241,25 @@ export type YieldAssumptionResolution =
  * total-yield by definition -- the assumptions-grid field is generically
  * labelled "yield" and this task's binding ruling is that "yield" always
  * means the grossed total, so an owner-entered value needs no further
- * gross-up) -- else the provider's trailing-twelve-month CASH yield
- * (`domain/market-data/dividend-yield.ts`, MKT-005), grossed up by the
- * resolved franking % using the identical ATO formula
+ * gross-up) -- else the resolved trailing-twelve-month CASH yield (DIV-009:
+ * `domain/market-data/dividend-yield.ts`'s `deriveYieldFromResolvedTtm`,
+ * which itself keeps the provider TTM leg's precedence over the DIV-008
+ * history-derived fallback exactly as `computeSecurityDividendForecast`
+ * already decided -- this function never re-decides that precedence),
+ * grossed up by the resolved franking % using the identical ATO formula
  * `franking.ts`'s `computeDefaultFrankingCredit` already implements
  * (grossed = cash + creditOnCash, and `computeDefaultFrankingCredit`'s
  * dividend-amount argument is linear, so passing the cash YIELD percentage
  * in place of a dollar amount computes the credit YIELD percentage using
- * the exact same formula) -- else `"none"`, carrying the provider TTM
- * module's own typed unavailability reason forward rather than a guess.
+ * the exact same formula) -- else `"none"`, carrying the TTM resolution's
+ * own typed unavailability reason forward rather than a guess. `source`/
+ * `method` distinguish a provider- from a history-derived yield (DIV-006's
+ * disclosure convention) so the assumption grid never presents a
+ * history-derived figure as if it were provider data.
  */
 export function resolveSecurityYield(
   ownerYieldOverridePercentDecimal: string | null,
-  providerTtmYield: TrailingDividendYieldResult,
+  ttmYield: ResolvedTtmYieldResult,
   frankingResolution: FrankingAssumptionResolution,
 ): YieldAssumptionResolution {
   if (ownerYieldOverridePercentDecimal !== null) {
@@ -256,18 +274,18 @@ export function resolveSecurityYield(
         "owner-set total yield assumption (already includes franking credits)",
     };
   }
-  if (!providerTtmYield.ok) {
+  if (!ttmYield.ok) {
     return {
       source: "none",
-      status: providerTtmYield.reason,
+      status: ttmYield.reason,
       grossedYieldPercentDecimal: null,
       cashYieldPercentDecimal: null,
       frankingPercentUsedDecimal: null,
       frankingSource: null,
-      method: `no owner override and the provider trailing yield is unavailable (${providerTtmYield.reason})`,
+      method: `no owner override and no usable trailing dividend yield is available (${ttmYield.reason})`,
     };
   }
-  const cashYieldPercentDecimal = providerTtmYield.trailingYieldPercentDecimal;
+  const cashYieldPercentDecimal = ttmYield.trailingYieldPercentDecimal;
   const creditYieldPercentDecimal = computeDefaultFrankingCredit(
     cashYieldPercentDecimal,
     frankingResolution.frankingPercentDecimal,
@@ -278,8 +296,12 @@ export function resolveSecurityYield(
       parseDecimal(creditYieldPercentDecimal),
     ),
   );
+  const legLabel =
+    ttmYield.ttmSource === "history_ttm"
+      ? "trailing 12-month cash yield derived from the security's own imported dividend history (DIV-008 fallback -- no usable provider trailing-yield data)"
+      : "provider trailing 12-month cash yield";
   return {
-    source: "provider_ttm",
+    source: ttmYield.ttmSource,
     status: "ok",
     grossedYieldPercentDecimal,
     cashYieldPercentDecimal,
@@ -287,8 +309,8 @@ export function resolveSecurityYield(
     frankingSource: frankingResolution.source,
     method:
       frankingResolution.source === "owner_override"
-        ? "provider trailing 12-month cash yield grossed up using the owner's franking assumption"
-        : "provider trailing 12-month cash yield; no franking assumption set, so no franking credit is added (0%)",
+        ? `${legLabel} grossed up using the owner's franking assumption`
+        : `${legLabel}; no franking assumption set, so no franking credit is added (0%)`,
   };
 }
 

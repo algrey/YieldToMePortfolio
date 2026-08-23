@@ -1,13 +1,19 @@
 // DIV-003: owner-scoped, READ-ONLY retirement-income projection service.
 // Composes holdings value (`app/owned-holdings.ts`), dividend history/
 // forecast (`app/owned-dividend-history.ts`, DIV-001), owner assumptions
-// (`db/repositories/dividends.ts`), historical portfolio value
-// (`db/repositories/snapshots.ts`), and provider trailing yield
-// (`domain/market-data/dividend-yield.ts`, MKT-005) into the pure
-// `domain/dividends/projection.ts` (DIV-003) functions. Every actual
-// projection/aggregation RULE lives in that pure domain module; this file
-// only fetches owner-scoped facts and calls it -- mirrors
-// `app/owned-dividend-history.ts`'s own split between I/O and derivation.
+// (`db/repositories/dividends.ts`), and historical portfolio value
+// (`db/repositories/snapshots.ts`) into the pure `domain/dividends/projection.ts`
+// (DIV-003) functions. Every actual projection/aggregation RULE lives in
+// that pure domain module; this file only fetches owner-scoped facts and
+// calls it -- mirrors `app/owned-dividend-history.ts`'s own split between
+// I/O and derivation. DIV-009: the per-security trailing yield feeding the
+// assumption grid is resolved from each security's ALREADY-COMPUTED
+// `forecast.ttmPerShareDecimal`/`ttmSource` (DIV-001's `loadOwnedDividendHistory`
+// already ran `computeSecurityDividendForecast` with this portfolio's
+// provider `dividend_events` AND its imported dividend history --
+// `domain/market-data/dividend-yield.ts`'s `deriveYieldFromResolvedTtm`,
+// MKT-005/DIV-009) -- this file does NOT fetch provider events a second
+// time or re-decide provider-vs-history precedence itself.
 //
 // Nothing in this file writes to storage. The what-if overlay
 // (`projectMultiYearIncomeWhatIf`, re-exported below for callers) is a pure
@@ -19,10 +25,7 @@ import { loadOwnedHoldings } from "./owned-holdings.ts";
 import { createDividendAssumptionsRepository } from "../db/repositories/dividends.ts";
 import { createHistoricalSnapshotRepository } from "../db/repositories/snapshots.ts";
 import { fyWindowForDate } from "../domain/dividends/fy-window.ts";
-import {
-  deriveTrailingDividendYield,
-  type TrailingDividendEventInput,
-} from "../domain/market-data/dividend-yield.ts";
+import { deriveYieldFromResolvedTtm } from "../domain/market-data/dividend-yield.ts";
 import {
   aggregateSecurityYields,
   computeCurrentFinancialYearRow,
@@ -51,14 +54,9 @@ export { projectMultiYearIncomeWhatIf } from "../domain/dividends/projection.ts"
 export type { WhatIfGrowthOverrides } from "../domain/dividends/projection.ts";
 
 const MAX_YEARS = 10;
-const MAX_EVENTS_PER_PORTFOLIO = 20_000;
 
 type Row = Record<string, unknown>;
 type PortfolioValueStatus = "available" | "partial" | "unavailable";
-
-function inClause(count: number): string {
-  return Array.from({ length: count }, () => "?").join(",");
-}
 
 function clampYearsBack(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isFinite(value)) return fallback;
@@ -225,42 +223,6 @@ export async function loadOwnedIncomeProjection(
     portfolioAssumptions?.portfolioDividendGrowthPercentDecimal ?? null,
   );
 
-  // Provider trailing yield needs each security's raw ingested
-  // `dividend_events` -- DIV-001's read service does not return these (it
-  // only returns already-derived rows), so this service fetches them itself
-  // in one bounded, whole-portfolio query, mirroring
-  // `app/owned-dividend-history.ts`'s own batching pattern.
-  const securityIds = [
-    ...new Set(history.securities.map((security) => security.securityId)),
-  ];
-  const eventsBySecurityId = new Map<string, TrailingDividendEventInput[]>();
-  if (securityIds.length > 0) {
-    const eventRows = await client.all<Row>(
-      `SELECT security_id, kind, status, ex_date, currency_code, gross_per_share_decimal
-       FROM dividend_events
-       WHERE security_id IN (${inClause(securityIds.length)})
-       LIMIT ?`,
-      [...securityIds, MAX_EVENTS_PER_PORTFOLIO + 1],
-    );
-    if (eventRows.length > MAX_EVENTS_PER_PORTFOLIO) {
-      throw new Error("too_many_dividend_events");
-    }
-    for (const row of eventRows) {
-      if (row.gross_per_share_decimal === null || row.ex_date === null)
-        continue;
-      const securityId = String(row.security_id);
-      const list = eventsBySecurityId.get(securityId) ?? [];
-      list.push({
-        exDate: String(row.ex_date),
-        currencyCode: String(row.currency_code),
-        grossPerShareDecimal: String(row.gross_per_share_decimal),
-        kind: String(row.kind) as TrailingDividendEventInput["kind"],
-        status: String(row.status) as TrailingDividendEventInput["status"],
-      });
-      eventsBySecurityId.set(securityId, list);
-    }
-  }
-
   const assumptionGrid: IncomeProjectionAssumptionRow[] =
     history.securities.map((security) => {
       const ownerAssumptions = securityAssumptionsById.get(
@@ -279,17 +241,29 @@ export async function loadOwnedIncomeProjection(
         security.portfolioSecurityId,
       );
       const nativePrice = holdingRow?.nativePrice ?? null;
-      const events = eventsBySecurityId.get(security.securityId) ?? [];
-      const providerTtmYield = deriveTrailingDividendYield(
-        events,
-        today,
+      // DIV-009: reuse the security's ALREADY-COMPUTED forecast TTM
+      // (`security.forecast.ttmPerShareDecimal`/`ttmSource`, DIV-001's
+      // `loadOwnedDividendHistory` already ran `computeSecurityDividendForecast`
+      // with this portfolio's provider `dividend_events` AND its imported
+      // dividend history) instead of re-deriving a trailing yield from raw
+      // provider events alone -- that used to gate the whole Multi-Year tab
+      // on provider coverage even when the DIV-008 history fallback had a
+      // real figure. Provider precedence is NOT re-decided here; the
+      // forecast already decided it.
+      const ttmYield = deriveYieldFromResolvedTtm(
+        {
+          ttmPerShareDecimal: security.forecast.ttmPerShareDecimal,
+          ttmSource: security.forecast.ttmSource,
+          currencyCode: security.forecast.currencyCode,
+          uncoveredReason: security.forecast.uncoveredReason,
+        },
         nativePrice !== null
           ? { amountDecimal: nativePrice, currencyCode: security.currencyCode }
           : null,
       );
       const yieldResolution = resolveSecurityYield(
         ownerAssumptions?.dividendYieldPercentDecimal ?? null,
-        providerTtmYield,
+        ttmYield,
         frankingResolution,
       );
       return {
