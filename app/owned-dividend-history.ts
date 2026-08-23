@@ -106,7 +106,7 @@ export async function loadOwnedDividendHistory(
   now = new Date(),
 ): Promise<OwnedDividendHistory> {
   const portfolio = await client.get<Row>(
-    `SELECT id, base_currency_code, history_complete_from FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
+    `SELECT id, base_currency_code FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
     [portfolioId, userId],
   );
   if (!portfolio) throw new Error("not_owned");
@@ -114,15 +114,16 @@ export async function loadOwnedDividendHistory(
   // below so it can assert a stored FX rate is only ever applied toward the
   // portfolio's own base currency, never an arbitrary security's currency.
   const portfolioBaseCurrencyCode = String(portfolio.base_currency_code);
-  // DIV-006: threaded into `computeSecurityDividendForecast`'s history-TTM
-  // fallback so it can gate a BRK-005 totals-mode row's shares-held-at-
-  // payment-date derivation on the portfolio's declared history-complete
-  // boundary -- mirrors `app/owned-capital-gains.ts`'s identical read.
-  const historyCompleteFrom =
-    typeof portfolio.history_complete_from === "string" &&
-    portfolio.history_complete_from.length > 0
-      ? portfolio.history_complete_from
-      : null;
+  // DIV-008 (owner ruling, 2026-08-23): `history_complete_from` used to be
+  // read here and threaded into `computeSecurityDividendForecast`'s
+  // history-TTM fallback as a completeness gate. The revised design removed
+  // that gate entirely (`domain/dividends/forecast.ts`'s `deriveHistoryRowDps`
+  // now trusts any row whose ledger-derived shares-held-at-payment-date is
+  // positive, no boundary required) -- this was the ONLY consumer of the
+  // column on this read path, so both the SELECT column and the local
+  // variable are removed rather than left as dead threading. CGT-002's own
+  // read of this column (`app/owned-capital-gains.ts`) is a SEPARATE,
+  // unrelated consumer and is untouched.
 
   const settings = await createOwnedUserSettingsRepository(client).get(userId);
   if (!settings) throw new Error("missing_user_settings");
@@ -413,7 +414,6 @@ export async function loadOwnedDividendHistory(
         ttmEvents,
         transactions,
         defaultFrankingPercentDecimal,
-        historyCompleteFrom,
         today,
       });
 

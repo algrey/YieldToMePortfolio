@@ -1245,7 +1245,6 @@ test("forecast: a declared-unpaid event within the window is near-certain, using
     ttmEvents: [],
     transactions: HOLDING_TX,
     defaultFrankingPercentDecimal: null,
-    historyCompleteFrom: null,
     today: "2024-06-01",
   });
   assert.equal(forecast.declaredEventCount, 1);
@@ -1276,7 +1275,6 @@ test("follow-up: a stable payer with no declared coverage forecasts exactly the 
     ttmEvents,
     transactions: HOLDING_TX, // 10 shares held
     defaultFrankingPercentDecimal: null,
-    historyCompleteFrom: null,
     today: "2024-06-01",
   });
   assert.equal(forecast.status, "declared_plus_ttm");
@@ -1296,7 +1294,6 @@ test("forecast: insufficient TTM history is disclosed, never silently zeroed, wh
     ttmEvents: [], // no trailing history at all
     transactions: HOLDING_TX,
     defaultFrankingPercentDecimal: null,
-    historyCompleteFrom: null,
     today: "2024-06-01",
   });
   assert.equal(forecast.status, "insufficient_history");
@@ -1312,7 +1309,6 @@ test("forecast: no current holding forecasts an explicit, honest zero (not 'unav
     ttmEvents: [],
     transactions: [],
     defaultFrankingPercentDecimal: null,
-    historyCompleteFrom: null,
     today: "2024-06-01",
   });
   assert.equal(forecast.status, "no_current_holding");
@@ -1361,7 +1357,6 @@ test("forecast: declared-plus-TTM combines near-certain declared events with a p
     ttmEvents,
     transactions: HOLDING_TX,
     defaultFrankingPercentDecimal: null,
-    historyCompleteFrom: null,
     today: "2024-06-01",
   });
   assert.equal(forecast.status, "declared_plus_ttm");
@@ -1428,7 +1423,6 @@ test("B1 (reviewer economic fixture): a stable semiannual payer's forecast never
     ttmEvents,
     transactions: HOLDING_TX,
     defaultFrankingPercentDecimal: null,
-    historyCompleteFrom: null,
     today: "2024-06-01",
   });
   assert.equal(forecast.declaredCashDecimal, "500");
@@ -1483,7 +1477,6 @@ test("forecast: both the declared and uncovered-tail franking use the ATO gross-
     ttmEvents,
     transactions: HOLDING_TX,
     defaultFrankingPercentDecimal: "100",
-    historyCompleteFrom: null,
     today: "2024-06-01",
   });
   // Declared: 10 shares x 1.00/share cash = 10 cash; fully-franked credit = 10 x 3/7.

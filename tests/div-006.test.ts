@@ -14,6 +14,24 @@
 // happened to be held historically. See `domain/dividends/forecast.ts`'s
 // module header and `deriveHistoryTrailingTwelveMonthDividend`'s doc
 // comment for the full mechanics.
+//
+// DIV-008 (owner ruling, 2026-08-23, REVISING this task): the original
+// design gated a BRK-005 totals-mode row's shares-held-at-payment-date
+// division on an owner-declared `portfolios.history_complete_from`
+// boundary -- with no in-app way to SET that boundary, every totals-mode
+// row was permanently indeterminate (the owner's real $0-projection
+// report). The owner rejected a settings-form mutator for that boundary
+// ("A user might want to see an incomplete history and it would be easier
+// to cross ref and debug an incorrect value than a $0 or missing value")
+// and the gate was REMOVED entirely: the division is now trusted whenever
+// the ledger's OWN shares-held-at-payment-date resolves POSITIVE, no
+// boundary required. Every test below that used to require a SET
+// `historyCompleteFrom` to unlock a totals-mode row (or expected `null`
+// history_complete_from to leave one indeterminate) is flipped accordingly
+// -- each flip is called out at the point of the change, never silently
+// re-purposed. `deriveHistoryTrailingTwelveMonthDividend`'s signature lost
+// its `historyCompleteFrom` parameter; `ComputeSecurityForecastInput` lost
+// its `historyCompleteFrom` field.
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -109,11 +127,14 @@ test("DIV-006: history TTM sums per-share-mode rows' own DPS within the trailing
     defaultFrankingPercentDecimal: null,
     today: TODAY,
   });
+  // DIV-008 flip: `deriveHistoryTrailingTwelveMonthDividend` no longer takes
+  // a `historyCompleteFrom` 5th argument (the gate was removed) -- this
+  // test's rows are per-share mode anyway, so the flip is signature-only,
+  // no behaviour change.
   const result = deriveHistoryTrailingTwelveMonthDividend(
     rows,
     [],
     "AUD",
-    null,
     TODAY,
   );
   assert.equal(result.ok, true);
@@ -123,24 +144,109 @@ test("DIV-006: history TTM sums per-share-mode rows' own DPS within the trailing
   assert.equal(result.ttmPerShareDecimal, "1.1");
   assert.equal(result.rowCount, 2);
   assert.equal(result.incompleteRowCount, 0);
+  assert.equal(result.historyGapRowCount, 0);
   assert.equal(result.incomplete, false);
 });
 
 test("DIV-006: zero qualifying history rows is insufficient_history, never zero or a guess", () => {
+  // DIV-008 flip: signature-only (no `historyCompleteFrom` argument).
+  const result = deriveHistoryTrailingTwelveMonthDividend([], [], "AUD", TODAY);
+  assert.deepEqual(result, { ok: false, reason: "insufficient_history" });
+});
+
+test("DIV-008: a per-share-mode row's DPS is used directly regardless of shares held at payment date -- even zero/negative -- the gap check never applies to it", () => {
+  // Deliberately NO transactions at all, so shares-held-at-payment-date
+  // resolves to "0" for every date -- if the gap check were (wrongly)
+  // applied to a per-share row, this would become a provable-gap
+  // exclusion. It must not: `deriveHistoryRowDps` returns the row's own
+  // `dividendPerShareDecimal` before ever consulting the ledger.
+  const rows = deriveDividendHistoryForSecurity({
+    portfolioSecurityId: "ps1",
+    securityCurrencyCode: "AUD",
+    events: [],
+    overrides: [],
+    receipts: [],
+    manualRecords: [
+      perShareManual({
+        id: "m1",
+        paymentDate: "2026-02-01",
+        dividendPerShareDecimal: "0.75",
+      }),
+    ],
+    transactions: [],
+    defaultFrankingPercentDecimal: null,
+    today: TODAY,
+  });
   const result = deriveHistoryTrailingTwelveMonthDividend(
-    [],
-    [],
+    rows,
+    [], // zero transactions -- shares-held-at-payment-date is "0" everywhere
     "AUD",
-    null,
     TODAY,
   );
-  assert.deepEqual(result, { ok: false, reason: "insufficient_history" });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.ttmPerShareDecimal, "0.75");
+  assert.equal(result.incompleteRowCount, 0);
+  assert.equal(result.historyGapRowCount, 0);
+});
+
+test("DIV-008: a totals-mode row whose ledger-derived shares-held-at-payment-date is NEGATIVE (a sell with no prior buy in the ledger) is a provable gap, same as zero", () => {
+  const rows = deriveDividendHistoryForSecurity({
+    portfolioSecurityId: "ps1",
+    securityCurrencyCode: "AUD",
+    events: [],
+    overrides: [],
+    receipts: [],
+    manualRecords: [
+      totalsManual({
+        id: "m1",
+        paymentDate: "2026-02-01",
+        totalCashDecimal: "500",
+      }),
+    ],
+    transactions: [],
+    defaultFrankingPercentDecimal: null,
+    today: TODAY,
+  });
+  // A sell with NO corresponding buy anywhere in the ledger -- an
+  // incomplete import -- drives `deriveSharesHeldAtDate` negative rather
+  // than clamping at zero (see `shares-held.ts`; no floor is applied).
+  const NEGATIVE_SHARES_TX: LedgerQuantityFact[] = [
+    tx({
+      id: "s1",
+      type: "sell",
+      localTradeDate: "2025-06-01",
+      quantityDecimal: "10",
+    }),
+  ];
+  const result = deriveHistoryTrailingTwelveMonthDividend(
+    rows,
+    NEGATIVE_SHARES_TX,
+    "AUD",
+    TODAY,
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(
+    result.ttmPerShareDecimal,
+    null,
+    "the only qualifying row is indeterminate -- nothing to sum",
+  );
+  assert.equal(result.rowCount, 1);
+  assert.equal(result.incompleteRowCount, 1);
+  assert.equal(
+    result.historyGapRowCount,
+    1,
+    "a negative resolved share count is a PROVABLE gap, same reason as zero -- never conflated with a genuinely unknown amount",
+  );
+  assert.equal(result.incomplete, true);
 });
 
 // ---------------------------------------------------------------------------
 // 2. Full-forecast integration: history fallback, provider precedence,
-//    foreign-currency conversion, incompleteness, boundary, DPS
-//    normalisation against the current position, and the sold-out state.
+//    foreign-currency conversion, incompleteness, and DPS normalisation
+//    against the current position. DIV-008: no `historyCompleteFrom`
+//    boundary is threaded through any of these any more.
 // ---------------------------------------------------------------------------
 
 test("DIV-006: with no usable provider TTM, the forecast falls back to the security's own history, normalised to the CURRENT share count", () => {
@@ -176,7 +282,8 @@ test("DIV-006: with no usable provider TTM, the forecast falls back to the secur
     ttmEvents: [], // no provider coverage at all -- the DIV-006 owner-state repro
     transactions: HOLDING_TX,
     defaultFrankingPercentDecimal: null,
-    historyCompleteFrom: null,
+    // DIV-008 flip: `historyCompleteFrom` no longer exists on this input --
+    // these rows are per-share mode anyway, so removing it changes nothing.
     today: TODAY,
   });
   assert.equal(forecast.status, "declared_plus_ttm");
@@ -185,6 +292,55 @@ test("DIV-006: with no usable provider TTM, the forecast falls back to the secur
   // 10 shares x 1.10 DPS = 11, fully uncovered window.
   assert.equal(forecast.uncoveredCashDecimal, "11");
   assert.equal(forecast.totalCashDecimal, "11");
+});
+
+test("DIV-008 end-to-end (owner-shaped): a Sharesight totals-mode-only security with NO history_complete_from concept at all reports a real non-zero history_ttm headline -- the exact case that used to read $0", () => {
+  // Mirrors the owner's real shape (BRK-005/BRK-005C): a Sharesight-synced
+  // security with ONLY totals-mode dividend history (no per-share rate, no
+  // provider dividend_events at all) and an ordinary buy in the ledger.
+  // Pre-DIV-008 this required a SET `history_complete_from` boundary
+  // covering the payment date to unlock at all -- with no in-app way to set
+  // one, it stayed `insufficient_history` forever. DIV-008 removed that
+  // requirement outright.
+  const rows = deriveDividendHistoryForSecurity({
+    portfolioSecurityId: "ps1",
+    securityCurrencyCode: "AUD",
+    events: [],
+    overrides: [],
+    receipts: [],
+    manualRecords: [
+      totalsManual({
+        id: "m1",
+        paymentDate: "2026-03-01",
+        totalCashDecimal: "150",
+      }),
+    ],
+    transactions: [
+      tx({ id: "b1", localTradeDate: "2025-01-01", quantityDecimal: "100" }),
+    ],
+    defaultFrankingPercentDecimal: null,
+    today: TODAY,
+  });
+  const HOLDING_TX: LedgerQuantityFact[] = [
+    tx({ id: "b1", localTradeDate: "2025-01-01", quantityDecimal: "100" }),
+  ];
+  const forecast = computeSecurityDividendForecast({
+    portfolioSecurityId: "ps1",
+    currencyCode: "AUD",
+    historyRows: rows,
+    ttmEvents: [], // zero provider coverage -- forces the history fallback
+    transactions: HOLDING_TX,
+    defaultFrankingPercentDecimal: null,
+    today: TODAY,
+  });
+  assert.equal(forecast.ttmSource, "history_ttm");
+  assert.equal(forecast.ttmIncomplete, false);
+  assert.notEqual(forecast.totalGrossDecimal, null);
+  assert.notEqual(forecast.totalGrossDecimal, "0");
+  // DPS = 150 / 100 shares held at payment = 1.5; unchanged position (100
+  // then, 100 now) annualises to exactly the received cash.
+  assert.equal(forecast.uncoveredCashDecimal, "150");
+  assert.equal(forecast.totalCashDecimal, "150");
 });
 
 test("DIV-006: a usable provider TTM keeps precedence over the history fallback even when history rows are also present", () => {
@@ -234,7 +390,6 @@ test("DIV-006: a usable provider TTM keeps precedence over the history fallback 
     ttmEvents,
     transactions: HOLDING_TX,
     defaultFrankingPercentDecimal: null,
-    historyCompleteFrom: null,
     today: TODAY,
   });
   assert.equal(forecast.ttmSource, "provider_ttm");
@@ -244,7 +399,7 @@ test("DIV-006: a usable provider TTM keeps precedence over the history fallback 
   assert.equal(forecast.totalCashDecimal, "1000");
 });
 
-test("DIV-006: a foreign-currency totals-mode row contributes its BRK-010-converted total, per-shared against the shares held on its own payment date", () => {
+test("DIV-008 flip (was: 'a foreign-currency totals-mode row ... trusted once history_complete_from covers the payment date'): the SAME row now derives from ledger evidence alone -- no boundary needed", () => {
   const rows = deriveDividendHistoryForSecurity({
     portfolioSecurityId: "ps1",
     securityCurrencyCode: "AUD",
@@ -282,9 +437,11 @@ test("DIV-006: a foreign-currency totals-mode row contributes its BRK-010-conver
     ttmEvents: [],
     transactions: HOLDING_TX,
     defaultFrankingPercentDecimal: null,
-    // Covers the row's 2026-02-01 payment date, so its shares-held-at-payment
-    // (100, unchanged from today's holding) is trusted.
-    historyCompleteFrom: "2020-01-01",
+    // DIV-008 flip: this test used to pass `historyCompleteFrom:
+    // "2020-01-01"` to cover the row's 2026-02-01 payment date -- that
+    // field no longer exists. The row's shares-held-at-payment-date (100,
+    // from the 2025-01-01 buy above) resolves POSITIVE on ledger evidence
+    // alone, so the SAME row derives with no boundary at all.
     today: TODAY,
   });
   assert.equal(forecast.ttmSource, "history_ttm");
@@ -295,7 +452,7 @@ test("DIV-006: a foreign-currency totals-mode row contributes its BRK-010-conver
   assert.equal(forecast.uncoveredCashDecimal, "300");
 });
 
-test("DIV-006: a totals-mode row with no trustworthy shares-held-at-payment-date makes the TTM explicitly incomplete, never zero, never silently dropped", () => {
+test("DIV-008 flip (was: 'no trustworthy shares-held-at-payment-date ... history_complete_from null'): a totals-mode row whose ledger shows ZERO shares held at its payment date (a missing early buy) is a provable history gap, named distinctly from a plain unknown amount", () => {
   const rows = deriveDividendHistoryForSecurity({
     portfolioSecurityId: "ps1",
     securityCurrencyCode: "AUD",
@@ -309,14 +466,17 @@ test("DIV-006: a totals-mode row with no trustworthy shares-held-at-payment-date
         totalCashDecimal: "500",
       }),
     ],
-    transactions: [
-      tx({ id: "b1", localTradeDate: "2025-01-01", quantityDecimal: "10" }),
-    ],
+    transactions: [],
     defaultFrankingPercentDecimal: null,
     today: TODAY,
   });
+  // The only buy in the ledger happens AFTER this row's payment date --
+  // shares-held-at-payment-date resolves to "0" even though a real dividend
+  // was received then. This is the PROVABLE gap DIV-008 names distinctly:
+  // the ledger itself proves something (almost certainly an early buy) is
+  // missing, e.g. from an incomplete CSV import.
   const HOLDING_TX: LedgerQuantityFact[] = [
-    tx({ id: "b1", localTradeDate: "2025-01-01", quantityDecimal: "10" }),
+    tx({ id: "b1", localTradeDate: "2026-06-01", quantityDecimal: "10" }),
   ];
   const forecast = computeSecurityDividendForecast({
     portfolioSecurityId: "ps1",
@@ -325,16 +485,13 @@ test("DIV-006: a totals-mode row with no trustworthy shares-held-at-payment-date
     ttmEvents: [],
     transactions: HOLDING_TX,
     defaultFrankingPercentDecimal: null,
-    // No declared history-complete boundary -- the ledger is not PROVEN
-    // complete as of the row's payment date, so its DPS cannot be trusted.
-    historyCompleteFrom: null,
     today: TODAY,
   });
   assert.equal(forecast.status, "insufficient_history");
   assert.equal(
     forecast.uncoveredReason,
-    "unknown_amount",
-    "distinct from plain insufficient_history -- there IS trailing-window evidence, just no determinable rate",
+    "history_gap",
+    "more specific than the generic unknown_amount -- the ledger PROVES a gap exists",
   );
   assert.equal(forecast.ttmIncomplete, true);
   assert.equal(
@@ -344,7 +501,7 @@ test("DIV-006: a totals-mode row with no trustworthy shares-held-at-payment-date
   );
 });
 
-test("DIV-006: a mix of a known-DPS row and an indeterminate totals-mode row reports the KNOWN portion, flagged incomplete rather than silently dropping the rest", () => {
+test("DIV-006: a mix of a known-DPS row and a provable-gap totals-mode row reports the KNOWN portion, flagged incomplete rather than silently dropping the rest", () => {
   const rows = deriveDividendHistoryForSecurity({
     portfolioSecurityId: "ps1",
     securityCurrencyCode: "AUD",
@@ -369,8 +526,23 @@ test("DIV-006: a mix of a known-DPS row and an indeterminate totals-mode row rep
     defaultFrankingPercentDecimal: null,
     today: TODAY,
   });
+  // DIV-008 flip: under the old completeness-gate design, m2 stayed
+  // indeterminate simply because `historyCompleteFrom` was `null` -- with
+  // the SAME 2023 holding, m2's shares-held-at-payment-date would now
+  // resolve POSITIVE (10) and derive fine, which would no longer exercise
+  // the "mixed known+indeterminate" case this test is for. The holding is
+  // reshaped instead to PROVE a real gap around m2's own payment date: sold
+  // out well before it, re-bought after it (current holding is unaffected
+  // -- still 10 by TODAY).
   const HOLDING_TX: LedgerQuantityFact[] = [
     tx({ id: "b1", localTradeDate: "2023-01-01", quantityDecimal: "10" }),
+    tx({
+      id: "s1",
+      type: "sell",
+      localTradeDate: "2024-01-01",
+      quantityDecimal: "10",
+    }), // 0 shares from here -- BEFORE m2's 2026-05-01 payment
+    tx({ id: "b2", localTradeDate: "2026-06-01", quantityDecimal: "10" }), // re-bought AFTER m2's payment
   ];
   const forecast = computeSecurityDividendForecast({
     portfolioSecurityId: "ps1",
@@ -379,19 +551,19 @@ test("DIV-006: a mix of a known-DPS row and an indeterminate totals-mode row rep
     ttmEvents: [],
     transactions: HOLDING_TX,
     defaultFrankingPercentDecimal: null,
-    historyCompleteFrom: null, // the totals-mode row's DPS stays indeterminate
     today: TODAY,
   });
+  assert.equal(forecast.currentSharesDecimal, "10");
   assert.equal(forecast.status, "declared_plus_ttm");
   assert.equal(forecast.ttmSource, "history_ttm");
   assert.equal(
     forecast.ttmIncomplete,
     true,
-    "one of the two trailing-window rows had no determinable rate",
+    "one of the two trailing-window rows (m2) is a provable gap",
   );
-  // Only the known 0.50/share row contributes: 10 shares x 0.50 = 5 -- a
-  // real, disclosed-partial number, never a fabricated 0 and never silently
-  // dropped to nothing.
+  // Only the known 0.50/share row (m1) contributes: 10 current shares x
+  // 0.50 = 5 -- a real, disclosed-partial number, never a fabricated 0 and
+  // never silently dropped to nothing.
   assert.equal(forecast.uncoveredCashDecimal, "5");
 });
 
@@ -400,7 +572,6 @@ test("DIV-006: boundary -- a history row dated exactly 365 days before today qua
     [],
     [],
     "AUD",
-    null,
     TODAY,
   );
   assert.equal(emptyWindow.ok, false);
@@ -431,7 +602,6 @@ test("DIV-006: boundary -- a history row dated exactly 365 days before today qua
     rowsForPaymentDate(TODAY),
     [],
     "AUD",
-    null,
     TODAY,
   );
   assert.equal(probe.ok, true);
@@ -442,7 +612,6 @@ test("DIV-006: boundary -- a history row dated exactly 365 days before today qua
     rowsForPaymentDate(windowFromDate),
     [],
     "AUD",
-    null,
     TODAY,
   );
   assert.equal(onBoundary.ok, true);
@@ -454,7 +623,6 @@ test("DIV-006: boundary -- a history row dated exactly 365 days before today qua
     rowsForPaymentDate(dayBefore.toISOString().slice(0, 10)),
     [],
     "AUD",
-    null,
     TODAY,
   );
   assert.deepEqual(beforeBoundary, {
@@ -495,7 +663,10 @@ test("DIV-006: DPS normalisation against a CHANGED position -- 100 shares at pay
     ttmEvents: [],
     transactions: HOLDING_TX,
     defaultFrankingPercentDecimal: null,
-    historyCompleteFrom: "2020-01-01", // covers the payment date
+    // DIV-008 flip: this used to require `historyCompleteFrom:
+    // "2020-01-01"` to cover the payment date -- the 100-share holding as
+    // of the 2025-01-01 buy (well before the 2026-02-01 payment) now proves
+    // itself directly from the ledger, no boundary declared.
     today: TODAY,
   });
   assert.equal(forecast.currentSharesDecimal, "200");
@@ -548,7 +719,6 @@ test("DIV-006: a fully sold-out position reports the honest zero-position state,
     ttmEvents: [],
     transactions: HOLDING_TX,
     defaultFrankingPercentDecimal: null,
-    historyCompleteFrom: null,
     today: TODAY,
   });
   assert.equal(forecast.currentSharesDecimal, "0");
@@ -563,9 +733,11 @@ test("DIV-006: a fully sold-out position reports the honest zero-position state,
 });
 
 // ---------------------------------------------------------------------------
-// 3. Review follow-up pins: window parity between the two legs, an
-//    un-converted foreign-currency (BRK-010 case C) history row, and a
-//    payment date before a SET (non-null) history_complete_from boundary.
+// 3. Review follow-up pins: window parity between the two legs, and an
+//    un-converted foreign-currency (BRK-010 case C) history row. DIV-008:
+//    the third follow-up pin in this section (a SET-but-too-late
+//    `history_complete_from` boundary) no longer has a boundary concept to
+//    pin -- replaced by the dedicated provable-gap test above.
 // ---------------------------------------------------------------------------
 
 test("DIV-006 review follow-up: the provider and history TTM legs compute the IDENTICAL trailing windowFromDate/windowToDate for the same asOfDate", () => {
@@ -602,7 +774,6 @@ test("DIV-006 review follow-up: the provider and history TTM legs compute the ID
     rows,
     [],
     "AUD",
-    null,
     TODAY,
   );
   assert.equal(providerResult.ok, true);
@@ -649,54 +820,7 @@ test("DIV-006 review follow-up: an un-converted foreign-currency totals-mode row
     rows,
     [],
     "NZD",
-    null,
     TODAY,
   );
   assert.deepEqual(result, { ok: false, reason: "mixed_currency" });
-});
-
-test("DIV-006 review follow-up: a totals-mode row's payment date BEFORE a SET (non-null) history_complete_from stays indeterminate -- never zero, never silently dropped", () => {
-  const rows = deriveDividendHistoryForSecurity({
-    portfolioSecurityId: "ps1",
-    securityCurrencyCode: "AUD",
-    events: [],
-    overrides: [],
-    receipts: [],
-    manualRecords: [
-      totalsManual({
-        id: "m1",
-        paymentDate: "2026-02-01",
-        totalCashDecimal: "500",
-      }),
-    ],
-    transactions: [
-      tx({ id: "b1", localTradeDate: "2025-01-01", quantityDecimal: "10" }),
-    ],
-    defaultFrankingPercentDecimal: null,
-    today: TODAY,
-  });
-  const HOLDING_TX: LedgerQuantityFact[] = [
-    tx({ id: "b1", localTradeDate: "2025-01-01", quantityDecimal: "10" }),
-  ];
-  const forecast = computeSecurityDividendForecast({
-    portfolioSecurityId: "ps1",
-    currencyCode: "AUD",
-    historyRows: rows,
-    ttmEvents: [],
-    transactions: HOLDING_TX,
-    defaultFrankingPercentDecimal: null,
-    // SET, but LATER than the row's 2026-02-01 payment date -- distinct from
-    // the null-boundary case already covered above: a boundary IS declared,
-    // it just does not reach back far enough to cover this row.
-    historyCompleteFrom: "2026-03-01",
-    today: TODAY,
-  });
-  assert.equal(forecast.status, "insufficient_history");
-  assert.equal(forecast.uncoveredReason, "unknown_amount");
-  assert.equal(forecast.ttmIncomplete, true);
-  assert.equal(
-    forecast.totalCashDecimal,
-    null,
-    "never fabricated as 0 -- nothing safe to total",
-  );
 });

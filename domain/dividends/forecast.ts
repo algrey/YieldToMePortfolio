@@ -51,16 +51,31 @@
 // already carries its own per-share amount, used directly; a BRK-005
 // totals-mode row (a Sharesight payout with only a total cash figure, no
 // share count) is converted to a per-share rate by dividing its total by the
-// shares HELD ON THAT ROW'S OWN PAYMENT DATE (`deriveSharesHeldAtDate`,
-// gated by the portfolio's declared `historyCompleteFrom` boundary --
-// mirrors `domain/gains/carry-forward.ts`'s identical history-honesty gate)
-// -- never approximated with TODAY's share count, which would silently
+// shares HELD ON THAT ROW'S OWN PAYMENT DATE (`deriveSharesHeldAtDate`) --
+// never approximated with TODAY's share count, which would silently
 // mis-scale the estimate whenever the position size changed between that
-// payment and now. See `deriveHistoryTrailingTwelveMonthDividend`'s own doc
-// comment for the exact incompleteness/currency rules. `ttmSource` on the
-// result discloses which leg actually won so a consumer can label the
-// figure "provider trailing 12 months" vs "your own recorded dividend
-// history".
+// payment and now.
+//
+// DIV-008 (owner ruling, 2026-08-23, revising DIV-006's original design):
+// this division is trusted whenever the ledger-derived share count is
+// POSITIVE -- the ledger as it stands IS the evidence, with no separate
+// `portfolios.history_complete_from` completeness gate. A prior design
+// required an owner-declared boundary date to cover the payment date before
+// trusting the division at all; the owner rejected it ("A user might want
+// to see an incomplete history and it would be easier to cross ref and
+// debug an incorrect value than a $0 or missing value") -- a real,
+// cross-checkable (possibly overstated) figure beats a permanently gated
+// $0/missing state. Zero-or-negative shares at the payment date despite a
+// received dividend is treated as a PROVABLE history gap (the ledger itself
+// proves something is missing, e.g. an early buy never imported) and that
+// ROW is excluded with a distinguishable reason -- see
+// `deriveHistoryRowDps`'s doc comment for the accepted-risk trade-off this
+// leaves in place (an UNDETECTABLE overstatement when a missing early buy
+// still leaves the ledger-derived count positive). See
+// `deriveHistoryTrailingTwelveMonthDividend`'s own doc comment for the exact
+// incompleteness/currency rules. `ttmSource` on the result discloses which
+// leg actually won so a consumer can label the figure "provider trailing 12
+// months" vs "your own recorded dividend history".
 import {
   addDecimal,
   compareDecimal,
@@ -136,13 +151,25 @@ function sumDecimals(values: readonly string[]): string {
   );
 }
 
+/** Discriminated per-row DPS derivation result -- `ok: false` always names
+ * WHY the rate is indeterminate, distinguishing a genuinely unknown amount
+ * from a PROVABLE ledger gap (see `deriveHistoryRowDps`'s doc comment)
+ * rather than collapsing both into one opaque `null`. */
+export type HistoryRowDpsResult =
+  | { ok: true; dpsDecimal: string }
+  | {
+      ok: false;
+      /** `"unknown_amount"`: the row's cash figure or payment date is genuinely absent -- nothing to divide. `"history_gap"`: a real dividend was received (known cash, known payment date) but the ledger's OWN shares-held-at-payment-date resolves to zero or negative -- the ledger itself proves a gap (e.g. an early buy never imported), never silently treated the same as a plain unknown amount. */
+      reason: "unknown_amount" | "history_gap";
+    };
+
 /**
- * DIV-006: per-row DPS (dividend-per-share) derivation for the history-TTM
- * fallback. A per-share-mode row (the overwhelming majority -- owner-typed
- * manual entries, receipts, per-share CSV imports, provider auto-derived
- * rows) already carries its own `dividendPerShareDecimal` directly -- the
- * row's OWN `sharesDecimal` is irrelevant to that figure (it is a rate, not
- * a total) and is deliberately never consulted here.
+ * DIV-006/DIV-008: per-row DPS (dividend-per-share) derivation for the
+ * history-TTM fallback. A per-share-mode row (the overwhelming majority --
+ * owner-typed manual entries, receipts, per-share CSV imports, provider
+ * auto-derived rows) already carries its own `dividendPerShareDecimal`
+ * directly -- the row's OWN `sharesDecimal` is irrelevant to that figure (it
+ * is a rate, not a total) and is deliberately never consulted here.
  *
  * A BRK-005 totals-mode row (`dividendPerShareDecimal === null` but
  * `cashDecimal !== null` -- a Sharesight payout reporting only a total cash
@@ -150,52 +177,63 @@ function sumDecimals(values: readonly string[]): string {
  * dividing that total by the shares HELD ON THE ROW'S OWN `paymentDate`
  * (`deriveSharesHeldAtDate`), never by today's current share count -- a
  * position bought/sold between that historical payment and today would
- * otherwise silently mis-scale the derived rate. This division is only
- * trusted when the portfolio's declared `historyCompleteFrom` boundary
- * covers the payment date (mirrors `domain/gains/carry-forward.ts`'s
- * identical history-honesty gate: an incomplete ledger before that date
- * could understate the true historical holding, corrupting the rate) --
- * `null` (no declared boundary), a later boundary, or a malformed value all
- * fail closed. Returns `null` -- never a fabricated "0" -- whenever the rate
- * genuinely cannot be established: unknown cash amount, no payment date, an
- * unproven-complete ledger as of that date, or (defensively) a zero
- * historical share count.
+ * otherwise silently mis-scale the derived rate.
+ *
+ * DIV-008 (owner ruling, 2026-08-23, replacing DIV-006's original
+ * `portfolios.history_complete_from` completeness gate -- see
+ * `docs/CALCULATIONS.md` section 11): this division is trusted whenever the
+ * ledger-derived
+ * shares-held-at-payment-date resolves POSITIVE -- the ledger AS IT STANDS
+ * is the evidence, no separate owner-declared boundary required. A
+ * zero-or-negative resolved share count despite a real received dividend
+ * (known cash, known payment date) is a PROVABLE gap -- the ledger itself
+ * proves something is missing (e.g. an early buy the owner never imported)
+ * -- and is reported as `"history_gap"`, distinguishable from a genuinely
+ * unknown amount/payment date (`"unknown_amount"`). Never silently dropped,
+ * never a fabricated "0".
+ *
+ * ACCEPTED RISK (owner-informed, stated plainly): a missing EARLY buy that
+ * still leaves the ledger-derived share count POSITIVE at the payment date
+ * (e.g. the owner held MORE shares than the ledger shows, but still some)
+ * yields an OVERSTATED DPS this function cannot detect or flag -- there is
+ * no ledger evidence of a gap in that case. The owner explicitly chose this
+ * visible-and-crosscheckable figure over the prior design's permanently
+ * gated $0/missing state: "A user might want to see an incomplete history
+ * and it would be easier to cross ref and debug an incorrect value than a
+ * $0 or missing value."
  */
 function deriveHistoryRowDps(
   row: DerivedDividendRow,
   transactions: readonly LedgerQuantityFact[],
-  historyCompleteFrom: string | null,
-): string | null {
+): HistoryRowDpsResult {
   if (row.dividendPerShareDecimal !== null) {
-    return row.dividendPerShareDecimal;
+    return { ok: true, dpsDecimal: row.dividendPerShareDecimal };
   }
-  if (row.cashDecimal === null) return null; // genuinely unknown amount
+  if (row.cashDecimal === null) {
+    return { ok: false, reason: "unknown_amount" }; // genuinely unknown amount
+  }
   const paymentDate = row.paymentDate;
-  if (paymentDate === null) return null;
-  if (
-    historyCompleteFrom === null ||
-    !DATE_PATTERN.test(historyCompleteFrom) ||
-    paymentDate < historyCompleteFrom
-  ) {
-    return null;
-  }
+  if (paymentDate === null) return { ok: false, reason: "unknown_amount" };
   const sharesAtPayment = deriveSharesHeldAtDate(transactions, paymentDate);
-  // Review follow-up: guard `<= 0`, not just the exact string `"0"` --
-  // `deriveSharesHeldAtDate` should never legitimately go negative, but this
-  // is the same defence-in-depth posture the rest of this module takes
-  // (e.g. `history.ts`'s F3 malformed-rate guard): a negative or zero
-  // historical share count is indeterminate, never a divisor that would
-  // silently produce a negative/fabricated DPS.
-  if (compareDecimal(parseDecimal(sharesAtPayment), ZERO) <= 0) return null;
-  return formatDecimalExact(
-    roundDecimal(
-      divideDecimal(
-        parseDecimal(row.cashDecimal),
-        parseDecimal(sharesAtPayment),
+  // A zero/negative ledger-derived share count at the payment date, despite
+  // a real received dividend, PROVES a gap in the ledger -- distinguishable
+  // from the generic "unknown_amount" reason above (see this function's doc
+  // comment).
+  if (compareDecimal(parseDecimal(sharesAtPayment), ZERO) <= 0) {
+    return { ok: false, reason: "history_gap" };
+  }
+  return {
+    ok: true,
+    dpsDecimal: formatDecimalExact(
+      roundDecimal(
+        divideDecimal(
+          parseDecimal(row.cashDecimal),
+          parseDecimal(sharesAtPayment),
+        ),
+        HISTORY_DPS_SCALE,
       ),
-      HISTORY_DPS_SCALE,
     ),
-  );
+  };
 }
 
 export type HistoryTtmDividendResult =
@@ -206,8 +244,10 @@ export type HistoryTtmDividendResult =
       currencyCode: string;
       /** Count of rows within the trailing window (regardless of whether their rate was derivable). */
       rowCount: number;
-      /** Of `rowCount`, how many had an indeterminate per-share rate (unknown cash amount, or an unresolvable shares-held-at-payment-date for a totals-mode row) -- excluded from `ttmPerShareDecimal`'s sum, never guessed, never silently dropped. */
+      /** Of `rowCount`, how many had an indeterminate per-share rate (unknown cash amount/payment date, or a provable ledger gap -- see `historyGapRowCount`) -- excluded from `ttmPerShareDecimal`'s sum, never guessed, never silently dropped. */
       incompleteRowCount: number;
+      /** DIV-008: of `incompleteRowCount`, how many were excluded specifically because the ledger PROVES a gap -- a real dividend was received but shares-held-at-payment-date resolved to zero or negative (e.g. a missing early buy), never because the amount/payment date was simply unknown. Distinguishable from the rest of `incompleteRowCount` so a consumer can tell "evidence of a missing transaction" apart from "genuinely unknown amount". */
+      historyGapRowCount: number;
       incomplete: boolean;
       windowFromDate: string;
       windowToDate: string;
@@ -218,7 +258,7 @@ export type HistoryTtmDividendResult =
     };
 
 /**
- * DIV-006: the history-derived TTM fallback, engaged by
+ * DIV-006/DIV-008: the history-derived TTM fallback, engaged by
  * `computeSecurityDividendForecast` only when the PROVIDER TTM leg
  * (`deriveTrailingTwelveMonthDividend`) is unusable for this security (no
  * qualifying provider events, or a currency mismatch) -- provider events
@@ -243,15 +283,17 @@ export type HistoryTtmDividendResult =
  * like `computeLifetimeDividendTotals`'s established convention, rather than
  * silently blending currencies. Otherwise this always succeeds
  * (`ok: true`): `ttmPerShareDecimal` sums every row whose rate WAS
- * derivable, and `incomplete`/`incompleteRowCount` disclose the rest rather
- * than dropping them -- `ttmPerShareDecimal` is `null` only in the
+ * derivable (DIV-008: no completeness boundary gates this any more --
+ * `deriveHistoryRowDps` trusts any row whose ledger-derived
+ * shares-held-at-payment-date is positive), and
+ * `incomplete`/`incompleteRowCount`/`historyGapRowCount` disclose the rest
+ * rather than dropping them -- `ttmPerShareDecimal` is `null` only in the
  * degenerate case where NOT ONE qualifying row's rate could be established.
  */
 export function deriveHistoryTrailingTwelveMonthDividend(
   historyRows: readonly DerivedDividendRow[],
   transactions: readonly LedgerQuantityFact[],
   currencyCode: string,
-  historyCompleteFrom: string | null,
   asOfDate: string,
 ): HistoryTtmDividendResult {
   if (!isValidDate(asOfDate)) {
@@ -271,12 +313,14 @@ export function deriveHistoryTrailingTwelveMonthDividend(
   }
   const dpsValues: string[] = [];
   let incompleteRowCount = 0;
+  let historyGapRowCount = 0;
   for (const row of qualifying) {
-    const dps = deriveHistoryRowDps(row, transactions, historyCompleteFrom);
-    if (dps === null) {
-      incompleteRowCount += 1;
+    const result = deriveHistoryRowDps(row, transactions);
+    if (result.ok) {
+      dpsValues.push(result.dpsDecimal);
     } else {
-      dpsValues.push(dps);
+      incompleteRowCount += 1;
+      if (result.reason === "history_gap") historyGapRowCount += 1;
     }
   }
   return {
@@ -285,6 +329,7 @@ export function deriveHistoryTrailingTwelveMonthDividend(
     currencyCode,
     rowCount: qualifying.length,
     incompleteRowCount,
+    historyGapRowCount,
     incomplete: incompleteRowCount > 0,
     windowFromDate,
     windowToDate: asOfDate,
@@ -317,8 +362,10 @@ export type SecurityDividendForecast = {
     | "insufficient_history"
     | "mixed_currency"
     | "invalid_input"
-    /** DIV-006: the security has trailing-window history rows, but NOT ONE of them has a determinable per-share rate (see `deriveHistoryTrailingTwelveMonthDividend`'s `incomplete`) -- distinct from `"insufficient_history"` (no trailing-window evidence at all), so a consumer can distinguish "we have nothing" from "we have evidence but can't quantify it". */
+    /** DIV-006: the security has trailing-window history rows, but NOT ONE of them has a determinable per-share rate, and none of that incompleteness is a provable ledger gap (see `historyGapRowCount`/`"history_gap"` below) -- distinct from `"insufficient_history"` (no trailing-window evidence at all), so a consumer can distinguish "we have nothing" from "we have evidence but can't quantify it". */
     | "unknown_amount"
+    /** DIV-008: the security has trailing-window history rows, NOT ONE has a determinable per-share rate, AND at least one of those rows is a PROVABLE ledger gap (`deriveHistoryTrailingTwelveMonthDividend`'s `historyGapRowCount > 0` -- a real dividend was received but the ledger's own shares-held-at-payment-date resolved to zero or negative, e.g. a missing early buy). More actionable than the generic `"unknown_amount"`: it names a concrete, cross-checkable ledger gap rather than a merely absent figure. */
+    | "history_gap"
     | null;
   /** null only when the uncovered tail is unknown AND there is no declared coverage for the full window (nothing safe to total). */
   totalCashDecimal: string | null;
@@ -341,8 +388,6 @@ export type ComputeSecurityForecastInput = {
   /** Also feeds the DIV-006 history-TTM fallback's shares-held-at-payment-date derivation for a BRK-005 totals-mode row. */
   transactions: readonly LedgerQuantityFact[];
   defaultFrankingPercentDecimal: string | null;
-  /** DIV-006: the portfolio's declared `history_complete_from` boundary (`portfolios.history_complete_from`) -- gates whether `deriveSharesHeldAtDate` can be trusted for a totals-mode history row's payment date; see `deriveHistoryRowDps`'s doc comment. `null` when the portfolio has no declared boundary (every totals-mode row then fails closed as incomplete, never guessed). */
-  historyCompleteFrom: string | null;
   today: string;
 };
 
@@ -483,7 +528,6 @@ export function computeSecurityDividendForecast(
         input.historyRows,
         input.transactions,
         input.currencyCode,
-        input.historyCompleteFrom,
         input.today,
       );
 
@@ -519,18 +563,26 @@ export function computeSecurityDividendForecast(
   if (ttmResolution.source === null) {
     // Neither leg is usable -- pick the most informative disclosed reason.
     // A history result that found trailing-window rows but could not
-    // determine ANY of their rates ("unknown_amount") is more specific than
-    // a bare "insufficient_history" and must not be conflated with it (DIV-006:
-    // "never silently dropped as if absent"); a history-side `mixed_currency`
-    // is likewise surfaced over a provider-side `insufficient_history` when
-    // it is the more concrete diagnosis. Otherwise the provider leg's own
-    // reason (or "mixed_currency" when the provider leg succeeded but its
-    // currency didn't match this security's) is reported, matching
-    // pre-DIV-006 behaviour when there is no history to fall back on at all.
+    // determine ANY of their rates ("unknown_amount", or DIV-008's more
+    // specific "history_gap" when at least one of those rows is a PROVABLE
+    // ledger gap) is more specific than a bare "insufficient_history" and
+    // must not be conflated with it (DIV-006: "never silently dropped as if
+    // absent"); a history-side `mixed_currency` is likewise surfaced over a
+    // provider-side `insufficient_history` when it is the more concrete
+    // diagnosis. Otherwise the provider leg's own reason (or
+    // "mixed_currency" when the provider leg succeeded but its currency
+    // didn't match this security's) is reported, matching pre-DIV-006
+    // behaviour when there is no history to fall back on at all.
     let reason: SecurityDividendForecast["uncoveredReason"];
     let ttmIncomplete = false;
     if (historyTtm !== null && historyTtm.ok) {
-      reason = "unknown_amount";
+      // DIV-008: a provable ledger gap is MORE actionable/specific than a
+      // generic unknown amount -- surfaced whenever at least one of the
+      // indeterminate rows is one, even if the rest are plain
+      // "unknown_amount" (the most concrete diagnosis wins, same
+      // specificity-ordering posture as the branches below).
+      reason =
+        historyTtm.historyGapRowCount > 0 ? "history_gap" : "unknown_amount";
       ttmIncomplete = true;
     } else if (
       historyTtm !== null &&
