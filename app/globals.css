@@ -3742,6 +3742,19 @@ dd {
     padding: 20px 24px 48px;
   }
 
+  /* UI-035 (owner report): UI-032 removed the owned screen's
+     `.portfolio-summary` aside, but this shared rule's 318px second
+     column -- sized for that aside -- was left in place, reserving a
+     permanent gap on the right of the owned holdings list at every
+     desktop width up to the 700px breakpoint above, where the grid drops
+     out entirely. Scoped to `.owned-holdings-layout` only: preview mode
+     still renders `.portfolio-summary` in the second column via the
+     shared `.holdings-layout` rule above and keeps its two-column
+     behaviour untouched. */
+  .owned-holdings-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .holdings-list {
     min-width: 0;
     border: 1px solid var(--divider);
