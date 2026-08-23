@@ -4301,6 +4301,15 @@ dd {
   color: var(--green-bright);
 }
 
+/* UI-037: the Next-12-Months tab's current-FY (actuals-so-far) row --
+   decorative reinforcement only. The row's own text already names it
+   ("(so far)" label, "actual to date" source, per AGENTS.md's non-colour
+   status-text rule) so this background is a supplementary cue, never the
+   only signal. */
+.income-row-current-fy {
+  background: color-mix(in srgb, var(--green-bright) 8%, transparent);
+}
+
 /* UI-017: year-row drill-through links to the dividend list filtered to
    that FY (`?fy=<endingYear>`), plus the Next-12-Months section's link to
    the known-only window (`?window=next12`). */

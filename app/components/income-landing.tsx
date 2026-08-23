@@ -13,7 +13,10 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { OwnedIncomeProjection } from "../owned-income-projection.ts";
-import type { PastFyDividendSource } from "../../domain/dividends/projection.ts";
+import type {
+  CurrentFinancialYearDividendSource,
+  PastFyDividendSource,
+} from "../../domain/dividends/projection.ts";
 import {
   formatCoverage,
   formatIncomeMoney,
@@ -35,6 +38,29 @@ function pastFySourceStatus(source: PastFyDividendSource): string {
     case "provider_estimate":
     case "partially_estimated":
       return "estimate";
+    case "no_evidence":
+      return "no evidence";
+    case "unavailable":
+      return "unavailable";
+  }
+}
+
+// UI-037 (owner directive): the current, still-open FY's own source label --
+// REUSES `computeCurrentFinancialYearRow`'s existing fy-to-date derivation
+// (already threaded onto `projection.currentFinancialYear` by DIV-011's
+// service wiring; no new derivation here). Deliberately distinct wording
+// from `pastFySourceStatus`'s "actual" (a CLOSED year's confirmed total) --
+// "actual to date" names this row as partial-year received-so-far actuals,
+// never conflated with a full year's figure. `fy_override` is still an
+// owner-entered real number, so it keeps the "actual" label past rows use.
+function currentFySourceStatus(
+  source: CurrentFinancialYearDividendSource,
+): string {
+  switch (source) {
+    case "fy_override":
+      return "actual";
+    case "fy_to_date":
+      return "actual to date";
     case "no_evidence":
       return "no evidence";
     case "unavailable":
@@ -95,6 +121,15 @@ export function IncomeLanding({
   const { breakdown } = projection;
   const totalSecurityCount =
     breakdown.includedSecurityCount + breakdown.excludedSecurities.length;
+  // UI-037 (owner directive): "dividends so far for this FY" -- REUSES the
+  // already-computed `projection.currentFinancialYear` (DIV-011's
+  // `computeCurrentFinancialYearRow` fy-to-date derivation, threaded through
+  // by `app/owned-income-projection.ts`; no new derivation here). `null`
+  // when the computation itself is degraded (`ok: false`) so the render
+  // below can fail closed to a banner rather than a fabricated row.
+  const currentFyRow = projection.currentFinancialYear.ok
+    ? projection.currentFinancialYear.row
+    : null;
 
   return (
     <main className="income-screen">
@@ -243,7 +278,18 @@ export function IncomeLanding({
           gap doesn't mean past history is unavailable). Honest states only:
           `formatIncomeMoney(null)` renders "Unavailable" rather than a
           fabricated zero, and the source column names `no_evidence` /
-          `unavailable` explicitly rather than folding them into "actual". */}
+          `unavailable` explicitly rather than folding them into "actual".
+          UI-037 (owner directive, 2026-08-24): "include the dividends so
+          far for this FY in the table as a new row" and "reverse the table
+          order, so most recent are at the top". The current (still-open)
+          FY's actuals-to-date row (`currentFyRow`, above) is the MOST
+          recent period on this screen -- it renders first, above every
+          CLOSED past year. `pastFinancialYears.rows` itself is already
+          produced newest-first (`domain/dividends/projection.ts`'s
+          `computePastFinancialYearRows` walks `yearsAgo` 1..N, so index 0
+          is always the most recently CLOSED year) -- the previous
+          `.slice().reverse()` here inverted that into oldest-first; simply
+          dropping it restores newest-first, matching the owner's request. */}
       <section
         className="income-past-fy"
         aria-labelledby="income-past-fy-title"
@@ -260,7 +306,20 @@ export function IncomeLanding({
                 : "The financial-year start month is invalid."}
             </span>
           </p>
-        ) : projection.pastFinancialYears.rows.length === 0 ? (
+        ) : null}
+        {/* UI-037: mirrors income-multi-year.tsx's own
+            `!currentFinancialYear.ok` banner precedent -- a degraded
+            fy-to-date computation is disclosed explicitly, never silently
+            dropped from the row set below. */}
+        {!projection.currentFinancialYear.ok ? (
+          <p className="status-banner warning" role="status">
+            <strong>Current financial year unavailable</strong>
+            <span>The financial-year start month is invalid.</span>
+          </p>
+        ) : null}
+        {currentFyRow === null &&
+        (!projection.pastFinancialYears.ok ||
+          projection.pastFinancialYears.rows.length === 0) ? (
           <p>No financial years in range.</p>
         ) : (
           <div className="income-fy-table-wrap">
@@ -282,58 +341,117 @@ export function IncomeLanding({
                 </tr>
               </thead>
               <tbody>
-                {projection.pastFinancialYears.rows
-                  .slice()
-                  .reverse()
-                  .map((row) => (
-                    <tr key={`past-fy-${row.endingYear}`}>
-                      <th scope="row">
-                        {/* UI-017 (owner directive): clicking a year row
-                            opens the dividend list filtered to that year --
-                            the whole label (including the partial marker)
-                            is wrapped in one real link so the row is
-                            keyboard-accessible and works without JS. */}
-                        <Link
-                          href={`${dividendsHref}?fy=${row.endingYear}`}
-                          className="income-fy-row-link"
-                        >
-                          {row.label}
-                          {row.excludedSecurities.length > 0 ? (
-                            <span className="unavailable"> · partial</span>
-                          ) : null}
-                        </Link>
-                      </th>
-                      <td className="numeric">
-                        {formatIncomeMoney(
-                          projection.baseCurrencyCode,
-                          projection.baseCurrencyCode,
-                          row.dividendGrossDecimal,
-                        )}
-                      </td>
-                      <td className="numeric">
-                        {formatIncomeMoney(
-                          projection.baseCurrencyCode,
-                          projection.baseCurrencyCode,
-                          row.dividendCashDecimal,
-                        )}
-                      </td>
-                      <td className="numeric">
-                        {formatIncomeMoney(
-                          projection.baseCurrencyCode,
-                          projection.baseCurrencyCode,
-                          row.dividendFrankingKnownDecimal,
-                        )}
-                        {row.dividendFrankingIncomplete ? (
+                {currentFyRow ? (
+                  <tr
+                    key={`fy-${currentFyRow.endingYear}-current`}
+                    className="income-row-current-fy"
+                  >
+                    <th scope="row">
+                      {/* Same real drill-through link as a past row --
+                          `fy_to_date`/`fy_override` both carry REAL
+                          underlying dividend rows for this FY so far
+                          (DIV-011 precedent: the current FY is not a bare
+                          projection here, it has real receipts). */}
+                      <Link
+                        href={`${dividendsHref}?fy=${currentFyRow.endingYear}`}
+                        className="income-fy-row-link"
+                      >
+                        {currentFyRow.label} (so far)
+                        {currentFyRow.excludedSecurities.length > 0 ? (
                           <span className="unavailable"> · partial</span>
                         ) : null}
-                      </td>
-                      <td>
-                        <span className="income-source">
-                          {pastFySourceStatus(row.dividendSource)}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
+                      </Link>
+                    </th>
+                    <td className="numeric">
+                      {formatIncomeMoney(
+                        projection.baseCurrencyCode,
+                        projection.baseCurrencyCode,
+                        currentFyRow.dividendGrossDecimal,
+                      )}
+                    </td>
+                    <td className="numeric">
+                      {formatIncomeMoney(
+                        projection.baseCurrencyCode,
+                        projection.baseCurrencyCode,
+                        currentFyRow.dividendCashDecimal,
+                      )}
+                    </td>
+                    <td className="numeric">
+                      {formatIncomeMoney(
+                        projection.baseCurrencyCode,
+                        projection.baseCurrencyCode,
+                        currentFyRow.dividendFrankingKnownDecimal,
+                      )}
+                      {currentFyRow.dividendFrankingIncomplete ? (
+                        <span className="unavailable"> · partial</span>
+                      ) : null}
+                    </td>
+                    <td>
+                      {/* Non-colour distinction (AGENTS.md): the row's own
+                          label already says "(so far)" and this source
+                          text says "actual to date" -- never "actual"
+                          alone, which past (CLOSED) rows use -- so the
+                          actuals-to-date-vs-a-full-year distinction never
+                          depends on the `.income-row-current-fy` styling
+                          alone. */}
+                      <span className="income-source">
+                        {currentFySourceStatus(currentFyRow.dividendSource)}
+                      </span>
+                    </td>
+                  </tr>
+                ) : null}
+                {(projection.pastFinancialYears.ok
+                  ? projection.pastFinancialYears.rows
+                  : []
+                ).map((row) => (
+                  <tr key={`past-fy-${row.endingYear}`}>
+                    <th scope="row">
+                      {/* UI-017 (owner directive): clicking a year row
+                          opens the dividend list filtered to that year --
+                          the whole label (including the partial marker)
+                          is wrapped in one real link so the row is
+                          keyboard-accessible and works without JS. */}
+                      <Link
+                        href={`${dividendsHref}?fy=${row.endingYear}`}
+                        className="income-fy-row-link"
+                      >
+                        {row.label}
+                        {row.excludedSecurities.length > 0 ? (
+                          <span className="unavailable"> · partial</span>
+                        ) : null}
+                      </Link>
+                    </th>
+                    <td className="numeric">
+                      {formatIncomeMoney(
+                        projection.baseCurrencyCode,
+                        projection.baseCurrencyCode,
+                        row.dividendGrossDecimal,
+                      )}
+                    </td>
+                    <td className="numeric">
+                      {formatIncomeMoney(
+                        projection.baseCurrencyCode,
+                        projection.baseCurrencyCode,
+                        row.dividendCashDecimal,
+                      )}
+                    </td>
+                    <td className="numeric">
+                      {formatIncomeMoney(
+                        projection.baseCurrencyCode,
+                        projection.baseCurrencyCode,
+                        row.dividendFrankingKnownDecimal,
+                      )}
+                      {row.dividendFrankingIncomplete ? (
+                        <span className="unavailable"> · partial</span>
+                      ) : null}
+                    </td>
+                    <td>
+                      <span className="income-source">
+                        {pastFySourceStatus(row.dividendSource)}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>

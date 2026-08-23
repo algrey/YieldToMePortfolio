@@ -682,7 +682,7 @@ test("UI-006A: both Income routes load via the owner-scoped context, deny an uno
   assert.match(service, /if \(!portfolio\) throw new Error\("not_owned"\)/);
 });
 
-test("UI-016 (supersedes follow-up 3): the landing page now requests real past-FY history (5 back / 1 forward), since it renders pastFinancialYears; multiYear/currentFinancialYear are still unused and not fetched wider than necessary", async () => {
+test("UI-016 (supersedes follow-up 3; UI-037 supersedes the currentFinancialYear-unused claim below): the landing page now requests real past-FY history (5 back / 1 forward), since it renders pastFinancialYears; multiYear is still unused and not fetched wider than necessary", async () => {
   const [landingPage, landingComponent] = await Promise.all([
     readFile(
       new URL(
@@ -701,12 +701,17 @@ test("UI-016 (supersedes follow-up 3): the landing page now requests real past-F
     /loadOwnedIncomeProjection\(\s*context\.client,\s*context\.userId,\s*portfolioId,\s*new Date\(\),\s*\{ yearsBack: 5, yearsForward: 1 \}/,
   );
   // UI-016: IncomeLanding now DOES read pastFinancialYears (the past-FY
-  // table this task added) -- multiYear/currentFinancialYear remain
-  // unused by this screen (the multi-year sub-page owns those), so the
-  // fetched range stays as narrow as the screen's real needs allow.
+  // table this task added). UI-037 (owner directive, 2026-08-24) then added
+  // the current FY's own actuals-so-far row, reusing the ALREADY-FETCHED
+  // `projection.currentFinancialYear` -- `loadOwnedIncomeProjection`
+  // computes it unconditionally regardless of which screen reads it, so
+  // this is an honest update from "this screen doesn't read it yet" to
+  // "this screen now does", not a widened fetch. `multiYear` (the forward
+  // FORECAST, owned by the multi-year sub-page) remains genuinely unused
+  // here.
   assert.match(landingComponent, /projection\.pastFinancialYears/);
-  assert.doesNotMatch(landingComponent, /projection\.multiYear/);
-  assert.doesNotMatch(landingComponent, /projection\.currentFinancialYear/);
+  assert.match(landingComponent, /projection\.currentFinancialYear/);
+  assert.doesNotMatch(landingComponent, /projection\.multiYear\b/);
 });
 
 test("UI-006A: private-cache coverage already applies to /portfolio/* (no route-specific header needed), and the matrix records the new routes", async () => {
