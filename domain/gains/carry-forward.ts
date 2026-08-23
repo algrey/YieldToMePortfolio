@@ -158,8 +158,20 @@ function minDecimal(
  * literally from the ruling: complete iff `historyCompleteFrom` is a valid
  * date on or before `earliestFyStartDate`; `null`, a later date, or a
  * malformed value are all incomplete (never silently treated as complete).
+ *
+ * Exported (CGT-004 review ruling B2/fold): `app/owned-capital-gains.ts`'s
+ * `buildCapitalGainsDisplayRows` needs the exact same "is this reference
+ * date covered by the completeness boundary" boolean for a SECOND purpose
+ * (classifying a padded, no-real-disposal financial year as a known zero
+ * vs. genuinely unknown) and reuses this function directly rather than
+ * re-deriving the same comparison, so the two call sites can never drift
+ * apart. That caller passes an arbitrary candidate FY's start date (not
+ * necessarily the true earliest disposal FY) and a caller-resolved
+ * fallback boundary in place of `historyCompleteFrom` when no boundary was
+ * declared -- it uses `.complete` only; `.message` is carry-chain-specific
+ * wording and not meaningful outside this module.
  */
-function evaluateHistoryCompleteness(
+export function evaluateHistoryCompleteness(
   historyCompleteFrom: string | null,
   earliestFyStartDate: string,
 ): { complete: boolean; message: string | null } {

@@ -49,7 +49,10 @@
 // the new carried breakdown for that year.
 import Link from "next/link";
 import { useEffect, useRef, useState, type RefObject } from "react";
-import type { OwnedCapitalGainsHistory } from "../owned-capital-gains.ts";
+import {
+  buildCapitalGainsDisplayRows,
+  type OwnedCapitalGainsHistory,
+} from "../owned-capital-gains.ts";
 import {
   CGT_CARRY_FORWARD_NOTE,
   CGT_METHOD_LABELS,
@@ -507,6 +510,18 @@ export function CapitalGainsScreen({
     : null;
   const hasFinalCarryOut = carryChain.finalCarryOutLossDecimal !== "0";
 
+  // CGT-004: `history.fyTotals` above (real disposal FYs only) still feeds
+  // the carry chain and lifetime rollup exactly as before this task --
+  // padding rows are never mixed into it, so a real FY's carried/lifetime
+  // figures are unaffected by padding (see `tests/cgt-004.test.ts`'s
+  // pass-through fixture, which pins a real FY's carried net estimate
+  // across a padded gap year). `displayRows` is a SEPARATE, display-only
+  // list padded out to the most recent `CAPITAL_GAINS_DISPLAY_YEARS`
+  // financial years (real FYs outside that window are still included,
+  // never dropped) -- see `buildCapitalGainsDisplayRows`'s header for the
+  // honesty rules behind its two placeholder tiers.
+  const displayRows = buildCapitalGainsDisplayRows(history);
+
   return (
     <main className="income-screen">
       <IncomeNav portfolioId={portfolioId} active="gains" />
@@ -548,7 +563,85 @@ export function CapitalGainsScreen({
             </tr>
           </thead>
           <tbody>
-            {history.fyTotals.map((fy) => {
+            {displayRows.map((row) => {
+              if (row.kind !== "data") {
+                // CGT-004 placeholder row: no real `FyCapitalGainsTotal` to
+                // open a detail dialog on, so the year is plain text, not a
+                // button. `no_disposals` is a real known zero (the
+                // completeness boundary -- declared, or evidence-based when
+                // none was declared -- covers this whole FY); `unknown` is
+                // genuinely unknown and must never render as $0. Review
+                // ruling B2: wording never claims "before recorded
+                // history" (false for a gap year between two real disposal
+                // years, and for the still-open current FY) -- see
+                // `buildCapitalGainsDisplayRows`'s header for the full
+                // honesty rules.
+                const known = row.kind === "no_disposals";
+                const moneyCell = known
+                  ? formatIncomeMoney(
+                      history.baseCurrencyCode,
+                      history.baseCurrencyCode,
+                      "0",
+                    )
+                  : formatIncomeMoney(
+                      history.baseCurrencyCode,
+                      history.baseCurrencyCode,
+                      null,
+                      { unavailableLabel: "Unknown" },
+                    );
+                const statusText = known
+                  ? row.isCurrentFy
+                    ? "No disposals recorded so far this financial year"
+                    : "No disposals recorded this financial year"
+                  : row.isCurrentFy
+                    ? "Unknown so far this financial year — no confirmed disposal record"
+                    : "Unknown — no confirmed disposal record for this financial year";
+                const coverageText =
+                  known && row.isCurrentFy
+                    ? "In progress" // review fold: never claim "Full" for a year that has not finished
+                    : known
+                      ? "Full"
+                      : "Unknown";
+                return (
+                  <tr key={row.endingYear}>
+                    <th scope="row">{row.label}</th>
+                    <td className="numeric">{moneyCell}</td>
+                    <td className="numeric">{moneyCell}</td>
+                    <td className="numeric">{moneyCell}</td>
+                    <td className="numeric">{moneyCell}</td>
+                    {/* Review fold: this cell's real meaning (a status
+                        explanation, not a calculation method) doesn't match
+                        the "Method" column header a real row's cell means --
+                        the aria-label overrides that association for
+                        assistive tech; the visible text is unchanged. */}
+                    <td aria-label={`Status: ${statusText}`}>
+                      <span className="income-source">{statusText}</span>
+                    </td>
+                    <td>
+                      {known ? (
+                        coverageText
+                      ) : (
+                        <span className="unavailable">{coverageText}</span>
+                      )}
+                    </td>
+                    {/* Review ruling B1: a real carried loss CAN legitimately
+                        pass THROUGH a no-disposal year unchanged on its way
+                        to a later FY -- this padding row never computes
+                        that pass-through, so it must never claim "nothing
+                        to carry" (a false assertion). Honest not-computed
+                        state instead: an em dash, with the real reason in
+                        the accessible name. */}
+                    <td
+                      className="numeric unavailable"
+                      colSpan={3}
+                      aria-label="Not computed for years with no disposals"
+                    >
+                      –
+                    </td>
+                  </tr>
+                );
+              }
+              const fy = row.fy;
               const fyHasUnabsorbedLoss = fy.unabsorbedLossDecimal !== "0";
               const carried = carriedByYear.get(fy.endingYear) ?? null;
               const tainted = carried?.carriedFiguresPartial ?? false;

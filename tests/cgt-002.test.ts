@@ -512,6 +512,7 @@ function cleanHistory(historyCompleteFrom: string | null) {
     disposalCount: 2,
     fyTotals: cleanTotals,
     historyCompleteFrom,
+    earliestTradeDate: null,
   };
 }
 

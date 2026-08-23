@@ -181,6 +181,10 @@ const populatedHistory = {
   // independently testable (history-incompleteness is covered by
   // `tests/cgt-002.test.ts` instead).
   historyCompleteFrom: "2024-07-01",
+  // CGT-004: unused whenever historyCompleteFrom is set (it always wins) --
+  // present anyway so this fixture matches the real OwnedCapitalGainsHistory
+  // shape honestly.
+  earliestTradeDate: null,
 };
 
 const screenProps = {

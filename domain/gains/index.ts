@@ -25,6 +25,7 @@ export {
 export {
   CGT_CARRY_FORWARD_NOTE,
   computeCapitalGainsCarryChain,
+  evaluateHistoryCompleteness,
   type CapitalGainsCarryChainResult,
   type FyCarriedCapitalGains,
 } from "./carry-forward.ts";
