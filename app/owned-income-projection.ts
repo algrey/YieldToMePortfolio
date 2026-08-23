@@ -254,8 +254,17 @@ export async function loadOwnedIncomeProjection(
         {
           ttmPerShareDecimal: security.forecast.ttmPerShareDecimal,
           ttmSource: security.forecast.ttmSource,
+          // DIV-009 review fix (B1): threaded through so a partially
+          // determinable history-derived rate is disclosed, never silently
+          // presented as complete.
+          ttmIncomplete: security.forecast.ttmIncomplete,
           currencyCode: security.forecast.currencyCode,
           uncoveredReason: security.forecast.uncoveredReason,
+          // DIV-009 review fix (B2): a security fully covered by declared
+          // events has a REAL, known 12-month total even when no trailing
+          // TTM rate exists -- never "insufficient_history" in that case.
+          hasFullDeclaredCoverage:
+            security.forecast.status === "fully_covered_by_declared",
         },
         nativePrice !== null
           ? { amountDecimal: nativePrice, currencyCode: security.currencyCode }
@@ -361,6 +370,14 @@ export async function loadOwnedIncomeProjection(
         currentPortfolioValueStatus: portfolioValueStatus as
           "available" | "partial",
         baseYieldPercentDecimal: aggregateYield.effectiveYieldPercentDecimal!,
+        // DIV-009 review fix (B1), identical B4 precedent: threaded so
+        // every projected row's own `method` discloses when the base yield
+        // was weighted in from a partially-determinable history-derived
+        // TTM -- survives standalone `projectMultiYearIncomeWhatIf`
+        // consumption, which the breakdown dialog's own disclosure does not
+        // cover.
+        baseYieldIncludesPartialTtm:
+          aggregateYield.partialTtmSecurities.length > 0,
         baseFrankingMixPercentDecimal:
           aggregateYield.effectiveFrankingMixPercentDecimal!,
         valueGrowthPercentDecimal: portfolioValueGrowth.growthPercentDecimal,

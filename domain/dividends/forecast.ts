@@ -372,9 +372,38 @@ export type SecurityDividendForecast = {
   totalFrankingKnownDecimal: string | null;
   totalFrankingIncomplete: boolean;
   totalGrossDecimal: string | null;
-  /** DIV-006: which TTM leg actually fed `uncoveredCashDecimal`/`totalCashDecimal` -- `"provider_ttm"` (provider `dividend_events`, unchanged from pre-DIV-006 behaviour) or `"history_ttm"` (this security's own derived dividend history, engaged only when the provider leg is unusable). `null` when no TTM was used at all: fully covered by declared events, no current holding, or genuinely insufficient/unusable data from BOTH sources. */
+  /** DIV-006/DIV-009 (round-2 review correction): which TTM leg RESOLVED a
+   * rate -- `"provider_ttm"` (provider `dividend_events`) or `"history_ttm"`
+   * (this security's own derived dividend history, engaged only when the
+   * provider leg is unusable). This no longer means "fed
+   * `uncoveredCashDecimal`/`totalCashDecimal`" (the pre-DIV-009 meaning) --
+   * DIV-009's B2 fix populates this field even on a `fully_covered_by_declared`
+   * forecast, whose total is fully known from declared events and NEVER
+   * consults the TTM at all. A non-null `ttmSource` therefore only means "a
+   * leg resolved a rate", independent of whether the total uses it; a
+   * consumer that cares whether the total itself is TTM-derived must check
+   * `status === "declared_plus_ttm" && ttmSource !== null`
+   * (`computeIncomeBreakdown`'s `partialTtmSecurities` gate does exactly
+   * this). `null` when no leg resolved a usable rate at all: no current
+   * holding, or genuinely insufficient/unusable data from BOTH sources
+   * (with or without declared coverage -- see `uncoveredReason`). */
   ttmSource: "provider_ttm" | "history_ttm" | null;
-  /** DIV-006: `true` when `ttmSource === "history_ttm"` and at least one trailing-window history row's per-share rate could not be established (`deriveHistoryTrailingTwelveMonthDividend`'s `incomplete`) -- the figure is real but may understate the true trailing rate. Always `false` for `"provider_ttm"` (that leg has no partial-row concept) and when `ttmSource` is `null`. */
+  /** `true` when a resolved (or attempted) history-derived rate is only
+   * partially determinable -- at least one trailing-window history row's
+   * per-share rate could not be established. DIV-009 (round-2 review
+   * correction): this describes the RESOLVED RATE itself, not whether that
+   * rate fed the forecast's totals -- a `fully_covered_by_declared`
+   * forecast (totals purely from declared events) can carry
+   * `ttmIncomplete: true` alongside a real `ttmSource`. A consumer that
+   * cares whether the TOTAL is understated must check
+   * `status === "declared_plus_ttm" && ttmSource !== null` alongside this
+   * flag, never this flag alone (see `ttmSource`'s doc comment and
+   * `computeIncomeBreakdown`'s gate). Always `false` for
+   * `ttmSource === "provider_ttm"` (that leg has no partial-row concept).
+   * Can also be `true` even when `ttmSource` is `null`: the "neither leg
+   * usable" branch below sets it when qualifying history rows exist but NOT
+   * ONE has a determinable rate (`uncoveredReason: "unknown_amount"` /
+   * `"history_gap"`) -- that case likewise never feeds a total via TTM. */
   ttmIncomplete: boolean;
   /** DIV-009: the resolved TTM PER-SHARE rate that actually fed this forecast (whichever leg `ttmSource` names), in `currencyCode` -- exposed so a consumer (the income-projection assumption grid/multi-year base) can derive its own per-share yield (rate / current price) from the SAME already-decided figure, rather than re-deriving a trailing yield from raw provider events alone and silently dropping the DIV-008 history fallback. `null` exactly when `ttmSource` is `null` (no leg produced a usable rate). */
   ttmPerShareDecimal: string | null;
@@ -485,36 +514,23 @@ export function computeSecurityDividendForecast(
       ? 0
       : daysBetweenInclusive(uncoveredFromDate, windowToDate);
 
-  if (uncoveredDays === 0) {
-    return {
-      portfolioSecurityId: input.portfolioSecurityId,
-      currencyCode: input.currencyCode,
-      windowFromDate,
-      windowToDate,
-      currentSharesDecimal,
-      status: "fully_covered_by_declared",
-      declaredCashDecimal,
-      declaredFrankingKnownDecimal,
-      declaredFrankingUnknownCount,
-      declaredEventCount: declaredRows.length,
-      declaredUnknownAmountCount,
-      uncoveredDays: 0,
-      uncoveredCashDecimal: "0",
-      uncoveredFrankingKnownDecimal: "0",
-      uncoveredReason: null,
-      totalCashDecimal: declaredCashDecimal,
-      totalFrankingKnownDecimal: declaredFrankingKnownDecimal,
-      totalFrankingIncomplete: declaredFrankingUnknownCount > 0,
-      totalGrossDecimal: sumDecimals([
-        declaredCashDecimal,
-        declaredFrankingKnownDecimal,
-      ]),
-      ttmSource: null,
-      ttmIncomplete: false,
-      ttmPerShareDecimal: null,
-    };
-  }
-
+  // DIV-009 review fix (B2, BLOCKING): the TTM legs used to be resolved
+  // AFTER the `uncoveredDays === 0` early return below, so a security fully
+  // covered by declared events short-circuited with `ttmSource`/
+  // `ttmPerShareDecimal` hardcoded `null` even when a perfectly usable
+  // provider (or history) TTM existed -- DIV-009's assumption-grid yield
+  // resolution then read that `null` pair and dead-ended the security to
+  // "no usable TTM" (`insufficient_history`), a REGRESSION from pre-DIV-009
+  // behaviour, which computed the provider yield independently of the
+  // forecast's own declared-coverage status. Resolving both legs BEFORE the
+  // `fully_covered_by_declared` branch (moved up from just below it, logic
+  // unchanged) lets that branch expose the real resolved rate too -- the
+  // forecast's own `status`/totals math is UNCHANGED by this move, only the
+  // ttm* fields exposed alongside it are now populated whenever a leg
+  // resolved, regardless of whether the forecast itself needed the TTM to
+  // total (declared coverage may make it strictly unnecessary for the
+  // total, but the ASSUMPTION GRID/yield-% concern is a separate consumer).
+  //
   // DIV-006: provider events keep precedence; the history-derived fallback
   // is only even ATTEMPTED when the provider leg is unusable for this
   // security (no qualifying events, or a currency mismatch) -- see the
@@ -537,10 +553,10 @@ export function computeSecurityDividendForecast(
 
   // Review follow-up (nit): a discriminated local the compiler can prove,
   // replacing an earlier `parseDecimal(ttmPerShareDecimal!)` non-null
-  // assertion below -- after the `ttmResolution.source === null` early
-  // return, TypeScript narrows `ttmResolution` to the two remaining
-  // variants, BOTH of which carry a real (non-null) `ttmPerShareDecimal`,
-  // so no assertion is needed at the point of use.
+  // assertion below -- after the `ttmResolution.source === null` narrowing,
+  // TypeScript narrows `ttmResolution` to the two remaining variants, BOTH
+  // of which carry a real (non-null) `ttmPerShareDecimal`, so no assertion
+  // is needed at the point of use.
   const ttmResolution:
     | { source: "provider_ttm"; ttmPerShareDecimal: string }
     | {
@@ -563,6 +579,47 @@ export function computeSecurityDividendForecast(
             incomplete: historyTtm.incomplete,
           }
         : { source: null };
+  const resolvedTtmSource = ttmResolution.source;
+  const resolvedTtmIncomplete =
+    ttmResolution.source === "history_ttm" ? ttmResolution.incomplete : false;
+  const resolvedTtmPerShareDecimal =
+    ttmResolution.source === null ? null : ttmResolution.ttmPerShareDecimal;
+
+  if (uncoveredDays === 0) {
+    return {
+      portfolioSecurityId: input.portfolioSecurityId,
+      currencyCode: input.currencyCode,
+      windowFromDate,
+      windowToDate,
+      currentSharesDecimal,
+      status: "fully_covered_by_declared",
+      declaredCashDecimal,
+      declaredFrankingKnownDecimal,
+      declaredFrankingUnknownCount,
+      declaredEventCount: declaredRows.length,
+      declaredUnknownAmountCount,
+      uncoveredDays: 0,
+      uncoveredCashDecimal: "0",
+      uncoveredFrankingKnownDecimal: "0",
+      // The forecast's own TOTAL is fully known from declared events --
+      // `uncoveredReason` stays `null` (there is no uncovered-tail problem
+      // to disclose here, matching this field's "why couldn't the total be
+      // computed" contract). A resolvable-or-not TTM rate is a SEPARATE
+      // concern, exposed via `ttmSource`/`ttmPerShareDecimal` below instead
+      // of overloading this field.
+      uncoveredReason: null,
+      totalCashDecimal: declaredCashDecimal,
+      totalFrankingKnownDecimal: declaredFrankingKnownDecimal,
+      totalFrankingIncomplete: declaredFrankingUnknownCount > 0,
+      totalGrossDecimal: sumDecimals([
+        declaredCashDecimal,
+        declaredFrankingKnownDecimal,
+      ]),
+      ttmSource: resolvedTtmSource,
+      ttmIncomplete: resolvedTtmIncomplete,
+      ttmPerShareDecimal: resolvedTtmPerShareDecimal,
+    };
+  }
 
   if (ttmResolution.source === null) {
     // Neither leg is usable -- pick the most informative disclosed reason.
@@ -633,10 +690,6 @@ export function computeSecurityDividendForecast(
       ttmPerShareDecimal: null,
     };
   }
-
-  const ttmSource = ttmResolution.source;
-  const ttmIncomplete =
-    ttmResolution.source === "history_ttm" ? ttmResolution.incomplete : false;
 
   // Both the provider and history TTM legs are normalised to the SAME
   // per-share-rate shape (see the module header), so the annualisation
@@ -711,8 +764,8 @@ export function computeSecurityDividendForecast(
       declaredFrankingKnownDecimal,
       uncoveredFrankingKnownDecimal ?? "0",
     ]),
-    ttmSource,
-    ttmIncomplete,
-    ttmPerShareDecimal: ttmResolution.ttmPerShareDecimal,
+    ttmSource: resolvedTtmSource,
+    ttmIncomplete: resolvedTtmIncomplete,
+    ttmPerShareDecimal: resolvedTtmPerShareDecimal,
   };
 }

@@ -195,7 +195,11 @@ export type YieldAssumptionSource =
 // DIV-006/DIV-008 reasons for a forecast whose history TTM leg is unusable;
 // surfaced here (rather than collapsed into "insufficient_history") so a
 // security with a PROVABLE ledger gap (`"history_gap"`) is named as such,
-// never silently blurred into a bare "no data at all" reason.
+// never silently blurred into a bare "no data at all" reason. DIV-009
+// review fix (B2): `"fully_covered_no_ttm"` added -- a security whose
+// 12-month forecast TOTAL is fully known from declared events but has no
+// trailing TTM rate must never read as `"insufficient_history"` (which
+// would wrongly suggest nothing is known about it at all).
 export type YieldAssumptionStatus =
   | "ok"
   | "insufficient_history"
@@ -204,7 +208,8 @@ export type YieldAssumptionStatus =
   | "mixed_currency"
   | "invalid_input"
   | "unknown_amount"
-  | "history_gap";
+  | "history_gap"
+  | "fully_covered_no_ttm";
 
 export type YieldAssumptionResolution =
   | {
@@ -214,6 +219,11 @@ export type YieldAssumptionResolution =
       cashYieldPercentDecimal: null;
       frankingPercentUsedDecimal: null;
       frankingSource: null;
+      // An owner-typed total yield has no trailing-window sample to be
+      // partial about -- always `false`, never omitted (DIV-009 review fix
+      // B1: a uniform boolean across every variant, so a consumer never has
+      // to narrow the union just to check completeness).
+      ttmIncomplete: false;
       method: string;
     }
   | {
@@ -223,6 +233,14 @@ export type YieldAssumptionResolution =
       cashYieldPercentDecimal: string;
       frankingPercentUsedDecimal: string;
       frankingSource: FrankingAssumptionSource;
+      // DIV-009 review fix (B1): threaded from `SecurityDividendForecast.ttmIncomplete`
+      // via `ResolvedTtmYieldResult` -- `true` only ever alongside
+      // `source: "history_ttm"` (the provider leg has no partial-row
+      // concept). A `true` value means this yield is REAL but may
+      // understate the true trailing rate; `method` names this explicitly
+      // (DIV-006's disclosure convention) rather than presenting it as a
+      // clean, complete figure.
+      ttmIncomplete: boolean;
       method: string;
     }
   | {
@@ -232,6 +250,9 @@ export type YieldAssumptionResolution =
       cashYieldPercentDecimal: null;
       frankingPercentUsedDecimal: null;
       frankingSource: null;
+      // No yield was resolved at all -- there is nothing to be "partially"
+      // complete, so always `false`.
+      ttmIncomplete: false;
       method: string;
     };
 
@@ -270,6 +291,7 @@ export function resolveSecurityYield(
       cashYieldPercentDecimal: null,
       frankingPercentUsedDecimal: null,
       frankingSource: null,
+      ttmIncomplete: false,
       method:
         "owner-set total yield assumption (already includes franking credits)",
     };
@@ -282,6 +304,7 @@ export function resolveSecurityYield(
       cashYieldPercentDecimal: null,
       frankingPercentUsedDecimal: null,
       frankingSource: null,
+      ttmIncomplete: false,
       method: `no owner override and no usable trailing dividend yield is available (${ttmYield.reason})`,
     };
   }
@@ -300,6 +323,13 @@ export function resolveSecurityYield(
     ttmYield.ttmSource === "history_ttm"
       ? "trailing 12-month cash yield derived from the security's own imported dividend history (DIV-008 fallback -- no usable provider trailing-yield data)"
       : "provider trailing 12-month cash yield";
+  // DIV-009 review fix (B1): a partially-determinable history-derived rate
+  // must be named in the method text, mirroring `computeIncomeBreakdown`'s
+  // `partialTtmSecurities`/`method` disclosure convention (DIV-006) -- never
+  // silently presented as a clean, complete figure.
+  const incompleteNote = ttmYield.ttmIncomplete
+    ? " (only PARTIALLY determinable -- at least one trailing-window history row's rate could not be established, so this may understate the true rate)"
+    : "";
   return {
     source: ttmYield.ttmSource,
     status: "ok",
@@ -307,10 +337,12 @@ export function resolveSecurityYield(
     cashYieldPercentDecimal,
     frankingPercentUsedDecimal: frankingResolution.frankingPercentDecimal,
     frankingSource: frankingResolution.source,
+    ttmIncomplete: ttmYield.ttmIncomplete,
     method:
-      frankingResolution.source === "owner_override"
+      (frankingResolution.source === "owner_override"
         ? `${legLabel} grossed up using the owner's franking assumption`
-        : `${legLabel}; no franking assumption set, so no franking credit is added (0%)`,
+        : `${legLabel}; no franking assumption set, so no franking credit is added (0%)`) +
+      incompleteNote,
   };
 }
 
@@ -400,6 +432,20 @@ export type AggregateYieldExclusion = {
   reason: AggregateYieldExclusionReason;
 };
 
+/**
+ * DIV-009 review fix (B1): an INCLUDED security (not excluded -- see
+ * `excluded` above) whose resolved yield carries `ttmIncomplete: true`
+ * (a real but only partially-determinable history-derived rate --
+ * `SecurityDividendForecast.ttmIncomplete`) -- named here rather than
+ * silently folded into a confident-looking `effectiveYieldPercentDecimal`,
+ * mirroring `computeIncomeBreakdown`'s `partialTtmSecurities` disclosure
+ * convention (DIV-006).
+ */
+export type AggregateYieldPartialTtmSecurity = {
+  portfolioSecurityId: string;
+  symbol: string;
+};
+
 export type AggregateYieldResult = {
   status: "ok" | "no_coverage";
   effectiveYieldPercentDecimal: string | null;
@@ -407,6 +453,8 @@ export type AggregateYieldResult = {
   includedValueDecimal: string;
   includedCount: number;
   excluded: AggregateYieldExclusion[];
+  /** DIV-009 review fix (B1): included securities whose contribution to `effectiveYieldPercentDecimal` is only partially known (never re-excluded on top of the row-level disclosure -- a real, non-fabricated figure still feeds the average, just possibly understated). Deliberately does NOT change `status` (a partial-TTM security must never gate the multi-year projection itself into `no_yield_coverage` -- unlike `computeIncomeBreakdown`'s standalone breakdown dialog, this result's `status` feeds `app/owned-income-projection.ts`'s multi-year availability gate directly). */
+  partialTtmSecurities: AggregateYieldPartialTtmSecurity[];
   method: string;
 };
 
@@ -442,6 +490,7 @@ export function aggregateSecurityYields(
   contributions: readonly SecurityYieldContribution[],
 ): AggregateYieldResult {
   const excluded: AggregateYieldExclusion[] = [];
+  const partialTtmSecurities: AggregateYieldPartialTtmSecurity[] = [];
   const included: {
     value: DecimalFraction;
     yieldPercent: DecimalFraction;
@@ -475,6 +524,15 @@ export function aggregateSecurityYields(
         contribution.franking.frankingPercentDecimal,
       ),
     });
+    // DIV-009 review fix (B1): included, but disclose the underlying rate
+    // may be understated -- never re-excluded on top of this (a real,
+    // non-fabricated figure still feeds the weighted average).
+    if (contribution.yield.ttmIncomplete) {
+      partialTtmSecurities.push({
+        portfolioSecurityId: contribution.portfolioSecurityId,
+        symbol: contribution.symbol,
+      });
+    }
   }
   if (included.length === 0) {
     return {
@@ -484,6 +542,7 @@ export function aggregateSecurityYields(
       includedValueDecimal: "0",
       includedCount: 0,
       excluded,
+      partialTtmSecurities: [],
       method:
         "no security in this portfolio has both a known current value and a resolved yield",
     };
@@ -514,6 +573,10 @@ export function aggregateSecurityYields(
       PROJECTION_SCALE,
     ),
   );
+  const partialTtmNote =
+    partialTtmSecurities.length > 0
+      ? ` (${partialTtmSecurities.length} of the ${included.length} included securit${partialTtmSecurities.length === 1 ? "y has" : "ies have"} an only partially determinable trailing-twelve-month figure -- named -- and may understate the true effective yield)`
+      : "";
   return {
     status: "ok",
     effectiveYieldPercentDecimal,
@@ -521,10 +584,12 @@ export function aggregateSecurityYields(
     includedValueDecimal: formatDecimalExact(includedValue),
     includedCount: included.length,
     excluded,
+    partialTtmSecurities,
     method:
-      excluded.length === 0
+      (excluded.length === 0
         ? "value-weighted average of every held security's resolved yield"
-        : `value-weighted average across ${included.length} of ${included.length + excluded.length} held securities; ${excluded.length} excluded (named) for an unavailable current value or insufficient yield data`,
+        : `value-weighted average across ${included.length} of ${included.length + excluded.length} held securities; ${excluded.length} excluded (named) for an unavailable current value or insufficient yield data`) +
+      partialTtmNote,
   };
 }
 
@@ -550,6 +615,20 @@ export type MultiYearProjectionAssumptions = {
    */
   currentPortfolioValueStatus: "available" | "partial";
   baseYieldPercentDecimal: string;
+  /**
+   * DIV-009 review fix (B1): `true` when `baseYieldPercentDecimal` was
+   * weighted in from at least one security whose own trailing yield is only
+   * partially determinable (`AggregateYieldResult.partialTtmSecurities`
+   * non-empty) -- mirrors `currentPortfolioValueStatus` immediately above,
+   * the identical B4 precedent: this flows into every row's `method` label
+   * so the disclosure survives standalone consumption of a
+   * `projectMultiYearIncomeWhatIf` result (a what-if table rendered on its
+   * own must not read as a confidently complete base when it was weighted
+   * from an understated figure). The per-security detail (which securities,
+   * named) lives on `AggregateYieldResult.partialTtmSecurities` -- this is
+   * only the boolean carried forward into the projection's own rows.
+   */
+  baseYieldIncludesPartialTtm: boolean;
   baseFrankingMixPercentDecimal: string;
   valueGrowthPercentDecimal: string;
   valueGrowthSource: PortfolioAssumptionSource;
@@ -677,6 +756,14 @@ export function projectMultiYearIncome(
           // original `OwnedIncomeProjection.portfolioValueStatus`, so the
           // disclosure has to travel with the row itself to survive that.
           `; based on a partial (understated) current portfolio value -- some holdings are unpriced`
+        : "") +
+      // DIV-009 review fix (B1), identical B4 precedent: the base yield
+      // itself may be weighted in from a partially-determinable
+      // history-derived TTM -- the breakdown dialog's own
+      // `partialTtmSecurities` disclosure does NOT cover the multi-year/
+      // what-if surfaces, so this must be baked into the row here too.
+      (assumptions.baseYieldIncludesPartialTtm
+        ? `; the base yield includes at least one security whose trailing-twelve-month figure is only partially determinable -- may understate true income`
         : "");
     for (let yearIndex = 1; yearIndex <= yearsForward; yearIndex += 1) {
       value = compoundOnce(value, valueFactor);
@@ -1438,7 +1525,25 @@ export function computeIncomeBreakdown(input: {
     // real `totalGrossDecimal`), but that figure's history-TTM leg may be
     // understated -- disclose it distinctly from `excludedSecurities`
     // rather than silently presenting the partial sum as complete.
-    if (security.forecast.ttmIncomplete) {
+    //
+    // DIV-009 review fix (round-2, BLOCKING): `ttmIncomplete` alone is NOT
+    // enough to gate this -- since DIV-009's B2 fix, `ttmIncomplete` can be
+    // `true` on a forecast whose TOTAL never consulted the TTM at all (a
+    // `fully_covered_by_declared` forecast, whose total is purely declared
+    // events; or the rarer "neither leg usable but declared coverage
+    // exists" case, whose total is likewise purely declared). Pushing on
+    // the flag alone there would report a purely-declared, fully-known
+    // total as "may understate true income", contradicting
+    // `IncomeBreakdownPartialTtmSecurity`'s own contract. The TTM only
+    // ACTUALLY feeds `totalGrossDecimal` in the `"declared_plus_ttm"`
+    // status with a resolved `ttmSource` (the branch that computes
+    // `uncoveredCashDecimal` from the annualised TTM rate) -- gate on that,
+    // not the flag alone.
+    if (
+      security.forecast.status === "declared_plus_ttm" &&
+      security.forecast.ttmSource !== null &&
+      security.forecast.ttmIncomplete
+    ) {
       partialTtmSecurities.push({
         portfolioSecurityId: security.portfolioSecurityId,
         symbol: security.symbol,

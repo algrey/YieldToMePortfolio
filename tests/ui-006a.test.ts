@@ -177,6 +177,7 @@ const multiYearAssumptions: MultiYearProjectionAssumptions = {
   currentPortfolioValueDecimal: "10000.00",
   currentPortfolioValueStatus: "available",
   baseYieldPercentDecimal: "6.00",
+  baseYieldIncludesPartialTtm: false,
   baseFrankingMixPercentDecimal: "20.00",
   valueGrowthPercentDecimal: "5",
   valueGrowthSource: "portfolio_assumption",

@@ -87,6 +87,7 @@ test("yield resolution: grossed-yield derivation from cash TTM + franking -- gro
       ok: true,
       trailingYieldPercentDecimal: "10",
       ttmSource: "provider_ttm",
+      ttmIncomplete: false,
     },
     franking,
   );
@@ -106,6 +107,7 @@ test("yield resolution: no owner override and no franking assumption set -- prov
       ok: true,
       trailingYieldPercentDecimal: "5",
       ttmSource: "provider_ttm",
+      ttmIncomplete: false,
     },
     franking,
   );
@@ -163,6 +165,7 @@ function yieldOk(percent: string): YieldAssumptionResolution {
     cashYieldPercentDecimal: null,
     frankingPercentUsedDecimal: null,
     frankingSource: null,
+    ttmIncomplete: false,
     method: "test",
   };
 }
@@ -176,6 +179,7 @@ function yieldNone(
     cashYieldPercentDecimal: null,
     frankingPercentUsedDecimal: null,
     frankingSource: null,
+    ttmIncomplete: false,
     method: "test",
   };
 }
@@ -319,6 +323,7 @@ const COMPOUNDING_FIXTURE: MultiYearProjectionInput = {
     currentPortfolioValueDecimal: "100000",
     currentPortfolioValueStatus: "available",
     baseYieldPercentDecimal: "10",
+    baseYieldIncludesPartialTtm: false,
     baseFrankingMixPercentDecimal: "0", // isolates value/yield compounding from the franking split
     valueGrowthPercentDecimal: "10",
     valueGrowthSource: "portfolio_assumption",
@@ -362,6 +367,7 @@ test("multi-year projection: yield also compounds by the dividend-growth assumpt
       currentPortfolioValueDecimal: "1000",
       currentPortfolioValueStatus: "available",
       baseYieldPercentDecimal: "4",
+      baseYieldIncludesPartialTtm: false,
       baseFrankingMixPercentDecimal: "0",
       valueGrowthPercentDecimal: "0", // isolates yield compounding
       valueGrowthSource: "none",
@@ -385,6 +391,7 @@ test("multi-year projection: franking mix splits the grossed dividend into an ex
       currentPortfolioValueDecimal: "1000",
       currentPortfolioValueStatus: "available",
       baseYieldPercentDecimal: "13",
+      baseYieldIncludesPartialTtm: false,
       baseFrankingMixPercentDecimal: "70", // exact 0.3 ratio, see decomposeGrossedAmount fixture above
       valueGrowthPercentDecimal: "0",
       valueGrowthSource: "none",

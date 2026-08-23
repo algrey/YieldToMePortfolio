@@ -258,6 +258,10 @@ export function deriveTrailingDividendYield(
 export type ResolvedForecastTtm = {
   ttmPerShareDecimal: string | null;
   ttmSource: "provider_ttm" | "history_ttm" | null;
+  /** `SecurityDividendForecast.ttmIncomplete` -- DIV-009 review fix (B1): a
+   * partially-determinable history-derived rate must travel with the yield
+   * it produces, never silently presented as a complete figure. */
+  ttmIncomplete: boolean;
   currencyCode: string;
   /** `SecurityDividendForecast.uncoveredReason` -- the most specific reason the forecast itself already picked when neither TTM leg was usable. */
   uncoveredReason:
@@ -267,6 +271,16 @@ export type ResolvedForecastTtm = {
     | "unknown_amount"
     | "history_gap"
     | null;
+  /** DIV-009 review fix (B2): `true` when `SecurityDividendForecast.status
+   * === "fully_covered_by_declared"` -- the security's own 12-month forecast
+   * TOTAL is fully known from declared near-certain events, independent of
+   * whether a trailing TTM RATE could also be established. Lets this
+   * function distinguish "no usable TTM at all" (`insufficient_history`,
+   * true ignorance) from "12 months of real coverage exists, there is just
+   * no trailing rate to derive a yield % from" -- the latter must never
+   * read as `insufficient_history`, which would misrepresent a security
+   * whose forward income is fully known. */
+  hasFullDeclaredCoverage: boolean;
 };
 
 export type ResolvedTtmYieldResult =
@@ -274,6 +288,8 @@ export type ResolvedTtmYieldResult =
       ok: true;
       trailingYieldPercentDecimal: string;
       ttmSource: "provider_ttm" | "history_ttm";
+      /** Threaded through from `ResolvedForecastTtm.ttmIncomplete` (B1) -- `true` only ever alongside `ttmSource: "history_ttm"` (the provider leg has no partial-row concept), matching `SecurityDividendForecast.ttmIncomplete`'s own invariant. */
+      ttmIncomplete: boolean;
     }
   | {
       ok: false;
@@ -284,7 +300,9 @@ export type ResolvedTtmYieldResult =
         | "unknown_amount"
         | "history_gap"
         | "price_unavailable"
-        | "currency_mismatch";
+        | "currency_mismatch"
+        /** DIV-009 review fix (B2): the security's 12-month forecast total is fully known from declared events, but no trailing TTM rate could be established -- never collapsed into `"insufficient_history"`, which would wrongly suggest nothing is known about this security. */
+        | "fully_covered_no_ttm";
     };
 
 /**
@@ -295,23 +313,37 @@ export type ResolvedTtmYieldResult =
  * the income-projection assumption grid/multi-year base's fix for "provider
  * events keep precedence exactly as the forecast already decided; a
  * portfolio with zero provider coverage but real imported dividend history
- * must not be `no_yield_coverage`". Provenance (`ttmSource`) travels with a
- * successful result so a consumer can distinguish a provider-derived yield
- * from a history-derived one, matching DIV-006's disclosure convention.
+ * must not be `no_yield_coverage`". Provenance (`ttmSource`) and
+ * completeness (`ttmIncomplete`) both travel with a successful result so a
+ * consumer can distinguish a provider-derived yield from a history-derived
+ * one (DIV-006's disclosure convention) and never silently present a
+ * partially-determinable history rate as a complete figure.
+ *
  * `resolved.ttmPerShareDecimal`/`ttmSource` being `null` together (the
- * forecast's own invariant) falls back to `resolved.uncoveredReason` --
- * itself `null` for a sold-out holding or a fully-declared-covered window,
- * neither of which is a genuine "no data" gap, so `"insufficient_history"`
- * is the conservative, most honest label for that residual case.
+ * forecast's own invariant) reports `resolved.uncoveredReason` when the
+ * forecast itself already picked a specific one (a genuine data problem:
+ * no trailing-window evidence, an unknown amount, a provable history gap,
+ * or a currency mismatch). When `uncoveredReason` is ALSO `null`, this is
+ * either a sold-out holding (no yield concept applies -- `"insufficient_history"`
+ * is the conservative label, and a zero-value holding carries no weight in
+ * `aggregateSecurityYields` regardless) or (DIV-009 review fix, B2) a
+ * security whose forecast is `hasFullDeclaredCoverage: true` -- 12 months of
+ * real, known income, just no trailing RATE -- which reports the distinct
+ * `"fully_covered_no_ttm"` rather than the misleading `"insufficient_history"`.
  */
 export function deriveYieldFromResolvedTtm(
   resolved: ResolvedForecastTtm,
   price: TrailingPriceReference | null,
 ): ResolvedTtmYieldResult {
   if (resolved.ttmPerShareDecimal === null || resolved.ttmSource === null) {
+    if (resolved.uncoveredReason !== null) {
+      return { ok: false, reason: resolved.uncoveredReason };
+    }
     return {
       ok: false,
-      reason: resolved.uncoveredReason ?? "insufficient_history",
+      reason: resolved.hasFullDeclaredCoverage
+        ? "fully_covered_no_ttm"
+        : "insufficient_history",
     };
   }
   if (!price) {
@@ -327,5 +359,6 @@ export function deriveYieldFromResolvedTtm(
     ok: true,
     trailingYieldPercentDecimal: yieldResult.trailingYieldPercentDecimal,
     ttmSource: resolved.ttmSource,
+    ttmIncomplete: resolved.ttmIncomplete,
   };
 }

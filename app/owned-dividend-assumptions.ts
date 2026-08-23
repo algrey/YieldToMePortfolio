@@ -9,14 +9,26 @@
 // applied figure, which is the wrong shape for this screen.
 //
 // Provider TTM yield reuses `domain/market-data/dividend-yield.ts`'s
-// `deriveTrailingDividendYield`, fed by the same `dividend_events` +
-// current-price-from-holdings inputs `app/owned-income-projection.ts` uses
-// for its own provider-yield column -- see that module's header comment
-// ("These feed DIV-003's assumptions grid 'provider yield' column"), which
-// is exactly this screen. Provider franking has no source in this codebase
-// (an honest, always-"unavailable" seam for a future provider, per the
-// owner's 2026-08-13 wireframe decision), so it is a constant, never
-// derived.
+// `deriveTrailingDividendYield`, fed by this screen's own `dividend_events` +
+// current-price-from-holdings read (below) -- a raw provider-events-only
+// figure, deliberately not the owner's resolved figure, matching this
+// screen's own "show provider vs. owner side by side" charter above.
+//
+// DIV-009 note (review round-1, recorded as a follow-up, not fixed here):
+// `app/owned-income-projection.ts`'s DIV-003 assumption grid no longer
+// mirrors this -- it now resolves its "yield" column from each security's
+// ALREADY-COMPUTED forecast TTM (`SecurityDividendForecast.ttmPerShareDecimal`/
+// `ttmSource`, which can be provider- OR history-derived, DIV-008's
+// fallback), not from a second `deriveTrailingDividendYield(dividend_events, ...)`
+// call. This EDITOR's "provider yield" column therefore no longer reflects
+// what DIV-003's grid actually bases its resolved yield on for a
+// history-derived security (it still shows a raw, possibly-`insufficient_history`
+// provider-only figure even when DIV-003 successfully resolved a real
+// history-derived yield for the same security) -- a scope decision left for
+// a future task, not addressed by DIV-009. Provider franking has no source
+// in this codebase (an honest, always-"unavailable" seam for a future
+// provider, per the owner's 2026-08-13 wireframe decision), so it is a
+// constant, never derived.
 import type { SqlClient } from "../db/repositories/sql-client.ts";
 import { createDividendAssumptionsRepository } from "../db/repositories/dividends.ts";
 import { createOwnedUserSettingsRepository } from "../db/repositories/owned-portfolios.ts";
