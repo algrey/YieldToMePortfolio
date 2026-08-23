@@ -59,10 +59,31 @@ type DisplayRow = {
   excludedSecurities: readonly PastFyExclusion[];
   overrideHref: string | null;
   /** UI-017 (owner directive): the dividend list filtered to this row's own
-   * FY (`?fy=<endingYear>`) -- `null` for every PROJECTED row (B2, round-1
-   * review ruling: a projection is a forecast, not a dividend row, so it
-   * never links out). Past/current rows always carry a real value here. */
+   * FY (`?fy=<endingYear>`) -- `null` for every PURELY future PROJECTED row
+   * (B2, round-1 review ruling: a projection is a forecast, not a dividend
+   * row, so it never links out). Past/current rows always carry a real
+   * value here -- DIV-011: the current FY's forecast row is an exception to
+   * the "projection never links out" default (see `mergeCurrentFinancialYear`
+   * below) because it has REAL underlying dividend rows (actuals received
+   * so far this FY), even though its headline figure is a forecast. */
   dividendsHref: string | null;
+  /** DIV-011 (owner directive, 2026-08-23): actual dividends received so far
+   * THIS financial year (`computeCurrentFinancialYearRow`'s existing
+   * fy-to-date derivation, reused verbatim -- never re-derived here).
+   * Populated only on the current FY's own row: either merged onto its
+   * forward-forecast row (`mergeCurrentFinancialYear`) or, when no forward
+   * forecast is available, shown on its own standalone row (`mapCurrentRow`,
+   * unchanged from pre-DIV-011). `null` on every past row and every
+   * genuinely FUTURE projected row. Rendered ALONGSIDE, never summed into,
+   * the row's own (forecast) dividend figures -- they cover different,
+   * non-additive time windows (FY-to-date actuals vs a rolling
+   * 12-month-forward forecast); summing them would double-count/misstate. */
+  actualToDateGrossDecimal: string | null;
+  /** `null` exactly when `actualToDateGrossDecimal` is -- i.e. this is not
+   * the current FY's own row at all. A non-null label with a `null` gross
+   * figure ("no data") is a real, honest state: the current FY genuinely has
+   * no recorded dividends yet. */
+  actualToDateSourceLabel: SourceLabel | null;
 };
 
 function mapPastRow(
@@ -93,19 +114,22 @@ function mapPastRow(
     excludedSecurities: row.excludedSecurities,
     overrideHref: `${assumptionsHref}?overrideYear=${row.endingYear}`,
     dividendsHref: `${dividendsHref}?fy=${row.endingYear}`,
+    actualToDateGrossDecimal: null,
+    actualToDateSourceLabel: null,
   };
 }
 
+/** DIV-011 fallback path: renders when NO forward forecast is available at
+ * all (`multiYear` degraded) -- the current FY's real actuals-to-date must
+ * still render on their own rather than silently vanishing just because a
+ * different subsystem (the forecast) is degraded. Unchanged from
+ * pre-DIV-011 (still the "(to date)" label, still labels the derived tier
+ * "fy to date"). */
 function mapCurrentRow(
   row: CurrentFinancialYearRow,
   dividendsHref: string,
 ): DisplayRow {
-  const sourceLabel: SourceLabel =
-    row.dividendSource === "fy_override"
-      ? "actual"
-      : row.dividendSource === "fy_to_date"
-        ? "fy to date"
-        : "no data";
+  const sourceLabel: SourceLabel = currentFinancialYearSourceLabel(row);
   return {
     key: `fy-${row.endingYear}-current`,
     label: `${row.label} (to date)`,
@@ -122,7 +146,19 @@ function mapCurrentRow(
     excludedSecurities: row.excludedSecurities,
     overrideHref: null,
     dividendsHref: `${dividendsHref}?fy=${row.endingYear}`,
+    actualToDateGrossDecimal: null,
+    actualToDateSourceLabel: null,
   };
+}
+
+function currentFinancialYearSourceLabel(
+  row: CurrentFinancialYearRow,
+): SourceLabel {
+  return row.dividendSource === "fy_override"
+    ? "actual"
+    : row.dividendSource === "fy_to_date"
+      ? "fy to date"
+      : "no data";
 }
 
 function mapProjectedRow(
@@ -152,9 +188,51 @@ function mapProjectedRow(
     // dividend row -- `?fy=<endingYear>` would either 404-honest-fallback
     // (years beyond the clamp) or, worse, silently show a mostly-empty real
     // list under a heading the owner just saw as a projection. Only past
-    // and current (FY-to-date) rows -- which have REAL underlying dividend
-    // rows -- ever link out.
+    // rows -- and, per DIV-011, the current FY's own forecast row (see
+    // `mergeCurrentFinancialYear`) -- which have REAL underlying dividend
+    // rows, ever link out. Every genuinely FUTURE row (yearIndex >= 2) keeps
+    // this `null`.
     dividendsHref: null,
+    actualToDateGrossDecimal: null,
+    actualToDateSourceLabel: null,
+  };
+}
+
+/** DIV-011 (owner directive, 2026-08-23): merges the current FY's real
+ * actuals-to-date onto its OWN forward-forecast row (year 1 of the active
+ * projection -- `MultiYearProjectionInput.startEndingYear`'s doc comment:
+ * year 1's `endingYear` IS the current FY) rather than rendering a second,
+ * separate "(to date)" row for the identical financial year the way
+ * pre-DIV-011 did. Two independently-derived facts land on ONE row: the
+ * row's own `grossDecimal`/`cashDecimal`/`frankingDecimal`/`yieldPercentDecimal`
+ * stay exactly what `mapProjectedRow` already computed (the forward
+ * forecast composition -- the SAME per-security sum feeding the
+ * Next-12-months headline); `actualToDateGrossDecimal`/`actualToDateSourceLabel`
+ * carry `computeCurrentFinancialYearRow`'s existing fy-to-date derivation,
+ * reused verbatim, never re-derived or summed into the forecast figures
+ * (they cover different, non-additive time windows). No-op (the plain
+ * forecast row, `actualToDate*` left `null`) when `currentFinancialYear`
+ * itself is degraded -- the forecast still renders honestly on its own. */
+function mergeCurrentFinancialYear(
+  forecastRow: DisplayRow,
+  /** Year 1's OWN `endingYear` (the raw `ProjectionYearRow` this
+   * `forecastRow` was mapped from) -- guarded against
+   * `currentFinancialYear.row.endingYear` before merging so a future wiring
+   * mistake (the service no longer aligning `startEndingYear` with the
+   * current FY) fails toward NOT merging actuals onto the wrong year, never
+   * a silent, wrong attribution. */
+  forecastEndingYear: number | null,
+  currentFinancialYear: ComputeCurrentFinancialYearRowResult,
+  dividendsHref: string,
+): DisplayRow {
+  if (!currentFinancialYear.ok) return forecastRow;
+  const row = currentFinancialYear.row;
+  if (forecastEndingYear !== row.endingYear) return forecastRow;
+  return {
+    ...forecastRow,
+    actualToDateGrossDecimal: row.dividendGrossDecimal,
+    actualToDateSourceLabel: currentFinancialYearSourceLabel(row),
+    dividendsHref: `${dividendsHref}?fy=${row.endingYear}`,
   };
 }
 
@@ -162,9 +240,17 @@ function isValidGrowthInput(value: string): boolean {
   return /^-?\d+(?:\.\d+)?$/.test(value.trim());
 }
 
-/** " (what-if)" only when this growth figure's OWN recorded source (from the active projection's assumptions, never component state alone) says so -- review fix B1. */
+/** " (what-if)"/" (default)" only when this growth figure's OWN recorded
+ * source (from the active projection's assumptions, never component state
+ * alone) says so -- review fix B1. DIV-011 review fix (B2): `source ===
+ * "none"` now substitutes a real, non-zero 6%/yr default (never the
+ * pre-DIV-011 "no growth assumed" 0%) -- rendering it bare would read
+ * exactly like an owner's real 0% choice, so it must say "(default)"
+ * explicitly, never presented as an assumption the owner made. */
 function growthSourceSuffix(source: string): string {
-  return source === "what_if" ? " (what-if)" : "";
+  if (source === "what_if") return " (what-if)";
+  if (source === "none") return " (default)";
+  return "";
 }
 
 function ValueCell({
@@ -269,10 +355,6 @@ export function IncomeMultiYear({
         .reverse()
         .map((row) => mapPastRow(row, assumptionsHref, dividendsHref))
     : [];
-  const currentRow =
-    currentFinancialYear.ok && currentFinancialYear.row
-      ? [mapCurrentRow(currentFinancialYear.row, dividendsHref)]
-      : [];
   const projectedRows =
     activeProjection && activeProjection.ok
       ? activeProjection.rows.map((row) =>
@@ -282,7 +364,29 @@ export function IncomeMultiYear({
           ),
         )
       : [];
-  const rows = [...pastRows, ...currentRow, ...projectedRows];
+  // DIV-011: year 1 of the forward projection IS the current FY's own
+  // forward-looking forecast, so its actuals-to-date merge onto that SAME
+  // row (`mergeCurrentFinancialYear`) rather than a second, separate row.
+  // When no forward forecast is available at all, the actuals-to-date still
+  // render on their OWN row (`mapCurrentRow`, unchanged) -- real data must
+  // never be dropped just because a different subsystem is degraded.
+  const forwardRows: DisplayRow[] =
+    projectedRows.length > 0
+      ? [
+          mergeCurrentFinancialYear(
+            projectedRows[0]!,
+            activeProjection && activeProjection.ok
+              ? activeProjection.rows[0]!.endingYear
+              : null,
+            currentFinancialYear,
+            dividendsHref,
+          ),
+          ...projectedRows.slice(1),
+        ]
+      : currentFinancialYear.ok && currentFinancialYear.row
+        ? [mapCurrentRow(currentFinancialYear.row, dividendsHref)]
+        : [];
+  const rows = [...pastRows, ...forwardRows];
 
   function updateValueGrowthInput(value: string) {
     setValueGrowthInput(value);
@@ -349,7 +453,7 @@ export function IncomeMultiYear({
             {multiYear.reason === "portfolio_value_unavailable"
               ? "The current portfolio value is unavailable, so forward years cannot be projected."
               : multiYear.reason === "no_yield_coverage"
-                ? "No held security has a resolved dividend yield, so forward years cannot be projected."
+                ? "No held security has a usable 12-month dividend forecast, so forward years cannot be projected."
                 : "Forward years could not be projected with the current year range."}
           </span>
         </p>
@@ -431,8 +535,11 @@ export function IncomeMultiYear({
                         FY -- separate from the row-detail button above,
                         which keeps its existing dialog affordance
                         (assumptions/method/override). `null` for every
-                        projected/forecast row (B2 ruling: a projection is
-                        not a dividend row). */}
+                        genuinely FUTURE projected row (B2 ruling: a
+                        projection is not a dividend row) -- DIV-011: the
+                        current FY's own forecast row is the one exception
+                        (it has real underlying dividend rows: actuals
+                        received so far this FY), see `mergeCurrentFinancialYear`. */}
                     {row.dividendsHref ? (
                       <Link
                         href={row.dividendsHref}
@@ -455,6 +562,21 @@ export function IncomeMultiYear({
                       baseCurrencyCode,
                       row.grossDecimal,
                     )}
+                    {/* DIV-011 (owner directive): the current FY's own row
+                        additionally discloses actuals received so far THIS
+                        financial year, reused verbatim from
+                        computeCurrentFinancialYearRow -- shown ALONGSIDE,
+                        never summed into, the figure above (a rolling
+                        12-month-forward forecast, a different time window). */}
+                    {row.actualToDateSourceLabel !== null ? (
+                      <span className="unavailable">
+                        {" "}
+                        ·{" "}
+                        {row.actualToDateGrossDecimal !== null
+                          ? `${formatIncomeMoney(baseCurrencyCode, baseCurrencyCode, row.actualToDateGrossDecimal)} received so far this FY`
+                          : "no dividends received yet this FY"}
+                      </span>
+                    ) : null}
                   </td>
                   <td className="numeric">
                     {formatIncomePercent(row.yieldPercentDecimal)}
@@ -469,10 +591,11 @@ export function IncomeMultiYear({
       <p className="income-assumption-summary">
         Yield is TOTAL yield, including franking credits. Portfolio value
         compounds at {formatIncomePercent(summaryValueGrowthPercentDecimal)}
-        /yr{growthSourceSuffix(summaryValueGrowthSource)}; dividend yield
-        compounds at {formatIncomePercent(summaryDividendGrowthPercentDecimal)}
-        /yr
-        {growthSourceSuffix(summaryDividendGrowthSource)} for projected years.
+        /yr{growthSourceSuffix(summaryValueGrowthSource)}; dividends compound at{" "}
+        {formatIncomePercent(summaryDividendGrowthPercentDecimal)}/yr
+        {growthSourceSuffix(summaryDividendGrowthSource)} for projected years;
+        the yield shown is derived (dividend ÷ value), not a projection input,
+        so it can rise OR fall even while dividends compound upward.
         {activeAssumptions?.currentPortfolioValueStatus === "partial"
           ? " Projected years are based on a partial (understated) current portfolio value -- some holdings are unpriced."
           : ""}
@@ -623,6 +746,23 @@ export function IncomeMultiYear({
               <dt>Source</dt>
               <dd>{selectedRow.sourceLabel}</dd>
             </div>
+            {/* DIV-011 (owner directive): the current FY's own row also
+                discloses actuals received so far this FY -- reused verbatim
+                from computeCurrentFinancialYearRow, never summed into the
+                figures above (a different, non-additive time window). */}
+            {selectedRow.actualToDateSourceLabel !== null ? (
+              <div>
+                <dt>Received so far this FY</dt>
+                <dd>
+                  {formatIncomeMoney(
+                    baseCurrencyCode,
+                    baseCurrencyCode,
+                    selectedRow.actualToDateGrossDecimal,
+                  )}{" "}
+                  ({selectedRow.actualToDateSourceLabel})
+                </dd>
+              </div>
+            ) : null}
           </dl>
           <p>{selectedRow.method}</p>
           {selectedRow.excludedSecurities.length > 0 ? (

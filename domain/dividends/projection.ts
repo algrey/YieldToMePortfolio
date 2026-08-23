@@ -148,7 +148,17 @@ export type PortfolioGrowthAssumption = {
   method: string;
 };
 
-/** Portfolio value-growth %: the single `dividend_portfolio_assumptions.value_growth_percent_decimal` input, or an explicit "no growth assumed" 0%. There is no further fallback tier -- this IS the top of its own chain. */
+// DIV-011 (owner directive, 2026-08-23 verbatim): "the portfolio growth %
+// affect the portfolio size and dividend growth affects the dividend
+// growth. These should both default to 6%." This is a DEFAULT-only change
+// -- an owner-set value (either column non-null) still wins outright and is
+// used exactly as typed, never overridden by this constant. Only the
+// bottom, no-assumption-recorded tier moves from the old "no growth
+// assumed" 0% to this figure, disclosed honestly in `method` below (never
+// silently presented as an owner choice).
+const DEFAULT_PORTFOLIO_GROWTH_PERCENT = "6";
+
+/** Portfolio value-growth %: the single `dividend_portfolio_assumptions.value_growth_percent_decimal` input, or -- when unset -- the DIV-011 default of 6%/yr (disclosed as a default, not an owner choice). There is no further fallback tier -- this IS the top of its own chain. */
 export function resolvePortfolioValueGrowth(
   valueGrowthPercentDecimal: string | null,
 ): PortfolioGrowthAssumption {
@@ -161,12 +171,12 @@ export function resolvePortfolioValueGrowth(
   }
   return {
     source: "none",
-    growthPercentDecimal: "0",
-    method: "no growth assumed",
+    growthPercentDecimal: DEFAULT_PORTFOLIO_GROWTH_PERCENT,
+    method: `no owner-set portfolio value-growth assumption -- defaulting to ${DEFAULT_PORTFOLIO_GROWTH_PERCENT}%/yr`,
   };
 }
 
-/** Portfolio dividend-growth %, used as the multi-year projection's yield-compounding input. Same single-tier shape as `resolvePortfolioValueGrowth`. */
+/** Portfolio dividend-growth %, used as the multi-year projection's dividend-compounding input (DIV-011: independently of value growth). Same single-tier shape as `resolvePortfolioValueGrowth`, including the DIV-011 6%/yr default when unset. */
 export function resolvePortfolioDividendGrowth(
   portfolioDividendGrowthPercentDecimal: string | null,
 ): PortfolioGrowthAssumption {
@@ -179,8 +189,8 @@ export function resolvePortfolioDividendGrowth(
   }
   return {
     source: "none",
-    growthPercentDecimal: "0",
-    method: "no growth assumed",
+    growthPercentDecimal: DEFAULT_PORTFOLIO_GROWTH_PERCENT,
+    method: `no owner-set portfolio dividend-growth assumption -- defaulting to ${DEFAULT_PORTFOLIO_GROWTH_PERCENT}%/yr`,
   };
 }
 
@@ -614,22 +624,59 @@ export type MultiYearProjectionAssumptions = {
    * built on a half-priced base.
    */
   currentPortfolioValueStatus: "available" | "partial";
-  baseYieldPercentDecimal: string;
   /**
-   * DIV-009 review fix (B1): `true` when `baseYieldPercentDecimal` was
-   * weighted in from at least one security whose own trailing yield is only
-   * partially determinable (`AggregateYieldResult.partialTtmSecurities`
-   * non-empty) -- mirrors `currentPortfolioValueStatus` immediately above,
-   * the identical B4 precedent: this flows into every row's `method` label
-   * so the disclosure survives standalone consumption of a
-   * `projectMultiYearIncomeWhatIf` result (a what-if table rendered on its
-   * own must not read as a confidently complete base when it was weighted
-   * from an understated figure). The per-security detail (which securities,
-   * named) lives on `AggregateYieldResult.partialTtmSecurities` -- this is
-   * only the boolean carried forward into the projection's own rows.
+   * DIV-011 (owner directive, 2026-08-23): year 1's dividend base -- the
+   * SAME per-security 12-month forecast sum feeding `computeIncomeBreakdown`'s
+   * Next-12-months headline (`IncomeBreakdownResult.totalGrossDecimal`/
+   * `totalCashDecimal`), reused verbatim by the caller (one derivation, never
+   * re-derived from a portfolio-level yield -- the root cause this task
+   * fixes: the old `baseYieldPercentDecimal * currentPortfolioValueDecimal`
+   * base structurally diverged from the headline whenever coverage/value
+   * gaps shrank the value-weighted yield below what the forecast sum itself
+   * knew). `franking = gross - cash` (by subtraction, the same
+   * `decomposeGrossedAmount`-style identity used elsewhere in this module),
+   * so no separate franking-mix input is needed here.
+   */
+  baseForecastGrossDecimal: string;
+  baseForecastCashDecimal: string;
+  /**
+   * DIV-009 review fix (B1), disclosure SURVIVES the DIV-011 base swap:
+   * `true` when the reused forecast sum above includes at least one
+   * security whose trailing-twelve-month figure is only partially
+   * determinable (`IncomeBreakdownResult.partialTtmSecurities` non-empty --
+   * the SAME concept `AggregateYieldResult.partialTtmSecurities` named
+   * pre-DIV-011, now sourced from the forecast-sum breakdown that actually
+   * feeds this base, not the separate yield-aggregation chain). Mirrors
+   * `currentPortfolioValueStatus` immediately above, the identical B4
+   * precedent: flows into every row's `method` label so the disclosure
+   * survives standalone consumption of a `projectMultiYearIncomeWhatIf`
+   * result.
    */
   baseYieldIncludesPartialTtm: boolean;
-  baseFrankingMixPercentDecimal: string;
+  /**
+   * DIV-011: `true` when the reused forecast sum's franking figure is only
+   * partially known (`IncomeBreakdownResult.totalFrankingIncomplete`) --
+   * the forecast total is built from real declared/estimated dividend
+   * events, some of which may carry an unknown per-event franking amount;
+   * disclosed here per the same B1/B4 "survive standalone consumption"
+   * precedent as `baseYieldIncludesPartialTtm` above, never silently
+   * dropped just because this base is now a direct dollar sum rather than a
+   * yield-derived figure.
+   */
+  baseForecastFrankingIncomplete: boolean;
+  /**
+   * DIV-011 review fix (B3): `computeIncomeBreakdown` can exclude WHOLE
+   * securities from the reused forecast sum entirely
+   * (`IncomeBreakdownResult.excludedSecurities` -- foreign-currency or
+   * `insufficient_history`), which is a MORE severe gap than
+   * `baseYieldIncludesPartialTtm` above (an included security whose figure
+   * may merely understate): an excluded security contributes NOTHING to
+   * `baseForecastGrossDecimal` at all. Pre-fix, a base built from (say) 1 of
+   * 4 held securities read exactly as confident as one built from 4 of 4 --
+   * this count, named in every row's `method`, closes that gap. `0` means
+   * every held (base-currency) security is included.
+   */
+  baseExcludedSecurityCount: number;
   valueGrowthPercentDecimal: string;
   valueGrowthSource: PortfolioAssumptionSource;
   dividendGrowthPercentDecimal: string;
@@ -652,7 +699,15 @@ export type MultiYearProjectionInput = {
   assumptions: MultiYearProjectionAssumptions;
   /** 1-10 inclusive (TASKS.md: "up to 10 years forward"). `0` (and anything else outside 1-10) is REJECTED with `reason: "invalid_years"`, never silently substituted with a minimum of 1 -- a caller explicitly requesting zero forward years must get an explicit boundary error, not a confident one-year projection it never asked for (review finding B3 / follow-up 3). */
   yearsForward: number;
-  /** The FY ending year the CURRENT (year-0) row belongs to, for FY-labelled rows; `null` produces plain "Year N" labels. */
+  /**
+   * DIV-011: the FY ending year immediately BEFORE year 1's own ending year
+   * -- i.e. `startEndingYear + 1` is year 1's `endingYear`, which is now the
+   * CURRENT financial year (year 1 represents the current FY's forward
+   * leg, reusing the Next-12-months forecast sum -- see
+   * `MultiYearProjectionAssumptions.baseForecastGrossDecimal` -- not a full
+   * future year the way it did pre-DIV-011). Each subsequent row is the
+   * next FY forward. `null` produces plain "Year N" labels.
+   */
   startEndingYear: number | null;
 };
 
@@ -668,13 +723,19 @@ export type MultiYearProjectionResult =
        * `"invalid_years"` / `"invalid_decimal"` are this function's OWN input
        * validation. `"portfolio_value_unavailable"` / `"no_yield_coverage"`
        * are never returned by this function itself (it always receives a
-       * concrete `currentPortfolioValueDecimal`/`baseYieldPercentDecimal`) --
+       * concrete `currentPortfolioValueDecimal`/`baseForecastGrossDecimal`) --
        * they exist on this union so the SERVICE layer
        * (`app/owned-income-projection.ts`) can report a degraded portfolio
-       * (no published holdings value, or no security has a resolved yield)
-       * through the identical typed shape instead of inventing a different
-       * failure contract, and so it never has to fabricate `"0"` inputs just
-       * to get a well-typed result back (review finding B3).
+       * (no published holdings value, or no held security has a usable
+       * 12-month forecast -- DIV-011: `computeIncomeBreakdown` reporting
+       * `"no_coverage"`, the same coverage gate the reused base itself now
+       * depends on) through the identical typed shape instead of inventing a
+       * different failure contract, and so it never has to fabricate `"0"`
+       * inputs just to get a well-typed result back (review finding B3). The
+       * `"no_yield_coverage"` reason NAME is kept unchanged across the
+       * DIV-011 base swap (minimal-diff -- every caller/test already
+       * branches on this literal); its MEANING moved from "no security has a
+       * resolved yield" to "no held security has a usable 12-month forecast".
        */
       reason:
         | "invalid_years"
@@ -691,39 +752,85 @@ function growthFactor(growthPercentDecimal: string): DecimalFraction {
   return addDecimal(ONE, fraction);
 }
 
+/**
+ * DIV-011 review fix (B2): a raw `PortfolioAssumptionSource` enum value
+ * (`"none"`) read as neutral -- indistinguishable from an owner's real 0%
+ * choice -- even though this module now substitutes a real, non-zero 6%
+ * figure for it. Named here so every row's `method` (and the UI's own
+ * summary line, which mirrors this wording) states plainly that a
+ * `"none"`-sourced rate is a DEFAULT, never presented as if the owner set
+ * it.
+ */
+function describeGrowthSource(source: PortfolioAssumptionSource): string {
+  switch (source) {
+    case "portfolio_assumption":
+      return "owner-set";
+    case "what_if":
+      return "what-if";
+    case "none":
+      return `default, ${DEFAULT_PORTFOLIO_GROWTH_PERCENT}%/yr unless set`;
+  }
+}
+
 /** One compounding step: `current * factor`, rounded ONCE to `PROJECTION_SCALE` -- the "single documented rounding per step" this task requires, and the mechanism that keeps a 10-year loop's tracked decimal scale bounded (see the `PROJECTION_SCALE` comment above). */
 function compoundOnce(currentDecimal: string, factor: DecimalFraction): string {
   const product = multiplyDecimal(parseDecimal(currentDecimal), factor);
   return formatDecimalExact(roundDecimal(product, PROJECTION_SCALE));
 }
 
-function grossDividendForYear(
+/**
+ * DIV-011: yield is a DERIVED DISPLAY figure only (`dividend / value * 100`)
+ * -- never re-consulted as a compounding input (value and dividend now
+ * compound independently on their own growth assumptions). Guards the
+ * zero/negative-value edge case (a genuinely zero or negative base
+ * portfolio value has no meaningful yield) by reporting `"0"` rather than
+ * dividing by zero; this mirrors `computeIncomeBreakdown`'s own
+ * `compareDecimal(currentValue, ZERO) > 0` guard for the identical
+ * dividend-over-value computation.
+ */
+function deriveYieldPercent(
+  grossDividendDecimal: string,
   valueDecimal: string,
-  yieldPercentDecimal: string,
 ): string {
-  const yieldFraction = roundDecimal(
-    divideDecimal(parseDecimal(yieldPercentDecimal), HUNDRED),
-    PROJECTION_SCALE,
-  );
+  const value = parseDecimal(valueDecimal);
+  if (compareDecimal(value, ZERO) <= 0) return "0";
   return formatDecimalExact(
     roundDecimal(
-      multiplyDecimal(parseDecimal(valueDecimal), yieldFraction),
+      multiplyDecimal(
+        divideDecimal(parseDecimal(grossDividendDecimal), value),
+        HUNDRED,
+      ),
       PROJECTION_SCALE,
     ),
   );
 }
 
 /**
- * Year N (N = 1..`yearsForward`): `value_N = value_{N-1} * (1 + valueGrowth)`,
- * `yield_N = yield_{N-1} * (1 + dividendGrowth)`,
- * `dividend_N = value_N * yield_N` (yield expressed as a fraction of value,
- * i.e. `yield% / 100`) -- compounded by REPEATED multiplication year over
- * year (not `(1+g)^N` computed once), each step rounded exactly once. The
- * grossed dividend is then split into cash/franking-credit using the
- * portfolio's aggregate franking mix (`decomposeGrossedAmount`). Every row
- * carries the assumptions and their sources so a consumer can render
- * "projected: value grows N%/yr (source), yield grows N%/yr (source)" next
- * to every number -- never a bare projected figure.
+ * DIV-011 (owner directive, 2026-08-23 verbatim): "the portfolio growth %
+ * affect the portfolio size and dividend growth affects the dividend
+ * growth ... update the calculation to be similar to what we did in the
+ * recent turn [`computeIncomeBreakdown`'s per-security forecast sum], then
+ * grow by the default growth percent for future years."
+ *
+ * Year 1 is the base: `value_1 = currentPortfolioValueDecimal` (unchanged --
+ * "now"), `dividend_1 = baseForecastGrossDecimal`/`baseForecastCashDecimal`
+ * (the SAME per-security forecast sum feeding the Next-12-months headline,
+ * reused verbatim -- one derivation, never re-derived from a portfolio-level
+ * yield). Year N (N = 2..`yearsForward`): `value_N = value_{N-1} * (1 +
+ * valueGrowth)`, `cash_N = cash_{N-1} * (1 + dividendGrowth)`, `gross_N =
+ * gross_{N-1} * (1 + dividendGrowth)` -- value and dividend compound
+ * independently on their OWN growth assumptions (neither drives the other);
+ * each compounding step rounded exactly once (`compoundOnce`, bounding
+ * `PROJECTION_SCALE` growth over up to 10 years). `franking_N = gross_N -
+ * cash_N` by SUBTRACTION from that year's own gross/cash (the
+ * `decomposeGrossedAmount`-style identity used elsewhere in this module),
+ * never an independent multiplication, so cash + franking always sums back
+ * to gross exactly regardless of any rounding drift between the
+ * independently-compounded gross/cash chains. `yieldPercentDecimal` on every
+ * row is a DERIVED DISPLAY figure (`deriveYieldPercent`), not a compounding
+ * input. Every row carries the assumptions and their sources so a consumer
+ * can render "projected: value grows N%/yr (source), dividend grows N%/yr
+ * (source)" next to every number -- never a bare projected figure.
  */
 export function projectMultiYearIncome(
   input: MultiYearProjectionInput,
@@ -739,15 +846,26 @@ export function projectMultiYearIncome(
   let rows: ProjectionYearRow[];
   try {
     const valueFactor = growthFactor(assumptions.valueGrowthPercentDecimal);
-    const yieldFactor = growthFactor(assumptions.dividendGrowthPercentDecimal);
+    const dividendFactor = growthFactor(
+      assumptions.dividendGrowthPercentDecimal,
+    );
     let value = assumptions.currentPortfolioValueDecimal;
-    let yieldPercent = assumptions.baseYieldPercentDecimal;
+    let grossDividend = assumptions.baseForecastGrossDecimal;
+    let cashDividend = assumptions.baseForecastCashDecimal;
     rows = [];
     const method =
-      `portfolio value compounds at ${assumptions.valueGrowthPercentDecimal}%/yr ` +
-      `(${assumptions.valueGrowthSource}); effective yield compounds at ` +
-      `${assumptions.dividendGrowthPercentDecimal}%/yr (${assumptions.dividendGrowthSource}); ` +
-      `dividend includes franking credits` +
+      `year 1 reuses the SAME 12-month per-security forecast sum as the ` +
+      `Next 12 Months headline (one derivation, not re-derived from a ` +
+      `portfolio-level yield) -- a ROLLING today+12-months window, not the ` +
+      `FY calendar boundary (the current FY's separate "received so far" ` +
+      `actuals annotation uses the FY window instead); portfolio value ` +
+      `compounds at ${assumptions.valueGrowthPercentDecimal}%/yr ` +
+      `(${describeGrowthSource(assumptions.valueGrowthSource)}) and ` +
+      `dividends compound at ${assumptions.dividendGrowthPercentDecimal}%/yr ` +
+      `(${describeGrowthSource(assumptions.dividendGrowthSource)}) ` +
+      `independently from year 2 onward; the yield shown is derived ` +
+      `(dividend ÷ value), not a projection input; dividend includes ` +
+      `franking credits` +
       (assumptions.currentPortfolioValueStatus === "partial"
         ? // Review finding B4: this note must live IN the row's own `method`
           // string, not just alongside it in a separate response field --
@@ -757,21 +875,35 @@ export function projectMultiYearIncome(
           // disclosure has to travel with the row itself to survive that.
           `; based on a partial (understated) current portfolio value -- some holdings are unpriced`
         : "") +
-      // DIV-009 review fix (B1), identical B4 precedent: the base yield
-      // itself may be weighted in from a partially-determinable
-      // history-derived TTM -- the breakdown dialog's own
-      // `partialTtmSecurities` disclosure does NOT cover the multi-year/
-      // what-if surfaces, so this must be baked into the row here too.
+      // DIV-011 review fix (B3): a security EXCLUDED ENTIRELY from the
+      // reused forecast sum (foreign currency or insufficient history) is a
+      // MORE severe gap than a merely partial-TTM security below -- named
+      // separately so a base built from only a minority of held securities
+      // never reads as confidently complete.
+      (assumptions.baseExcludedSecurityCount > 0
+        ? `; ${assumptions.baseExcludedSecurityCount} held ${assumptions.baseExcludedSecurityCount === 1 ? "security" : "securities"} excluded entirely from this base (foreign currency or insufficient history, named on the Next 12 Months breakdown) -- may understate true income`
+        : "") +
+      // DIV-009 review fix (B1), identical B4 precedent, SURVIVING the
+      // DIV-011 base swap: the reused forecast sum may include at least one
+      // security whose trailing-twelve-month figure is only partially
+      // determinable.
       (assumptions.baseYieldIncludesPartialTtm
-        ? `; the base yield includes at least one security whose trailing-twelve-month figure is only partially determinable -- may understate true income`
+        ? `; the base forecast includes at least one security whose trailing-twelve-month figure is only partially determinable -- may understate true income`
+        : "") +
+      (assumptions.baseForecastFrankingIncomplete
+        ? `; franking credits are not fully known for every dividend in the base forecast`
         : "");
     for (let yearIndex = 1; yearIndex <= yearsForward; yearIndex += 1) {
-      value = compoundOnce(value, valueFactor);
-      yieldPercent = compoundOnce(yieldPercent, yieldFactor);
-      const grossDividendDecimal = grossDividendForYear(value, yieldPercent);
-      const { cashDecimal, frankingDecimal } = decomposeGrossedAmount(
-        grossDividendDecimal,
-        assumptions.baseFrankingMixPercentDecimal,
+      if (yearIndex > 1) {
+        value = compoundOnce(value, valueFactor);
+        grossDividend = compoundOnce(grossDividend, dividendFactor);
+        cashDividend = compoundOnce(cashDividend, dividendFactor);
+      }
+      const frankingCreditDecimal = formatDecimalExact(
+        subtractDecimal(
+          parseDecimal(grossDividend),
+          parseDecimal(cashDividend),
+        ),
       );
       const endingYear =
         startEndingYear === null ? null : startEndingYear + yearIndex;
@@ -783,10 +915,10 @@ export function projectMultiYearIncome(
             ? `Year ${yearIndex}`
             : `FY${String(endingYear).slice(-2)}`,
         valueDecimal: value,
-        yieldPercentDecimal: yieldPercent,
-        grossDividendDecimal,
-        cashDividendDecimal: cashDecimal,
-        frankingCreditDecimal: frankingDecimal,
+        yieldPercentDecimal: deriveYieldPercent(grossDividend, value),
+        grossDividendDecimal: grossDividend,
+        cashDividendDecimal: cashDividend,
+        frankingCreditDecimal,
         method,
       });
     }
@@ -1187,12 +1319,20 @@ export function computePastFinancialYearRows(
 // c2. Current (in-progress) financial-year row -- follow-up 2: the
 // multi-year view otherwise has a gap between the last CLOSED past FY and
 // the first FORWARD-projected FY, with nowhere to show what has actually
-// happened so far this FY. Deliberately the "honest simpler option" per the
-// review's own framing: this reports FY-TO-DATE actuals (the current FY's
-// share of DIV-001's already-precedence-resolved per-security totals),
-// labelled as partial-year, rather than trying to forecast the remainder of
-// the year and risk conflating a modelled estimate with what has actually
-// been received so far.
+// happened so far this FY. This function itself is UNCHANGED by DIV-011: it
+// still reports FY-TO-DATE actuals only (the current FY's share of DIV-001's
+// already-precedence-resolved per-security totals), labelled as partial-year,
+// never trying to forecast the remainder of the year itself (that would risk
+// conflating a modelled estimate with what has actually been received so
+// far). DIV-011 (owner directive, 2026-08-23): the SERVICE/UI layer
+// (`app/owned-income-projection.ts`/`app/components/income-multi-year.tsx`)
+// now pairs this function's output ALONGSIDE `projectMultiYearIncome`'s year
+// 1 row (the current FY's forward-looking forecast, `startEndingYear + 1 ===
+// currentEndingYear`) as ONE displayed "current FY" row -- actuals-to-date
+// (this function, reused verbatim) shown next to, never summed into, the
+// forward forecast composition (a different derivation over a different,
+// rolling time window; summing would double-count/misstate). See DIV-011's
+// completion note for the exact merged-row contract.
 // ---------------------------------------------------------------------------
 
 export type CurrentFinancialYearDividendSource =
@@ -1473,6 +1613,12 @@ export type IncomeBreakdownSecurityInput = {
  * partial coverage". A security with a zero forecast because it currently
  * holds no shares (`status: "no_current_holding"`) is a REAL fact and
  * contributes an honest 0, not an exclusion.
+ *
+ * DIV-011 (owner directive, 2026-08-23): this result is now ALSO the
+ * multi-year projection's year-1 base (`MultiYearProjectionAssumptions.baseForecastGrossDecimal`/
+ * `baseForecastCashDecimal`, `app/owned-income-projection.ts`) -- one
+ * derivation, reused verbatim by that caller, never re-derived from a
+ * separate portfolio-level yield the way the multi-year base used to be.
  */
 export function computeIncomeBreakdown(input: {
   baseCurrencyCode: string;

@@ -342,6 +342,40 @@ export async function loadOwnedIncomeProjection(
   // `yearsForward` outside 1-10 (including the explicit `0` case, follow-up
   // 3) is checked FIRST, independent of data availability, so a shape error
   // is never masked by a data-availability error or vice versa.
+  const currentFinancialYear: ComputeCurrentFinancialYearRowResult =
+    computeCurrentFinancialYearRow({
+      baseCurrencyCode: resolvedBaseCurrencyCode,
+      startMonth: history.financialYearStartMonth,
+      currentEndingYear,
+      securities: pastFinancialYearSecurities,
+      portfolioFyOverrides: history.portfolioFyOverrides,
+      currentPortfolioValueDecimal,
+      currentPortfolioValueStatus: portfolioValueStatus,
+    });
+
+  // DIV-011 (owner directive, 2026-08-23): computed BEFORE the multi-year
+  // block below so its `totalGrossDecimal`/`totalCashDecimal` can be reused
+  // VERBATIM as the multi-year projection's year-1 base -- the root-cause
+  // fix for the $20,731-vs-$38,552 divergence (the old base derived year 1
+  // from `aggregateYield.effectiveYieldPercentDecimal * currentPortfolioValueDecimal`,
+  // an aggregate value-weighted yield that structurally shrank below what
+  // this per-security forecast SUM already knew whenever coverage/value
+  // gaps existed). `aggregateYield`/`assumptionGrid` are UNCHANGED and still
+  // computed above for the assumption-grid display and the landing page's
+  // "Explain this estimate" dialog -- they simply no longer feed the
+  // multi-year base.
+  const breakdown = computeIncomeBreakdown({
+    baseCurrencyCode: resolvedBaseCurrencyCode,
+    currentPortfolioValueDecimal,
+    currentPortfolioValueStatus: portfolioValueStatus,
+    securities: history.securities.map((security) => ({
+      portfolioSecurityId: security.portfolioSecurityId,
+      symbol: security.symbol,
+      currencyCode: security.currencyCode,
+      forecast: security.forecast,
+    })),
+  });
+
   let multiYear: MultiYearProjectionResult;
   let multiYearBaselineInput: MultiYearProjectionInput | null = null;
   if (
@@ -352,7 +386,11 @@ export async function loadOwnedIncomeProjection(
     multiYear = { ok: false, reason: "invalid_years" };
   } else if (currentPortfolioValueDecimal === null) {
     multiYear = { ok: false, reason: "portfolio_value_unavailable" };
-  } else if (aggregateYield.status !== "ok") {
+  } else if (breakdown.totalGrossDecimal === null) {
+    // DIV-011: the gate now mirrors the base itself -- no held security has
+    // a usable 12-month forecast (`breakdown.status === "no_coverage"`),
+    // not "no security has a resolved yield" (the old `aggregateYield`-based
+    // gate, which could disagree with the base's own real coverage).
     multiYear = { ok: false, reason: "no_yield_coverage" };
   } else {
     multiYearBaselineInput = {
@@ -369,17 +407,22 @@ export async function loadOwnedIncomeProjection(
         // base in its own row `method` labels.
         currentPortfolioValueStatus: portfolioValueStatus as
           "available" | "partial",
-        baseYieldPercentDecimal: aggregateYield.effectiveYieldPercentDecimal!,
-        // DIV-009 review fix (B1), identical B4 precedent: threaded so
-        // every projected row's own `method` discloses when the base yield
-        // was weighted in from a partially-determinable history-derived
-        // TTM -- survives standalone `projectMultiYearIncomeWhatIf`
-        // consumption, which the breakdown dialog's own disclosure does not
-        // cover.
-        baseYieldIncludesPartialTtm:
-          aggregateYield.partialTtmSecurities.length > 0,
-        baseFrankingMixPercentDecimal:
-          aggregateYield.effectiveFrankingMixPercentDecimal!,
+        baseForecastGrossDecimal: breakdown.totalGrossDecimal,
+        baseForecastCashDecimal: breakdown.totalCashDecimal!,
+        // DIV-009 review fix (B1), identical B4 precedent, SURVIVING the
+        // DIV-011 base swap: now sourced from `breakdown.partialTtmSecurities`
+        // (the SAME forecast-sum aggregation that feeds the base itself),
+        // not the separate `aggregateYield` chain.
+        baseYieldIncludesPartialTtm: breakdown.partialTtmSecurities.length > 0,
+        // DIV-011 review fix (B3): a security EXCLUDED ENTIRELY from
+        // `breakdown` (foreign currency or insufficient history --
+        // `IncomeBreakdownResult.excludedSecurities`) contributes NOTHING to
+        // the reused base, unlike a partial-TTM security above (which still
+        // contributes a real, merely understated figure) -- named
+        // separately so a base built from a minority of held securities
+        // never reads as confidently complete.
+        baseExcludedSecurityCount: breakdown.excludedSecurities.length,
+        baseForecastFrankingIncomplete: breakdown.totalFrankingIncomplete,
         valueGrowthPercentDecimal: portfolioValueGrowth.growthPercentDecimal,
         valueGrowthSource: portfolioValueGrowth.source,
         dividendGrowthPercentDecimal:
@@ -387,21 +430,14 @@ export async function loadOwnedIncomeProjection(
         dividendGrowthSource: portfolioDividendGrowth.source,
       },
       yearsForward,
-      startEndingYear: currentFyWindowResult.ok ? currentEndingYear : null,
+      // DIV-011: year 1's `endingYear` (`startEndingYear + 1`) is now the
+      // CURRENT financial year, not the year after it -- year 1 represents
+      // the current FY's own forward-looking forecast (see
+      // `MultiYearProjectionInput.startEndingYear`'s doc comment).
+      startEndingYear: currentFyWindowResult.ok ? currentEndingYear - 1 : null,
     };
     multiYear = projectMultiYearIncome(multiYearBaselineInput);
   }
-
-  const currentFinancialYear: ComputeCurrentFinancialYearRowResult =
-    computeCurrentFinancialYearRow({
-      baseCurrencyCode: resolvedBaseCurrencyCode,
-      startMonth: history.financialYearStartMonth,
-      currentEndingYear,
-      securities: pastFinancialYearSecurities,
-      portfolioFyOverrides: history.portfolioFyOverrides,
-      currentPortfolioValueDecimal,
-      currentPortfolioValueStatus: portfolioValueStatus,
-    });
 
   let historicalPortfolioValueByYear = new Map<number, string | null>();
   if (yearsBack > 0) {
@@ -448,18 +484,6 @@ export async function loadOwnedIncomeProjection(
     securities: pastFinancialYearSecurities,
     portfolioFyOverrides: history.portfolioFyOverrides,
     historicalPortfolioValueByYear,
-  });
-
-  const breakdown = computeIncomeBreakdown({
-    baseCurrencyCode: resolvedBaseCurrencyCode,
-    currentPortfolioValueDecimal,
-    currentPortfolioValueStatus: portfolioValueStatus,
-    securities: history.securities.map((security) => ({
-      portfolioSecurityId: security.portfolioSecurityId,
-      symbol: security.symbol,
-      currencyCode: security.currencyCode,
-      forecast: security.forecast,
-    })),
   });
 
   const status: OwnedIncomeProjection["status"] =

@@ -883,33 +883,55 @@ const currentFinancialYearRow = {
 const multiYearAssumptions = {
   currentPortfolioValueDecimal: "10000.00",
   currentPortfolioValueStatus: "available",
-  baseYieldPercentDecimal: "6.00",
-  baseFrankingMixPercentDecimal: "20.00",
+  // DIV-011: the reused per-security forecast sum (the SAME base
+  // computeIncomeBreakdown's Next-12-months headline uses).
+  baseForecastGrossDecimal: "600.00",
+  baseForecastCashDecimal: "480.00",
+  baseYieldIncludesPartialTtm: false,
+  baseForecastFrankingIncomplete: false,
+  baseExcludedSecurityCount: 0,
   valueGrowthPercentDecimal: "5",
   valueGrowthSource: "portfolio_assumption",
   dividendGrowthPercentDecimal: "0",
   dividendGrowthSource: "none",
 };
 
+// DIV-011: year 1's `endingYear` (2026) IS the current FY -- it merges with
+// `currentFinancialYearRow` (same endingYear, 2026) onto ONE row, so it DOES
+// link out (real underlying dividend rows: actuals received so far).
+// Year 2 (FY27) is genuinely FUTURE -- the B2 ruling below still applies to
+// it: a projection is a forecast, never a dividend row, so it never links.
 const baselineMultiYear = {
   ok: true,
   rows: [
     {
       yearIndex: 1,
-      endingYear: 2027,
-      label: "FY27",
-      valueDecimal: "10500.00",
-      yieldPercentDecimal: "6.00",
-      grossDividendDecimal: "630.00",
-      cashDividendDecimal: "504.00",
-      frankingCreditDecimal: "126.00",
+      endingYear: 2026,
+      label: "FY26",
+      valueDecimal: "10000.00", // UNGROWN -- year 1 is the current value (DIV-011)
+      yieldPercentDecimal: "6",
+      grossDividendDecimal: "600.00",
+      cashDividendDecimal: "480.00",
+      frankingCreditDecimal: "120.00",
       method: "compounded",
     },
     {
-      // A projected row whose ending year is unknown -- never a link.
       yearIndex: 2,
+      endingYear: 2027,
+      label: "FY27",
+      valueDecimal: "10500.00",
+      yieldPercentDecimal: "5.71",
+      grossDividendDecimal: "600.00",
+      cashDividendDecimal: "480.00",
+      frankingCreditDecimal: "120.00",
+      method: "compounded",
+    },
+    {
+      // A further-out projected row whose ending year is unknown -- never a
+      // link.
+      yearIndex: 3,
       endingYear: null,
-      label: "Year 2",
+      label: "Year 3",
       valueDecimal: "11000.00",
       yieldPercentDecimal: "6.00",
       grossDividendDecimal: "660.00",
@@ -933,13 +955,15 @@ const populatedMultiYearProps = {
   multiYear: baselineMultiYear,
   multiYearBaselineInput: {
     assumptions: multiYearAssumptions,
-    yearsForward: 2,
-    startEndingYear: 2026,
+    yearsForward: 3,
+    // DIV-011: `startEndingYear + 1` is year 1's own ending year, now the
+    // CURRENT FY (2026) -- see `MultiYearProjectionInput.startEndingYear`.
+    startEndingYear: 2025,
   },
   portfolioValueGrowthPercentDecimal: "5",
   portfolioDividendGrowthPercentDecimal: "0",
   yearsBack: 2,
-  yearsForward: 2,
+  yearsForward: 3,
 };
 
 function renderMultiYear(overrides: Record<string, unknown> = {}) {
@@ -963,20 +987,21 @@ test("UI-017: the multi-year sub-page's past-FY row keeps its existing detail bu
   );
 });
 
-test("UI-017: the multi-year sub-page's current-FY ('to date') row also links to ?fy=<endingYear>", () => {
+test("UI-017/DIV-011: the multi-year sub-page's current-FY row (now MERGED onto its own forward-forecast row -- the old separate '(to date)' row is gone) also links to ?fy=<endingYear>", () => {
   const html = renderMultiYear();
+  assert.doesNotMatch(html, /FY26 \(to date\)/);
   assert.match(
     html,
-    /<button type="button" class="income-row-trigger">FY26 \(to date\)<\/button>\s*<a class="income-fy-year-link" href="\/portfolio\/portfolio-a\/income\/dividends\?fy=2026">View dividends<\/a>/,
+    /<button type="button" class="income-row-trigger">FY26 \(projected\)<\/button>\s*<a class="income-fy-year-link" href="\/portfolio\/portfolio-a\/income\/dividends\?fy=2026">View dividends<\/a>/,
   );
 });
 
-test("UI-017 (B2 RULING): a projected row is NEVER linked, even when it has a perfectly resolvable ending year -- a projection is a forecast, not a dividend row", () => {
+test("UI-017 (B2 RULING): a genuinely FUTURE projected row is NEVER linked, even when it has a perfectly resolvable ending year -- a projection is a forecast, not a dividend row (DIV-011: this is now year 2 -- year 1, the current FY, is the one deliberate exception, see the test above)", () => {
   const html = renderMultiYear();
-  // FY27 (yearIndex 1, endingYear 2027) is a PROJECTED row in this fixture
-  // (see baselineMultiYear) -- the parser would otherwise accept
-  // ?fy=2027 (current+1), so this specifically exercises the "the link
-  // would have worked" case, not just an out-of-range one.
+  // FY27 (yearIndex 2, endingYear 2027) is a genuinely FUTURE row in this
+  // fixture (see baselineMultiYear) -- the parser would otherwise accept
+  // ?fy=2027, so this specifically exercises the "the link would have
+  // worked" case, not just an out-of-range one.
   const fy27RowMatch = html.match(
     /<button type="button" class="income-row-trigger">FY27 \(projected\)<\/button>([\s\S]{0,80})<\/th>/,
   );
@@ -985,16 +1010,16 @@ test("UI-017 (B2 RULING): a projected row is NEVER linked, even when it has a pe
   assert.doesNotMatch(html, /\?fy=2027/);
 });
 
-test("UI-017 (B2 RULING): a further-out projected row (current+2, which the parser WOULD reject) also renders no link and no href", () => {
+test("UI-017 (B2 RULING): a further-out projected row (current+3, which the parser WOULD reject) also renders no link and no href", () => {
   const html = renderMultiYear({
     multiYear: {
       ok: true,
       rows: [
         ...baselineMultiYear.rows,
         {
-          yearIndex: 2,
-          endingYear: 2028,
-          label: "FY28",
+          yearIndex: 4,
+          endingYear: 2029,
+          label: "FY29",
           valueDecimal: "11000.00",
           yieldPercentDecimal: "6.00",
           grossDividendDecimal: "660.00",
@@ -1006,21 +1031,21 @@ test("UI-017 (B2 RULING): a further-out projected row (current+2, which the pars
       assumptions: multiYearAssumptions,
     },
   });
-  const fy28RowMatch = html.match(
-    /<button type="button" class="income-row-trigger">FY28 \(projected\)<\/button>([\s\S]{0,80})<\/th>/,
+  const fy29RowMatch = html.match(
+    /<button type="button" class="income-row-trigger">FY29 \(projected\)<\/button>([\s\S]{0,80})<\/th>/,
   );
-  assert.ok(fy28RowMatch, "expected to find the FY28 projected row");
-  assert.doesNotMatch(fy28RowMatch![1], /income-fy-year-link/);
-  assert.doesNotMatch(html, /\?fy=2028/);
+  assert.ok(fy29RowMatch, "expected to find the FY29 projected row");
+  assert.doesNotMatch(fy29RowMatch![1], /income-fy-year-link/);
+  assert.doesNotMatch(html, /\?fy=2029/);
 });
 
 test("UI-017: a projected row with NO resolvable ending year renders no dividends link either (never a broken/guessed href)", () => {
   const html = renderMultiYear();
-  const yearTwoRowMatch = html.match(
-    /<button type="button" class="income-row-trigger">Year 2 \(projected\)<\/button>([\s\S]{0,60})<\/th>/,
+  const yearThreeRowMatch = html.match(
+    /<button type="button" class="income-row-trigger">Year 3 \(projected\)<\/button>([\s\S]{0,60})<\/th>/,
   );
-  assert.ok(yearTwoRowMatch, "expected to find the 'Year 2' row");
-  assert.doesNotMatch(yearTwoRowMatch![1], /income-fy-year-link/);
+  assert.ok(yearThreeRowMatch, "expected to find the 'Year 3' row");
+  assert.doesNotMatch(yearThreeRowMatch![1], /income-fy-year-link/);
 });
 
 test("UI-017: the multi-year page threads a real dividendsHref prop through to the component", async () => {

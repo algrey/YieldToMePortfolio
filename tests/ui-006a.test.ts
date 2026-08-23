@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
+  projectMultiYearIncome,
   projectMultiYearIncomeWhatIf,
   type MultiYearProjectionAssumptions,
   type MultiYearProjectionInput,
@@ -156,6 +157,11 @@ const pastFinancialYearRows = [
   },
 ];
 
+// DIV-011 (owner directive, 2026-08-23): the current FY's row (endingYear
+// 2026) now shares its ending year with the forward projection's OWN year 1
+// (`startEndingYear + 1`) -- they get merged into ONE displayed row by
+// `IncomeMultiYear` (see `mergeCurrentFinancialYear`), rather than rendering
+// as two separate rows for the identical financial year.
 const currentFinancialYearRow = {
   endingYear: 2026,
   label: "FY26",
@@ -176,9 +182,14 @@ const currentFinancialYearRow = {
 const multiYearAssumptions: MultiYearProjectionAssumptions = {
   currentPortfolioValueDecimal: "10000.00",
   currentPortfolioValueStatus: "available",
-  baseYieldPercentDecimal: "6.00",
+  // DIV-011: the same $600/$480 forecast sum the landing fixture's
+  // `breakdown.totalGrossDecimal`/`totalCashDecimal` above use -- one
+  // derivation, reused verbatim as the multi-year base.
+  baseForecastGrossDecimal: "600.00",
+  baseForecastCashDecimal: "480.00",
   baseYieldIncludesPartialTtm: false,
-  baseFrankingMixPercentDecimal: "20.00",
+  baseForecastFrankingIncomplete: false,
+  baseExcludedSecurityCount: 0,
   valueGrowthPercentDecimal: "5",
   valueGrowthSource: "portfolio_assumption",
   dividendGrowthPercentDecimal: "0",
@@ -188,10 +199,12 @@ const multiYearAssumptions: MultiYearProjectionAssumptions = {
 // The exact MultiYearProjectionInput the real service would hand the
 // component -- used both to render the baseline and, in the what-if
 // recompute test, fed through the REAL `projectMultiYearIncomeWhatIf`.
+// DIV-011: `startEndingYear` is now `currentEndingYear - 1` so year 1's own
+// `endingYear` (`startEndingYear + 1` = 2026) IS the current FY.
 const multiYearBaselineInput: MultiYearProjectionInput = {
   assumptions: multiYearAssumptions,
   yearsForward: 1,
-  startEndingYear: 2026,
+  startEndingYear: 2025,
 };
 
 const baselineMultiYear = {
@@ -199,15 +212,15 @@ const baselineMultiYear = {
   rows: [
     {
       yearIndex: 1,
-      endingYear: 2027,
-      label: "FY27",
-      valueDecimal: "10500.00",
-      yieldPercentDecimal: "6.00",
-      grossDividendDecimal: "630.00",
-      cashDividendDecimal: "504.00",
-      frankingCreditDecimal: "126.00",
+      endingYear: 2026,
+      label: "FY26",
+      valueDecimal: "10000.00", // UNGROWN -- year 1 is the current value (DIV-011)
+      yieldPercentDecimal: "6",
+      grossDividendDecimal: "600.00", // the reused forecast sum, unmodified
+      cashDividendDecimal: "480.00",
+      frankingCreditDecimal: "120.00",
       method:
-        "portfolio value compounds at 5%/yr (portfolio_assumption); effective yield compounds at 0%/yr (none); dividend includes franking credits",
+        "year 1 reuses the SAME 12-month per-security forecast sum as the Next 12 Months headline (one derivation, not re-derived from a portfolio-level yield); portfolio value compounds at 5%/yr (portfolio_assumption) and dividends compound at 0%/yr (none) independently from year 2 onward; the yield shown is derived (dividend ÷ value), not a projection input; dividend includes franking credits",
     },
   ],
   assumptions: multiYearAssumptions,
@@ -310,7 +323,7 @@ test("UI-006A: no dividend-forecast coverage is disclosed explicitly, never pres
 
 // --- Multi-year -------------------------------------------------------
 
-test("UI-006A: multi-year table marks the current FY and projected rows distinctly in the row label itself (owner ruling 2026-08-22: the compact Source column is gone; DIV-003's source label -- actual/estimate/fy to date/projected -- stays accessible only via each row's detail dialog, never as a whole table column)", () => {
+test("UI-006A/DIV-011: multi-year table merges the current FY's actuals-to-date onto its OWN forward-forecast row -- one row per FY, not a separate '(to date)' row for the same year the forecast row already covers", () => {
   const html = renderMultiYear();
   // UI-026 (B2): the caption now folds in the screen-level base-currency
   // statement ("AUD reporting values"), mirroring portfolio-shell.tsx's
@@ -321,20 +334,21 @@ test("UI-006A: multi-year table marks the current FY and projected rows distinct
   );
   assert.doesNotMatch(html, /<th scope="col">Source<\/th>/);
   assert.doesNotMatch(html, /class="income-source"/);
-  // current FY labelled distinctly in the row label itself, never
-  // "actual"/"estimate", and never colour alone.
-  assert.match(html, />FY26 \(to date\)</);
-  // projected, visually distinguished (green class) AND labelled in text
-  // (never colour alone) -- "(projected)" is part of the row label now
-  // that the Source column is gone.
+  // DIV-011: the old separate "FY26 (to date)" row is GONE -- year 1 of the
+  // forward projection IS the current FY (FY26), rendered once, visually
+  // distinguished (green class) AND labelled in text (never colour alone).
+  assert.doesNotMatch(html, /FY26 \(to date\)/);
   assert.match(html, /class="income-row-projected"/);
-  assert.match(html, /FY27 \(projected\)/);
+  assert.match(html, /FY26 \(projected\)/);
+  // That same row discloses actuals received so far this FY alongside its
+  // forecast figure (DIV-011 merged-row contract).
+  assert.match(html, /\$600\.00[\s\S]{0,80}\$300\.00 received so far this FY/);
 });
 
 test("UI-006A: every row is tappable via a real button (row-detail affordance) and past rows additionally link to an FY override", () => {
   const html = renderMultiYear();
   const triggerCount = (html.match(/class="income-row-trigger"/g) ?? []).length;
-  assert.equal(triggerCount, 4); // 2 past + 1 current + 1 projected row
+  assert.equal(triggerCount, 3); // 2 past + 1 merged current/projected row (DIV-011)
   assert.match(
     html,
     /<button type="button" class="income-row-trigger">FY25<\/button>/,
@@ -345,11 +359,11 @@ test("UI-006A: every row is tappable via a real button (row-detail affordance) a
   assert.doesNotMatch(html, /<dialog/);
 });
 
-test("UI-006A: one assumption summary line states yield includes franking and names both growth assumptions", () => {
+test("UI-006A/DIV-011: one assumption summary line states yield includes franking, names both growth assumptions (a 'none'-sourced one labelled '(default)', never rendered bare like an owner choice), and states the shown yield is derived, not a projection input", () => {
   const html = renderMultiYear();
   assert.match(
     html,
-    /<p class="income-assumption-summary">Yield is TOTAL yield, including franking credits\. Portfolio value compounds at 5%\/yr; dividend yield compounds at 0%\/yr for projected years\.<\/p>/,
+    /<p class="income-assumption-summary">Yield is TOTAL yield, including franking credits\. Portfolio value compounds at 5%\/yr; dividends compound at 0%\/yr \(default\) for projected years; the yield shown is derived \(dividend ÷ value\), not a projection input, so it can rise OR fall even while dividends compound upward\.<\/p>/,
   );
 });
 
@@ -422,7 +436,7 @@ test("UI-006A: clampYears is behaviourally exercised (beyond source greps) -- ou
   assert.equal(clampYears("3.9", DEFAULT_YEARS_BACK, 0), 3);
 });
 
-test("UI-006A: a degraded forward projection is disclosed as an explicit warning banner, not silently rendered as an empty or zeroed projected row", () => {
+test("UI-006A: a degraded forward projection is disclosed as an explicit warning banner, not silently rendered as an empty or zeroed projected row -- the current FY's real actuals-to-date still render on their OWN row (DIV-011 fallback, never dropped just because the forecast is degraded)", () => {
   const html = renderMultiYear({
     multiYear: { ok: false, reason: "no_yield_coverage" },
     multiYearBaselineInput: null,
@@ -430,9 +444,13 @@ test("UI-006A: a degraded forward projection is disclosed as an explicit warning
   assert.match(html, /Forward projection unavailable/);
   assert.match(
     html,
-    /No held security has a resolved dividend yield, so forward years cannot be projected\./,
+    /No held security has a usable 12-month dividend forecast, so forward years cannot be projected\./,
   );
   assert.doesNotMatch(html, /class="income-row-projected"/);
+  // DIV-011 fallback: no forecast row exists to merge onto, so the current
+  // FY's actuals-to-date render on their own standalone "(to date)" row,
+  // exactly as pre-DIV-011.
+  assert.match(html, /FY26 \(to date\)/);
 });
 
 test("UI-006A: a degraded past-FY or current-FY computation is disclosed as its own explicit banner, never silently collapsed to an empty table with no explanation (follow-up 1)", () => {
@@ -441,25 +459,41 @@ test("UI-006A: a degraded past-FY or current-FY computation is disclosed as its 
   });
   assert.match(pastDegradedHtml, /Past financial years unavailable/);
   assert.match(pastDegradedHtml, /requested years-back range is invalid/);
-  // The current-FY and projected rows still render -- only the past rows
-  // are missing.
-  assert.match(pastDegradedHtml, /FY26 \(to date\)/);
+  // The current FY's merged row still renders -- only the past rows are
+  // missing. DIV-011: it's the forecast row (FY26 (projected)) now, not a
+  // separate "(to date)" row -- its "received so far" annotation carries
+  // the actuals disclosure that the old standalone row used to.
+  assert.match(pastDegradedHtml, /FY26 \(projected\)/);
+  assert.match(pastDegradedHtml, /received so far this FY/);
   assert.doesNotMatch(pastDegradedHtml, /FY25/);
 
   const currentDegradedHtml = renderMultiYear({
     currentFinancialYear: { ok: false, reason: "invalid_start_month" },
   });
   assert.match(currentDegradedHtml, /Current financial year unavailable/);
+  // The forecast row still renders (multiYear itself is fine in this
+  // fixture) -- it just carries no actuals-to-date annotation since
+  // `currentFinancialYear` itself is degraded (DIV-011: merge is a no-op).
   assert.doesNotMatch(currentDegradedHtml, /\(to date\)/);
+  assert.doesNotMatch(currentDegradedHtml, /received so far this FY/);
+  assert.match(currentDegradedHtml, /FY26 \(projected\)/);
 });
 
 // --- B1: what-if recompute path and the assumption summary -------------
 
 test("B1: applying a what-if recomputes forward rows via the REAL projectMultiYearIncomeWhatIf (not a source grep), and the rendered summary/value cells reflect the ACTIVE (applied) assumptions, never the stale saved growth rates", () => {
+  // DIV-011: year 1 is the ungrown base regardless of growth assumptions --
+  // a growth what-if only shows a difference from year 2 onward, so this
+  // exercises a 2-year baseline (the 1-year `multiYearBaselineInput` module
+  // fixture wouldn't have a growth-affected row to compare at all).
+  const twoYearBaseline: MultiYearProjectionInput = {
+    ...multiYearBaselineInput,
+    yearsForward: 2,
+  };
   // Exercise the exact recompute path `applyWhatIf()` calls: the same pure
   // function, the same baseline input the service would hand the
   // component, with 8%/3% overrides over the saved 5%/0%.
-  const appliedResult = projectMultiYearIncomeWhatIf(multiYearBaselineInput, {
+  const appliedResult = projectMultiYearIncomeWhatIf(twoYearBaseline, {
     valueGrowthPercentDecimal: "8",
     dividendGrowthPercentDecimal: "3",
   });
@@ -469,11 +503,22 @@ test("B1: applying a what-if recomputes forward rows via the REAL projectMultiYe
   assert.equal(appliedResult.assumptions.valueGrowthSource, "what_if");
   assert.equal(appliedResult.assumptions.dividendGrowthPercentDecimal, "3");
   assert.equal(appliedResult.assumptions.dividendGrowthSource, "what_if");
-  // The recomputed row genuinely differs from the 5%/0% baseline row (not
-  // an untouched copy).
+  // Year 1 is the UNGROWN base either way (DIV-011) -- unaffected by the
+  // what-if growth override.
+  assert.equal(appliedResult.rows[0].valueDecimal, "10000.00");
+  assert.equal(appliedResult.rows[0].grossDividendDecimal, "600.00");
+  // Year 2 genuinely differs from the 5%/0% baseline's own year 2 (not an
+  // untouched copy) -- this is where independent-axis growth actually shows.
+  const baseline = projectMultiYearIncome(twoYearBaseline);
+  assert.equal(baseline.ok, true);
+  if (!baseline.ok) throw new Error("unreachable");
   assert.notEqual(
-    appliedResult.rows[0].valueDecimal,
-    baselineMultiYear.rows[0].valueDecimal,
+    appliedResult.rows[1].valueDecimal,
+    baseline.rows[1].valueDecimal,
+  );
+  assert.notEqual(
+    appliedResult.rows[1].grossDividendDecimal,
+    baseline.rows[1].grossDividendDecimal,
   );
 
   // Render with this REAL recomputed result as the active projection --
@@ -482,37 +527,44 @@ test("B1: applying a what-if recomputes forward rows via the REAL projectMultiYe
   // (5%/0%) are deliberately left unchanged here to prove the summary does
   // NOT fall back to them.
   const html = renderMultiYear({ multiYear: appliedResult });
-  assert.match(html, /compounds at 8%\/yr \(what-if\)/);
-  assert.match(html, /compounds at 3%\/yr \(what-if\)/);
-  assert.doesNotMatch(html, /compounds at 5%\/yr(?! \(what-if\))/);
-  assert.doesNotMatch(html, /compounds at 0%\/yr(?! \(what-if\))/);
-  // The recomputed projected row's own value/gross figures are shown too.
+  assert.match(html, /value compounds at 8%\/yr \(what-if\)/);
+  assert.match(html, /dividends compound at 3%\/yr \(what-if\)/);
+  assert.doesNotMatch(html, /value compounds at 5%\/yr(?! \(what-if\))/);
+  assert.doesNotMatch(html, /dividends compound at 0%\/yr(?! \(what-if\))/);
+  // The recomputed year-2 projected row's own value/gross figures are shown
+  // too.
   assert.match(
     html,
     new RegExp(
-      `FY27[\\s\\S]{0,400}${appliedResult.rows[0].grossDividendDecimal.replace(".", "\\.")}`,
+      `FY27[\\s\\S]{0,400}${appliedResult.rows[1].grossDividendDecimal.replace(".", "\\.")}`,
     ),
   );
 });
 
 // --- B2: partial-value disclosure on the visible surface ----------------
 
-test("B2: a partial current portfolio value is disclosed as a non-colour '· partial' marker on BOTH the current-year and projected value cells, and in the assumption summary -- not only inside the row-detail dialog", () => {
+test("B2: a partial current portfolio value is disclosed as a non-colour '· partial' marker on BOTH the current-year (merged) and a genuinely future projected value cell, and in the assumption summary -- not only inside the row-detail dialog", () => {
+  // DIV-011: year 1 (the current FY, FY26) is UNGROWN, so a second, future
+  // row (FY27, yearIndex 2) is needed to prove the partial-value marker
+  // survives into a row that actually compounds off the partial base.
+  const twoYearPartial = projectMultiYearIncome({
+    assumptions: {
+      ...multiYearAssumptions,
+      currentPortfolioValueStatus: "partial",
+    },
+    yearsForward: 2,
+    startEndingYear: multiYearBaselineInput.startEndingYear,
+  });
+  assert.equal(twoYearPartial.ok, true);
   const html = renderMultiYear({
     currentFinancialYear: {
       ok: true,
       row: { ...currentFinancialYearRow, valueStatus: "partial" },
     },
-    multiYear: {
-      ...baselineMultiYear,
-      assumptions: {
-        ...multiYearAssumptions,
-        currentPortfolioValueStatus: "partial",
-      },
-    },
+    multiYear: twoYearPartial,
   });
-  // Current-year row value cell.
-  assert.match(html, /FY26 \(to date\)[\s\S]{0,600}· partial/);
+  // Current-year (merged) row value cell.
+  assert.match(html, /FY26 \(projected\)[\s\S]{0,600}· partial/);
   // Projected row value cell (the forward projection compounds off the
   // SAME partial base for every year).
   assert.match(html, /FY27[\s\S]{0,600}· partial/);

@@ -55,15 +55,31 @@ test("dividend-growth resolution: owner security override > portfolio default > 
   assert.match(none.method, /no growth assumed/);
 });
 
-test("portfolio-level growth assumptions: set value falls through to source 'portfolio_assumption'; blank is 'none' with 0%, never fabricated", () => {
+test("portfolio-level growth assumptions: set value falls through to source 'portfolio_assumption'; blank is 'none' -- DIV-011 (owner directive): defaults to 6%/yr, never the old 0%, and never fabricated as an owner choice", () => {
   assert.deepEqual(resolvePortfolioValueGrowth("8"), {
     source: "portfolio_assumption",
     growthPercentDecimal: "8",
     method: "owner-set portfolio value-growth assumption",
   });
   assert.equal(resolvePortfolioValueGrowth(null).source, "none");
-  assert.equal(resolvePortfolioValueGrowth(null).growthPercentDecimal, "0");
+  assert.equal(resolvePortfolioValueGrowth(null).growthPercentDecimal, "6");
+  assert.match(
+    resolvePortfolioValueGrowth(null).method,
+    /defaulting to 6%\/yr/,
+  );
   assert.equal(resolvePortfolioDividendGrowth(null).source, "none");
+  assert.equal(resolvePortfolioDividendGrowth(null).growthPercentDecimal, "6");
+  assert.match(
+    resolvePortfolioDividendGrowth(null).method,
+    /defaulting to 6%\/yr/,
+  );
+  // An owner-set value still wins outright -- the DEFAULT is the only thing
+  // that changed.
+  assert.deepEqual(resolvePortfolioDividendGrowth("3"), {
+    source: "portfolio_assumption",
+    growthPercentDecimal: "3",
+    method: "owner-set portfolio dividend-growth assumption",
+  });
 });
 
 test("yield resolution: owner override wins outright, no gross-up applied (owner value already means total yield)", () => {
@@ -318,23 +334,35 @@ test("aggregateSecurityYields: value_unavailable is checked before the yield che
 // b. Multi-year projection -- exact-decimal compounding, spot-checked
 // ---------------------------------------------------------------------------
 
+// DIV-011 (owner directive, 2026-08-23): the fixture/tests below were
+// rewritten -- year 1 is now the UNGROWN base (`currentPortfolioValueDecimal`
+// and the reused `baseForecastGrossDecimal`/`baseForecastCashDecimal`
+// forecast sum, verbatim), and value/dividend compound INDEPENDENTLY on
+// their own growth assumptions starting from year 2 (yield is a derived
+// display figure, never a compounding input). Pre-DIV-011 this fixture
+// derived year 1 from `baseYieldPercentDecimal * currentPortfolioValueDecimal`
+// (both already grown once) -- the exact mechanism the root-cause
+// investigation found diverging from `computeIncomeBreakdown`'s
+// Next-12-months headline.
 const COMPOUNDING_FIXTURE: MultiYearProjectionInput = {
   assumptions: {
     currentPortfolioValueDecimal: "100000",
     currentPortfolioValueStatus: "available",
-    baseYieldPercentDecimal: "10",
+    baseForecastGrossDecimal: "10000",
+    baseForecastCashDecimal: "10000", // 0% franking mix -- isolates value/dividend compounding from the cash/franking split
     baseYieldIncludesPartialTtm: false,
-    baseFrankingMixPercentDecimal: "0", // isolates value/yield compounding from the franking split
+    baseForecastFrankingIncomplete: false,
+    baseExcludedSecurityCount: 0,
     valueGrowthPercentDecimal: "10",
     valueGrowthSource: "portfolio_assumption",
-    dividendGrowthPercentDecimal: "0", // yield held constant so value compounding is hand-verifiable in isolation
+    dividendGrowthPercentDecimal: "0", // dividend held constant so value compounding is hand-verifiable in isolation
     dividendGrowthSource: "none",
   },
   yearsForward: 10,
   startEndingYear: 2026,
 };
 
-test("multi-year projection: exact-decimal compounding, spot-checked at year 1, 2, and 10", () => {
+test("multi-year projection (DIV-011): year 1 is the UNGROWN base (current value, the reused forecast sum verbatim); value compounds from year 2 onward, spot-checked at year 1, 2, and 10", () => {
   const result = projectMultiYearIncome(COMPOUNDING_FIXTURE);
   assert.equal(result.ok, true);
   if (!result.ok) return;
@@ -342,36 +370,72 @@ test("multi-year projection: exact-decimal compounding, spot-checked at year 1, 
   assert.equal(year1.yearIndex, 1);
   assert.equal(year1.endingYear, 2027);
   assert.equal(year1.label, "FY27");
-  assert.equal(year1.valueDecimal, "110000"); // 100000 * 1.1
-  assert.equal(year1.yieldPercentDecimal, "10");
-  assert.equal(year1.grossDividendDecimal, "11000"); // 110000 * 0.10
-  assert.equal(year1.cashDividendDecimal, "11000");
+  assert.equal(year1.valueDecimal, "100000"); // UNGROWN -- year 1 is the current value, not yet compounded
+  assert.equal(year1.yieldPercentDecimal, "10"); // derived display: 10000 / 100000 * 100
+  assert.equal(year1.grossDividendDecimal, "10000"); // the reused base forecast sum, unmodified
+  assert.equal(year1.cashDividendDecimal, "10000");
   assert.equal(year1.frankingCreditDecimal, "0");
 
   const year2 = result.rows[1]!;
-  assert.equal(year2.valueDecimal, "121000"); // 100000 * 1.1^2
-  assert.equal(year2.grossDividendDecimal, "12100");
+  assert.equal(year2.valueDecimal, "110000"); // 100000 * 1.1 -- growth starts applying from year 2
+  assert.equal(year2.grossDividendDecimal, "10000"); // dividend growth is 0% in this fixture -- unchanged
 
-  // 1.1^10 = 2.5937424601 exactly (11^10 / 10^10, a terminating decimal).
+  // 1.1^9 = 2.357947691 exactly (11^9 / 10^9, a terminating decimal) --
+  // value compounds 9 times reaching year 10 (years 2 through 10).
   const year10 = result.rows[9]!;
   assert.equal(year10.yearIndex, 10);
   assert.equal(year10.endingYear, 2036);
-  assert.equal(year10.valueDecimal, "259374.24601");
-  assert.equal(year10.grossDividendDecimal, "25937.424601");
-  assert.equal(year10.cashDividendDecimal, "25937.424601");
+  assert.equal(year10.valueDecimal, "235794.7691");
+  assert.equal(year10.grossDividendDecimal, "10000");
+  assert.equal(year10.cashDividendDecimal, "10000");
+  assert.equal(year10.frankingCreditDecimal, "0");
 });
 
-test("multi-year projection: yield also compounds by the dividend-growth assumption, independently of value growth", () => {
+test("multi-year projection (DIV-011): dividend compounds by the dividend-growth assumption, independently of value growth (yield is a derived display figure, not a compounding input)", () => {
   const result = projectMultiYearIncome({
     assumptions: {
       currentPortfolioValueDecimal: "1000",
       currentPortfolioValueStatus: "available",
-      baseYieldPercentDecimal: "4",
+      baseForecastGrossDecimal: "40",
+      baseForecastCashDecimal: "40",
       baseYieldIncludesPartialTtm: false,
-      baseFrankingMixPercentDecimal: "0",
-      valueGrowthPercentDecimal: "0", // isolates yield compounding
+      baseForecastFrankingIncomplete: false,
+      baseExcludedSecurityCount: 0,
+      valueGrowthPercentDecimal: "0", // isolates dividend compounding
       valueGrowthSource: "none",
       dividendGrowthPercentDecimal: "5",
+      dividendGrowthSource: "portfolio_assumption",
+    },
+    yearsForward: 3,
+    startEndingYear: null,
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.rows[0]!.valueDecimal, "1000"); // year 1 -- the ungrown base
+  assert.equal(result.rows[0]!.grossDividendDecimal, "40");
+  assert.equal(result.rows[0]!.yieldPercentDecimal, "4"); // derived: 40 / 1000 * 100
+  assert.equal(result.rows[0]!.label, "Year 1"); // no startEndingYear -> plain label
+
+  assert.equal(result.rows[1]!.valueDecimal, "1000"); // value growth is 0% -- unchanged
+  assert.equal(result.rows[1]!.grossDividendDecimal, "42"); // 40 * 1.05
+  assert.equal(result.rows[1]!.yieldPercentDecimal, "4.2"); // derived: 42 / 1000 * 100
+
+  assert.equal(result.rows[2]!.grossDividendDecimal, "44.1"); // 42 * 1.05
+});
+
+test("multi-year projection (DIV-011): franking credit is derived by subtraction (gross - cash) every year -- an exact cash/credit round trip, never an independent multiplication", () => {
+  const result = projectMultiYearIncome({
+    assumptions: {
+      currentPortfolioValueDecimal: "1000",
+      currentPortfolioValueStatus: "available",
+      baseForecastGrossDecimal: "130",
+      baseForecastCashDecimal: "100", // 30 franking credit -- the exact 0.3 ratio, see decomposeGrossedAmount fixture above
+      baseYieldIncludesPartialTtm: false,
+      baseForecastFrankingIncomplete: false,
+      baseExcludedSecurityCount: 0,
+      valueGrowthPercentDecimal: "0",
+      valueGrowthSource: "none",
+      dividendGrowthPercentDecimal: "10",
       dividendGrowthSource: "portfolio_assumption",
     },
     yearsForward: 2,
@@ -379,20 +443,60 @@ test("multi-year projection: yield also compounds by the dividend-growth assumpt
   });
   assert.equal(result.ok, true);
   if (!result.ok) return;
-  assert.equal(result.rows[0]!.valueDecimal, "1000");
-  assert.equal(result.rows[0]!.yieldPercentDecimal, "4.2"); // 4 * 1.05
-  assert.equal(result.rows[0]!.label, "Year 1"); // no startEndingYear -> plain label
-  assert.equal(result.rows[1]!.yieldPercentDecimal, "4.41"); // 4.2 * 1.05
+  const year1 = result.rows[0]!;
+  assert.equal(year1.grossDividendDecimal, "130");
+  assert.equal(year1.cashDividendDecimal, "100");
+  assert.equal(year1.frankingCreditDecimal, "30");
+  assert.match(year1.method, /includes franking credits/);
+
+  // Year 2: gross and cash each compound by 10% independently; franking is
+  // DERIVED by subtraction from that year's own gross/cash (never an
+  // independent multiplication) -- still an exact round trip.
+  const year2 = result.rows[1]!;
+  assert.equal(year2.grossDividendDecimal, "143"); // 130 * 1.1
+  assert.equal(year2.cashDividendDecimal, "110"); // 100 * 1.1
+  assert.equal(year2.frankingCreditDecimal, "33"); // 143 - 110, exact
 });
 
-test("multi-year projection: franking mix splits the grossed dividend into an exact cash/credit round trip every year", () => {
+test("multi-year projection (DIV-011 review fix B3): a several-excluded base (most held securities contributed NOTHING to the reused forecast sum) is named on EVERY row's method, not just the merely-partial-TTM case -- a base built from a minority of held securities must never read as confidently complete", () => {
   const result = projectMultiYearIncome({
     assumptions: {
-      currentPortfolioValueDecimal: "1000",
+      currentPortfolioValueDecimal: "10000",
       currentPortfolioValueStatus: "available",
-      baseYieldPercentDecimal: "13",
+      baseForecastGrossDecimal: "100", // only 1 of 4 held securities actually contributed
+      baseForecastCashDecimal: "100",
       baseYieldIncludesPartialTtm: false,
-      baseFrankingMixPercentDecimal: "70", // exact 0.3 ratio, see decomposeGrossedAmount fixture above
+      baseForecastFrankingIncomplete: false,
+      baseExcludedSecurityCount: 3,
+      valueGrowthPercentDecimal: "0",
+      valueGrowthSource: "none",
+      dividendGrowthPercentDecimal: "0",
+      dividendGrowthSource: "none",
+    },
+    yearsForward: 2,
+    startEndingYear: null,
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  for (const row of result.rows) {
+    assert.match(
+      row.method,
+      /3 held securities excluded entirely from this base/,
+    );
+    assert.match(row.method, /may understate true income/);
+  }
+});
+
+test("multi-year projection: a base excluding exactly one security uses the singular 'security', never 'securityies' or a bare count", () => {
+  const result = projectMultiYearIncome({
+    assumptions: {
+      currentPortfolioValueDecimal: "10000",
+      currentPortfolioValueStatus: "available",
+      baseForecastGrossDecimal: "100",
+      baseForecastCashDecimal: "100",
+      baseYieldIncludesPartialTtm: false,
+      baseForecastFrankingIncomplete: false,
+      baseExcludedSecurityCount: 1,
       valueGrowthPercentDecimal: "0",
       valueGrowthSource: "none",
       dividendGrowthPercentDecimal: "0",
@@ -403,11 +507,53 @@ test("multi-year projection: franking mix splits the grossed dividend into an ex
   });
   assert.equal(result.ok, true);
   if (!result.ok) return;
-  const row = result.rows[0]!;
-  assert.equal(row.grossDividendDecimal, "130");
-  assert.equal(row.cashDividendDecimal, "100");
-  assert.equal(row.frankingCreditDecimal, "30");
-  assert.match(row.method, /includes franking credits/);
+  assert.match(
+    result.rows[0]!.method,
+    /1 held security excluded entirely from this base/,
+  );
+});
+
+test("multi-year projection: baseExcludedSecurityCount: 0 (every held security included) adds NO exclusion clause to the method", () => {
+  const result = projectMultiYearIncome(COMPOUNDING_FIXTURE);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.doesNotMatch(result.rows[0]!.method, /excluded entirely/);
+});
+
+test("multi-year projection (DIV-011 review fix B2): a 'none'-sourced growth rate is named as a DEFAULT, never rendered as if the owner chose it -- both axes", () => {
+  const result = projectMultiYearIncome({
+    ...COMPOUNDING_FIXTURE,
+    assumptions: {
+      ...COMPOUNDING_FIXTURE.assumptions,
+      valueGrowthPercentDecimal: "6",
+      valueGrowthSource: "none",
+      dividendGrowthPercentDecimal: "6",
+      dividendGrowthSource: "none",
+    },
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.match(result.rows[0]!.method, /6%\/yr \(default, 6%\/yr unless set\)/);
+  // Both axes -- appears twice.
+  const matches = result.rows[0]!.method.match(
+    /\(default, 6%\/yr unless set\)/g,
+  );
+  assert.equal(matches?.length, 2);
+  // An owner-set rate on BOTH axes reads distinctly, never "default".
+  const ownerSet = projectMultiYearIncome({
+    ...COMPOUNDING_FIXTURE,
+    assumptions: {
+      ...COMPOUNDING_FIXTURE.assumptions,
+      dividendGrowthPercentDecimal: "3",
+      dividendGrowthSource: "portfolio_assumption",
+    },
+  });
+  assert.equal(ownerSet.ok, true);
+  if (ownerSet.ok) {
+    assert.doesNotMatch(ownerSet.rows[0]!.method, /default/);
+    const ownerSetMatches = ownerSet.rows[0]!.method.match(/\(owner-set\)/g);
+    assert.equal(ownerSetMatches?.length, 2);
+  }
 });
 
 test("multi-year projection: rejects years forward outside the 1-10 bound with a typed reason", () => {
@@ -449,9 +595,10 @@ test("what-if overlay: substitutes only value/dividend growth, leaves the baseli
   });
   assert.equal(whatIf.ok, true);
   if (!whatIf.ok) return;
-  // Value no longer grows; yield/dividendGrowth untouched (still 0% in the
-  // fixture), so every year's value and gross dividend equal year 0's.
+  // Year 1 is the ungrown base regardless (DIV-011) -- a value-growth
+  // override only shows a difference from year 2 onward.
   assert.equal(whatIf.rows[0]!.valueDecimal, "100000");
+  assert.equal(whatIf.rows[1]!.valueDecimal, "100000"); // value no longer grows
   assert.equal(whatIf.rows[9]!.valueDecimal, "100000");
   assert.equal(whatIf.assumptions.valueGrowthSource, "what_if");
   assert.equal(whatIf.assumptions.dividendGrowthSource, "none"); // untouched override
@@ -460,7 +607,7 @@ test("what-if overlay: substitutes only value/dividend growth, leaves the baseli
   assert.equal(COMPOUNDING_FIXTURE.assumptions.valueGrowthPercentDecimal, "10");
   const baseline = projectMultiYearIncome(COMPOUNDING_FIXTURE);
   assert.equal(baseline.ok, true);
-  if (baseline.ok) assert.equal(baseline.rows[0]!.valueDecimal, "110000");
+  if (baseline.ok) assert.equal(baseline.rows[1]!.valueDecimal, "110000");
 });
 
 test("B4: a 'partial' base portfolio value's disclosure survives into BOTH the baseline projection's row methods and a standalone what-if result's row methods", () => {
