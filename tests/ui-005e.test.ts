@@ -535,14 +535,23 @@ test("rendered manual workflow remains labelled, keyboard-operable, and narrow-s
   const script = `
     import { createElement } from "react";
     import { renderToStaticMarkup } from "react-dom/server";
+    // UI-037: the heading's HistoryBackControl calls useRouter(), so this
+    // static render mounts the same router stub qa-001b.test.ts uses.
+    import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime";
     import { ManualLedgerEntry } from ${JSON.stringify(componentUrl)};
-    process.stdout.write(renderToStaticMarkup(createElement(ManualLedgerEntry, {
-      portfolioId: "portfolio-a", baseCurrencyCode: "AUD",
-      initialIdempotencyKey: "manual-ledger:server-issued",
-      options: { currencies: ["AUD", "USD"], securities: [
-        { id: "membership-a", label: "ABC", currencyCode: "USD" }
-      ] }
-    })));
+    const routerStub = {
+      push() {}, replace() {}, back() {}, forward() {}, refresh() {}, prefetch() {},
+    };
+    process.stdout.write(renderToStaticMarkup(createElement(
+      AppRouterContext.Provider, { value: routerStub },
+      createElement(ManualLedgerEntry, {
+        portfolioId: "portfolio-a", baseCurrencyCode: "AUD",
+        initialIdempotencyKey: "manual-ledger:server-issued",
+        options: { currencies: ["AUD", "USD"], securities: [
+          { id: "membership-a", label: "ABC", currencyCode: "USD" }
+        ] }
+      }),
+    )));
   `;
   const html = execFileSync(
     process.execPath,

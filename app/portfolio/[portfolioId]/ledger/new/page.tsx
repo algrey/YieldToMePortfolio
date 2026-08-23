@@ -1,5 +1,5 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
+import { HistoryBackControl } from "../../../../components/back-control";
 import { loadAuthenticatedWorkspace } from "../../../../authenticated-workspace";
 import { ManualLedgerEntry } from "../../../../components/manual-ledger-entry";
 import { createManualLedgerMutationKeyRepository } from "../../../../../db/repositories/manual-ledger-keys";
@@ -41,8 +41,14 @@ export default async function ManualLedgerEntryPage({
   if (workspace.status === "unavailable") {
     return (
       <main className="manual-workflow-placeholder">
-        <section className="empty-state" aria-labelledby="ledger-unavailable">
+        <div className="subnav-heading">
+          <HistoryBackControl
+            fallbackHref={`/portfolio/${portfolioId}/details`}
+            label="Back"
+          />
           <p className="eyebrow">Private ledger</p>
+        </div>
+        <section className="empty-state" aria-labelledby="ledger-unavailable">
           <h1 id="ledger-unavailable">Manual entry unavailable</h1>
           <p>
             The owned portfolio could not be verified. No portfolio data or
@@ -59,19 +65,22 @@ export default async function ManualLedgerEntryPage({
   if (!context.ok) {
     return (
       <main className="manual-workflow-placeholder">
+        <div className="subnav-heading">
+          <HistoryBackControl
+            fallbackHref={`/portfolio/${portfolioId}/details`}
+            label="Back"
+          />
+          <p className="eyebrow">Private ledger</p>
+        </div>
         <section
           className="empty-state"
           aria-labelledby="ledger-options-unavailable"
         >
-          <p className="eyebrow">Private ledger</p>
           <h1 id="ledger-options-unavailable">Manual entry unavailable</h1>
           <p>
             The owned ledger options could not be loaded. No mutation form is
             shown.
           </p>
-          <Link href={`/portfolio/${portfolioId}/details`}>
-            Return to portfolio details
-          </Link>
         </section>
       </main>
     );
@@ -92,19 +101,22 @@ export default async function ManualLedgerEntryPage({
   } catch {
     return (
       <main className="manual-workflow-placeholder">
+        <div className="subnav-heading">
+          <HistoryBackControl
+            fallbackHref={`/portfolio/${portfolioId}/details`}
+            label="Back"
+          />
+          <p className="eyebrow">Private ledger</p>
+        </div>
         <section
           className="empty-state"
           aria-labelledby="ledger-options-unavailable"
         >
-          <p className="eyebrow">Private ledger</p>
           <h1 id="ledger-options-unavailable">Manual entry unavailable</h1>
           <p>
             The owned ledger options could not be loaded. No mutation form is
             shown.
           </p>
-          <Link href={`/portfolio/${portfolioId}/details`}>
-            Return to portfolio details
-          </Link>
         </section>
       </main>
     );

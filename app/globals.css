@@ -2015,7 +2015,10 @@ dd {
   line-height: 1.55;
 }
 
-.manual-ledger-heading a {
+/* UI-037: `:not(.subnav-back)` keeps the heading's back arrow on the
+   shared `.subnav-back` styling (green glyph, no extra top margin) instead
+   of this text-link treatment. */
+.manual-ledger-heading a:not(.subnav-back) {
   display: inline-flex;
   min-height: 44px;
   align-items: center;

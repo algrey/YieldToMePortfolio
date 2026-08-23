@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { HistoryBackControl } from "./back-control";
 import { useState } from "react";
 import type { ManualLedgerOptions } from "../../db/repositories/manual-ledger-options.ts";
 import {
@@ -299,16 +299,24 @@ export function ManualLedgerEntry({
   return (
     <main className="manual-ledger-page">
       <header className="manual-ledger-heading">
-        <p className="eyebrow">Private ledger · server validated</p>
+        {/* UI-037 (owner-reported orphan): this page is reachable from the
+            Details screen AND the top bar's "+" menu on every primary tab,
+            so the back control goes BACK in history rather than to one
+            hard-coded parent; a direct/deep-linked arrival falls back to
+            Details. Replaces the old return-to-details text link. */}
+        <div className="subnav-heading">
+          <HistoryBackControl
+            fallbackHref={`/portfolio/${portfolioId}/details`}
+            label="Back"
+          />
+          <p className="eyebrow">Private ledger · server validated</p>
+        </div>
         <h1>Manual entry and corrections</h1>
         <p>
           Record a supported ledger fact without changing history. Business
           dates stay visible; exact timestamps and provenance remain in the
           evidence disclosure.
         </p>
-        <Link href={`/portfolio/${portfolioId}/details`}>
-          Return to portfolio details
-        </Link>
       </header>
       {result ? (
         <ResultPanel
