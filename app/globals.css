@@ -4361,6 +4361,16 @@ dd {
   grid-template-columns: 1fr 1fr;
 }
 
+/* DIV-012 review fold: the per-field invalid-input hint moved OUT of
+   `<label>` (nested extra text there would become part of the input's
+   accessible NAME) to its own sibling element, associated via
+   `aria-describedby` instead -- this wrapper keeps the label+hint stacked
+   as one grid item, mirroring the old label-only `display: grid` stacking. */
+.income-whatif-field {
+  display: grid;
+  gap: 4px;
+}
+
 .income-whatif-inputs label {
   display: grid;
   gap: 4px;
@@ -4379,22 +4389,9 @@ dd {
   font: inherit;
 }
 
-.income-whatif-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.income-whatif-actions button {
-  min-height: 44px;
-  padding: 0 16px;
-  border: 1px solid var(--divider);
-  border-radius: 0;
-  background: transparent;
-  color: var(--cream);
-  cursor: pointer;
-}
+/* DIV-012: the Apply/Reset `.income-whatif-actions` button pair is gone --
+   the what-if overlay live-applies with no buttons -- so that rule (and its
+   `button` sub-rule) is removed rather than left orphaned. */
 
 .income-whatif-marker {
   color: var(--green-bright);

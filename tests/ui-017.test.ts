@@ -1010,8 +1010,18 @@ test("UI-017 (B2 RULING): a genuinely FUTURE projected row is NEVER linked, even
   assert.doesNotMatch(html, /\?fy=2027/);
 });
 
+// DIV-012 flips this pin's fixture wiring honestly: the component no longer
+// reads the `multiYear` prop for forward rows whenever `multiYearBaselineInput`
+// is present (it always live-recomputes from the baseline + the what-if
+// inputs instead -- see income-multi-year.tsx). This test needs an
+// ARBITRARY hand-crafted 4th row the real domain projector wouldn't
+// organically produce from a `yearsForward: 3` baseline, so it forces the
+// fallback path (`multiYearBaselineInput: null`) that still renders the raw
+// `multiYear` prop directly -- exercising the identical `mapProjectedRow`/
+// `dividendsHref` logic under test either way.
 test("UI-017 (B2 RULING): a further-out projected row (current+3, which the parser WOULD reject) also renders no link and no href", () => {
   const html = renderMultiYear({
+    multiYearBaselineInput: null,
     multiYear: {
       ok: true,
       rows: [
@@ -1039,8 +1049,16 @@ test("UI-017 (B2 RULING): a further-out projected row (current+3, which the pars
   assert.doesNotMatch(html, /\?fy=2029/);
 });
 
+// DIV-012 flips this pin's fixture wiring honestly (same rationale as the
+// FY29 test above): `baselineMultiYear`'s hand-crafted "Year 3" row (a null
+// `endingYear`) is the DEFAULT `multiYear` prop, but the real domain
+// projector always resolves a concrete `endingYear` when `startEndingYear`
+// is set (as this fixture's `multiYearBaselineInput` is), so the live
+// recompute path would never organically produce a null-ending-year row to
+// exercise. Force the fallback path so the raw hand-crafted `multiYear` prop
+// is what renders.
 test("UI-017: a projected row with NO resolvable ending year renders no dividends link either (never a broken/guessed href)", () => {
-  const html = renderMultiYear();
+  const html = renderMultiYear({ multiYearBaselineInput: null });
   const yearThreeRowMatch = html.match(
     /<button type="button" class="income-row-trigger">Year 3 \(projected\)<\/button>([\s\S]{0,60})<\/th>/,
   );

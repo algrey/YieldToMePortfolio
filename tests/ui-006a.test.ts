@@ -359,7 +359,19 @@ test("UI-006A: every row is tappable via a real button (row-detail affordance) a
   assert.doesNotMatch(html, /<dialog/);
 });
 
-test("UI-006A/DIV-011: one assumption summary line states yield includes franking, names both growth assumptions (a 'none'-sourced one labelled '(default)', never rendered bare like an owner choice), and states the shown yield is derived, not a projection input", () => {
+// DIV-012 (owner directive, 2026-08-24), review round 1 (B3 RULING) flips
+// this pin honestly a SECOND time: round-1's "always defaults to 6%,
+// labelled (what-if) from the very first render" reading was rejected by
+// review -- an owner who HAS recorded a portfolio growth assumption must see
+// it seeded (never silently replaced by 6%), and until they actually edit a
+// field, the summary must read with OWNER-SET/default semantics, not a
+// premature "(what-if)". `populatedMultiYearProps` records a real 5%
+// (portfolio_assumption) / 0% (none, i.e. no dividend-growth assumption
+// recorded) baseline -- since neither field has been touched, this is now
+// (once again) exactly what renders on load, restoring the PRE-DIV-012
+// wording. See tests/div-012.test.ts for the seeded-vs-none-recorded B3
+// coverage and the debounce/overflow (B1/B2) coverage.
+test("DIV-012 (B3 RULING)/UI-006A: on initial render (untouched), the assumption summary seeds from the portfolio's own saved growth assumptions with owner-set/default semantics -- never a premature '(what-if)'", () => {
   const html = renderMultiYear();
   assert.match(
     html,
@@ -367,16 +379,33 @@ test("UI-006A/DIV-011: one assumption summary line states yield includes frankin
   );
 });
 
-test("UI-006A: what-if is two plain number inputs with Apply/Reset, no slider, and no 'applied' marker until Apply runs", () => {
+// DIV-012 flips this pin: Apply/Reset buttons are GONE (owner directive --
+// "remove the apply and reset buttons ... have it live apply"). The two
+// number inputs remain -- B3 RULING: seeded from the portfolio's own saved
+// growth ("5"/"0" in this fixture, not a hardcoded "6"), with no slider.
+test("DIV-012/UI-006A: what-if is two plain live-apply number inputs (seeded from the portfolio's own saved growth), with NO Apply/Reset buttons and no slider", () => {
   const html = renderMultiYear();
   assert.match(html, /Portfolio growth % \/ yr/);
   assert.match(html, /Dividend growth % \/ yr/);
   const numberInputCount = (html.match(/type="number"/g) ?? []).length;
   assert.equal(numberInputCount, 2);
   assert.doesNotMatch(html, /type="range"/);
-  assert.match(html, />Apply<\/button>/);
-  assert.match(html, />Reset<\/button>/);
-  assert.doesNotMatch(html, /Applied, not saved/);
+  assert.doesNotMatch(html, />Apply</);
+  assert.doesNotMatch(html, />Reset</);
+  // Scoped to the what-if section specifically.
+  const whatIfSectionMatch = html.match(
+    /<section class="income-whatif"[\s\S]*?<\/section>/,
+  );
+  assert.ok(whatIfSectionMatch, "expected an .income-whatif section");
+  const whatIfSectionHtml = whatIfSectionMatch![0];
+  const seededValues = [
+    ...whatIfSectionHtml.matchAll(/<input[^>]*\bvalue="([^"]*)"/g),
+  ].map((m) => m[1]);
+  assert.deepEqual(seededValues, ["5", "0"]);
+  // No <button> at all inside the what-if section specifically (the page
+  // still has other real buttons elsewhere -- row-detail triggers, the
+  // range-controls submit -- so this must be scoped, not a whole-page ban).
+  assert.doesNotMatch(whatIfSectionHtml, /<button/);
 });
 
 test("UI-006A: range controls are years-back/years-forward <select>s (no slider) defaulting to 2 back / 4 forward with 0-10 / 1-10 bounds", async () => {
@@ -481,80 +510,122 @@ test("UI-006A: a degraded past-FY or current-FY computation is disclosed as its 
 
 // --- B1: what-if recompute path and the assumption summary -------------
 
-test("B1: applying a what-if recomputes forward rows via the REAL projectMultiYearIncomeWhatIf (not a source grep), and the rendered summary/value cells reflect the ACTIVE (applied) assumptions, never the stale saved growth rates", () => {
+// DIV-012 flips this pin a SECOND time (review round 1, B3 RULING): the
+// component always recomputes `activeProjection` itself from
+// `multiYearBaselineInput` + the live (state-held, not prop-held) input
+// values (never simply reads the `multiYear` prop for forward rows), BUT
+// B3 established that until the owner actually EDITS a field, that axis's
+// override is `undefined` -- letting the baseline's OWN saved growth pass
+// straight through untouched. So on the very first render this test now
+// proves the OPPOSITE of round 1's (rejected) claim: the baseline's own
+// 8%/3% growth renders EXACTLY as recomputed via `projectMultiYearIncomeWhatIf`
+// with BOTH overrides `undefined` -- proving the seed/pass-through is real
+// (not a leftover hardcoded 6% default baked into the render), while a
+// direct call to the SAME pure function WITH explicit overrides (the
+// mechanism that fires once an axis is actually touched) demonstrably
+// produces a genuinely different year-2 result -- i.e. the override
+// mechanism itself still works, it is just gated on touched state the
+// static render harness here cannot simulate (see tests/div-012.test.ts's
+// touched-gating structural pin).
+test("DIV-012 (B3 RULING)/B1: on initial (untouched) render, the live recompute reproduces the baseline's OWN saved 8%/3% growth EXACTLY (no premature '(what-if)' override) via the real projectMultiYearIncomeWhatIf with both overrides undefined", () => {
   // DIV-011: year 1 is the ungrown base regardless of growth assumptions --
   // a growth what-if only shows a difference from year 2 onward, so this
-  // exercises a 2-year baseline (the 1-year `multiYearBaselineInput` module
-  // fixture wouldn't have a growth-affected row to compare at all).
+  // exercises a 2-year baseline.
   const twoYearBaseline: MultiYearProjectionInput = {
     ...multiYearBaselineInput,
     yearsForward: 2,
+    assumptions: {
+      ...multiYearAssumptions,
+      valueGrowthPercentDecimal: "8",
+      valueGrowthSource: "portfolio_assumption",
+      dividendGrowthPercentDecimal: "3",
+      dividendGrowthSource: "portfolio_assumption",
+    },
   };
-  // Exercise the exact recompute path `applyWhatIf()` calls: the same pure
-  // function, the same baseline input the service would hand the
-  // component, with 8%/3% overrides over the saved 5%/0%.
-  const appliedResult = projectMultiYearIncomeWhatIf(twoYearBaseline, {
-    valueGrowthPercentDecimal: "8",
-    dividendGrowthPercentDecimal: "3",
-  });
-  assert.equal(appliedResult.ok, true);
-  if (!appliedResult.ok) throw new Error("unreachable");
-  assert.equal(appliedResult.assumptions.valueGrowthPercentDecimal, "8");
-  assert.equal(appliedResult.assumptions.valueGrowthSource, "what_if");
-  assert.equal(appliedResult.assumptions.dividendGrowthPercentDecimal, "3");
-  assert.equal(appliedResult.assumptions.dividendGrowthSource, "what_if");
-  // Year 1 is the UNGROWN base either way (DIV-011) -- unaffected by the
-  // what-if growth override.
-  assert.equal(appliedResult.rows[0].valueDecimal, "10000.00");
-  assert.equal(appliedResult.rows[0].grossDividendDecimal, "600.00");
-  // Year 2 genuinely differs from the 5%/0% baseline's own year 2 (not an
-  // untouched copy) -- this is where independent-axis growth actually shows.
+  // Exercise the exact recompute path the component calls on every render
+  // while BOTH axes are untouched: the same pure function, the same
+  // baseline input the service would hand the component, with both
+  // overrides `undefined` -- i.e. a pure pass-through of the baseline.
+  const untouchedResult = projectMultiYearIncomeWhatIf(twoYearBaseline, {});
+  assert.equal(untouchedResult.ok, true);
+  if (!untouchedResult.ok) throw new Error("unreachable");
+  assert.equal(untouchedResult.assumptions.valueGrowthPercentDecimal, "8");
+  assert.equal(
+    untouchedResult.assumptions.valueGrowthSource,
+    "portfolio_assumption",
+  );
+  assert.equal(untouchedResult.assumptions.dividendGrowthPercentDecimal, "3");
+  assert.equal(
+    untouchedResult.assumptions.dividendGrowthSource,
+    "portfolio_assumption",
+  );
   const baseline = projectMultiYearIncome(twoYearBaseline);
   assert.equal(baseline.ok, true);
   if (!baseline.ok) throw new Error("unreachable");
-  assert.notEqual(
-    appliedResult.rows[1].valueDecimal,
+  assert.equal(
+    untouchedResult.rows[1].valueDecimal,
     baseline.rows[1].valueDecimal,
   );
-  assert.notEqual(
-    appliedResult.rows[1].grossDividendDecimal,
+  assert.equal(
+    untouchedResult.rows[1].grossDividendDecimal,
     baseline.rows[1].grossDividendDecimal,
   );
 
-  // Render with this REAL recomputed result as the active projection --
-  // exactly what `IncomeMultiYear` shows once `whatIfApplied` is true and
-  // `whatIfResult` holds this value. The saved-props growth percentages
-  // (5%/0%) are deliberately left unchanged here to prove the summary does
-  // NOT fall back to them.
-  const html = renderMultiYear({ multiYear: appliedResult });
-  assert.match(html, /value compounds at 8%\/yr \(what-if\)/);
-  assert.match(html, /dividends compound at 3%\/yr \(what-if\)/);
-  assert.doesNotMatch(html, /value compounds at 5%\/yr(?! \(what-if\))/);
-  assert.doesNotMatch(html, /dividends compound at 0%\/yr(?! \(what-if\))/);
-  // The recomputed year-2 projected row's own value/gross figures are shown
-  // too.
+  // Sanity: the SAME pure function, called WITH explicit overrides (the
+  // mechanism that fires once the owner actually edits a field), genuinely
+  // diverges from the untouched pass-through -- proving the override
+  // mechanism itself is real, only gated on touched state.
+  const editedResult = projectMultiYearIncomeWhatIf(twoYearBaseline, {
+    valueGrowthPercentDecimal: "6",
+    dividendGrowthPercentDecimal: "6",
+  });
+  assert.equal(editedResult.ok, true);
+  if (!editedResult.ok) throw new Error("unreachable");
+  assert.equal(editedResult.assumptions.valueGrowthSource, "what_if");
+  assert.notEqual(
+    editedResult.rows[1].grossDividendDecimal,
+    untouchedResult.rows[1].grossDividendDecimal,
+  );
+
+  // Render with the baseline's OWN saved 8%/3% growth, untouched -- the
+  // summary and the year-2 row must show the BASELINE's own figures, never
+  // a hardcoded default.
+  const html = renderMultiYear({
+    multiYearBaselineInput: twoYearBaseline,
+    multiYear: baseline,
+  });
+  assert.match(html, /value compounds at 8%\/yr(?! \(what-if\))/);
+  assert.match(html, /dividends compound at 3%\/yr(?! \(what-if\))/);
+  assert.doesNotMatch(html, /\(what-if\)/);
+  // The untouched (baseline-pass-through) year-2 row's own value/gross
+  // figures are shown.
   assert.match(
     html,
     new RegExp(
-      `FY27[\\s\\S]{0,400}${appliedResult.rows[1].grossDividendDecimal.replace(".", "\\.")}`,
+      `FY27[\\s\\S]{0,400}${untouchedResult.rows[1].grossDividendDecimal.replace(".", "\\.")}`,
     ),
   );
 });
 
 // --- B2: partial-value disclosure on the visible surface ----------------
 
+// DIV-012 flips this pin: the partial-value status now has to be set on
+// `multiYearBaselineInput` (what the live recompute actually reads), not
+// merely on a swapped-in `multiYear` prop the render path no longer
+// consults for forward rows.
 test("B2: a partial current portfolio value is disclosed as a non-colour '· partial' marker on BOTH the current-year (merged) and a genuinely future projected value cell, and in the assumption summary -- not only inside the row-detail dialog", () => {
   // DIV-011: year 1 (the current FY, FY26) is UNGROWN, so a second, future
   // row (FY27, yearIndex 2) is needed to prove the partial-value marker
   // survives into a row that actually compounds off the partial base.
-  const twoYearPartial = projectMultiYearIncome({
+  const partialBaselineInput: MultiYearProjectionInput = {
+    ...multiYearBaselineInput,
+    yearsForward: 2,
     assumptions: {
       ...multiYearAssumptions,
       currentPortfolioValueStatus: "partial",
     },
-    yearsForward: 2,
-    startEndingYear: multiYearBaselineInput.startEndingYear,
-  });
+  };
+  const twoYearPartial = projectMultiYearIncome(partialBaselineInput);
   assert.equal(twoYearPartial.ok, true);
   const html = renderMultiYear({
     currentFinancialYear: {
@@ -562,6 +633,7 @@ test("B2: a partial current portfolio value is disclosed as a non-colour '· par
       row: { ...currentFinancialYearRow, valueStatus: "partial" },
     },
     multiYear: twoYearPartial,
+    multiYearBaselineInput: partialBaselineInput,
   });
   // Current-year (merged) row value cell.
   assert.match(html, /FY26 \(projected\)[\s\S]{0,600}· partial/);
@@ -584,25 +656,48 @@ test("B2: no partial-value marker or disclosure appears when the current portfol
   assert.doesNotMatch(html, /partial \(understated\)/);
 });
 
-// --- Follow-up 2: editing an input after Apply clears the stale marker --
+// --- Follow-up 2 (SUPERSEDED by DIV-012) --------------------------------
 
-test("follow-up 2: editing either growth input after Apply clears whatIfApplied/whatIfResult so the table cannot keep showing a what-if projection for inputs that no longer match it", async () => {
+// DIV-012 (owner directive, 2026-08-24) removed the Apply/Reset gate this
+// pin exercised entirely: there is no more `whatIfApplied`/`whatIfResult`
+// state to clear on edit, because there is no more "applied" state at all
+// -- every render already recomputes live from both current input values
+// (see the module header's root-cause note and `resolveWhatIfGrowthPercentDecimal`).
+// This pin is flipped to confirm the OLD shared-gate mechanism is gone
+// structurally, not merely renamed; see tests/div-012.test.ts for the full
+// live-apply/cross-reset-fix coverage this task added.
+test("DIV-012 (supersedes follow-up 2): the old shared whatIfApplied/whatIfResult/applyWhatIf/resetWhatIf gate no longer exists -- each input's onChange sets ONLY its own independent state", async () => {
   const component = await readFile(
     new URL("../app/components/income-multi-year.tsx", import.meta.url),
     "utf8",
   );
+  for (const identifier of [
+    "whatIfApplied",
+    "whatIfResult",
+    "applyWhatIf",
+    "resetWhatIf",
+    "setWhatIfApplied",
+    "setWhatIfResult",
+  ]) {
+    assert.doesNotMatch(
+      component,
+      new RegExp(`\\b${identifier}\\b`),
+      `expected the removed "${identifier}" identifier to be gone entirely`,
+    );
+  }
+  // DIV-012 review round 1 (B3 RULING) flips the onChange shape a second
+  // time: each handler now ALSO flips that axis's OWN "touched" flag (so
+  // the override only kicks in once an edit genuinely happens) -- still
+  // writing ONLY its own field's raw state + its own field's touched flag,
+  // never touching the sibling axis.
   assert.match(
     component,
-    /function updateValueGrowthInput[\s\S]{0,400}if \(whatIfApplied\) \{\s*setWhatIfApplied\(false\);\s*setWhatIfResult\(null\);/,
+    /onChange={\(event\) => \{\s*setValueGrowthInput\(event\.target\.value\);\s*setValueGrowthTouched\(true\);\s*\}}/,
   );
   assert.match(
     component,
-    /function updateDividendGrowthInput[\s\S]{0,400}if \(whatIfApplied\) \{\s*setWhatIfApplied\(false\);\s*setWhatIfResult\(null\);/,
+    /onChange={\(event\) => \{\s*setDividendGrowthInput\(event\.target\.value\);\s*setDividendGrowthTouched\(true\);\s*\}}/,
   );
-  // Both number inputs are wired to the clearing setters, not the raw
-  // useState setters directly.
-  assert.match(component, /onChange={\(event\) =>\s*updateValueGrowthInput/);
-  assert.match(component, /onChange={\(event\) =>\s*updateDividendGrowthInput/);
 });
 
 // --- What-if non-persistence -----------------------------------------
@@ -744,7 +839,8 @@ test("UI-006A: Income interactive controls meet the 44x44 CSS-pixel touch-target
     ".income-coverage-link",
     ".income-row-trigger",
     ".income-whatif-inputs input",
-    ".income-whatif-actions button",
+    // DIV-012: the Apply/Reset `.income-whatif-actions button` rule is gone
+    // -- those buttons no longer exist (live-apply, no buttons).
     ".income-range-controls select,\n.income-range-controls button",
   ]) {
     const block = extractBlock(styles, selector);

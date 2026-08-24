@@ -5,23 +5,81 @@
 // labels (actual / estimate / projected, current FY labelled distinctly);
 // every row opens its own detail (receipts/override/projection inputs);
 // past rows additionally offer "Override this FY"; one assumption summary
-// line under the table (yield means TOTAL yield including franking); the
-// what-if overlay is two plain number inputs + Apply/Reset with only a
-// compact "applied, not saved" marker, recomputed CLIENT-SIDE via DIV-003's
-// pure `projectMultiYearIncomeWhatIf` -- imported from the pure domain
-// module (`domain/dividends/projection.ts`, no SqlClient import anywhere in
-// that file) rather than the owner-scoped service wrapper, so nothing here
-// can accidentally pull server-only/D1 code into the client bundle and the
-// what-if stays unpersisted BY CONSTRUCTION (nothing in this file writes to
-// storage); range controls (years back / years forward) sit at the bottom,
-// as a plain GET form so the range works without client JS.
+// line under the table (yield means TOTAL yield including franking);
+// recomputed CLIENT-SIDE via DIV-003's pure `projectMultiYearIncomeWhatIf`
+// -- imported from the pure domain module (`domain/dividends/projection.ts`,
+// no SqlClient import anywhere in that file) rather than the owner-scoped
+// service wrapper, so nothing here can accidentally pull server-only/D1 code
+// into the client bundle and the what-if stays unpersisted BY CONSTRUCTION
+// (nothing in this file writes to storage); range controls (years back /
+// years forward) sit at the bottom, as a plain GET form so the range works
+// without client JS.
 //
 // Review fix (2026-08-13, B1/B2): the assumption summary and the value
 // column both derive from the ACTIVE projection's own typed assumptions
-// object (never from the saved-props growth percentages, which go stale the
-// moment a what-if is applied), and the current/projected rows' partial-base
-// value status is carried onto the visible surface, not just into the
-// row-detail dialog.
+// object (never from the saved-props growth percentages, which would go
+// stale the moment the what-if inputs diverge from them), and the
+// current/projected rows' partial-base value status is carried onto the
+// visible surface, not just into the row-detail dialog.
+//
+// DIV-012 (owner directive, 2026-08-24): the what-if overlay is now two
+// plain number inputs with NO Apply/Reset controls -- it live-applies on
+// every keystroke, both fields defaulting to 6%/yr, independently editable.
+// ROOT CAUSE of the pre-fix "editing one field briefly resets the other
+// field to the default" quirk: the old design gated BOTH growth axes'
+// displayed figures behind one SHARED boolean flag recording whether a
+// what-if had been "applied" (plus a paired "applied result" state cell
+// alongside it) -- editing EITHER input's change handler unconditionally
+// cleared BOTH of those shared cells, which flipped the rendered
+// projection/summary for BOTH growth axes back to the saved baseline
+// assumptions at once, even though only one field's text had actually
+// changed and the other field's own typed value was untouched in its own
+// state. From the owner's seat that reads exactly as "the field I didn't
+// touch reset to its default". This was never a draft-state/server-resync
+// bug -- this component has never made a server round trip for the what-if
+// (see the non-persistence tests below) -- it was a single shared pair of
+// state cells coupling two otherwise-independent inputs' VISIBLE effect.
+// Removing that shared "applied"/"not applied" concept entirely (the table
+// always reflects the CURRENT resolved value of both inputs, nothing to
+// apply or leave stale) makes the coupling structurally impossible: each
+// field's own `useState` is independent, and the live projection is a pure
+// function of both current values recomputed on every render -- see
+// `resolveWhatIfGrowthPercentDecimal` (`../income-whatif.ts`, split into a
+// plain non-JSX module so `tests/div-012.test.ts` can import it directly
+// under the repo's native-Node test runner), and tests/div-012.test.ts for
+// the source-level pin proving the old shared state cells no longer exist
+// anywhere in this file.
+//
+// DIV-012 review round 1 (BLOCKING fixes):
+// B1 -- the RAW input (`valueGrowthInput`/`dividendGrowthInput`) stays
+// instant (the controlled `<input>`'s own `value`, so typing never lags),
+// but the RECOMPUTE reads a separately-debounced echo of it
+// (`debouncedValueGrowthInput`/`debouncedDividendGrowthInput`, ~300ms,
+// `WHATIF_DEBOUNCE_MS` below) -- a transient mid-typing state ("3.", "",
+// a lone "-") never reaches `resolveWhatIfGrowthPercentDecimal`/the
+// projector until typing actually settles, so it can no longer flash the
+// whole table/summary to the 6% fallback the way the ORIGINAL cross-reset
+// bug flashed it to the saved baseline. Only once settled does an honestly
+// invalid/empty value resolve to the real 6% default (+ hint).
+// B2 -- a live recompute CAN itself fail (e.g. an overflow-class growth
+// input the domain projector's decimal library rejects) even though the
+// ORIGINAL server-computed `multiYear` was fine -- `activeProjectionUnavailable`
+// below is keyed off `activeProjection` (not `multiYear`) so this failure
+// gets its own disclosure banner, and the assumption-summary paragraph is
+// suppressed entirely rather than describing rows that no longer render.
+// B3 (RULING) -- each box SEEDS from the portfolio's own saved growth
+// assumption when one is recorded, defaulting to 6% only when none exists
+// (`portfolioValueGrowthPercentDecimal`/`portfolioDividendGrowthPercentDecimal`
+// already encode exactly that resolution -- see `resolvePortfolioValueGrowth`/
+// `resolvePortfolioDividendGrowth`, `domain/dividends/projection.ts` --
+// CALCULATIONS.md:696's "an owner-set value... is used exactly as typed,
+// never overridden" stays true). The "(what-if)" suffix only applies once
+// the owner actually EDITS a field away from its seed
+// (`valueGrowthTouched`/`dividendGrowthTouched` below) -- until then that
+// axis's override is left `undefined`, so `projectMultiYearIncomeWhatIf`
+// passes the baseline's own `portfolio_assumption`/`none` source straight
+// through unmodified, and the summary reads with owner-set/default
+// semantics exactly as the pre-what-if baseline did.
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { IncomeNav } from "./income-nav.tsx";
@@ -36,6 +94,10 @@ import {
   type PastFyExclusion,
   type ProjectionYearRow,
 } from "../../domain/dividends/projection.ts";
+import {
+  isValidGrowthInput,
+  resolveWhatIfGrowthPercentDecimal,
+} from "../income-whatif.ts";
 import { formatIncomeMoney, formatIncomePercent } from "../income-format.ts";
 
 type SourceLabel =
@@ -236,10 +298,6 @@ function mergeCurrentFinancialYear(
   };
 }
 
-function isValidGrowthInput(value: string): boolean {
-  return /^-?\d+(?:\.\d+)?$/.test(value.trim());
-}
-
 /** " (what-if)"/" (default)" only when this growth figure's OWN recorded
  * source (from the active projection's assumptions, never component state
  * alone) says so -- review fix B1. DIV-011 review fix (B2): `source ===
@@ -252,6 +310,12 @@ function growthSourceSuffix(source: string): string {
   if (source === "none") return " (default)";
   return "";
 }
+
+/** DIV-012 review (B1, BLOCKING): the recompute debounce -- the controlled
+ * inputs themselves stay instant; only the value FED INTO the live
+ * projection/summary waits this long after the owner stops typing. ~300ms
+ * per the review ruling. */
+const WHATIF_DEBOUNCE_MS = 300;
 
 function ValueCell({
   currencyCode,
@@ -303,16 +367,39 @@ export function IncomeMultiYear({
   const rowOpenerRef = useRef<HTMLButtonElement | null>(null);
   const [selectedRow, setSelectedRow] = useState<DisplayRow | null>(null);
 
+  // DIV-012 review (B3, RULING): both what-if fields SEED from the
+  // portfolio's own saved growth assumption when one is recorded, defaulting
+  // to 6%/yr only when none exists -- `portfolioValueGrowthPercentDecimal`/
+  // `portfolioDividendGrowthPercentDecimal` already encode exactly that
+  // resolution (`resolvePortfolioValueGrowth`/`resolvePortfolioDividendGrowth`
+  // in the domain module), so seeding from them directly keeps
+  // CALCULATIONS.md:696's "an owner-set value is used exactly as typed,
+  // never overridden" true on load. Two separate `useState` calls per axis
+  // -- nothing here can share a mutable cell between the two.
   const [valueGrowthInput, setValueGrowthInput] = useState(
     portfolioValueGrowthPercentDecimal,
   );
   const [dividendGrowthInput, setDividendGrowthInput] = useState(
     portfolioDividendGrowthPercentDecimal,
   );
-  const [whatIfResult, setWhatIfResult] =
-    useState<MultiYearProjectionResult | null>(null);
-  const [whatIfApplied, setWhatIfApplied] = useState(false);
-  const [whatIfError, setWhatIfError] = useState<string | null>(null);
+  // Has the owner actually EDITED this axis away from its seed yet? Gates
+  // whether this axis's override is passed to the pure projector at all
+  // (see `activeProjection` below) -- untouched means "let the baseline's
+  // own owner-set/default source pass straight through", so the summary
+  // reads with owner-set semantics, never a premature "(what-if)", until an
+  // actual edit happens.
+  const [valueGrowthTouched, setValueGrowthTouched] = useState(false);
+  const [dividendGrowthTouched, setDividendGrowthTouched] = useState(false);
+  // DIV-012 review (B1, BLOCKING): the RECOMPUTE reads these DEBOUNCED
+  // echoes of the raw inputs above, not the raw inputs directly -- see
+  // `WHATIF_DEBOUNCE_MS` and the effects below. The controlled inputs'
+  // OWN `value` stays wired to the instant `valueGrowthInput`/
+  // `dividendGrowthInput` state, so typing itself never lags.
+  const [debouncedValueGrowthInput, setDebouncedValueGrowthInput] = useState(
+    portfolioValueGrowthPercentDecimal,
+  );
+  const [debouncedDividendGrowthInput, setDebouncedDividendGrowthInput] =
+    useState(portfolioDividendGrowthPercentDecimal);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -326,12 +413,76 @@ export function IncomeMultiYear({
     }
   }, [selectedRow]);
 
-  const activeProjection = whatIfApplied ? whatIfResult : multiYear;
+  // DIV-012 review (B1, BLOCKING): each axis debounces INDEPENDENTLY (two
+  // separate effects, two separate timers) -- editing one field's timer
+  // never touches the other's. A fresh keystroke resets its OWN timer (the
+  // cleanup function), so the recompute only fires once typing on that
+  // field actually settles for `WHATIF_DEBOUNCE_MS`.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedValueGrowthInput(valueGrowthInput);
+    }, WHATIF_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [valueGrowthInput]);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedDividendGrowthInput(dividendGrowthInput);
+    }, WHATIF_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [dividendGrowthInput]);
+
+  // DIV-012: each axis resolves its OWN debounced (settled) input
+  // independently -- neither resolution reads the other field's state, so
+  // there is nothing left that could couple them (see the module header's
+  // root-cause note).
+  const resolvedValueGrowthPercentDecimal = resolveWhatIfGrowthPercentDecimal(
+    debouncedValueGrowthInput,
+  );
+  const resolvedDividendGrowthPercentDecimal =
+    resolveWhatIfGrowthPercentDecimal(debouncedDividendGrowthInput);
+  // DIV-012 review (B1, BLOCKING): gated on the DEBOUNCED (settled) input,
+  // never the raw one -- the hint itself must not flash on/off while typing
+  // any more than the table/summary should.
+  const valueGrowthHintVisible = !isValidGrowthInput(debouncedValueGrowthInput);
+  const dividendGrowthHintVisible = !isValidGrowthInput(
+    debouncedDividendGrowthInput,
+  );
+
+  // DIV-012: the what-if inputs ARE the live control surface for the
+  // forward projection now -- recomputed via the pure domain projector on
+  // every render directly from both current SETTLED input values, no Apply
+  // step, no "applied" gate. An axis the owner hasn't touched yet passes
+  // `undefined` (B3 RULING: let the baseline's own owner-set/default value
+  // and source through unmodified, rather than forcing a premature
+  // "(what-if)" 6% override onto an untouched field). `multiYearBaselineInput`
+  // is `null` in exactly the same degraded cases `multiYear` itself is
+  // `ok: false` (CALCULATIONS.md's "Degraded multi-year inputs" section), so
+  // falling back to the server-computed `multiYear` there reuses its own
+  // typed failure/degradation handling unchanged -- there is nothing a live
+  // what-if could compute from when the baseline itself is unavailable.
+  const activeProjection = multiYearBaselineInput
+    ? projectMultiYearIncomeWhatIf(multiYearBaselineInput, {
+        valueGrowthPercentDecimal: valueGrowthTouched
+          ? resolvedValueGrowthPercentDecimal
+          : undefined,
+        dividendGrowthPercentDecimal: dividendGrowthTouched
+          ? resolvedDividendGrowthPercentDecimal
+          : undefined,
+      })
+    : multiYear;
+  // DIV-012 review (B2, BLOCKING): a live recompute can itself fail (e.g. an
+  // overflow-class growth input the domain projector's decimal library
+  // rejects) even when the ORIGINAL server-computed `multiYear` was fine --
+  // this is intentionally keyed off `activeProjection`, never `multiYear`,
+  // so it fires for a live-recompute failure the `!multiYear.ok` banner
+  // below can never see.
+  const activeProjectionUnavailable =
+    multiYearBaselineInput !== null && !activeProjection.ok;
   // Review fix B1: the summary line and the projected rows' partial-base
   // marker both read from THIS -- the active projection's own labelled
   // assumptions -- never from the saved `portfolioValueGrowthPercentDecimal`
-  // props, which are the SAVED assumption and go stale the instant a
-  // what-if is applied.
+  // props, which reflect the portfolio's SAVED assumption, not the live
+  // what-if inputs above.
   const activeAssumptions =
     activeProjection && activeProjection.ok
       ? activeProjection.assumptions
@@ -343,11 +494,9 @@ export function IncomeMultiYear({
     activeAssumptions?.dividendGrowthPercentDecimal ??
     portfolioDividendGrowthPercentDecimal;
   const summaryValueGrowthSource =
-    activeAssumptions?.valueGrowthSource ??
-    (whatIfApplied ? "what_if" : "portfolio_assumption");
+    activeAssumptions?.valueGrowthSource ?? "portfolio_assumption";
   const summaryDividendGrowthSource =
-    activeAssumptions?.dividendGrowthSource ??
-    (whatIfApplied ? "what_if" : "portfolio_assumption");
+    activeAssumptions?.dividendGrowthSource ?? "portfolio_assumption";
 
   const pastRows = pastFinancialYears.ok
     ? pastFinancialYears.rows
@@ -388,60 +537,6 @@ export function IncomeMultiYear({
         : [];
   const rows = [...pastRows, ...forwardRows];
 
-  function updateValueGrowthInput(value: string) {
-    setValueGrowthInput(value);
-    // Follow-up 2: an edit after Apply invalidates the stale "applied"
-    // marker/result immediately -- the table must never keep showing a
-    // what-if projection for inputs that no longer match it.
-    if (whatIfApplied) {
-      setWhatIfApplied(false);
-      setWhatIfResult(null);
-    }
-  }
-
-  function updateDividendGrowthInput(value: string) {
-    setDividendGrowthInput(value);
-    if (whatIfApplied) {
-      setWhatIfApplied(false);
-      setWhatIfResult(null);
-    }
-  }
-
-  function applyWhatIf() {
-    setWhatIfError(null);
-    if (!multiYearBaselineInput) {
-      setWhatIfError(
-        "A what-if projection is not available for this portfolio.",
-      );
-      return;
-    }
-    if (
-      !isValidGrowthInput(valueGrowthInput) ||
-      !isValidGrowthInput(dividendGrowthInput)
-    ) {
-      setWhatIfError("Enter a plain growth percentage, e.g. 3 or -1.5.");
-      return;
-    }
-    const result = projectMultiYearIncomeWhatIf(multiYearBaselineInput, {
-      valueGrowthPercentDecimal: valueGrowthInput.trim(),
-      dividendGrowthPercentDecimal: dividendGrowthInput.trim(),
-    });
-    if (!result.ok) {
-      setWhatIfError("That combination could not be projected.");
-      return;
-    }
-    setWhatIfResult(result);
-    setWhatIfApplied(true);
-  }
-
-  function resetWhatIf() {
-    setValueGrowthInput(portfolioValueGrowthPercentDecimal);
-    setDividendGrowthInput(portfolioDividendGrowthPercentDecimal);
-    setWhatIfResult(null);
-    setWhatIfApplied(false);
-    setWhatIfError(null);
-  }
-
   return (
     <main className="income-screen">
       <IncomeNav portfolioId={portfolioId} active="multi-year" />
@@ -455,6 +550,20 @@ export function IncomeMultiYear({
               : multiYear.reason === "no_yield_coverage"
                 ? "No held security has a usable 12-month dividend forecast, so forward years cannot be projected."
                 : "Forward years could not be projected with the current year range."}
+          </span>
+        </p>
+      ) : activeProjectionUnavailable ? (
+        // DIV-012 review (B2, BLOCKING): the ORIGINAL server-computed
+        // `multiYear` was fine (the banner above stays silent) but the LIVE
+        // what-if recompute itself failed -- an overflow-class growth input
+        // the domain projector's decimal library rejects, for instance. This
+        // must not be a silently emptied table with a summary describing
+        // rows that no longer exist.
+        <p className="status-banner warning" role="status">
+          <strong>What-if projection unavailable</strong>
+          <span>
+            That combination could not be projected. Try different growth
+            percentages.
           </span>
         </p>
       ) : null}
@@ -588,61 +697,114 @@ export function IncomeMultiYear({
         </table>
       </div>
 
-      <p className="income-assumption-summary">
-        Yield is TOTAL yield, including franking credits. Portfolio value
-        compounds at {formatIncomePercent(summaryValueGrowthPercentDecimal)}
-        /yr{growthSourceSuffix(summaryValueGrowthSource)}; dividends compound at{" "}
-        {formatIncomePercent(summaryDividendGrowthPercentDecimal)}/yr
-        {growthSourceSuffix(summaryDividendGrowthSource)} for projected years;
-        the yield shown is derived (dividend ÷ value), not a projection input,
-        so it can rise OR fall even while dividends compound upward.
-        {activeAssumptions?.currentPortfolioValueStatus === "partial"
-          ? " Projected years are based on a partial (understated) current portfolio value -- some holdings are unpriced."
-          : ""}
-      </p>
+      {/* DIV-012 review (B2, BLOCKING): this must never describe rows that
+          aren't rendered -- when the live recompute itself has failed
+          (`activeProjectionUnavailable`, its own banner above), there is no
+          active projection's assumptions left to honestly summarise, so the
+          whole paragraph is suppressed rather than falling back to stale
+          saved-prop growth figures next to an empty/degraded table. */}
+      {!activeProjectionUnavailable ? (
+        <p className="income-assumption-summary">
+          Yield is TOTAL yield, including franking credits. Portfolio value
+          compounds at {formatIncomePercent(summaryValueGrowthPercentDecimal)}
+          /yr{growthSourceSuffix(summaryValueGrowthSource)}; dividends compound
+          at {formatIncomePercent(summaryDividendGrowthPercentDecimal)}/yr
+          {growthSourceSuffix(summaryDividendGrowthSource)} for projected years;
+          the yield shown is derived (dividend ÷ value), not a projection input,
+          so it can rise OR fall even while dividends compound upward.
+          {activeAssumptions?.currentPortfolioValueStatus === "partial"
+            ? " Projected years are based on a partial (understated) current portfolio value -- some holdings are unpriced."
+            : ""}
+        </p>
+      ) : null}
 
+      {/* DIV-012 (owner directive + B3 RULING): live-apply, no Apply/Reset
+          controls -- typing here recomputes `activeProjection` above,
+          debounced ~300ms (B1) so a mid-typing invalid state never flashes
+          the table/summary to the fallback. Each field SEEDS from the
+          portfolio's own saved growth assumption when one is recorded,
+          defaulting to 6%/yr only when none exists; once settled, an
+          empty/invalid entry falls back to that same 6% default honestly
+          (never erroring or fabricating a zero -- see
+          `resolveWhatIfGrowthPercentDecimal`), disclosed via the hint below
+          each field rather than blocking input. Selecting the field's
+          contents on focus/click (mobile tap included) means a quick
+          re-entry never has to fight the previous value. These are live
+          preview inputs, not a mutation -- they keep working offline, no
+          `isOnline` gating. */}
       <section className="income-whatif" aria-labelledby="income-whatif-title">
         <p className="eyebrow" id="income-whatif-title">
           What if
         </p>
         <div className="income-whatif-inputs">
-          <label>
-            <span>Portfolio growth % / yr</span>
-            <input
-              type="number"
-              step="0.01"
-              value={valueGrowthInput}
-              onChange={(event) => updateValueGrowthInput(event.target.value)}
-            />
-          </label>
-          <label>
-            <span>Dividend growth % / yr</span>
-            <input
-              type="number"
-              step="0.01"
-              value={dividendGrowthInput}
-              onChange={(event) =>
-                updateDividendGrowthInput(event.target.value)
-              }
-            />
-          </label>
+          <div className="income-whatif-field">
+            <label>
+              <span>Portfolio growth % / yr</span>
+              <input
+                type="number"
+                step="0.01"
+                value={valueGrowthInput}
+                onChange={(event) => {
+                  setValueGrowthInput(event.target.value);
+                  setValueGrowthTouched(true);
+                }}
+                onFocus={(event) => event.currentTarget.select()}
+                onClick={(event) => event.currentTarget.select()}
+                aria-describedby={
+                  valueGrowthHintVisible
+                    ? "whatif-value-growth-hint"
+                    : undefined
+                }
+              />
+            </label>
+            {/* DIV-012 review fold: a hint nested INSIDE the <label> would
+                become part of the input's ACCESSIBLE NAME (every text node a
+                <label> wraps), changing that name every time validity
+                toggles -- moved OUT of the label as its own element,
+                associated instead via `aria-describedby`
+                (`dividend-assumptions-editor.tsx`'s established precedent),
+                so the accessible NAME (the caption span) stays stable and
+                this is announced as a description instead. */}
+            {valueGrowthHintVisible ? (
+              <span id="whatif-value-growth-hint" className="unavailable">
+                Using the default 6%/yr until you enter a plain number.
+              </span>
+            ) : null}
+          </div>
+          <div className="income-whatif-field">
+            <label>
+              <span>Dividend growth % / yr</span>
+              <input
+                type="number"
+                step="0.01"
+                value={dividendGrowthInput}
+                onChange={(event) => {
+                  setDividendGrowthInput(event.target.value);
+                  setDividendGrowthTouched(true);
+                }}
+                onFocus={(event) => event.currentTarget.select()}
+                onClick={(event) => event.currentTarget.select()}
+                aria-describedby={
+                  dividendGrowthHintVisible
+                    ? "whatif-dividend-growth-hint"
+                    : undefined
+                }
+              />
+            </label>
+            {dividendGrowthHintVisible ? (
+              <span id="whatif-dividend-growth-hint" className="unavailable">
+                Using the default 6%/yr until you enter a plain number.
+              </span>
+            ) : null}
+          </div>
         </div>
-        <div className="income-whatif-actions">
-          <button type="button" onClick={applyWhatIf}>
-            Apply
-          </button>
-          <button type="button" onClick={resetWhatIf}>
-            Reset
-          </button>
-          {whatIfApplied ? (
-            <span className="income-whatif-marker">Applied, not saved</span>
-          ) : null}
-        </div>
-        {whatIfError ? (
-          <p className="unavailable" role="alert">
-            {whatIfError}
+        {multiYearBaselineInput ? (
+          <p className="income-whatif-marker">Live preview here -- not saved</p>
+        ) : (
+          <p className="unavailable" role="status">
+            A what-if projection is not available for this portfolio.
           </p>
-        ) : null}
+        )}
       </section>
 
       <form
