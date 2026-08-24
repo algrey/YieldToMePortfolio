@@ -53,8 +53,11 @@ import type { CapitalEventInput } from "../domain/dividends/projection.ts";
 import {
   addDecimal,
   compareDecimal,
+  divideDecimal,
   formatDecimalExact,
+  formatDecimalTrimmed,
   fromInteger,
+  multiplyDecimal,
   parseDecimal,
 } from "../domain/calculations/decimal.ts";
 
@@ -440,32 +443,57 @@ export function sumCapitalEventAmounts(
  * DIFFERENT figure, rendered separately); `"single"` when every parcel
  * shares the identical yield (compared as DECIMAL VALUES via
  * `compareDecimal`, not raw strings, so "2" and "2.00" still count as the
- * same yield); `"mixed"` otherwise -- deliberately NEVER an averaged
- * number, which would misrepresent a blend of genuinely different
- * per-parcel yields as one exact figure. */
+ * same yield); `"average"` otherwise -- the NET-AMOUNT-WEIGHTED average of
+ * the parcels' yields (owner ruling 2026-08-24, superseding the DIV-014
+ * round-1 "Mixed" label: "Yield in the saved scenarios should be the total
+ * average portfolio yield for the scenario, not 'mixed'"). The weighting is
+ * over SIGNED amounts (a removal's yield reduces the blend exactly as it
+ * reduces the scenario's income), so the figure is the yield of the
+ * scenario's NET capital change -- consistent with the row's net "amount
+ * invested" cell beside it. A net amount of exactly zero has no meaningful
+ * blended yield and falls back to `"indeterminate"` (rendered as an
+ * em-dash, never a fabricated figure or a divide-by-zero). */
 export type IncomeScenarioYieldSummary =
   | { kind: "none" }
   | { kind: "single"; yieldPercentDecimal: string }
-  | { kind: "mixed" };
+  | { kind: "average"; yieldPercentDecimal: string }
+  | { kind: "indeterminate" };
 
 export function deriveIncomeScenarioYieldSummary(
   rows: readonly CapitalEventInput[],
 ): IncomeScenarioYieldSummary {
   if (rows.length === 0) return { kind: "none" };
-  const first = rows[0]!.yieldPercentDecimal;
-  const allMatch = rows.every((row) => {
-    try {
-      return (
+  try {
+    const first = rows[0]!.yieldPercentDecimal;
+    const allMatch = rows.every(
+      (row) =>
         compareDecimal(
           parseDecimal(row.yieldPercentDecimal),
           parseDecimal(first),
-        ) === 0
+        ) === 0,
+    );
+    if (allMatch) return { kind: "single", yieldPercentDecimal: first };
+    let weighted = fromInteger(0n);
+    let net = fromInteger(0n);
+    for (const row of rows) {
+      const amount = parseDecimal(row.amountDecimal);
+      net = addDecimal(net, amount);
+      weighted = addDecimal(
+        weighted,
+        multiplyDecimal(amount, parseDecimal(row.yieldPercentDecimal)),
       );
-    } catch {
-      return row.yieldPercentDecimal === first;
     }
-  });
-  return allMatch
-    ? { kind: "single", yieldPercentDecimal: first }
-    : { kind: "mixed" };
+    if (compareDecimal(net, fromInteger(0n)) === 0) {
+      return { kind: "indeterminate" };
+    }
+    return {
+      kind: "average",
+      yieldPercentDecimal: formatDecimalTrimmed(
+        divideDecimal(weighted, net),
+        2,
+      ),
+    };
+  } catch {
+    return { kind: "indeterminate" };
+  }
 }

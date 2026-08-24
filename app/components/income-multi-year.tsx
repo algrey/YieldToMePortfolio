@@ -1531,13 +1531,16 @@ export function IncomeMultiYear({
                         )}
                       </td>
                       <td className="numeric">
-                        {yieldSummary.kind === "single"
+                        {/* UI: owner ruling 2026-08-24 — differing parcel
+                            yields show the net-amount-weighted AVERAGE
+                            (never "Mixed"); a zero-net scenario has no
+                            meaningful blend and stays an em-dash. */}
+                        {yieldSummary.kind === "single" ||
+                        yieldSummary.kind === "average"
                           ? formatIncomePercent(
                               yieldSummary.yieldPercentDecimal,
                             )
-                          : yieldSummary.kind === "mixed"
-                            ? "Mixed"
-                            : "—"}
+                          : "—"}
                       </td>
                       <td className="numeric">
                         {scenario.valueGrowthPercentDecimal !== null

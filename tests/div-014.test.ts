@@ -191,7 +191,7 @@ test("DIV-014 (owner ruling, negative amounts): sumCapitalEventAmounts nets remo
   );
 });
 
-test("DIV-014 (owner ruling, mixed yields): deriveIncomeScenarioYieldSummary is 'none' with no parcels, 'single' when every parcel shares the identical yield (compared as decimal VALUES, not raw strings), and 'mixed' otherwise -- never a fabricated average", () => {
+test("DIV-014 (owner ruling 2026-08-24, superseding round-1 'Mixed'): deriveIncomeScenarioYieldSummary is 'none' with no parcels, 'single' when every parcel shares the identical yield (compared as decimal VALUES, not raw strings), the net-amount-weighted 'average' otherwise, and 'indeterminate' when the net amount is exactly zero", () => {
   assert.deepEqual(deriveIncomeScenarioYieldSummary([]), { kind: "none" });
   assert.deepEqual(
     deriveIncomeScenarioYieldSummary([
@@ -208,12 +208,33 @@ test("DIV-014 (owner ruling, mixed yields): deriveIncomeScenarioYieldSummary is 
     ]),
     { kind: "single", yieldPercentDecimal: "2" },
   );
+  // Differing yields blend as the net-amount-weighted average (owner:
+  // "the total average portfolio yield for the scenario"): equal amounts
+  // at 2% and 3% -> exactly 2.5%.
   assert.deepEqual(
     deriveIncomeScenarioYieldSummary([
-      { ...sampleInput, yieldPercentDecimal: "2" },
-      { ...sampleInput, yieldPercentDecimal: "3" },
+      { ...sampleInput, amountDecimal: "1000", yieldPercentDecimal: "2" },
+      { ...sampleInput, amountDecimal: "1000", yieldPercentDecimal: "3" },
     ]),
-    { kind: "mixed" },
+    { kind: "average", yieldPercentDecimal: "2.5" },
+  );
+  // Signed weighting: +10000 @ 4% with -2500 @ 5.5% -> net 7500,
+  // (10000*4 - 2500*5.5) / 7500 = 26250/7500 = 3.5%.
+  assert.deepEqual(
+    deriveIncomeScenarioYieldSummary([
+      { ...sampleInput, amountDecimal: "10000", yieldPercentDecimal: "4" },
+      { ...sampleInput, amountDecimal: "-2500", yieldPercentDecimal: "5.5" },
+    ]),
+    { kind: "average", yieldPercentDecimal: "3.5" },
+  );
+  // A net-zero scenario has no meaningful blended yield -- honest
+  // indeterminate (em-dash), never a divide-by-zero or fabricated figure.
+  assert.deepEqual(
+    deriveIncomeScenarioYieldSummary([
+      { ...sampleInput, amountDecimal: "5000", yieldPercentDecimal: "2" },
+      { ...sampleInput, amountDecimal: "-5000", yieldPercentDecimal: "3" },
+    ]),
+    { kind: "indeterminate" },
   );
 });
 
@@ -977,8 +998,9 @@ test("DIV-014: the saved-scenario row summary derivation renders honestly -- net
   assert.match(html, new RegExp(formatIncomePercent("3")));
   assert.match(html, new RegExp(formatIncomePercent("7")));
 
-  // Mixed-yield scenario: net 400, "Mixed" yield, capital growth follows
-  // portfolio (null), dividend growth 4%.
+  // Mixed-yield scenario: net 400, weighted-average yield (owner ruling
+  // 2026-08-24: never "Mixed" — 200@3% + 200@5% blends to exactly 4%),
+  // capital growth follows portfolio (null), dividend growth 4%.
   assert.match(html, />Mixed yield<\/button>/);
   assert.match(
     html,
@@ -989,7 +1011,9 @@ test("DIV-014: the saved-scenario row summary derivation renders honestly -- net
       ),
     ),
   );
-  assert.match(html, />Mixed<\/td>/);
+  assert.doesNotMatch(html, />Mixed<\/td>/);
+  // The blended 4% (weighted average) and the 4% dividend-growth cell both
+  // render as the same formatted percent string.
   assert.match(html, new RegExp(formatIncomePercent("4")));
 
   // No-parcel scenario: net "0", yield em-dash, both growth axes follow
