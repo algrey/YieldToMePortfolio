@@ -18,7 +18,25 @@
 // internal fetched state -- `HistoricalDataPanel` itself still owns the
 // fetch/pending orchestration, but every RENDERED state is independently
 // testable without needing a live effect to run.
+//
+// MKT-018B (guided flow, 2026-08-24): adds a "Download price history"
+// coverage panel ABOVE the import controls below -- `docs/
+// MARKET_DATA_STRATEGY.md` section 24's spike verdict is NO-GO for a
+// Worker-side fetch against Intelligent Investor (robots.txt `Disallow` on
+// the exact chart-data endpoint, WAF UA gate), so this panel stays
+// read-only/link-only: it lists the active portfolio's zero/partial
+// price-history securities (server read: `app/price-history-coverage.ts`,
+// one batched owner-scoped query, fetched over HTTP below -- never imported
+// directly, see `app/price-history-coverage-format.ts`'s header comment for
+// why) with a guide link per ticker, and feeds the SAME existing
+// single-security importer below (never a forked pipeline).
 import { useEffect, useRef, useState } from "react";
+import {
+  coverageGapSummary,
+  iiDownloadFilename,
+  iiShareUrl,
+  type PriceHistoryCoverageRow as ServerPriceHistoryCoverageRow,
+} from "../price-history-coverage-format.ts";
 
 const FETCH_TIMEOUT_MS = 20_000;
 
@@ -77,6 +95,85 @@ export type UploadBatch = {
   malformedRowCount: number;
   createdAt: string;
 };
+
+// MKT-018B (guided flow): `iiShareUrl`, `iiDownloadFilename`, and
+// `coverageGapSummary` live in `app/price-history-coverage-format.ts` (a
+// plain, DB-free `.ts` module, not this "use client" `.tsx` one, and NOT
+// `app/price-history-coverage.ts` -- that file's dynamic
+// `import("./portfolio-actions.ts")` would drag `cloudflare:workers` into
+// the client bundle) so `tests/mkt-018b.test.ts` can import them directly
+// under Node's `--experimental-strip-types` loader, which cannot import
+// JSX -- mirrors `app/price-history-chart-geometry.ts`'s split from the
+// UI-018 chart component. Re-exported here under the SAME name the server
+// read uses so
+// callers of this panel never see two divergent shapes.
+export type PriceHistoryCoverageRow = ServerPriceHistoryCoverageRow;
+
+export function PriceHistoryCoverageZeroList({
+  rows,
+}: {
+  rows: PriceHistoryCoverageRow[];
+}) {
+  if (rows.length === 0) return null;
+  return (
+    <div className="historical-data-coverage-group">
+      <h4>No price history yet</h4>
+      <ul className="historical-data-coverage-list">
+        {rows.map((row) => (
+          <li key={row.portfolioSecurityId}>
+            <span className="historical-data-coverage-name">
+              <strong>{row.ticker}</strong> — {row.name}
+            </span>
+            <a
+              className="historical-data-coverage-link"
+              href={iiShareUrl(row.ticker)}
+              target="_blank"
+              rel="noopener noreferrer"
+              referrerPolicy="no-referrer"
+            >
+              Open {row.ticker} on Intelligent Investor
+            </a>
+            <span className="historical-data-coverage-filename">
+              Expected download filename: {iiDownloadFilename(row.ticker)}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+export function PriceHistoryCoveragePartialList({
+  rows,
+}: {
+  rows: PriceHistoryCoverageRow[];
+}) {
+  if (rows.length === 0) return null;
+  return (
+    <div className="historical-data-coverage-group">
+      <h4>Partial price history</h4>
+      <ul className="historical-data-coverage-list">
+        {rows.map((row) => (
+          <li key={row.portfolioSecurityId}>
+            <span className="historical-data-coverage-name">
+              <strong>{row.ticker}</strong> — {row.name}
+            </span>
+            <span>{coverageGapSummary(row)}</span>
+            <a
+              className="historical-data-coverage-link"
+              href={iiShareUrl(row.ticker)}
+              target="_blank"
+              rel="noopener noreferrer"
+              referrerPolicy="no-referrer"
+            >
+              Open {row.ticker} on Intelligent Investor
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 async function fetchJson<T>(
   input: string,
@@ -292,7 +389,7 @@ export function PriceUploadList({
   );
 }
 
-export function HistoricalDataPanel() {
+export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
   const [exchangeAlias, setExchangeAlias] = useState("ASX");
   const [currencyCode, setCurrencyCode] = useState("AUD");
   const [file, setFile] = useState<File | null>(null);
@@ -317,6 +414,65 @@ export function HistoricalDataPanel() {
   const [deletePending, setDeletePending] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
+
+  const [coverage, setCoverage] = useState<{
+    zero: PriceHistoryCoverageRow[];
+    partial: PriceHistoryCoverageRow[];
+  } | null>(null);
+  const [coverageError, setCoverageError] = useState<string | null>(null);
+  // React's own "adjusting state when a prop changes" recipe
+  // (react.dev/learn/you-might-not-need-an-effect) -- calling setState
+  // synchronously INSIDE an effect body triggers an extra cascading render
+  // (and this codebase's lint config enforces that rule); resetting during
+  // render instead, guarded by comparing against the last portfolioId this
+  // panel fetched for, avoids it while still clearing stale coverage the
+  // instant the owner switches the "Target portfolio" dropdown.
+  const [coveragePortfolioId, setCoveragePortfolioId] = useState(portfolioId);
+  if (portfolioId !== coveragePortfolioId) {
+    setCoveragePortfolioId(portfolioId);
+    setCoverage(null);
+    setCoverageError(null);
+  }
+
+  // MKT-018B (guided flow): re-fetches whenever the owner switches the
+  // import page's "Target portfolio" -- `portfolioId` here is exactly that
+  // dropdown's current selection (`ImportReview`'s `targetPortfolioId`,
+  // itself defaulted to `portfolios[0].id`, i.e. the owner's "active"
+  // portfolio), mirroring `SharesightSyncPanel`'s per-portfolio scoping.
+  useEffect(() => {
+    if (!portfolioId) return;
+    let cancelled = false;
+    fetch(
+      `/api/portfolios/${encodeURIComponent(portfolioId)}/price-history-coverage`,
+      { cache: "no-store" },
+    )
+      .then((response) => response.json())
+      .then((raw: unknown) => {
+        const result = raw as
+          | {
+              ok: true;
+              zero: PriceHistoryCoverageRow[];
+              partial: PriceHistoryCoverageRow[];
+            }
+          | { ok: false; message: string };
+        if (cancelled) return;
+        if (!result.ok) {
+          setCoverageError(result.message);
+          return;
+        }
+        setCoverage({ zero: result.zero, partial: result.partial });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCoverageError(
+            "The request failed. Check your connection and retry.",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [portfolioId]);
 
   async function loadBatches() {
     const result = await fetchJson<{ batches: UploadBatch[] }>(
@@ -500,6 +656,43 @@ export function HistoricalDataPanel() {
         previously exported backup.
       </p>
 
+      <section
+        className="historical-data-coverage"
+        aria-labelledby="historical-data-coverage-title"
+      >
+        <h3 id="historical-data-coverage-title">Download price history</h3>
+        <p>
+          Downloads run in your own browser via the guide — this app never
+          fetches Intelligent Investor&apos;s data directly.
+        </p>
+        {coverageError ? (
+          <p role="alert" className="historical-data-error">
+            {coverageError}
+          </p>
+        ) : null}
+        {!coverageError && coverage === null ? (
+          <p role="status">Checking price-history coverage…</p>
+        ) : null}
+        {coverage &&
+        coverage.zero.length === 0 &&
+        coverage.partial.length === 0 ? (
+          <p>Every held security has recorded price history.</p>
+        ) : null}
+        {coverage ? (
+          <>
+            <PriceHistoryCoverageZeroList rows={coverage.zero} />
+            <PriceHistoryCoveragePartialList rows={coverage.partial} />
+          </>
+        ) : null}
+        {coverage &&
+        (coverage.zero.length > 0 || coverage.partial.length > 0) ? (
+          <p>
+            Download each CSV above, then{" "}
+            <a href="#historical-data-single-upload">import it below</a>.
+          </p>
+        ) : null}
+      </section>
+
       <div className="historical-data-settings">
         <label>
           Exchange
@@ -517,7 +710,10 @@ export function HistoricalDataPanel() {
         </label>
       </div>
 
-      <div className="historical-data-import">
+      <div
+        className="historical-data-import"
+        id="historical-data-single-upload"
+      >
         <h3>Import single security</h3>
         <label>
           Price history CSV

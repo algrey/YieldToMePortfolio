@@ -1600,7 +1600,7 @@ export function ImportReview({
         />
       ) : null}
 
-      <HistoricalDataPanel />
+      <HistoricalDataPanel portfolioId={targetPortfolioId} />
 
       {message ? (
         <p className="action-feedback" role="alert">

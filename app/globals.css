@@ -5073,6 +5073,65 @@ dd {
   color: var(--muted);
 }
 
+.historical-data-coverage {
+  margin-top: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--divider);
+  border-radius: 4px;
+  background: var(--forest);
+}
+
+.historical-data-coverage h3 {
+  margin-top: 0;
+}
+
+.historical-data-coverage-group {
+  margin-top: 14px;
+}
+
+.historical-data-coverage-group h4 {
+  margin: 0 0 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.historical-data-coverage-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.historical-data-coverage-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--divider);
+  font-size: 0.82rem;
+  color: var(--cream);
+}
+
+.historical-data-coverage-name {
+  color: var(--cream);
+}
+
+.historical-data-coverage-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--green-bright);
+  width: fit-content;
+}
+
+.historical-data-coverage-filename {
+  color: var(--muted);
+}
+
 .historical-data-dialog {
   width: min(480px, calc(100vw - 32px));
   padding: 24px;
