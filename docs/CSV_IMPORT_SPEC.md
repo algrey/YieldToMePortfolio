@@ -549,6 +549,25 @@ Settings accompanying the upload: exchange (defaults `ASX`) and currency
 convention, NOT validated against an `exchanges` table row (that table is
 unpopulated in this deployment; see `docs/MARKET_DATA_STRATEGY.md` §18).
 
+**Multi-file upload (MKT-018C):** the file picker accepts `multiple` --
+selecting more than one file at once runs each file through this SAME
+preview/confirm pipeline, one file at a time, in the order selected
+(`app/multi-file-price-upload.ts`'s `runMultiFilePriceUpload`); it never
+forks a combined-file mega-batch. Every file still gets its own explicit
+owner-reviewed preview -- the run pauses on each file's preview and waits
+for the owner to Confirm/Skip/Cancel before moving on, exactly like a
+single-file upload's existing preview-then-confirm step, never
+auto-committed. One file failing preview or confirm (a malformed CSV, a
+ticker not held, etc.) is recorded against that filename with an honest
+message and the run continues to the next file -- it never blocks or
+aborts the remaining siblings; "Cancel remaining files" is the only way to
+stop early, and it never touches files not yet reached. Per-file request/
+size caps are unchanged (this section's 2 MiB / 20,000-row limits, enforced
+per request); there is no additional aggregate cap on the number of files
+in one run. On completion (or cancellation), `HistoricalDataPanel` re-fetches
+the MKT-018B coverage panel so any tickers the run just covered drop off
+the zero-history list.
+
 ### 15.2 Full backup export / re-import (`domain/market-data/price-backup-csv.ts`)
 
 A SEPARATE, self-describing CSV format -- comma-delimited, RFC4180

@@ -1582,7 +1582,7 @@ test("MKT-008 render: HistoricalDataPanel's default render shows the section hea
   assert.match(html, /Price history import/);
   assert.match(html, />Exchange</);
   assert.match(html, />Currency</);
-  assert.match(html, /Import single security/);
+  assert.match(html, /Import security price history/);
   assert.match(html, /Import backup/);
   assert.match(html, />Export</);
   assert.match(html, /Past uploads/);

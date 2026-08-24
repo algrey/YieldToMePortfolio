@@ -5073,6 +5073,23 @@ dd {
   color: var(--muted);
 }
 
+/* MKT-018C: the sequential multi-file run's live status + per-file results
+   list, rendered inline under the single-file preview/confirm controls
+   (same "historical-data-import" section, same visual language -- reuses
+   .historical-data-preview/.historical-data-actions/.historical-data-uploads/
+   .historical-data-upload-list above rather than introducing new ones). */
+.historical-data-multi-run {
+  margin-top: 12px;
+}
+
+.historical-data-multi-run h4 {
+  margin-top: 16px;
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 0.95rem;
+  color: var(--cream);
+}
+
 .historical-data-coverage {
   margin-top: 12px;
   padding: 14px 16px;

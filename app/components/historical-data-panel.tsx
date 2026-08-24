@@ -37,6 +37,13 @@ import {
   iiShareUrl,
   type PriceHistoryCoverageRow as ServerPriceHistoryCoverageRow,
 } from "../price-history-coverage-format.ts";
+import {
+  runMultiFilePriceUpload,
+  type MultiFileConfirmResult,
+  type MultiFileDecision,
+  type MultiFilePreviewResult,
+  type MultiFileStepResult,
+} from "../multi-file-price-upload.ts";
 
 const FETCH_TIMEOUT_MS = 20_000;
 
@@ -389,6 +396,97 @@ export function PriceUploadList({
   );
 }
 
+/**
+ * MKT-018C: renders the sequential multi-file run's live status -- extracted
+ * as a pure, explicit-props presentational component (matching
+ * `SinglePreviewSummary`/`PriceUploadList` above) so `tests/mkt-018c.test.ts`
+ * can render every phase directly without a live effect or interactive DOM
+ * harness (this codebase has neither, see `tests/brk-005b.test.ts`'s header
+ * note). Status text names the phase explicitly (never color-only) per
+ * QA-001B; the results list is append-only and never removes an earlier
+ * file's outcome, so a scroll-back always shows every file's fate.
+ */
+export function MultiFileRunStatus({
+  running,
+  phase,
+  total,
+  index,
+  currentFilename,
+  currentPreview,
+  pending,
+  results,
+  cancelled,
+  onConfirm,
+  onSkip,
+  onCancel,
+}: {
+  running: boolean;
+  phase: "checking" | "reviewing" | "importing" | null;
+  total: number;
+  index: number;
+  currentFilename: string | null;
+  currentPreview: SinglePreview | null;
+  pending: boolean;
+  results: MultiFileStepResult[];
+  cancelled: boolean;
+  onConfirm: () => void;
+  onSkip: () => void;
+  onCancel: () => void;
+}) {
+  if (!running && results.length === 0) return null;
+  const statusText = running
+    ? phase === "reviewing"
+      ? `Reviewing file ${index} of ${total}: ${currentFilename}.`
+      : phase === "importing"
+        ? `Importing file ${index} of ${total}: ${currentFilename}…`
+        : `Checking file ${index} of ${total}: ${currentFilename}…`
+    : cancelled
+      ? `Cancelled — ${results.length} of ${total} file(s) processed.`
+      : `Finished: ${results.length} of ${total} file(s) processed.`;
+  return (
+    <div className="historical-data-multi-run">
+      <p role="status" aria-busy={running || undefined}>
+        {statusText}
+      </p>
+      {currentPreview ? (
+        <>
+          <SinglePreviewSummary preview={currentPreview} />
+          <div className="historical-data-actions">
+            <button
+              type="button"
+              onClick={onConfirm}
+              disabled={pending}
+              aria-busy={pending || undefined}
+            >
+              {pending ? "Importing…" : "Confirm import"}
+            </button>
+            <button type="button" onClick={onSkip} disabled={pending}>
+              Skip this file
+            </button>
+            <button type="button" onClick={onCancel} disabled={pending}>
+              Cancel remaining files
+            </button>
+          </div>
+        </>
+      ) : null}
+      {results.length > 0 ? (
+        <div className="historical-data-uploads">
+          <h4>Multi-file import results</h4>
+          <ul className="historical-data-upload-list">
+            {results.map((result, resultIndex) => (
+              <li key={`${result.filename}-${resultIndex}`}>
+                <span>
+                  {result.filename}: {result.message}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
   const [exchangeAlias, setExchangeAlias] = useState("ASX");
   const [currencyCode, setCurrencyCode] = useState("AUD");
@@ -400,6 +498,36 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
   const [singleError, setSingleError] = useState<string | null>(null);
   const [singlePending, setSinglePending] = useState(false);
   const [singleResult, setSingleResult] = useState<string | null>(null);
+
+  // MKT-018C: selecting MORE THAN ONE file switches into this sequential
+  // run -- each file still goes through the exact same preview/confirm
+  // endpoints as the single-file path above (`multiPreviewFile`/
+  // `multiConfirmFile` below build the identical FormData), just walked one
+  // file at a time via `runMultiFilePriceUpload`. Selecting exactly one
+  // file (including via the `multiple` picker) takes the ORIGINAL
+  // `file`/`singlePreview`/... state path above, byte-for-byte unchanged,
+  // so a single-file upload behaves exactly as it did before this task.
+  const [multiRunning, setMultiRunning] = useState(false);
+  const [multiTotal, setMultiTotal] = useState(0);
+  const [multiIndex, setMultiIndex] = useState(0);
+  const [multiCurrentFilename, setMultiCurrentFilename] = useState<
+    string | null
+  >(null);
+  const [multiCurrentPreview, setMultiCurrentPreview] =
+    useState<SinglePreview | null>(null);
+  const [multiPending, setMultiPending] = useState(false);
+  const [multiPhase, setMultiPhase] = useState<
+    "checking" | "reviewing" | "importing" | null
+  >(null);
+  const [multiResults, setMultiResults] = useState<MultiFileStepResult[]>([]);
+  const [multiCancelled, setMultiCancelled] = useState(false);
+  // Resolves the Promise `runMultiFilePriceUpload`'s `decide` callback is
+  // awaiting on -- set while a file's preview is on screen awaiting the
+  // owner's Confirm/Skip/Cancel click, cleared once one of those buttons
+  // resolves it. Never auto-resolved: the owner reviews every file.
+  const multiDecisionRef = useRef<
+    ((decision: MultiFileDecision) => void) | null
+  >(null);
 
   const [backupFile, setBackupFile] = useState<File | null>(null);
   const [backupPreview, setBackupPreview] = useState<BackupPreview | null>(
@@ -439,40 +567,67 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
   // dropdown's current selection (`ImportReview`'s `targetPortfolioId`,
   // itself defaulted to `portfolios[0].id`, i.e. the owner's "active"
   // portfolio), mirroring `SharesightSyncPanel`'s per-portfolio scoping.
+  //
+  // MKT-018C: the fetch itself is extracted to `fetchCoverage` (below) so a
+  // finished multi-file upload run can re-request coverage directly --
+  // freshly-covered tickers must drop off the zero-history list once the
+  // run commits their price history, and this panel never unmounts between
+  // files, so nothing else would trigger that refresh.
   useEffect(() => {
     if (!portfolioId) return;
     let cancelled = false;
-    fetch(
-      `/api/portfolios/${encodeURIComponent(portfolioId)}/price-history-coverage`,
-      { cache: "no-store" },
-    )
-      .then((response) => response.json())
-      .then((raw: unknown) => {
-        const result = raw as
-          | {
-              ok: true;
-              zero: PriceHistoryCoverageRow[];
-              partial: PriceHistoryCoverageRow[];
-            }
-          | { ok: false; message: string };
-        if (cancelled) return;
-        if (!result.ok) {
-          setCoverageError(result.message);
-          return;
-        }
-        setCoverage({ zero: result.zero, partial: result.partial });
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setCoverageError(
-            "The request failed. Check your connection and retry.",
-          );
-        }
-      });
+    fetchCoverage(portfolioId).then((result) => {
+      if (cancelled) return;
+      if (!result.ok) {
+        setCoverageError(result.message);
+        return;
+      }
+      setCoverageError(null);
+      setCoverage({ zero: result.zero, partial: result.partial });
+    });
     return () => {
       cancelled = true;
     };
   }, [portfolioId]);
+
+  async function fetchCoverage(forPortfolioId: string): Promise<
+    | {
+        ok: true;
+        zero: PriceHistoryCoverageRow[];
+        partial: PriceHistoryCoverageRow[];
+      }
+    | { ok: false; message: string }
+  > {
+    try {
+      const response = await fetch(
+        `/api/portfolios/${encodeURIComponent(forPortfolioId)}/price-history-coverage`,
+        { cache: "no-store" },
+      );
+      return (await response.json()) as
+        | {
+            ok: true;
+            zero: PriceHistoryCoverageRow[];
+            partial: PriceHistoryCoverageRow[];
+          }
+        | { ok: false; message: string };
+    } catch {
+      return {
+        ok: false,
+        message: "The request failed. Check your connection and retry.",
+      };
+    }
+  }
+
+  async function refreshCoverage() {
+    if (!portfolioId) return;
+    const result = await fetchCoverage(portfolioId);
+    if (!result.ok) {
+      setCoverageError(result.message);
+      return;
+    }
+    setCoverageError(null);
+    setCoverage({ zero: result.zero, partial: result.partial });
+  }
 
   async function loadBatches() {
     const result = await fetchJson<{ batches: UploadBatch[] }>(
@@ -571,6 +726,111 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
     setSinglePreview(null);
     setFile(null);
     void loadBatches();
+  }
+
+  // MKT-018C: the multi-file preview/confirm calls below build the SAME
+  // FormData fields (`file`, `exchangeAlias`, `currencyCode`, and --
+  // confirm only -- `sourceLabel`) against the SAME two endpoints
+  // `previewSingle`/`confirmSingle` call above; only the file object and
+  // which state setters run differ. Exchange/currency settings apply to
+  // every file in the run, exactly like the single-file section's shared
+  // fields above -- Intelligent Investor exports for one portfolio are all
+  // the same exchange/currency in practice, and this reuses the existing
+  // controls rather than asking per-file.
+  async function multiPreviewFile(
+    uploadFile: File,
+  ): Promise<MultiFilePreviewResult<SinglePreview>> {
+    const form = new FormData();
+    form.set("file", uploadFile);
+    form.set("exchangeAlias", exchangeAlias);
+    form.set("currencyCode", currencyCode);
+    const result = await fetchJson<{ preview: SinglePreview }>(
+      "/api/market-data/price-uploads/preview",
+      { method: "POST", body: form },
+    );
+    if (!result.ok) return { ok: false, message: result.message };
+    return { ok: true, preview: result.value.preview };
+  }
+
+  async function multiConfirmFile(
+    uploadFile: File,
+  ): Promise<MultiFileConfirmResult> {
+    const form = new FormData();
+    form.set("file", uploadFile);
+    form.set("exchangeAlias", exchangeAlias);
+    form.set("currencyCode", currencyCode);
+    form.set("sourceLabel", sourceLabel);
+    const result = await fetchJson<{ batch: UploadBatch; written: number }>(
+      "/api/market-data/price-uploads/confirm",
+      { method: "POST", body: form },
+    );
+    if (!result.ok) return { ok: false, message: result.message };
+    return {
+      ok: true,
+      written: result.value.written,
+      insertedRowCount: result.value.batch.insertedRowCount,
+    };
+  }
+
+  /** Resolves the pending `decide` Promise `runMultiFilePriceUpload` is
+   * awaiting -- called by the Confirm/Skip/Cancel buttons rendered under
+   * the current file's preview. */
+  function respondMultiDecision(decision: MultiFileDecision) {
+    const resolve = multiDecisionRef.current;
+    if (!resolve) return;
+    multiDecisionRef.current = null;
+    setMultiCurrentPreview(null);
+    if (decision === "confirm") {
+      setMultiPending(true);
+      setMultiPhase("importing");
+    }
+    resolve(decision);
+  }
+
+  async function startMultiRun(selected: File[]) {
+    setMultiRunning(true);
+    setMultiCancelled(false);
+    setMultiResults([]);
+    setMultiTotal(selected.length);
+    setMultiIndex(0);
+    setMultiCurrentFilename(null);
+    setMultiCurrentPreview(null);
+    setMultiPending(false);
+    setMultiPhase(null);
+
+    const { results, cancelled } = await runMultiFilePriceUpload(selected, {
+      previewFile: multiPreviewFile,
+      confirmFile: multiConfirmFile,
+      filenameOf: (uploadFile) => uploadFile.name,
+      onProgress: (index, total, filename) => {
+        setMultiIndex(index);
+        setMultiTotal(total);
+        setMultiCurrentFilename(filename);
+        setMultiCurrentPreview(null);
+        setMultiPending(true);
+        setMultiPhase("checking");
+      },
+      decide: (preview) =>
+        new Promise((resolve) => {
+          setMultiPending(false);
+          setMultiPhase("reviewing");
+          setMultiCurrentPreview(preview);
+          multiDecisionRef.current = resolve;
+        }),
+    });
+
+    setMultiResults(results);
+    setMultiCancelled(cancelled);
+    setMultiRunning(false);
+    setMultiPending(false);
+    setMultiPhase(null);
+    setMultiCurrentPreview(null);
+    setMultiCurrentFilename(null);
+    void loadBatches();
+    // MKT-018B's coverage panel must refresh after the run so any
+    // now-covered tickers drop off the zero-history list -- see the
+    // `refreshCoverage` note above.
+    void refreshCoverage();
   }
 
   async function previewBackup() {
@@ -698,6 +958,7 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
           Exchange
           <input
             value={exchangeAlias}
+            disabled={multiRunning}
             onChange={(event) => setExchangeAlias(event.target.value)}
           />
         </label>
@@ -705,6 +966,7 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
           Currency
           <input
             value={currencyCode}
+            disabled={multiRunning}
             onChange={(event) => setCurrencyCode(event.target.value)}
           />
         </label>
@@ -714,17 +976,44 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
         className="historical-data-import"
         id="historical-data-single-upload"
       >
-        <h3>Import single security</h3>
+        <h3>Import security price history</h3>
+        <p>
+          Select one file to import it directly below, or select several at once
+          to import them one at a time, in order.
+        </p>
+        <p>
+          The Exchange, Currency, and Source label settings above and below
+          apply to every file in the run -- they cannot be changed per file.
+        </p>
         <label>
           Price history CSV
           <input
             type="file"
             accept=".csv,text/csv,text/tab-separated-values"
+            multiple
+            disabled={multiRunning}
             onChange={(event) => {
-              setFile(event.target.files?.[0] ?? null);
+              const selected = Array.from(event.target.files ?? []);
+              // MKT-018C: exactly one file (including one chosen from a
+              // multi-select picker) takes the ORIGINAL single-file state
+              // path below, unchanged -- only picking more than one file
+              // switches into the sequential multi-file run.
+              if (selected.length > 1) {
+                setFile(null);
+                setSinglePreview(null);
+                setSingleError(null);
+                setSingleResult(null);
+                void startMultiRun(selected);
+                return;
+              }
+              setFile(selected[0] ?? null);
               setSinglePreview(null);
               setSingleError(null);
               setSingleResult(null);
+              setMultiResults([]);
+              setMultiCancelled(false);
+              setMultiPhase(null);
+              setMultiCurrentPreview(null);
             }}
           />
         </label>
@@ -732,6 +1021,7 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
           Source label
           <input
             value={sourceLabel}
+            disabled={multiRunning}
             onChange={(event) => setSourceLabel(event.target.value)}
           />
         </label>
@@ -768,6 +1058,20 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
             {singleResult}
           </p>
         ) : null}
+        <MultiFileRunStatus
+          running={multiRunning}
+          phase={multiPhase}
+          total={multiTotal}
+          index={multiIndex}
+          currentFilename={multiCurrentFilename}
+          currentPreview={multiCurrentPreview}
+          pending={multiPending}
+          results={multiResults}
+          cancelled={multiCancelled}
+          onConfirm={() => respondMultiDecision("confirm")}
+          onSkip={() => respondMultiDecision("skip")}
+          onCancel={() => respondMultiDecision("cancel")}
+        />
       </div>
 
       <div className="historical-data-import">
