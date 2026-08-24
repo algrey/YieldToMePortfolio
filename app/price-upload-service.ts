@@ -14,13 +14,15 @@ import {
 } from "../db/repositories/price-uploads.ts";
 import {
   DEFAULT_PRICE_CSV_LIMITS,
-  parsePriceCsv,
+  validateUploadedPriceCsvPayload,
   type PriceCsvDataRow,
 } from "../domain/market-data/price-csv.ts";
 import {
   DEFAULT_PRICE_BACKUP_LIMITS,
   formatPriceBackupCsv,
-  parsePriceBackupCsv,
+  MAX_SOURCE_LABEL_LENGTH,
+  sanitizeUploadedMalformedByReason,
+  validateUploadedPriceBackupPayload,
   type PriceBackupDataRow,
   type PriceBackupExportRow,
   type PriceBackupMalformedReason,
@@ -36,20 +38,36 @@ import {
 
 // MKT-008: this is the ONLY layer that ever writes -- both the preview and
 // confirm actions call the SAME parse-and-resolve helpers below, over the
-// SAME uploaded bytes. Deliberately STATELESS between preview and confirm
-// (no `price_upload_rows` staging table the way the ledger CSV flow uses):
-// parsing and resolution here are pure/deterministic over the file's own
-// bytes plus the owner's ALREADY-existing securities, so a preview is
-// exactly "run the same read-only computation confirm is about to run, and
-// show the result" -- the client resubmits the identical `File` object
-// (still held in the browser, not re-selected) on confirm. This avoids a
-// second staging schema for a feature whose "review" step has no owner
-// judgment calls to make beyond "does this match what I expected" (unlike
-// the ledger CSV flow, which stages ambiguous mappings/candidate securities
-// an owner must actively resolve).
+// SAME uploaded row payload. Deliberately STATELESS between preview and
+// confirm (no `price_upload_rows` staging table the way the ledger CSV flow
+// uses): resolution here is pure/deterministic over the payload's own rows
+// plus the owner's ALREADY-existing securities, so a preview is exactly
+// "run the same read-only computation confirm is about to run, and show the
+// result" -- the client resubmits the identical parsed rows (re-derived from
+// the same `File` object still held in the browser, not re-selected) on
+// confirm. This avoids a second staging schema for a feature whose "review"
+// step has no owner judgment calls to make beyond "does this match what I
+// expected" (unlike the ledger CSV flow, which stages ambiguous
+// mappings/candidate securities an owner must actively resolve).
+//
+// IMP-010A (2026-08-25): the CSV TEXT is no longer decoded/split/classified
+// here -- that now runs in the BROWSER (`historical-data-panel.tsx` imports
+// `parsePriceCsv`/`parsePriceBackupCsv` from `domain/market-data/` directly,
+// the SAME pure parsers this file used to call over raw bytes), which
+// uploads structured, already-normalized row JSON instead of a file. This
+// layer keeps FULL authority unchanged: `validateUploadedPriceCsvPayload`/
+// `validateUploadedPriceBackupPayload` re-validate every field of every
+// uploaded row with the EXACT SAME grammar the browser's parser enforces
+// (client output is untrusted input per AGENTS.md -- a hand-crafted hostile
+// payload that skips the real parser is rejected row-by-row, fail-closed,
+// exactly as equivalent malformed CSV text used to be). No content-hash
+// digest existed for this path before IMP-010A (idempotency here has always
+// been the natural-key upsert in `writePriceUploadObservations`, not a
+// file-level fingerprint -- see that function's own header comment), so
+// there is no digest semantics to preserve: a re-upload of the same rows
+// still upserts onto the identical `price_observations` row it always did.
 
 export const DEFAULT_SOURCE_LABEL = "intelligent-investor";
-const MAX_SOURCE_LABEL_LENGTH = 60;
 const CONTROL_CHARACTER_PATTERN = /[\x00-\x1f\x7f]/g;
 
 export type PriceUploadContext = Readonly<{
@@ -103,13 +121,29 @@ type ResolvedSingleUpload = Readonly<{
 }>;
 
 /**
- * Parses `bytes` as a single-security price CSV and resolves its ticker
- * against the owner's OWN securities -- shared by preview and confirm (see
- * this file's header comment). Never writes.
+ * Raw shape of a browser-parsed single-security upload payload -- `unknown`
+ * because it arrived as untrusted JSON over the wire (the client's file
+ * picker or a hostile hand-crafted request, indistinguishable at this
+ * boundary). `malformedCount` is the browser parser's OWN count of rows it
+ * already dropped before ever sending them -- purely informational (surfaced
+ * on the batch record for the owner's "N malformed rows" disclosure), never
+ * trusted for anything write-affecting; the rows that DO arrive are always
+ * re-validated below regardless of what this number claims.
+ */
+export type SinglePriceUploadPayload = Readonly<{
+  ticker: unknown;
+  rows: unknown;
+  malformedCount?: unknown;
+}>;
+
+/**
+ * Validates `payload` as a browser-parsed single-security price-CSV upload
+ * and resolves its ticker against the owner's OWN securities -- shared by
+ * preview and confirm (see this file's header comment). Never writes.
  */
 async function parseAndResolveSingleUpload(
   context: PriceUploadContext,
-  bytes: Uint8Array,
+  payload: SinglePriceUploadPayload,
   settings: SingleUploadSettings,
 ): Promise<{ ok: true; value: ResolvedSingleUpload } | Failure> {
   const exchangeAlias = settings.exchangeAlias.trim().toUpperCase();
@@ -127,16 +161,19 @@ async function parseAndResolveSingleUpload(
   if (!currencyCode) {
     return fail(400, "The currency is invalid or inactive.");
   }
-  const parsed = parsePriceCsv(bytes, DEFAULT_PRICE_CSV_LIMITS);
+  const parsed = validateUploadedPriceCsvPayload(
+    payload,
+    DEFAULT_PRICE_CSV_LIMITS,
+  );
   if (!parsed.ok) {
-    return fail(
-      parsed.code === "BYTE_LIMIT_EXCEEDED" ||
-        parsed.code === "ROW_LIMIT_EXCEEDED"
-        ? 400
-        : 400,
-      parsed.message,
-    );
+    return fail(400, parsed.message);
   }
+  const clientMalformedCount =
+    typeof payload.malformedCount === "number" &&
+    Number.isInteger(payload.malformedCount) &&
+    payload.malformedCount >= 0
+      ? payload.malformedCount
+      : 0;
   const evidence: PriceUploadSecurityEvidenceRow[] =
     await loadSameUserSecurityEvidenceForTicker(
       context.client,
@@ -180,7 +217,13 @@ async function parseAndResolveSingleUpload(
       securityId: resolution.securityId,
       matchedName: resolution.canonicalName,
       rows: parsed.rows,
-      malformedCount: parsed.malformed.length,
+      // The batch-level malformed count is the browser's own count (rows
+      // it already dropped before sending, informational only) PLUS any
+      // rows this server-side re-validation additionally rejected (only
+      // ever non-zero for a hostile payload that skipped the real
+      // browser parser -- an honest upload's `parsed.malformed` is always
+      // empty here, since the browser already filtered).
+      malformedCount: clientMalformedCount + parsed.malformed.length,
     },
   };
 }
@@ -235,10 +278,14 @@ function summarizeRows(rows: readonly PriceCsvDataRow[]): {
 
 export async function previewSinglePriceUpload(
   context: PriceUploadContext,
-  bytes: Uint8Array,
+  payload: SinglePriceUploadPayload,
   settings: SingleUploadSettings,
 ): Promise<{ ok: true; preview: SinglePriceUploadPreview } | Failure> {
-  const resolved = await parseAndResolveSingleUpload(context, bytes, settings);
+  const resolved = await parseAndResolveSingleUpload(
+    context,
+    payload,
+    settings,
+  );
   if (!resolved.ok) return resolved;
   const { value } = resolved;
   const summary = summarizeRows(value.rows);
@@ -264,12 +311,16 @@ export type SinglePriceUploadConfirmResult = Readonly<{
 
 export async function confirmSinglePriceUpload(
   context: PriceUploadContext,
-  bytes: Uint8Array,
+  payload: SinglePriceUploadPayload,
   settings: SingleUploadSettings,
   input: Readonly<{ filename: string; sourceLabel: string }>,
   now: () => string = () => new Date().toISOString(),
 ): Promise<{ ok: true; value: SinglePriceUploadConfirmResult } | Failure> {
-  const resolved = await parseAndResolveSingleUpload(context, bytes, settings);
+  const resolved = await parseAndResolveSingleUpload(
+    context,
+    payload,
+    settings,
+  );
   if (!resolved.ok) return resolved;
   const { value } = resolved;
   if (value.rows.length === 0) {
@@ -452,9 +503,23 @@ async function resolveBackupGroups(
   return results;
 }
 
+/**
+ * Raw shape of a browser-parsed backup-restore upload payload -- `unknown`
+ * because it arrived as untrusted JSON over the wire (see
+ * `SinglePriceUploadPayload`'s identical rationale above).
+ * `malformedByReason` is the browser parser's OWN per-reason breakdown of
+ * rows it already dropped before ever sending them -- informational only
+ * (`sanitizeUploadedMalformedByReason` strips anything that isn't a
+ * recognised reason with a non-negative integer count).
+ */
+export type BackupPriceUploadPayload = Readonly<{
+  rows: unknown;
+  malformedByReason?: unknown;
+}>;
+
 async function parseAndResolveBackup(
   context: PriceUploadContext,
-  bytes: Uint8Array,
+  payload: BackupPriceUploadPayload,
 ): Promise<
   | {
       ok: true;
@@ -466,23 +531,33 @@ async function parseAndResolveBackup(
     }
   | Failure
 > {
-  const parsed = parsePriceBackupCsv(bytes, DEFAULT_PRICE_BACKUP_LIMITS);
+  const parsed = validateUploadedPriceBackupPayload(
+    payload,
+    DEFAULT_PRICE_BACKUP_LIMITS,
+  );
   if (!parsed.ok) return fail(400, parsed.message);
   const groups = groupBackupRows(parsed.rows);
   const resolved = await resolveBackupGroups(context, groups);
   // Follow-up (1): the parser already computes a reason per malformed row --
   // surface the breakdown rather than a single opaque count, so the owner
   // can tell "wrong format version" from "unknown provider" from "bad
-  // price" without re-parsing the file themselves.
+  // price" without re-parsing the file themselves. Starts from the
+  // browser's own (sanitized, informational) breakdown and adds anything
+  // this server-side re-validation ALSO rejected (only ever non-zero for a
+  // hostile payload that skipped the real browser parser).
   const malformedByReason: Partial<Record<PriceBackupMalformedReason, number>> =
-    {};
+    sanitizeUploadedMalformedByReason(payload.malformedByReason);
   for (const row of parsed.malformed) {
     malformedByReason[row.reason] = (malformedByReason[row.reason] ?? 0) + 1;
   }
+  const parsedMalformedCount = Object.values(malformedByReason).reduce(
+    (sum, count) => sum + (count ?? 0),
+    0,
+  );
   return {
     ok: true,
     value: {
-      parsedMalformedCount: parsed.malformed.length,
+      parsedMalformedCount,
       malformedByReason,
       resolved,
     },
@@ -491,9 +566,9 @@ async function parseAndResolveBackup(
 
 export async function previewBackupPriceUpload(
   context: PriceUploadContext,
-  bytes: Uint8Array,
+  payload: BackupPriceUploadPayload,
 ): Promise<{ ok: true; preview: BackupUploadPreview } | Failure> {
-  const result = await parseAndResolveBackup(context, bytes);
+  const result = await parseAndResolveBackup(context, payload);
   if (!result.ok) return result;
   const { parsedMalformedCount, malformedByReason, resolved } = result.value;
   const perProviderMap = new Map<
@@ -565,11 +640,11 @@ export type BackupConfirmResult = Readonly<{
 
 export async function confirmBackupPriceUpload(
   context: PriceUploadContext,
-  bytes: Uint8Array,
+  payload: BackupPriceUploadPayload,
   input: Readonly<{ filename: string }>,
   now: () => string = () => new Date().toISOString(),
 ): Promise<{ ok: true; value: BackupConfirmResult } | Failure> {
-  const result = await parseAndResolveBackup(context, bytes);
+  const result = await parseAndResolveBackup(context, payload);
   if (!result.ok) return result;
   const { parsedMalformedCount, resolved } = result.value;
   // exchange_mismatch groups fall through to the `unresolvedRowCount`

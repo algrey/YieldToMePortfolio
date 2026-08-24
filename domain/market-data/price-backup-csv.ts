@@ -30,8 +30,19 @@
 // this is free correctness from not duplicating the decode logic).
 
 import { decodeText, stripBom } from "./text-encoding.ts";
+import { isPositiveDecimal, isValidMarketDate } from "./price-value-grammar.ts";
 
 export const PRICE_BACKUP_FORMAT_VERSION = "yieldtome-price-backup-v1";
+
+// MKT-008/IMP-010A: the ONE `source_label` length convention this app uses
+// for the historical-data import surface -- originally local to
+// `app/price-upload-service.ts`'s `sanitizeSourceLabel` (the single-security
+// form's batch-level label); moved here and re-exported so
+// `validateUploadedPriceBackupRow` below can apply the SAME truncation to a
+// backup row's per-row `sourceLabel` field (review B2 fix, 2026-08-25: that
+// field was length-unbounded before this fix) without a second,
+// independently-chosen number.
+export const MAX_SOURCE_LABEL_LENGTH = 60;
 
 const HEADER = [
   "format_version",
@@ -125,6 +136,24 @@ export type PriceBackupMalformedReason =
   | "invalid_observation_at"
   | "invalid_quote_metadata";
 
+/** Runtime enumeration of `PriceBackupMalformedReason`'s members -- the
+ * SINGLE source of truth both `parsePriceBackupCsv`'s own classification
+ * above and IMP-010A's `sanitizeUploadedMalformedByReason` below key off
+ * (never a second, hand-maintained list that could silently drift from the
+ * type union). */
+export const PRICE_BACKUP_MALFORMED_REASONS: readonly PriceBackupMalformedReason[] =
+  [
+    "wrong_column_count",
+    "unsupported_format_version",
+    "unknown_provider",
+    "invalid_symbol_or_exchange",
+    "invalid_currency",
+    "invalid_date",
+    "invalid_price",
+    "invalid_observation_at",
+    "invalid_quote_metadata",
+  ];
+
 export type PriceBackupMalformedRow = Readonly<{
   physicalRowNumber: number;
   reason: PriceBackupMalformedReason;
@@ -152,10 +181,29 @@ export type PriceBackupLimits = Readonly<{ maxBytes: number; maxRows: number }>;
 // A full-portfolio backup can span many securities' full histories --
 // generous relative to the single-security caps (`price-csv.ts`), but still
 // bounded (this task's caps-documented precedent).
+//
+// Review B1 fix (BLOCKING, 2026-08-25): `maxRows` was previously 500,000 --
+// arithmetically unreachable through IMP-010A's JSON upload payload
+// (measured ~2.30x byte expansion per row vs. this file's own raw-CSV
+// serialization, `tests/imp-010a.test.ts` pins the exact figure) even
+// against the raised 64 MiB request-body ceiling
+// (`app/price-upload-actions.ts`'s `MAX_BACKUP_REQUEST_BYTES`) --
+// documenting it as achievable was false. 130,000 is the HONEST figure:
+// comfortably under BOTH (a) the ~137,970 rows the 20 MiB `maxBytes` cap
+// above can ever actually produce from a real export (typical per-row CSV
+// bytes), and (b) the ~136,400 rows the 64 MiB server ceiling can accept
+// even in the WORST case where every row hits this file's own per-field
+// length bounds (`MAX_SOURCE_LABEL_LENGTH`, `DECIMAL_LIMITS.inputDigits`) --
+// so this row-count check and the server's byte-ceiling check are
+// consistent with each other under every input, not just the typical case.
 export const DEFAULT_PRICE_BACKUP_LIMITS: PriceBackupLimits = Object.freeze({
   maxBytes: 20 * 1024 * 1024,
-  maxRows: 500_000,
+  maxRows: 130_000,
 });
+
+function formatMiB(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(0)} MiB`;
+}
 
 // Only providers this deployment can honestly have exported -- see this
 // module's header comment. A future new provider extends this list (never
@@ -174,20 +222,6 @@ const ADJUSTMENT_STATES = new Set([
   "total_return_adjusted",
 ]);
 const CURRENCY_PATTERN = /^[A-Z]{3}$/;
-const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-const DECIMAL_PATTERN = /^(0|[1-9]\d*)(\.\d+)?$/;
-
-function isPositiveDecimal(value: string): boolean {
-  return DECIMAL_PATTERN.test(value) && /[1-9]/.test(value);
-}
-
-function isValidMarketDate(value: string): boolean {
-  if (!DATE_PATTERN.test(value)) return false;
-  const parsed = Date.parse(`${value}T00:00:00Z`);
-  return (
-    Number.isFinite(parsed) && new Date(parsed).toISOString().startsWith(value)
-  );
-}
 
 function isIsoInstant(value: string): boolean {
   return (
@@ -207,7 +241,12 @@ export function parsePriceBackupCsv(
     return {
       ok: false,
       code: "BYTE_LIMIT_EXCEEDED",
-      message: "The file exceeded the configured size limit.",
+      // Review B1 fix: names the actual configured limit and an action --
+      // this check runs client-side (the browser calls this SAME function
+      // before ever uploading), so a too-large backup is caught with an
+      // actionable message before the network round trip, not as an
+      // opaque 413 from the server.
+      message: `The file exceeded the ${formatMiB(limits.maxBytes)} size limit. Split the backup into multiple files (e.g. by provider or date range) and re-import each.`,
     };
   }
   const decoded = decodeText(bytes);
@@ -244,7 +283,9 @@ export function parsePriceBackupCsv(
     return {
       ok: false,
       code: "ROW_LIMIT_EXCEEDED",
-      message: "The file exceeded the configured row limit.",
+      // Review B1 fix: same actionable-before-upload rationale as the byte
+      // check above.
+      message: `The file exceeded the ${limits.maxRows.toLocaleString("en-US")}-row limit. Split the backup into multiple files (e.g. by provider or date range) and re-import each.`,
     };
   }
 
@@ -344,5 +385,220 @@ export function parsePriceBackupCsv(
       delayedMinutes,
     });
   }
+  return { ok: true, rows, malformed };
+}
+
+// ---------------------------------------------------------------------------
+// IMP-010A: browser-parse/server-authority split -- see `price-csv.ts`'s own
+// IMP-010A section header for the full rationale (identical split, applied
+// to this backup format's richer per-row shape). `format_version` is NOT
+// part of the uploaded-row shape below: the browser's own
+// `parsePriceBackupCsv` already rejected any row whose version didn't match
+// `PRICE_BACKUP_FORMAT_VERSION` before this payload was ever built, so a
+// validated row carries no leftover need to restate it -- there is nothing
+// downstream that reads a per-row format version off `PriceBackupDataRow`
+// either (the export/round-trip write path always re-stamps the CURRENT
+// constant, see `formatPriceBackupCsv` above).
+// ---------------------------------------------------------------------------
+
+export type PriceBackupUploadedRowInput = Readonly<{
+  providerId: unknown;
+  sourceLabel: unknown;
+  providerSymbol: unknown;
+  providerExchange: unknown;
+  currencyCode: unknown;
+  marketDate: unknown;
+  priceDecimal: unknown;
+  observationAt: unknown;
+  marketTimezone: unknown;
+  interval: unknown;
+  quality: unknown;
+  adjustmentState: unknown;
+  delayedMinutes: unknown;
+}>;
+
+export type ValidateUploadedPriceBackupRowResult =
+  | { ok: true; row: PriceBackupDataRow }
+  | { ok: false; reason: PriceBackupMalformedReason };
+
+/** Re-validates ONE row of an untrusted browser-uploaded backup payload,
+ * field by field, using the SAME predicates/sets `parsePriceBackupCsv`
+ * enforces on raw text above -- never a second definition. */
+export function validateUploadedPriceBackupRow(
+  physicalRowNumber: number,
+  candidate: unknown,
+): ValidateUploadedPriceBackupRowResult {
+  if (
+    typeof candidate !== "object" ||
+    candidate === null ||
+    Array.isArray(candidate)
+  ) {
+    return { ok: false, reason: "wrong_column_count" };
+  }
+  const record = candidate as Record<string, unknown>;
+  const {
+    providerId,
+    sourceLabel,
+    providerSymbol,
+    providerExchange,
+    currencyCode,
+    marketDate,
+    priceDecimal,
+    observationAt,
+    marketTimezone,
+    interval,
+    quality,
+    adjustmentState,
+    delayedMinutes,
+  } = record;
+  if (
+    typeof providerId !== "string" ||
+    typeof sourceLabel !== "string" ||
+    typeof providerSymbol !== "string" ||
+    typeof providerExchange !== "string" ||
+    typeof currencyCode !== "string" ||
+    typeof marketDate !== "string" ||
+    typeof priceDecimal !== "string" ||
+    typeof observationAt !== "string" ||
+    typeof marketTimezone !== "string" ||
+    typeof interval !== "string" ||
+    typeof quality !== "string" ||
+    typeof adjustmentState !== "string"
+  ) {
+    return { ok: false, reason: "wrong_column_count" };
+  }
+  if (!KNOWN_PROVIDER_IDS.has(providerId)) {
+    return { ok: false, reason: "unknown_provider" };
+  }
+  if (!providerSymbol || !providerExchange) {
+    return { ok: false, reason: "invalid_symbol_or_exchange" };
+  }
+  if (!CURRENCY_PATTERN.test(currencyCode)) {
+    return { ok: false, reason: "invalid_currency" };
+  }
+  if (!isValidMarketDate(marketDate)) {
+    return { ok: false, reason: "invalid_date" };
+  }
+  if (!isPositiveDecimal(priceDecimal)) {
+    return { ok: false, reason: "invalid_price" };
+  }
+  if (!isIsoInstant(observationAt)) {
+    return { ok: false, reason: "invalid_observation_at" };
+  }
+  if (
+    !marketTimezone ||
+    !INTERVALS.has(interval) ||
+    !QUALITIES.has(quality) ||
+    !ADJUSTMENT_STATES.has(adjustmentState)
+  ) {
+    return { ok: false, reason: "invalid_quote_metadata" };
+  }
+  let validatedDelayedMinutes: number | null = null;
+  if (delayedMinutes !== null && delayedMinutes !== undefined) {
+    if (
+      typeof delayedMinutes !== "number" ||
+      !Number.isInteger(delayedMinutes) ||
+      delayedMinutes < 0
+    ) {
+      return { ok: false, reason: "invalid_quote_metadata" };
+    }
+    validatedDelayedMinutes = delayedMinutes;
+  }
+  // Review B2 fix: `sourceLabel` is free text with no dedicated malformed
+  // reason (it never affected write correctness -- see the write path's own
+  // comment), so an over-long value is TRUNCATED rather than rejected,
+  // matching `app/price-upload-service.ts`'s `sanitizeSourceLabel` (same
+  // `MAX_SOURCE_LABEL_LENGTH`) instead of failing the whole row closed for a
+  // display-only field.
+  const boundedSourceLabel = sourceLabel.slice(0, MAX_SOURCE_LABEL_LENGTH);
+  return {
+    ok: true,
+    row: {
+      physicalRowNumber,
+      providerId,
+      sourceLabel: boundedSourceLabel,
+      providerSymbol,
+      providerExchange,
+      currencyCode,
+      marketDate,
+      priceDecimal,
+      observationAt,
+      marketTimezone,
+      interval: interval as PriceBackupDataRow["interval"],
+      quality: quality as PriceBackupDataRow["quality"],
+      adjustmentState: adjustmentState as PriceBackupDataRow["adjustmentState"],
+      delayedMinutes: validatedDelayedMinutes,
+    },
+  };
+}
+
+/**
+ * Sanitizes the browser's OWN per-reason malformed-row breakdown (computed
+ * client-side from rows the real parser above already dropped before ever
+ * sending them) -- informational display only (the owner's "N malformed
+ * rows: X wrong price, Y unknown provider" preview text), never trusted for
+ * anything write-affecting. An unrecognised key or a non-integer/negative
+ * count is dropped rather than coerced -- fail-closed, matching this
+ * module's own untrusted-input discipline.
+ */
+export function sanitizeUploadedMalformedByReason(
+  candidate: unknown,
+): Partial<Record<PriceBackupMalformedReason, number>> {
+  const result: Partial<Record<PriceBackupMalformedReason, number>> = {};
+  if (typeof candidate !== "object" || candidate === null) return result;
+  const record = candidate as Record<string, unknown>;
+  for (const reason of PRICE_BACKUP_MALFORMED_REASONS) {
+    const value = record[reason];
+    if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+      result[reason] = value;
+    }
+  }
+  return result;
+}
+
+export type ValidateUploadedPriceBackupPayloadResult =
+  | {
+      ok: true;
+      rows: PriceBackupDataRow[];
+      malformed: PriceBackupMalformedRow[];
+    }
+  | { ok: false; message: string };
+
+/**
+ * Validates a full browser-parsed backup-restore payload (`{ rows }`) --
+ * `app/price-upload-service.ts`'s server-authority layer calls this INSTEAD
+ * of `parsePriceBackupCsv` for IMP-010A's browser-parse path.
+ */
+export function validateUploadedPriceBackupPayload(
+  payload: unknown,
+  limits: PriceBackupLimits = DEFAULT_PRICE_BACKUP_LIMITS,
+): ValidateUploadedPriceBackupPayloadResult {
+  if (typeof payload !== "object" || payload === null) {
+    return { ok: false, message: "The upload payload is invalid." };
+  }
+  const rawRows = (payload as Record<string, unknown>).rows;
+  if (!Array.isArray(rawRows)) {
+    return { ok: false, message: "The upload payload is invalid." };
+  }
+  if (rawRows.length > limits.maxRows) {
+    return {
+      ok: false,
+      message: `The file exceeded the ${limits.maxRows.toLocaleString("en-US")}-row limit. Split the backup into multiple files (e.g. by provider or date range) and re-import each.`,
+    };
+  }
+  // F3 (recorded, not blocking): this row-count check runs BEFORE the
+  // per-row loop below, so a payload that is BOTH over the row-count budget
+  // AND contains per-row grammar-invalid rows only ever reports the
+  // over-budget reason -- intentional (skips fully validating a payload
+  // already being rejected) but noted since it means a hostile payload's
+  // per-row problems never surface once it is also oversized.
+  const rows: PriceBackupDataRow[] = [];
+  const malformed: PriceBackupMalformedRow[] = [];
+  rawRows.forEach((candidate, index) => {
+    const physicalRowNumber = index + 2;
+    const result = validateUploadedPriceBackupRow(physicalRowNumber, candidate);
+    if (result.ok) rows.push(result.row);
+    else malformed.push({ physicalRowNumber, reason: result.reason });
+  });
   return { ok: true, rows, malformed };
 }

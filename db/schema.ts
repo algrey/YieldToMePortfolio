@@ -3833,6 +3833,17 @@ export const intradayPricePoints = sqliteTable(
 // CREATED -- exactly the rows a delete of this batch will remove. The UI
 // states both when they differ (never implies a delete reverts overlaid
 // values on rows it did not create).
+//
+// IMP-010A provenance note (2026-08-25): since CSV parsing moved into the
+// BROWSER, `malformed_row_count` is CLIENT-CLAIMED on this path -- it is
+// the browser parser's own count of rows it dropped before ever sending
+// them, PLUS any additional rows this deployment's own server-side
+// re-validation independently rejected among what it actually received
+// (`app/price-upload-service.ts`'s IMP-010A header note). The server can
+// only verify the second part; the first part is informational/display
+// only (the owner's "N malformed rows" text) and is never trusted for
+// anything write-affecting -- `row_count`/`inserted_row_count` above stay
+// server-computed from what was actually written, unaffected.
 export const priceUploadBatches = sqliteTable(
   "price_upload_batches",
   {

@@ -107,6 +107,84 @@ function utf16BytesOf(
   return bytes;
 }
 
+// IMP-010A: `previewSinglePriceUpload`/`confirmSinglePriceUpload`/
+// `previewBackupPriceUpload`/`confirmBackupPriceUpload` now take a
+// BROWSER-PARSED row payload instead of raw file bytes (the parsing itself
+// moved into the client -- see `app/price-upload-service.ts`'s IMP-010A
+// header note). These two helpers model exactly what
+// `historical-data-panel.tsx`'s `parseSingleCsvFile`/`parseBackupCsvFile`
+// do: run the SAME shared pure parser this file's own parser-level tests
+// below already exercise, then shape its output into the JSON payload a
+// real upload would POST -- so every service-level test's fixture text
+// still goes through the real parser (parser-parity by construction, not a
+// second hand-written normalization).
+function csvPayloadOf(text: string): {
+  ticker: string;
+  rows: Array<{ marketDate: string; priceDecimal: string }>;
+  malformedCount: number;
+} {
+  const parsed = parsePriceCsv(bytesOf(text));
+  if (!parsed.ok) {
+    throw new Error(`test fixture CSV failed to parse: ${parsed.message}`);
+  }
+  return {
+    ticker: parsed.ticker,
+    rows: parsed.rows.map((row) => ({
+      marketDate: row.marketDate,
+      priceDecimal: row.priceDecimal,
+    })),
+    malformedCount: parsed.malformed.length,
+  };
+}
+
+function backupPayloadOf(text: string): {
+  rows: Array<{
+    providerId: string;
+    sourceLabel: string;
+    providerSymbol: string;
+    providerExchange: string;
+    currencyCode: string;
+    marketDate: string;
+    priceDecimal: string;
+    observationAt: string;
+    marketTimezone: string;
+    interval: string;
+    quality: string;
+    adjustmentState: string;
+    delayedMinutes: number | null;
+  }>;
+  malformedByReason: Record<string, number>;
+} {
+  const parsed = parsePriceBackupCsv(bytesOf(text));
+  if (!parsed.ok) {
+    throw new Error(
+      `test fixture backup CSV failed to parse: ${parsed.message}`,
+    );
+  }
+  const malformedByReason: Record<string, number> = {};
+  for (const row of parsed.malformed) {
+    malformedByReason[row.reason] = (malformedByReason[row.reason] ?? 0) + 1;
+  }
+  return {
+    rows: parsed.rows.map((row) => ({
+      providerId: row.providerId,
+      sourceLabel: row.sourceLabel,
+      providerSymbol: row.providerSymbol,
+      providerExchange: row.providerExchange,
+      currencyCode: row.currencyCode,
+      marketDate: row.marketDate,
+      priceDecimal: row.priceDecimal,
+      observationAt: row.observationAt,
+      marketTimezone: row.marketTimezone,
+      interval: row.interval,
+      quality: row.quality,
+      adjustmentState: row.adjustmentState,
+      delayedMinutes: row.delayedMinutes,
+    })),
+    malformedByReason,
+  };
+}
+
 test("MKT-012 round 2 review F8: domain/market-data/selection.ts's OWNER_IMPORT_PROVIDER_ID is byte-identical to this repository's own constant of the same name", () => {
   assert.equal(SELECTION_OWNER_IMPORT_PROVIDER_ID, OWNER_IMPORT_PROVIDER_ID);
 });
@@ -732,7 +810,7 @@ test("MKT-008 preview: a happy-path CSV matches the owner's security and reports
   const client = createSqliteSqlClient(db);
   const result = await previewSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf(SINGLE_CSV),
+    csvPayloadOf(SINGLE_CSV),
     {
       exchangeAlias: "ASX",
       currencyCode: "AUD",
@@ -758,7 +836,7 @@ test("MKT-008 preview: no security held for the ticker is an honest error naming
   const client = createSqliteSqlClient(db);
   const result = await previewSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf("DateTime,XYZ\n1998-03-12,1.00\n"),
+    csvPayloadOf("DateTime,XYZ\n1998-03-12,1.00\n"),
     { exchangeAlias: "ASX", currencyCode: "AUD" },
   );
   assert.equal(result.ok, false);
@@ -779,7 +857,7 @@ test("MKT-008 preview (B3): a ticker held on a DIFFERENT exchange than the setti
   const client = createSqliteSqlClient(db);
   const result = await previewSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf(SINGLE_CSV),
+    csvPayloadOf(SINGLE_CSV),
     { exchangeAlias: "ASX", currencyCode: "AUD" },
   );
   assert.equal(result.ok, false);
@@ -794,7 +872,7 @@ test("MKT-008 preview: an unsupported exchange is rejected rather than guessing 
   const client = createSqliteSqlClient(db);
   const result = await previewSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf(SINGLE_CSV),
+    csvPayloadOf(SINGLE_CSV),
     {
       exchangeAlias: "NYSE",
       currencyCode: "AUD",
@@ -816,7 +894,7 @@ test("MKT-008 preview: ambiguous ticker evidence (two securities, no way to pref
   const client = createSqliteSqlClient(db);
   const result = await previewSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf(SINGLE_CSV),
+    csvPayloadOf(SINGLE_CSV),
     {
       exchangeAlias: "ASX",
       currencyCode: "AUD",
@@ -832,7 +910,7 @@ test("MKT-008 confirm: writes owner-import price_observations with the midnight-
   const client = createSqliteSqlClient(db);
   const result = await confirmSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf(SINGLE_CSV),
+    csvPayloadOf(SINGLE_CSV),
     { exchangeAlias: "ASX", currencyCode: "AUD" },
     { filename: "fmg.csv", sourceLabel: "intelligent-investor" },
     () => "2026-08-20T00:00:00.000Z",
@@ -877,9 +955,17 @@ test("MKT-008 confirm: writes owner-import price_observations with the midnight-
 test("MKT-008 confirm: malformed rows are counted on the batch, never silently dropped", async () => {
   const db = await ownedFixture();
   const client = createSqliteSqlClient(db);
+  // IMP-010A: `csvPayloadOf` runs the SAME shared parser the browser now
+  // runs -- it already dropped the two malformed rows before building the
+  // payload, reporting `malformedCount: 2` alongside the one valid row, just
+  // like a real browser upload would. The batch's recorded
+  // `malformedRowCount` is this client-reported count (the browser already
+  // classified these rows; nothing hostile was submitted here) -- see the
+  // dedicated hostile-payload test below for the SERVER's own independent
+  // re-validation path.
   const result = await confirmSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf(
+    csvPayloadOf(
       "DateTime,FMG\n1998-03-12,0.07852\n1998-02-30,1.00\n1998-03-14,-1\n",
     ),
     { exchangeAlias: "ASX", currencyCode: "AUD" },
@@ -901,7 +987,7 @@ test("MKT-008 idempotent overlay: importing the SAME file twice (same fixed now)
   const now = () => "2026-08-20T00:00:00.000Z";
   const first = await confirmSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf(SINGLE_CSV),
+    csvPayloadOf(SINGLE_CSV),
     settings,
     input,
     now,
@@ -917,7 +1003,7 @@ test("MKT-008 idempotent overlay: importing the SAME file twice (same fixed now)
 
   const second = await confirmSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf(SINGLE_CSV),
+    csvPayloadOf(SINGLE_CSV),
     settings,
     input,
     now,
@@ -975,7 +1061,7 @@ test("MKT-008 delete: removes exactly the upload's own rows and the batch row, o
   const now = () => "2026-08-20T00:00:00.000Z";
   const confirmed = await confirmSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf(SINGLE_CSV),
+    csvPayloadOf(SINGLE_CSV),
     settings,
     input,
     now,
@@ -1016,7 +1102,7 @@ test("MKT-008 delete: removes exactly the upload's own rows and the batch row, o
 
   const restored = await confirmSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf(SINGLE_CSV),
+    csvPayloadOf(SINGLE_CSV),
     settings,
     input,
     now,
@@ -1061,7 +1147,7 @@ test("MKT-008 B1 drill (a): a Sharesight-accreted row overlaid by a backup impor
 
   const restored = await confirmBackupPriceUpload(
     context(client, "user-a"),
-    bytesOf(backupCsv),
+    backupPayloadOf(backupCsv),
     { filename: "backup.csv" },
     () => "2026-08-21T00:00:00.000Z",
   );
@@ -1110,7 +1196,7 @@ test("MKT-008 B1 drill (b): import A, overlay B, delete B -- A's rows are intact
 
   const uploadA = await confirmSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf("DateTime,FMG\n1998-03-12,0.07852\n1998-03-13,0.08\n"),
+    csvPayloadOf("DateTime,FMG\n1998-03-12,0.07852\n1998-03-13,0.08\n"),
     settings,
     { filename: "a.csv", sourceLabel: "upload-a" },
     now,
@@ -1123,7 +1209,7 @@ test("MKT-008 B1 drill (b): import A, overlay B, delete B -- A's rows are intact
   // new 1998-03-14.
   const uploadB = await confirmSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf("DateTime,FMG\n1998-03-13,0.09\n1998-03-14,0.10\n"),
+    csvPayloadOf("DateTime,FMG\n1998-03-13,0.09\n1998-03-14,0.10\n"),
     settings,
     { filename: "b.csv", sourceLabel: "upload-b" },
     now,
@@ -1179,7 +1265,7 @@ test("MKT-008 backup preview: a per-reason malformed breakdown and B3's exchange
   const csv = [header, ...rows].join("\n") + "\n";
   const preview = await previewBackupPriceUpload(
     context(client, "user-a"),
-    bytesOf(csv),
+    backupPayloadOf(csv),
   );
   assert.equal(preview.ok, true);
   if (!preview.ok) return;
@@ -1203,7 +1289,7 @@ test("MKT-008 export -> wipe -> import-backup: a full round trip is lossless and
   // An owner-import row (via the normal write path).
   const confirmed = await confirmSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf(SINGLE_CSV),
+    csvPayloadOf(SINGLE_CSV),
     { exchangeAlias: "ASX", currencyCode: "AUD" },
     { filename: "fmg.csv", sourceLabel: "intelligent-investor" },
     () => "2026-08-20T00:00:00.000Z",
@@ -1247,7 +1333,7 @@ test("MKT-008 export -> wipe -> import-backup: a full round trip is lossless and
 
   const backupPreview = await previewBackupPriceUpload(
     context(client, "user-a"),
-    bytesOf(csv),
+    backupPayloadOf(csv),
   );
   assert.equal(backupPreview.ok, true);
   if (backupPreview.ok) {
@@ -1258,7 +1344,7 @@ test("MKT-008 export -> wipe -> import-backup: a full round trip is lossless and
 
   const restored = await confirmBackupPriceUpload(
     context(client, "user-a"),
-    bytesOf(csv),
+    backupPayloadOf(csv),
     { filename: "backup.csv" },
     () => "2026-08-21T00:00:00.000Z",
   );
@@ -1298,7 +1384,7 @@ test("MKT-008 export scope: only the owner's own user-scoped rows export -- neve
   const client = createSqliteSqlClient(db);
   await confirmSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf(SINGLE_CSV),
+    csvPayloadOf(SINGLE_CSV),
     { exchangeAlias: "ASX", currencyCode: "AUD" },
     { filename: "fmg.csv", sourceLabel: "intelligent-investor" },
     () => "2026-08-20T00:00:00.000Z",
@@ -1315,7 +1401,7 @@ test("MKT-008 listing: past uploads are owner-scoped and never leak across owner
   const client = createSqliteSqlClient(db);
   await confirmSinglePriceUpload(
     context(client, "user-a"),
-    bytesOf(SINGLE_CSV),
+    csvPayloadOf(SINGLE_CSV),
     { exchangeAlias: "ASX", currencyCode: "AUD" },
     { filename: "fmg.csv", sourceLabel: "intelligent-investor" },
     () => "2026-08-20T00:00:00.000Z",

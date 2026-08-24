@@ -41,6 +41,7 @@
 // silent corruption -- fail-closed, not a data-integrity risk).
 
 import { decodeText, stripBom } from "./text-encoding.ts";
+import { isPositiveDecimal, isValidMarketDate } from "./price-value-grammar.ts";
 
 /**
  * Splits one line into fields, honoring RFC-4180-lite double-quoting: a
@@ -168,13 +169,8 @@ export type ParsePriceCsvResult =
       message: string;
     };
 
-const DECIMAL_PATTERN = /^(0|[1-9]\d*)(\.\d+)?$/;
 const TICKER_PATTERN = /^[A-Za-z0-9]{1,10}$/;
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})(?: \d{2}:\d{2}:\d{2})?$/;
-
-function isPositiveDecimal(value: string): boolean {
-  return DECIMAL_PATTERN.test(value) && /[1-9]/.test(value);
-}
 
 function isValidCalendarDate(value: string): boolean {
   const match = DATE_PATTERN.exec(value);
@@ -288,4 +284,139 @@ export function parsePriceCsv(
   }
 
   return { ok: true, ticker, delimiter, rows, malformed };
+}
+
+// ---------------------------------------------------------------------------
+// IMP-010A: browser-parse/server-authority split.
+//
+// The functions above run in the BROWSER now (imported directly into
+// `historical-data-panel.tsx`'s "use client" bundle -- see that file and
+// `app/price-upload-service.ts`'s header comment) so the CPU-heavy text
+// decode/split/row-classify work never runs on the Worker. The functions
+// below are the SERVER's side of that split: they re-validate the
+// STRUCTURED rows a browser-parsed upload payload claims are valid, using
+// the EXACT SAME grammar (`price-value-grammar.ts`'s `isPositiveDecimal`/
+// `isValidMarketDate`, and this file's own `TICKER_PATTERN`) the parser
+// above already enforces -- never a second, potentially-drifting
+// definition of "valid". Per AGENTS.md, client output is untrusted input:
+// a hostile payload that skips the browser parser entirely (a
+// hand-crafted `fetch` call, not a real upload) must be rejected exactly
+// as if the equivalent malformed text had reached the OLD server-side
+// parser, row by row, fail-closed.
+// ---------------------------------------------------------------------------
+
+/** One row of an already browser-normalized upload payload -- the shape
+ * `PriceCsvDataRow` reduces to once its `physicalRowNumber` (meaningless
+ * for a payload the owner never sees broken down by source line -- see
+ * this module's IMP-010A section header) is dropped. */
+export type PriceCsvUploadedRowInput = Readonly<{
+  marketDate: unknown;
+  priceDecimal: unknown;
+}>;
+
+export type ValidateUploadedPriceCsvRowResult =
+  | { ok: true; row: PriceCsvDataRow }
+  | { ok: false; reason: PriceCsvMalformedReason };
+
+/** Re-validates ONE row from an untrusted uploaded payload. `marketDate`
+ * must already be the parser's NORMALIZED `YYYY-MM-DD` form (no time
+ * suffix) -- a real browser upload always sends exactly that, since it ran
+ * the same `parsePriceCsv` above; a hostile payload sending the raw
+ * `YYYY-MM-DD HH:MM:SS` form is correctly rejected as `invalid_date`
+ * rather than silently re-normalized, since untrusted input must be
+ * validated in the shape the contract declares, not coerced. */
+export function validateUploadedPriceCsvRow(
+  physicalRowNumber: number,
+  candidate: unknown,
+): ValidateUploadedPriceCsvRowResult {
+  if (
+    typeof candidate !== "object" ||
+    candidate === null ||
+    Array.isArray(candidate)
+  ) {
+    return { ok: false, reason: "wrong_column_count" };
+  }
+  const record = candidate as Record<string, unknown>;
+  const { marketDate, priceDecimal } = record;
+  if (typeof marketDate !== "string" || typeof priceDecimal !== "string") {
+    return { ok: false, reason: "wrong_column_count" };
+  }
+  if (!isValidMarketDate(marketDate)) {
+    return { ok: false, reason: "invalid_date" };
+  }
+  if (!isPositiveDecimal(priceDecimal)) {
+    return { ok: false, reason: "invalid_price" };
+  }
+  return { ok: true, row: { physicalRowNumber, marketDate, priceDecimal } };
+}
+
+/** Re-validates the header-derived ticker an uploaded payload claims --
+ * same `TICKER_PATTERN` the raw-text header parser above enforces. */
+export function validateUploadedPriceCsvTicker(
+  candidate: unknown,
+): string | null {
+  return typeof candidate === "string" && TICKER_PATTERN.test(candidate)
+    ? candidate
+    : null;
+}
+
+export type ValidateUploadedPriceCsvPayloadResult =
+  | {
+      ok: true;
+      ticker: string;
+      rows: PriceCsvDataRow[];
+      malformed: PriceCsvMalformedRow[];
+    }
+  | { ok: false; message: string };
+
+/**
+ * Validates a full browser-parsed upload payload (`{ ticker, rows }`,
+ * `unknown` because it arrived as untrusted JSON over the wire) --
+ * `app/price-upload-service.ts`'s server-authority layer calls this INSTEAD
+ * of `parsePriceCsv` for IMP-010A's browser-parse path. Row-count budget
+ * mirrors `parsePriceCsv`'s own `limits.maxRows` check (the 20k-row cap
+ * still applies, re-checked here since the server no longer sees the
+ * original file's byte size to bound directly -- see this task's
+ * CSV_IMPORT_SPEC.md note on the budget's post-IMP-010A shape).
+ */
+export function validateUploadedPriceCsvPayload(
+  payload: unknown,
+  limits: PriceCsvLimits = DEFAULT_PRICE_CSV_LIMITS,
+): ValidateUploadedPriceCsvPayloadResult {
+  if (typeof payload !== "object" || payload === null) {
+    return { ok: false, message: "The upload payload is invalid." };
+  }
+  const record = payload as Record<string, unknown>;
+  const ticker = validateUploadedPriceCsvTicker(record.ticker);
+  if (!ticker) {
+    return {
+      ok: false,
+      message: "The header's ticker column name is not a valid ticker.",
+    };
+  }
+  const rawRows = record.rows;
+  if (!Array.isArray(rawRows)) {
+    return { ok: false, message: "The upload payload is invalid." };
+  }
+  if (rawRows.length > limits.maxRows) {
+    return {
+      ok: false,
+      message: "The file exceeded the configured row limit.",
+    };
+  }
+  const rows: PriceCsvDataRow[] = [];
+  const malformed: PriceCsvMalformedRow[] = [];
+  rawRows.forEach((candidate, index) => {
+    // Payload rows carry no source line number (the browser already
+    // dropped its malformed rows before sending) -- a synthetic 1-indexed
+    // position (header counted as row 1, matching `parsePriceCsv`'s
+    // convention) is good enough since no caller ever surfaces this number
+    // to the owner for THIS payload shape (see this module's IMP-010A
+    // section header).
+    const physicalRowNumber = index + 2;
+    const result = validateUploadedPriceCsvRow(physicalRowNumber, candidate);
+    if (result.ok) rows.push(result.row);
+    else malformed.push({ physicalRowNumber, reason: result.reason });
+  });
+  return { ok: true, ticker, rows, malformed };
 }

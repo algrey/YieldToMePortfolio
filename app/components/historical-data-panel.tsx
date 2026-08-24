@@ -44,6 +44,24 @@ import {
   type MultiFilePreviewResult,
   type MultiFileStepResult,
 } from "../multi-file-price-upload.ts";
+// IMP-010A: the SAME pure parsers `app/price-upload-service.ts` used to run
+// server-side over raw upload bytes now run HERE, in the browser -- moving
+// the CPU-heavy text decode/split/row-classify work off the Worker (see
+// that file's IMP-010A header note and `docs/ARCHITECTURE.md`'s decision
+// entry). Both modules import only `./text-encoding.ts` (no server/DB/
+// Node-only dependency), so they are safe in this "use client" bundle.
+// This is the ONLY place either parser is now invoked from a real (not
+// hostile-payload) upload -- the server re-validates every field of every
+// row it receives regardless (`validateUploadedPriceCsvPayload`/
+// `validateUploadedPriceBackupPayload`), never trusting client output.
+import {
+  DEFAULT_PRICE_CSV_LIMITS,
+  parsePriceCsv,
+} from "../../domain/market-data/price-csv.ts";
+import {
+  DEFAULT_PRICE_BACKUP_LIMITS,
+  parsePriceBackupCsv,
+} from "../../domain/market-data/price-backup-csv.ts";
 
 const FETCH_TIMEOUT_MS = 20_000;
 
@@ -207,6 +225,110 @@ async function fetchJson<T>(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function postJson<T>(
+  input: string,
+  payload: unknown,
+): Promise<{ ok: true; value: T } | { ok: false; message: string }> {
+  return fetchJson<T>(input, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+type ClientSingleUploadPayload = {
+  ticker: string;
+  rows: { marketDate: string; priceDecimal: string }[];
+  malformedCount: number;
+};
+
+type ClientBackupUploadPayload = {
+  rows: Array<{
+    providerId: string;
+    sourceLabel: string;
+    providerSymbol: string;
+    providerExchange: string;
+    currencyCode: string;
+    marketDate: string;
+    priceDecimal: string;
+    observationAt: string;
+    marketTimezone: string;
+    interval: string;
+    quality: string;
+    adjustmentState: string;
+    delayedMinutes: number | null;
+  }>;
+  malformedByReason: Record<string, number>;
+};
+
+/**
+ * IMP-010A: runs the shared `parsePriceCsv` (imported above) on `file`
+ * directly in the browser -- the CPU-heavy decode/split/row-classify work
+ * this module's header note describes. A parse failure (bad encoding,
+ * missing header, invalid ticker, over the 2 MiB/20k-row budget) is
+ * reported with the SAME message text the server used to return for the
+ * identical failure, just without a network round trip.
+ */
+async function parseSingleCsvFile(
+  file: File,
+): Promise<
+  | { ok: true; payload: ClientSingleUploadPayload }
+  | { ok: false; message: string }
+> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const parsed = parsePriceCsv(bytes, DEFAULT_PRICE_CSV_LIMITS);
+  if (!parsed.ok) return { ok: false, message: parsed.message };
+  return {
+    ok: true,
+    payload: {
+      ticker: parsed.ticker,
+      rows: parsed.rows.map((row) => ({
+        marketDate: row.marketDate,
+        priceDecimal: row.priceDecimal,
+      })),
+      malformedCount: parsed.malformed.length,
+    },
+  };
+}
+
+/** IMP-010A: the backup-restore format's equivalent of `parseSingleCsvFile`
+ * above, using the shared `parsePriceBackupCsv`. */
+async function parseBackupCsvFile(
+  file: File,
+): Promise<
+  | { ok: true; payload: ClientBackupUploadPayload }
+  | { ok: false; message: string }
+> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const parsed = parsePriceBackupCsv(bytes, DEFAULT_PRICE_BACKUP_LIMITS);
+  if (!parsed.ok) return { ok: false, message: parsed.message };
+  const malformedByReason: Record<string, number> = {};
+  for (const row of parsed.malformed) {
+    malformedByReason[row.reason] = (malformedByReason[row.reason] ?? 0) + 1;
+  }
+  return {
+    ok: true,
+    payload: {
+      rows: parsed.rows.map((row) => ({
+        providerId: row.providerId,
+        sourceLabel: row.sourceLabel,
+        providerSymbol: row.providerSymbol,
+        providerExchange: row.providerExchange,
+        currencyCode: row.currencyCode,
+        marketDate: row.marketDate,
+        priceDecimal: row.priceDecimal,
+        observationAt: row.observationAt,
+        marketTimezone: row.marketTimezone,
+        interval: row.interval,
+        quality: row.quality,
+        adjustmentState: row.adjustmentState,
+        delayedMinutes: row.delayedMinutes,
+      })),
+      malformedByReason,
+    },
+  };
 }
 
 export function SinglePreviewSummary({ preview }: { preview: SinglePreview }) {
@@ -685,13 +807,16 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
     setSinglePending(true);
     setSingleError(null);
     setSingleResult(null);
-    const form = new FormData();
-    form.set("file", file);
-    form.set("exchangeAlias", exchangeAlias);
-    form.set("currencyCode", currencyCode);
-    const result = await fetchJson<{ preview: SinglePreview }>(
+    const parsed = await parseSingleCsvFile(file);
+    if (!parsed.ok) {
+      setSinglePending(false);
+      setSingleError(parsed.message);
+      setSinglePreview(null);
+      return;
+    }
+    const result = await postJson<{ preview: SinglePreview }>(
       "/api/market-data/price-uploads/preview",
-      { method: "POST", body: form },
+      { ...parsed.payload, exchangeAlias, currencyCode },
     );
     setSinglePending(false);
     if (!result.ok) {
@@ -706,14 +831,21 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
     if (!file || !singlePreview) return;
     setSinglePending(true);
     setSingleError(null);
-    const form = new FormData();
-    form.set("file", file);
-    form.set("exchangeAlias", exchangeAlias);
-    form.set("currencyCode", currencyCode);
-    form.set("sourceLabel", sourceLabel);
-    const result = await fetchJson<{ batch: UploadBatch; written: number }>(
+    const parsed = await parseSingleCsvFile(file);
+    if (!parsed.ok) {
+      setSinglePending(false);
+      setSingleError(parsed.message);
+      return;
+    }
+    const result = await postJson<{ batch: UploadBatch; written: number }>(
       "/api/market-data/price-uploads/confirm",
-      { method: "POST", body: form },
+      {
+        ...parsed.payload,
+        exchangeAlias,
+        currencyCode,
+        sourceLabel,
+        filename: file.name,
+      },
     );
     setSinglePending(false);
     if (!result.ok) {
@@ -729,24 +861,23 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
   }
 
   // MKT-018C: the multi-file preview/confirm calls below build the SAME
-  // FormData fields (`file`, `exchangeAlias`, `currencyCode`, and --
-  // confirm only -- `sourceLabel`) against the SAME two endpoints
-  // `previewSingle`/`confirmSingle` call above; only the file object and
-  // which state setters run differ. Exchange/currency settings apply to
-  // every file in the run, exactly like the single-file section's shared
-  // fields above -- Intelligent Investor exports for one portfolio are all
-  // the same exchange/currency in practice, and this reuses the existing
-  // controls rather than asking per-file.
+  // JSON payload (browser-parsed `ticker`/`rows`/`malformedCount`, plus
+  // `exchangeAlias`/`currencyCode`, and -- confirm only -- `sourceLabel`/
+  // `filename`) against the SAME two endpoints `previewSingle`/
+  // `confirmSingle` call above; only the file object and which state
+  // setters run differ. Exchange/currency settings apply to every file in
+  // the run, exactly like the single-file section's shared fields above --
+  // Intelligent Investor exports for one portfolio are all the same
+  // exchange/currency in practice, and this reuses the existing controls
+  // rather than asking per-file.
   async function multiPreviewFile(
     uploadFile: File,
   ): Promise<MultiFilePreviewResult<SinglePreview>> {
-    const form = new FormData();
-    form.set("file", uploadFile);
-    form.set("exchangeAlias", exchangeAlias);
-    form.set("currencyCode", currencyCode);
-    const result = await fetchJson<{ preview: SinglePreview }>(
+    const parsed = await parseSingleCsvFile(uploadFile);
+    if (!parsed.ok) return { ok: false, message: parsed.message };
+    const result = await postJson<{ preview: SinglePreview }>(
       "/api/market-data/price-uploads/preview",
-      { method: "POST", body: form },
+      { ...parsed.payload, exchangeAlias, currencyCode },
     );
     if (!result.ok) return { ok: false, message: result.message };
     return { ok: true, preview: result.value.preview };
@@ -755,14 +886,17 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
   async function multiConfirmFile(
     uploadFile: File,
   ): Promise<MultiFileConfirmResult> {
-    const form = new FormData();
-    form.set("file", uploadFile);
-    form.set("exchangeAlias", exchangeAlias);
-    form.set("currencyCode", currencyCode);
-    form.set("sourceLabel", sourceLabel);
-    const result = await fetchJson<{ batch: UploadBatch; written: number }>(
+    const parsed = await parseSingleCsvFile(uploadFile);
+    if (!parsed.ok) return { ok: false, message: parsed.message };
+    const result = await postJson<{ batch: UploadBatch; written: number }>(
       "/api/market-data/price-uploads/confirm",
-      { method: "POST", body: form },
+      {
+        ...parsed.payload,
+        exchangeAlias,
+        currencyCode,
+        sourceLabel,
+        filename: uploadFile.name,
+      },
     );
     if (!result.ok) return { ok: false, message: result.message };
     return {
@@ -838,11 +972,16 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
     setBackupPending(true);
     setBackupError(null);
     setBackupResult(null);
-    const form = new FormData();
-    form.set("file", backupFile);
-    const result = await fetchJson<{ preview: BackupPreview }>(
+    const parsed = await parseBackupCsvFile(backupFile);
+    if (!parsed.ok) {
+      setBackupPending(false);
+      setBackupError(parsed.message);
+      setBackupPreview(null);
+      return;
+    }
+    const result = await postJson<{ preview: BackupPreview }>(
       "/api/market-data/price-uploads/backup/preview",
-      { method: "POST", body: form },
+      parsed.payload,
     );
     setBackupPending(false);
     if (!result.ok) {
@@ -857,15 +996,19 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
     if (!backupFile || !backupPreview) return;
     setBackupPending(true);
     setBackupError(null);
-    const form = new FormData();
-    form.set("file", backupFile);
-    const result = await fetchJson<{
+    const parsed = await parseBackupCsvFile(backupFile);
+    if (!parsed.ok) {
+      setBackupPending(false);
+      setBackupError(parsed.message);
+      return;
+    }
+    const result = await postJson<{
       batch: UploadBatch;
       written: number;
       unresolvedRowCount: number;
     }>("/api/market-data/price-uploads/backup/confirm", {
-      method: "POST",
-      body: form,
+      ...parsed.payload,
+      filename: backupFile.name,
     });
     setBackupPending(false);
     if (!result.ok) {

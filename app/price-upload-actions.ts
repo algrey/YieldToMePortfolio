@@ -1,4 +1,4 @@
-import { getAuthenticatedSqlContext } from "./portfolio-actions";
+import { getAuthenticatedSqlContext } from "./portfolio-actions.ts";
 import {
   confirmBackupPriceUpload,
   confirmSinglePriceUpload,
@@ -14,6 +14,13 @@ import {
   type SinglePriceUploadConfirmResult,
   type SinglePriceUploadPreview,
 } from "./price-upload-service";
+import {
+  filenameFromBody,
+  MAX_BACKUP_REQUEST_BYTES,
+  MAX_UPLOAD_REQUEST_BYTES,
+  readJsonBody,
+  settingsFromBody,
+} from "./price-upload-request-body.ts";
 import type { PriceUploadBatchRecord } from "../db/repositories/price-uploads.ts";
 
 type ActionFailure = {
@@ -22,67 +29,12 @@ type ActionFailure = {
   message: string;
 };
 
-// A single owner-uploaded price CSV is one security's full history -- much
-// smaller than the ledger CSV's multi-portfolio-transaction scope, so a flat
-// 8 MiB request-body ceiling (well above `price-csv.ts`'s own 2 MiB file
-// cap, leaving room for multipart overhead) is enough without a runtime-plan
-// lookup the way `assessCsvImportUploadStart` needs.
-const MAX_UPLOAD_REQUEST_BYTES = 8 * 1024 * 1024;
-const MAX_BACKUP_REQUEST_BYTES = 24 * 1024 * 1024;
-
-function tooLarge(contentLength: number | null, ceiling: number): boolean {
-  return contentLength !== null && contentLength > ceiling;
-}
-
-async function readFileField(
-  request: Request,
-  ceiling: number,
-): Promise<
-  | { ok: true; bytes: Uint8Array; filename: string; form: FormData }
-  | ActionFailure
-> {
-  if (
-    tooLarge(
-      Number(request.headers.get("content-length") ?? "0") || null,
-      ceiling,
-    )
-  ) {
-    return { ok: false, status: 413, message: "The file is too large." };
-  }
-  let form: FormData;
-  try {
-    form = await request.formData();
-  } catch {
-    return { ok: false, status: 400, message: "The upload could not be read." };
-  }
-  const file = form.get("file");
-  if (!(file instanceof File)) {
-    return { ok: false, status: 400, message: "Choose a file to upload." };
-  }
-  if (file.size > ceiling) {
-    return { ok: false, status: 413, message: "The file is too large." };
-  }
-  return {
-    ok: true,
-    bytes: new Uint8Array(await file.arrayBuffer()),
-    filename: file.name,
-    form,
-  };
-}
-
-function settingsFromForm(form: FormData) {
-  return {
-    exchangeAlias: String(form.get("exchangeAlias") ?? "ASX").trim() || "ASX",
-    currencyCode: String(form.get("currencyCode") ?? "AUD").trim() || "AUD",
-  };
-}
-
 export async function previewSinglePriceUploadAction(
   request: Request,
 ): Promise<{ ok: true; preview: SinglePriceUploadPreview } | ActionFailure> {
   const context = await getAuthenticatedSqlContext();
   if (!context.ok) return context;
-  const read = await readFileField(request, MAX_UPLOAD_REQUEST_BYTES);
+  const read = await readJsonBody(request, MAX_UPLOAD_REQUEST_BYTES);
   if (!read.ok) return read;
   const sqlContext: PriceUploadContext = {
     client: context.client,
@@ -90,8 +42,12 @@ export async function previewSinglePriceUploadAction(
   };
   return previewSinglePriceUpload(
     sqlContext,
-    read.bytes,
-    settingsFromForm(read.form),
+    {
+      ticker: read.body.ticker,
+      rows: read.body.rows,
+      malformedCount: read.body.malformedCount,
+    },
+    settingsFromBody(read.body),
   );
 }
 
@@ -102,22 +58,27 @@ export async function confirmSinglePriceUploadAction(
 > {
   const context = await getAuthenticatedSqlContext();
   if (!context.ok) return context;
-  const read = await readFileField(request, MAX_UPLOAD_REQUEST_BYTES);
+  const read = await readJsonBody(request, MAX_UPLOAD_REQUEST_BYTES);
   if (!read.ok) return read;
   const sqlContext: PriceUploadContext = {
     client: context.client,
     userId: context.userId,
   };
-  const sourceLabel = String(
-    read.form.get("sourceLabel") ?? DEFAULT_SOURCE_LABEL,
-  );
+  const sourceLabel =
+    typeof read.body.sourceLabel === "string"
+      ? read.body.sourceLabel
+      : DEFAULT_SOURCE_LABEL;
   const result:
     { ok: true; value: SinglePriceUploadConfirmResult } | ActionFailure =
     await confirmSinglePriceUpload(
       sqlContext,
-      read.bytes,
-      settingsFromForm(read.form),
-      { filename: read.filename, sourceLabel },
+      {
+        ticker: read.body.ticker,
+        rows: read.body.rows,
+        malformedCount: read.body.malformedCount,
+      },
+      settingsFromBody(read.body),
+      { filename: filenameFromBody(read.body), sourceLabel },
     );
   if (!result.ok) return result;
   return { ok: true, batch: result.value.batch, written: result.value.written };
@@ -128,13 +89,16 @@ export async function previewBackupPriceUploadAction(
 ): Promise<{ ok: true; preview: BackupUploadPreview } | ActionFailure> {
   const context = await getAuthenticatedSqlContext();
   if (!context.ok) return context;
-  const read = await readFileField(request, MAX_BACKUP_REQUEST_BYTES);
+  const read = await readJsonBody(request, MAX_BACKUP_REQUEST_BYTES);
   if (!read.ok) return read;
   const sqlContext: PriceUploadContext = {
     client: context.client,
     userId: context.userId,
   };
-  return previewBackupPriceUpload(sqlContext, read.bytes);
+  return previewBackupPriceUpload(sqlContext, {
+    rows: read.body.rows,
+    malformedByReason: read.body.malformedByReason,
+  });
 }
 
 export async function confirmBackupPriceUploadAction(request: Request): Promise<
@@ -148,16 +112,18 @@ export async function confirmBackupPriceUploadAction(request: Request): Promise<
 > {
   const context = await getAuthenticatedSqlContext();
   if (!context.ok) return context;
-  const read = await readFileField(request, MAX_BACKUP_REQUEST_BYTES);
+  const read = await readJsonBody(request, MAX_BACKUP_REQUEST_BYTES);
   if (!read.ok) return read;
   const sqlContext: PriceUploadContext = {
     client: context.client,
     userId: context.userId,
   };
   const result: { ok: true; value: BackupConfirmResult } | ActionFailure =
-    await confirmBackupPriceUpload(sqlContext, read.bytes, {
-      filename: read.filename,
-    });
+    await confirmBackupPriceUpload(
+      sqlContext,
+      { rows: read.body.rows, malformedByReason: read.body.malformedByReason },
+      { filename: filenameFromBody(read.body) },
+    );
   if (!result.ok) return result;
   return {
     ok: true,

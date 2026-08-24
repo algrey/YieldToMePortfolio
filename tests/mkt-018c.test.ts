@@ -8,13 +8,19 @@
  * decisions, progress callbacks) with fake preview/confirm/decide
  * implementations (no fetch, no DOM `File`, no interactive render harness
  * -- this codebase has neither, see `tests/brk-005b.test.ts`'s header
- * note); a real-pipeline idempotent-re-run proof wired to the UNCHANGED
+ * note); a real-pipeline idempotent-re-run proof wired to
  * `previewSinglePriceUpload`/`confirmSinglePriceUpload` (`app/
  * price-upload-service.ts`, same functions `tests/mkt-008.test.ts` already
- * covers); and `app/components/historical-data-panel.tsx`'s
- * `MultiFileRunStatus` presentational component plus source-text pins
- * proving the single-file `previewSingle`/`confirmSingle` functions are
- * untouched (byte-unchanged single-file behaviour).
+ * covers -- IMP-010A (2026-08-25) changed their second parameter from raw
+ * file bytes to a browser-parsed row payload; this file's own
+ * `csvPayloadOf` helper below mirrors `mkt-008.test.ts`'s, and
+ * `historical-data-panel.tsx`'s `parseSingleCsvFile` in real use); and
+ * `app/components/historical-data-panel.tsx`'s `MultiFileRunStatus`
+ * presentational component plus source-text pins proving the single-file
+ * `previewSingle`/`confirmSingle` functions still call the SAME shared
+ * client parser, the SAME endpoints, and report the SAME result message
+ * (UX-unchanged, per MKT-018C's own ruling -- the upload PAYLOAD shape is
+ * IMP-010A's whole point, not a regression here).
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -32,6 +38,7 @@ import {
   previewSinglePriceUpload,
   type PriceUploadContext,
 } from "../app/price-upload-service.ts";
+import { parsePriceCsv } from "../domain/market-data/price-csv.ts";
 import {
   createSqliteSqlClient,
   type SqlClient,
@@ -235,6 +242,28 @@ function bytesOf(text: string): Uint8Array {
   return new TextEncoder().encode(text);
 }
 
+/** IMP-010A: mirrors `tests/mkt-008.test.ts`'s helper of the same name --
+ * runs the SAME shared parser the browser now runs, shaping its output into
+ * the JSON payload a real upload posts. */
+function csvPayloadOf(text: string): {
+  ticker: string;
+  rows: Array<{ marketDate: string; priceDecimal: string }>;
+  malformedCount: number;
+} {
+  const parsed = parsePriceCsv(bytesOf(text));
+  if (!parsed.ok) {
+    throw new Error(`test fixture CSV failed to parse: ${parsed.message}`);
+  }
+  return {
+    ticker: parsed.ticker,
+    rows: parsed.rows.map((row) => ({
+      marketDate: row.marketDate,
+      priceDecimal: row.priceDecimal,
+    })),
+    malformedCount: parsed.malformed.length,
+  };
+}
+
 async function migratedDatabase(): Promise<DatabaseSync> {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys = ON;");
@@ -282,14 +311,14 @@ test("MKT-018C: a multi-file run through the REAL single-file pipeline is idempo
   const client = createSqliteSqlClient(db);
   const ctx = context(client, "user-a");
   const files = [
-    { filename: "fmg.csv", bytes: bytesOf(FMG_CSV) },
-    { filename: "bhp.csv", bytes: bytesOf(BHP_CSV) },
+    { filename: "fmg.csv", payload: csvPayloadOf(FMG_CSV) },
+    { filename: "bhp.csv", payload: csvPayloadOf(BHP_CSV) },
   ];
 
   const deps = {
     filenameOf: (f: (typeof files)[number]) => f.filename,
     previewFile: async (f: (typeof files)[number]) => {
-      const result = await previewSinglePriceUpload(ctx, f.bytes, {
+      const result = await previewSinglePriceUpload(ctx, f.payload, {
         exchangeAlias: "ASX",
         currencyCode: "AUD",
       });
@@ -299,7 +328,7 @@ test("MKT-018C: a multi-file run through the REAL single-file pipeline is idempo
     confirmFile: async (f: (typeof files)[number]) => {
       const result = await confirmSinglePriceUpload(
         ctx,
-        f.bytes,
+        f.payload,
         { exchangeAlias: "ASX", currencyCode: "AUD" },
         { filename: f.filename, sourceLabel: "intelligent-investor" },
         () => "2026-08-24T00:00:00.000Z",
@@ -358,17 +387,20 @@ test("MKT-018C: a malformed file in a real multi-file run never blocks its sibli
   const client = createSqliteSqlClient(db);
   const ctx = context(client, "user-a");
   const files = [
-    { filename: "fmg.csv", bytes: bytesOf(FMG_CSV) },
+    { filename: "fmg.csv", payload: csvPayloadOf(FMG_CSV) },
     // Ticker XYZ is not held by user-a -- previewSinglePriceUpload fails
     // this one honestly (404, names the ticker) without touching fmg/bhp.
-    { filename: "xyz.csv", bytes: bytesOf("DateTime,XYZ\n1998-03-12,1.00\n") },
-    { filename: "bhp.csv", bytes: bytesOf(BHP_CSV) },
+    {
+      filename: "xyz.csv",
+      payload: csvPayloadOf("DateTime,XYZ\n1998-03-12,1.00\n"),
+    },
+    { filename: "bhp.csv", payload: csvPayloadOf(BHP_CSV) },
   ];
 
   const deps = {
     filenameOf: (f: (typeof files)[number]) => f.filename,
     previewFile: async (f: (typeof files)[number]) => {
-      const result = await previewSinglePriceUpload(ctx, f.bytes, {
+      const result = await previewSinglePriceUpload(ctx, f.payload, {
         exchangeAlias: "ASX",
         currencyCode: "AUD",
       });
@@ -378,7 +410,7 @@ test("MKT-018C: a malformed file in a real multi-file run never blocks its sibli
     confirmFile: async (f: (typeof files)[number]) => {
       const result = await confirmSinglePriceUpload(
         ctx,
-        f.bytes,
+        f.payload,
         { exchangeAlias: "ASX", currencyCode: "AUD" },
         { filename: f.filename, sourceLabel: "intelligent-investor" },
         () => "2026-08-24T00:00:00.000Z",
@@ -441,22 +473,26 @@ test("MKT-018C review fold: the Exchange, Currency, and Source label inputs are 
   assert.match(sourceLabelBlock!, /disabled=\{multiRunning\}/);
 });
 
-test("MKT-018C: single-file behaviour is byte-unchanged -- previewSingle/confirmSingle still build the exact same FormData fields and result message as before this task", async () => {
+// IMP-010A honest flip (2026-08-25): this test used to assert the
+// single-file `previewSingle`/`confirmSingle` bodies built literal
+// `FormData` fields (`form.set("file", file)`, ...) -- that assertion is
+// now FALSE by design: this task moves the CSV parse into the browser and
+// uploads structured row JSON instead of the raw file (see
+// `app/price-upload-service.ts`'s IMP-010A header note). What MKT-018C's
+// own ruling actually requires stays true and is re-pinned below: the
+// single-file path still calls `parseSingleCsvFile` (the SAME shared
+// parser the multi-file path also uses -- one implementation, not a fork),
+// still posts to the exact same `/preview`/`/confirm` endpoints, and still
+// reports the identical success message template.
+test("MKT-018C / IMP-010A: single-file behaviour is UX-unchanged -- previewSingle/confirmSingle parse via the shared client parser, post to the same endpoints, and report the same result message as before this task", async () => {
   const source = await readFile(new URL(PANEL_PATH, import.meta.url), "utf8");
 
   const previewSingleBody = source.match(
     /async function previewSingle\(\) \{[\s\S]*?\n {2}\}/,
   )?.[0];
   assert.ok(previewSingleBody, "expected to find previewSingle's body");
-  assert.match(previewSingleBody!, /form\.set\("file", file\);/);
-  assert.match(
-    previewSingleBody!,
-    /form\.set\("exchangeAlias", exchangeAlias\);/,
-  );
-  assert.match(
-    previewSingleBody!,
-    /form\.set\("currencyCode", currencyCode\);/,
-  );
+  assert.match(previewSingleBody!, /parseSingleCsvFile\(file\)/);
+  assert.match(previewSingleBody!, /exchangeAlias,\s*currencyCode/);
   assert.doesNotMatch(previewSingleBody!, /sourceLabel/);
   assert.match(
     previewSingleBody!,
@@ -467,8 +503,8 @@ test("MKT-018C: single-file behaviour is byte-unchanged -- previewSingle/confirm
     /async function confirmSingle\(\) \{[\s\S]*?\n {2}\}/,
   )?.[0];
   assert.ok(confirmSingleBody, "expected to find confirmSingle's body");
-  assert.match(confirmSingleBody!, /form\.set\("file", file\);/);
-  assert.match(confirmSingleBody!, /form\.set\("sourceLabel", sourceLabel\);/);
+  assert.match(confirmSingleBody!, /parseSingleCsvFile\(file\)/);
+  assert.match(confirmSingleBody!, /sourceLabel,/);
   assert.match(
     confirmSingleBody!,
     /"\/api\/market-data\/price-uploads\/confirm"/,

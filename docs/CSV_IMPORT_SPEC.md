@@ -542,7 +542,10 @@ Malformed rows are counted with a reason (`wrong_column_count` |
 silently dropped, matching the ledger CSV's own malformed-row discipline
 (§9). Caps: 2 MiB / 20,000 rows (`DEFAULT_PRICE_CSV_LIMITS`) -- generous
 headroom for a single security's entire multi-decade daily-close history,
-bounded the same way §7 bounds the ledger upload.
+bounded the same way §7 bounds the ledger upload. Since `IMP-010A` (see
+§15.4), this parser runs in the BROWSER, so the 2 MiB byte cap is enforced
+client-side, before the file is ever uploaded; the server independently
+re-checks the 20,000-row cap on the received payload.
 
 Settings accompanying the upload: exchange (defaults `ASX`) and currency
 (defaults `AUD`) -- free text, matching the existing `source_exchange_alias`
@@ -595,7 +598,11 @@ per-security counts, a per-reason malformed-row breakdown, and any
 unresolved/ambiguous/exchange-mismatched rows before writing, and writes
 with natural-key idempotent upsert -- overlaying a backup onto already-live
 data (including Sharesight's own ongoing hourly accretion) is safe by
-construction. Caps: 20 MiB / 500,000 rows (`DEFAULT_PRICE_BACKUP_LIMITS`).
+construction. Caps: 20 MiB / 130,000 rows (`DEFAULT_PRICE_BACKUP_LIMITS` --
+corrected from an original, arithmetically-unreachable 500,000-row figure by
+the IMP-010A review's B1 fix; see §15.4 for the honest recomputation) --
+since `IMP-010A` (see §15.4), the 20 MiB byte cap is enforced client-side and
+the server re-checks the 130,000-row cap on the received payload.
 
 **Follow-up (2), the "lossless" claim's exact bound.** "Lossless" is bound
 to the provider allow-list above: a row whose `provider_id` this deployment
@@ -649,3 +656,115 @@ date in the exchange's own timezone (ASX -> `Australia/Sydney`, an explicit
 allow-list -- `docs/MARKET_DATA_STRATEGY.md` §18) -- never a fabricated
 intraday time, and never the file's own `HH:MM:SS` (an export artifact,
 not real precision this app has evidence for).
+
+### 15.4 Browser-parse / server-authority upload payloads (`IMP-010A`)
+
+As of `IMP-010A` (2026-08-25, owner directive: "Change the project so the
+CSV processing is done in browser, then uploaded as rows to the database...
+to help me stay on the Cloudflare free plan"), §15.1 and §15.2's parsers
+(`parsePriceCsv`, `parsePriceBackupCsv`) run in the BROWSER --
+`app/components/historical-data-panel.tsx` imports them directly from
+`domain/market-data/` (both modules import only the shared
+`text-encoding.ts` UTF-8/UTF-16 detector, no server/DB/Node dependency) --
+and POSTs their already-normalized output as JSON instead of uploading the
+raw file. This is a decode/CPU-reduction move only: staging, preview/
+confirm, idempotency, batch attribution, and provenance are all
+byte-unchanged from §15.1-15.3 above.
+
+**Upload payload shapes**, POSTed as the JSON request body to the SAME
+routes §15.1/§15.2 already named (`/api/market-data/price-uploads/preview`
+`.../confirm` `.../backup/preview` `.../backup/confirm`):
+
+- Single-security format: `{ exchangeAlias, currencyCode, ticker, rows: [{
+marketDate, priceDecimal }, ...], malformedCount }` (confirm also carries
+  `sourceLabel`, `filename`). `malformedCount` is the browser's own count of
+  rows it already dropped before sending -- informational/display only
+  (`price_upload_batches.malformed_row_count`), never trusted for anything
+  write-affecting.
+- Backup format: `{ rows: [{ providerId, sourceLabel, providerSymbol,
+providerExchange, currencyCode, marketDate, priceDecimal, observationAt,
+marketTimezone, interval, quality, adjustmentState, delayedMinutes }, ...],
+malformedByReason }` (confirm also carries `filename`). `malformedByReason`
+  is the browser's own per-reason breakdown, same informational-only status.
+
+**Server-side re-validation.** `app/price-upload-service.ts` no longer
+decodes or splits CSV text -- it calls
+`validateUploadedPriceCsvPayload`/`validateUploadedPriceBackupPayload`
+(`domain/market-data/price-csv.ts`/`price-backup-csv.ts`), which re-check
+EVERY field of EVERY row with the identical grammar the browser parsers
+enforce (ticker pattern; date/decimal grammar via the shared
+`price-value-grammar.ts`; the backup format's provider allow-list,
+currency pattern, ISO-instant grammar, and `interval`/`quality`/
+`adjustment_state` enums). Client output is untrusted input per AGENTS.md: a
+hand-crafted request that skips the real browser parser is rejected
+row-by-row, fail-closed -- a row that doesn't validate never reaches
+`writePriceUploadObservations`, exactly as an equivalent malformed CSV row
+never did before this task. Any server-side-detected malformed rows are
+added to the (otherwise browser-reported) `malformedCount`/
+`malformedByReason` shown in the preview.
+
+**Digest/idempotency finding.** No file-level content hash existed for this
+path before `IMP-010A` -- `price_observations.payload_sha256` is written
+`NULL` for every `owner-import` row; idempotency has always been the
+natural-key `ON CONFLICT` upsert described in §15.3 (BRK-012B, this file),
+keyed off each row's own `market_date`/`price_decimal` content, not the
+source file's bytes. There was therefore no digest semantics to preserve --
+re-uploading the same rows dedupes identically to before this task
+(pinned in `tests/imp-010a.test.ts`).
+
+**Plan gate.** Unlike the ledger CSV (§7, `assessCsvImportUploadStart`), this
+path never imported or called the `YIELDTOME_WORKERS_PLAN` gate -- it already
+ran under `"free"` before `IMP-010A`. Nothing on this path is genuinely
+paid-only; the gate exists only on the separate `IMP-010B` (17-column
+ledger CSV) sub-task.
+
+**Budget re-scoping and request-body defence (review round-2, BLOCKING fixes,
+2026-08-25).** A row's JSON encoding runs LARGER than its raw-CSV encoding --
+field names repeat on every row, unlike a CSV's one-time header line. Measured
+(`tests/imp-010a.test.ts` pins the exact figure): a typical backup row is
+~2.30x its raw-CSV byte size as JSON. Two blocking fixes followed from this:
+
+- `app/price-upload-request-body.ts`'s `MAX_BACKUP_REQUEST_BYTES` raised
+  24 MiB -> **64 MiB**. The original (unchanged-from-pre-`IMP-010A`) 24 MiB
+  ceiling silently rejected any backup export over ~10.35 MiB with an opaque
+  413 -- a genuine disaster-recovery regression, since export/backup-restore
+  is this feature's whole safety-net purpose. 64 MiB honestly covers the
+  20 MiB client-side file cap at the measured expansion factor
+  (20 * 2.30 ~= 46 MiB) with real headroom, and stays well under Cloudflare's
+  ~100 MB platform request-body limit; the existing D1 write chunking
+  (`db/repositories/price-uploads.ts`'s `PRICE_UPLOAD_WRITE_LIMITS`) already
+  turns a large accepted payload into bounded `batch()` calls, so no
+  additional request-level chunking is needed to stay under that limit.
+  `MAX_UPLOAD_REQUEST_BYTES` (the single-security format's own 8 MiB
+  ceiling) needed no change -- that format's rows are tiny and its 2 MiB
+  client file cap never approaches the JSON-expanded ceiling.
+- The row-count cap (§15.2's now-corrected 130,000, `DEFAULT_PRICE_BACKUP_
+LIMITS.maxRows`) is chosen to fit under BOTH the 20 MiB client file cap
+  (which can realistically produce at most ~137,970 rows) AND the 64 MiB
+  server ceiling even in the WORST case where every row hits this format's
+  own per-field length bounds below (~136,400 rows) -- so for real exports
+  (and any payload at the bounded fields' worst case) the row-count check
+  and the byte-ceiling check never disagree about what fits. A hostile
+  payload padding the few length-unbounded fields (providerSymbol,
+  providerExchange, marketTimezone, observationAt fractional seconds) can
+  still exceed the ceiling first -- it simply fails closed on the measured
+  byte check.
+  `parsePriceBackupCsv`'s row/byte-limit-exceeded messages now name the
+  actual configured limit and suggest splitting the file, so this is an
+  ACTIONABLE client-side pre-check (it runs in the browser, before any
+  upload attempt) rather than an opaque later 413.
+- The request-body size check no longer trusts the `content-length` HEADER
+  alone -- attacker-controlled, and simply ABSENT on a chunked-transfer
+  request, so a chunked body of any size previously sailed past that check.
+  `readJsonBody` now reads the body as text and measures its ACTUAL byte
+  length before ever calling `JSON.parse`.
+- Two upload-row fields were previously length-unbounded and are now
+  bounded: `priceDecimal` at `domain/calculations/decimal.ts`'s
+  `DECIMAL_LIMITS.inputDigits` (64 -- the SAME cap every other money/price/
+  quantity input in this app already enforces, reused via the shared
+  `price-value-grammar.ts`, never a second number); `sourceLabel` at the
+  existing `MAX_SOURCE_LABEL_LENGTH` (60, moved from `app/
+price-upload-service.ts`'s `sanitizeSourceLabel` into `domain/market-data/
+price-backup-csv.ts` so both the single-format batch label and the backup
+  format's per-row label share one convention) -- truncated, not rejected,
+  since it is a display-only field that was never persisted per row anyway.
