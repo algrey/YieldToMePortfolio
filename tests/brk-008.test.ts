@@ -297,14 +297,17 @@ test("BRK-008 shape evidence: an id (UUID) used as an object key is never echoed
 });
 
 test("BRK-008 shape evidence: a secret-shaped string used as an object key is never echoed", () => {
-  // A realistic secret token (mixed-case, like a real API key/access token
-  // -- e.g. Stripe-style `sk_live_<random>`) rather than a purely
-  // lower_snake_case string: `FIELD_NAME_KEY_PATTERN` is deliberately
-  // narrow (lower_snake_case only), so a secret that happened to be ALL
-  // lowercase letters/digits/underscores would itself pass it -- that is
-  // the documented, reviewed shape of the classifier, not a gap this test
-  // is meant to paper over. Mixed case is what a real high-entropy secret
-  // actually looks like, and is what this test proves is never echoed.
+  // A realistic secret token (mixed-case, like a real API key/access token)
+  // rather than a purely lower_snake_case string: `FIELD_NAME_KEY_PATTERN`
+  // is deliberately narrow (lower_snake_case only), so a secret that
+  // happened to be ALL lowercase letters/digits/underscores would itself
+  // pass it -- that is the documented, reviewed shape of the classifier,
+  // not a gap this test is meant to paper over. Mixed case is what a real
+  // high-entropy secret actually looks like, and is what this test proves
+  // is never echoed. (An earlier revision used Stripe's public
+  // documentation example key here, which tripped GitHub push protection
+  // as a false positive -- this fixture is deliberately NOT shaped like
+  // any real provider's key format for that reason.)
   const SECRET_KEY = "fk_FAKE_4eC39HqLyjWDarjtT1zdp7dc";
   const shape = deriveShapeEvidence({ [SECRET_KEY]: { active: true } });
   const serialized = JSON.stringify(shape);
