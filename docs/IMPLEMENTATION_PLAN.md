@@ -39,7 +39,7 @@ Gate:
 - scaffold builds and routes responsively;
 - config is fail-closed;
 - Wrangler-generated types and Worker configuration agree, with the unapproved `IMAGES` path removed and no undeclared binding reference;
-- the production profile declares Workers Paid for the 10 MiB/100,000-row import contract and Free profile rejects that upload path;
+- the production profile declares Workers Paid for the 10 MiB/100,000-row import contract and Free profile rejects that upload path (superseded `2026-08-25` by `IMP-010B`: the ledger CSV's byte-decode/row-split work now runs in the browser, so a Free profile supports this import contract too and `worker/runtime-config.ts` no longer gates production on the paid plan -- see `docs/ARCHITECTURE.md`'s `IMP-010B` entry);
 - Yahoo best-effort technical behavior and free fallback policy recorded;
 - the exact supplied 17-column header is locked as the complete supported import contract.
 

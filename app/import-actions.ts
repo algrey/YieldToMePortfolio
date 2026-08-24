@@ -27,15 +27,20 @@ import {
   type ImportRowExclusionActionFailure,
   type ImportRowExclusionActionSuccess,
 } from "./import-row-exclusion-service.ts";
-import {
-  assessCsvImportUploadStart,
-  parseStrictVersionedCsvImport,
-} from "../domain/imports";
+import { classifyImportRows, DEFAULT_IMPORT_LIMITS } from "../domain/imports";
 import type {
   ImportPreviewExistingDividendEntry,
   ImportPreviewPortfolio,
   ImportPreviewSecurityCandidate,
 } from "../domain/imports/reconciliation";
+import {
+  fileMetadataFromImportBody,
+  MAX_IMPORT_UPLOAD_REQUEST_BYTES,
+  rawRowsFromImportBody,
+  readJsonBody,
+  supersedesBatchIdFromImportBody,
+  targetPortfolioIdFromImportBody,
+} from "./import-request-body.ts";
 
 type ImportActionFailure = {
   ok: false;
@@ -151,54 +156,58 @@ async function loadReview(
   });
 }
 
-async function runtimePlan(): Promise<"free" | "paid"> {
-  const { env } = await import("cloudflare:workers");
-  return (env as typeof env & { YIELDTOME_WORKERS_PLAN?: unknown })
-    .YIELDTOME_WORKERS_PLAN === "paid"
-    ? "paid"
-    : "free";
-}
-
+// IMP-010B: the 17-column ledger CSV now parses in the BROWSER, the same
+// way IMP-010A moved the price-CSV path's parsing there -- see
+// `app/import-request-body.ts`'s header comment and
+// `app/components/import-review.tsx`'s upload handlers, which import
+// `splitStrictVersionedCsvRows` directly from
+// `domain/imports/strict-versioned-parser.ts` (the single shared
+// implementation) and upload the resulting `rows: string[][]` as JSON
+// instead of the raw file. This action's remaining server-side work --
+// `classifyImportRows` below -- is the sole, server-only classification
+// authority: the browser never classifies (it only splits), so this is the
+// ONE place the row grammar executes, once per upload, over the untrusted
+// uploaded rows; it no longer reads a raw CSV body at all, so (per the
+// investigation recorded in CSV_IMPORT_SPEC.md's IMP-010B section) nothing
+// about this path is genuinely incompatible with the Cloudflare Workers
+// free plan any more, matching the price-CSV path's own precedent -- there
+// is no `assessCsvImportUploadStart`/`YIELDTOME_WORKERS_PLAN` gate here.
 export async function createImportPreviewAction(
   request: Request,
 ): Promise<ImportActionSuccess | ImportActionFailure> {
   const context = await getAuthenticatedSqlContext();
   if (!context.ok) return context;
-  const assessment = assessCsvImportUploadStart({
-    workersPlan: await runtimePlan(),
-    contentLength: null,
-  });
-  if (!assessment.ok)
-    return {
-      ok: false,
-      status: assessment.status as 403 | 413,
-      message: assessment.message,
-    };
+  const read = await readJsonBody(request, MAX_IMPORT_UPLOAD_REQUEST_BYTES);
+  if (!read.ok) return read;
   try {
-    const form = await request.formData();
-    const file = form.get("file");
-    const targetPortfolioId = String(
-      form.get("targetPortfolioId") ?? "",
-    ).trim();
-    const supersedesBatchId = String(
-      form.get("supersedesBatchId") ?? "",
-    ).trim();
-    if (!(file instanceof File) || !targetPortfolioId) {
+    const targetPortfolioId = targetPortfolioIdFromImportBody(read.body);
+    const supersedesBatchId = supersedesBatchIdFromImportBody(read.body);
+    const fileMetadata = fileMetadataFromImportBody(read.body);
+    const rawRows = rawRowsFromImportBody(
+      read.body,
+      DEFAULT_IMPORT_LIMITS.maxRows,
+    );
+    // IMP-010B review round (fold 3): two genuinely different failure
+    // reasons were previously conflated into one "Choose a CSV file and
+    // portfolio" message -- a missing/blank `targetPortfolioId` is a real
+    // "you forgot to pick a portfolio" UX state (the client's own `upload`/
+    // `stageCorrectedSuccessor` handlers already guard this before ever
+    // sending a request), while a malformed `fileMetadata`/`rawRows` is a
+    // payload-SHAPE problem (a hostile or broken direct request, since the
+    // real upload flow always sends a well-formed payload once a file is
+    // picked) that has nothing to do with "choosing a file."
+    if (!targetPortfolioId) {
       return {
         ok: false,
         status: 400,
-        message: "Choose a CSV file and portfolio.",
+        message: "Choose a target portfolio.",
       };
     }
-    const fileAssessment = assessCsvImportUploadStart({
-      workersPlan: await runtimePlan(),
-      contentLength: file.size,
-    });
-    if (!fileAssessment.ok) {
+    if (!fileMetadata || rawRows === null) {
       return {
         ok: false,
-        status: fileAssessment.status as 403 | 413,
-        message: fileAssessment.message,
+        status: 400,
+        message: "The uploaded CSV payload was invalid or malformed.",
       };
     }
     const portfolio = await createOwnedPortfolioRepository(context.client).get(
@@ -207,9 +216,10 @@ export async function createImportPreviewAction(
     );
     if (!portfolio)
       return { ok: false, status: 404, message: "Portfolio not found." };
-    const parseResult = await parseStrictVersionedCsvImport(
-      new Uint8Array(await file.arrayBuffer()),
-      { maxBytes: fileAssessment.maxBytes, maxRows: fileAssessment.maxRows },
+    const parseResult = await classifyImportRows(
+      rawRows,
+      DEFAULT_IMPORT_LIMITS,
+      fileMetadata.fileSha256,
     );
     const parserVersion = parseResult.parserVersion;
     const started = await createOwnedImportStagingRepository(
@@ -219,9 +229,9 @@ export async function createImportPreviewAction(
       supersedesBatchId: supersedesBatchId || null,
       parserFormat: "strict-versioned-csv",
       parserVersion,
-      filename: file.name,
-      byteSize: file.size,
-      fileSha256: parseResult.fileFingerprint,
+      filename: fileMetadata.filename,
+      byteSize: fileMetadata.byteSize,
+      fileSha256: fileMetadata.fileSha256,
     });
     if (!started.ok) {
       return {

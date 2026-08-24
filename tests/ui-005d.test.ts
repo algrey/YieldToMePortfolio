@@ -31,7 +31,17 @@ test("import reversal UI keeps confirmation, impact, progress, and successor bou
     /\/api\/import\/commit\/\$\{historyDetail\.batch\.id\}\/reverse/,
   );
   assert.match(review, /idempotencyKey/);
-  assert.match(review, /form\.set\("supersedesBatchId", supersededBatchId\)/);
+  // IMP-010B honest flip: the corrected-successor upload moved from a
+  // `multipart/form-data` `FormData` (`form.set("supersedesBatchId", ...)`)
+  // to browser-parsed JSON (`postImportUploadJson(file, targetId,
+  // supersededBatchId)`), since the server no longer reads a raw CSV file
+  // at all -- see `app/import-request-body.ts`. The superseded-batch
+  // reference forwarding this pins is otherwise unchanged: it is still the
+  // reversed batch's own id, still passed straight through.
+  assert.match(
+    review,
+    /postImportUploadJson\(\s*file,\s*targetId,\s*supersededBatchId,?\s*\)/,
+  );
   assert.match(review, /loadHistoryDetail\(result\.review\.batch\.id\)/);
   assert.match(
     review,

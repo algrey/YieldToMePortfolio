@@ -601,6 +601,39 @@ function parseTradeTimestamp(
   };
 }
 
+// IMP-010B review round (fold 5): every size/count/malformed-content
+// rejection this module can return -- both from the character-level
+// `parseCsvText` loop below AND from `classifyImportRows`'s defense-in-depth
+// re-checks over an untrusted `rows[][]` payload -- names the ACTUAL
+// configured limit and suggests a concrete action, matching the
+// `IMP-010A` round-2 precedent (`domain/market-data/price-backup-csv.ts`'s
+// `formatMiB`-based messages). Both code paths call these SAME builders so
+// the wording never drifts between "the browser rejected this before
+// upload" and "the server rejected this after upload" for the identical
+// failure code.
+function formatMiB(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(0)} MiB`;
+}
+
+function csvTooLargeMessage(limits: ImportLimits): string {
+  return `The CSV exceeded the ${formatMiB(limits.maxBytes)} size limit. Split the file into smaller batches and import each separately.`;
+}
+
+function rowLimitExceededMessage(limits: ImportLimits): string {
+  return `The CSV exceeded the ${limits.maxRows.toLocaleString("en-US")}-row limit. Split the file into smaller batches and import each separately.`;
+}
+
+function fieldLimitExceededMessage(limits: ImportLimits): string {
+  return `A CSV field exceeded the ${limits.maxFieldLength.toLocaleString("en-US")}-character limit. Check the file for a corrupted or unterminated quoted value.`;
+}
+
+const NOT_VALID_UTF8_MESSAGE =
+  "The supplied CSV is not valid UTF-8. Re-export or save the file as UTF-8 and try again.";
+const NUL_OR_BINARY_MESSAGE =
+  "The supplied CSV contains NUL or binary content. Remove the binary content and try again.";
+const UNTERMINATED_QUOTE_MESSAGE =
+  "The CSV contains an unterminated quoted field. Check the file for a missing closing quote.";
+
 function parseCsvText(text: string, limits: ImportLimits): CsvRowsResult {
   const rows: string[][] = [];
   let row: string[] = [];
@@ -612,7 +645,7 @@ function parseCsvText(text: string, limits: ImportLimits): CsvRowsResult {
       return {
         ok: false,
         code: "FIELD_LIMIT_EXCEEDED",
-        message: "A CSV field exceeded the configured size limit.",
+        message: fieldLimitExceededMessage(limits),
       };
     }
 
@@ -628,7 +661,7 @@ function parseCsvText(text: string, limits: ImportLimits): CsvRowsResult {
       return {
         ok: false,
         code: "ROW_LIMIT_EXCEEDED",
-        message: "The CSV exceeded the configured row limit.",
+        message: rowLimitExceededMessage(limits),
       };
     }
 
@@ -663,7 +696,7 @@ function parseCsvText(text: string, limits: ImportLimits): CsvRowsResult {
         return {
           ok: false,
           code: "FIELD_LIMIT_EXCEEDED",
-          message: "A CSV field exceeded the configured size limit.",
+          message: fieldLimitExceededMessage(limits),
         };
       }
       continue;
@@ -708,7 +741,7 @@ function parseCsvText(text: string, limits: ImportLimits): CsvRowsResult {
       return {
         ok: false,
         code: "FIELD_LIMIT_EXCEEDED",
-        message: "A CSV field exceeded the configured size limit.",
+        message: fieldLimitExceededMessage(limits),
       };
     }
   }
@@ -717,7 +750,7 @@ function parseCsvText(text: string, limits: ImportLimits): CsvRowsResult {
     return {
       ok: false,
       code: "CSV_DECODE_FAILED",
-      message: "The CSV contains an unterminated quoted field.",
+      message: UNTERMINATED_QUOTE_MESSAGE,
     };
   }
 
@@ -739,6 +772,11 @@ function parseCsvText(text: string, limits: ImportLimits): CsvRowsResult {
 function stripBom(value: string): string {
   return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;
 }
+
+// IMP-010B: written via `String.fromCharCode` rather than a `\u0000`
+// escape literal so every NUL/binary-content check below is expressed the
+// same way.
+const NUL_CHARACTER = String.fromCharCode(0);
 
 function toBytes(source: string | Uint8Array): Uint8Array {
   return typeof source === "string" ? new TextEncoder().encode(source) : source;
@@ -1296,58 +1334,71 @@ export function assessCsvImportUploadStart(input: {
   };
 }
 
-export async function parseStrictVersionedCsvImport(
-  source: string | Uint8Array,
-  options: {
-    maxBytes?: number;
-    maxRows?: number;
-    maxFieldLength?: number;
-  } = {},
-): Promise<ImportParseResult> {
-  const limits: ImportLimits = {
-    maxBytes: options.maxBytes ?? DEFAULT_IMPORT_LIMITS.maxBytes,
-    maxRows: options.maxRows ?? DEFAULT_IMPORT_LIMITS.maxRows,
-    maxFieldLength:
-      options.maxFieldLength ?? DEFAULT_IMPORT_LIMITS.maxFieldLength,
-  };
+export type ImportRowSplitFailureCode =
+  | "CSV_IMPORT_TOO_LARGE"
+  | "ROW_LIMIT_EXCEEDED"
+  | "FIELD_LIMIT_EXCEEDED"
+  | "CSV_DECODE_FAILED";
 
+export type ImportRowSplitResult =
+  | Readonly<{ ok: true; fileFingerprint: string; rows: string[][] }>
+  | Readonly<{
+      ok: false;
+      fileFingerprint: string;
+      code: ImportRowSplitFailureCode;
+      message: string;
+    }>;
+
+// IMP-010B: this is the CPU-heavy half of the strict 17-column parser --
+// byte decode, BOM strip, and RFC-4180-style quoted-field/row splitting.
+// This half is what was too heavy to run on the Cloudflare Workers free
+// plan (see `assessCsvImportUploadStart`'s now-superseded header note and
+// CSV_IMPORT_SPEC.md's IMP-010B section); it now runs in the BROWSER
+// (`app/components/import-review.tsx` imports THIS function directly from
+// here, the SAME module the server used to run this over raw bytes),
+// producing `rows: string[][]` -- still fully UNCLASSIFIED, no
+// grammar/enum/decimal validation has happened AT ALL yet -- that the
+// browser uploads to the server instead of the raw file.
+//
+// IMP-010B review round (B1 fix): this function's OWN job stops at
+// splitting. `classifyImportRows` below (header validation, per-row
+// grammar/enum/decimal rules, duplicate fingerprinting) is NEVER called
+// from the browser bundle -- it runs ONLY on the server, over the rows
+// this function (or a hostile payload skipping it entirely) produced. See
+// `classifyImportRows`'s own header comment for why that single-authority
+// shape is a STRONGER guarantee than a browser/server dual-run would be.
+export async function splitStrictVersionedCsvRows(
+  source: string | Uint8Array,
+  limits: ImportLimits,
+): Promise<ImportRowSplitResult> {
   const bytes = toBytes(source);
   const fileFingerprint = await sha256Hex(bytes);
 
   if (bytes.byteLength > limits.maxBytes) {
-    return createUploadTooLargeFailure(
+    return {
+      ok: false,
       fileFingerprint,
-      "The CSV upload exceeds the configured size limit.",
-    );
+      code: "CSV_IMPORT_TOO_LARGE",
+      message: csvTooLargeMessage(limits),
+    };
   }
 
   const decoded = decodeUtf8(bytes);
   if (decoded === null) {
     return {
       ok: false,
-      parserVersion: SUPPORTED_IMPORT_PARSER_VERSION,
       fileFingerprint,
       code: "CSV_DECODE_FAILED",
-      message: "The supplied CSV is not valid UTF-8.",
-      issues: [
-        makeIssue("CSV_DECODE_FAILED", "The supplied CSV is not valid UTF-8."),
-      ],
+      message: NOT_VALID_UTF8_MESSAGE,
     };
   }
 
-  if (decoded.includes("\u0000")) {
+  if (decoded.includes(NUL_CHARACTER)) {
     return {
       ok: false,
-      parserVersion: SUPPORTED_IMPORT_PARSER_VERSION,
       fileFingerprint,
       code: "CSV_DECODE_FAILED",
-      message: "The supplied CSV contains NUL or binary content.",
-      issues: [
-        makeIssue(
-          "CSV_DECODE_FAILED",
-          "The supplied CSV contains NUL or binary content.",
-        ),
-      ],
+      message: NUL_OR_BINARY_MESSAGE,
     };
   }
 
@@ -1355,15 +1406,121 @@ export async function parseStrictVersionedCsvImport(
   if (!rowsResult.ok) {
     return {
       ok: false,
-      parserVersion: SUPPORTED_IMPORT_PARSER_VERSION,
       fileFingerprint,
       code: rowsResult.code,
       message: rowsResult.message,
-      issues: [makeIssue(rowsResult.code, rowsResult.message)],
     };
   }
 
-  if (rowsResult.rows.length === 0) {
+  return { ok: true, fileFingerprint, rows: rowsResult.rows };
+}
+
+function createRowSplitFailure(
+  fileFingerprint: string,
+  code: ImportRowSplitFailureCode,
+  message: string,
+): ImportParseFailure {
+  return {
+    ok: false,
+    parserVersion: SUPPORTED_IMPORT_PARSER_VERSION,
+    fileFingerprint,
+    code,
+    message,
+    issues: [makeIssue(code, message)],
+  };
+}
+
+// IMP-010B review round (B1 fix -- corrects a false claim in the original
+// entry): this is now the SOLE row-classification authority in the ENTIRE
+// codebase, browser included. `splitStrictVersionedCsvRows` above is the
+// only piece of parsing that runs client-side, and it does ONLY byte
+// decode/BOM-strip/row-splitting -- it produces unclassified `string[][]`
+// and never calls this function. `app/components/import-review.tsx` never
+// imports `classifyImportRows` at all (grep it; it only imports
+// `splitStrictVersionedCsvRows`). Classification -- header validation,
+// per-row grammar/enum/decimal rules, duplicate fingerprinting -- happens
+// EXACTLY ONCE, HERE, on the SERVER, every time, for every upload. That is
+// a STRONGER guarantee than "the browser and server both run the same
+// function": there is no second, independently-invoked execution of this
+// logic anywhere to ever disagree with this one, and a hostile payload
+// that skips the browser's `splitStrictVersionedCsvRows` entirely still
+// hits the identical, only-ever-server-side classification path a genuine
+// upload's rows pass through -- never a simplified or bypassable re-check.
+// `rows`/`fileFingerprint` are BOTH untrusted input at this boundary
+// (AGENTS.md): a hand-crafted hostile payload must be rejected exactly as
+// the equivalent malformed CSV text would have been rejected by the
+// pre-IMP-010B server-side text parser. The size/count/content bounds
+// checked immediately below re-enforce the SAME limits
+// `splitStrictVersionedCsvRows`'s character-level parser already enforces,
+// since nothing guarantees an untrusted `rows` payload ever passed through
+// that parser at all -- including, per the review's B2/fold-4 finding, the
+// original raw-CSV BYTE-VOLUME cap (`limits.maxBytes`): row-count and
+// per-field-length bounds alone do not bound total volume (up to `maxRows`
+// rows each near `maxFieldLength` could otherwise total far more than
+// `maxBytes` while passing both individually), so this reconstructs the
+// equivalent CSV text and measures its real encoded size too.
+export async function classifyImportRows(
+  rows: readonly (readonly string[])[],
+  limits: ImportLimits,
+  fileFingerprint: string,
+): Promise<ImportParseResult> {
+  if (rows.length > limits.maxRows + 1) {
+    return createRowSplitFailure(
+      fileFingerprint,
+      "ROW_LIMIT_EXCEEDED",
+      rowLimitExceededMessage(limits),
+    );
+  }
+
+  for (const row of rows) {
+    for (const field of row) {
+      if (field.length > limits.maxFieldLength) {
+        return createRowSplitFailure(
+          fileFingerprint,
+          "FIELD_LIMIT_EXCEEDED",
+          fieldLimitExceededMessage(limits),
+        );
+      }
+      if (field.includes(NUL_CHARACTER)) {
+        return createRowSplitFailure(
+          fileFingerprint,
+          "CSV_DECODE_FAILED",
+          NUL_OR_BINARY_MESSAGE,
+        );
+      }
+    }
+  }
+
+  // Bounded by the row-count/field-length checks just above (already
+  // enforced) AND by `app/import-request-body.ts`'s
+  // `MAX_IMPORT_UPLOAD_REQUEST_BYTES` request-body ceiling (already
+  // enforced before this function is ever reached from the server action)
+  // -- this reconstruction and its single `TextEncoder` call therefore run
+  // over already-small (well under `MAX_IMPORT_UPLOAD_REQUEST_BYTES`) data,
+  // one linear pass, genuinely cheap. Joined with a single `\n` per row
+  // (1 byte) rather than `\r\n` (2) or the original quoting -- a
+  // DELIBERATE UNDER-estimate: every real line terminator this parser
+  // accepts (`\n`, `\r`, `\r\n`) is at least 1 byte, and dropped quote
+  // characters only shrink the reconstruction further, so this can never
+  // exceed the TRUE original byte size. That keeps this check a pure
+  // LOWER BOUND: it can only ever reject a payload that is AT LEAST this
+  // large (never a false positive against a file that legitimately passed
+  // `splitStrictVersionedCsvRows`'s own exact byte check), at the cost of
+  // a small amount of slack against a hostile payload trying to sneak
+  // marginally over `maxBytes` -- an accepted tradeoff, since the request
+  // body's own ceiling remains the hard backstop regardless.
+  const reconstructedCsvBytes = new TextEncoder().encode(
+    rows.map((row) => row.join(",")).join("\n"),
+  ).length;
+  if (reconstructedCsvBytes > limits.maxBytes) {
+    return createRowSplitFailure(
+      fileFingerprint,
+      "CSV_IMPORT_TOO_LARGE",
+      csvTooLargeMessage(limits),
+    );
+  }
+
+  if (rows.length === 0) {
     const header: ImportHeaderReport = {
       parserVersion: SUPPORTED_IMPORT_PARSER_VERSION,
       observedHeaders: [],
@@ -1380,7 +1537,7 @@ export async function parseStrictVersionedCsvImport(
     );
   }
 
-  const headerValidation = validateHeader(rowsResult.rows[0] ?? []);
+  const headerValidation = validateHeader([...(rows[0] ?? [])]);
   if (!headerValidation.ok) {
     return createHeaderMismatchFailure(
       fileFingerprint,
@@ -1391,13 +1548,13 @@ export async function parseStrictVersionedCsvImport(
 
   let bodyStartIndex = 1;
   while (
-    bodyStartIndex < rowsResult.rows.length &&
-    isBlankRow(rowsResult.rows[bodyStartIndex] ?? [])
+    bodyStartIndex < rows.length &&
+    isBlankRow(rows[bodyStartIndex] as string[])
   ) {
     bodyStartIndex += 1;
   }
 
-  const rows: ParsedImportRow[] = [];
+  const parsedRows: ParsedImportRow[] = [];
   const issues: ImportIssue[] = [];
   const seenFingerprints = new Map<string, number>();
   let blankRows = 0;
@@ -1408,9 +1565,9 @@ export async function parseStrictVersionedCsvImport(
   let dividendRows = 0;
   let duplicateRows = 0;
 
-  for (let index = bodyStartIndex; index < rowsResult.rows.length; index += 1) {
+  for (let index = bodyStartIndex; index < rows.length; index += 1) {
     const rowNumber = index + 1;
-    const row = rowsResult.rows[index] ? [...rowsResult.rows[index]] : [];
+    const row = rows[index] ? [...(rows[index] as string[])] : [];
     const classification = classifyRow(
       row,
       headerValidation.headerIndex,
@@ -1463,7 +1620,7 @@ export async function parseStrictVersionedCsvImport(
     }
 
     issues.push(...classification.issues);
-    rows.push({
+    parsedRows.push({
       rowNumber,
       kind: classification.kind,
       rawFields: row,
@@ -1478,10 +1635,10 @@ export async function parseStrictVersionedCsvImport(
     parserVersion: headerValidation.header.parserVersion,
     fileFingerprint,
     header: headerValidation.header,
-    rows,
+    rows: parsedRows,
     issues,
     summary: {
-      totalRows: rows.length,
+      totalRows: parsedRows.length,
       blankRows,
       definitionRows,
       transactionRows,
@@ -1491,6 +1648,36 @@ export async function parseStrictVersionedCsvImport(
       duplicateRows,
     },
   };
+}
+
+export async function parseStrictVersionedCsvImport(
+  source: string | Uint8Array,
+  options: {
+    maxBytes?: number;
+    maxRows?: number;
+    maxFieldLength?: number;
+  } = {},
+): Promise<ImportParseResult> {
+  const limits: ImportLimits = {
+    maxBytes: options.maxBytes ?? DEFAULT_IMPORT_LIMITS.maxBytes,
+    maxRows: options.maxRows ?? DEFAULT_IMPORT_LIMITS.maxRows,
+    maxFieldLength:
+      options.maxFieldLength ?? DEFAULT_IMPORT_LIMITS.maxFieldLength,
+  };
+
+  const split = await splitStrictVersionedCsvRows(source, limits);
+  if (!split.ok) {
+    if (split.code === "CSV_IMPORT_TOO_LARGE") {
+      return createUploadTooLargeFailure(split.fileFingerprint, split.message);
+    }
+    return createRowSplitFailure(
+      split.fileFingerprint,
+      split.code,
+      split.message,
+    );
+  }
+
+  return await classifyImportRows(split.rows, limits, split.fileFingerprint);
 }
 
 export function isSupportedImportFieldName(

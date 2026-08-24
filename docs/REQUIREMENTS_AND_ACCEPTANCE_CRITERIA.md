@@ -560,7 +560,7 @@ Acceptance:
 - Missing bindings fail at startup/request boundary with safe errors.
 - The generated Worker configuration and Vinext compatibility check are exercised in CI-equivalent verification; unsupported Next/Vinext behavior is not assumed from Next.js documentation alone.
 - Cloudflare runtime/binding types are generated with Wrangler and checked for drift; built Worker code references no binding absent from its environment configuration.
-- The production deployment profile is Workers Paid for the documented CSV limit and recovery objective. A Free-profile deployment fails closed on CSV upload unless a separately documented Worker-runtime benchmark approves a smaller limit.
+- The production deployment profile is Workers Paid for the documented CSV limit and recovery objective. A Free-profile deployment fails closed on CSV upload unless a separately documented Worker-runtime benchmark approves a smaller limit. `IMP-010B` (2026-08-25) supersedes this criterion, kept here as the record of the original decision: the ledger CSV's byte-decode/row-split work now runs in the browser (`domain/imports/strict-versioned-parser.ts`'s `splitStrictVersionedCsvRows`), so a Free-profile deployment now supports CSV import via browser-parse/server-authority the same way the MKT-008 price-CSV path always did (`IMP-010A`) -- nothing on this path remains genuinely paid-only, and `worker/runtime-config.ts`'s `production-requires-paid-workers` gate is retired accordingly (see `docs/ARCHITECTURE.md`'s `IMP-010B` entry and `docs/CSV_IMPORT_SPEC.md`'s IMP-010B section for the full ruling).
 
 ### PLAT-002 — PWA foundation
 

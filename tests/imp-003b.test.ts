@@ -543,11 +543,19 @@ test("reversal resumes after a bounded failure and corrected upload supersedes o
   assert.deepEqual(crossUser, { ok: false, reason: "not_found" });
 });
 
+// IMP-010B honest flip: the upload request body moved from
+// `multipart/form-data` (read via `request.formData()`/`form.get(...)`) to
+// browser-parsed JSON (read via `readJsonBody`/`supersedesBatchIdFromImportBody`
+// -- see `app/import-request-body.ts`), since the server no longer reads a
+// raw CSV file at all. The corrected-batch-reference forwarding this test
+// pins is otherwise unchanged: `supersedesBatchId` is still read from the
+// request and still forwarded as `supersedesBatchId || null` into
+// `startUpload`.
 test("corrected upload action forwards the superseded batch reference", async () => {
   const source = await readFile(
     new URL("../app/import-actions.ts", import.meta.url),
     "utf8",
   );
-  assert.match(source, /form\.get\("supersedesBatchId"\)/);
+  assert.match(source, /supersedesBatchIdFromImportBody\(read\.body\)/);
   assert.match(source, /supersedesBatchId: supersedesBatchId \|\| null/);
 });

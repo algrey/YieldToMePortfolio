@@ -12,9 +12,11 @@
  * `text-encoding.ts`/`price-value-grammar.ts` modules they depend on) carry
  * NO server-only dependency; (2) a static proof the price-CSV action/service
  * layer never gates on `YIELDTOME_WORKERS_PLAN` (the "free plan" requirement
- * is trivially satisfied because there is no plan branch to fail on --
- * unlike the ledger-CSV path `app/import-actions.ts` gates via
- * `assessCsvImportUploadStart`, which this path never calls); (3) hostile
+ * is trivially satisfied because there is no plan branch to fail on -- at
+ * the time this task shipped, the ledger-CSV path `app/import-actions.ts`
+ * still gated via `assessCsvImportUploadStart`; IMP-010B (`tests/imp-010b.test.ts`)
+ * later moved that path to the SAME browser-parse/server-authority split
+ * and lifted its gate too, for the same reason); (3) hostile
  * uploaded-row-payload rejection for both formats' server-side
  * re-validators (`validateUploadedPriceCsvPayload`/
  * `validateUploadedPriceBackupPayload`), independent of whether a real
@@ -124,7 +126,9 @@ test("IMP-010A browser-safety: historical-data-panel.tsx imports the parsers dir
 
 // ---------------------------------------------------------------------------
 // (2) Plan gate: the price-CSV path has no YIELDTOME_WORKERS_PLAN branch --
-// unlike the ledger-CSV path, there is nothing to lift for "free" to work.
+// there was never anything to lift for "free" to work here (IMP-010B later
+// lifted the ledger-CSV path's OWN gate for the same underlying reason --
+// see tests/imp-010b.test.ts).
 // ---------------------------------------------------------------------------
 
 // The two patterns below deliberately look for an ACTUAL reference (an

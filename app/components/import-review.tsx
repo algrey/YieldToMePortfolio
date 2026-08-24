@@ -25,6 +25,10 @@ import {
   scopeCommitToBatch,
 } from "../import-review-commit-state.ts";
 import type { RowSummary } from "../../domain/imports/row-summary.ts";
+import {
+  DEFAULT_IMPORT_LIMITS,
+  splitStrictVersionedCsvRows,
+} from "../../domain/imports/strict-versioned-parser.ts";
 
 type PortfolioOption = { id: string; name: string; homeCurrencyCode: string };
 // BRK-009C: distinct securities the "Review securities" table renders, one
@@ -668,6 +672,75 @@ export function ImportReview({
     }
   }
 
+  // IMP-010B: the CPU-heavy byte-decode/quoted-field-splitting half of the
+  // strict 17-column parser now runs HERE in the browser --
+  // `splitStrictVersionedCsvRows`, imported directly from
+  // `domain/imports/strict-versioned-parser.ts` (the SAME module the
+  // server used to run this over raw bytes, never a fork -- see that
+  // module's IMP-010B header comment). A failure here (the file is too
+  // large, over the row-count/field-length bounds, or not decodable text)
+  // is reported to the owner immediately, before any network request --
+  // an "honest client-side pre-check message" per CSV_IMPORT_SPEC.md's
+  // IMP-010B section -- rather than uploading a doomed file only to have
+  // the server reject it. `splitStrictVersionedCsvRows`'s own
+  // `fileFingerprint` IS the file's SHA-256 (the SAME hash
+  // `import_batches.file_sha256`'s dedupe/resume key has always used --
+  // see `app/import-request-body.ts`'s header note on why the server now
+  // trusts this client-computed value); no separate hashing step is
+  // needed. Row-level GRAMMAR/header validation (HEADER_MISMATCH, enum,
+  // decimal, date issues, etc.) is deliberately NOT duplicated here -- that
+  // still happens server-side, via `classifyImportRows`, so a batch with
+  // those issues flows into the SAME staged "invalid batch" review screen
+  // it always has, unchanged.
+  async function prepareImportUpload(
+    file: File,
+  ): Promise<
+    | { ok: true; fileSha256: string; rows: string[][] }
+    | { ok: false; message: string }
+  > {
+    const split = await splitStrictVersionedCsvRows(
+      new Uint8Array(await file.arrayBuffer()),
+      DEFAULT_IMPORT_LIMITS,
+    );
+    if (!split.ok) {
+      return { ok: false, message: split.message };
+    }
+    return { ok: true, fileSha256: split.fileFingerprint, rows: split.rows };
+  }
+
+  async function postImportUploadJson(
+    file: File,
+    targetId: string,
+    supersedesBatchId: string,
+  ): Promise<{ ok: true; review: Review } | { ok: false; message: string }> {
+    const prepared = await prepareImportUpload(file);
+    if (!prepared.ok) return prepared;
+    const response = await fetch("/api/import/preview", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        targetPortfolioId: targetId,
+        supersedesBatchId,
+        filename: file.name,
+        fileSha256: prepared.fileSha256,
+        byteSize: file.size,
+        rows: prepared.rows,
+      }),
+    });
+    const result = (await response.json()) as
+      { ok: true; review: Review } | { ok: false; message: string };
+    if (!response.ok || result.ok === false) {
+      return {
+        ok: false,
+        message:
+          result.ok === false
+            ? result.message
+            : "The import preview could not be created.",
+      };
+    }
+    return result;
+  }
+
   async function stageCorrectedSuccessor(file: File) {
     if (
       historyDetail?.batch.status !== "reversed" ||
@@ -680,25 +753,16 @@ export function ImportReview({
     }
     const supersededBatchId = historyDetail.batch.id;
     const targetId = historyDetail.batch.targetPortfolioId;
-    const form = new FormData();
-    form.set("file", file);
-    form.set("targetPortfolioId", targetId);
-    form.set("supersedesBatchId", supersededBatchId);
     setSuccessorPending(true);
     setMessage(null);
     try {
-      const response = await fetch("/api/import/preview", {
-        method: "POST",
-        body: form,
-      });
-      const result = (await response.json()) as
-        { ok: true; review: Review } | { ok: false; message: string };
-      if (!response.ok || result.ok === false) {
-        throw new Error(
-          result.ok === false
-            ? result.message
-            : "The corrected import preview could not be created.",
-        );
+      const result = await postImportUploadJson(
+        file,
+        targetId,
+        supersededBatchId,
+      );
+      if (!result.ok) {
+        throw new Error(result.message);
       }
       setTargetPortfolioId(targetId);
       setReview(result.review);
@@ -723,26 +787,17 @@ export function ImportReview({
   async function upload(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    if (!form.get("file") || !targetPortfolioId) {
+    const file = form.get("file");
+    if (!(file instanceof File) || !targetPortfolioId) {
       setMessage("Choose a CSV file and portfolio before previewing.");
       return;
     }
     setPending(true);
     setMessage(null);
     try {
-      form.set("targetPortfolioId", targetPortfolioId);
-      const response = await fetch("/api/import/preview", {
-        method: "POST",
-        body: form,
-      });
-      const result = (await response.json()) as
-        { ok: true; review: Review } | { ok: false; message: string };
-      if (!response.ok || result.ok === false) {
-        throw new Error(
-          result.ok === false
-            ? result.message
-            : "The import preview could not be created.",
-        );
+      const result = await postImportUploadJson(file, targetPortfolioId, "");
+      if (!result.ok) {
+        throw new Error(result.message);
       }
       setReview(result.review);
       setCommit(null);

@@ -126,8 +126,13 @@ CLOUDFLARE_ACCESS_AUDIENCE=yieldtome-local-dev
 YIELDTOME_WORKERS_PLAN=paid
 ```
 
-The issuer/audience must match the gateway. `YIELDTOME_WORKERS_PLAN=paid` enables
-the CSV import profile locally (it fails closed on the free plan).
+The issuer/audience must match the gateway. As of `IMP-010B` (2026-08-25), the
+ledger CSV import path's byte-decode/row-split work runs in the browser, so it
+no longer fails closed on `YIELDTOME_WORKERS_PLAN=free` (see
+`docs/ARCHITECTURE.md`'s `IMP-010B` entry) -- `YIELDTOME_WORKERS_PLAN` is
+still validated (must be `free` or `paid` outside `local`, where it defaults
+to `free`) but is otherwise advisory/unused metadata for behavior; either
+value works locally.
 
 Repository write paths use D1's `batch()` API for atomic multi-statement
 writes (D1 rejects SQL-level `BEGIN`/`COMMIT`/`ROLLBACK`), so local D1 and

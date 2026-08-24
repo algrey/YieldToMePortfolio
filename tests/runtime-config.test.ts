@@ -6,7 +6,16 @@ import {
   resolveRuntimeConfig,
 } from "../worker/runtime-config.ts";
 
-test("local runtime defaults stay fail-closed on CSV import and provider is disabled", () => {
+// IMP-010B review round (B2 ruling, honest flip): the ledger CSV import
+// path's decode/parse work moved to the browser, so nothing in this
+// codebase is fail-closed on CSV import by plan any more --
+// `RuntimeConfig.csvImport` (the `enabled`/`reason` fields this test used
+// to assert) was retired along with the `production-requires-paid-workers`
+// gate it fed a now-false "Workers Free fails closed on CSV import" reason
+// string into. See CSV_IMPORT_SPEC.md's IMP-010B section and
+// `worker/runtime-config.ts`'s own `workersPlan` field comment for the full
+// ruling.
+test("local runtime defaults resolve with the free plan and a disabled provider", () => {
   const result = resolveRuntimeConfig({
     ASSETS: {
       fetch: async () => new Response("ok"),
@@ -21,11 +30,6 @@ test("local runtime defaults stay fail-closed on CSV import and provider is disa
   assert.equal(result.config.environment, "local");
   assert.equal(result.config.workersPlan, "free");
   assert.equal(result.config.marketDataProvider, "disabled");
-  assert.equal(result.config.csvImport.enabled, false);
-  assert.match(
-    result.config.csvImport.reason ?? "",
-    /Workers Free fails closed on CSV import/i,
-  );
 });
 
 test("preview and production fail closed when Access config is missing", () => {
@@ -57,7 +61,7 @@ test("preview and production fail closed when Access config is missing", () => {
   }
 });
 
-test("production requires Workers Paid and accepts the approved provider set only", () => {
+test("production accepts the approved provider set only -- Workers Paid is no longer required", () => {
   const productionResult = resolveRuntimeConfig({
     ASSETS: {
       fetch: async () => new Response("ok"),
@@ -74,8 +78,7 @@ test("production requires Workers Paid and accepts the approved provider set onl
     return;
   }
 
-  assert.equal(productionResult.config.csvImport.enabled, true);
-  assert.equal(productionResult.config.csvImport.maxRows, 100_000);
+  assert.equal(productionResult.config.workersPlan, "paid");
 
   const unsupportedProviderResult = resolveRuntimeConfig({
     ASSETS: {
@@ -95,6 +98,42 @@ test("production requires Workers Paid and accepts the approved provider set onl
       /invalid-market-data-provider/,
     );
   }
+});
+
+// IMP-010B review round (B2 ruling): this is the actual behavioral proof
+// the owner's free-plan production directive requires -- a `production`
+// deployment with `YIELDTOME_WORKERS_PLAN: "free"` must resolve
+// successfully (previously: a hard 503 on every request via
+// `production-requires-paid-workers`, now removed).
+test("production resolves successfully under the free Workers plan -- the retired production-requires-paid-workers gate", () => {
+  const result = resolveRuntimeConfig({
+    ASSETS: {
+      fetch: async () => new Response("ok"),
+    },
+    YIELDTOME_RUNTIME_ENV: "production",
+    YIELDTOME_WORKERS_PLAN: "free",
+    MARKET_DATA_PROVIDER: "disabled",
+    CLOUDFLARE_ACCESS_ISSUER: "https://example.cloudflareaccess.com",
+    CLOUDFLARE_ACCESS_AUDIENCE: "audience",
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.config.environment, "production");
+  assert.equal(result.config.workersPlan, "free");
+  assert.doesNotMatch(JSON.stringify(Object.keys(result.config)), /csvImport/);
+});
+
+test("no RuntimeConfigErrorCode is ever production-requires-paid-workers -- the gate is gone, not merely unreachable", async () => {
+  const source = await readFile(
+    new URL("../worker/runtime-config.ts", import.meta.url),
+    "utf8",
+  );
+  // Matches an actual TS string-literal USE (the retired error-code union
+  // member, or a `code: "..."` object literal) -- not this file's own
+  // explanatory comments, which name the retired code in backticks, never
+  // double-quotes.
+  assert.doesNotMatch(source, /"production-requires-paid-workers"/);
 });
 
 test("wrangler source and generated worker config stay aligned with the task profile", async () => {

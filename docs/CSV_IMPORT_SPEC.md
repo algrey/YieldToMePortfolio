@@ -255,8 +255,8 @@ Source zero becomes missing with `FX_ZERO_TREATED_AS_UNKNOWN`. It does not block
 
 - Authenticated owner only.
 - `.csv` extension is advisory; validate content as bounded text.
-- Initial size limit: 10 MiB and 100,000 physical rows; make configurable. This release contract requires a Workers Paid production deployment because Workers Free cannot guarantee the parse/normalize/hash workload within its 10 ms CPU limit.
-- A deployment configured as Workers Free rejects CSV import before reading the body. Enabling a smaller Free limit requires a separate Worker-runtime benchmark and a documented configuration profile.
+- Initial size limit: 10 MiB and 100,000 physical rows; make configurable.
+- As of `IMP-010B` (see §16), the CPU-heavy decode/normalize/hash workload described above runs in the BROWSER, not the Worker -- the historical "requires a Workers Paid production deployment because Workers Free cannot guarantee this within its 10 ms CPU limit" constraint, and the `assessCsvImportUploadStart`/`YIELDTOME_WORKERS_PLAN` gate that enforced it, no longer apply to this path (`worker/runtime-config.ts`'s `production-requires-paid-workers` deployment gate is retired accordingly -- a deliberate, owner-backed free-plan production directive, not merely an unused code path). See §16 for the full re-scope.
 - Stream/bounded parse; reject NUL/binary content and pathological field sizes.
 - Support UTF-8 with optional BOM. Non-UTF-8 requires explicit future encoding support.
 - Do not evaluate spreadsheet formulas, HTML, Markdown, URLs, or note content.
@@ -431,6 +431,8 @@ Import history is private, owner-scoped, and non-cacheable. Batch detail returns
 `file fingerprint = SHA-256(exact uploaded bytes)`
 
 Same owner + fingerprint + parser version finds exact uploads. The user can inspect the existing batch rather than create ledger effects again.
+
+As of `IMP-010B` (§16), this hash is computed in the BROWSER (over the original file, before any parsing) and sent alongside the already-split rows; the server records it as supplied, since it no longer receives the raw bytes to recompute from itself. See §16 for the full trust-boundary write-up.
 
 ### Row identity
 
@@ -712,11 +714,15 @@ source file's bytes. There was therefore no digest semantics to preserve --
 re-uploading the same rows dedupes identically to before this task
 (pinned in `tests/imp-010a.test.ts`).
 
-**Plan gate.** Unlike the ledger CSV (§7, `assessCsvImportUploadStart`), this
-path never imported or called the `YIELDTOME_WORKERS_PLAN` gate -- it already
-ran under `"free"` before `IMP-010A`. Nothing on this path is genuinely
-paid-only; the gate exists only on the separate `IMP-010B` (17-column
-ledger CSV) sub-task.
+**Plan gate.** This path never imported or called the `YIELDTOME_WORKERS_PLAN`
+gate -- it already ran under `"free"` before `IMP-010A`. At the time this
+section was written, the ledger CSV (§7, `assessCsvImportUploadStart`) still
+carried the ONLY genuine plan gate in the codebase; `IMP-010B` (§16) later
+applied this same ruling to that path and retired its gate too, for the
+identical underlying reason (the CPU-heavy work the gate protected moved to
+the browser) -- including the deployment-level `production-requires-paid-workers`
+gate in `worker/runtime-config.ts`, a deliberate free-plan production
+directive, not merely an unused code path.
 
 **Budget re-scoping and request-body defence (review round-2, BLOCKING fixes,
 2026-08-25).** A row's JSON encoding runs LARGER than its raw-CSV encoding --
@@ -768,3 +774,212 @@ price-upload-service.ts`'s `sanitizeSourceLabel` into `domain/market-data/
 price-backup-csv.ts` so both the single-format batch label and the backup
   format's per-row label share one convention) -- truncated, not rejected,
   since it is a display-only field that was never persisted per row anyway.
+
+## 16. Browser-parse / server-authority upload payload — ledger CSV (`IMP-010B`)
+
+As of `IMP-010B` (2026-08-25, applying `IMP-010A`'s binding ruling to the
+second flagged upload path), §§1-14 above's 17-column strict parser
+(`parseStrictVersionedCsvImport`, `domain/imports/strict-versioned-parser.ts`)
+is split into two composable halves: `splitStrictVersionedCsvRows` (byte
+decode, BOM strip, RFC-4180-style quoted-field/row splitting -- the CPU-heavy
+half §7 originally required a Workers Paid deployment for) and
+`classifyImportRows` (header validation, per-row grammar/enum/decimal
+classification, duplicate fingerprinting, summary counts -- unchanged logic,
+now reusable standalone). `parseStrictVersionedCsvImport` itself keeps its
+original signature and behaviour, as a thin composition of the two.
+
+`app/components/import-review.tsx` imports `splitStrictVersionedCsvRows`
+DIRECTLY (the module carries no server/DB/Node dependency at all -- verified
+by a source scan, `tests/imp-010b.test.ts`), running it over the picked
+file in the browser to produce `rows: string[][]` (still fully
+UNCLASSIFIED -- no grammar/enum/decimal validation has happened yet) plus
+`fileFingerprint` (the file's SHA-256, a side effect of the same call). The
+upload and corrected-successor handlers POST this as the JSON body of the
+SAME `/api/import/preview` route (unchanged CSRF, unchanged route wiring):
+
+```
+{ targetPortfolioId, supersedesBatchId, filename, fileSha256, byteSize, rows }
+```
+
+**Server-side classification authority (corrected per review round B1 --
+the original entry here overstated a "browser also ran this" dual-execution
+model that never existed).** `app/import-actions.ts`'s
+`createImportPreviewAction` no longer reads a raw CSV body at all -- it reads
+the browser-split JSON via `app/import-request-body.ts` (new, DB/auth-free,
+mirroring `app/price-upload-request-body.ts`'s split-for-testability
+precedent; its `readJsonBody` is REUSED BY REFERENCE from that module, never
+forked) and calls `classifyImportRows` on the untrusted `rows` array. The
+BROWSER NEVER CALLS `classifyImportRows` -- it only runs
+`splitStrictVersionedCsvRows` (byte decode/splitting, producing unclassified
+`rows: string[][]`). Classification -- header validation, per-row grammar/
+enum/decimal rules, duplicate fingerprinting -- happens EXACTLY ONCE, on the
+SERVER, for every upload, honest or hostile alike. This is NOT the §15.4
+price-CSV path's shape either (there, `validateUploadedPriceCsvPayload`
+re-validates a CLAIMED already-normalized `{marketDate, priceDecimal}` pair
+the browser itself also produced); here there is no browser-side
+classification run to even compare against -- a hostile payload that skips
+`splitStrictVersionedCsvRows` entirely still hits the IDENTICAL,
+only-ever-server-side classification path a genuine upload's rows pass
+through. This single-authority shape is a STRONGER guarantee than a
+browser/server dual-run would be: there is no second, independently-invoked
+execution of the classification logic anywhere in the codebase to ever
+disagree with the server's own. Row-count (`DEFAULT_IMPORT_LIMITS.maxRows`,
+100,000), per-field-length (`.maxFieldLength`, 1 MiB), byte-volume
+(`.maxBytes`, 10 MiB -- fold 4, below), and NUL/binary-content bounds are ALL
+re-checked INSIDE `classifyImportRows` itself, since nothing guarantees an
+untrusted `rows` payload ever passed through the browser's own
+`splitStrictVersionedCsvRows` at all. Staging/preview/reconciliation/commit/
+reversal semantics from normalized rows onward (§§8-13) are byte-unchanged.
+
+**Digest/idempotency finding.** UNLIKE §15.4's price-CSV path, this path DOES
+key idempotent dedupe/resume on a file-level content hash -- §10's "File
+identity" (`file_sha256 = SHA-256(exact uploaded bytes)`,
+`import_batches`'s `ON CONFLICT(user_id, file_sha256, parser_format,
+parser_version)`). Per the binding ruling ("if it hashes raw file bytes: the
+client sends the file SHA-256 + byte size alongside rows; the server records
+both and uses them exactly as today"), the browser now computes this SAME
+hash (`splitStrictVersionedCsvRows`'s `fileFingerprint`, still `SHA-256` over
+the raw source bytes -- verified byte-identical to the pre-`IMP-010B`
+server-computed value, `tests/imp-010b.test.ts`) and sends it; the server
+records it VERBATIM, unverified, since it no longer has the raw bytes to
+recompute from. This hash is a NATURAL-KEY DEDUP HINT ONLY, scoped
+per-`user_id` by the same unique constraint it always used -- never a
+financial-correctness or cross-user security boundary, since every row is
+independently re-derived via `classifyImportRows` regardless of what the
+hash claims. A client that lies about it can, at worst, cause ITS OWN
+re-upload to wrongly dedupe against (or fail to dedupe against) a PRIOR
+upload from the SAME account -- never unvalidated content reaching staging,
+never another user's data. An honest client's re-upload of the identical
+file dedupes/resumes exactly as before this task
+(`tests/imp-010b.test.ts`'s idempotent-re-upload-and-resume case). `byteSize`
+is a NEW kind of client-claimed value here (fold 1, corrects the original
+entry's "always has been" framing): before this task, the server read
+`file.size` straight off the real `File`/`Blob` object in a `multipart/
+form-data` upload -- intrinsic to the actual transmitted bytes, not an
+independently declarable number. It now arrives as an ordinary JSON field
+with no tie to `rows`'s real content, so it BECOMES client-claimed here.
+`app/import-request-body.ts`'s `fileMetadataFromImportBody` bounds it above
+by `MAX_IMPORT_UPLOAD_REQUEST_BYTES` (fold 2) but it otherwise stays
+display/audit-only (`import_batches.byte_size`), never used for any
+security-critical enforcement -- the request-body byte ceiling and
+`classifyImportRows`'s own row/field/byte-volume bounds are independent of
+whatever this field claims.
+
+**Plan-gate re-scope (honest, per the binding ruling's critical
+investigation #2).** §7's `assessCsvImportUploadStart`
+`YIELDTOME_WORKERS_PLAN === "free"` rejection existed SOLELY to avoid the
+CPU-heavy raw-CSV-text decode/split described there running on the Workers
+free plan -- exactly the work `splitStrictVersionedCsvRows` above moves into
+the browser. `app/import-actions.ts` no longer imports
+`assessCsvImportUploadStart` or reads `YIELDTOME_WORKERS_PLAN` at all
+(source-scan-pinned, `tests/imp-010b.test.ts`); its remaining server-side
+work (`classifyImportRows`'s per-row grammar over already-split rows, no
+decode/quote-parsing) is the same weight category §15.4 already judged
+plan-agnostic for the price-CSV path. **Conclusion: nothing about the ledger
+CSV import path remains genuinely paid-only.** §7 is corrected accordingly.
+The gate function itself (`assessCsvImportUploadStart`) is left in place,
+still independently unit-tested (`tests/imports.test.ts`), but is no longer
+called by any production caller.
+
+**Deployment-profile change (review round B2 RULING -- deliberate and
+owner-backed, not incidental).** The application-level gate above was not
+the only place `YIELDTOME_WORKERS_PLAN` blocked production: `worker/
+runtime-config.ts`'s `resolveRuntimeConfig` also hard-failed the ENTIRE
+Worker -- a 503 on every single request, not just CSV import -- whenever
+`environment === "production"` and `workersPlan !== "paid"`
+(`production-requires-paid-workers`). This existed for the identical
+reason: the documented CSV contract required Workers Paid's CPU budget.
+Per the owner's explicit directive to run production on the Workers FREE
+plan, and since that reason no longer applies, this gate is retired
+deliberately, not merely left unreachable: `resolveRuntimeConfig` no longer
+emits `production-requires-paid-workers` (removed from
+`RuntimeConfigErrorCode` entirely), `worker/index.ts`'s resulting 503 path
+for that reason is gone (its `!runtimeConfig.ok` handling is otherwise
+unchanged), and the now-dead `RuntimeConfig.csvImport.{enabled,maxBytes,
+maxRows,reason}` config -- never read by any consumer in this codebase
+(confirmed by a repo-wide grep) and whose `reason` string ("Workers Free
+fails closed on CSV import...") had gone FALSE the moment this task shipped
+-- is removed rather than repaired. **What `YIELDTOME_WORKERS_PLAN` still
+gates after this: NOTHING.** `RuntimeConfig.workersPlan` is still parsed
+and validated (must be `free`/`paid` when set outside `local`, which
+defaults to `free`) and carried through as recorded deployment metadata,
+but no module reads it for any behavioral decision any more. Retiring the
+variable entirely (the env var, `wrangler.json`'s `vars` entries, this
+field, `parseWorkersPlan`) is a reasonable follow-up, deliberately NOT done
+here to avoid expanding this task's scope into an unrelated config-surface
+removal. `wrangler.json`'s own `env.production.vars.YIELDTOME_WORKERS_PLAN`
+value is left as `"paid"` -- an actual deployment/billing lever the owner
+sets directly, distinct from the code-level gate this task retires -- so
+its existing alignment test (`tests/runtime-config.test.ts`'s "wrangler
+source and generated worker config stay aligned" case) is unchanged.
+`tests/runtime-config.test.ts` gained a direct proof that a `production`
+deployment now resolves successfully under `workersPlan: "free"`, plus a
+source-scan pin that `production-requires-paid-workers` never appears as an
+actual code reference (as opposed to explanatory prose) again.
+
+**Recorded (Orchestrator TASKS.md note, not a code change this task
+makes).** The client-side pre-check short-circuit described below (`CSV_
+IMPORT_TOO_LARGE`/`ROW_LIMIT_EXCEEDED`/`FIELD_LIMIT_EXCEEDED`/`CSV_DECODE_
+FAILED`) is a genuine, deliberate audit-trail reduction versus the
+pre-`IMP-010B` behaviour: those four rejections no longer create a staged
+"invalid batch" `import_batches` row the way a post-upload server-side
+rejection did before this task, since the browser now refuses to even
+attempt the upload. Header mismatches and per-row grammar issues are
+UNAFFECTED -- they still stage normally as an invalid batch, since only
+server-side `classifyImportRows` can detect them.
+
+**Budget re-scoping and request-body defence.** §7's 10 MiB / 100,000-row /
+1 MiB-max-field bounds (`DEFAULT_IMPORT_LIMITS`) are now enforced CLIENT-SIDE
+FIRST, inside `splitStrictVersionedCsvRows`, with pre-check messages that name
+the actual configured limit and a concrete action (`CSV_IMPORT_TOO_LARGE` /
+`ROW_LIMIT_EXCEEDED` / `FIELD_LIMIT_EXCEEDED` name the MiB/row/character
+ceiling and suggest splitting the file or checking for a corrupted value,
+matching the `IMP-010A` round-2 precedent's `formatMiB`-based wording;
+`CSV_DECODE_FAILED`'s two variants name the concrete fix -- re-save as UTF-8,
+or remove binary content) -- all four short-circuit in the browser before any
+network request, a genuine UX improvement over the pre-`IMP-010B` behaviour,
+where only the byte-size cap pre-checked via `assessCsvImportUploadStart` and
+the row/field/decode bounds surfaced only AFTER upload, as a staged "invalid
+batch" in the review screen; header mismatches and per-row grammar issues
+still surface that same way, since only `classifyImportRows` -- necessarily
+server-round-tripped -- can detect them. ALL FOUR bounds are ALSO
+re-enforced SERVER-SIDE, inside `classifyImportRows` itself, using the SAME
+message-building functions (never a second, drifting wording), since nothing
+guarantees an untrusted `rows` payload ever passed through the real browser
+parser.
+
+**Byte-volume re-enforcement (fold 4, corrects the original entry's
+"unaffected" claim).** Row-count and per-field-length bounds alone do NOT
+bound total volume: up to `maxRows` (100,000) rows each near
+`maxFieldLength` (1 MiB) could pass both checks individually while totalling
+far more than `maxBytes` (10 MiB). `classifyImportRows` therefore
+reconstructs the equivalent CSV text (fields comma-joined, rows joined by a
+single `\n`) and measures its real encoded byte length against `maxBytes` too
+-- a single `TextEncoder` call, cheap because it only ever runs over data
+already bounded by the 24 MiB request-body ceiling below. The `\n` join is a
+DELIBERATE under-estimate (every line terminator this parser accepts is at
+least 1 byte, and dropped quote characters only shrink the reconstruction
+further), so this check is a pure LOWER BOUND: it can only reject a payload
+that is genuinely at least this large, never a false positive against a file
+that legitimately passed `splitStrictVersionedCsvRows`'s own exact byte
+check.
+
+The JSON request body's own ceiling, `app/import-request-body.ts`'s new
+`MAX_IMPORT_UPLOAD_REQUEST_BYTES` (24 MiB), was MEASURED (not guessed)
+against this path's OWN row shape -- a plain `string[][]` (one array of 17
+strings per row), materially cheaper per byte than §15.2's backup-format
+named-field-object-per-row shape (~2.30x measured expansion there). Per-row
+JSON quoting/comma overhead is roughly CONSTANT regardless of field content
+length, so the worst case is neither the shortest-possible row (high ratio,
+but capped at 100,000 rows it can never reach the full 10 MiB byte budget)
+nor the longest-possible row (low ratio, fewer rows needed), but the row size
+that saturates BOTH `DEFAULT_IMPORT_LIMITS.maxBytes` (10 MiB) and `.maxRows`
+(100,000) SIMULTANEOUSLY: measured at ~1.34x expansion, ~13.16 MiB worst-case
+total (`tests/imp-010b.test.ts`'s expansion-factor drill). 24 MiB leaves
+~1.8x real headroom over that honest worst case (WIDER than the original
+10 MiB raw-CSV cap alone -- the byte-volume re-enforcement above is what
+keeps the EFFECTIVE ceiling at `maxBytes`, not the wider 24 MiB JSON
+allowance), and stays well under Cloudflare's ~100 MB platform request-body
+limit; `db/repositories/import-staging.ts`'s existing single atomic
+`client.batch()` write remains bounded by the unchanged `maxRows` cap (see
+§7's "Known risk" note).
