@@ -110,6 +110,7 @@ export default async function IncomeMultiYearPage({
       portfolioDividendGrowthPercentDecimal={
         projection.portfolioDividendGrowth.growthPercentDecimal
       }
+      financialYearStartMonth={projection.financialYearStartMonth}
       yearsBack={yearsBack}
       yearsForward={yearsForward}
     />

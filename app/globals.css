@@ -4400,6 +4400,77 @@ dd {
   text-transform: uppercase;
 }
 
+/* DIV-013: the "Add/Remove Capital" subsection -- a SEPARATE sibling
+   section from `.income-whatif` (see that component's own comment), reusing
+   the identical dark-token card/input shape so the two read as one visual
+   system. */
+.income-capital-events {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--divider);
+  border-radius: 0;
+  background: var(--forest);
+}
+
+.income-capital-events-inputs {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.income-capital-events-inputs label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.income-capital-events-inputs input,
+.income-capital-events-inputs select {
+  min-height: 44px;
+  width: 100%;
+  padding: 0 10px;
+  border: 1px solid var(--divider);
+  border-radius: 0;
+  background: var(--ink);
+  color: var(--cream);
+  font: inherit;
+}
+
+.income-capital-events-apply,
+.income-reinvest-toggle {
+  min-height: 44px;
+  width: fit-content;
+  padding: 0 16px;
+  border: 1px solid var(--divider);
+  border-radius: 0;
+  background: var(--ink);
+  color: var(--cream);
+  font: inherit;
+}
+
+.income-capital-events-apply:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.income-reinvest-toggle.active {
+  background: var(--green-bright);
+  color: var(--ink);
+  border-color: var(--green-bright);
+}
+
+.income-capital-events-remove {
+  min-width: 44px;
+  min-height: 44px;
+  border: 1px solid var(--divider);
+  border-radius: 0;
+  background: var(--ink);
+  color: var(--cream);
+  font: inherit;
+}
+
 .income-range-controls {
   display: flex;
   flex-wrap: wrap;
@@ -4437,6 +4508,10 @@ dd {
   }
 
   .income-whatif-inputs {
+    grid-template-columns: 1fr;
+  }
+
+  .income-capital-events-inputs {
     grid-template-columns: 1fr;
   }
 }

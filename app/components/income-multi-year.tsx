@@ -84,6 +84,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { IncomeNav } from "./income-nav.tsx";
 import {
+  applyCapitalEventsToProjection,
   projectMultiYearIncomeWhatIf,
   type ComputeCurrentFinancialYearRowResult,
   type ComputePastFinancialYearRowsResult,
@@ -95,10 +96,37 @@ import {
   type ProjectionYearRow,
 } from "../../domain/dividends/projection.ts";
 import {
+  CAPITAL_EVENT_DEFAULT_NAME,
+  CAPITAL_EVENT_DEFAULT_YIELD_PERCENT_DECIMAL,
+  capitalEventDraftToRow,
+  capitalEventRowToDomainInput,
+  capitalEventsStorageKey,
+  defaultCapitalEventMonthYear,
+  isValidCapitalEventDraft,
   isValidGrowthInput,
+  loadCapitalEventsSession,
   resolveWhatIfGrowthPercentDecimal,
+  saveCapitalEventsSession,
+  sortCapitalEventRows,
+  type CapitalEventDraft,
+  type CapitalEventRowState,
 } from "../income-whatif.ts";
 import { formatIncomeMoney, formatIncomePercent } from "../income-format.ts";
+
+const MONTH_NAMES = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
 
 type SourceLabel =
   "actual" | "estimate" | "fy to date" | "projected" | "no data";
@@ -223,8 +251,18 @@ function currentFinancialYearSourceLabel(
       : "no data";
 }
 
+/** Accepts either the plain base `ProjectionYearRow` (`yieldPercentDecimal`
+ * always a string) or DIV-013's capital-adjusted
+ * `CapitalEventProjectionYearRow` (`yieldPercentDecimal` may be `null` --
+ * an over-removal parcel can newly drive a row's value to zero/negative,
+ * where there is no meaningful yield to report). `DisplayRow.yieldPercentDecimal`
+ * is already `string | null` (see `formatIncomePercent`'s existing
+ * null-safe "Unavailable" handling below), so this widening is purely
+ * about what this function itself is willing to ACCEPT. */
 function mapProjectedRow(
-  row: ProjectionYearRow,
+  row: Omit<ProjectionYearRow, "yieldPercentDecimal"> & {
+    yieldPercentDecimal: string | null;
+  },
   valueStatus: "available" | "partial",
 ): DisplayRow {
   return {
@@ -347,6 +385,7 @@ export function IncomeMultiYear({
   multiYearBaselineInput,
   portfolioValueGrowthPercentDecimal,
   portfolioDividendGrowthPercentDecimal,
+  financialYearStartMonth,
   yearsBack,
   yearsForward,
 }: {
@@ -360,6 +399,10 @@ export function IncomeMultiYear({
   multiYearBaselineInput: MultiYearProjectionInput | null;
   portfolioValueGrowthPercentDecimal: string;
   portfolioDividendGrowthPercentDecimal: string;
+  /** DIV-013: the portfolio's FY start month (1-12) -- needed to place the
+   * "Add/Remove Capital" what-if parcels' owner-chosen calendar month/year
+   * onto the same FY calendar the rows above already use. */
+  financialYearStartMonth: number;
   yearsBack: number;
   yearsForward: number;
 }) {
@@ -401,6 +444,41 @@ export function IncomeMultiYear({
   const [debouncedDividendGrowthInput, setDebouncedDividendGrowthInput] =
     useState(portfolioDividendGrowthPercentDecimal);
 
+  // DIV-013 (owner directive): the "Add/Remove Capital" what-if rows --
+  // committed (post-Apply) parcels, the reinvest-dividends toggle, and the
+  // uncommitted draft input fields feeding Apply. Starts empty/off on every
+  // fresh mount (server-render included); `hydratedKeyRef` below gates when
+  // it is safe to start WRITING to sessionStorage, so the initial empty
+  // state can never clobber a real prior-session value before the load
+  // effect has had a chance to read it back in (see the two effects below).
+  const [capitalRows, setCapitalRows] = useState<CapitalEventRowState[]>([]);
+  const [reinvestDividends, setReinvestDividends] = useState(false);
+  // DIV-013 review (B3, BLOCKING): which PORTFOLIO's own storage key the
+  // CURRENT `capitalRows`/`reinvestDividends` state actually reflects --
+  // `null` until the very first load completes. A `useRef` (not state) is
+  // deliberate, and its correctness depends on the SAVE effect below being
+  // declared BEFORE the LOAD effect (see the save effect's own comment):
+  // on the SAME render pass a `portfolioId` prop change re-runs both
+  // effects, the save effect must run FIRST and observe the STALE ref
+  // (still the PREVIOUS portfolio's key) so it early-returns, rather than
+  // writing the just-left portfolio's still-in-state rows into the NEWLY
+  // entered portfolio's own key -- reviewer finding B3: switching
+  // portfolios without a full remount was clobbering the destination
+  // portfolio's real stored session with the source portfolio's leftovers.
+  const hydratedKeyRef = useRef<string | null>(null);
+  const capitalEventDefaults = defaultCapitalEventMonthYear(new Date());
+  const [draftName, setDraftName] = useState("");
+  const [draftAmount, setDraftAmount] = useState("");
+  const [draftMonth, setDraftMonth] = useState(
+    String(capitalEventDefaults.month),
+  );
+  const [draftYear, setDraftYear] = useState(String(capitalEventDefaults.year));
+  const [draftYield, setDraftYield] = useState(
+    CAPITAL_EVENT_DEFAULT_YIELD_PERCENT_DECIMAL,
+  );
+  const [draftCapitalGrowth, setDraftCapitalGrowth] = useState("");
+  const [draftDividendGrowth, setDraftDividendGrowth] = useState("");
+
   useEffect(() => {
     const dialog = dialogRef.current;
     if (selectedRow && dialog && !dialog.open) {
@@ -430,6 +508,55 @@ export function IncomeMultiYear({
     }, WHATIF_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [dividendGrowthInput]);
+
+  // DIV-013 review (B3, BLOCKING): declared BEFORE the load effect below --
+  // effects run in DECLARATION order within a single render pass, so on the
+  // exact pass a `portfolioId` prop change re-runs both (both depend on
+  // it), THIS one runs FIRST and reads `hydratedKeyRef.current` as it stood
+  // BEFORE the load effect (below) has had any chance to update it this
+  // pass -- still the PREVIOUS portfolio's key, which mismatches the
+  // now-current `portfolioId`, so it early-returns without writing. Only
+  // on the FOLLOWING render (once the load effect's `setCapitalRows`/
+  // `setReinvestDividends` calls have actually committed, and its own ref
+  // update has caught up) does this effect re-run and see the ref/state
+  // agree -- at which point `capitalRows`/`reinvestDividends` genuinely
+  // belong to the CURRENT `portfolioId`, and persisting them is safe.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (hydratedKeyRef.current !== capitalEventsStorageKey(portfolioId)) {
+      return;
+    }
+    saveCapitalEventsSession(
+      window.sessionStorage,
+      capitalEventsStorageKey(portfolioId),
+      { rows: capitalRows, reinvestDividends },
+    );
+  }, [capitalRows, reinvestDividends, portfolioId]);
+
+  // DIV-013 (owner directive: "persists for the session and resets unless
+  // saved"): reads any capital-change rows/reinvest flag left over from
+  // earlier in THIS session -- or, on a PORTFOLIO SWITCH, that OTHER
+  // portfolio's own separate key -- back in. Runs on mount and on every
+  // `portfolioId` change, client-side only (an effect never runs during
+  // server render, so this never throws there even though
+  // `window`/`sessionStorage` do not exist on the server). Declared AFTER
+  // the save effect above -- see that effect's own comment for why the
+  // ORDER is load-behind-save, not just save-behind-load.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    // Indirected through a nested callback rather than calling setState
+    // directly in the effect body -- the same sanctioned
+    // `react-hooks/set-state-in-effect` workaround
+    // `QuoteCorrectionHistory` (`portfolio-shell.tsx`) already uses for its
+    // own mount-time load.
+    (() => {
+      const key = capitalEventsStorageKey(portfolioId);
+      const loaded = loadCapitalEventsSession(window.sessionStorage, key);
+      setCapitalRows(loaded.rows);
+      setReinvestDividends(loaded.reinvestDividends);
+      hydratedKeyRef.current = key;
+    })();
+  }, [portfolioId]);
 
   // DIV-012: each axis resolves its OWN debounced (settled) input
   // independently -- neither resolution reads the other field's state, so
@@ -498,6 +625,32 @@ export function IncomeMultiYear({
   const summaryDividendGrowthSource =
     activeAssumptions?.dividendGrowthSource ?? "portfolio_assumption";
 
+  // DIV-013: owner-entered capital-change parcels layered onto the ACTIVE
+  // (already DIV-012 what-if-adjusted) projection -- never a second,
+  // independent recompute of the growth what-if itself (`applyCapitalEventsToProjection`
+  // takes `activeProjection`'s own already-resolved rows/assumptions as its
+  // base). Sorted oldest-first before mapping (owner directive) -- sort
+  // order has no effect on the MATH (each parcel resolves against its own
+  // date independently), only on this display's row order.
+  const sortedCapitalRows = sortCapitalEventRows(capitalRows);
+  const capitalEventsResult =
+    activeProjection && activeProjection.ok
+      ? applyCapitalEventsToProjection(
+          {
+            rows: activeProjection.rows,
+            assumptions: activeProjection.assumptions,
+          },
+          sortedCapitalRows.map(capitalEventRowToDomainInput),
+          { startMonth: financialYearStartMonth, reinvestDividends },
+        )
+      : null;
+  // Never true when no parcel/reinvestment is configured -- the domain
+  // function's own empty-input fast path always succeeds, so this can only
+  // fire once the owner has actually entered something (an invalid parcel,
+  // or a `financialYearStartMonth` the service itself could not resolve).
+  const capitalEventsUnavailable =
+    capitalEventsResult !== null && !capitalEventsResult.ok;
+
   const pastRows = pastFinancialYears.ok
     ? pastFinancialYears.rows
         .slice()
@@ -506,7 +659,10 @@ export function IncomeMultiYear({
     : [];
   const projectedRows =
     activeProjection && activeProjection.ok
-      ? activeProjection.rows.map((row) =>
+      ? (capitalEventsResult && capitalEventsResult.ok
+          ? capitalEventsResult.rows
+          : activeProjection.rows
+        ).map((row) =>
           mapProjectedRow(
             row,
             activeProjection.assumptions.currentPortfolioValueStatus,
@@ -536,6 +692,50 @@ export function IncomeMultiYear({
         ? [mapCurrentRow(currentFinancialYear.row, dividendsHref)]
         : [];
   const rows = [...pastRows, ...forwardRows];
+
+  // DIV-013: the current draft (uncommitted "Add/Remove Capital" input
+  // fields) as the pure validator's own input shape -- `month`/`year` are
+  // parsed here (the `<select>` guarantees `draftMonth` is always a valid
+  // "1".."12" string; `draftYear` is free text and may not parse to a real
+  // integer, which `isValidCapitalEventDraft` catches identically to any
+  // other invalid field).
+  const capitalEventDraft: CapitalEventDraft = {
+    name: draftName,
+    amountDecimal: draftAmount,
+    month: Number(draftMonth),
+    year: Number(draftYear),
+    yieldPercentDecimal: draftYield,
+    capitalGrowthInput: draftCapitalGrowth,
+    dividendGrowthInput: draftDividendGrowth,
+  };
+  const capitalEventDraftValid = isValidCapitalEventDraft(capitalEventDraft);
+
+  function handleApplyCapitalEvent() {
+    if (!capitalEventDraftValid) return;
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `capital-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setCapitalRows((existing) => [
+      ...existing,
+      capitalEventDraftToRow(capitalEventDraft, id),
+    ]);
+    // Owner directive: "more rows addable via the same inputs" -- reset the
+    // draft back to fresh defaults for the next entry rather than leaving
+    // the just-applied values sitting in the fields.
+    const nextDefaults = defaultCapitalEventMonthYear(new Date());
+    setDraftName("");
+    setDraftAmount("");
+    setDraftMonth(String(nextDefaults.month));
+    setDraftYear(String(nextDefaults.year));
+    setDraftYield(CAPITAL_EVENT_DEFAULT_YIELD_PERCENT_DECIMAL);
+    setDraftCapitalGrowth("");
+    setDraftDividendGrowth("");
+  }
+
+  function handleRemoveCapitalRow(id: string) {
+    setCapitalRows((existing) => existing.filter((row) => row.id !== id));
+  }
 
   return (
     <main className="income-screen">
@@ -715,6 +915,16 @@ export function IncomeMultiYear({
           {activeAssumptions?.currentPortfolioValueStatus === "partial"
             ? " Projected years are based on a partial (understated) current portfolio value -- some holdings are unpriced."
             : ""}
+          {/* DIV-013 review (fold): the parcel-applied disclosure used to
+              live ONLY in the "Add/Remove Capital" section's own marker,
+              two sections lower than the figures it actually describes --
+              folded up here too, gated identically (`capitalEventsResult?.ok
+              === true`, the same B2 "never describe unrendered rows"
+              guard). */}
+          {capitalEventsResult?.ok === true &&
+          (sortedCapitalRows.length > 0 || reinvestDividends)
+            ? ` ${sortedCapitalRows.length} what-if capital-change parcel${sortedCapitalRows.length === 1 ? "" : "s"}${reinvestDividends ? " + dividend reinvestment" : ""} applied -- not saved.`
+            : ""}
         </p>
       ) : null}
 
@@ -805,6 +1015,232 @@ export function IncomeMultiYear({
             A what-if projection is not available for this portfolio.
           </p>
         )}
+      </section>
+
+      {/* DIV-013 (owner directive, 2026-08-24): "Add/Remove Capital" -- a
+          SEPARATE, sibling section from `.income-whatif` above (never nested
+          inside it -- DIV-012's own pins assert NO `<button>` exists inside
+          that section at all, so Apply/remove/reinvest controls live here
+          instead). Owner-entered hypothetical capital-change parcels layer
+          onto the table above via `capitalEventsResult`; nothing here is
+          ever saved (DIV-014 scope) -- sessionStorage only, reset on a new
+          browser session. */}
+      <section
+        className="income-capital-events"
+        aria-labelledby="income-capital-events-title"
+      >
+        <p className="eyebrow" id="income-capital-events-title">
+          Add / remove capital
+        </p>
+        <p className="unavailable">
+          What-if only -- these hypothetical amounts are never saved and never
+          change your real portfolio.
+        </p>
+        <div className="income-capital-events-inputs">
+          <label>
+            <span>Name</span>
+            <input
+              type="text"
+              value={draftName}
+              onChange={(event) => setDraftName(event.target.value)}
+              placeholder={CAPITAL_EVENT_DEFAULT_NAME}
+            />
+          </label>
+          <label>
+            <span>Amount (signed; negative removes)</span>
+            <input
+              type="number"
+              step="0.01"
+              value={draftAmount}
+              onChange={(event) => setDraftAmount(event.target.value)}
+              onFocus={(event) => event.currentTarget.select()}
+              onClick={(event) => event.currentTarget.select()}
+            />
+          </label>
+          <label>
+            <span>Month</span>
+            <select
+              value={draftMonth}
+              onChange={(event) => setDraftMonth(event.target.value)}
+            >
+              {MONTH_NAMES.map((name, index) => (
+                <option key={name} value={String(index + 1)}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Year</span>
+            <input
+              type="number"
+              step="1"
+              value={draftYear}
+              onChange={(event) => setDraftYear(event.target.value)}
+              onFocus={(event) => event.currentTarget.select()}
+              onClick={(event) => event.currentTarget.select()}
+            />
+          </label>
+          <label>
+            <span>Dividend yield %/yr</span>
+            <input
+              type="number"
+              step="0.01"
+              value={draftYield}
+              onChange={(event) => setDraftYield(event.target.value)}
+              onFocus={(event) => event.currentTarget.select()}
+              onClick={(event) => event.currentTarget.select()}
+            />
+          </label>
+          <label>
+            <span>Capital growth %/yr (blank follows portfolio)</span>
+            <input
+              type="number"
+              step="0.01"
+              value={draftCapitalGrowth}
+              onChange={(event) => setDraftCapitalGrowth(event.target.value)}
+              onFocus={(event) => event.currentTarget.select()}
+              onClick={(event) => event.currentTarget.select()}
+              placeholder="Follows portfolio"
+            />
+          </label>
+          <label>
+            <span>Dividend growth %/yr (blank follows portfolio)</span>
+            <input
+              type="number"
+              step="0.01"
+              value={draftDividendGrowth}
+              onChange={(event) => setDraftDividendGrowth(event.target.value)}
+              onFocus={(event) => event.currentTarget.select()}
+              onClick={(event) => event.currentTarget.select()}
+              placeholder="Follows portfolio"
+            />
+          </label>
+        </div>
+        {!capitalEventDraftValid ? (
+          <span className="unavailable">
+            Enter a valid signed amount, month, year, and dividend yield to
+            apply.
+          </span>
+        ) : null}
+        <button
+          type="button"
+          className="income-capital-events-apply"
+          disabled={!capitalEventDraftValid}
+          onClick={handleApplyCapitalEvent}
+        >
+          Apply
+        </button>
+
+        {sortedCapitalRows.length > 0 ? (
+          <div className="income-fy-table-wrap">
+            <table className="income-fy-table income-capital-events-rows">
+              <caption>Capital-change parcels (what-if only)</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Name</th>
+                  <th scope="col" className="numeric">
+                    Amount
+                  </th>
+                  <th scope="col">Date</th>
+                  <th scope="col" className="numeric">
+                    Yield
+                  </th>
+                  <th scope="col" className="numeric">
+                    Capital growth
+                  </th>
+                  <th scope="col" className="numeric">
+                    Dividend growth
+                  </th>
+                  <th scope="col">
+                    <span className="visually-hidden">Remove</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedCapitalRows.map((row) => (
+                  <tr key={row.id}>
+                    <th scope="row">{row.name}</th>
+                    <td className="numeric">
+                      {formatIncomeMoney(
+                        baseCurrencyCode,
+                        baseCurrencyCode,
+                        row.amountDecimal,
+                        { signed: true },
+                      )}
+                    </td>
+                    <td>
+                      {MONTH_NAMES[row.month - 1]} {row.year}
+                    </td>
+                    <td className="numeric">
+                      {formatIncomePercent(row.yieldPercentDecimal)}
+                    </td>
+                    <td className="numeric">
+                      {row.capitalGrowthPercentDecimal !== null
+                        ? formatIncomePercent(row.capitalGrowthPercentDecimal)
+                        : "Follows portfolio"}
+                    </td>
+                    <td className="numeric">
+                      {row.dividendGrowthPercentDecimal !== null
+                        ? formatIncomePercent(row.dividendGrowthPercentDecimal)
+                        : "Follows portfolio"}
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="income-capital-events-remove"
+                        onClick={() => handleRemoveCapitalRow(row.id)}
+                        aria-label={`Remove ${row.name} capital-change parcel`}
+                      >
+                        ×
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+
+        <button
+          type="button"
+          className={
+            reinvestDividends
+              ? "income-reinvest-toggle active"
+              : "income-reinvest-toggle"
+          }
+          aria-pressed={reinvestDividends}
+          onClick={() => setReinvestDividends((value) => !value)}
+        >
+          Reinvest dividends{reinvestDividends ? " (on)" : " (off)"}
+        </button>
+
+        {capitalEventsUnavailable ? (
+          <p className="status-banner warning" role="status">
+            <strong>Capital-change what-if unavailable</strong>
+            <span>
+              That combination could not be projected. Check the entered amounts
+              and dates.
+            </span>
+          </p>
+        ) : /* DIV-013 review (B2, BLOCKING): this must never describe rows
+              that are not rendered (the identical DIV-012 B2 ruling) --
+              `capitalEventsResult?.ok === true` is the ONLY signal that a
+              projected table with these parcels actually applied to it
+              exists at all; `sortedCapitalRows`/`reinvestDividends` alone
+              say nothing about whether `activeProjection` itself is even
+              `ok` (when it is not, `capitalEventsResult` is `null`, and
+              `capitalEventsUnavailable` above stays `false` too -- there is
+              simply nothing to describe). */
+        capitalEventsResult?.ok === true &&
+          (sortedCapitalRows.length > 0 || reinvestDividends) ? (
+          <p className="income-whatif-marker">
+            {sortedCapitalRows.length} capital-change parcel
+            {sortedCapitalRows.length === 1 ? "" : "s"}
+            {reinvestDividends ? " + dividend reinvestment" : ""} applied to the
+            table above -- not saved.
+          </p>
+        ) : null}
       </section>
 
       <form

@@ -457,15 +457,20 @@ test("DIV-012 (owner directive): clicking or focusing either what-if field selec
     source.match(/onClick={\(event\) => event\.currentTarget\.select\(\)}/g) ??
     []
   ).length;
+  // DIV-013 (owner directive, 2026-08-24) reuses this identical
+  // select-on-focus/click convention on 5 more numeric fields in the new
+  // "Add/Remove Capital" section (amount, year, yield, capital growth,
+  // dividend growth) -- 2 (this test's original growth what-if pair) + 5 =
+  // 7 total across the whole component source.
   assert.equal(
     selectHandlerCount,
-    2,
-    "expected onFocus select() on both inputs",
+    7,
+    "expected onFocus select() on the growth what-if pair plus the 5 DIV-013 capital-event fields",
   );
   assert.equal(
     clickHandlerCount,
-    2,
-    "expected onClick select() on both inputs",
+    7,
+    "expected onClick select() on the growth what-if pair plus the 5 DIV-013 capital-event fields",
   );
 });
 

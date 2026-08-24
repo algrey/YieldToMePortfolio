@@ -387,10 +387,15 @@ test("DIV-012/UI-006A: what-if is two plain live-apply number inputs (seeded fro
   const html = renderMultiYear();
   assert.match(html, /Portfolio growth % \/ yr/);
   assert.match(html, /Dividend growth % \/ yr/);
+  // DIV-013 (owner directive, 2026-08-24) added a sibling "Add/Remove
+  // Capital" section with 5 more `type="number"` fields (amount, year,
+  // yield, capital growth, dividend growth) alongside the 2 growth-what-if
+  // inputs this test originally pinned -- 7 total. The scoped check below
+  // still confirms the ORIGINAL 2 stay exactly inside `.income-whatif`
+  // itself.
   const numberInputCount = (html.match(/type="number"/g) ?? []).length;
-  assert.equal(numberInputCount, 2);
+  assert.equal(numberInputCount, 7);
   assert.doesNotMatch(html, /type="range"/);
-  assert.doesNotMatch(html, />Apply</);
   assert.doesNotMatch(html, />Reset</);
   // Scoped to the what-if section specifically.
   const whatIfSectionMatch = html.match(
@@ -842,6 +847,10 @@ test("UI-006A: Income interactive controls meet the 44x44 CSS-pixel touch-target
     // DIV-012: the Apply/Reset `.income-whatif-actions button` rule is gone
     // -- those buttons no longer exist (live-apply, no buttons).
     ".income-range-controls select,\n.income-range-controls button",
+    // DIV-013: the "Add/Remove Capital" subsection's own controls.
+    ".income-capital-events-inputs input,\n.income-capital-events-inputs select",
+    ".income-capital-events-apply,\n.income-reinvest-toggle",
+    ".income-capital-events-remove",
   ]) {
     const block = extractBlock(styles, selector);
     assert.match(

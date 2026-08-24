@@ -34,8 +34,11 @@ import {
   type DecimalFraction,
 } from "../calculations/decimal.ts";
 import { computeDefaultFrankingCredit } from "./franking.ts";
-import { fyWindowForDate } from "./fy-window.ts";
-import type { FyWindow } from "../calculations/financial-year.ts";
+import { fyWindowForDate, fyWindowForEndingYear } from "./fy-window.ts";
+import {
+  isValidFinancialYearStartMonth,
+  type FyWindow,
+} from "../calculations/financial-year.ts";
 import type {
   FyDividendOverrideFact,
   FyDividendTotal,
@@ -956,6 +959,479 @@ export function projectMultiYearIncomeWhatIf(
     assumptions.dividendGrowthSource = "what_if";
   }
   return projectMultiYearIncome({ ...baseline, assumptions });
+}
+
+// ---------------------------------------------------------------------------
+// f. Capital-event overlay (DIV-013, owner directive 2026-08-24): layers
+// owner-entered hypothetical add/remove-capital "parcels" onto an
+// ALREADY-COMPUTED multi-year projection (normally `projectMultiYearIncomeWhatIf`'s
+// own output -- this function never re-derives the growth what-if itself,
+// it only takes that result's `rows`/`assumptions` as its own base, so
+// calling it twice with the same overrides never happens). Pure, what-if-
+// only display math -- no persistence capability in this module, the same
+// structural guarantee as the rest of this file (see the module header).
+//
+// Parcel mechanics (Orchestrator ruling, TASKS.md DIV-013): a parcel
+// "joins" the projection at its own owner-chosen calendar month/year, and
+// mirrors the base projection's OWN year-1-is-the-base/year-N-compounds-once
+// shape (`compoundOnce`) rather than inventing a second compounding
+// convention: the parcel's VALUE is exactly its (signed) amount, unchanged,
+// in the FY it joins (no growth applied yet -- "now" for this parcel,
+// exactly like the base projection's own year 1), then compounds once per
+// FY thereafter at its own (or, when blank, the CURRENT portfolio's) growth
+// rate. The parcel's DIVIDEND is pro-rated in its OWN joining FY by
+// months-held-that-FY/12 (owner directive, verbatim) against its full-year
+// rate (`amount * yield% / 100`); every later FY uses that full annual
+// rate, compounded the same once-per-FY way as the value. A negative
+// amount (capital REMOVAL) uses the identical formula -- the sign carries
+// through every step by ordinary arithmetic, so a removal's contributions
+// simply subtract from the totals rather than needing a mirrored,
+// duplicated code path.
+export type CapitalEventInput = {
+  id: string;
+  name: string;
+  /** Signed -- negative removes capital. */
+  amountDecimal: string;
+  /** 1-12, the calendar month the parcel starts (or stops) compounding. */
+  month: number;
+  /** Calendar year, e.g. 2027. */
+  year: number;
+  /** This parcel's OWN total (grossed) dividend yield %/yr. */
+  yieldPercentDecimal: string;
+  /**
+   * `null` means LIVE-follow the CURRENT portfolio value-growth assumption
+   * -- resolved fresh from `base.assumptions.valueGrowthPercentDecimal` on
+   * EVERY call, never copied/cached (this function has no memory between
+   * calls), so a later change to the portfolio's -- or an active DIV-012
+   * what-if's -- growth assumption changes this parcel's own projected
+   * figures the very next call, by construction.
+   */
+  capitalGrowthPercentDecimal: string | null;
+  /** Same blank-follows-portfolio contract as `capitalGrowthPercentDecimal`, against the current dividend-growth assumption. */
+  dividendGrowthPercentDecimal: string | null;
+};
+
+export type CapitalEventContribution = {
+  id: string;
+  name: string;
+  valueDecimal: string;
+  grossDividendDecimal: string;
+};
+
+export type CapitalEventProjectionYearRow = Omit<
+  ProjectionYearRow,
+  "yieldPercentDecimal"
+> & {
+  /** Every capital-event parcel (owner-entered, or -- when reinvestment is
+   * on -- auto-generated) that has JOINED by this row, i.e. this row's own
+   * FY ending year is at or after the parcel's join FY. Empty when no
+   * parcel has joined yet, or none are configured at all. */
+  capitalEventContributions: readonly CapitalEventContribution[];
+  /**
+   * DIV-013 review (fold): `null` when this row's OWN capital-adjusted
+   * `valueDecimal` is zero or negative -- newly reachable via an owner's
+   * over-removal parcel (the base projection's own real portfolio value can
+   * never go negative on its own, so `deriveYieldPercent`'s plain `"0"`
+   * fallback was never reachable there; overloading that same "0" here
+   * would read as a real, confirmed zero-yield holding rather than the
+   * honest "no meaningful yield at a zero/negative value" it actually is).
+   */
+  yieldPercentDecimal: string | null;
+};
+
+export type CapitalEventProjectionResult =
+  | {
+      ok: true;
+      rows: CapitalEventProjectionYearRow[];
+      assumptions: MultiYearProjectionAssumptions;
+    }
+  | {
+      ok: false;
+      reason:
+        | "invalid_start_month"
+        // A parcel's own month/year, amount, yield, or growth override is
+        // not a usable decimal/calendar value -- fails the WHOLE overlay
+        // closed (never silently drops just the one bad parcel), mirroring
+        // `projectMultiYearIncome`'s own `invalid_decimal` contract.
+        | "invalid_decimal"
+        // The base projection's own rows carry no `endingYear` at all
+        // (`MultiYearProjectionInput.startEndingYear` was `null`) -- there
+        // is no FY calendar to place a parcel's calendar month/year onto.
+        // Only reachable when at least one parcel/reinvestment is actually
+        // configured (see the empty-input fast path below); an unconfigured
+        // overlay never needs a calendar and always succeeds.
+        | "no_fy_calendar";
+    };
+
+export type ApplyCapitalEventsOptions = {
+  /** The portfolio's financial-year start month (1-12) -- needed to place
+   * each parcel's owner-chosen calendar month/year into the SAME FY
+   * calendar the base projection's rows already use. */
+  startMonth: number;
+  /** DIV-013 (owner directive): when true, each projected FY's OWN
+   * (already capital-event-adjusted) total dividend is layered back in as a
+   * new, auto-generated capital-event parcel dated at that FY's calendar
+   * midpoint, yielding that FY's own derived average yield -- see
+   * `applyCapitalEventsToProjection`'s doc comment for the exact,
+   * owner-approved simple-approximation formula this implements verbatim
+   * (recorded again in `docs/CALCULATIONS.md`). */
+  reinvestDividends: boolean;
+};
+
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+function pad4(value: number): string {
+  return String(value).padStart(4, "0");
+}
+
+/** `amount * percent / 100`, single rounding at `PROJECTION_SCALE` -- the
+ * same "one rounding per arithmetic step" convention as every other money
+ * calc in this module. */
+function applyPercentToAmount(
+  amountDecimal: string,
+  percentDecimal: string,
+): string {
+  return formatDecimalExact(
+    roundDecimal(
+      multiplyDecimal(
+        parseDecimal(amountDecimal),
+        divideDecimal(parseDecimal(percentDecimal), HUNDRED),
+      ),
+      PROJECTION_SCALE,
+    ),
+  );
+}
+
+/** Adds `months` calendar months to a `{year, month}` pair (`month` 1-12), plain integer arithmetic -- used only to date the reinvestment-generated parcel at its FY's calendar midpoint (display/record purposes; see the doc comment below). */
+function addCalendarMonths(
+  year: number,
+  month: number,
+  months: number,
+): { year: number; month: number } {
+  const zeroBasedTotal = year * 12 + (month - 1) + months;
+  return {
+    year: Math.floor(zeroBasedTotal / 12),
+    month: (((zeroBasedTotal % 12) + 12) % 12) + 1,
+  };
+}
+
+type ResolvedCapitalEvent = {
+  id: string;
+  name: string;
+  amountDecimal: string;
+  joinEndingYear: number;
+  /** 1-12 -- months from the parcel's own join month (inclusive) to its
+   * join FY's end month (inclusive). Only ever consulted for the parcel's
+   * OWN join-FY row (`k === 0` below); irrelevant, and never read, for any
+   * later row. */
+  monthsHeldInJoinFy: number;
+  fullYearDividendBaseDecimal: string;
+  capitalGrowthFactor: DecimalFraction;
+  dividendGrowthFactor: DecimalFraction;
+};
+
+/** Resolves one owner-entered (or auto-generated) parcel against the
+ * portfolio's FY calendar and its CURRENT growth assumptions -- throws on
+ * any unusable decimal/calendar input, caught by the caller's try/catch
+ * (mirrors `projectMultiYearIncome`'s own fail-closed contract). */
+function resolveCapitalEvent(
+  event: CapitalEventInput,
+  startMonth: number,
+  currentValueGrowthPercentDecimal: string,
+  currentDividendGrowthPercentDecimal: string,
+): ResolvedCapitalEvent {
+  if (
+    !Number.isInteger(event.month) ||
+    event.month < 1 ||
+    event.month > 12 ||
+    !Number.isInteger(event.year)
+  ) {
+    throw new Error("invalid_capital_event_date");
+  }
+  const joinDate = `${pad4(event.year)}-${pad2(event.month)}-01`;
+  const joinWindow = fyWindowForDate(joinDate, startMonth);
+  if (!joinWindow.ok) throw new Error("invalid_capital_event_fy");
+  const [endYear, endMonth] = joinWindow.window.endDate.split("-").map(Number);
+  const monthsHeldInJoinFy =
+    endYear! * 12 + endMonth! - (event.year * 12 + event.month) + 1;
+  const resolvedCapitalGrowthPercentDecimal =
+    event.capitalGrowthPercentDecimal ?? currentValueGrowthPercentDecimal;
+  const resolvedDividendGrowthPercentDecimal =
+    event.dividendGrowthPercentDecimal ?? currentDividendGrowthPercentDecimal;
+  return {
+    id: event.id,
+    name: event.name,
+    amountDecimal: event.amountDecimal,
+    joinEndingYear: joinWindow.endingYear,
+    monthsHeldInJoinFy,
+    fullYearDividendBaseDecimal: applyPercentToAmount(
+      event.amountDecimal,
+      event.yieldPercentDecimal,
+    ),
+    capitalGrowthFactor: growthFactor(resolvedCapitalGrowthPercentDecimal),
+    dividendGrowthFactor: growthFactor(resolvedDividendGrowthPercentDecimal),
+  };
+}
+
+/** This parcel's contribution to one row (identified by that row's own FY
+ * ending year), or `null` when the parcel has not joined by then. `k = 0`
+ * (the parcel's OWN join FY) pro-rates the dividend by
+ * `monthsHeldInJoinFy/12`, value unprorated (see the module-section header);
+ * `k >= 1` compounds both the value and the full-year dividend rate `k`
+ * times via the SAME once-per-step `compoundOnce` the base projection uses. */
+function capitalEventContributionForYear(
+  resolved: ResolvedCapitalEvent,
+  rowEndingYear: number,
+): { valueDecimal: string; grossDividendDecimal: string } | null {
+  const k = rowEndingYear - resolved.joinEndingYear;
+  if (k < 0) return null;
+  if (k === 0) {
+    const monthsFraction = roundDecimal(
+      divideDecimal(
+        fromInteger(BigInt(resolved.monthsHeldInJoinFy)),
+        fromInteger(12n),
+      ),
+      PROJECTION_SCALE,
+    );
+    return {
+      valueDecimal: resolved.amountDecimal,
+      grossDividendDecimal: formatDecimalExact(
+        roundDecimal(
+          multiplyDecimal(
+            parseDecimal(resolved.fullYearDividendBaseDecimal),
+            monthsFraction,
+          ),
+          PROJECTION_SCALE,
+        ),
+      ),
+    };
+  }
+  let value = resolved.amountDecimal;
+  let dividend = resolved.fullYearDividendBaseDecimal;
+  for (let step = 0; step < k; step += 1) {
+    value = compoundOnce(value, resolved.capitalGrowthFactor);
+    dividend = compoundOnce(dividend, resolved.dividendGrowthFactor);
+  }
+  return { valueDecimal: value, grossDividendDecimal: dividend };
+}
+
+/**
+ * DIV-013 (owner's simple formula, recorded verbatim -- `docs/CALCULATIONS.md`
+ * mirrors this note): "each projected year reinvests that year's dividends
+ * as a mid-year parcel whose yield is the average portfolio yield."
+ * Implemented as: after finalising FY N's own row (base + every
+ * ALREADY-EXISTING parcel's contribution -- owner-entered parcels and any
+ * auto-generated parcel from an EARLIER FY, never this same FY's own
+ * not-yet-created parcel, which would be circular), a new parcel is
+ * generated dated at FY N's calendar midpoint, with: amount = FY N's own
+ * just-finalised TOTAL gross dividend (base + every already-applied
+ * parcel -- may be negative if capital removals net out the base income);
+ * yield = FY N's own just-finalised derived yield % (dividend ÷ value,
+ * i.e. the SAME value-weighted-composition figure the row's own Yield
+ * column already shows -- the "average portfolio yield" in the owner's own
+ * words); both growth axes left blank (follow the CURRENT portfolio
+ * assumptions -- an auto-generated parcel has no owner-chosen growth rate
+ * of its own). Because the parcel is only ever ADDED to the working list
+ * AFTER FY N's own row is finalised, its first VISIBLE effect on any row is
+ * FY N+1 onward (a full one-FY compounding step, `k=1`) -- it can never
+ * retroactively change the very total it was generated from, and the
+ * first-partial-FY pro-rata rule above is consequently never exercised for
+ * an auto-generated parcel (it is dated mid-year purely as a record of
+ * WHEN in the FY the dividends were notionally received, matching the
+ * owner's own "mid-year parcel" phrase -- not to claim any partial-year
+ * income of its own the FY it is created).
+ */
+export function applyCapitalEventsToProjection(
+  base: {
+    rows: readonly ProjectionYearRow[];
+    assumptions: MultiYearProjectionAssumptions;
+  },
+  capitalEvents: readonly CapitalEventInput[],
+  options: ApplyCapitalEventsOptions,
+): CapitalEventProjectionResult {
+  // Fast path: nothing to layer on -- never touches the FY-calendar
+  // requirement below, so an unconfigured overlay is byte-for-byte the base
+  // projection's own rows (plus the empty-contributions field), regardless
+  // of whether `options.startMonth`/`base.rows[*].endingYear` would even
+  // support placing a parcel.
+  if (capitalEvents.length === 0 && !options.reinvestDividends) {
+    return {
+      ok: true,
+      rows: base.rows.map((row) => ({
+        ...row,
+        capitalEventContributions: [],
+      })),
+      assumptions: base.assumptions,
+    };
+  }
+  if (!isValidFinancialYearStartMonth(options.startMonth)) {
+    return { ok: false, reason: "invalid_start_month" };
+  }
+  if (!base.rows.every((row) => row.endingYear !== null)) {
+    return { ok: false, reason: "no_fy_calendar" };
+  }
+  try {
+    const active: ResolvedCapitalEvent[] = capitalEvents.map((event) =>
+      resolveCapitalEvent(
+        event,
+        options.startMonth,
+        base.assumptions.valueGrowthPercentDecimal,
+        base.assumptions.dividendGrowthPercentDecimal,
+      ),
+    );
+    const outputRows: CapitalEventProjectionYearRow[] = [];
+    for (const row of base.rows) {
+      const endingYear = row.endingYear!;
+      const contributions: CapitalEventContribution[] = [];
+      let valueSum = ZERO;
+      // DIV-013 review (B1, BLOCKING): a POSITIVE and a NEGATIVE net
+      // contribution are combined differently below (see the cash/franking
+      // split), so they are tracked separately from the moment each
+      // contribution is seen, not just summed into one `divSum` the way an
+      // earlier draft did.
+      let positiveDivSum = ZERO;
+      let negativeDivSum = ZERO;
+      for (const resolved of active) {
+        const contribution = capitalEventContributionForYear(
+          resolved,
+          endingYear,
+        );
+        if (!contribution) continue;
+        contributions.push({
+          id: resolved.id,
+          name: resolved.name,
+          valueDecimal: contribution.valueDecimal,
+          grossDividendDecimal: contribution.grossDividendDecimal,
+        });
+        valueSum = addDecimal(
+          valueSum,
+          parseDecimal(contribution.valueDecimal),
+        );
+        const contributionDividend = parseDecimal(
+          contribution.grossDividendDecimal,
+        );
+        if (compareDecimal(contributionDividend, ZERO) < 0) {
+          negativeDivSum = addDecimal(negativeDivSum, contributionDividend);
+        } else {
+          positiveDivSum = addDecimal(positiveDivSum, contributionDividend);
+        }
+      }
+      const totalDivSum = addDecimal(positiveDivSum, negativeDivSum);
+      const newValueDecimal = formatDecimalExact(
+        addDecimal(parseDecimal(row.valueDecimal), valueSum),
+      );
+      const newGrossDecimal = formatDecimalExact(
+        addDecimal(parseDecimal(row.grossDividendDecimal), totalDivSum),
+      );
+      // DIV-013 review (B1, BLOCKING, Orchestrator ruling): a POSITIVE net
+      // contribution stays the documented simplification (a capital-event
+      // parcel carries a single owner-entered TOTAL yield, not a separate
+      // franking assumption -- its dividend is treated as pure CASH, 0%
+      // franked). A NEGATIVE net contribution (capital REMOVAL) is the true
+      // mirror of removing part of the real portfolio, so it splits
+      // PRO-RATA against THIS ROW'S OWN (base, pre-capital-event)
+      // cash/franking composition instead -- charging the whole reduction
+      // against cash alone could otherwise render a deeply negative cash
+      // figure next to an UNCHANGED (or even larger, proportionally)
+      // franking figure, which is not what removing part of a real
+      // portfolio would do (reviewer finding B1: gross 10,000 / cash
+      // -20,000 / franking 30,000 was reachable pre-fix). The cash
+      // reduction is computed via ONE proportional multiplication (the
+      // row's own cash÷gross ratio, rounded once at `PROJECTION_SCALE`);
+      // `franking = gross - cash` by SUBTRACTION from the combined totals
+      // (this module's standing identity) then automatically halves the
+      // franking figure alongside gross for an exact half-portfolio
+      // removal, with no separate franking-side rounding to drift.
+      let cashDelta = positiveDivSum;
+      if (compareDecimal(negativeDivSum, ZERO) < 0) {
+        const baseGrossDividend = parseDecimal(row.grossDividendDecimal);
+        if (compareDecimal(baseGrossDividend, ZERO) > 0) {
+          const cashRatio = roundDecimal(
+            divideDecimal(
+              parseDecimal(row.cashDividendDecimal),
+              baseGrossDividend,
+            ),
+            PROJECTION_SCALE,
+          );
+          const cashReduction = roundDecimal(
+            multiplyDecimal(negativeDivSum, cashRatio),
+            PROJECTION_SCALE,
+          );
+          cashDelta = addDecimal(cashDelta, cashReduction);
+        } else {
+          // No meaningful base cash/franking ratio to split a removal
+          // against (the row's OWN base dividend is itself zero or
+          // negative) -- falls back to charging the whole reduction
+          // against cash, the pre-B1 treatment, rather than dividing by a
+          // zero/negative base.
+          cashDelta = addDecimal(cashDelta, negativeDivSum);
+        }
+      }
+      const newCashDecimal = formatDecimalExact(
+        addDecimal(parseDecimal(row.cashDividendDecimal), cashDelta),
+      );
+      const newFrankingDecimal = formatDecimalExact(
+        subtractDecimal(
+          parseDecimal(newGrossDecimal),
+          parseDecimal(newCashDecimal),
+        ),
+      );
+      // DIV-013 review (fold): an over-removal parcel can newly drive a
+      // row's combined value to zero or negative -- the base projection's
+      // own `deriveYieldPercent` "0" fallback was designed for a guard that
+      // was never actually reachable there (a real portfolio value cannot
+      // go negative on its own); reusing it here would present a fabricated
+      // "0.00%" as if it were a real, confirmed zero yield.
+      const valueNonPositive =
+        compareDecimal(parseDecimal(newValueDecimal), ZERO) <= 0;
+      const outputRow: CapitalEventProjectionYearRow = {
+        ...row,
+        valueDecimal: newValueDecimal,
+        grossDividendDecimal: newGrossDecimal,
+        cashDividendDecimal: newCashDecimal,
+        frankingCreditDecimal: newFrankingDecimal,
+        yieldPercentDecimal: valueNonPositive
+          ? null
+          : deriveYieldPercent(newGrossDecimal, newValueDecimal),
+        capitalEventContributions: contributions,
+      };
+      outputRows.push(outputRow);
+      if (options.reinvestDividends) {
+        const window = fyWindowForEndingYear(endingYear, options.startMonth);
+        if (!window.ok) throw new Error("invalid_reinvest_window");
+        const [startYear, startMonthNum] = window.window.startDate
+          .split("-")
+          .map(Number);
+        const mid = addCalendarMonths(startYear!, startMonthNum!, 6);
+        active.push(
+          resolveCapitalEvent(
+            {
+              id: `reinvest-fy-${endingYear}`,
+              name: `Reinvested dividends (FY${String(endingYear).slice(-2)})`,
+              amountDecimal: newGrossDecimal,
+              month: mid.month,
+              year: mid.year,
+              // A zero/negative-value row has no meaningful derived yield
+              // (`outputRow.yieldPercentDecimal` is `null` there) -- the
+              // auto-generated reinvestment parcel falls back to an
+              // explicit 0% for that FY rather than failing the whole
+              // overlay closed over an internally-generated input.
+              yieldPercentDecimal: outputRow.yieldPercentDecimal ?? "0",
+              capitalGrowthPercentDecimal: null,
+              dividendGrowthPercentDecimal: null,
+            },
+            options.startMonth,
+            base.assumptions.valueGrowthPercentDecimal,
+            base.assumptions.dividendGrowthPercentDecimal,
+          ),
+        );
+      }
+    }
+    return { ok: true, rows: outputRows, assumptions: base.assumptions };
+  } catch {
+    return { ok: false, reason: "invalid_decimal" };
+  }
 }
 
 // ---------------------------------------------------------------------------

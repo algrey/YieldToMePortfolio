@@ -115,6 +115,13 @@ export type OwnedIncomeProjection = {
   currentFinancialYear: ComputeCurrentFinancialYearRowResult;
   pastFinancialYears: ComputePastFinancialYearRowsResult;
   breakdown: IncomeBreakdownResult;
+  /** DIV-013: the portfolio's own FY start month (1-12), threaded through so
+   * the "Add/Remove Capital" what-if overlay can place an owner-chosen
+   * calendar month/year onto the SAME FY calendar the multi-year rows
+   * already use (`applyCapitalEventsToProjection`,
+   * `domain/dividends/projection.ts`). Already resolved by
+   * `loadOwnedDividendHistory` above -- reused verbatim, never re-derived. */
+  financialYearStartMonth: number;
 };
 
 export async function loadOwnedIncomeProjection(
@@ -505,5 +512,6 @@ export async function loadOwnedIncomeProjection(
     currentFinancialYear,
     pastFinancialYears,
     breakdown,
+    financialYearStartMonth: history.financialYearStartMonth,
   };
 }
