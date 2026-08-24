@@ -1,5 +1,7 @@
 # YieldToMe executable backlog
 
+> **History rewrite note (2026-08-25):** the entire git history was rewritten with `git filter-repo --replace-text` to purge a false-positive secret-scanner hit (Stripe's PUBLIC documentation example key, used as a masking-test fixture in tests/brk-008.test.ts — never a real credential; see the 2026-08-24 fixture-swap commit's message). Every commit hash changed; hashes quoted in completion notes BELOW this line are pre-rewrite identifiers kept as historical record — resolve them via the pre-rewrite bundle at ../YieldToMePortfolio-prerewrite-20260825.bundle if ever needed. HEAD's tree was verified byte-identical before/after.
+
 Status: dependency-explicit implementation tasks grouped by workstream
 Date: 2026-07-29
 
