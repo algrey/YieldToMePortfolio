@@ -50,6 +50,13 @@ export function resolveWhatIfGrowthPercentDecimal(raw: string): string {
 // imported directly by the repo's native-`node --experimental-strip-types`
 // test runner.
 import type { CapitalEventInput } from "../domain/dividends/projection.ts";
+import {
+  addDecimal,
+  compareDecimal,
+  formatDecimalExact,
+  fromInteger,
+  parseDecimal,
+} from "../domain/calculations/decimal.ts";
 
 /** DIV-013 owner defaults ("dividend yield (default 2%)"; "name (default
  * 'Change')"). */
@@ -217,7 +224,12 @@ export function capitalEventsStorageKey(portfolioId: string): string {
   return `yieldtome:income-whatif-capital-events:${portfolioId}`;
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
+/** Exported (DIV-014): reused by `isValidCapitalEventInputRow` below to
+ * validate an untrusted saved-scenario row payload from the same shape this
+ * sessionStorage guard already trusts. */
+export function isPlainRecord(
+  value: unknown,
+): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -284,4 +296,176 @@ export function saveCapitalEventsSession(
   } catch {
     // Storage unavailable/full/blocked -- swallowed deliberately.
   }
+}
+
+// ---------------------------------------------------------------------------
+// DIV-014 (owner directive, 2026-08-24): pure helpers for the "Save
+// Scenario" subsection -- the reverse (loaded scenario -> component state)
+// mapping DIV-013's own doc comment on `CapitalEventRowState` anticipated,
+// the untrusted-payload row validator the server action uses (mirroring
+// `isValidStoredRow` above's shape but with full decimal-grammar/range
+// checking, since this crosses a real network boundary, not just
+// sessionStorage read-back), and the row-summary derivations the saved-
+// scenario list row renders (net amount invested, yield).
+// ---------------------------------------------------------------------------
+
+/** Server-side name/row caps -- exported so the client input's `maxLength`
+ * and the action's own validation share exactly one source of truth. */
+export const INCOME_SCENARIO_NAME_MAX_LENGTH = 120;
+export const INCOME_SCENARIO_MAX_ROWS = 500;
+
+/** The exact reverse of `capitalEventRowToDomainInput` above -- both types
+ * are structurally identical (see that function's own doc comment), so this
+ * is a plain field-for-field copy, never a lossy conversion. Used when a
+ * saved scenario (persisted as `CapitalEventInput[]`, the domain shape) is
+ * loaded back into the component's own `CapitalEventRowState[]` session
+ * state. */
+export function capitalEventInputToRow(
+  input: CapitalEventInput,
+): CapitalEventRowState {
+  return {
+    id: input.id,
+    name: input.name,
+    amountDecimal: input.amountDecimal,
+    month: input.month,
+    year: input.year,
+    yieldPercentDecimal: input.yieldPercentDecimal,
+    capitalGrowthPercentDecimal: input.capitalGrowthPercentDecimal,
+    dividendGrowthPercentDecimal: input.dividendGrowthPercentDecimal,
+  };
+}
+
+/** Full runtime validation of ONE untrusted capital-change row from a
+ * client-submitted save-scenario payload -- unlike `isValidStoredRow`
+ * (sessionStorage read-back, same-origin, already-typed-by-this-app
+ * content), this crosses a real network boundary, so every decimal field's
+ * GRAMMAR (`isValidGrowthInput`) and every integer field's RANGE are
+ * checked too, mirroring `isValidCapitalEventDraft`'s own rigor. */
+export function isValidCapitalEventInputRow(
+  value: unknown,
+): value is CapitalEventInput {
+  if (!isPlainRecord(value)) return false;
+  if (typeof value.id !== "string" || value.id.length === 0) return false;
+  if (typeof value.name !== "string" || value.name.trim().length === 0) {
+    return false;
+  }
+  if (
+    typeof value.amountDecimal !== "string" ||
+    !isValidGrowthInput(value.amountDecimal)
+  ) {
+    return false;
+  }
+  if (
+    typeof value.month !== "number" ||
+    !Number.isInteger(value.month) ||
+    value.month < 1 ||
+    value.month > 12
+  ) {
+    return false;
+  }
+  if (
+    typeof value.year !== "number" ||
+    !Number.isInteger(value.year) ||
+    value.year < 1900 ||
+    value.year > 2999
+  ) {
+    return false;
+  }
+  if (
+    typeof value.yieldPercentDecimal !== "string" ||
+    !isValidGrowthInput(value.yieldPercentDecimal)
+  ) {
+    return false;
+  }
+  if (
+    value.capitalGrowthPercentDecimal !== null &&
+    (typeof value.capitalGrowthPercentDecimal !== "string" ||
+      !isValidGrowthInput(value.capitalGrowthPercentDecimal))
+  ) {
+    return false;
+  }
+  if (
+    value.dividendGrowthPercentDecimal !== null &&
+    (typeof value.dividendGrowthPercentDecimal !== "string" ||
+      !isValidGrowthInput(value.dividendGrowthPercentDecimal))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** DIV-014 (owner ruling): "decide and document how an untouched axis is
+ * stored so a loaded scenario still follows the portfolio assumption". A
+ * `NULL`-stored axis (the owner never edited it away from its seed before
+ * saving) resolves back to the CURRENT `portfolioGrowthPercentDecimal` --
+ * i.e. it seeds the input box exactly like a fresh mount does
+ * (`IncomeMultiYear`'s own `useState(portfolioValueGrowthPercentDecimal)`
+ * seed) and stays `touched: false`, so it keeps live-following the
+ * portfolio's own assumption on every future render, never a frozen copy of
+ * whatever that assumption happened to be at SAVE time. A non-null stored
+ * value is the owner's own frozen edit, restored verbatim with
+ * `touched: true` (an already-touched axis never re-seeds from the
+ * portfolio, matching `CALCULATIONS.md`:696's "an owner-set value is used
+ * exactly as typed, never overridden"). */
+export function resolveLoadedScenarioGrowthField(
+  storedPercentDecimal: string | null,
+  currentPortfolioGrowthPercentDecimal: string,
+): { input: string; touched: boolean } {
+  return storedPercentDecimal === null
+    ? { input: currentPortfolioGrowthPercentDecimal, touched: false }
+    : { input: storedPercentDecimal, touched: true };
+}
+
+/** DIV-014 owner ruling: the saved-scenario row's "amount invested" is the
+ * NET signed sum of every parcel's own signed amount (additions positive,
+ * removals negative, per DIV-013's own "Amount (signed; negative removes)"
+ * convention) -- a removal genuinely nets AGAINST an addition rather than
+ * being reported as a separate gross figure, so this is honestly a NET
+ * figure, never a fabricated "total contributed" gross sum. An empty
+ * scenario (no parcels) sums to exact "0". */
+export function sumCapitalEventAmounts(
+  rows: readonly CapitalEventInput[],
+): string {
+  let total = fromInteger(0n);
+  for (const row of rows) {
+    total = addDecimal(total, parseDecimal(row.amountDecimal));
+  }
+  return formatDecimalExact(total);
+}
+
+/** DIV-014 owner ruling: "for yield either the single common parcel yield
+ * or an honest mixed indicator ... never a fabricated average presented as
+ * exact". `"none"` when the scenario has no capital-change parcels at all
+ * (there is no parcel yield to report -- a top-level growth axis is a
+ * DIFFERENT figure, rendered separately); `"single"` when every parcel
+ * shares the identical yield (compared as DECIMAL VALUES via
+ * `compareDecimal`, not raw strings, so "2" and "2.00" still count as the
+ * same yield); `"mixed"` otherwise -- deliberately NEVER an averaged
+ * number, which would misrepresent a blend of genuinely different
+ * per-parcel yields as one exact figure. */
+export type IncomeScenarioYieldSummary =
+  | { kind: "none" }
+  | { kind: "single"; yieldPercentDecimal: string }
+  | { kind: "mixed" };
+
+export function deriveIncomeScenarioYieldSummary(
+  rows: readonly CapitalEventInput[],
+): IncomeScenarioYieldSummary {
+  if (rows.length === 0) return { kind: "none" };
+  const first = rows[0]!.yieldPercentDecimal;
+  const allMatch = rows.every((row) => {
+    try {
+      return (
+        compareDecimal(
+          parseDecimal(row.yieldPercentDecimal),
+          parseDecimal(first),
+        ) === 0
+      );
+    } catch {
+      return row.yieldPercentDecimal === first;
+    }
+  });
+  return allMatch
+    ? { kind: "single", yieldPercentDecimal: first }
+    : { kind: "mixed" };
 }

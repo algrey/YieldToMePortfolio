@@ -87,6 +87,13 @@ export {
   type WatchlistMutationFailure,
   type WatchlistRepository,
 } from "./watchlist.ts";
+export {
+  createIncomeScenarioRepository,
+  type IncomeScenarioMutationFailure,
+  type IncomeScenarioRecord,
+  type IncomeScenarioRepository,
+  type SaveIncomeScenarioInput,
+} from "./income-scenarios.ts";
 export type {
   AppendAuditEventInput,
   AuditEventRecord,

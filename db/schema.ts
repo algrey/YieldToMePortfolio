@@ -3952,3 +3952,63 @@ export const watchlistEntries = sqliteTable(
     ),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// DIV-014 (owner directive, 2026-08-24): saved multi-year income what-if
+// scenarios -- durable, portfolio-scoped, owner-named. Stores ONLY the
+// scenario's INPUTS, never any computed projection output: the
+// "Add/Remove Capital" parcel rows (`domain/dividends/projection.ts`'s own
+// `CapitalEventInput[]` shape, JSON-encoded verbatim, including each
+// parcel's own `null` blank-follows-portfolio growth flags), the
+// reinvest-dividends toggle, and the two top-level what-if growth axes.
+// Each growth axis is stored EITHER as a concrete decimal string (the owner
+// explicitly edited that axis away from its seed before saving) OR `NULL`
+// (the axis was left untouched) -- `NULL` means a LOADED scenario still
+// LIVE-follows whatever the portfolio's own growth assumption resolves to
+// at load time, never a frozen copy of what it happened to be at save time
+// (see `app/income-whatif.ts`'s `resolveLoadedScenarioGrowthField`, the one
+// place a stored value is turned back into the component's touched/input
+// state). Composite FK to `(portfolios.id, portfolios.userId)` mirrors
+// `dividendFyOverrides`'s identical owner-scoped, portfolio-scoped pattern
+// immediately below it in this file (defense in depth: a caller can never
+// pass a `portfolioId` that belongs to a different `userId` than the one
+// making the request).
+export const incomeWhatifScenarios = sqliteTable(
+  "income_whatif_scenarios",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    name: text("name").notNull(),
+    // `CapitalEventInput[]` JSON-encoded verbatim -- see the header comment.
+    capitalRowsJson: text("capital_rows_json").notNull(),
+    reinvestDividends: integer("reinvest_dividends").notNull(),
+    // `NULL` = this axis was left untouched at save time (live-follows the
+    // portfolio assumption on every future load); a decimal string = the
+    // owner's own edited input, frozen exactly as saved.
+    valueGrowthPercentDecimal: text("value_growth_percent_decimal"),
+    dividendGrowthPercentDecimal: text("dividend_growth_percent_decimal"),
+    createdAt: text("created_at").notNull(),
+    version: integer("version").notNull().default(1),
+  },
+  (table) => [
+    foreignKey({
+      name: "income_whatif_scenarios_portfolio_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    check(
+      "income_whatif_scenarios_name_check",
+      sql`length(trim(${table.name})) > 0`,
+    ),
+    check(
+      "income_whatif_scenarios_reinvest_dividends_check",
+      sql`${table.reinvestDividends} IN (0, 1)`,
+    ),
+    index("income_whatif_scenarios_portfolio_user_idx").on(
+      table.portfolioId,
+      table.userId,
+      table.createdAt,
+    ),
+  ],
+);

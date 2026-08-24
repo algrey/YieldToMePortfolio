@@ -4471,6 +4471,59 @@ dd {
   font: inherit;
 }
 
+/* DIV-014: "Save Scenario" -- reuses the identical dark-token card shape as
+   `.income-whatif`/`.income-capital-events` so this reads as the same
+   what-if visual system. */
+.income-saved-scenarios {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--divider);
+  border-radius: 0;
+  background: var(--forest);
+}
+
+.income-save-scenario-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.income-save-scenario-inputs label {
+  display: grid;
+  gap: 4px;
+  flex: 1 1 220px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.income-save-scenario-inputs input {
+  min-height: 44px;
+  width: 100%;
+  padding: 0 10px;
+  border: 1px solid var(--divider);
+  border-radius: 0;
+  background: var(--ink);
+  color: var(--cream);
+  font: inherit;
+}
+
+.income-save-scenario-inputs button {
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--divider);
+  border-radius: 0;
+  background: var(--ink);
+  color: var(--cream);
+  font: inherit;
+}
+
+.income-save-scenario-inputs button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
 .income-range-controls {
   display: flex;
   flex-wrap: wrap;

@@ -81,6 +81,7 @@
 // through unmodified, and the summary reads with owner-set/default
 // semantics exactly as the pre-what-if baseline did.
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { IncomeNav } from "./income-nav.tsx";
 import {
@@ -95,19 +96,25 @@ import {
   type PastFyExclusion,
   type ProjectionYearRow,
 } from "../../domain/dividends/projection.ts";
+import type { IncomeScenarioRecord } from "../../db/repositories/index.ts";
 import {
   CAPITAL_EVENT_DEFAULT_NAME,
   CAPITAL_EVENT_DEFAULT_YIELD_PERCENT_DECIMAL,
   capitalEventDraftToRow,
+  capitalEventInputToRow,
   capitalEventRowToDomainInput,
   capitalEventsStorageKey,
   defaultCapitalEventMonthYear,
+  deriveIncomeScenarioYieldSummary,
+  INCOME_SCENARIO_NAME_MAX_LENGTH,
   isValidCapitalEventDraft,
   isValidGrowthInput,
   loadCapitalEventsSession,
+  resolveLoadedScenarioGrowthField,
   resolveWhatIfGrowthPercentDecimal,
   saveCapitalEventsSession,
   sortCapitalEventRows,
+  sumCapitalEventAmounts,
   type CapitalEventDraft,
   type CapitalEventRowState,
 } from "../income-whatif.ts";
@@ -388,6 +395,16 @@ export function IncomeMultiYear({
   financialYearStartMonth,
   yearsBack,
   yearsForward,
+  // DIV-014: defaulted (never left `undefined`) so a caller that predates
+  // this task's props -- e.g. an older test fixture rendering this
+  // component directly, as `tests/div-012.test.ts`/`tests/div-013.test.ts`/
+  // `tests/ui-006a.test.ts`/`tests/ui-017.test.ts` all do -- degrades to
+  // "no saved scenarios" rather than throwing on `.length`/`.map` against
+  // `undefined`. The real server caller (`page.tsx`) always supplies both
+  // explicitly; these defaults are a runtime safety net, not a documented
+  // optional-prop contract (the type below stays required).
+  initialScenarios = [],
+  scenariosUnavailable = false,
 }: {
   portfolioId: string;
   assumptionsHref: string;
@@ -405,7 +422,16 @@ export function IncomeMultiYear({
   financialYearStartMonth: number;
   yearsBack: number;
   yearsForward: number;
+  /** DIV-014: server-loaded saved scenarios for this portfolio -- owned by
+   * the server component (`page.tsx`'s `loadOwnedIncomeScenarios`), NEVER
+   * mirrored into local state here (see `handleSaveScenario`/
+   * `handleDeleteScenario`'s own comments: `router.refresh()` re-fetches
+   * this prop after every mutation, mirroring `portfolio-shell.tsx`'s
+   * identical watchlist pattern). */
+  initialScenarios: IncomeScenarioRecord[];
+  scenariosUnavailable: boolean;
 }) {
+  const router = useRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const rowOpenerRef = useRef<HTMLButtonElement | null>(null);
   const [selectedRow, setSelectedRow] = useState<DisplayRow | null>(null);
@@ -478,6 +504,22 @@ export function IncomeMultiYear({
   );
   const [draftCapitalGrowth, setDraftCapitalGrowth] = useState("");
   const [draftDividendGrowth, setDraftDividendGrowth] = useState("");
+
+  // DIV-014 ("Save Scenario" -- owner directive): the name field the owner
+  // types before saving, and the pending/error UI state for the save and
+  // delete network calls below. Deliberately NOT a mirror of `initialScenarios`
+  // itself -- see that prop's own doc comment.
+  const [scenarioName, setScenarioName] = useState("");
+  const [scenarioSavePending, setScenarioSavePending] = useState(false);
+  const [scenarioSaveError, setScenarioSaveError] = useState<string | null>(
+    null,
+  );
+  const [scenarioDeletePendingId, setScenarioDeletePendingId] = useState<
+    string | null
+  >(null);
+  const [scenarioActionError, setScenarioActionError] = useState<string | null>(
+    null,
+  );
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -735,6 +777,134 @@ export function IncomeMultiYear({
 
   function handleRemoveCapitalRow(id: string) {
     setCapitalRows((existing) => existing.filter((row) => row.id !== id));
+  }
+
+  // DIV-014 ("Save Scenario" -- owner directive): posts the CURRENT growth
+  // inputs + capital-change parcels + reinvest flag as a new named
+  // scenario. Owner ruling: store INPUTS only, never a computed output --
+  // `sortedCapitalRows.map(capitalEventRowToDomainInput)` is the SAME
+  // mapping DIV-013's own live render path already uses (never a second,
+  // divergent one), and each growth axis is `null` (untouched -- keeps
+  // live-following the portfolio) unless the owner actually edited it
+  // (`valueGrowthTouched`/`dividendGrowthTouched`), in which case the
+  // DEBOUNCED/settled resolved value is stored -- see
+  // `resolveLoadedScenarioGrowthField`'s doc comment for the reverse
+  // (load-time) half of this contract. `router.refresh()` re-fetches
+  // `initialScenarios` from the server afterwards (this component never
+  // mirrors that list into local state -- see the prop's own doc comment).
+  async function handleSaveScenario() {
+    const name = scenarioName.trim();
+    if (name.length === 0) return;
+    setScenarioSavePending(true);
+    setScenarioSaveError(null);
+    try {
+      const response = await fetch(
+        `/api/portfolios/${portfolioId}/income-scenarios`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name,
+            rows: sortedCapitalRows.map(capitalEventRowToDomainInput),
+            reinvestDividends,
+            valueGrowthPercentDecimal: valueGrowthTouched
+              ? resolvedValueGrowthPercentDecimal
+              : null,
+            dividendGrowthPercentDecimal: dividendGrowthTouched
+              ? resolvedDividendGrowthPercentDecimal
+              : null,
+          }),
+        },
+      );
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok) {
+        throw new Error(result.message ?? "This scenario could not be saved.");
+      }
+      setScenarioName("");
+      router.refresh();
+    } catch (error) {
+      setScenarioSaveError(
+        error instanceof Error
+          ? error.message
+          : "This scenario could not be saved.",
+      );
+    } finally {
+      setScenarioSavePending(false);
+    }
+  }
+
+  // DIV-014 (owner ruling, verbatim): "clicking a row loads it and scraps
+  // the current scenario, no confirmation" -- every relevant piece of state
+  // is overwritten WHOLESALE and IMMEDIATELY (both the raw AND the
+  // debounced growth-input echoes are set together, bypassing the normal
+  // ~300ms debounce entirely, so the replacement takes visible effect on
+  // the very next render, never delayed). `setCapitalRows`/
+  // `setReinvestDividends` changing also re-triggers the EXISTING DIV-013
+  // save effect (gated on `hydratedKeyRef` already matching this mounted
+  // portfolio, true by this point), which persists the loaded scenario into
+  // `sessionStorage` under this portfolio's own key -- "updates
+  // sessionStorage per DIV-013's mechanics" (owner ruling), reusing that
+  // mechanism rather than a second, parallel one.
+  function handleLoadScenario(scenario: IncomeScenarioRecord) {
+    setCapitalRows(scenario.rows.map(capitalEventInputToRow));
+    setReinvestDividends(scenario.reinvestDividends);
+    const value = resolveLoadedScenarioGrowthField(
+      scenario.valueGrowthPercentDecimal,
+      portfolioValueGrowthPercentDecimal,
+    );
+    setValueGrowthInput(value.input);
+    setValueGrowthTouched(value.touched);
+    setDebouncedValueGrowthInput(value.input);
+    const dividend = resolveLoadedScenarioGrowthField(
+      scenario.dividendGrowthPercentDecimal,
+      portfolioDividendGrowthPercentDecimal,
+    );
+    setDividendGrowthInput(dividend.input);
+    setDividendGrowthTouched(dividend.touched);
+    setDebouncedDividendGrowthInput(dividend.input);
+  }
+
+  // DIV-014 (owner ruling): "delete is permanent (x, no confirm per owner)
+  // but audited" -- no `confirm()`/dialog gate, the DELETE route's own
+  // repository call (`db/repositories/income-scenarios.ts`'s `remove`)
+  // writes the audit row unconditionally on this path.
+  async function handleDeleteScenario(scenario: IncomeScenarioRecord) {
+    setScenarioDeletePendingId(scenario.id);
+    setScenarioActionError(null);
+    try {
+      const response = await fetch(
+        `/api/portfolios/${portfolioId}/income-scenarios`,
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            id: scenario.id,
+            expectedVersion: scenario.version,
+          }),
+        },
+      );
+      const result = (await response.json()) as {
+        ok: boolean;
+        message?: string;
+      };
+      if (!response.ok || !result.ok) {
+        throw new Error(
+          result.message ?? "This scenario could not be removed.",
+        );
+      }
+      router.refresh();
+    } catch (error) {
+      setScenarioActionError(
+        error instanceof Error
+          ? error.message
+          : "This scenario could not be removed.",
+      );
+    } finally {
+      setScenarioDeletePendingId(null);
+    }
   }
 
   return (
@@ -1241,6 +1411,166 @@ export function IncomeMultiYear({
             table above -- not saved.
           </p>
         ) : null}
+      </section>
+
+      {/* DIV-014 (owner directive, 2026-08-24): "below the What-If section,
+          a Save Scenario area" -- placed after `.income-capital-events`
+          (rather than immediately after `.income-whatif`) because a
+          "scenario" is the FULL current what-if state: both top-level
+          growth inputs AND the capital-change parcels/reinvest flag above,
+          so saving before the parcel section would be premature. Owner
+          spec verbatim: "scenarios NAMED before saving; each saved scenario
+          = a row showing name, amount invested, yield, capital and
+          dividend growth %, with an x to delete; clicking a row loads it
+          and SCRAPS the current scenario, no confirmation." */}
+      <section
+        className="income-saved-scenarios"
+        aria-labelledby="income-saved-scenarios-title"
+      >
+        <p className="eyebrow" id="income-saved-scenarios-title">
+          Save scenario
+        </p>
+        <p className="unavailable">
+          Saves the growth inputs and capital-change parcels above as a named
+          scenario you can reload later -- durable, but still never changes your
+          real portfolio. Clicking a saved scenario below loads it immediately
+          and replaces everything above -- there is no confirmation.
+        </p>
+        <div className="income-save-scenario-inputs">
+          <label>
+            <span>Scenario name</span>
+            <input
+              type="text"
+              value={scenarioName}
+              onChange={(event) => setScenarioName(event.target.value)}
+              maxLength={INCOME_SCENARIO_NAME_MAX_LENGTH}
+            />
+          </label>
+          <button
+            type="button"
+            disabled={scenarioName.trim().length === 0 || scenarioSavePending}
+            onClick={handleSaveScenario}
+          >
+            {scenarioSavePending ? "Saving…" : "Save scenario"}
+          </button>
+        </div>
+        {scenarioSaveError ? (
+          <p className="status-banner warning" role="status">
+            <strong>Scenario not saved</strong>
+            <span>{scenarioSaveError}</span>
+          </p>
+        ) : null}
+        {scenarioActionError ? (
+          <p className="status-banner warning" role="status">
+            <strong>Scenario action failed</strong>
+            <span>{scenarioActionError}</span>
+          </p>
+        ) : null}
+
+        {scenariosUnavailable ? (
+          <p className="unavailable">
+            Saved scenarios are temporarily unavailable.
+          </p>
+        ) : initialScenarios.length === 0 ? (
+          <p className="unavailable">No saved scenarios yet.</p>
+        ) : (
+          <div className="income-fy-table-wrap">
+            <table className="income-fy-table income-saved-scenarios-rows">
+              {/* DIV-014 owner ruling: "amount invested" is the NET signed
+                  sum of every parcel's own signed amount (removals net
+                  AGAINST additions, per DIV-013's own signed-amount
+                  convention) -- see `sumCapitalEventAmounts`'s doc comment
+                  for why this is honestly a net figure, never a gross
+                  "total contributed". */}
+              <caption>Saved scenarios (net amount invested)</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Name</th>
+                  <th scope="col" className="numeric">
+                    Net amount invested
+                  </th>
+                  <th scope="col" className="numeric">
+                    Yield
+                  </th>
+                  <th scope="col" className="numeric">
+                    Capital growth
+                  </th>
+                  <th scope="col" className="numeric">
+                    Dividend growth
+                  </th>
+                  <th scope="col">
+                    <span className="visually-hidden">Delete</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {initialScenarios.map((scenario) => {
+                  const netAmountInvested = sumCapitalEventAmounts(
+                    scenario.rows,
+                  );
+                  const yieldSummary = deriveIncomeScenarioYieldSummary(
+                    scenario.rows,
+                  );
+                  return (
+                    <tr key={scenario.id}>
+                      <th scope="row">
+                        <button
+                          type="button"
+                          className="income-row-trigger"
+                          onClick={() => handleLoadScenario(scenario)}
+                        >
+                          {scenario.name}
+                        </button>
+                      </th>
+                      <td className="numeric">
+                        {formatIncomeMoney(
+                          baseCurrencyCode,
+                          baseCurrencyCode,
+                          netAmountInvested,
+                          { signed: true },
+                        )}
+                      </td>
+                      <td className="numeric">
+                        {yieldSummary.kind === "single"
+                          ? formatIncomePercent(
+                              yieldSummary.yieldPercentDecimal,
+                            )
+                          : yieldSummary.kind === "mixed"
+                            ? "Mixed"
+                            : "—"}
+                      </td>
+                      <td className="numeric">
+                        {scenario.valueGrowthPercentDecimal !== null
+                          ? formatIncomePercent(
+                              scenario.valueGrowthPercentDecimal,
+                            )
+                          : "Follows portfolio"}
+                      </td>
+                      <td className="numeric">
+                        {scenario.dividendGrowthPercentDecimal !== null
+                          ? formatIncomePercent(
+                              scenario.dividendGrowthPercentDecimal,
+                            )
+                          : "Follows portfolio"}
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="income-capital-events-remove"
+                          disabled={scenarioDeletePendingId === scenario.id}
+                          onClick={() => handleDeleteScenario(scenario)}
+                          aria-label={`Delete saved scenario ${scenario.name}`}
+                        >
+                          ×
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <form

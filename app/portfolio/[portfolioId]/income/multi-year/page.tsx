@@ -2,6 +2,10 @@ import { notFound } from "next/navigation";
 import { loadAuthenticatedWorkspace } from "../../../../authenticated-workspace";
 import { getAuthenticatedSqlContext } from "../../../../portfolio-actions";
 import { loadOwnedIncomeProjection } from "../../../../owned-income-projection";
+import {
+  loadOwnedIncomeScenarios,
+  type IncomeScenarioRecord,
+} from "../../../../owned-income-scenarios";
 import { IncomeMultiYear } from "../../../../components/income-multi-year";
 import { IncomeNav } from "../../../../components/income-nav";
 import {
@@ -90,6 +94,25 @@ export default async function IncomeMultiYearPage({
     );
   }
 
+  // DIV-014: saved what-if scenarios load server-side alongside the rest of
+  // this page's data -- a failure here degrades honestly to an empty list
+  // plus an explicit "unavailable" disclosure (never silently claimed as
+  // "no scenarios saved yet", which would misrepresent a fetch failure as a
+  // real fact) rather than failing the WHOLE page the way a degraded
+  // `projection` load does above; this list is a non-critical convenience
+  // layered on top of the always-available what-if inputs.
+  let scenarios: IncomeScenarioRecord[] = [];
+  let scenariosUnavailable = false;
+  try {
+    scenarios = await loadOwnedIncomeScenarios(
+      context.client,
+      context.userId,
+      portfolioId,
+    );
+  } catch {
+    scenariosUnavailable = true;
+  }
+
   // Follow-up 1: pass DIV-003's typed results straight through rather than
   // silently collapsing a degraded `ok: false` into `[]`/`null` here --
   // `IncomeMultiYear` renders the same disclosed-banner pattern used for a
@@ -113,6 +136,8 @@ export default async function IncomeMultiYearPage({
       financialYearStartMonth={projection.financialYearStartMonth}
       yearsBack={yearsBack}
       yearsForward={yearsForward}
+      initialScenarios={scenarios}
+      scenariosUnavailable={scenariosUnavailable}
     />
   );
 }

@@ -119,6 +119,12 @@ const OWNED_TABLES = [
   // case: every row here is the owner's own watch entry, never a shared/
   // deployment-scope fact.
   "watchlist_entries",
+  // DIV-014: owner-scoped saved multi-year income what-if scenario --
+  // stores only the scenario's own INPUTS (see db/schema.ts's
+  // `incomeWhatifScenarios` header comment), never a computed projection.
+  // Keyed by `user_id` (and `portfolio_id`) directly, same "owned" shape as
+  // `watchlist_entries` immediately above.
+  "income_whatif_scenarios",
 ];
 const classifications: Record<string, ExportTableClassification> =
   Object.fromEntries(
@@ -362,6 +368,11 @@ const PURGE_TABLES_IN_FK_ORDER = [
   // `intraday_price_points` immediately above. No other table references
   // it.
   "watchlist_entries",
+  // DIV-014: saved income what-if scenarios reference (portfolio_id,
+  // user_id) via a composite FK to `portfolios` -- must be deleted before
+  // `portfolios` below. No other table references it, so any position
+  // before `portfolios` is FK-safe.
+  "income_whatif_scenarios",
   "transactions",
   "portfolio_securities",
   "portfolio_settings",

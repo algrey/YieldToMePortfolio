@@ -23,6 +23,25 @@ import {
 } from "../domain/dividends/index.ts";
 import type { OwnedDividendListRow } from "../app/owned-dividend-list.ts";
 
+// DIV-014 added a `useRouter()` call to `IncomeMultiYear` (`router.refresh()`
+// after the new "Save Scenario" save/delete calls), so a bare
+// `renderToStaticMarkup` of it now throws "invariant expected app router to
+// be mounted". Mirrors `tests/wlt-001.test.ts`'s `AppRouterContext.Provider`
+// stub wrapping for `portfolio-shell.tsx` (also a `useRouter()` consumer) --
+// harmless for the other components this shared helper renders, which don't
+// call `useRouter` at all.
+const ROUTER_STUB_IMPORT = `
+  import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime";
+  const routerStub = {
+    push() {},
+    replace() {},
+    back() {},
+    forward() {},
+    refresh() {},
+    prefetch() {},
+  };
+`;
+
 function renderComponent(
   componentName: string,
   componentPath: string,
@@ -33,9 +52,16 @@ function renderComponent(
     import { createElement } from "react";
     import { renderToStaticMarkup } from "react-dom/server";
     import { ${componentName} } from ${JSON.stringify(componentUrl)};
+    ${ROUTER_STUB_IMPORT}
     const props = ${JSON.stringify(props)};
     process.stdout.write(
-      renderToStaticMarkup(createElement(${componentName}, props)),
+      renderToStaticMarkup(
+        createElement(
+          AppRouterContext.Provider,
+          { value: routerStub },
+          createElement(${componentName}, props),
+        ),
+      ),
     );
   `;
   return execFileSync(

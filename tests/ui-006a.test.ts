@@ -28,6 +28,25 @@ function extractBlock(css: string, selector: string): string {
   return match![1];
 }
 
+// DIV-014 added a `useRouter()` call to `IncomeMultiYear` (`router.refresh()`
+// after the new "Save Scenario" save/delete calls), so a bare
+// `renderToStaticMarkup` of it now throws "invariant expected app router to
+// be mounted". Mirrors `tests/wlt-001.test.ts`'s `AppRouterContext.Provider`
+// stub wrapping for `portfolio-shell.tsx` (also a `useRouter()` consumer) --
+// harmless for the other components this shared helper renders, which don't
+// call `useRouter` at all.
+const ROUTER_STUB_IMPORT = `
+  import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime";
+  const routerStub = {
+    push() {},
+    replace() {},
+    back() {},
+    forward() {},
+    refresh() {},
+    prefetch() {},
+  };
+`;
+
 function renderComponent(
   componentName: string,
   componentPath: string,
@@ -38,9 +57,16 @@ function renderComponent(
     import { createElement } from "react";
     import { renderToStaticMarkup } from "react-dom/server";
     import { ${componentName} } from ${JSON.stringify(componentUrl)};
+    ${ROUTER_STUB_IMPORT}
     const props = ${JSON.stringify(props)};
     process.stdout.write(
-      renderToStaticMarkup(createElement(${componentName}, props)),
+      renderToStaticMarkup(
+        createElement(
+          AppRouterContext.Provider,
+          { value: routerStub },
+          createElement(${componentName}, props),
+        ),
+      ),
     );
   `;
   return execFileSync(
@@ -707,7 +733,7 @@ test("DIV-012 (supersedes follow-up 2): the old shared whatIfApplied/whatIfResul
 
 // --- What-if non-persistence -----------------------------------------
 
-test("UI-006A: the what-if overlay recomputes CLIENT-SIDE via the pure domain projector -- no server action, fetch, or mutation route backs it, so it is unpersisted by construction", async () => {
+test("UI-006A: the what-if overlay recomputes CLIENT-SIDE via the pure domain projector -- no server action or mutation route backs IT, so it stays unpersisted by construction (honestly flipped by DIV-014: this file DOES now contain fetch( calls, but only for the SEPARATE, deliberately-persisted 'Save Scenario' feature -- see the scoped fetch( assertion below)", async () => {
   const [component, ownedIncomeProjectionRoute] = await Promise.all([
     readFile(
       new URL("../app/components/income-multi-year.tsx", import.meta.url),
@@ -724,7 +750,27 @@ test("UI-006A: the what-if overlay recomputes CLIENT-SIDE via the pure domain pr
   // client component can write to storage.
   assert.match(component, /from "..\/..\/domain\/dividends\/projection\.ts"/);
   assert.doesNotMatch(component, /from "\.\.\/owned-income-projection/);
-  assert.doesNotMatch(component, /fetch\(/);
+  // DIV-014 added a genuinely NEW, explicitly-persisted "Save Scenario"
+  // feature to this SAME file (owner ruling: saved scenarios are durable).
+  // The growth what-if overlay this test is about is still computed purely
+  // client-side with nothing reachable from it that writes to storage --
+  // every `fetch(` this file now contains must belong to DIV-014's Save
+  // Scenario feature (its own CSRF-gated route), never the what-if overlay
+  // itself (see `tests/div-014.test.ts` for that feature's own coverage).
+  const fetchCalls = component.match(/fetch\(/g) ?? [];
+  const scenarioRouteFetchCalls =
+    component.match(
+      /fetch\(\s*\n?\s*`\/api\/portfolios\/\$\{portfolioId\}\/income-scenarios`/g,
+    ) ?? [];
+  assert.ok(
+    scenarioRouteFetchCalls.length > 0,
+    "expected DIV-014's Save Scenario fetch calls to exist",
+  );
+  assert.equal(
+    fetchCalls.length,
+    scenarioRouteFetchCalls.length,
+    "every fetch( in this file must belong to DIV-014's Save Scenario feature, never the growth what-if overlay this test pins",
+  );
   assert.doesNotMatch(component, /mutation-request/);
   assert.doesNotMatch(component, /"use server"/);
   assert.match(

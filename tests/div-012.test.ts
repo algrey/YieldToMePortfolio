@@ -141,6 +141,24 @@ const noneProps = {
   portfolioDividendGrowthPercentDecimal: "6",
 };
 
+// DIV-014 added a `useRouter()` call to `IncomeMultiYear` (`router.refresh()`
+// after the new "Save Scenario" save/delete calls), so a bare
+// `renderToStaticMarkup` now throws "invariant expected app router to be
+// mounted". Mirrors `tests/wlt-001.test.ts`'s `AppRouterContext.Provider`
+// stub wrapping for `portfolio-shell.tsx` (also a `useRouter()` consumer) --
+// harmless for components that don't call `useRouter` at all.
+const ROUTER_STUB_IMPORT = `
+  import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime";
+  const routerStub = {
+    push() {},
+    replace() {},
+    back() {},
+    forward() {},
+    refresh() {},
+    prefetch() {},
+  };
+`;
+
 function renderComponent(
   componentName: string,
   componentPath: string,
@@ -151,9 +169,16 @@ function renderComponent(
     import { createElement } from "react";
     import { renderToStaticMarkup } from "react-dom/server";
     import { ${componentName} } from ${JSON.stringify(componentUrl)};
+    ${ROUTER_STUB_IMPORT}
     const props = ${JSON.stringify(props)};
     process.stdout.write(
-      renderToStaticMarkup(createElement(${componentName}, props)),
+      renderToStaticMarkup(
+        createElement(
+          AppRouterContext.Provider,
+          { value: routerStub },
+          createElement(${componentName}, props),
+        ),
+      ),
     );
   `;
   return execFileSync(
@@ -437,7 +462,19 @@ test("DIV-012 (cross-reset regression pin): the removed shared 'applied' state c
 test("DIV-012: the what-if is still recomputed CLIENT-SIDE via the pure domain projector on every render -- confirms this was never a server-round-trip/draft-resync bug", async () => {
   const source = await readComponentSource();
   assert.match(source, /"use client"/);
-  assert.doesNotMatch(source, /fetch\(/);
+  // DIV-014 added a genuinely NEW, explicitly-persisted "Save Scenario"
+  // feature to this SAME file -- every `fetch(` this file now contains
+  // must belong to THAT feature's own CSRF-gated route, never the growth
+  // what-if this test is about (see `tests/div-014.test.ts` for that
+  // feature's own coverage; `tests/ui-006a.test.ts` carries the identical
+  // scoped assertion).
+  const fetchCalls = source.match(/fetch\(/g) ?? [];
+  const scenarioRouteFetchCalls =
+    source.match(
+      /fetch\(\s*\n?\s*`\/api\/portfolios\/\$\{portfolioId\}\/income-scenarios`/g,
+    ) ?? [];
+  assert.equal(fetchCalls.length, scenarioRouteFetchCalls.length);
+  assert.ok(scenarioRouteFetchCalls.length > 0);
   assert.doesNotMatch(source, /"use server"/);
   assert.match(
     source,
