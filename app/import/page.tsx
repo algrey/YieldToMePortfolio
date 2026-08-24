@@ -1,4 +1,5 @@
 import { ImportReview } from "../components/import-review";
+import { HistoryBackControl } from "../components/back-control";
 import { loadAuthenticatedWorkspace } from "../authenticated-workspace";
 import { getAuthenticatedSqlContext } from "../portfolio-actions";
 import { loadOwnedSharesightLinks } from "../owned-sharesight-links";
@@ -11,7 +12,10 @@ export default async function ImportPage() {
   if (workspace.status !== "ready" && workspace.status !== "empty") {
     return (
       <main className="import-review-page">
-        <p className="eyebrow">Import review</p>
+        <div className="subnav-heading">
+          <HistoryBackControl fallbackHref="/" label="Back" />
+          <p className="eyebrow">Import review</p>
+        </div>
         <h1>Import is unavailable</h1>
         <p>{workspace.message ?? "Your private workspace is unavailable."}</p>
       </main>
@@ -20,7 +24,10 @@ export default async function ImportPage() {
   if (workspace.portfolios.length === 0) {
     return (
       <main className="import-review-page">
-        <p className="eyebrow">Import review</p>
+        <div className="subnav-heading">
+          <HistoryBackControl fallbackHref="/" label="Back" />
+          <p className="eyebrow">Import review</p>
+        </div>
         <h1>Create a portfolio first</h1>
         <p>No private portfolio is available to receive this import.</p>
       </main>

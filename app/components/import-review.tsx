@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { HistoryBackControl } from "./back-control";
 import { useEffect, useRef } from "react";
 import type { ImportHistoryDetail } from "../import-history-service.ts";
 import type { ImportReversalActionResult } from "../import-reversal-service.ts";
@@ -1536,7 +1537,14 @@ export function ImportReview({
 
   return (
     <main className="import-review-page">
-      <p className="eyebrow">Import review</p>
+      {/* UI-038 (owner-reported orphan): /import is opened from the top
+          bar's "+" menu on every primary tab, so the back control goes BACK
+          in history rather than to one hard-coded parent; a direct arrival
+          falls back to the workspace overview. */}
+      <div className="subnav-heading">
+        <HistoryBackControl fallbackHref="/" label="Back" />
+        <p className="eyebrow">Import review</p>
+      </div>
       <h1>Preview a CSV import</h1>
       <p className="import-intro">
         Upload, inspect, and resolve issues before an explicit financial commit
