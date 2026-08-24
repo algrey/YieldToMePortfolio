@@ -19,7 +19,8 @@
 // the per-holding detail area); the Income tab list itself stays here.
 import { SubNav } from "./sub-nav";
 
-export type IncomeView = "next12" | "multi-year" | "gains" | "dividends";
+export type IncomeView =
+  "next12" | "multi-year" | "gains" | "dividends" | "assumptions";
 
 const INCOME_VIEWS: readonly {
   key: IncomeView;
@@ -47,6 +48,17 @@ const INCOME_VIEWS: readonly {
     key: "dividends",
     label: "All dividends",
     href: (id) => `/portfolio/${id}/income/dividends`,
+  },
+  {
+    key: "assumptions",
+    // UI-039 (owner directive 2026-08-24, direct edit): the dividend
+    // assumptions editor (UI-006B) existed only as an orphaned route the
+    // owner could not discover -- surfaced here as a fifth sub-tab. The
+    // assumptions PAGE itself is unchanged for now (it renders its own
+    // chrome without this bar; owner: "We can work on the Assumptions
+    // page later, just add it for now").
+    label: "Assumptions",
+    href: (id) => `/portfolio/${id}/income/assumptions`,
   },
 ];
 
