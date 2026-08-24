@@ -26,7 +26,19 @@ export type MultiFilePreviewResult<TPreview> =
   { ok: true; preview: TPreview } | { ok: false; message: string };
 
 export type MultiFileConfirmResult =
-  | { ok: true; written: number; insertedRowCount: number }
+  | {
+      ok: true;
+      written: number;
+      insertedRowCount: number;
+      /** EFF-001 (review fold): overrides the generated "Imported N ...
+       * (X newly created, Y overlaid existing)" message below with an
+       * exact, caller-supplied one -- e.g. delta-upload's "all rows were
+       * already present" short-circuit, which never calls confirm at all
+       * and so has no real written/insertedRowCount story to summarize.
+       * Omitted (the ordinary case) falls through to the generated text,
+       * byte-identical to before this field existed. */
+      message?: string;
+    }
   | { ok: false; message: string };
 
 export type MultiFileDecision = "confirm" | "skip" | "cancel";
@@ -112,9 +124,11 @@ export async function runMultiFilePriceUpload<TFile, TPreview>(
     results.push({
       filename,
       status: "committed",
-      message: `Imported ${confirmResult.written} price observation${
-        confirmResult.written === 1 ? "" : "s"
-      } (${confirmResult.insertedRowCount} newly created, ${overlaid} overlaid existing).`,
+      message:
+        confirmResult.message ??
+        `Imported ${confirmResult.written} price observation${
+          confirmResult.written === 1 ? "" : "s"
+        } (${confirmResult.insertedRowCount} newly created, ${overlaid} overlaid existing).`,
     });
   }
   return { results, cancelled: false };

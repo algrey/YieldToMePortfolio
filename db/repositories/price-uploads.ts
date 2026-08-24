@@ -104,6 +104,84 @@ function chunk<T>(items: readonly T[], size: number): T[][] {
 }
 
 /**
+ * EFF-001 (measure 2, "delta-upload"): a defensive bound on how many
+ * distinct dates a single security's OWN existing owner-import coverage
+ * read may return -- mirrors `domain/market-data/price-csv.ts`'s
+ * `DEFAULT_PRICE_CSV_LIMITS.maxRows` (20,000; a generous ~80 years of daily
+ * history), the same headroom this read exists to compare against. Unlike
+ * `app/price-history-coverage.ts`'s MULTI-security aggregate (which chunks
+ * an `IN (...)` clause across up to 500 held securities,
+ * `COVERAGE_READ_CHUNK_SIZE = 50` per chunk, to stay under D1's
+ * bind-parameter ceiling), this read is scoped to exactly ONE security via
+ * two plain equality binds -- there is no parameter-count risk to chunk
+ * against, only a row-count one, which this `LIMIT` bounds directly.
+ */
+const MAX_EXISTING_MARKET_DATES = 20_000;
+
+/**
+ * The (date, price) observations a specific security ALREADY has owner-import
+ * price history for (this exact write path's own `provider_id`, this
+ * owner's own `user`-scope rows) -- feeds the "N identical row(s) already
+ * present -- skipped" client-side delta-upload optimization
+ * (`app/price-upload-service.ts`'s `previewSinglePriceUpload`, via
+ * `domain/market-data/price-csv.ts`'s `filterRowsAlreadyPresent`).
+ *
+ * Review B1 fix (BLOCKING, 2026-08-25): the first version returned dates
+ * ONLY -- a CSV carrying a CORRECTED price for an already-covered date was
+ * then indistinguishable from a genuine duplicate and silently never
+ * uploaded, while the preview kept promising "overwriting the price on any
+ * date already imported". Returning `closeDecimal` alongside `marketDate`
+ * lets the caller compare VALUE, not just presence -- a corrected price
+ * still uploads and converges normally.
+ *
+ * Deliberately scoped to `provider_id = OWNER_IMPORT_PROVIDER_ID AND
+ * interval = 'eod'` rather than every row for this security: a
+ * Sharesight/Yahoo-sourced observation on the same date is a DIFFERENT fact
+ * (different provider, different interval/quality, a different `ON
+ * CONFLICT` target entirely -- see `writePriceUploadObservations`'s header
+ * comment), not something a CSV re-upload should treat as "already
+ * covered". Review fold: the `interval = 'eod'` filter was missing from the
+ * first version -- the reviewer's repro hand-crafted an `owner-import`
+ * row with `interval != 'eod'` (mirroring how this same provider id could,
+ * in principle, carry a non-eod row) on the SAME market_date, which then
+ * wrongly shadowed a genuine eod upload; `writePriceUploadObservations`'s
+ * owner-import candidates are ALWAYS `interval: "eod"`, so this read must
+ * match that exactly to reflect the SAME natural key the upsert converges
+ * on, not a looser one.
+ *
+ * A write-avoidance HEURISTIC ONLY: the client uses this list to decide
+ * which rows to bother SENDING, never a correctness gate --
+ * `writePriceUploadObservations`'s upsert (plus its own measure-3
+ * identical-value guard) handles whatever arrives regardless of whether the
+ * client's coverage snapshot was stale or skipped entirely.
+ */
+export async function loadOwnerImportPriceObservationsForSecurity(
+  client: SqlClient,
+  userId: string,
+  securityId: string,
+): Promise<Array<{ marketDate: string; closeDecimal: string }>> {
+  const rows = await client.all<{
+    market_date: string;
+    close_decimal: string;
+  }>(
+    `SELECT market_date, close_decimal FROM price_observations
+      WHERE security_id = ?
+        AND provider_id = ?
+        AND interval = 'eod'
+        AND access_scope = 'user'
+        AND scope_user_id = ?
+        AND adjustment_state = 'raw'
+      ORDER BY market_date
+      LIMIT ?`,
+    [securityId, OWNER_IMPORT_PROVIDER_ID, userId, MAX_EXISTING_MARKET_DATES],
+  );
+  return rows.map((row) => ({
+    marketDate: String(row.market_date),
+    closeDecimal: String(row.close_decimal),
+  }));
+}
+
+/**
  * Writes `candidates` as natural-key idempotent upserts into
  * `price_observations`. Each candidate's `providerId` decides which of
  * `price_observations`' TWO unique indexes the `ON CONFLICT` clause targets
@@ -137,6 +215,30 @@ function chunk<T>(items: readonly T[], size: number): T[][] {
  * returns the EXISTING row's (different) id, since `id` is never touched by
  * `DO UPDATE SET`. This needs no extra query -- it falls out of the same
  * `RETURNING id` the write already reads for `written`.
+ *
+ * EFF-001 (measure 3, "identical-value upserts free"): the `DO UPDATE SET`
+ * clause now carries a `WHERE` guard comparing every column it would
+ * otherwise touch (`ingested_at` excluded -- it is bookkeeping, not a
+ * value, and would make the guard always true) against `excluded.*` with
+ * SQLite's null-safe `IS NOT`. When a re-upload's candidate is
+ * byte-identical to the stored row on every VALUE column, the `WHERE`
+ * evaluates false and SQLite performs NO write at all for that row --
+ * neither an INSERT nor an UPDATE, the pre-existing row is left completely
+ * untouched (documented SQLite `ON CONFLICT ... DO UPDATE ... WHERE`
+ * behaviour: a false guard abandons the upsert for that conflicting row).
+ * `RETURNING id` then reports nothing for that statement, so `written`
+ * correctly excludes it; `unchangedCount` counts it separately so callers
+ * can disclose the saving honestly rather than have it silently vanish from
+ * the "N price observation(s)" total. This guard is SCOPED to this single
+ * write path -- it does not touch, and does not need to compose its own
+ * WHERE clause with, MKT-011A's rollup strictly-newer guard
+ * (`db/repositories/intraday-price-capture.ts`), MKT-015's backfill
+ * `noDowngrade` guard (`db/repositories/sharesight-price-refresh.ts`), or
+ * WLT-001's prime guard (`app/watchlist-actions.ts`) -- each of those
+ * targets a DIFFERENT `ON CONFLICT` index/provider (the Yahoo-compatible
+ * partial index, `provider_id != 'owner-import'`) via its OWN separate
+ * write function, so there is no single SQL statement where two WHERE
+ * clauses would need to combine; they compose simply by being independent.
  */
 export async function writePriceUploadObservations(
   client: SqlClient,
@@ -146,23 +248,50 @@ export async function writePriceUploadObservations(
     candidates: readonly PriceUploadWriteCandidate[];
     now: string;
   }>,
-): Promise<{ written: number; insertedCount: number }> {
-  if (input.candidates.length === 0) return { written: 0, insertedCount: 0 };
+): Promise<{
+  written: number;
+  insertedCount: number;
+  unchangedCount: number;
+  /** Review fold (2026-08-25): distinguishes measure 3's genuine
+   * identical-value skip (`unchangedCount`) from the structurally-different
+   * failure mode of the guard-created mapping still being absent when the
+   * price statement ran -- see the post-batch verification below. Expected
+   * to be `0` in ordinary operation (the guard-create statement immediately
+   * precedes each price statement in the SAME batch); a non-zero value is a
+   * genuine data-integrity anomaly worth investigating, never silently
+   * folded into `unchangedCount`'s write-avoidance meaning. */
+  mappingMissingCount: number;
+}> {
+  if (input.candidates.length === 0) {
+    return {
+      written: 0,
+      insertedCount: 0,
+      unchangedCount: 0,
+      mappingMissingCount: 0,
+    };
+  }
 
   let written = 0;
   let insertedCount = 0;
+  let unchangedCount = 0;
+  let mappingMissingCount = 0;
   for (const batchCandidates of chunk(
     input.candidates,
     PRICE_UPLOAD_WRITE_LIMITS.maxCandidatesPerChunk,
   )) {
     const statements: SqlStatement[] = [];
-    // Tracks, per price_observations statement, the INDEX into `statements`
-    // and the `id` this call generated for it -- so the post-batch loop can
-    // tell INSERT (returned id === generated id) from an ON CONFLICT
-    // overlay (returned id is the pre-existing row's, different) without a
-    // second query.
-    const priceStatementEntries: Array<{ index: number; generatedId: string }> =
-      [];
+    // Tracks, per price_observations statement, the INDEX into `statements`,
+    // the `id` this call generated for it (so the post-batch loop can tell
+    // INSERT -- returned id === generated id -- from an ON CONFLICT overlay,
+    // returned id is the pre-existing row's, different -- without a second
+    // query), and the (providerId, securityId) pair a post-batch mapping
+    // verification needs if this candidate resolves ambiguously (see below).
+    const priceStatementEntries: Array<{
+      index: number;
+      generatedId: string;
+      providerId: string;
+      securityId: string;
+    }> = [];
     for (const candidate of batchCandidates) {
       statements.push({
         sql: `INSERT INTO security_provider_mappings (
@@ -196,7 +325,12 @@ export async function writePriceUploadObservations(
              provider_id, scope_key, mapping_id, interval, observation_at, adjustment_state
            )`;
       const generatedId = randomUUID();
-      priceStatementEntries.push({ index: statements.length, generatedId });
+      priceStatementEntries.push({
+        index: statements.length,
+        generatedId,
+        providerId: candidate.providerId,
+        securityId: candidate.securityId,
+      });
       statements.push({
         sql: `INSERT INTO price_observations (
                 id, provider_id, access_scope, scope_user_id, scope_key,
@@ -217,6 +351,13 @@ export async function writePriceUploadObservations(
                 quality = excluded.quality,
                 delayed_minutes = excluded.delayed_minutes,
                 ingested_at = excluded.ingested_at
+              WHERE
+                market_date IS NOT excluded.market_date
+                OR market_timezone IS NOT excluded.market_timezone
+                OR currency_code IS NOT excluded.currency_code
+                OR close_decimal IS NOT excluded.close_decimal
+                OR quality IS NOT excluded.quality
+                OR delayed_minutes IS NOT excluded.delayed_minutes
               RETURNING id`,
         params: [
           generatedId,
@@ -246,14 +387,59 @@ export async function writePriceUploadObservations(
       });
     }
     const results = await client.batch(statements);
+    // EFF-001 (measure 3 + review fold): no `RETURNING id` row means EITHER
+    // (a) the guarded `INSERT ... SELECT ... WHERE mappingIdSubquery IS NOT
+    // NULL` matched nothing, or (b) the row DID conflict but the
+    // `DO UPDATE ... WHERE` guard found every value column already
+    // identical and correctly performed no write at all. These are
+    // DIFFERENT facts -- (b) is the intended write-avoidance saving, (a) is
+    // a genuine anomaly (the guard-create statement immediately precedes
+    // each price statement in the SAME batch, so this "should" be
+    // unreachable) -- so unresolved entries are verified against
+    // `security_provider_mappings` in ONE follow-up read per chunk (only
+    // when needed) rather than silently folded into one ambiguous count.
+    const unresolvedEntries: typeof priceStatementEntries = [];
     for (const entry of priceStatementEntries) {
       const returnedId = results[entry.index]?.results[0]?.id;
-      if (returnedId === undefined) continue;
+      if (returnedId === undefined) {
+        unresolvedEntries.push(entry);
+        continue;
+      }
       written += 1;
       if (returnedId === entry.generatedId) insertedCount += 1;
     }
+    if (unresolvedEntries.length > 0) {
+      const uniquePairs = [
+        ...new Map(
+          unresolvedEntries.map((entry) => [
+            `${entry.providerId} ${entry.securityId}`,
+            entry,
+          ]),
+        ).values(),
+      ];
+      const existingMappings = await client.all<{
+        provider_id: string;
+        security_id: string;
+      }>(
+        `SELECT DISTINCT provider_id, security_id FROM security_provider_mappings
+          WHERE valid_to IS NULL AND (${uniquePairs
+            .map(() => `(provider_id = ? AND security_id = ?)`)
+            .join(" OR ")})`,
+        uniquePairs.flatMap((entry) => [entry.providerId, entry.securityId]),
+      );
+      const mappingExists = new Set(
+        existingMappings.map((row) => `${row.provider_id} ${row.security_id}`),
+      );
+      for (const entry of unresolvedEntries) {
+        if (mappingExists.has(`${entry.providerId} ${entry.securityId}`)) {
+          unchangedCount += 1;
+        } else {
+          mappingMissingCount += 1;
+        }
+      }
+    }
   }
-  return { written, insertedCount };
+  return { written, insertedCount, unchangedCount, mappingMissingCount };
 }
 
 export type CreatePriceUploadBatchInput = Readonly<{

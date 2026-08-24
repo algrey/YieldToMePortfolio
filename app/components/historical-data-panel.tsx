@@ -55,8 +55,12 @@ import {
 // row it receives regardless (`validateUploadedPriceCsvPayload`/
 // `validateUploadedPriceBackupPayload`), never trusting client output.
 import {
+  DEFAULT_DOWNSAMPLE_BOUNDARY_YEAR,
   DEFAULT_PRICE_CSV_LIMITS,
+  downsamplePriceCsvRows,
+  filterRowsAlreadyPresent,
   parsePriceCsv,
+  type PriceCsvExistingObservation,
 } from "../../domain/market-data/price-csv.ts";
 import {
   DEFAULT_PRICE_BACKUP_LIMITS,
@@ -81,6 +85,24 @@ export type SinglePreview = {
   dateTo: string | null;
   sampleFirst: { marketDate: string; priceDecimal: string } | null;
   sampleLast: { marketDate: string; priceDecimal: string } | null;
+  // EFF-001 (measure 2): the server's own read of this security's existing
+  // owner-import (date, price) observations, plus how many of THIS file's
+  // rows are EXACT (date, price) duplicates of one of those --
+  // `existingObservations` is also what `confirmSingle`/`multiConfirmFile`
+  // filter the upload payload against before sending. Review B1 fix:
+  // comparing VALUE (not just date) means a CORRECTED price for an
+  // already-covered date is never silently dropped.
+  existingObservations: PriceCsvExistingObservation[];
+  identicalCount: number;
+  /** Review B2: the explicit "X row(s) will be written" figure. */
+  rowsToWriteCount: number;
+  // EFF-001 (measures 4/5): LOCAL-only stats the browser computed during
+  // parsing -- never round-tripped through the server (it never sees the
+  // rows these counts describe, since they are dropped before upload).
+  noDataOmittedCount: number;
+  downsampleApplied: boolean;
+  downsampleBoundaryYear: number;
+  preDownsampleRowCount: number;
 };
 
 const MALFORMED_REASON_LABELS: Record<string, string> = {
@@ -263,6 +285,8 @@ type ClientBackupUploadPayload = {
   malformedByReason: Record<string, number>;
 };
 
+export type DownsampleSettings = { enabled: boolean; boundaryYear: number };
+
 /**
  * IMP-010A: runs the shared `parsePriceCsv` (imported above) on `file`
  * directly in the browser -- the CPU-heavy decode/split/row-classify work
@@ -270,26 +294,56 @@ type ClientBackupUploadPayload = {
  * missing header, invalid ticker, over the 2 MiB/20k-row budget) is
  * reported with the SAME message text the server used to return for the
  * identical failure, just without a network round trip.
+ *
+ * EFF-001 (measures 4/5): the parser's own `malformed` list already
+ * separates `"no_data"` (blank/zero price cells) from genuine malformed
+ * reasons -- `noDataOmittedCount` is that count, kept OUT of the
+ * `malformedCount` sent to the server so that field's meaning (rows that
+ * failed grammar validation) stays unchanged. `downsamplePriceCsvRows` then
+ * reduces pre-boundary rows to one per calendar month when `downsample.enabled`.
+ * Both are LOCAL-only reductions -- the server never sees the dropped rows
+ * and never re-derives or enforces either choice (see that function's own
+ * header comment).
  */
 async function parseSingleCsvFile(
   file: File,
+  downsample: DownsampleSettings,
 ): Promise<
-  | { ok: true; payload: ClientSingleUploadPayload }
+  | {
+      ok: true;
+      payload: ClientSingleUploadPayload;
+      noDataOmittedCount: number;
+      preDownsampleRowCount: number;
+      downsampleApplied: boolean;
+    }
   | { ok: false; message: string }
 > {
   const bytes = new Uint8Array(await file.arrayBuffer());
   const parsed = parsePriceCsv(bytes, DEFAULT_PRICE_CSV_LIMITS);
   if (!parsed.ok) return { ok: false, message: parsed.message };
+  const noDataOmittedCount = parsed.malformed.filter(
+    (row) => row.reason === "no_data",
+  ).length;
+  const trueMalformedCount = parsed.malformed.length - noDataOmittedCount;
+  const preDownsampleRowCount = parsed.rows.length;
+  const downsampled = downsample.enabled
+    ? downsamplePriceCsvRows(parsed.rows, {
+        boundaryYear: downsample.boundaryYear,
+      })
+    : { rows: parsed.rows, droppedCount: 0 };
   return {
     ok: true,
     payload: {
       ticker: parsed.ticker,
-      rows: parsed.rows.map((row) => ({
+      rows: downsampled.rows.map((row) => ({
         marketDate: row.marketDate,
         priceDecimal: row.priceDecimal,
       })),
-      malformedCount: parsed.malformed.length,
+      malformedCount: trueMalformedCount,
     },
+    noDataOmittedCount,
+    preDownsampleRowCount,
+    downsampleApplied: downsample.enabled && downsampled.droppedCount > 0,
   };
 }
 
@@ -355,6 +409,36 @@ export function SinglePreviewSummary({ preview }: { preview: SinglePreview }) {
           {preview.sampleLast?.marketDate} @ {preview.sampleLast?.priceDecimal}.
         </p>
       ) : null}
+      {/* EFF-001 (measure 4): a blank/zero price cell is an honest absence
+          of a trade, disclosed separately from genuine malformed rows. */}
+      {preview.noDataOmittedCount > 0 ? (
+        <p>
+          {preview.noDataOmittedCount} no-data row(s) omitted (blank or zero
+          price).
+        </p>
+      ) : null}
+      {/* EFF-001 (measure 5): states exactly what will be stored, and the
+          write-budget saving, before the owner confirms. */}
+      {preview.downsampleApplied ? (
+        <p>
+          Daily from {preview.downsampleBoundaryYear}-01-01; monthly (last
+          trading day of the month) before -- {preview.rowCount} row(s) instead
+          of {preview.preDownsampleRowCount}.
+        </p>
+      ) : null}
+      {/* EFF-001 (measure 2, review B1 fix): write-avoidance -- these rows
+          are never even sent on confirm, since they are EXACT duplicates of
+          what this security already has (date AND price both match). A
+          corrected price for an already-covered date is never counted
+          here -- it uploads normally, per the sentence below. */}
+      {preview.identicalCount > 0 ? (
+        <p>
+          {preview.identicalCount} identical row(s) already present -- skipped.
+        </p>
+      ) : null}
+      {/* Review B2: the explicit write-budget figure, stated before the
+          owner confirms. */}
+      <p>{preview.rowsToWriteCount} row(s) will be written.</p>
       <p>
         Confirming will write these observations for {preview.matchedName},
         overwriting the price on any date already imported for this security.
@@ -621,6 +705,35 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
   const [singlePending, setSinglePending] = useState(false);
   const [singleResult, setSingleResult] = useState<string | null>(null);
 
+  // EFF-001 (measure 5): DEFAULT ON (owner ruling), boundary year adjustable
+  // per import -- applies to every file in a multi-file run, mirroring the
+  // exchange/currency settings above. `boundaryYearText` is the raw input
+  // string (so the owner can freely edit/clear the field); `boundaryYear`
+  // below derives the effective number, falling back to the default for
+  // anything not a plain 4-digit year rather than silently using `NaN`.
+  const [downsampleEnabled, setDownsampleEnabled] = useState(true);
+  const [boundaryYearText, setBoundaryYearText] = useState(
+    String(DEFAULT_DOWNSAMPLE_BOUNDARY_YEAR),
+  );
+  const parsedBoundaryYear = Number(boundaryYearText);
+  const boundaryYear =
+    Number.isInteger(parsedBoundaryYear) &&
+    parsedBoundaryYear > 1900 &&
+    parsedBoundaryYear < 2200
+      ? parsedBoundaryYear
+      : DEFAULT_DOWNSAMPLE_BOUNDARY_YEAR;
+  const downsampleSettings: DownsampleSettings = {
+    enabled: downsampleEnabled,
+    boundaryYear,
+  };
+  // EFF-001 (measure 2): `multiConfirmFile` runs strictly AFTER the SAME
+  // file's `multiPreviewFile` resolved and the owner confirmed (
+  // `runMultiFilePriceUpload` processes one file at a time, never
+  // concurrently) -- this ref carries that preview's `existingObservations`
+  // across to the confirm call for the SAME file, since `confirmFile`'s
+  // shared interface (`multi-file-price-upload.ts`) takes only the file.
+  const multiExistingDatesRef = useRef<PriceCsvExistingObservation[]>([]);
+
   // MKT-018C: selecting MORE THAN ONE file switches into this sequential
   // run -- each file still goes through the exact same preview/confirm
   // endpoints as the single-file path above (`multiPreviewFile`/
@@ -807,7 +920,7 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
     setSinglePending(true);
     setSingleError(null);
     setSingleResult(null);
-    const parsed = await parseSingleCsvFile(file);
+    const parsed = await parseSingleCsvFile(file, downsampleSettings);
     if (!parsed.ok) {
       setSinglePending(false);
       setSingleError(parsed.message);
@@ -824,36 +937,72 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
       setSinglePreview(null);
       return;
     }
-    setSinglePreview(result.value.preview);
+    setSinglePreview({
+      ...result.value.preview,
+      noDataOmittedCount: parsed.noDataOmittedCount,
+      preDownsampleRowCount: parsed.preDownsampleRowCount,
+      downsampleApplied: parsed.downsampleApplied,
+      downsampleBoundaryYear: boundaryYear,
+    });
   }
 
   async function confirmSingle() {
     if (!file || !singlePreview) return;
     setSinglePending(true);
     setSingleError(null);
-    const parsed = await parseSingleCsvFile(file);
+    const parsed = await parseSingleCsvFile(file, downsampleSettings);
     if (!parsed.ok) {
       setSinglePending(false);
       setSingleError(parsed.message);
       return;
     }
-    const result = await postJson<{ batch: UploadBatch; written: number }>(
-      "/api/market-data/price-uploads/confirm",
-      {
-        ...parsed.payload,
-        exchangeAlias,
-        currencyCode,
-        sourceLabel,
-        filename: file.name,
-      },
+    // EFF-001 (measure 2, review B1 fix): sends only rows that are NOT
+    // exact (date, price) duplicates of an existing owner-import
+    // observation for this security -- write-avoidance only, the server's
+    // upsert handles whatever arrives regardless (never a correctness
+    // dependency on this filter running or being up to date). A row whose
+    // date is covered but whose price DIFFERS (a correction) is never
+    // filtered out here.
+    const { rows: rowsToUpload } = filterRowsAlreadyPresent(
+      parsed.payload.rows,
+      singlePreview.existingObservations,
     );
+    if (rowsToUpload.length === 0 && parsed.payload.rows.length > 0) {
+      setSinglePending(false);
+      setSingleResult(
+        `All ${parsed.payload.rows.length} row(s) were already present (identical) for ${singlePreview.ticker} -- nothing new to import.`,
+      );
+      setSinglePreview(null);
+      setFile(null);
+      return;
+    }
+    const result = await postJson<{
+      batch: UploadBatch;
+      written: number;
+      unchangedCount: number;
+    }>("/api/market-data/price-uploads/confirm", {
+      ...parsed.payload,
+      rows: rowsToUpload,
+      exchangeAlias,
+      currencyCode,
+      sourceLabel,
+      filename: file.name,
+    });
     setSinglePending(false);
     if (!result.ok) {
       setSingleError(result.message);
       return;
     }
+    const overlaid = result.value.written - result.value.batch.insertedRowCount;
+    // EFF-001 (measure 3): discloses the write-avoidance saving honestly
+    // rather than letting `written` silently undercount the rows this
+    // confirm actually matched.
+    const unchangedNote =
+      result.value.unchangedCount > 0
+        ? `, ${result.value.unchangedCount} unchanged -- no write needed`
+        : "";
     setSingleResult(
-      `Imported ${result.value.written} price observation${result.value.written === 1 ? "" : "s"} for ${singlePreview.ticker} (${result.value.batch.insertedRowCount} newly created, ${result.value.written - result.value.batch.insertedRowCount} overlaid existing).`,
+      `Imported ${result.value.written} price observation${result.value.written === 1 ? "" : "s"} for ${singlePreview.ticker} (${result.value.batch.insertedRowCount} newly created, ${overlaid} overlaid existing${unchangedNote}).`,
     );
     setSinglePreview(null);
     setFile(null);
@@ -873,25 +1022,59 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
   async function multiPreviewFile(
     uploadFile: File,
   ): Promise<MultiFilePreviewResult<SinglePreview>> {
-    const parsed = await parseSingleCsvFile(uploadFile);
+    const parsed = await parseSingleCsvFile(uploadFile, downsampleSettings);
     if (!parsed.ok) return { ok: false, message: parsed.message };
     const result = await postJson<{ preview: SinglePreview }>(
       "/api/market-data/price-uploads/preview",
       { ...parsed.payload, exchangeAlias, currencyCode },
     );
     if (!result.ok) return { ok: false, message: result.message };
-    return { ok: true, preview: result.value.preview };
+    // EFF-001 (measure 2): stashed for the SAME file's `multiConfirmFile`
+    // call below -- see `multiExistingDatesRef`'s own doc comment for why a
+    // ref, not a parameter, carries this across.
+    multiExistingDatesRef.current = result.value.preview.existingObservations;
+    return {
+      ok: true,
+      preview: {
+        ...result.value.preview,
+        noDataOmittedCount: parsed.noDataOmittedCount,
+        preDownsampleRowCount: parsed.preDownsampleRowCount,
+        downsampleApplied: parsed.downsampleApplied,
+        downsampleBoundaryYear: boundaryYear,
+      },
+    };
   }
 
   async function multiConfirmFile(
     uploadFile: File,
   ): Promise<MultiFileConfirmResult> {
-    const parsed = await parseSingleCsvFile(uploadFile);
+    const parsed = await parseSingleCsvFile(uploadFile, downsampleSettings);
     if (!parsed.ok) return { ok: false, message: parsed.message };
+    const { rows: rowsToUpload } = filterRowsAlreadyPresent(
+      parsed.payload.rows,
+      multiExistingDatesRef.current,
+    );
+    // EFF-001 (measure 2, review fold): everything was already present
+    // (identical) for this security -- nothing to send. Mirrors
+    // `confirmSingle`'s short-circuit (a true "0 written" rather than
+    // sending an empty row array the server would otherwise reject as a
+    // malformed/empty file) AND now gives the same honest "already present"
+    // message the single-file path shows, via `MultiFileConfirmResult`'s
+    // optional `message` override, rather than the generic
+    // "0 newly created, 0 overlaid existing" template.
+    if (rowsToUpload.length === 0 && parsed.payload.rows.length > 0) {
+      return {
+        ok: true,
+        written: 0,
+        insertedRowCount: 0,
+        message: `All ${parsed.payload.rows.length} row(s) were already present (identical) -- nothing new to import.`,
+      };
+    }
     const result = await postJson<{ batch: UploadBatch; written: number }>(
       "/api/market-data/price-uploads/confirm",
       {
         ...parsed.payload,
+        rows: rowsToUpload,
         exchangeAlias,
         currencyCode,
         sourceLabel,
@@ -1111,6 +1294,30 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
             value={currencyCode}
             disabled={multiRunning}
             onChange={(event) => setCurrencyCode(event.target.value)}
+          />
+        </label>
+        {/* EFF-001 (measure 5): DEFAULT ON, boundary year adjustable per
+            import -- applies to every file in a multi-file run, same as
+            Exchange/Currency above. Full daily history stays the default
+            data model everywhere else; this only thins what a NEW CSV
+            import writes for dates before the boundary. */}
+        <label>
+          <input
+            type="checkbox"
+            checked={downsampleEnabled}
+            disabled={multiRunning}
+            onChange={(event) => setDownsampleEnabled(event.target.checked)}
+          />{" "}
+          Downsample history before the boundary year to monthly
+        </label>
+        <label>
+          Boundary year
+          <input
+            type="number"
+            inputMode="numeric"
+            value={boundaryYearText}
+            disabled={multiRunning || !downsampleEnabled}
+            onChange={(event) => setBoundaryYearText(event.target.value)}
           />
         </label>
       </div>

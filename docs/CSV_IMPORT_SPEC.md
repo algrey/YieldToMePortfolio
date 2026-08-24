@@ -540,9 +540,15 @@ least one nonzero digit) -- negative, zero, exponent-notation, and
 non-decimal values all fail that row closed.
 
 Malformed rows are counted with a reason (`wrong_column_count` |
-`invalid_date` | `invalid_price`) and disclosed in the preview -- NEVER
-silently dropped, matching the ledger CSV's own malformed-row discipline
-(§9). Caps: 2 MiB / 20,000 rows (`DEFAULT_PRICE_CSV_LIMITS`) -- generous
+`invalid_date` | `invalid_price` | `no_data`) and disclosed in the preview --
+NEVER silently dropped, matching the ledger CSV's own malformed-row
+discipline (§9). `no_data` (`EFF-001`, added 2026-08-25) is a BLANK or
+explicit-zero price cell (`""`, `"0"`, `"0.00"`, ...) -- Intelligent
+Investor's own convention for "no trade recorded that day" -- disclosed
+separately from genuine garbage (`invalid_price`, e.g. `"N/A"` or a negative
+number) as "N no-data rows omitted" rather than folded into a generic
+malformed count that would wrongly suggest the file itself is corrupt; see
+§15.5. Caps: 2 MiB / 20,000 rows (`DEFAULT_PRICE_CSV_LIMITS`) -- generous
 headroom for a single security's entire multi-decade daily-close history,
 bounded the same way §7 bounds the ledger upload. Since `IMP-010A` (see
 §15.4), this parser runs in the BROWSER, so the 2 MiB byte cap is enforced
@@ -645,12 +651,27 @@ upload is later deleted, only re-attributed correctly to its original
 creator). The owner-facing delete confirmation states this precisely:
 "Removes the N observations this upload created. Prices it changed on rows
 created elsewhere are not reverted." `price_upload_batches.row_count`
-(every valid row the file contained) and `inserted_row_count` (the subset
-actually created) are both recorded and both shown when they differ.
+and `inserted_row_count` (the subset actually created) are both recorded
+and both shown when they differ.
 Re-uploading the identical file after a delete reconstructs byte-identical
 facts under a new batch id (market-data observations carry no
 versioned-override ledger the way ledger transactions do -- "restore" means
 the same facts exist again, not that the same row ids return).
+
+**Review B3 correction (`EFF-001`, 2026-08-25): what `row_count` actually
+counts, post-EFF-001.** The sentence above previously read "every valid row
+the file contained" -- no longer exactly true. `row_count` is the number of
+rows in THIS CONFIRM CALL's payload, i.e. whatever the browser actually
+decided to SEND -- for the single-security path (§15.1), that is the
+file's valid rows AFTER §15.5's client-side no-data omission (measure 4),
+pre-boundary downsampling (measure 5), and delta-upload filtering
+(measure 2) all ran, not a count of the original file's rows. It also does
+NOT measure actual database WRITES -- see §15.5's measure 3, whose
+identical-value guard can leave `written` (a confirm-response field, never
+persisted to `price_upload_batches`) smaller than `row_count` for a
+payload containing byte-identical re-uploads. The backup path (§15.2) is
+unaffected -- measures 2/4/5 are scoped to the single-security path only
+(§15.5).
 
 `observation_at` is derived from the file's bare trading date via the
 midnight-exchange-timezone convention: the UTC instant of MIDNIGHT on that
@@ -682,7 +703,17 @@ marketDate, priceDecimal }, ...], malformedCount }` (confirm also carries
   `sourceLabel`, `filename`). `malformedCount` is the browser's own count of
   rows it already dropped before sending -- informational/display only
   (`price_upload_batches.malformed_row_count`), never trusted for anything
-  write-affecting.
+  write-affecting. **Review B3 correction (`EFF-001`, 2026-08-25):** since
+  measure 4 (§15.5), `malformedCount`/`malformed_row_count` counts ONLY
+  genuinely malformed rows (`wrong_column_count`/`invalid_date`/
+  `invalid_price`) -- rows the browser classified `no_data` (a blank/zero
+  price cell) are DELIBERATELY EXCLUDED from this count, never persisted to
+  `price_upload_batches` at all. That count is disclosed ONLY as a
+  transient, preview/confirm-result-time UI line ("N no-data row(s)
+  omitted") the owner sees in the moment, then discarded -- by design, not
+  an oversight, to keep `malformed_row_count`'s meaning ("this row failed
+  grammar validation") stable rather than conflating it with "this row was
+  a deliberate, honest no-op".
 - Backup format: `{ rows: [{ providerId, sourceLabel, providerSymbol,
 providerExchange, currencyCode, marketDate, priceDecimal, observationAt,
 marketTimezone, interval, quality, adjustmentState, delayedMinutes }, ...],
@@ -774,6 +805,151 @@ price-upload-service.ts`'s `sanitizeSourceLabel` into `domain/market-data/
 price-backup-csv.ts` so both the single-format batch label and the backup
   format's per-row label share one convention) -- truncated, not rejected,
   since it is a display-only field that was never persisted per row anyway.
+
+### 15.5 Write-budget efficiency for the single-security path (`EFF-001`, 2026-08-25)
+
+Owner ruling (verbatim): "lets do 2, 3, 4, and 5. With 5 being monthly before
+2018 an configurable on import. I want to keep the option open of having a
+useful database that can be shared." A holding-window default (discarding
+history older than what current holdings need) was explicitly REJECTED --
+full history stays the default so an export/backup of this database stays a
+useful, shareable artifact on its own (see `docs/ARCHITECTURE.md`'s decision
+log for the full rationale). The four measures below are all CLIENT-side
+row-selection or SERVER-side write-avoidance optimizations layered on top of
+§15.1's existing pipeline; none of them change what a row, once written,
+means, and none of them are a correctness dependency -- disabling all four
+(or the client sending full, unfiltered daily rows) still upserts and
+converges exactly as §15.1/§15.3 already describe.
+
+**(2) Delta-upload.** `previewSinglePriceUpload` now also reads the matched
+security's own EXISTING owner-import (date, price) observations
+(`loadOwnerImportPriceObservationsForSecurity`, `db/repositories/price-uploads.ts` --
+scoped to `provider_id = 'owner-import' AND interval = 'eod'`, this owner's
+`user`-scope rows only, bounded at 20,000 rows) and returns them alongside
+the preview, plus how many of the previewed rows are EXACT (date, price)
+duplicates of one. The preview discloses "N identical row(s) already present
+-- skipped" and, per review B2, an unconditional "N row(s) will be written"
+statement (`rowCount - identicalCount`) so the write-budget cost is explicit
+before confirming, not merely implied. On confirm, the browser filters its
+upload payload (`domain/market-data/price-csv.ts`'s `filterRowsAlreadyPresent`)
+down to only the rows that are NOT exact duplicates before sending -- a
+bandwidth/statement-count saving distinct from measure (3) below (which
+saves D1 WRITE quota even for rows that DO get sent). If every previewed row
+is an exact duplicate, the browser never calls confirm at all (an honest
+"nothing new to import" result, not a POST with an empty row array the
+server would otherwise reject as a malformed/empty file). This is a
+HEURISTIC ONLY: a stale or skipped coverage read never blocks or corrupts an
+upload -- `writePriceUploadObservations`'s upsert handles whatever rows
+actually arrive, exactly as before.
+
+**Review B1 fix (BLOCKING, 2026-08-25): comparing VALUE, not just presence.**
+The first version of measure (2) filtered by `marketDate` alone -- a CSV
+carrying a CORRECTED price for an already-imported date was then
+indistinguishable from a genuine duplicate and silently NEVER uploaded,
+while `SinglePreviewSummary`'s existing sentence ("Confirming will write
+these observations ... overwriting the price on any date already imported")
+kept promising otherwise. Fixed by comparing `(marketDate, priceDecimal)`
+together, exact-string (never a numeric-equivalence compare, matching
+measure 3's own exact-string guard so the two layers never disagree about
+what counts as "identical") -- a row whose date is covered but whose price
+DIFFERS is never filtered; it uploads and converges normally, exactly like
+an ordinary correction always has. Review fold: the coverage read is also
+scoped to `interval = 'eod'` (every owner-import write candidate is always
+`interval: "eod"`) so a row of a different interval on the same date/security
+can never shadow the genuine eod observation.
+
+**(3) Identical-value upserts are free.** `writePriceUploadObservations`'s
+`ON CONFLICT ... DO UPDATE SET` now carries a `WHERE` guard comparing every
+column it would otherwise write (`market_date`, `market_timezone`,
+`currency_code`, `close_decimal`, `quality`, `delayed_minutes`; deliberately
+EXCLUDING `ingested_at`, which is bookkeeping, not a value) against
+`excluded.*` with SQLite's null-safe `IS NOT`. A re-upload whose candidate
+row is byte-identical to the stored row on every value column performs NO
+write at all (SQLite's documented `ON CONFLICT ... DO UPDATE ... WHERE`
+behaviour: a false guard abandons the upsert for that conflicting row
+entirely -- neither an INSERT nor an UPDATE). `writePriceUploadObservations`
+now returns `unchangedCount` alongside `written`/`insertedCount` so the
+confirm result discloses the saving ("... 4 unchanged -- no write needed")
+rather than letting `written` silently undercount. This guard is SCOPED to
+this ONE write path (single-security AND backup-restore confirms both go
+through it, so backup re-imports get the same saving for free); it shares no
+SQL statement with, and needs no interaction with, MKT-011A's rollup
+strictly-newer guard, MKT-015's backfill `noDowngrade` guard, or WLT-001's
+prime guard -- each of those targets a DIFFERENT `ON CONFLICT` index/provider
+via its own separate write function, so the guards compose by being
+independent, not by combining into one WHERE expression. `tests/mkt-011a.test.ts`,
+`tests/brk-012c.test.ts` (MKT-015), and `tests/wlt-001.test.ts` are
+unmodified and stay green under this change. Review fold: a "no `RETURNING
+id` row" result can in principle mean two DIFFERENT things -- the intended
+identical-value skip, or the guard-created `security_provider_mappings` row
+still being absent (structurally unreachable in ordinary operation, since
+the guard-create statement always precedes the price statement in the SAME
+`batch()` call, but not provably impossible). `writePriceUploadObservations`
+now distinguishes them with a single follow-up verification read per chunk
+(only when needed): `unchangedCount` for a confirmed-existing mapping,
+`mappingMissingCount` (expected `0`) for a genuine anomaly, so the two are
+never silently conflated under one ambiguous counter.
+
+**(4) No-data-day omission.** See §15.1's `no_data` malformed reason -- a
+blank/zero price cell is dropped by the BROWSER parser before ever being
+sent, with an honest preview count ("N no-data row(s) omitted (blank or zero
+price)"), distinct from genuinely malformed rows.
+
+**(5) Pre-boundary downsampling to monthly, configurable, DEFAULT ON.**
+`domain/market-data/price-csv.ts`'s `downsamplePriceCsvRows` keeps every row
+dated on/after a boundary date UNCHANGED (daily resolution preserved) and,
+for every row BEFORE it, keeps only the LAST trading observation of each
+calendar month (chosen by comparing `marketDate` values, not file order --
+"last" means latest date within that month, i.e. closest to month-end). The
+boundary year defaults to 2018 and, together with the enable/disable toggle,
+is adjustable per import (`HistoricalDataPanel`'s "Downsample history..."
+checkbox and "Boundary year" field, applying to every file in a multi-file
+run like the existing Exchange/Currency settings). The preview states
+exactly what will be stored before the owner confirms ("Daily from
+2018-01-01; monthly (last trading day of the month) before -- N row(s)
+instead of M"). Stored rows carry no special marking -- they are ordinary
+`price_observations` rows, just sparser; every existing consumer (§15.3's
+provenance rules, snapshot valuation, dividend yield derivation) treats them
+identically to a daily-imported row, since nothing about a row's own shape
+changed. This is CLIENT-only: the server places no requirement on upload
+cadence and never re-derives or enforces monthly spacing -- a client that
+uploads full daily history regardless of this setting is not a correctness
+bug, only a missed budget optimization.
+
+_Downstream consumers checked (owner ruling required "decide honestly and
+document" rather than silently assume "fine"):_
+
+- `app/price-history-coverage-format.ts`'s `classifyPriceHistoryCoverage`
+  (MKT-018B's "Download price history" panel) only compares the EARLIEST and
+  LATEST observation dates against the holding's first-transaction date and
+  today's staleness window -- it never inspects the SPACING between
+  observations. Sparse (monthly) pre-boundary history therefore cannot ever
+  trip its `partial` classification on that basis; NO code change was
+  needed here. (If a future change ever adds an internal-density check to
+  that function, it must be taught the boundary explicitly -- this
+  observation is not a permanent guarantee, only true of the function as it
+  exists today.)
+- The `UI-018` price-history chart's gap classification
+  (`app/price-history-chart-geometry.ts`'s `classifyPriceHistorySegments`)
+  derives its "is this delta a gap" threshold from a SINGLE dataset-wide
+  `bucketSize` (how heavily the LONG-RANGE display's own point cap
+  downsampled the fetched series overall). A security with dense recent
+  daily history plus sparse (genuinely monthly) pre-boundary history mixed
+  in the same "Max"/long-range view can have its pre-boundary segments
+  legitimately flagged `gap: true` and rendered dashed, because the
+  uniform, index-based `bucketSize` derived from the DENSE region
+  under-estimates the SPARSE region's real, deliberate cadence. This is a
+  KNOWN, documented, non-blocking COSMETIC limitation: every stored point
+  still renders at its correct date/price position (`scalePriceHistoryPoints`
+  is date-proportional, never index-spaced), and the dashed styling is not
+  factually wrong (there genuinely are no stored observations between two
+  monthly points -- downsampling means exactly that), only potentially more
+  visually "uncertain-looking" than the data warrants. A cadence-aware fix
+  (scoping the gap floor per calendar era, or carrying a per-row density
+  hint) is a future follow-up if this proves confusing in practice, not
+  taken here to keep this task's change scoped to the import path.
+  `tests/eff-001.test.ts` pins the ACTUAL observed behaviour for a mixed
+  monthly/daily fixture (never an assumed one).
 
 ## 16. Browser-parse / server-authority upload payload — ledger CSV (`IMP-010B`)
 

@@ -45,6 +45,23 @@ export function isPositiveDecimal(value: string): boolean {
   return PRICE_DECIMAL_PATTERN.test(value) && /[1-9]/.test(value);
 }
 
+/**
+ * EFF-001 (measure 4, "omit no-data days"): a price cell that is BLANK or
+ * an explicit zero (`""`, `"0"`, `"0.00"`, ...) -- the two forms Intelligent
+ * Investor's own export uses to mean "no trade recorded for this day",
+ * never a genuine price. Deliberately narrower than "not
+ * `isPositiveDecimal`": a GARBAGE cell ("N/A", "-1", "abc") is still
+ * `invalid_price` (a parse failure worth flagging as malformed), while a
+ * blank/zero cell is an honest absence of data worth its OWN "no-data"
+ * disclosure rather than being lumped in with genuine corruption -- see
+ * `price-csv.ts`'s `PriceCsvMalformedReason` header comment for how the two
+ * reasons are told apart. Checked BEFORE `isPositiveDecimal` in both
+ * `price-csv.ts` parse paths.
+ */
+export function isNoDataPriceCell(value: string): boolean {
+  return /^(0(\.0+)?)?$/.test(value.trim());
+}
+
 export function isValidMarketDate(value: string): boolean {
   if (!MARKET_DATE_PATTERN.test(value)) return false;
   const parsed = Date.parse(`${value}T00:00:00Z`);

@@ -363,17 +363,25 @@ test("MKT-018C: a multi-file run through the REAL single-file pipeline is idempo
   assert.equal(countAfterFirst.n, 4);
 
   // Re-run the SAME two files -- every row should overlay, not duplicate.
+  // EFF-001 (2026-08-25, honest flip): this test's `deps.confirmFile` calls
+  // `confirmSinglePriceUpload` directly with the FULL (unfiltered) payload
+  // -- the client-side delta-upload filtering (measure 2) lives in
+  // `historical-data-panel.tsx`'s `multiConfirmFile`, not exercised here.
+  // The re-submitted values are byte-identical to what the first run just
+  // wrote, so measure 3's identical-value `WHERE` guard now performs ZERO
+  // writes for both files (`written`/`insertedRowCount` both 0) rather than
+  // the pre-EFF-001 unconditional overlay that always counted 2 "written".
   const second = await runMultiFilePriceUpload(files, deps);
   assert.equal(second.results.length, 2);
   assert.equal(second.results[0]!.status, "committed");
   assert.match(
     second.results[0]!.message,
-    /\(0 newly created, 2 overlaid existing\)/,
+    /\(0 newly created, 0 overlaid existing\)/,
   );
   assert.equal(second.results[1]!.status, "committed");
   assert.match(
     second.results[1]!.message,
-    /\(0 newly created, 2 overlaid existing\)/,
+    /\(0 newly created, 0 overlaid existing\)/,
   );
 
   const countAfterSecond = db
@@ -491,7 +499,13 @@ test("MKT-018C / IMP-010A: single-file behaviour is UX-unchanged -- previewSingl
     /async function previewSingle\(\) \{[\s\S]*?\n {2}\}/,
   )?.[0];
   assert.ok(previewSingleBody, "expected to find previewSingle's body");
-  assert.match(previewSingleBody!, /parseSingleCsvFile\(file\)/);
+  // EFF-001 (2026-08-25, honest flip): `parseSingleCsvFile` now also takes
+  // the owner's downsample settings (measure 5) -- the call target and its
+  // FIRST argument (`file`) are unchanged, only a second argument was added.
+  assert.match(
+    previewSingleBody!,
+    /parseSingleCsvFile\(file, downsampleSettings\)/,
+  );
   assert.match(previewSingleBody!, /exchangeAlias,\s*currencyCode/);
   assert.doesNotMatch(previewSingleBody!, /sourceLabel/);
   assert.match(
@@ -503,16 +517,22 @@ test("MKT-018C / IMP-010A: single-file behaviour is UX-unchanged -- previewSingl
     /async function confirmSingle\(\) \{[\s\S]*?\n {2}\}/,
   )?.[0];
   assert.ok(confirmSingleBody, "expected to find confirmSingle's body");
-  assert.match(confirmSingleBody!, /parseSingleCsvFile\(file\)/);
+  assert.match(
+    confirmSingleBody!,
+    /parseSingleCsvFile\(file, downsampleSettings\)/,
+  );
   assert.match(confirmSingleBody!, /sourceLabel,/);
   assert.match(
     confirmSingleBody!,
     /"\/api\/market-data\/price-uploads\/confirm"/,
   );
-  // The exact single-file success message template, unchanged.
+  // EFF-001 (2026-08-25, honest flip): the success message template gained
+  // an optional ", N unchanged -- no write needed" clause (measure 3's
+  // honest disclosure) -- the core "Imported N ... (X newly created, Y
+  // overlaid existing" shape is unchanged.
   assert.match(
     confirmSingleBody!,
-    /`Imported \$\{result\.value\.written\} price observation\$\{result\.value\.written === 1 \? "" : "s"\} for \$\{singlePreview\.ticker\} \(\$\{result\.value\.batch\.insertedRowCount\} newly created, \$\{result\.value\.written - result\.value\.batch\.insertedRowCount\} overlaid existing\)\.`/,
+    /`Imported \$\{result\.value\.written\} price observation\$\{result\.value\.written === 1 \? "" : "s"\} for \$\{singlePreview\.ticker\} \(\$\{result\.value\.batch\.insertedRowCount\} newly created, \$\{overlaid\} overlaid existing\$\{unchangedNote\}\)\.`/,
   );
 });
 

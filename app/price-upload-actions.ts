@@ -51,10 +51,14 @@ export async function previewSinglePriceUploadAction(
   );
 }
 
-export async function confirmSinglePriceUploadAction(
-  request: Request,
-): Promise<
-  { ok: true; batch: PriceUploadBatchRecord; written: number } | ActionFailure
+export async function confirmSinglePriceUploadAction(request: Request): Promise<
+  | {
+      ok: true;
+      batch: PriceUploadBatchRecord;
+      written: number;
+      unchangedCount: number;
+    }
+  | ActionFailure
 > {
   const context = await getAuthenticatedSqlContext();
   if (!context.ok) return context;
@@ -81,7 +85,12 @@ export async function confirmSinglePriceUploadAction(
       { filename: filenameFromBody(read.body), sourceLabel },
     );
   if (!result.ok) return result;
-  return { ok: true, batch: result.value.batch, written: result.value.written };
+  return {
+    ok: true,
+    batch: result.value.batch,
+    written: result.value.written,
+    unchangedCount: result.value.unchangedCount,
+  };
 }
 
 export async function previewBackupPriceUploadAction(
@@ -107,6 +116,7 @@ export async function confirmBackupPriceUploadAction(request: Request): Promise<
       batch: PriceUploadBatchRecord;
       written: number;
       unresolvedRowCount: number;
+      unchangedCount: number;
     }
   | ActionFailure
 > {
@@ -130,6 +140,7 @@ export async function confirmBackupPriceUploadAction(request: Request): Promise<
     batch: result.value.batch,
     written: result.value.written,
     unresolvedRowCount: result.value.unresolvedRowCount,
+    unchangedCount: result.value.unchangedCount,
   };
 }
 

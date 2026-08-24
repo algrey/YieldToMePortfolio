@@ -4,6 +4,7 @@ import {
   createPriceUploadBatch,
   deletePriceUploadBatch,
   listPriceUploadBatches,
+  loadOwnerImportPriceObservationsForSecurity,
   loadOwnerPriceExportRows,
   loadSameUserSecurityEvidenceForTicker,
   updatePriceUploadBatchInsertedCount,
@@ -14,8 +15,10 @@ import {
 } from "../db/repositories/price-uploads.ts";
 import {
   DEFAULT_PRICE_CSV_LIMITS,
+  filterRowsAlreadyPresent,
   validateUploadedPriceCsvPayload,
   type PriceCsvDataRow,
+  type PriceCsvExistingObservation,
 } from "../domain/market-data/price-csv.ts";
 import {
   DEFAULT_PRICE_BACKUP_LIMITS,
@@ -240,6 +243,26 @@ export type SinglePriceUploadPreview = Readonly<{
   dateTo: string | null;
   sampleFirst: Readonly<{ marketDate: string; priceDecimal: string }> | null;
   sampleLast: Readonly<{ marketDate: string; priceDecimal: string }> | null;
+  /** EFF-001 (measure 2, "delta-upload"): the matched security's OWN
+   * existing owner-import (date, price) observations
+   * (`loadOwnerImportPriceObservationsForSecurity`) -- the client uses this
+   * to decide which of `rows` are worth SENDING on confirm ("N identical
+   * row(s) already present -- skipped"), never as a server-enforced filter
+   * (the confirm write path accepts whatever rows arrive regardless).
+   * Review B1 fix: carries `closeDecimal`, not just the date, so a
+   * CORRECTED price for an already-covered date is never mistaken for a
+   * duplicate -- see `domain/market-data/price-csv.ts`'s
+   * `filterRowsAlreadyPresent` header comment for the exact-match rule. */
+  existingObservations: readonly PriceCsvExistingObservation[];
+  /** How many of THIS preview's `rows` are EXACT (date, price) duplicates of
+   * an entry in `existingObservations` -- computed here so the client never
+   * has to re-derive the same count from the (potentially large)
+   * observation list twice. */
+  identicalCount: number;
+  /** Review B2: the explicit "X row(s) will be written" figure --
+   * `rowCount - identicalCount` -- so the owner sees the actual write-budget
+   * cost before confirming, not just the pieces it is derived from. */
+  rowsToWriteCount: number;
 }>;
 
 function summarizeRows(rows: readonly PriceCsvDataRow[]): {
@@ -289,6 +312,21 @@ export async function previewSinglePriceUpload(
   if (!resolved.ok) return resolved;
   const { value } = resolved;
   const summary = summarizeRows(value.rows);
+  // EFF-001 (measure 2): the security is already resolved at this point --
+  // reads this security's OWN existing owner-import (date, price)
+  // observations so the client can show "N identical row(s) already present
+  // -- skipped" and filter its confirm payload down to only the rows that
+  // are not exact duplicates (B1 fix: a corrected price is never dropped).
+  const existingObservations =
+    await loadOwnerImportPriceObservationsForSecurity(
+      context.client,
+      context.userId,
+      value.securityId,
+    );
+  const { identicalCount } = filterRowsAlreadyPresent(
+    value.rows,
+    existingObservations,
+  );
   return {
     ok: true,
     preview: {
@@ -300,6 +338,9 @@ export async function previewSinglePriceUpload(
       rowCount: value.rows.length,
       malformedCount: value.malformedCount,
       ...summary,
+      existingObservations,
+      identicalCount,
+      rowsToWriteCount: value.rows.length - identicalCount,
     },
   };
 }
@@ -307,6 +348,10 @@ export async function previewSinglePriceUpload(
 export type SinglePriceUploadConfirmResult = Readonly<{
   batch: PriceUploadBatchRecord;
   written: number;
+  /** EFF-001 (measure 3): rows this confirm matched but did NOT write
+   * because every value column was already identical to the stored row
+   * (`writePriceUploadObservations`'s `DO UPDATE ... WHERE` guard). */
+  unchangedCount: number;
 }>;
 
 export async function confirmSinglePriceUpload(
@@ -366,15 +411,13 @@ export async function confirmSinglePriceUpload(
     malformedRowCount: value.malformedCount,
     now: nowIso,
   });
-  const { written, insertedCount } = await writePriceUploadObservations(
-    context.client,
-    {
+  const { written, insertedCount, unchangedCount } =
+    await writePriceUploadObservations(context.client, {
       userId: context.userId,
       uploadBatchId: batchId,
       candidates,
       now: nowIso,
-    },
-  );
+    });
   await updatePriceUploadBatchInsertedCount(
     context.client,
     context.userId,
@@ -384,7 +427,7 @@ export async function confirmSinglePriceUpload(
   const batches = await listPriceUploadBatches(context.client, context.userId);
   const batch = batches.find((item) => item.id === batchId);
   if (!batch) return fail(503, "The upload could not be confirmed.");
-  return { ok: true, value: { batch, written } };
+  return { ok: true, value: { batch, written, unchangedCount } };
 }
 
 // ---------------------------------------------------------------------------
@@ -636,6 +679,10 @@ export type BackupConfirmResult = Readonly<{
   batch: PriceUploadBatchRecord;
   written: number;
   unresolvedRowCount: number;
+  /** EFF-001 (measure 3): see `SinglePriceUploadConfirmResult.unchangedCount` --
+   * the SAME write path, so a backup re-import of already-identical rows
+   * gets the same write-avoidance for free. */
+  unchangedCount: number;
 }>;
 
 export async function confirmBackupPriceUpload(
@@ -691,15 +738,13 @@ export async function confirmBackupPriceUpload(
     malformedRowCount: parsedMalformedCount + unresolvedRowCount,
     now: nowIso,
   });
-  const { written, insertedCount } = await writePriceUploadObservations(
-    context.client,
-    {
+  const { written, insertedCount, unchangedCount } =
+    await writePriceUploadObservations(context.client, {
       userId: context.userId,
       uploadBatchId: batchId,
       candidates,
       now: nowIso,
-    },
-  );
+    });
   await updatePriceUploadBatchInsertedCount(
     context.client,
     context.userId,
@@ -709,7 +754,10 @@ export async function confirmBackupPriceUpload(
   const batches = await listPriceUploadBatches(context.client, context.userId);
   const batch = batches.find((item) => item.id === batchId);
   if (!batch) return fail(503, "The backup import could not be confirmed.");
-  return { ok: true, value: { batch, written, unresolvedRowCount } };
+  return {
+    ok: true,
+    value: { batch, written, unresolvedRowCount, unchangedCount },
+  };
 }
 
 export async function listOwnedPriceUploads(

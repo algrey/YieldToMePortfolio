@@ -41,7 +41,11 @@
 // silent corruption -- fail-closed, not a data-integrity risk).
 
 import { decodeText, stripBom } from "./text-encoding.ts";
-import { isPositiveDecimal, isValidMarketDate } from "./price-value-grammar.ts";
+import {
+  isNoDataPriceCell,
+  isPositiveDecimal,
+  isValidMarketDate,
+} from "./price-value-grammar.ts";
 
 /**
  * Splits one line into fields, honoring RFC-4180-lite double-quoting: a
@@ -138,8 +142,16 @@ export type PriceCsvDataRow = Readonly<{
   priceDecimal: string;
 }>;
 
+/**
+ * EFF-001 (measure 4): `"no_data"` is a DISTINCT reason from
+ * `"invalid_price"` -- a blank/zero price cell (`isNoDataPriceCell`) is an
+ * honest absence of a trade for that day, not corrupt/garbage input.
+ * Callers disclose it separately ("N no-data rows omitted") rather than
+ * folding it into a generic "malformed" count that would wrongly suggest
+ * the file itself is broken.
+ */
 export type PriceCsvMalformedReason =
-  "wrong_column_count" | "invalid_date" | "invalid_price";
+  "wrong_column_count" | "invalid_date" | "invalid_price" | "no_data";
 
 export type PriceCsvMalformedRow = Readonly<{
   physicalRowNumber: number;
@@ -275,6 +287,10 @@ export function parsePriceCsv(
       malformed.push({ physicalRowNumber, reason: "invalid_date" });
       continue;
     }
+    if (isNoDataPriceCell(rawPrice!)) {
+      malformed.push({ physicalRowNumber, reason: "no_data" });
+      continue;
+    }
     if (!isPositiveDecimal(rawPrice!)) {
       malformed.push({ physicalRowNumber, reason: "invalid_price" });
       continue;
@@ -343,6 +359,14 @@ export function validateUploadedPriceCsvRow(
   }
   if (!isValidMarketDate(marketDate)) {
     return { ok: false, reason: "invalid_date" };
+  }
+  // EFF-001 (measure 4): a real browser upload already omits no-data rows
+  // before sending (see this module's `PriceCsvMalformedReason` header
+  // comment) -- an honest browser payload never carries one. A hostile
+  // payload that sends one anyway is classified the SAME way the raw-text
+  // parser above would, not silently accepted as a genuine price.
+  if (isNoDataPriceCell(priceDecimal)) {
+    return { ok: false, reason: "no_data" };
   }
   if (!isPositiveDecimal(priceDecimal)) {
     return { ok: false, reason: "invalid_price" };
@@ -419,4 +443,152 @@ export function validateUploadedPriceCsvPayload(
     else malformed.push({ physicalRowNumber, reason: result.reason });
   });
   return { ok: true, ticker, rows, malformed };
+}
+
+// ---------------------------------------------------------------------------
+// EFF-001 (measure 5): client-side pre-boundary downsampling.
+//
+// Owner ruling (2026-08-25, TASKS.md EFF-001): keeping every daily row of a
+// multi-decade single-security history costs write quota disproportionate to
+// its value once it is many years old, but the owner explicitly rejected a
+// holding-window default (option 1) -- full history stays the default so a
+// backup/export of this database stays "useful [and] shareable". The
+// compromise: DOWNSAMPLE (never discard) pre-boundary history to one row per
+// calendar month, ON by default, with the boundary year and the toggle both
+// adjustable per import. This is purely a CLIENT-side row-selection choice
+// over rows already known valid (`PriceCsvDataRow[]`) -- the server places no
+// requirement on upload cadence and never re-derives or enforces this
+// (a client that uploads full daily history anyway is not a correctness
+// bug, only a missed budget optimization).
+// ---------------------------------------------------------------------------
+
+/** Owner-confirmed default boundary year (TASKS.md EFF-001 ruling, verbatim:
+ * "monthly before 2018 an[d] configurable on import"). */
+export const DEFAULT_DOWNSAMPLE_BOUNDARY_YEAR = 2018;
+
+export type DownsamplePriceCsvOptions = Readonly<{
+  /** Calendar year (inclusive) from which rows stay daily -- every row
+   * dated `${boundaryYear}-01-01` or later passes through unchanged. */
+  boundaryYear: number;
+}>;
+
+export type DownsamplePriceCsvResult = Readonly<{
+  /** Post-downsample rows, sorted ascending by `marketDate`: every
+   * on/after-boundary row unchanged, plus at most one row per calendar
+   * month for before-boundary rows. */
+  rows: PriceCsvDataRow[];
+  /** How many rows this call actually dropped (`rows.length` before minus
+   * after) -- the caller's honest "N rows instead of M" preview figure. */
+  droppedCount: number;
+}>;
+
+/**
+ * Keeps ONE row per calendar month -- the month's LAST trading observation,
+ * chosen by comparing `marketDate` values (not array position, so caller
+ * order need not be pre-sorted) -- for every row dated before
+ * `${options.boundaryYear}-01-01`; every on/after-boundary row passes
+ * through untouched, so recent history stays full daily resolution. Applied
+ * ONLY to already-valid rows (never to a malformed/no-data row, which
+ * `parsePriceCsv`/`validateUploadedPriceCsvPayload` already excluded from
+ * `rows` before this ever runs). A no-op (returns `rows` as given,
+ * `droppedCount: 0`) when every row is already on/after the boundary.
+ */
+export function downsamplePriceCsvRows(
+  rows: readonly PriceCsvDataRow[],
+  options: DownsamplePriceCsvOptions,
+): DownsamplePriceCsvResult {
+  const boundaryDate = `${String(options.boundaryYear).padStart(4, "0")}-01-01`;
+  const monthlyWinners = new Map<string, PriceCsvDataRow>();
+  const onOrAfterBoundary: PriceCsvDataRow[] = [];
+  for (const row of rows) {
+    if (row.marketDate >= boundaryDate) {
+      onOrAfterBoundary.push(row);
+      continue;
+    }
+    const monthKey = row.marketDate.slice(0, 7); // "YYYY-MM"
+    const existing = monthlyWinners.get(monthKey);
+    if (!existing || row.marketDate > existing.marketDate) {
+      monthlyWinners.set(monthKey, row);
+    }
+  }
+  const kept = [...monthlyWinners.values(), ...onOrAfterBoundary].sort(
+    (left, right) =>
+      left.marketDate < right.marketDate
+        ? -1
+        : left.marketDate > right.marketDate
+          ? 1
+          : 0,
+  );
+  return { rows: kept, droppedCount: rows.length - kept.length };
+}
+
+// ---------------------------------------------------------------------------
+// EFF-001 (measure 2, review B1 fix 2026-08-25): delta-upload must compare
+// VALUE, not just presence.
+//
+// The first version of this measure filtered by `marketDate` alone -- fatal:
+// a CSV carrying a CORRECTED price for an already-imported date was silently
+// never uploaded (the date "already existed", so the row was dropped before
+// ever reaching the server), while `SinglePreviewSummary` kept telling the
+// owner "Confirming will write these observations ... overwriting the price
+// on any date already imported" -- a promise the code no longer kept. Fixed
+// by comparing (marketDate, priceDecimal) together: a row is "already
+// present" ONLY when BOTH match an existing observation EXACTLY (the SAME
+// string, never a numeric-equivalence compare -- money-as-decimal-string
+// discipline, matching `writePriceUploadObservations`'s measure-3 guard's
+// own exact-string comparison, so the two layers never disagree about what
+// counts as "identical"). A row whose date is covered but whose price
+// differs is NEVER filtered -- it uploads, and the server's upsert (plus
+// measure 3's identical-value guard) converges it normally, exactly like an
+// ordinary correction always has.
+// ---------------------------------------------------------------------------
+
+export type PriceCsvExistingObservation = Readonly<{
+  marketDate: string;
+  closeDecimal: string;
+}>;
+
+export type FilterAlreadyPresentRow = Readonly<{
+  marketDate: string;
+  priceDecimal: string;
+}>;
+
+export type FilterAlreadyPresentResult<T extends FilterAlreadyPresentRow> =
+  Readonly<{
+    /** Rows to actually upload -- every row NOT an exact (date, price)
+     * duplicate of an existing observation. Order-preserving. */
+    rows: T[];
+    /** Rows dropped because they exactly matched an existing observation --
+     * the honest "N identical row(s) already present -- skipped" count. */
+    identicalCount: number;
+  }>;
+
+/**
+ * Filters `rows` (already-valid, already-downsampled upload candidates)
+ * against `existing` (this security's own prior owner-import observations,
+ * `loadOwnerImportPriceObservationsForSecurity`) -- see this section's
+ * header comment for the exact-match rule. Generic over `T` so callers can
+ * pass either the parser's own `PriceCsvDataRow[]` or the client's reduced
+ * `{ marketDate, priceDecimal }[]` upload-payload shape without a
+ * throwaway re-mapping.
+ */
+export function filterRowsAlreadyPresent<T extends FilterAlreadyPresentRow>(
+  rows: readonly T[],
+  existing: readonly PriceCsvExistingObservation[],
+): FilterAlreadyPresentResult<T> {
+  const existingByDate = new Map<string, string>();
+  for (const observation of existing) {
+    existingByDate.set(observation.marketDate, observation.closeDecimal);
+  }
+  const kept: T[] = [];
+  let identicalCount = 0;
+  for (const row of rows) {
+    const existingPrice = existingByDate.get(row.marketDate);
+    if (existingPrice !== undefined && existingPrice === row.priceDecimal) {
+      identicalCount += 1;
+      continue;
+    }
+    kept.push(row);
+  }
+  return { rows: kept, identicalCount };
 }

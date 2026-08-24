@@ -242,7 +242,11 @@ test("MKT-008 price-csv: malformed rows are counted with a reason, never silentl
         "1998-03-12,-1.00", // negative price
         "1998-03-13,1e5", // exponent price
         "1998-03-14,abc", // non-decimal price
-        "1998-03-15,0", // zero price (never positive)
+        // EFF-001 (2026-08-25, honest flip): a zero price cell is now its
+        // OWN "no_data" reason (a blank/zero cell means "no trade recorded
+        // that day", distinct from genuine garbage) -- see
+        // `domain/market-data/price-value-grammar.ts`'s `isNoDataPriceCell`.
+        "1998-03-15,0", // zero price -> no_data, not invalid_price
         "onlyonecolumn",
         "1998-03-16,0.10", // valid, proves parsing continues past malformed rows
       ].join("\n") + "\n",
@@ -257,7 +261,7 @@ test("MKT-008 price-csv: malformed rows are counted with a reason, never silentl
       "invalid_price",
       "invalid_price",
       "invalid_price",
-      "invalid_price",
+      "no_data",
       "wrong_column_count",
     ],
   );
@@ -1524,7 +1528,15 @@ test("MKT-008 write path: chunking (>25 candidates) writes every row correctly a
     candidates,
     now: "2026-08-20T00:00:00.000Z",
   });
-  assert.equal(result.written, 30);
+  // EFF-001 (2026-08-25, honest flip): `index % 28` wraps at index 28/29,
+  // re-targeting days 1 and 2 with the SAME `priceDecimal: "1.00"` an
+  // EARLIER chunk already wrote -- these two now hit the identical-value
+  // `WHERE` guard (measure 3) and perform NO write (28 genuine writes, 2
+  // unchanged), rather than the pre-EFF-001 unconditional overlay that
+  // counted all 30 as "written" regardless of whether anything changed.
+  assert.equal(result.written, 28);
+  assert.equal(result.insertedCount, 28);
+  assert.equal(result.unchangedCount, 2);
 });
 
 // ---------------------------------------------------------------------------
