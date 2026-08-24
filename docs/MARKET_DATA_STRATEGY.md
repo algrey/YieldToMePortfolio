@@ -836,3 +836,143 @@ the "uncertain" hollow styling would misrepresent it. An `observed` tick
 provenance wording ("intraday capture, delayed — not a close," never
 "live"/"close"), the honest empty-state paths, and `scalePriceHistoryPoints`
 itself (byte-for-byte unmodified).
+
+## 24. Intelligent Investor price-endpoint evidence spike (MKT-018A, 2026-08-24)
+
+Owner directive (2026-08-24): "In the import dialog, lets add a button to
+download the historical values for all shares in the portfolio using this
+method [`docs/ASXCSVDownloadGuide.md`]." That guide's method is a
+CLIENT-SIDE Highcharts CSV export (`chart.downloadCSV()`) run in a real
+browser tab against `intelligentinvestor.com.au` share pages — a Cloudflare
+Worker cannot execute page JS, so the button cannot literally run the
+guide's script server-side. Per the Orchestrator's evidence-first ruling
+(BRK-008/MKT-009A pattern), this spike checks whether the chart's underlying
+data instead arrives over a plain, fetchable HTTP endpoint a Worker COULD
+call directly, BEFORE any MKT-018B implementation is written.
+`scripts/ii-price-endpoint-spike.mjs` is the re-runnable evidence tool
+(default tickers SHL/CBA/BHP; all findings below are VERIFIED by this
+spike's own live run against those three tickers on 2026-08-24, not
+third-party/community-reported — unlike MKT-009A's Yahoo spike, this site
+publishes no unofficial-client literature this research found, so there is
+no COMMUNITY-REPORTED tier to separate out here).
+
+**An unauthenticated, fetchable endpoint exists and returns the full price
+series.** The share page (`/shares/asx-{ticker}/`, redirecting to a slugged
+canonical URL, e.g. `/shares/asx-shl/sonic-healthcare-limited`) embeds a
+hidden `<input class="ajax-loader-data" data-content="…">` element naming an
+AJAX fragment path lazy-loaded client-side:
+`/shares/asx-{ticker}/{slug}/_price-chart?loadEntity=True&DisplayStockCode=True`.
+`GET`-ing that path directly, with no cookies and no session of any kind,
+returns HTTP 200 and an HTML fragment containing the page's actual
+`Highcharts.StockChart` config inline — including a `series: [{ id:
+'dataseries', name: '{TICKER}', data: [ [timestampMs, price], … ] }]` array
+holding the FULL price history, not a preview/paginated slice. This array's
+tuples are plain `[number, number]` pairs, so it happens to be valid JSON
+once isolated (bracket-depth extraction, no eval needed) — see the spike
+script's `extractDataArray`.
+
+**Coverage observed, this run (2026-08-24):**
+
+| Ticker | Points | First date | Last observation (UTC) | First close | Last close |
+| ------ | ------ | ---------- | ---------------------- | ----------- | ---------- |
+| SHL    | 9,216  | 1990-09-06 | 2026-08-21T00:00:00Z   | 0.029445    | 21.08      |
+| CBA    | 8,960  | 1991-09-12 | 2026-08-21T16:35:00Z   | 6.46        | 157.99     |
+| BHP    | 10,147 | 1987-01-02 | 2026-08-21T00:00:00Z   | 2.68838     | 65.16      |
+
+Granularity is daily (timestamps are UTC midnight for ordinary trading days,
+confirmed by inspecting gap spacing across a run of consecutive points — 24h
+between weekdays, 72h across a weekend, matching ASX's trading calendar);
+the single most-recent point can instead carry a same-day intraday
+timestamp (CBA's run above shows `16:35:00Z`), i.e. the series' tail is a
+live-updating "latest" point layered onto an otherwise-daily series, not a
+second data source. **Currency**: the fragment's own visible heading states
+it plainly per ticker — `"{TICKER} Share Price Chart - AUD ($)"` — VERIFIED
+for all three tickers this run; the endpoint never returns a currency code
+in the data payload itself, only in this heading text, so a Worker consumer
+would need to parse that heading (fragile) or hard-code the
+ASX-is-always-AUD assumption this codebase's `domain/market-data/
+exchange-timezone.ts` already makes for MKT-008 (§18) — reasonable, but a
+real coupling. **Adjustment status: NOT STATED by the source, and this
+spike's own evidence points toward the series being adjusted, not raw** —
+SHL's first-recorded close of $0.029445 (2.9 cents) in 1990 for a company
+whose price series is described only as "Share Price Chart," combined with
+this magnitude of multi-decade compression across all three tickers, is far
+more consistent with a split-adjusted series than a literal nominal 1990
+trading price. This is INFERENCE, not verified against any documented
+methodology — the page states no adjustment policy anywhere this spike
+found. `price_observations.adjustment_state` is a three-way CHECK constraint
+(`'raw' | 'split_adjusted' | 'total_return_adjusted'`, `docs/DATA_MODEL.md`)
+that any MKT-018B write path would need to pick a real, defensible value
+for; this spike cannot resolve that question, only flag it as open and
+likely NOT `'raw'`.
+
+**Bonus, tangential finding: a second embedded series carries dividend
+events**, `{ type: 'flags', name: 'divFlag', data: [ { x: timestampMs,
+title: 'D', text: '2 ¢' }, … ] }`, in the SAME fragment — but as a genuine
+JS object literal (unquoted keys, single-quoted strings), not valid JSON, so
+the spike script's JSON-based extractor correctly reports "present but did
+not parse as JSON" rather than silently dropping or fabricating dividend
+data. Out of MKT-018's price-history scope; noted for a future task should
+dividend backfill ever target this source.
+
+**robots.txt explicitly disallows this exact endpoint, and the site
+actively blocks non-browser clients — the strongest evidence in this
+spike, and it points the other way from a straightforward technical
+"yes."** VERIFIED, this run:
+
+- `GET https://www.intelligentinvestor.com.au/robots.txt` (HTTP 200)
+  contains `Disallow: /*_price-chart` — a wildcard rule matching EXACTLY the
+  endpoint this spike just used, under `User-agent: *` (no exemption for any
+  named crawler), alongside `Crawl-delay: 20`.
+- The site's WAF returns a bare HTTP 403 ("Oops! You do not have access") to
+  ANY request carrying no `User-Agent` header at all — VERIFIED against both
+  a share page and the `_price-chart` fragment itself. A real browser-shaped
+  `User-Agent` string is sufficient to get a normal 200 (this spike used
+  one throughout, documented at the top of `USER_AGENT` in the script). This
+  is a materially different posture from the Yahoo-compatible adapter this
+  codebase already ships (§3–§5, no UA gate, no path-specific robots
+  disallow found) or Sharesight's contractual API (§17) — here, a compliant
+  automated client is asked by the site's own robots.txt not to fetch this
+  path at all, and reaching it anyway requires presenting as a browser the
+  request plainly is not.
+- The general Terms & Conditions page (`investsmart.com.au/terms-and-conditions`)
+  is a client-rendered SPA (Framer-hosted per its CSP; the raw HTML this
+  spike fetched contains no readable terms text, only the page shell) — this
+  spike could not retrieve scraping/automation language from it by a plain
+  GET. Recorded honestly as an open gap, NOT as evidence the terms permit
+  automated access; robots.txt above is the clear, direct, machine-readable
+  signal already in hand and it is a negative one.
+- No login, account, or cookie of any kind was needed to reach any endpoint
+  in this spike — the data itself is genuinely public/delayed, consistent
+  with the guide's own framing. The robots.txt/WAF findings above are about
+  AUTOMATED access, not about the data being paywalled.
+
+**Go/no-go recommendation for MKT-018B: NO-GO for a Worker-side automated
+fetch directly against this endpoint.** The data is technically reachable,
+unauthenticated, and shaped exactly right (full daily history, one HTTP call
+per resolved ticker slug) — but the site's own robots.txt names this precise
+path `Disallow` for every crawler with no exemption, and reaching it at all
+requires a request that presents as a browser when it structurally is not
+(no UA header = 403). Unlike MKT-009A's Yahoo finding (general ToS
+boilerplate against "automated means," no per-endpoint robots rule, no UA
+gate observed) or BRK-012A's Sharesight finding (a real, owner-authorized
+OAuth API), this is a specific, unambiguous, machine-readable "do not crawl
+this" instruction attached to the exact endpoint MKT-018B would need to call
+on a recurring, owner-triggered basis. Building an import feature that
+routinely disregards that instruction — however low-volume and
+personal-use — is a materially different risk posture than this codebase's
+existing market-data integrations, and the Orchestrator should treat it as
+requiring an explicit, informed owner decision before any code change, not
+a default "public data, so it's fine" call.
+
+**Recommended fallback, per MKT-018's own contingency plan:** the GUIDED
+flow — the import dialog's "Download price history" button lists the
+portfolio's zero-history tickers with per-ticker links to the guide's own
+share-page URL pattern (`docs/ASXCSVDownloadGuide.md`), plus a drop-zone
+feeding the downloaded CSVs into the existing MKT-008 owner-upload importer
+(preview/idempotent/reversible, already shipped, §18). This keeps the
+actual `_price-chart` fetch exactly where the guide already puts it — an
+owner-initiated action in their own browser tab, which the robots.txt
+`Disallow` (aimed at automated crawlers, not an owner's own interactive
+browsing) does not implicate — and avoids introducing a new WAF-evasion
+dependency into deployed Worker code.
