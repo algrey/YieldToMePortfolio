@@ -32,6 +32,7 @@ import type {
   PriceHistoryProvenance,
 } from "../owned-price-history.ts";
 import { currencyDisplayPrefix } from "../currency-display.ts";
+import { formatDayMonthYear } from "../date-display.ts";
 
 const FETCH_TIMEOUT_MS = 15_000;
 const CHART_WIDTH = 600;
@@ -95,16 +96,14 @@ function priceText(value: string): string {
 
 /** Compact "12 Mar 1998" date label, matching `overviewDate`'s style in
  * `portfolio-shell.tsx` but spelling the year (a price series can span
- * decades, where the year is the fact that matters most). */
+ * decades, where the year is the fact that matters most).
+ *
+ * BUG-003: delegates to the Intl/locale-data-free `date-display.ts`
+ * formatter -- see that module's header comment for why any
+ * `toLocaleDateString`/`Intl` call for a textual month can never be
+ * hydration-safe here, even fully pinned. */
 function chartDate(date: string): string {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return date;
-  const parsed = new Date(`${date}T00:00:00Z`);
-  const day = parsed.getUTCDate();
-  const month = parsed.toLocaleDateString("en-AU", {
-    month: "short",
-    timeZone: "UTC",
-  });
-  return `${day} ${month} ${date.slice(0, 4)}`;
+  return formatDayMonthYear(date);
 }
 
 /** Review round-1 fix (F2): the delayed-quote line used to hardcode
@@ -127,7 +126,13 @@ function providerDisplayLabel(providerId: string): string {
  * clock time -- labelled "market-local" everywhere it is shown (never bare,
  * which could be misread as the viewer's own local time). `null` (never a
  * guess) when `observedAt`/`marketTimezone` is missing or unparsable -- the
- * caller falls back to date-only wording in that case. */
+ * caller falls back to date-only wording in that case.
+ *
+ * BUG-003 sweep: deliberately LEFT as `Intl.DateTimeFormat` (not converted
+ * to `date-display.ts`) -- `hour`/`minute` with `hour12: false` are numeric
+ * digit fields, never a textual month/weekday/day-period name, so this
+ * result is stable across the CLDR/ICU version skew BUG-003 found; only
+ * TEXTUAL locale fields are hydration-unsafe. */
 function marketLocalTimeLabel(
   observedAt: string | null | undefined,
   marketTimezone: string | null,

@@ -63,8 +63,10 @@ import type { HoldingsSummaryFooter } from "../owned-holdings-summary.ts";
 import { currencyDisplayPrefix } from "../currency-display.ts";
 import {
   currentFyWindow,
+  groupThousands,
   lastFyWindow,
 } from "../../domain/calculations/index.ts";
+import { formatDayMonth } from "../date-display.ts";
 import { type PortfolioSection } from "../portfolio-sections";
 
 // Type-only re-export for existing callers (e.g. the holding-detail route)
@@ -405,7 +407,12 @@ function wholeDollarAmount(value: string) {
   const rounded =
     BigInt(integerPart.replaceAll(",", "")) + (shouldRoundUp ? 1n : 0n);
 
-  return `${sign}${currency}${rounded.toLocaleString("en-AU")}`;
+  // BUG-003 sweep: `BigInt.prototype.toLocaleString` is still Intl/CLDR
+  // digit-grouping under the hood, so it carries the same
+  // server-vs-browser hydration risk as the date formatters this task
+  // fixes -- `groupThousands` (already used elsewhere in this client graph
+  // for money display) groups digits by a fixed regex, zero locale data.
+  return `${sign}${currency}${groupThousands(rounded.toString())}`;
 }
 
 function sortByExactKey<T>(
@@ -1936,12 +1943,13 @@ function OwnedWorkspaceScreen({
   );
 }
 
+// BUG-003: delegates to the Intl/locale-data-free `date-display.ts`
+// formatter -- this fed the Overview table's own `<th scope="row">` rows,
+// the exact hydration mismatch the owner's browser console reported
+// (server "1 June 2026" vs. browser "1 Jun 2026"); see that module's header
+// comment for the full root cause.
 function overviewDate(date: string) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return date;
-  return `${date.slice(8)} ${new Date(`${date}T00:00:00Z`).toLocaleDateString(
-    "en-AU",
-    { month: "short", timeZone: "UTC" },
-  )}`;
+  return formatDayMonth(date);
 }
 
 function OverviewFact({

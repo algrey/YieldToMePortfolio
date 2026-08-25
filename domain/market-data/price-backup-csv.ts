@@ -205,6 +205,15 @@ function formatMiB(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(0)} MiB`;
 }
 
+// BUG-003 sweep: `Number.prototype.toLocaleString` is Intl/CLDR digit
+// grouping under the hood, so a message built with it carries the same
+// server-vs-browser hydration risk the date formatters fixed by this task
+// carry (this module is reachable from the "use client" import-review
+// screen) -- a fixed digit-grouping regex has zero locale-data dependency.
+function groupThousands(value: number): string {
+  return value.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
 // Only providers this deployment can honestly have exported -- see this
 // module's header comment. A future new provider extends this list (never
 // a schema change), keeping the "future sources fit" ruling literal.
@@ -285,7 +294,7 @@ export function parsePriceBackupCsv(
       code: "ROW_LIMIT_EXCEEDED",
       // Review B1 fix: same actionable-before-upload rationale as the byte
       // check above.
-      message: `The file exceeded the ${limits.maxRows.toLocaleString("en-US")}-row limit. Split the backup into multiple files (e.g. by provider or date range) and re-import each.`,
+      message: `The file exceeded the ${groupThousands(limits.maxRows)}-row limit. Split the backup into multiple files (e.g. by provider or date range) and re-import each.`,
     };
   }
 
@@ -583,7 +592,7 @@ export function validateUploadedPriceBackupPayload(
   if (rawRows.length > limits.maxRows) {
     return {
       ok: false,
-      message: `The file exceeded the ${limits.maxRows.toLocaleString("en-US")}-row limit. Split the backup into multiple files (e.g. by provider or date range) and re-import each.`,
+      message: `The file exceeded the ${groupThousands(limits.maxRows)}-row limit. Split the backup into multiple files (e.g. by provider or date range) and re-import each.`,
     };
   }
   // F3 (recorded, not blocking): this row-count check runs BEFORE the

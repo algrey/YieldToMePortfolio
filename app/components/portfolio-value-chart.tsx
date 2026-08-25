@@ -40,6 +40,7 @@ import {
 } from "../overview-fy-range.ts";
 import { subtractCalendarMonths } from "../overview-range.ts";
 import { currencyDisplayPrefix } from "../currency-display.ts";
+import { formatDayMonthYear } from "../date-display.ts";
 import type { OwnedPortfolioValueHistory } from "./portfolio-shell";
 
 const CHART_WIDTH = 600;
@@ -60,16 +61,14 @@ function valueText(value: string): string {
 
 /** Matches `holding-price-chart.tsx`'s `chartDate` -- a series here can
  * span decades (owner-import history reaches back to whenever the CSV
- * starts), so the year is always spelled out. */
+ * starts), so the year is always spelled out.
+ *
+ * BUG-003: delegates to the Intl/locale-data-free `date-display.ts`
+ * formatter -- this fed the `<th scope="row">` table rows that actually
+ * hydration-mismatched (server "1 June 2026" vs. browser "1 Jun 2026"); see
+ * that module's header comment for the full root cause. */
 function chartDate(date: string): string {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return date;
-  const parsed = new Date(`${date}T00:00:00Z`);
-  const day = parsed.getUTCDate();
-  const month = parsed.toLocaleDateString("en-AU", {
-    month: "short",
-    timeZone: "UTC",
-  });
-  return `${day} ${month} ${date.slice(0, 4)}`;
+  return formatDayMonthYear(date);
 }
 
 type Coord = { date: string; x: number; y: number };

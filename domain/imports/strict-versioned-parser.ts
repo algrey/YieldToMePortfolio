@@ -619,12 +619,21 @@ function csvTooLargeMessage(limits: ImportLimits): string {
   return `The CSV exceeded the ${formatMiB(limits.maxBytes)} size limit. Split the file into smaller batches and import each separately.`;
 }
 
+// BUG-003 sweep: `Number.prototype.toLocaleString` is Intl/CLDR digit
+// grouping under the hood, so a message built with it carries the same
+// server-vs-browser hydration risk the date formatters fixed by this task
+// carry (this module is reachable from the "use client" import-review
+// screen) -- a fixed digit-grouping regex has zero locale-data dependency.
+function groupThousands(value: number): string {
+  return value.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
 function rowLimitExceededMessage(limits: ImportLimits): string {
-  return `The CSV exceeded the ${limits.maxRows.toLocaleString("en-US")}-row limit. Split the file into smaller batches and import each separately.`;
+  return `The CSV exceeded the ${groupThousands(limits.maxRows)}-row limit. Split the file into smaller batches and import each separately.`;
 }
 
 function fieldLimitExceededMessage(limits: ImportLimits): string {
-  return `A CSV field exceeded the ${limits.maxFieldLength.toLocaleString("en-US")}-character limit. Check the file for a corrupted or unterminated quoted value.`;
+  return `A CSV field exceeded the ${groupThousands(limits.maxFieldLength)}-character limit. Check the file for a corrupted or unterminated quoted value.`;
 }
 
 const NOT_VALID_UTF8_MESSAGE =
