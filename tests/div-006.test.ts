@@ -48,6 +48,12 @@ import {
   deriveTrailingTwelveMonthDividend,
   type TrailingDividendEventInput,
 } from "../domain/market-data/dividend-yield.ts";
+import { computeDefaultFrankingCredit } from "../domain/dividends/franking.ts";
+import {
+  addDecimal,
+  formatDecimalExact,
+  parseDecimal,
+} from "../domain/calculations/decimal.ts";
 
 const TODAY = "2026-08-13";
 
@@ -823,4 +829,192 @@ test("DIV-006 review follow-up: an un-converted foreign-currency totals-mode row
     TODAY,
   );
   assert.deepEqual(result, { ok: false, reason: "mixed_currency" });
+});
+
+// BUG-004 (owner-reported, 2026-08-25): "Under the income tab, Next 12
+// Months subtab, it shows estimated franking credits as zero. Franking
+// credits over the last 12 months were $9,082." Root cause: the uncovered
+// (history-TTM) tail's franking estimate only ever consulted the security's
+// OWNER-SET `dividend_security_assumptions.franking_percent_decimal`
+// ASSUMPTION -- never set on the real account under investigation -- and
+// never consulted the REAL per-row franking evidence already resolved onto
+// every history row (`DerivedDividendRow.frankingTotalDecimal`, e.g. from
+// imported Sharesight totals). Fixed by carrying that per-row evidence
+// forward with the SAME per-row division discipline DIV-008 already
+// established for cash (`deriveHistoryRowFrankingPerShare`).
+test("BUG-004: a totals-mode security with real per-row franking evidence (Sharesight totals) and no owner franking assumption projects the uncovered tail's franking from that evidence, never $0", () => {
+  const rows = deriveDividendHistoryForSecurity({
+    portfolioSecurityId: "ps1",
+    securityCurrencyCode: "AUD",
+    events: [],
+    overrides: [],
+    receipts: [],
+    manualRecords: [
+      totalsManual({
+        id: "m1",
+        paymentDate: "2026-03-01",
+        totalCashDecimal: "150",
+        totalFrankingDecimal: "64.29", // real recorded franking credit, ~30% company-tax-rate-implied
+      }),
+    ],
+    transactions: [
+      tx({ id: "b1", localTradeDate: "2025-01-01", quantityDecimal: "100" }),
+    ],
+    defaultFrankingPercentDecimal: null, // owner never set a franking assumption -- the exact real-account shape
+    today: TODAY,
+  });
+  const HOLDING_TX: LedgerQuantityFact[] = [
+    tx({ id: "b1", localTradeDate: "2025-01-01", quantityDecimal: "100" }),
+  ];
+  const forecast = computeSecurityDividendForecast({
+    portfolioSecurityId: "ps1",
+    currencyCode: "AUD",
+    historyRows: rows,
+    ttmEvents: [],
+    transactions: HOLDING_TX,
+    defaultFrankingPercentDecimal: null,
+    today: TODAY,
+  });
+  assert.equal(forecast.ttmSource, "history_ttm");
+  // Franking DPS = 64.29 / 100 shares held at payment = 0.6429; unchanged
+  // position (100 then, 100 now) annualises to exactly the received credit.
+  assert.equal(forecast.uncoveredFrankingKnownDecimal, "64.29");
+  assert.equal(forecast.totalFrankingKnownDecimal, "64.29");
+  assert.equal(forecast.totalFrankingIncomplete, false);
+  assert.equal(
+    forecast.totalGrossDecimal,
+    formatDecimalExact(
+      addDecimal(
+        parseDecimal(forecast.totalCashDecimal!),
+        parseDecimal(forecast.totalFrankingKnownDecimal!),
+      ),
+    ),
+  );
+});
+
+test("BUG-004: a security with real evidence of an UNFRANKED dividend (totalFrankingDecimal '0') projects a real, known $0 franking -- distinct from no evidence at all", () => {
+  const rows = deriveDividendHistoryForSecurity({
+    portfolioSecurityId: "ps1",
+    securityCurrencyCode: "AUD",
+    events: [],
+    overrides: [],
+    receipts: [],
+    manualRecords: [
+      totalsManual({
+        id: "m1",
+        paymentDate: "2026-03-01",
+        totalCashDecimal: "150",
+        totalFrankingDecimal: "0", // real reported zero -- an unfranked payout, not "unknown"
+      }),
+    ],
+    transactions: [
+      tx({ id: "b1", localTradeDate: "2025-01-01", quantityDecimal: "100" }),
+    ],
+    defaultFrankingPercentDecimal: null,
+    today: TODAY,
+  });
+  const HOLDING_TX: LedgerQuantityFact[] = [
+    tx({ id: "b1", localTradeDate: "2025-01-01", quantityDecimal: "100" }),
+  ];
+  const forecast = computeSecurityDividendForecast({
+    portfolioSecurityId: "ps1",
+    currencyCode: "AUD",
+    historyRows: rows,
+    ttmEvents: [],
+    transactions: HOLDING_TX,
+    defaultFrankingPercentDecimal: null,
+    today: TODAY,
+  });
+  assert.equal(forecast.uncoveredFrankingKnownDecimal, "0");
+  assert.equal(forecast.totalFrankingKnownDecimal, "0");
+  // A REAL known zero (real evidence, all rows resolved) is complete, not
+  // flagged incomplete -- distinguishable from "no evidence at all" below.
+  assert.equal(forecast.totalFrankingIncomplete, false);
+});
+
+test("BUG-004: a security with genuinely NO franking evidence anywhere (no assumption, no per-row franking fact) contributes a $0 known total but is flagged incomplete, never presented as a confident zero", () => {
+  const rows = deriveDividendHistoryForSecurity({
+    portfolioSecurityId: "ps1",
+    securityCurrencyCode: "AUD",
+    events: [],
+    overrides: [],
+    receipts: [],
+    manualRecords: [
+      perShareManual({
+        id: "m1",
+        paymentDate: "2026-03-01",
+        dividendPerShareDecimal: "1.50",
+        sharesDecimal: "100",
+        frankingCreditPerShareDecimal: null, // genuinely unknown, not zero
+      }),
+    ],
+    transactions: [
+      tx({ id: "b1", localTradeDate: "2025-01-01", quantityDecimal: "100" }),
+    ],
+    defaultFrankingPercentDecimal: null,
+    today: TODAY,
+  });
+  const HOLDING_TX: LedgerQuantityFact[] = [
+    tx({ id: "b1", localTradeDate: "2025-01-01", quantityDecimal: "100" }),
+  ];
+  const forecast = computeSecurityDividendForecast({
+    portfolioSecurityId: "ps1",
+    currencyCode: "AUD",
+    historyRows: rows,
+    ttmEvents: [],
+    transactions: HOLDING_TX,
+    defaultFrankingPercentDecimal: null,
+    today: TODAY,
+  });
+  assert.equal(forecast.ttmSource, "history_ttm");
+  assert.equal(forecast.uncoveredFrankingKnownDecimal, null);
+  assert.equal(forecast.totalFrankingKnownDecimal, "0");
+  assert.equal(
+    forecast.totalFrankingIncomplete,
+    true,
+    "must never present an evidence-free $0 franking total as complete",
+  );
+  // The cash side is entirely unaffected by the franking gap.
+  assert.equal(forecast.totalCashDecimal, "150");
+});
+
+test("BUG-004: an owner-set franking assumption still wins outright over the security's own history evidence (existing precedence unchanged)", () => {
+  const rows = deriveDividendHistoryForSecurity({
+    portfolioSecurityId: "ps1",
+    securityCurrencyCode: "AUD",
+    events: [],
+    overrides: [],
+    receipts: [],
+    manualRecords: [
+      totalsManual({
+        id: "m1",
+        paymentDate: "2026-03-01",
+        totalCashDecimal: "150",
+        totalFrankingDecimal: "64.29", // real evidence -- must be OUTRANKED by the owner override below
+      }),
+    ],
+    transactions: [
+      tx({ id: "b1", localTradeDate: "2025-01-01", quantityDecimal: "100" }),
+    ],
+    defaultFrankingPercentDecimal: "50", // owner-set assumption wins
+    today: TODAY,
+  });
+  const HOLDING_TX: LedgerQuantityFact[] = [
+    tx({ id: "b1", localTradeDate: "2025-01-01", quantityDecimal: "100" }),
+  ];
+  const forecast = computeSecurityDividendForecast({
+    portfolioSecurityId: "ps1",
+    currencyCode: "AUD",
+    historyRows: rows,
+    ttmEvents: [],
+    transactions: HOLDING_TX,
+    defaultFrankingPercentDecimal: "50",
+    today: TODAY,
+  });
+  // ATO gross-up of $150 cash at 50% franking, NOT the real $64.29 evidence.
+  assert.notEqual(forecast.uncoveredFrankingKnownDecimal, "64.29");
+  assert.equal(
+    forecast.uncoveredFrankingKnownDecimal,
+    computeDefaultFrankingCredit("150", "50"),
+  );
 });

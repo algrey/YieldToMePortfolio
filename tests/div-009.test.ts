@@ -322,6 +322,54 @@ test("DIV-009 OWNER ACCEPTANCE CHECK: totals-mode history + zero dividend_events
   assert.equal(whatIf.ok, true);
 });
 
+// BUG-004 (owner-reported, 2026-08-25, real account): "Under the income tab,
+// Next 12 Months subtab, it shows estimated franking credits as zero.
+// Franking credits over the last 12 months were $9,082." This account's own
+// shape is EXACTLY `ownerShapedFixture` above (totals-mode Sharesight
+// history, zero provider `dividend_events`, no `dividend_security_assumptions`
+// franking-percent row ever set) -- the real read-only D1 copy under
+// investigation confirmed `dividend_security_assumptions` is completely
+// empty, and confirmed the pre-fix breakdown read
+// `totalFrankingKnownDecimal: "0"`/`totalFrankingIncomplete: true` against a
+// real ~$9,082.46 trailing-12-month franking total in
+// `dividend_manual_records`. This test pins the service-level, end-to-end
+// fix on the SAME fixture shape used above, closing the DIV-011 knock-on too
+// (the multi-year year-1 franking is `gross - cash` by subtraction from this
+// SAME breakdown, so it inherits the fix without any separate change).
+test("BUG-004 OWNER ACCEPTANCE CHECK: real per-row franking evidence (Sharesight totals-mode, no franking assumption ever set) is carried into the Next 12 Months breakdown's franking total, not $0", async () => {
+  const db = await ownerShapedFixture();
+  db.exec(`
+    UPDATE dividend_manual_records
+      SET total_franking_decimal = '64.29'
+      WHERE id = 'm1';
+  `);
+  const client = createSqliteSqlClient(db);
+  const projection = await loadOwnedIncomeProjection(
+    client,
+    "a",
+    "pa",
+    new Date("2026-08-13T08:00:00Z"),
+  );
+
+  assert.equal(projection.status, "ok");
+  assert.notEqual(projection.breakdown.totalFrankingKnownDecimal, "0");
+  assert.equal(projection.breakdown.totalFrankingKnownDecimal, "64.29");
+  assert.equal(projection.breakdown.totalFrankingIncomplete, false);
+  assert.equal(
+    projection.breakdown.totalGrossDecimal,
+    "214.29", // 150 cash + 64.29 franking, exactly
+  );
+
+  // DIV-011 knock-on: the multi-year year-1 row reuses this SAME breakdown
+  // total verbatim, so its own franking (gross - cash) reflects the fix too,
+  // with no separate change required.
+  assert.equal(projection.multiYear.ok, true);
+  if (!projection.multiYear.ok) throw new Error("unreachable");
+  const year1 = projection.multiYear.rows[0]!;
+  assert.equal(year1.frankingCreditDecimal, "64.29");
+  assert.notEqual(year1.frankingCreditDecimal, "0");
+});
+
 test("DIV-009: a security with a PROVABLE history gap (DIV-008's most specific reason) is excluded honestly from the assumption grid's yield, named via the typed status, and does not silently zero the multi-year base", async () => {
   const db = await ownerShapedFixture();
   // A second security whose ONLY history row is a provable ledger gap: a

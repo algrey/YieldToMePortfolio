@@ -236,11 +236,82 @@ function deriveHistoryRowDps(
   };
 }
 
+/**
+ * BUG-004: per-row FRANKING-per-share derivation for the history-TTM
+ * fallback, mirroring `deriveHistoryRowDps`'s exact precedence so franking
+ * is carried forward by the SAME evidence discipline as cash (owner-reported
+ * "estimated franking credits show $0" despite ~$9,082 of real trailing-12-
+ * month franking evidence -- root cause: the uncovered-tail estimate only
+ * ever consulted the security's OWNER-SET franking-percent ASSUMPTION,
+ * `dividend_security_assumptions.franking_percent_decimal`, which this
+ * account never set, and never consulted the REAL per-row franking evidence
+ * already resolved onto every history row, `DerivedDividendRow.frankingTotalDecimal`
+ * -- see `computeSecurityDividendForecast`'s `uncoveredFrankingKnownDecimal`).
+ *
+ * A per-share-mode row's OWN resolved franking rate
+ * (`row.franking.perShareDecimal`, already computed at row-construction time
+ * from real per-dividend evidence -- an imported/receipt/manual franking
+ * fact, or the security's own default-percent assumption grossed up against
+ * THIS row's own per-share amount) is used directly, exactly like
+ * `deriveHistoryRowDps` prefers `row.dividendPerShareDecimal` over
+ * re-deriving one. `row.franking.source === "unknown"` (no override, no
+ * default assumption, or the per-share dividend amount itself was unknown)
+ * means this row's franking is genuinely unresolved -- `"unknown_amount"`,
+ * never a fabricated "0".
+ *
+ * A BRK-005 totals-mode row (`row.dividendPerShareDecimal === null` -- a
+ * Sharesight payout reporting only totals, no share count) never resolves a
+ * native `franking.perShareDecimal` (`resolveFrankingPerShare` requires a
+ * known per-share dividend amount to gross up); its franking is instead a
+ * TOTAL dollar figure (`row.frankingTotalDecimal`, the record's own imported
+ * `total_franking_decimal` when present), divided by the ledger's
+ * shares-held-at-payment-date -- the identical DIV-008 fallback
+ * `deriveHistoryRowDps` uses for cash, never today's current share count (a
+ * position bought/sold since that payment would otherwise mis-scale the
+ * rate). A zero/negative resolved share count despite real recorded
+ * franking is the same PROVABLE ledger gap `deriveHistoryRowDps` names
+ * `"history_gap"`.
+ */
+function deriveHistoryRowFrankingPerShare(
+  row: DerivedDividendRow,
+  transactions: readonly LedgerQuantityFact[],
+): HistoryRowDpsResult {
+  if (row.dividendPerShareDecimal !== null) {
+    if (row.franking.perShareDecimal === null) {
+      return { ok: false, reason: "unknown_amount" };
+    }
+    return { ok: true, dpsDecimal: row.franking.perShareDecimal };
+  }
+  if (row.frankingTotalDecimal === null) {
+    return { ok: false, reason: "unknown_amount" };
+  }
+  const paymentDate = row.paymentDate;
+  if (paymentDate === null) return { ok: false, reason: "unknown_amount" };
+  const sharesAtPayment = deriveSharesHeldAtDate(transactions, paymentDate);
+  if (compareDecimal(parseDecimal(sharesAtPayment), ZERO) <= 0) {
+    return { ok: false, reason: "history_gap" };
+  }
+  return {
+    ok: true,
+    dpsDecimal: formatDecimalExact(
+      roundDecimal(
+        divideDecimal(
+          parseDecimal(row.frankingTotalDecimal),
+          parseDecimal(sharesAtPayment),
+        ),
+        HISTORY_DPS_SCALE,
+      ),
+    ),
+  };
+}
+
 export type HistoryTtmDividendResult =
   | {
       ok: true;
       /** Sum of trailing-365-day per-share rates derived from this security's own history rows -- `null` only when EVERY qualifying row's rate is indeterminate (nothing safe to total; see `incomplete`). Never a fabricated "0". */
       ttmPerShareDecimal: string | null;
+      /** BUG-004 (owner-reported "estimated franking credits show $0" despite ~$9,082 of real trailing-12-month franking evidence): sum of trailing-365-day per-share FRANKING rates derived from this security's OWN history rows' real recorded franking evidence (`DerivedDividendRow.frankingTotalDecimal` -- `deriveHistoryRowFrankingPerShare`, the same per-row evidence discipline as `ttmPerShareDecimal` above), independent of `ttmPerShareDecimal`'s own completeness (a row can have a determinable cash rate but indeterminate/unknown franking, or vice versa -- see `frankingIncompleteRowCount`). `null` only when NOT ONE qualifying row's franking rate is known -- never a fabricated "0". */
+      ttmFrankingPerShareDecimal: string | null;
       currencyCode: string;
       /** Count of rows within the trailing window (regardless of whether their rate was derivable). */
       rowCount: number;
@@ -249,6 +320,12 @@ export type HistoryTtmDividendResult =
       /** DIV-008: of `incompleteRowCount`, how many were excluded specifically because the ledger PROVES a gap -- a real dividend was received but shares-held-at-payment-date resolved to zero or negative (e.g. a missing early buy), never because the amount/payment date was simply unknown. Distinguishable from the rest of `incompleteRowCount` so a consumer can tell "evidence of a missing transaction" apart from "genuinely unknown amount". */
       historyGapRowCount: number;
       incomplete: boolean;
+      /** BUG-004: of `rowCount`, how many had an indeterminate per-share FRANKING rate (the row's own franking evidence is genuinely unknown -- `franking.source === "unknown"` with no total either -- or the same ledger-derived-share-count issues as `incompleteRowCount`/`historyGapRowCount` above) -- excluded from `ttmFrankingPerShareDecimal`'s sum. Tracked separately from `incompleteRowCount` because a row's cash and franking completeness are independent facts. */
+      frankingIncompleteRowCount: number;
+      /** BUG-004: mirrors `historyGapRowCount` for the franking rate specifically. */
+      frankingHistoryGapRowCount: number;
+      /** BUG-004: `true` whenever `frankingIncompleteRowCount > 0` -- at least one qualifying row's franking rate could not be established, so `ttmFrankingPerShareDecimal` (when non-null) may understate the true trailing franking rate. */
+      frankingIncomplete: boolean;
       windowFromDate: string;
       windowToDate: string;
     }
@@ -314,6 +391,9 @@ export function deriveHistoryTrailingTwelveMonthDividend(
   const dpsValues: string[] = [];
   let incompleteRowCount = 0;
   let historyGapRowCount = 0;
+  const frankingDpsValues: string[] = [];
+  let frankingIncompleteRowCount = 0;
+  let frankingHistoryGapRowCount = 0;
   for (const row of qualifying) {
     const result = deriveHistoryRowDps(row, transactions);
     if (result.ok) {
@@ -322,15 +402,33 @@ export function deriveHistoryTrailingTwelveMonthDividend(
       incompleteRowCount += 1;
       if (result.reason === "history_gap") historyGapRowCount += 1;
     }
+    // BUG-004: franking's own per-row completeness is tracked independently
+    // of cash's above -- a row can have a determinable cash rate but unknown
+    // franking (or the reverse), so this must never be folded into the cash
+    // counters.
+    const frankingResult = deriveHistoryRowFrankingPerShare(row, transactions);
+    if (frankingResult.ok) {
+      frankingDpsValues.push(frankingResult.dpsDecimal);
+    } else {
+      frankingIncompleteRowCount += 1;
+      if (frankingResult.reason === "history_gap") {
+        frankingHistoryGapRowCount += 1;
+      }
+    }
   }
   return {
     ok: true,
     ttmPerShareDecimal: dpsValues.length > 0 ? sumDecimals(dpsValues) : null,
+    ttmFrankingPerShareDecimal:
+      frankingDpsValues.length > 0 ? sumDecimals(frankingDpsValues) : null,
     currencyCode,
     rowCount: qualifying.length,
     incompleteRowCount,
     historyGapRowCount,
     incomplete: incompleteRowCount > 0,
+    frankingIncompleteRowCount,
+    frankingHistoryGapRowCount,
+    frankingIncomplete: frankingIncompleteRowCount > 0,
     windowFromDate,
     windowToDate: asOfDate,
   };
@@ -719,23 +817,76 @@ export function computeSecurityDividendForecast(
       PRORATION_SCALE,
     ),
   );
-  // The uncovered tail is a single scalar cash estimate (not a per-share
-  // figure across discrete events); `computeDefaultFrankingCredit` is
-  // linear in its dividend-amount argument, so the same ATO gross-up
-  // formula (`franking.ts`'s module header/`docs/CALCULATIONS.md` section
-  // 11) applies directly to this total cash figure, sharing the exact
-  // formula and rounding rule `resolveFrankingPerShare`'s default tier
-  // uses -- not a separate/divergent calculation.
-  const uncoveredFrankingKnownDecimal =
-    input.defaultFrankingPercentDecimal !== null
-      ? computeDefaultFrankingCredit(
-          uncoveredCashDecimal,
-          input.defaultFrankingPercentDecimal,
-        )
-      : null;
+  // BUG-004 (owner-reported: Next 12 Months showed $0 estimated franking
+  // credits despite ~$9,082 of real trailing-12-month franking evidence):
+  // precedence for the uncovered tail's franking estimate, per-security,
+  // never a portfolio-blanket ratio. (1) An owner-set franking-percent
+  // ASSUMPTION (`dividend_security_assumptions.franking_percent_decimal`)
+  // still wins when present -- unchanged, the owner's explicit override
+  // always takes precedence over inferred history. (2) Otherwise, when the
+  // TTM leg that actually won is the HISTORY leg, this security's OWN
+  // trailing-window per-row franking EVIDENCE (`historyTtm.ttmFrankingPerShareDecimal`,
+  // derived by `deriveHistoryTrailingTwelveMonthDividend` using the
+  // identical per-row division discipline as the cash rate above -- real
+  // recorded franking, e.g. from imported Sharesight totals, not a
+  // fabricated percentage) is carried forward with the SAME
+  // declared-displacement/proration math as cash just above, so a security
+  // that actually received franked dividends projects a franked estimate.
+  // (3) A `provider_ttm` leg carries no per-event franking data this
+  // codebase resolves, and a security with neither an assumption nor
+  // history franking evidence has nothing safe to total -- `null`
+  // (unavailable), never a fabricated "0" standing in for missing evidence.
+  let uncoveredFrankingKnownDecimal: string | null;
+  let usedHistoryFrankingEvidence = false;
+  if (input.defaultFrankingPercentDecimal !== null) {
+    uncoveredFrankingKnownDecimal = computeDefaultFrankingCredit(
+      uncoveredCashDecimal,
+      input.defaultFrankingPercentDecimal,
+    );
+  } else if (
+    ttmResolution.source === "history_ttm" &&
+    historyTtm !== null &&
+    historyTtm.ok &&
+    historyTtm.ttmFrankingPerShareDecimal !== null
+  ) {
+    usedHistoryFrankingEvidence = true;
+    const frankingAnnual = multiplyDecimal(
+      parseDecimal(currentSharesDecimal),
+      parseDecimal(historyTtm.ttmFrankingPerShareDecimal),
+    );
+    const declaredFrankingValue = parseDecimal(declaredFrankingKnownDecimal);
+    const remainingAnnualFranking =
+      compareDecimal(frankingAnnual, declaredFrankingValue) <= 0
+        ? ZERO
+        : subtractDecimal(frankingAnnual, declaredFrankingValue);
+    uncoveredFrankingKnownDecimal = formatDecimalExact(
+      roundDecimal(
+        divideDecimal(
+          multiplyDecimal(
+            remainingAnnualFranking,
+            fromInteger(BigInt(uncoveredDays)),
+          ),
+          fromInteger(365n),
+        ),
+        PRORATION_SCALE,
+      ),
+    );
+  } else {
+    uncoveredFrankingKnownDecimal = null;
+  }
 
+  // DIV-006-style disclosure: the total is also "incomplete" when it WAS
+  // computed from history evidence but that evidence itself only partially
+  // covered the trailing window (`historyTtm.frankingIncomplete`) -- a real,
+  // non-fabricated figure that may still understate the true rate, named
+  // rather than presented as complete.
   const totalFrankingIncomplete =
-    declaredFrankingUnknownCount > 0 || uncoveredFrankingKnownDecimal === null;
+    declaredFrankingUnknownCount > 0 ||
+    uncoveredFrankingKnownDecimal === null ||
+    (usedHistoryFrankingEvidence &&
+      historyTtm !== null &&
+      historyTtm.ok &&
+      historyTtm.frankingIncomplete);
   return {
     portfolioSecurityId: input.portfolioSecurityId,
     currencyCode: input.currencyCode,
