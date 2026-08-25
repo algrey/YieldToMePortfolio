@@ -536,6 +536,46 @@ test("MKT-011A repository: rollupIntradayPricePoint promotes the last point with
   assert.equal(row.close_decimal, "12.50");
 });
 
+test("HIST-002 review B2: rollupIntradayPricePoint invalidates a pre-existing stored value-history row for the affected security's portfolio, but only when the write actually changed something", async () => {
+  const db = await captureFixture();
+  const client = createSqliteSqlClient(db);
+  await guardInsertSharesightMapping(client, {
+    securityId: "security-a",
+    marketCode: "ASX",
+    instrumentCode: "ABC",
+    now: "2026-08-24T06:00:00Z",
+  });
+  db.exec(`
+    INSERT INTO portfolio_value_history (id, user_id, portfolio_id, value_date, value_decimal, completeness, held_security_count, priced_security_count, computed_at)
+    VALUES ('phv-1', 'owner-a', 'portfolio-a', '2026-08-24', '1234.50', 'complete', 1, 1, '2026-08-24T00:00:00Z');
+  `);
+  const point = {
+    priceDecimal: "12.50",
+    currencyCode: "AUD",
+    marketDate: "2026-08-24",
+    marketTimezone: "+10:00",
+    observedAt: "2026-08-24T06:00:00Z",
+    delayedMinutes: null,
+    quality: "observed",
+    providerRevisionId: null,
+  } as const;
+  const result = await rollupIntradayPricePoint(client, {
+    userId: "owner-a",
+    providerId: SHARESIGHT_PRICE_PROVIDER_ID,
+    securityId: "security-a",
+    point,
+    now: "2026-08-24T06:26:00Z",
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.written, true);
+  const stored = db
+    .prepare(
+      `SELECT id FROM portfolio_value_history WHERE portfolio_id = 'portfolio-a' AND value_date = '2026-08-24'`,
+    )
+    .all();
+  assert.equal(stored.length, 0);
+});
+
 test("MKT-011A repository: sharesight rollupIntradayPricePoint CONVERGES on re-run for the SAME (security, market_date, provider) -- one row, updated to the latest point, never a duplicate (review round B1 fix)", async () => {
   const db = await captureFixture();
   const client = createSqliteSqlClient(db);

@@ -7,9 +7,15 @@ const MAX_CHUNK_SIZE = 2;
 
 export const IMPORT_REVERSAL_LIMITS = {
   maxChunkSize: MAX_CHUNK_SIZE,
-  maxQueriesPerInvocation: 50,
+  // HIST-002 review B2 fix (2026-08-25): each reversed transaction now
+  // routes through `ledger.ts`'s `persist()`, which pushes one additional
+  // `valueHistoryInvalidationFromDateStatement` DELETE into that
+  // transaction's own atomic batch (see `persist`'s own doc comment) --
+  // a small 2-transaction fixture measured 51 total queries/statements
+  // against the previous 50 ceiling (1 over). Raised with headroom.
+  maxQueriesPerInvocation: 56,
   maxStatementsPerAtomicUnit: 10,
-  maxStatementsPerInvocation: 50,
+  maxStatementsPerInvocation: 56,
   maxParametersPerStatement: 100,
 } as const;
 

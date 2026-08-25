@@ -112,8 +112,10 @@ import {
   type FxEvidence,
 } from "../calculations/multi-currency.ts";
 import {
-  deriveSharesHeldAtDate,
+  buildSharesHeldTimeline,
+  sharesHeldAtDateFromTimeline,
   type LedgerQuantityFact,
+  type SharesHeldTimeline,
 } from "../dividends/shares-held.ts";
 import {
   selectFxObservation,
@@ -236,6 +238,11 @@ type IndexedSecurity = {
   currencyCode: string;
   transactions: readonly LedgerQuantityFact[];
   priceByDate: ReadonlyMap<string, readonly PriceObservation[]>;
+  /** HIST-002 layer 1: one shares-held walk built ONCE per security and
+   * reused across every requested date, replacing a per-(date x security)
+   * `deriveSharesHeldAtDate` replay -- see `../dividends/shares-held.ts`'s
+   * `buildSharesHeldTimeline` doc comment for the equivalence proof. */
+  sharesTimeline: SharesHeldTimeline;
 };
 
 export type ComputeHistoricalPortfolioValueInput = {
@@ -303,7 +310,7 @@ function valuePointAtDate(
   for (const security of securities) {
     let quantity: string;
     try {
-      quantity = deriveSharesHeldAtDate(security.transactions, date);
+      quantity = sharesHeldAtDateFromTimeline(security.sharesTimeline, date);
     } catch {
       // Review fold (BLOCKING): a throw here is a real data-integrity
       // problem, not "nothing held" -- must not silently report this
@@ -413,6 +420,7 @@ export function computeHistoricalPortfolioValueAtDate(
       currencyCode: security.currencyCode,
       transactions: security.transactions,
       priceByDate: indexByMarketDate(security.priceObservations),
+      sharesTimeline: buildSharesHeldTimeline(security.transactions),
     }),
   );
   const fxByDate = indexByMarketDate(input.fxObservations);
@@ -440,6 +448,7 @@ export function computeHistoricalPortfolioValueSeries(
       currencyCode: security.currencyCode,
       transactions: security.transactions,
       priceByDate: indexByMarketDate(security.priceObservations),
+      sharesTimeline: buildSharesHeldTimeline(security.transactions),
     }),
   );
   const fxByDate = indexByMarketDate(input.fxObservations);

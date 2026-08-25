@@ -35,6 +35,89 @@
  * full record (an earlier version replayed cash the same way it replays
  * share transactions, which surfaced a real data-quality problem: the
  * owner's actual cash ledger has no reliable opening balance).
+ *
+ * HIST-002 (owner ruling, 2026-08-25 -- "go" on persist-once + incremental):
+ * `loadHistoricalPortfolioValueSeries` now consults `portfolio_value_history`
+ * (db/repositories/portfolio-value-history.ts) before deriving anything --
+ * a candidate date already stored is served from that trivial bounded read
+ * (no shares/price/FX derivation at all). The read-time derivation above
+ * remains the ONE formula and stays the fallback/verifier for whatever is
+ * NOT yet stored: the bounded backfill-on-read logic INLINE in
+ * `loadHistoricalPortfolioValueSeries` below derives up to
+ * `MAX_DERIVE_DATES_PER_READ` of the newest MISSING candidate dates per
+ * read (bounded compute, "tens of ms" per Layer 1's ~0.05ms/candidate-date
+ * measurement on the real DB copy -- see TASKS.md's HIST-002 entry for the
+ * full before/after numbers) and opportunistically persists exactly those
+ * freshly-derived points (EFF-001-style identical-value guard: an unchanged
+ * re-derivation writes zero rows). Any STILL-missing dates beyond that
+ * bound are simply absent from this read's `points` -- never a fabricated
+ * or null-value placeholder, the SAME "date not a candidate" shape this
+ * feature already uses for genuine gaps; `backfillPending` discloses the
+ * fact honestly rather than silently. This is how a brand-new portfolio's
+ * ~1,700-candidate-date backfill (see the HIST-002 entry's measured count)
+ * completes over several reads, newest dates first (matching
+ * `MAX_CANDIDATE_DATES` truncation's existing "keep the most recent"
+ * convention), while every read's OWN derivation cost stays bounded --
+ * unlike `MAX_CANDIDATE_DATES` truncation this is NOT a permanent limit:
+ * once a date is stored it stays stored, subject to invalidation (see
+ * below). Review fold: "fully backfilled never re-derives" is NOT a
+ * universal guarantee -- a date the derivation genuinely cannot resolve
+ * (`valueDecimal: null`) is NEVER stored (the honesty invariant), so it is
+ * always "missing" and gets a cheap, bounded, single-date re-derivation
+ * attempt on every subsequent read until it genuinely resolves.
+ *
+ * Invalidation (review B2, BLOCKING -- a stored row is a CACHE, and a cache
+ * that never invalidates is a correctness bug, not a performance feature):
+ * three write paths can make a stored row wrong, all fixed in this task --
+ * (1) a price-history import touching a past date
+ * (`invalidateStoredValueHistoryForSecurity` below, wired into
+ * `app/price-upload-service.ts`'s MKT-008/MKT-020 confirm paths); (2) a
+ * ledger mutation (a back-dated buy, a reversal, a superseding edit) that
+ * changes shares-held from some date forward
+ * (`db/repositories/ledger.ts`'s `persist`, and
+ * `db/repositories/import-commit.ts`'s `finalize` for the ledger-CSV commit
+ * path -- both delete every stored row from the earliest affected
+ * `local_trade_date` onward, via
+ * `db/repositories/portfolio-value-history.ts`'s
+ * `valueHistoryInvalidationFromDateStatement`, in the SAME atomic batch as
+ * the mutation itself); (3) a non-CSV price writer
+ * (`db/repositories/market-data-refresh.ts`'s Yahoo-compatible rollup,
+ * `db/repositories/intraday-price-capture.ts`'s MKT-011A capture) landing a
+ * fresher price for a security/date already stored (via that same module's
+ * `buildValueHistoryInvalidationStatementsForSecurities`). See each site's own
+ * doc comment for exactly what "affected" means there.
+ *
+ * Recorded follow-up (deliberately NOT solved by this task -- review B2):
+ * `loadFacts`'s `PRICE_SCOPE` predicate does not filter by `interval`, so a
+ * `delayed`/`intraday` price observation participates in this derivation
+ * exactly like an `eod` one (matching `app/owned-holdings.ts`'s CURRENT-
+ * value read, per the B2a decision above). Combined with invalidation (3),
+ * this means TODAY's stored point can be invalidated and re-derived
+ * multiple times as intraday ticks accrete through the day, converging on
+ * whatever was captured LAST before the next read -- never a fabricated or
+ * stale value, but also never a considered "which intraday tick should
+ * TODAY's stored point reflect" decision. Whether the store should exclude
+ * `delayed`/`intraday` rows entirely (matching the OTHER persisted
+ * pipeline's BRK-012C EOD-only exclusion) is a real open product question,
+ * not addressed here.
+ *
+ * Multi-Year's FY-end lookups (`loadHistoricalPortfolioValueAtDates`) use a
+ * DIFFERENT, non-zero `priceToleranceDays` (see that function's own doc
+ * comment) -- a value the tolerance-0 stored table CANNOT answer from a
+ * nearby stored date, ever (different securities can each resolve their OWN
+ * nearest-within-tolerance price on a DIFFERENT calendar date, so no single
+ * stored aggregate row is equivalent -- proven, and reproduced: an earlier
+ * version of this function consulted the store for an EXACT date match
+ * before falling back to the tolerance-7 derivation, which review B1 found
+ * silently serves the tolerance-0 stored value whenever a candidate date
+ * happens to exist exactly on the FY-end date -- UNDER-counting held
+ * securities priced only in the preceding week, reproduced as a 3x
+ * understatement and a complete->partial->unavailable flip on real fixture
+ * data. That store consult is REMOVED: `loadHistoricalPortfolioValueAtDates`
+ * never reads `portfolio_value_history` at all -- the tolerance-7 read-time
+ * derivation is the SOLE authority for every FY-end value, always. At ~10
+ * dates/read this costs negligible CPU, so there is no efficiency reason to
+ * risk the correctness bug.
  */
 import type { SqlClient } from "../db/repositories/sql-client.ts";
 import type {
@@ -48,6 +131,11 @@ import {
   type HistoricalValueSecurityFact,
 } from "../domain/snapshots/historical-portfolio-value.ts";
 import type { LedgerQuantityFact } from "../domain/dividends/shares-held.ts";
+import {
+  deleteStoredValueHistoryInRangeForOwnedSecurity,
+  loadStoredValueHistory,
+  upsertStoredValueHistory,
+} from "../db/repositories/portfolio-value-history.ts";
 
 // Bounds, documented (free-plan READ discipline -- this feature performs no
 // writes at all, so the binding budget is D1's per-request statement/row
@@ -69,6 +157,16 @@ const MAX_FX_OBSERVATIONS = 20_000;
 // the chart/Multi-Year baseline actually need); `datesTruncated` discloses
 // this honestly rather than silently.
 const MAX_CANDIDATE_DATES = 3_660;
+// HIST-002: bounds how many MISSING (not-yet-stored) candidate dates one
+// read will derive read-time before persisting -- the free-tier CPU-safety
+// lever (see this module header's HIST-002 paragraph). Chosen from Layer
+// 1's measured ~0.05ms-per-candidate-date compute cost on the real DB copy
+// (18 securities, ~2,600 candidate dates): 400 * 0.05ms ~= 20ms, a "tens of
+// ms" bound with headroom under this request's other work, while a fully
+// backfilled/steady-state portfolio (the overwhelmingly common case after
+// the first several reads) skips derivation ENTIRELY via the stored-only
+// fast path below.
+const MAX_DERIVE_DATES_PER_READ = 400;
 // Review B3 ruling: Multi-Year's FY-end lookups may use the last
 // observation on-or-before the FY end within this bounded lookback --
 // covers a weekend/holiday landing exactly on an FY-end date; beyond it,
@@ -282,6 +380,13 @@ export type HistoricalPortfolioValueResult = {
    * `MAX_CANDIDATE_DATES` could hold -- the oldest dates were dropped, kept
    * most-recent-first; disclosed rather than silently thinned. */
   datesTruncated: boolean;
+  /** HIST-002: `true` when at least one candidate date within range has NOT
+   * yet been derived+stored (this read's `MAX_DERIVE_DATES_PER_READ` bound
+   * was hit) -- those dates are simply absent from `points` this time, and
+   * will appear once a later read's bounded backfill reaches them (newest
+   * dates first). Disclosed honestly rather than silently thinning the
+   * series the way `datesTruncated` already is. */
+  backfillPending: boolean;
 };
 
 /** Bounded owner-scoped read of every fact this feature needs, shared by
@@ -507,7 +612,13 @@ async function resolveRange(
 }
 
 /** Loads the full bounded value series for the graph -- one point per
- * distinct observation date in range, never a synthetic daily grid. */
+ * distinct observation date in range, never a synthetic daily grid.
+ *
+ * HIST-002: candidate dates already present in `portfolio_value_history`
+ * are served from that store directly (no derivation); the newest
+ * `MAX_DERIVE_DATES_PER_READ` MISSING dates are derived read-time and
+ * opportunistically persisted for next time -- see this module's header
+ * comment for the full design record. */
 export async function loadHistoricalPortfolioValueSeries(
   client: SqlClient,
   userId: string,
@@ -537,14 +648,67 @@ export async function loadHistoricalPortfolioValueSeries(
     dates = dates.slice(dates.length - MAX_CANDIDATE_DATES); // keep the MOST RECENT dates
   }
 
-  const points = computeHistoricalPortfolioValueSeries({
+  const stored = await loadStoredValueHistory(
+    client,
+    userId,
+    portfolioId,
+    range.rangeFrom,
+    range.rangeTo,
+    MAX_CANDIDATE_DATES + 1,
+  );
+  const missingDates = dates.filter((date) => !stored.has(date));
+
+  if (missingDates.length === 0) {
+    // Fully backfilled for this range: the trivial bounded-read fast path
+    // HIST-002 exists for -- no shares/price/FX derivation at all.
+    const points = dates.map((date) => stored.get(date)!);
+    return {
+      baseCurrencyCode: facts.baseCurrencyCode,
+      rangeFrom: range.rangeFrom,
+      rangeTo: range.rangeTo,
+      points,
+      datesTruncated,
+      backfillPending: false,
+    };
+  }
+
+  // Newest-missing-first (dates/missingDates are ascending, so the tail is
+  // the newest) -- matches MAX_CANDIDATE_DATES' own "keep the most recent"
+  // convention and prioritises the range an owner is most likely viewing.
+  const toDerive =
+    missingDates.length > MAX_DERIVE_DATES_PER_READ
+      ? missingDates.slice(-MAX_DERIVE_DATES_PER_READ)
+      : missingDates;
+  const backfillPending = toDerive.length < missingDates.length;
+
+  const derived = computeHistoricalPortfolioValueSeries({
     baseCurrencyCode: facts.baseCurrencyCode,
     portfolioTimezone: facts.timezone,
     now: nowIso,
-    dates,
+    dates: toDerive,
     securities: facts.securities,
     fxObservations: facts.fxObservations,
   });
+  await upsertStoredValueHistory(client, {
+    userId,
+    portfolioId,
+    points: derived,
+    now: nowIso,
+  });
+  const derivedByDate = new Map(derived.map((point) => [point.date, point]));
+
+  const points: HistoricalPortfolioValuePoint[] = [];
+  for (const date of dates) {
+    const storedPoint = stored.get(date);
+    if (storedPoint) {
+      points.push(storedPoint);
+      continue;
+    }
+    const derivedPoint = derivedByDate.get(date);
+    if (derivedPoint) points.push(derivedPoint);
+    // else: beyond this read's derive bound -- honestly absent, see
+    // `backfillPending`.
+  }
 
   return {
     baseCurrencyCode: facts.baseCurrencyCode,
@@ -552,6 +716,7 @@ export async function loadHistoricalPortfolioValueSeries(
     rangeTo: range.rangeTo,
     points,
     datesTruncated,
+    backfillPending,
   };
 }
 
@@ -601,6 +766,13 @@ export async function loadHistoricalPortfolioValueAtDates(
   const boundedRangeFrom =
     rangeFrom < earliestAllowed ? earliestAllowed : rangeFrom;
 
+  // HIST-002/review B1 (BLOCKING correction): this loader deliberately does
+  // NOT consult `portfolio_value_history` at all, ever -- see this module's
+  // header for the reproduced correctness bug an earlier "exact stored
+  // match" shortcut caused (a stored tolerance-0 row can UNDER-count a
+  // tolerance-7 answer, silently, whenever a candidate date happens to
+  // exist exactly on the FY-end date). The read-time tolerance-7
+  // derivation below is the SOLE authority for every FY-end value.
   const facts = await loadFacts(
     client,
     userId,
@@ -636,4 +808,45 @@ export async function loadHistoricalPortfolioValueAtDates(
     );
   }
   return result;
+}
+
+/**
+ * HIST-002 invalidation (the CALC-005 requeue-gap lesson, applied here):
+ * called from `app/price-upload-service.ts`'s MKT-008/MKT-020 confirm paths
+ * immediately after a price-history write touches `dates` for `securityId`.
+ * DELETES the corresponding `portfolio_value_history` rows for every
+ * owner-scoped portfolio that holds this security, one ranged
+ * `value_date BETWEEN MIN(dates) AND MAX(dates)` DELETE per portfolio
+ * (review B2 follow-up 5: a single ranged delete, not one chunked DELETE
+ * per ~50 dates -- a few untouched dates inside that span may be
+ * conservatively invalidated too, which is safe: they are cheaply
+ * re-derived, and the EFF-001 guard makes an unchanged re-derivation a
+ * zero-write no-op). Deliberately does NOT recompute anything itself: a
+ * deleted row is indistinguishable from a never-backfilled one to
+ * `loadHistoricalPortfolioValueSeries`'s existing bounded backfill-on-read
+ * path, which re-derives it the next time that portfolio's history is
+ * actually read -- so invalidation never needs a second, parallel
+ * recompute implementation.
+ *
+ * Owner-scoped: `securityId` alone is never trusted to imply ownership --
+ * only portfolios belonging to `userId` are touched (matches every other
+ * query in this module) -- see
+ * `deleteStoredValueHistoryInRangeForOwnedSecurity`'s own doc comment.
+ */
+export async function invalidateStoredValueHistoryForSecurity(
+  client: SqlClient,
+  userId: string,
+  securityId: string,
+  dates: readonly string[],
+): Promise<{ portfoliosInvalidated: number; rowsDeleted: number }> {
+  const validDates = [...new Set(dates.filter((d) => DATE.test(d)))].sort();
+  if (validDates.length === 0)
+    return { portfoliosInvalidated: 0, rowsDeleted: 0 };
+  return deleteStoredValueHistoryInRangeForOwnedSecurity(
+    client,
+    userId,
+    securityId,
+    validDates[0]!,
+    validDates[validDates.length - 1]!,
+  );
 }

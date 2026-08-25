@@ -38,6 +38,7 @@ import {
   resolvePriceUploadSecurity,
   type PriceUploadSecurityEvidenceRow,
 } from "../domain/market-data/resolve-price-upload-security.ts";
+import { invalidateStoredValueHistoryForSecurity } from "./historical-portfolio-value.ts";
 
 // MKT-008: this is the ONLY layer that ever writes -- both the preview and
 // confirm actions call the SAME parse-and-resolve helpers below, over the
@@ -69,6 +70,37 @@ import {
 // file-level fingerprint -- see that function's own header comment), so
 // there is no digest semantics to preserve: a re-upload of the same rows
 // still upserts onto the identical `price_observations` row it always did.
+
+// HIST-002 (the CALC-005 requeue-gap lesson): a price-history-only import
+// (MKT-008's single-CSV upload, MKT-020's OHLCV variant which reuses this
+// SAME confirm path, and the backup re-import below) can touch PAST dates a
+// portfolio's stored value-history already cached -- see
+// `app/historical-portfolio-value.ts`'s `invalidateStoredValueHistoryForSecurity`
+// doc comment for why a bounded DELETE (never a recompute here) is enough
+// to guarantee the next read re-derives those dates honestly, for every
+// owner-scoped portfolio that holds the affected security. Grouped by
+// securityId so one import touching many dates for the same security costs
+// one DELETE pass per (security, portfolio) pair, not one per row.
+async function invalidateValueHistoryForCandidates(
+  context: PriceUploadContext,
+  candidates: readonly PriceUploadWriteCandidate[],
+): Promise<void> {
+  const datesBySecurity = new Map<string, Set<string>>();
+  for (const candidate of candidates) {
+    const dates =
+      datesBySecurity.get(candidate.securityId) ?? new Set<string>();
+    dates.add(candidate.marketDate);
+    datesBySecurity.set(candidate.securityId, dates);
+  }
+  for (const [securityId, dates] of datesBySecurity) {
+    await invalidateStoredValueHistoryForSecurity(
+      context.client,
+      context.userId,
+      securityId,
+      [...dates],
+    );
+  }
+}
 
 export const DEFAULT_SOURCE_LABEL = "intelligent-investor";
 const CONTROL_CHARACTER_PATTERN = /[\x00-\x1f\x7f]/g;
@@ -424,6 +456,11 @@ export async function confirmSinglePriceUpload(
     batchId,
     insertedCount,
   );
+  // HIST-002: invalidate any stored value-history rows this import's dates
+  // may have touched -- see `invalidateValueHistoryForCandidates`'s header
+  // comment. Runs even when every candidate turned out EFF-001-unchanged
+  // (cheap, idempotent DELETEs of rows that may not exist).
+  await invalidateValueHistoryForCandidates(context, candidates);
   const batches = await listPriceUploadBatches(context.client, context.userId);
   const batch = batches.find((item) => item.id === batchId);
   if (!batch) return fail(503, "The upload could not be confirmed.");
@@ -751,6 +788,8 @@ export async function confirmBackupPriceUpload(
     batchId,
     insertedCount,
   );
+  // HIST-002: see `confirmSinglePriceUpload`'s identical call.
+  await invalidateValueHistoryForCandidates(context, candidates);
   const batches = await listPriceUploadBatches(context.client, context.userId);
   const batch = batches.find((item) => item.id === batchId);
   if (!batch) return fail(503, "The backup import could not be confirmed.");

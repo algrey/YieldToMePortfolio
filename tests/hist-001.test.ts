@@ -784,12 +784,20 @@ test("HIST-001 review fold: datesTruncated is set when the RANGE itself is clamp
 });
 
 // ---------------------------------------------------------------------------
-// Part 4: bounded-read / no-write pin -- this feature performs SELECT-only
-// reads, never a write, so the D1 free-plan write budget is never touched
-// by a view (HIST-001 ruling).
+// Part 4: bounded-read pin -- this feature performed SELECT-only reads under
+// HIST-001, so the D1 free-plan write budget was never touched by a view.
+// HIST-002 (2026-08-25 owner ruling) deliberately supersedes the
+// "never writes" half of that invariant: this module now opportunistically
+// PERSISTS its own bounded, derived output into `portfolio_value_history`
+// (see this test's own header for the write-budget arithmetic and the
+// module's header comment for the full design record) -- still never a
+// SECOND formula, never an unbounded write, and never raw SQL written
+// directly in THIS file (every write stays behind the dedicated
+// db/repositories/portfolio-value-history.ts repository, matching this
+// codebase's universal app/* -> db/repositories/* layering).
 // ---------------------------------------------------------------------------
 
-test("HIST-001: app/historical-portfolio-value.ts never calls a write method (source pin -- no .run(/.batch( on the SqlClient)", async () => {
+test("HIST-002: app/historical-portfolio-value.ts writes ONLY through the dedicated portfolio-value-history repository (source pin) -- no raw SQL write statement lives in this file itself", async () => {
   const source = await readFile(
     new URL("../app/historical-portfolio-value.ts", import.meta.url),
     "utf8",
@@ -799,6 +807,9 @@ test("HIST-001: app/historical-portfolio-value.ts never calls a write method (so
   assert.doesNotMatch(source, /\bINSERT INTO\b/i);
   assert.doesNotMatch(source, /\bUPDATE\b/i);
   assert.doesNotMatch(source, /\bDELETE FROM\b/i);
+  // HIST-002: the module DOES now write, deliberately, but only by calling
+  // this one repository function -- never a parallel/ad hoc write path.
+  assert.match(source, /upsertStoredValueHistory/);
 });
 
 test("HIST-001: domain/snapshots/historical-portfolio-value.ts is DB-free (no SqlClient import at all)", async () => {
@@ -1088,6 +1099,7 @@ test("HIST-001: PortfolioValueChart -- unavailable state renders an honest messa
         baseCurrencyCode: "AUD",
         points: [],
         datesTruncated: false,
+        backfillPending: false,
       },
       financialYearStartMonth: 7,
       timezone: "Australia/Sydney",
@@ -1108,6 +1120,7 @@ test("HIST-001: PortfolioValueChart -- empty state (no priced dates yet) renders
         baseCurrencyCode: "AUD",
         points: [],
         datesTruncated: false,
+        backfillPending: false,
       },
       financialYearStartMonth: 7,
       timezone: "Australia/Sydney",
@@ -1149,6 +1162,7 @@ test("HIST-001: PortfolioValueChart -- renders an SVG with a dashed gap segment 
           },
         ],
         datesTruncated: false,
+        backfillPending: false,
       },
       financialYearStartMonth: 7,
       timezone: "Australia/Sydney",
@@ -1195,6 +1209,7 @@ test("HIST-001 review B2b: a PARTIAL point renders VISUALLY DISTINCT from a comp
           },
         ],
         datesTruncated: false,
+        backfillPending: false,
       },
       financialYearStartMonth: 7,
       timezone: "Australia/Sydney",
@@ -1213,6 +1228,60 @@ test("HIST-001 review B2b: a PARTIAL point renders VISUALLY DISTINCT from a comp
   assert.match(html, /1 partial \(1 unpriced held-security instance/);
   // The table's State column also names the per-row priced/held count.
   assert.match(html, /partial \(2\/3 held securities priced\)/);
+});
+
+test("HIST-002 review B3: backfillPending renders an honest 'still catching up' disclosure on the coverage line -- never silently rendering a mid-backfill series as complete", () => {
+  const withoutPending = renderComponent(
+    "PortfolioValueChart",
+    "../app/components/portfolio-value-chart.tsx",
+    {
+      history: {
+        status: "ok",
+        baseCurrencyCode: "AUD",
+        points: [
+          {
+            date: "2025-09-01",
+            valueDecimal: "2000",
+            completeness: "complete",
+            heldSecurityCount: 1,
+            pricedSecurityCount: 1,
+          },
+        ],
+        datesTruncated: false,
+        backfillPending: false,
+      },
+      financialYearStartMonth: 7,
+      timezone: "Australia/Sydney",
+      nowInstant: "2026-08-25T00:00:00.000Z",
+    },
+  );
+  assert.doesNotMatch(withoutPending, /still catching up/);
+
+  const withPending = renderComponent(
+    "PortfolioValueChart",
+    "../app/components/portfolio-value-chart.tsx",
+    {
+      history: {
+        status: "ok",
+        baseCurrencyCode: "AUD",
+        points: [
+          {
+            date: "2025-09-01",
+            valueDecimal: "2000",
+            completeness: "complete",
+            heldSecurityCount: 1,
+            pricedSecurityCount: 1,
+          },
+        ],
+        datesTruncated: false,
+        backfillPending: true,
+      },
+      financialYearStartMonth: 7,
+      timezone: "Australia/Sydney",
+      nowInstant: "2026-08-25T00:00:00.000Z",
+    },
+  );
+  assert.match(withPending, /still catching up/);
 });
 
 /** BUG-002 determinism pin: renders the SAME props TWICE, in the SAME
@@ -1278,6 +1347,7 @@ test("HIST-001/BUG-002 determinism pin: PortfolioValueChart renders BYTE-IDENTIC
           },
         ],
         datesTruncated: true,
+        backfillPending: false,
       },
       financialYearStartMonth: 7,
       timezone: "Australia/Sydney",
@@ -1423,7 +1493,7 @@ async function realisticScaleFixture(): Promise<DatabaseSync> {
   return db;
 }
 
-test("HIST-001 review B1 compute-bound pin: 18 securities x ~1,500 shared trading dates (27,000 price rows) completes the FULL series derivation in bounded time -- the indexed lookup fix, not the old O(dates x securities x observations) linear scan", async () => {
+test("HIST-001/HIST-002 review B1 compute-bound pin: 18 securities x ~1,500 shared trading dates (27,000 price rows) -- the FIRST (never-backfilled) read is BOUNDED to MAX_DERIVE_DATES_PER_READ, and the full series completes over successive bounded reads (the indexed lookup fix, not the old O(dates x securities x observations) linear scan)", async () => {
   const db = await realisticScaleFixture();
   const rawClient = createSqliteSqlClient(db);
   const { client, rowsRead } = countingSqlClient(rawClient);
@@ -1437,9 +1507,15 @@ test("HIST-001 review B1 compute-bound pin: 18 securities x ~1,500 shared tradin
   const elapsedMs = performance.now() - startedAt;
   assert.ok(result);
   if (!result) return;
-  assert.equal(result.points.length, 1500);
+  // HIST-002: the first read on a never-backfilled portfolio is bounded to
+  // MAX_DERIVE_DATES_PER_READ candidate dates (newest first) -- never the
+  // full 1,500 in one request, the free-tier-CPU-safety point of Layer 2.
+  assert.equal(result.points.length, 400);
+  assert.equal(result.backfillPending, true);
   // Sanity: the derivation actually ran real math, not a short-circuit --
-  // every point should have all 18 securities priced (same date grid).
+  // every point should have all 18 securities priced (same date grid), and
+  // the served points are the NEWEST 400 dates (dates ascending; the fixture
+  // built `dates` ascending too).
   assert.equal(result.points[0]!.pricedSecurityCount, 18);
   assert.equal(
     result.points[result.points.length - 1]!.pricedSecurityCount,
@@ -1448,9 +1524,10 @@ test("HIST-001 review B1 compute-bound pin: 18 securities x ~1,500 shared tradin
   // GENEROUS ceiling (review: "count evaluations or wall-clock with
   // generous ceiling") -- the old O(dates x securities x observations)
   // scan was measured at ~35s-CPU-class cost on real data at this scale;
-  // the indexed fix should complete in well under a second on any modern
-  // machine. 5s leaves enormous headroom while still catching a
-  // regression back to the quadratic-ish shape.
+  // the indexed fix (now bounded to 400 dates/read on top) should complete
+  // in well under a second on any modern machine. 5s leaves enormous
+  // headroom while still catching a regression back to the quadratic-ish
+  // shape.
   assert.ok(
     elapsedMs < 5_000,
     `expected the indexed derivation to complete in <5000ms, took ${elapsedMs.toFixed(0)}ms`,
@@ -1458,8 +1535,47 @@ test("HIST-001 review B1 compute-bound pin: 18 securities x ~1,500 shared tradin
   // Recorded (also in docs/ARCHITECTURE.md §9.1): the measured read
   // budget for a load at this exact realistic scale.
   console.log(
-    `HIST-001 B1 measurement: ${elapsedMs.toFixed(0)}ms elapsed, ${rowsRead()} total rows read for an 18-security/~1,500-date Overview load.`,
+    `HIST-001 B1 measurement: ${elapsedMs.toFixed(0)}ms elapsed, ${rowsRead()} total rows read for an 18-security/~1,500-date Overview load (first, bounded read).`,
   );
+
+  // HIST-002 backfill-to-completion drill: successive reads of the SAME
+  // portfolio (bounded backfill persists across reads) eventually cover
+  // every candidate date, newest-first, with NO duplicate/lost dates and
+  // zero further derivation once caught up (the stored-only fast path).
+  let latest = result;
+  let reads = 1;
+  while (latest.backfillPending) {
+    reads += 1;
+    const next = await loadHistoricalPortfolioValueSeries(
+      client,
+      "a",
+      "pa",
+      new Date("2026-08-25T00:00:00Z"),
+    );
+    assert.ok(next);
+    if (!next) return;
+    latest = next;
+  }
+  assert.equal(latest.points.length, 1500);
+  assert.equal(latest.backfillPending, false);
+  // ceil(1500 / 400) = 4 bounded reads to fully backfill.
+  assert.equal(reads, 4);
+  for (const point of latest.points) {
+    assert.equal(point.pricedSecurityCount, 18);
+    assert.equal(point.completeness, "complete");
+  }
+  // Idempotency + free write-avoidance: ONE MORE read, now fully stored,
+  // must not re-derive anything and must report the identical series.
+  const finalRead = await loadHistoricalPortfolioValueSeries(
+    client,
+    "a",
+    "pa",
+    new Date("2026-08-25T00:00:00Z"),
+  );
+  assert.ok(finalRead);
+  if (!finalRead) return;
+  assert.equal(finalRead.backfillPending, false);
+  assert.deepEqual(finalRead.points, latest.points);
 });
 
 // ---------------------------------------------------------------------------

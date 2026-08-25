@@ -273,6 +273,7 @@ export async function loadAuthenticatedWorkspace(
                 baseCurrencyCode:
                   configuredWorkspace.activePortfolio!.baseCurrencyCode,
                 datesTruncated: false,
+                backfillPending: false,
               }
             : {
                 status:
@@ -282,6 +283,7 @@ export async function loadAuthenticatedWorkspace(
                 points: result.points,
                 baseCurrencyCode: result.baseCurrencyCode,
                 datesTruncated: result.datesTruncated,
+                backfillPending: result.backfillPending,
               },
         )
         .catch(() => ({
@@ -290,6 +292,7 @@ export async function loadAuthenticatedWorkspace(
           baseCurrencyCode:
             configuredWorkspace.activePortfolio!.baseCurrencyCode,
           datesTruncated: false,
+          backfillPending: false,
         }));
       try {
         const snapshotRepo = createHistoricalSnapshotRepository(client);

@@ -4,6 +4,7 @@ import {
   type LedgerPostingPersistenceInput,
 } from "./ledger.ts";
 import { createAuditInsertStatement } from "./audit.ts";
+import { valueHistoryInvalidationFromDateStatement } from "./portfolio-value-history.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 import { prepareLedgerPosting } from "../../domain/ledger/posting.ts";
 import {
@@ -47,30 +48,43 @@ const DECIMAL = /^(0|[1-9]\d*)(\.\d+)?$/;
 export const IMPORT_COMMIT_LIMITS = {
   maxChunkSize: MAX_CHUNK_SIZE,
   // CALC-004 review-round B2 fix: `finalize`'s one atomic `batch()` call
-  // now emits 2 `calculation_runs` INSERTs per affected portfolio (one per
+  // emits 2 `calculation_runs` INSERTs per affected portfolio (one per
   // pipeline -- see `finalize`'s own comment) plus 1 audit insert plus 1
   // batch-status UPDATE, i.e. `2 * affectedCount + 2` statements. At the
-  // documented `maxAffectedPortfolios` ceiling of 25 that is exactly 52,
+  // documented `maxAffectedPortfolios` ceiling of 25 that was exactly 52,
   // which exceeded the ORIGINAL 50-statement bound here -- reviewer-
   // reproduced: `isBoundedAtomicUnit` rejected the batch outright
   // (`atomic_failure`, `resumable: true`), and because `affected.length`
   // (and therefore the statement count) is deterministic from the
   // batch's own already-committed rows, EVERY retry recomputed the
   // identical 52 statements and failed identically -- a batch touching
-  // 25 portfolios could never finish committing. Raised to 60 (8
-  // statements of headroom above the 52-statement worst case). This is
-  // NOT a loosening of D1's real per-invocation ceiling: this bound
-  // constrains ONE atomic `batch()` call within a single commit
-  // invocation, and D1's actually-relevant constraint is total
-  // statements per INVOCATION (the same ~1000-statement assumption
+  // 25 portfolios could never finish committing.
+  //
+  // HIST-002 review B2 fix (2026-08-25): `finalize` now ALSO pushes one
+  // `valueHistoryInvalidationFromDateStatement` DELETE per affected
+  // portfolio into the SAME batch (see that function's own doc comment) --
+  // `3 * affectedCount + 2` statements, 77 at the 25-portfolio ceiling.
+  // Raised from 60 to 85 (8 statements of headroom above the new
+  // 77-statement worst case, matching the ORIGINAL fix's own headroom
+  // convention). This is still NOT a loosening of D1's real per-invocation
+  // ceiling: this bound constrains ONE atomic `batch()` call within a
+  // single commit invocation, and D1's actually-relevant constraint is
+  // total statements per INVOCATION (the same ~1000-statement assumption
   // `app/calculation-executor-service.ts`'s budgets are calibrated
-  // against) -- 60 statements in one batch call is nowhere near that.
-  // `maxAffectedPortfolios` itself is UNCHANGED at 25 (a real batch
-  // touching more than 25 distinct portfolios in one commit is
-  // exceptionally unusual, and unrelated to this fix).
-  maxStatementsPerChunk: 60,
+  // against) -- 85 statements in one batch call is nowhere near that.
+  // `maxAffectedPortfolios` itself is UNCHANGED at 25.
+  maxStatementsPerChunk: 85,
   maxParametersPerStatement: 100,
-  maxQueriesPerInvocation: 50,
+  // HIST-002 review B2 fix: the per-row ledger-CSV posting path
+  // (`buildLedgerPostingStatements`, used by the row-commit loop below)
+  // also gained one invalidation statement per row -- a small, bounded
+  // fixture (2 rows/2 portfolios) measured 53 total queries against the
+  // previous 50-statement ceiling (2 over). Raised to 60 with headroom;
+  // this bound is a documentation-level budget target for typical/test-
+  // scale commits, not a runtime-enforced cap (unlike `maxStatementsPerChunk`
+  // above), so it is sized against MEASURED typical usage, not the
+  // 25-portfolio worst case.
+  maxQueriesPerInvocation: 60,
   maxChunksPerInvocation: 1,
   maxAffectedPortfolios: 25,
 } as const;
@@ -805,31 +819,47 @@ export function createOwnedImportCommitRepository(
       (total, row) => total + Number(row.committed_count),
       0,
     );
-    const statements: SqlStatement[] = affected.map((row) => {
-      const portfolioId = String(row.portfolio_id);
-      const ledgerHighWater = String(row.ledger_high_water);
-      const rebuildJobId = `import-rebuild:${batch.id}:${portfolioId}:${commitKey}`;
-      return {
-        sql: `INSERT INTO calculation_runs (
+    // HIST-002 review B2 (BLOCKING): the whole point of `affected`'s own
+    // `range_from` (MIN(local_trade_date) across every row this commit
+    // touched for the portfolio) is that it is already the earliest date a
+    // stored value-history row could be wrong from -- ONE ranged DELETE per
+    // affected portfolio, in the SAME atomic batch as the queueing below,
+    // covers the whole commit regardless of how many rows it contained. See
+    // `valueHistoryInvalidationFromDateStatement`'s own doc comment.
+    const statements: SqlStatement[] = affected.map((row) =>
+      valueHistoryInvalidationFromDateStatement(
+        userId,
+        String(row.portfolio_id),
+        String(row.range_from),
+      ),
+    );
+    statements.push(
+      ...affected.map((row) => {
+        const portfolioId = String(row.portfolio_id);
+        const ledgerHighWater = String(row.ledger_high_water);
+        const rebuildJobId = `import-rebuild:${batch.id}:${portfolioId}:${commitKey}`;
+        return {
+          sql: `INSERT INTO calculation_runs (
           id, user_id, portfolio_id, range_from, range_to, calculation_version,
           reason, invalidation_source, status, attempt, ledger_high_water_start,
           idempotency_key, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, 1, 'import_commit', ?, 'queued', 0, ?, ?, ?, ?)
         ON CONFLICT (user_id, portfolio_id, calculation_version, idempotency_key) DO NOTHING`,
-        params: [
-          rebuildJobId,
-          userId,
-          portfolioId,
-          String(row.range_from),
-          String(row.range_to),
-          batch.id,
-          ledgerHighWater,
-          rebuildJobId,
-          nowAt,
-          nowAt,
-        ],
-      };
-    });
+          params: [
+            rebuildJobId,
+            userId,
+            portfolioId,
+            String(row.range_from),
+            String(row.range_to),
+            batch.id,
+            ledgerHighWater,
+            rebuildJobId,
+            nowAt,
+            nowAt,
+          ],
+        };
+      }),
+    );
     // CALC-004: one sibling `snapshot`-pipeline run per affected portfolio,
     // alongside the `projection`-pipeline run queued above -- see
     // `db/repositories/ledger.ts`'s `snapshotCalculationRunStatement` doc

@@ -4023,3 +4023,76 @@ export const incomeWhatifScenarios = sqliteTable(
     ),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// HIST-002 (owner ruling, 2026-08-25: "go" on the persist-once +
+// incremental read path -- see TASKS.md's HIST-002 entry): a durable cache
+// of `domain/snapshots/historical-portfolio-value.ts`'s EXACT-DATE
+// (`priceToleranceDays: 0`) read-time derivation, one row per (portfolio,
+// candidate date) the derivation actually resolved a value for. This is NOT
+// a second formula -- every stored row's `value_decimal`/`completeness`/
+// `held_security_count`/`priced_security_count` is that module's own output,
+// copied verbatim; the read-time derivation remains the SOLE source of
+// truth and the fallback/verifier whenever a row is missing (see the
+// bounded backfill-on-read logic inline in
+// `app/historical-portfolio-value.ts`'s `loadHistoricalPortfolioValueSeries`
+// -- this table's only write path besides invalidation).
+// SECURITIES-ONLY per the BUG-002 owner ruling, matching the derivation it
+// caches -- no cash columns, ever.
+//
+// Honesty invariant: a date with NO usable value is simply ABSENT here --
+// never a NULL-valued placeholder row (mirrors
+// `HistoricalPortfolioValuePoint`'s own "not a candidate date" convention;
+// a `completeness = 'partial'` row DOES still get a row, because the
+// derivation resolved a real, if partial, non-null total for it -- only a
+// fully-unresolved date has no row at all).
+//
+// Natural key `(portfolio_id, value_date)`; `id` stays a surrogate per this
+// codebase's universal PK convention. Composite FK to
+// `(portfolios.id, portfolios.userId)` mirrors `incomeWhatifScenarios`
+// immediately above (defense in depth against a cross-owner `portfolioId`).
+export const portfolioValueHistory = sqliteTable(
+  "portfolio_value_history",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    valueDate: text("value_date").notNull(),
+    valueDecimal: text("value_decimal").notNull(),
+    completeness: text("completeness").notNull(),
+    heldSecurityCount: integer("held_security_count").notNull(),
+    pricedSecurityCount: integer("priced_security_count").notNull(),
+    // Provenance: when this row was last (re)computed -- never displayed,
+    // audit/debugging only (matches this codebase's convention of recording
+    // computation/ingestion instants even on derived/cache rows).
+    computedAt: text("computed_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "portfolio_value_history_portfolio_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    check(
+      "portfolio_value_history_completeness_check",
+      sql`${table.completeness} IN ('complete', 'partial')`,
+    ),
+    check(
+      "portfolio_value_history_held_count_check",
+      sql`${table.heldSecurityCount} >= 0`,
+    ),
+    check(
+      "portfolio_value_history_priced_count_check",
+      sql`${table.pricedSecurityCount} >= 0 AND ${table.pricedSecurityCount} <= ${table.heldSecurityCount}`,
+    ),
+    uniqueIndex("portfolio_value_history_portfolio_date_unique").on(
+      table.portfolioId,
+      table.valueDate,
+    ),
+    index("portfolio_value_history_user_portfolio_idx").on(
+      table.userId,
+      table.portfolioId,
+      table.valueDate,
+    ),
+  ],
+);

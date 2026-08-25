@@ -560,10 +560,16 @@ test("limits Cron work to bounded job and provider request budgets", async () =>
     maxWorkerMemoryBytes: 128 * 1024 * 1024,
     maxD1QueriesPerJob: 8,
   });
+  // HIST-002 review B2: maxStatementsPerChunk raised from 6 (5 writes + 1
+  // progress update) to make room for the value-history invalidation
+  // DELETEs commitChunk now also issues, bounded by the new
+  // maxInvalidationPortfoliosPerChunk (see market-data-refresh.ts's own
+  // comment: 5 + 1 + 20 = 26).
   assert.deepEqual(MARKET_DATA_REFRESH_REPOSITORY_LIMITS, {
     maxObservationsPerChunk: 5,
-    maxStatementsPerChunk: 6,
+    maxStatementsPerChunk: 26,
     maxBoundParametersPerStatement: 100,
+    maxInvalidationPortfoliosPerChunk: 20,
   });
   const disabledProvider = providerFor(async () => ({ ok: true, value: [] }));
   assert.throws(
@@ -669,4 +675,39 @@ test("scheduled handler is durable and does not use waitUntil for refresh work",
     } as unknown as Env),
     { ok: true, skipped: true, jobs: 0, providerRequests: 0 },
   );
+});
+
+test("HIST-002 review B2: a Yahoo-compatible price commit invalidates a pre-existing stored value-history row for EVERY owner holding the security (deployment-scope write, cross-owner invalidation)", async () => {
+  const database = await createMigratedDatabase();
+  seedMarketData(database);
+  database.exec(`
+    INSERT INTO portfolios (id, user_id, code, name, base_currency_code, timezone, accounting_method, status, created_at, updated_at, version)
+    VALUES ('portfolio-a', 'user-a', 'A', 'A portfolio', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-03', '2026-08-03', 1);
+    INSERT INTO portfolio_securities (id, user_id, portfolio_id, security_id, source_symbol, source_currency_code, status, created_at, updated_at)
+    VALUES ('membership-a', 'user-a', 'portfolio-a', 'security-a', 'AAA', 'AUD', 'held', '2026-08-03', '2026-08-03');
+    INSERT INTO portfolio_value_history (id, user_id, portfolio_id, value_date, value_decimal, completeness, held_security_count, priced_security_count, computed_at)
+    VALUES ('phv-1', 'user-a', 'portfolio-a', '2026-07-29', '1000.00', 'complete', 1, 1, '2026-08-03T00:00:00Z');
+  `);
+  const provider = providerFor(async (request) => ({
+    ok: true,
+    value: [priceObservation(request.from, "105")],
+  }));
+  const service = serviceFor(database, provider);
+  await service.request(
+    priceJobInput(
+      "job-price-invalidate",
+      "invalidate-1",
+      "2026-07-29",
+      "2026-07-29",
+    ),
+  );
+  const run = await service.processPending();
+  assert.equal(run.jobsCompleted, 1);
+
+  const stored = database
+    .prepare(
+      `SELECT id FROM portfolio_value_history WHERE portfolio_id = 'portfolio-a' AND value_date = '2026-07-29'`,
+    )
+    .all();
+  assert.equal(stored.length, 0);
 });

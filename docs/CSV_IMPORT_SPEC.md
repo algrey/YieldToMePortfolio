@@ -1039,6 +1039,48 @@ document" rather than silently assume "fine"):_
   `tests/eff-001.test.ts` pins the ACTUAL observed behaviour for a mixed
   monthly/daily fixture (never an assumed one).
 
+### 15.6 Historical value-history invalidation on confirm (`HIST-002`, 2026-08-25)
+
+Both confirm paths (`app/price-upload-service.ts`'s `confirmSinglePriceUpload`
+-- the single-security path §15.1/§15.1.1 describes, covering `MKT-020`'s
+OHLCV variant for free since it reuses the same confirm function -- and
+`confirmBackupPriceUpload`, §15.2's backup restore) now call
+`invalidateStoredValueHistoryForSecurity`
+(`app/historical-portfolio-value.ts`) immediately after
+`writePriceUploadObservations` returns, once per distinct security touched
+by the confirmed rows. This is ONE ranged `value_date BETWEEN [MIN(date),
+MAX(date)]` DELETE per affected owner-scoped portfolio (review B2 follow-up:
+not one DELETE per date -- a few untouched dates inside that span may be
+conservatively invalidated too, safely, since they are cheaply re-derived
+and free to re-store if unchanged), over the FULL set of that security's
+imported market dates (not just the ones EFF-001's write-avoidance guard
+actually wrote -- an unchanged-value row's date still falls inside the
+invalidated span).
+
+This exists because `docs/ARCHITECTURE.md`'s `CALC-005` entry recorded a
+real defect in the OTHER (dormant) persisted-snapshot pipeline: nothing
+requeues it when a price-history-only import lands, so a snapshot run
+started before an import permanently misses the new prices. HIST-002
+introduces a SECOND persisted cache (`portfolio_value_history`, the Overview
+graph's read path ONLY -- Multi-Year's FY-end lookups never read or write
+this table at all, see `docs/ARCHITECTURE.md` §9.2 and
+`docs/DATA_MODEL.md`'s `portfolio_value_history` entry for why) and
+deliberately does NOT repeat that mistake: every price-history confirm
+invalidates the affected owner-scoped portfolios' stored rows in that date
+span, delta-aware (never a whole-series wipe). This is the SAME pattern
+`db/repositories/ledger.ts`/`import-commit.ts` (ledger mutations) and
+`db/repositories/market-data-refresh.ts`/`intraday-price-capture.ts`
+(non-CSV price writers) also use for their own write paths -- see
+`docs/ARCHITECTURE.md` §9.2 for the full record of all three. Invalidation
+is a DELETE only -- the next read of that portfolio's history re-derives the
+affected dates through the SAME bounded backfill-on-read mechanism every
+other missing date already goes through, so this confirm-time hook needs no
+recompute logic of its own and stays cheap regardless of how many dates one
+import touches. `tests/hist-002.test.ts` pins the end-to-end shape: a stored
+value-history row exists, a re-import corrects that date's price through the
+real confirm path, the stored row is gone immediately after, and the next
+read reports the corrected figure.
+
 ## 16. Browser-parse / server-authority upload payload — ledger CSV (`IMP-010B`)
 
 As of `IMP-010B` (2026-08-25, applying `IMP-010A`'s binding ruling to the

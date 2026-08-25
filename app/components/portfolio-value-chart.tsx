@@ -392,6 +392,9 @@ export function PortfolioValueChart({
                 {history.datesTruncated
                   ? " · older history was trimmed to keep this read bounded"
                   : ""}
+                {history.backfillPending
+                  ? " · still catching up — more history will appear on your next visit"
+                  : ""}
               </p>
               <details className="chart-table-details">
                 <summary>View history as a table</summary>

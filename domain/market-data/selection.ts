@@ -175,6 +175,33 @@ function dayAge(asOf: string, marketDate: string): number | null {
   );
 }
 
+// HIST-002 layer 1 (measured ~15k constructions per Overview load):
+// `availableByPortfolioCutoff` calls `localDateAt` once per candidate
+// observation, and each call previously built a brand-new
+// `Intl.DateTimeFormat` -- the formatter depends only on `timezone`
+// (finitely many distinct portfolio timezones per load), so it is safe to
+// build once per timezone and reuse. A construction that throws (invalid
+// IANA zone) is deliberately NOT cached, so every call still gets the same
+// honest `null` fallback `localDateAt` already returns for a bad timezone.
+const dateTimeFormatCache = new Map<string, Intl.DateTimeFormat>();
+
+function getDateTimeFormat(timezone: string): Intl.DateTimeFormat | null {
+  const cached = dateTimeFormatCache.get(timezone);
+  if (cached) return cached;
+  try {
+    const formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    dateTimeFormatCache.set(timezone, formatter);
+    return formatter;
+  } catch {
+    return null;
+  }
+}
+
 function localDateAt(
   timestamp: string,
   timezone: string | undefined,
@@ -182,13 +209,10 @@ function localDateAt(
   if (!timezone) return null;
   const instant = Date.parse(timestamp);
   if (!Number.isFinite(instant)) return null;
+  const formatter = getDateTimeFormat(timezone);
+  if (!formatter) return null;
   try {
-    const parts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: timezone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).formatToParts(new Date(instant));
+    const parts = formatter.formatToParts(new Date(instant));
     const values = new Map(
       parts
         .filter((part) => part.type !== "literal")

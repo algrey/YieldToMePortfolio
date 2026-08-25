@@ -125,6 +125,13 @@ const OWNED_TABLES = [
   // Keyed by `user_id` (and `portfolio_id`) directly, same "owned" shape as
   // `watchlist_entries` immediately above.
   "income_whatif_scenarios",
+  // HIST-002: persisted cache of the read-time historical-value derivation
+  // (see db/schema.ts's `portfolioValueHistory` header comment) -- same
+  // "owned" shape as `portfolio_daily_snapshots` above (a re-derivable
+  // cache is still exported/purged like any other owner-scoped row; the
+  // owner's export should reflect what is stored, not just what could be
+  // recomputed).
+  "portfolio_value_history",
 ];
 const classifications: Record<string, ExportTableClassification> =
   Object.fromEntries(
@@ -327,6 +334,11 @@ const PURGE_TABLES_IN_FK_ORDER = [
   "snapshot_publications",
   "projection_publications",
   "portfolio_daily_snapshots",
+  // HIST-002: cached historical-value rows reference only (portfolio_id,
+  // user_id) via a composite FK to `portfolios`, same FK-safety as
+  // `portfolio_daily_snapshots` immediately above. No other table
+  // references it.
+  "portfolio_value_history",
   "calculation_runs",
   "cash_ledger_entries",
   "cash_accounts",

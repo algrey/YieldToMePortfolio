@@ -290,6 +290,15 @@ export type OwnedPortfolioValueHistory = {
   /** `true` when more distinct observation dates existed than the loader's
    * bound could hold -- the OLDEST dates were dropped, most-recent-first. */
   datesTruncated: boolean;
+  /** HIST-002 review B3: `true` when this portfolio's stored value-history
+   * cache is still catching up (this read's bounded backfill hit its
+   * per-read cap) -- some of the NEWEST candidate dates within range are
+   * honestly absent from `points` this time, and will appear on a later
+   * read (see `app/historical-portfolio-value.ts`'s
+   * `HistoricalPortfolioValueResult.backfillPending`). Disclosed on the
+   * chart's coverage line rather than silently rendering a mid-catch-up
+   * series as if it were complete. */
+  backfillPending: boolean;
 };
 export type OwnedOverviewPoint = {
   date: string;
@@ -4812,6 +4821,7 @@ export function PortfolioShell({
                     ownedWorkspace.activePortfolio.baseCurrencyCode,
                   points: [],
                   datesTruncated: false,
+                  backfillPending: false,
                 }
               }
             />

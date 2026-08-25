@@ -4,6 +4,7 @@ import type {
   ObservationScope,
   PriceObservation,
 } from "../../domain/market-data/contracts.ts";
+import { buildValueHistoryInvalidationStatementsForSecurities } from "./portfolio-value-history.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 
 export type RefreshTargetKind = "price" | "fx";
@@ -91,8 +92,17 @@ const JOB_COLUMNS = `
 
 export const MARKET_DATA_REFRESH_REPOSITORY_LIMITS = {
   maxObservationsPerChunk: 5,
-  maxStatementsPerChunk: 6,
+  // HIST-002 review B2: raised from 6 (5 writes + 1 progress update) to make
+  // room for the value-history invalidation DELETEs this commit now also
+  // issues (`maxInvalidationPortfoliosPerChunk` below) -- see `commitChunk`.
+  maxStatementsPerChunk: 26,
   maxBoundParametersPerStatement: 100,
+  // HIST-002 review B2: TOTAL portfolio rows one chunk's invalidation may
+  // touch, across every distinct security in the chunk -- bounds the extra
+  // statements this commit's atomic batch gains to stay well under D1's
+  // practical per-batch ceiling (matches `maxStatementsPerChunk` above: 5
+  // writes + 1 progress update + up to 20 invalidation deletes = 26).
+  maxInvalidationPortfoliosPerChunk: 20,
 } as const;
 
 const CHUNK_LEASE_GUARD = `EXISTS (
@@ -453,6 +463,47 @@ export function createMarketDataRefreshRepository(client: SqlClient) {
         input.expectedHighWaterDate,
       ];
       const statements = writeStatements(input.observations, guardParams);
+      // HIST-002 review B2 (BLOCKING): a Yahoo-compatible (or Sharesight,
+      // via `rollupIntradayPricePoint`'s sibling path -- see
+      // `intraday-price-capture.ts`) price write can land a fresher/
+      // corrected price for a date this commit's write touches, for ANY
+      // owner holding the security -- invalidate the affected stored
+      // value-history rows in this SAME atomic batch, per-security
+      // (min/max market date across this chunk's price observations only;
+      // FX observations do not key a single security and are out of scope
+      // here -- see this module's own recorded follow-up in
+      // `app/historical-portfolio-value.ts`'s header for the related,
+      // deliberately-not-solved interval question).
+      const priceTargetsBySecurity = new Map<
+        string,
+        { fromDate: string; toDate: string }
+      >();
+      for (const observation of input.observations) {
+        if (observation.kind !== "price") continue;
+        const existing = priceTargetsBySecurity.get(observation.securityId);
+        if (!existing) {
+          priceTargetsBySecurity.set(observation.securityId, {
+            fromDate: observation.marketDate,
+            toDate: observation.marketDate,
+          });
+          continue;
+        }
+        if (observation.marketDate < existing.fromDate)
+          existing.fromDate = observation.marketDate;
+        if (observation.marketDate > existing.toDate)
+          existing.toDate = observation.marketDate;
+      }
+      if (priceTargetsBySecurity.size > 0) {
+        const invalidationStatements =
+          await buildValueHistoryInvalidationStatementsForSecurities(
+            client,
+            [...priceTargetsBySecurity.entries()].map(
+              ([securityId, range]) => ({ securityId, ...range }),
+            ),
+            MARKET_DATA_REFRESH_REPOSITORY_LIMITS.maxInvalidationPortfoliosPerChunk,
+          );
+        statements.push(...invalidationStatements);
+      }
       statements.push({
         sql: `UPDATE market_data_refresh_jobs
               SET high_water_date = ?,

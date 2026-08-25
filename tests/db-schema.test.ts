@@ -127,6 +127,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "portfolio_daily_snapshots",
     "portfolio_securities",
     "portfolio_settings",
+    "portfolio_value_history",
     "portfolios",
     "price_observations",
     "price_upload_batches",

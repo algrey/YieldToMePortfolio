@@ -92,6 +92,75 @@ function positiveOrNull(value: string | null): DecimalFraction | null {
   }
 }
 
+/** Excludes reversed originals and reversal records themselves, in EITHER
+ * order of construction -- shared by `deriveSharesHeldAtDate` and
+ * `buildSharesHeldTimeline` so both start from the identical "usable rows"
+ * definition (HIST-002 layer 1: the two functions must never drift into two
+ * conventions for the same fact). Does NOT sort or apply the `asOfDate`
+ * cutoff -- callers do that themselves, differently. */
+function usableTransactions(
+  transactions: readonly LedgerQuantityFact[],
+): LedgerQuantityFact[] {
+  const reversedIds = new Set(
+    transactions
+      .filter((transaction) => transaction.reversesTransactionId !== null)
+      .map((transaction) => transaction.reversesTransactionId as string),
+  );
+  return transactions
+    .filter((transaction) => transaction.status === "posted")
+    .filter((transaction) => transaction.reversesTransactionId === null)
+    .filter((transaction) => !reversedIds.has(transaction.id));
+}
+
+/** The ledger's chronological application order for one security's usable
+ * transactions -- `tradeAt` (the precise instant), `id` as the final
+ * deterministic tiebreak. Shared so both functions below apply transactions
+ * in the identical order. */
+function byLedgerOrder(
+  left: LedgerQuantityFact,
+  right: LedgerQuantityFact,
+): number {
+  return (
+    left.tradeAt.localeCompare(right.tradeAt) || left.id.localeCompare(right.id)
+  );
+}
+
+/** ONE transaction's effect on a running shares-held total -- the single
+ * definition of the math both `deriveSharesHeldAtDate` (per-date replay) and
+ * `buildSharesHeldTimeline` (HIST-002 layer 1's hoisted one-walk-per-security
+ * variant) fold with, so the two can never compute two different answers for
+ * the same transaction sequence. */
+function applyTransactionEffect(
+  total: DecimalFraction,
+  transaction: LedgerQuantityFact,
+): DecimalFraction {
+  if (transaction.type === "buy" || transaction.type === "sell") {
+    if (transaction.quantityDecimal === null) return total;
+    let quantity: DecimalFraction;
+    try {
+      quantity = parseDecimal(transaction.quantityDecimal);
+    } catch {
+      return total;
+    }
+    return addDecimal(
+      total,
+      transaction.type === "sell" ? negateDecimal(quantity) : quantity,
+    );
+  }
+  if (transaction.type === "split") {
+    const numerator = positiveOrNull(transaction.quantityDecimal);
+    const denominator = positiveOrNull(transaction.unitPriceDecimal);
+    if (!numerator || !denominator) return total; // malformed split fact: no effect rather than a thrown error
+    return roundDecimal(
+      divideDecimal(multiplyDecimal(total, numerator), denominator),
+      SPLIT_RATIO_SCALE,
+    );
+  }
+  // Every other transaction type (cash movements, fees, tax, opening
+  // balance) has no effect on share quantity.
+  return total;
+}
+
 /**
  * Signed quantity held for one portfolio security as of `asOfDate`
  * (inclusive), from raw ledger transaction facts. Returns the exact decimal
@@ -104,53 +173,108 @@ export function deriveSharesHeldAtDate(
   transactions: readonly LedgerQuantityFact[],
   asOfDate: string,
 ): string {
-  const reversedIds = new Set(
-    transactions
-      .filter((transaction) => transaction.reversesTransactionId !== null)
-      .map((transaction) => transaction.reversesTransactionId as string),
-  );
-  const usable = transactions
-    .filter((transaction) => transaction.status === "posted")
-    .filter((transaction) => transaction.reversesTransactionId === null)
-    .filter((transaction) => !reversedIds.has(transaction.id))
+  const usable = usableTransactions(transactions)
     .filter((transaction) => transaction.localTradeDate <= asOfDate)
-    .slice()
-    .sort(
-      (left, right) =>
-        left.tradeAt.localeCompare(right.tradeAt) ||
-        left.id.localeCompare(right.id),
-    );
+    .sort(byLedgerOrder);
 
   let total: DecimalFraction = ZERO;
   for (const transaction of usable) {
-    if (transaction.type === "buy" || transaction.type === "sell") {
-      if (transaction.quantityDecimal === null) continue;
-      let quantity: DecimalFraction;
-      try {
-        quantity = parseDecimal(transaction.quantityDecimal);
-      } catch {
-        continue;
-      }
-      total = addDecimal(
-        total,
-        transaction.type === "sell" ? negateDecimal(quantity) : quantity,
-      );
-      continue;
-    }
-    if (transaction.type === "split") {
-      const numerator = positiveOrNull(transaction.quantityDecimal);
-      const denominator = positiveOrNull(transaction.unitPriceDecimal);
-      if (!numerator || !denominator) continue; // malformed split fact: no effect rather than a thrown error
-      total = roundDecimal(
-        divideDecimal(multiplyDecimal(total, numerator), denominator),
-        SPLIT_RATIO_SCALE,
-      );
-      continue;
-    }
-    // Every other transaction type (cash movements, fees, tax, opening
-    // balance) has no effect on share quantity.
+    total = applyTransactionEffect(total, transaction);
   }
   return formatDecimalExact(total);
+}
+
+/** HIST-002 layer 1: one precomputed "shares held" walk for a security,
+ * built ONCE and then queried cheaply for many dates -- replaces a
+ * per-(date x security) `deriveSharesHeldAtDate` replay (each of which
+ * re-filters and re-sorts the WHOLE transaction list) with a single
+ * filter+sort+fold, followed by O(log n) lookups.
+ *
+ * Provable equivalence (not merely assumed): `deriveSharesHeldAtDate`
+ * processes the SAME fixed ledger order (`byLedgerOrder`, keyed on `tradeAt`)
+ * restricted to whichever prefix satisfies `localTradeDate <= asOfDate` --
+ * filtering never reorders the survivors, so that restricted set is always
+ * some SUBSEQUENCE of the full ledger order. That subsequence only equals a
+ * simple PREFIX of the full order (letting a binary search answer every
+ * date) when `localTradeDate` is non-decreasing along `byLedgerOrder` --
+ * true whenever `tradeAt` and `localTradeDate` describe the same event
+ * consistently (the overwhelmingly common case), but NOT schema-enforced
+ * (`tradeAt`/`localTradeDate` are independently supplied at the ledger
+ * boundary -- see `app/manual-ledger-contract.ts`). This function checks
+ * that invariant itself, once, over the actual data: if it holds,
+ * `checkpoints` below makes every date lookup a binary search, byte-identical
+ * to the per-date replay by construction (both fold the same
+ * `applyTransactionEffect` over the same prefix). If it does NOT hold for
+ * some pathological security, `checkpoints` is `null` and
+ * `sharesHeldAtDateFromTimeline` transparently falls back to calling
+ * `deriveSharesHeldAtDate` directly -- slower for that one security, but
+ * NEVER wrong.
+ */
+export type SharesHeldTimeline = {
+  readonly checkpoints:
+    | readonly {
+        readonly localTradeDate: string;
+        readonly totalDecimal: string;
+      }[]
+    | null;
+  readonly transactions: readonly LedgerQuantityFact[];
+};
+
+export function buildSharesHeldTimeline(
+  transactions: readonly LedgerQuantityFact[],
+): SharesHeldTimeline {
+  const order = usableTransactions(transactions).sort(byLedgerOrder);
+
+  let monotonic = true;
+  for (let index = 1; index < order.length; index += 1) {
+    if (order[index]!.localTradeDate < order[index - 1]!.localTradeDate) {
+      monotonic = false;
+      break;
+    }
+  }
+  if (!monotonic) {
+    return { checkpoints: null, transactions };
+  }
+
+  let total: DecimalFraction = ZERO;
+  const checkpoints: { localTradeDate: string; totalDecimal: string }[] = [];
+  for (const transaction of order) {
+    total = applyTransactionEffect(total, transaction);
+    checkpoints.push({
+      localTradeDate: transaction.localTradeDate,
+      totalDecimal: formatDecimalExact(total),
+    });
+  }
+  return { checkpoints, transactions };
+}
+
+/** Queries a `SharesHeldTimeline` at `asOfDate` -- O(log n) on the fast
+ * (monotonic) path via a rightmost-match binary search over `checkpoints`
+ * (duplicates on the same date are expected -- same-day transactions each
+ * get their own checkpoint; the rightmost one is the correct end-of-day
+ * total), or the exact `deriveSharesHeldAtDate` replay on the fallback path.
+ * Always returns the identical string `deriveSharesHeldAtDate` would. */
+export function sharesHeldAtDateFromTimeline(
+  timeline: SharesHeldTimeline,
+  asOfDate: string,
+): string {
+  const { checkpoints } = timeline;
+  if (checkpoints === null) {
+    return deriveSharesHeldAtDate(timeline.transactions, asOfDate);
+  }
+  let low = 0;
+  let high = checkpoints.length - 1;
+  let match = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (checkpoints[mid]!.localTradeDate <= asOfDate) {
+      match = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return match === -1 ? "0" : checkpoints[match]!.totalDecimal;
 }
 
 // HIST-001: sibling reconstruction for a cash ACCOUNT's running balance at an

@@ -15,6 +15,7 @@ import {
   type LedgerMutationAuthorization,
 } from "./manual-ledger-keys.ts";
 import { resolveSnapshotRunRange } from "./snapshots.ts";
+import { valueHistoryInvalidationFromDateStatement } from "./portfolio-value-history.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 import {
   prepareLedgerPosting,
@@ -479,6 +480,19 @@ export async function buildLedgerPostingStatements(
     createdAt,
   );
   if (snapshotRunStatement) statements.push(snapshotRunStatement);
+  // HIST-002 review B2 (BLOCKING): this posting can change shares held from
+  // `input.localTradeDate` onward (the ledger-CSV commit path this function
+  // serves) -- invalidate every stored value-history row from that date
+  // forward, in the SAME atomic batch as the posting itself, so the graph
+  // can never freeze on a stale figure. See
+  // `valueHistoryInvalidationFromDateStatement`'s own doc comment.
+  statements.push(
+    valueHistoryInvalidationFromDateStatement(
+      userId,
+      input.portfolioId,
+      input.localTradeDate,
+    ),
+  );
   statements.push(
     createAuditInsertStatement(
       {
@@ -839,6 +853,14 @@ export function createOwnedLedgerRepository(
     cashEffectOverride?: string | null,
     inventoryPlans: readonly InventoryPlan[] = [],
     authorization?: LedgerMutationAuthorization,
+    // HIST-002 review B2: the EARLIEST local_trade_date this mutation can
+    // affect shares-held from. Defaults to `input.localTradeDate` -- correct
+    // for `post` (a brand-new fact effective from its own date) and
+    // `reverse` (whose `input.localTradeDate` is already copied from the
+    // ORIGINAL transaction being reversed, see `reverse()` below). A
+    // `supersede` can move a fact to a DIFFERENT date, so `supersede()`
+    // passes the true min(original date, new date) explicitly.
+    earliestAffectedLocalDate: string = input.localTradeDate,
   ): Promise<LedgerMutationResult> {
     const sourceReferenceConflict = await getBySourceReference(userId, input);
     if (sourceReferenceConflict) {
@@ -984,6 +1006,19 @@ export function createOwnedLedgerRepository(
       createdAt,
     );
     if (snapshotRunStatement) statements.push(snapshotRunStatement);
+    // HIST-002 review B2 (BLOCKING): post/reverse/supersede can all change
+    // shares held from `earliestAffectedLocalDate` onward -- invalidate
+    // every stored value-history row from that date forward, in the SAME
+    // atomic batch as the mutation itself (never a separate, skippable
+    // follow-up call). See `valueHistoryInvalidationFromDateStatement`'s own
+    // doc comment.
+    statements.push(
+      valueHistoryInvalidationFromDateStatement(
+        userId,
+        input.portfolioId,
+        earliestAffectedLocalDate,
+      ),
+    );
     statements.push(
       createAuditInsertStatement(
         {
@@ -1255,6 +1290,14 @@ export function createOwnedLedgerRepository(
         if (!validation.ok) return validation;
         plans.push(validation.plan);
       }
+      // HIST-002 review B2: a supersession can move a fact to a DIFFERENT
+      // local_trade_date than the original -- invalidate from the EARLIER
+      // of the two, so both the vacated old date and the new date's
+      // forward history are covered by one ranged delete.
+      const earliestAffectedLocalDate =
+        original.localTradeDate < input.localTradeDate
+          ? original.localTradeDate
+          : input.localTradeDate;
       const mutation = await persist(
         userId,
         supersedingInput,
@@ -1264,6 +1307,7 @@ export function createOwnedLedgerRepository(
         undefined,
         plans,
         authorization,
+        earliestAffectedLocalDate,
       );
       if (mutation.ok || mutation.reason !== "concurrent_change") {
         return mutation;

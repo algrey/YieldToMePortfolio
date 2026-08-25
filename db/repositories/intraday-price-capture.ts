@@ -2,6 +2,13 @@ import { randomUUID } from "node:crypto";
 import type { SqlClient } from "./sql-client.ts";
 import type { ProviderDataQuality } from "../../domain/market-data/contracts.ts";
 import { SHARESIGHT_PRICE_PROVIDER_ID } from "./sharesight-price-refresh.ts";
+import { buildValueHistoryInvalidationStatementsForSecurities } from "./portfolio-value-history.ts";
+
+// HIST-002 review B2: how many portfolios' value-history rows one rollup
+// write may invalidate -- this writes exactly ONE security/date per call,
+// so a small cap is generous (a real security is held by a small handful
+// of portfolios); matches `market-data-refresh.ts`'s identical rationale.
+const MAX_INVALIDATION_PORTFOLIOS_PER_ROLLUP = 20;
 
 // MKT-011A: repository layer for the daily intraday-price-capture sweep --
 // `app/daily-price-capture-service.ts` is the orchestrator; every function
@@ -578,7 +585,38 @@ export async function rollupIntradayPricePoint(
      RETURNING id`,
     baseParams,
   );
-  return { ok: true, written: rows.length > 0 };
+  const written = rows.length > 0;
+  // HIST-002 review B2 (BLOCKING): this rollup can land a fresher price for
+  // a date this security's held portfolios already have a stored
+  // value-history row for -- ANY owner holding the security, not just
+  // `input.userId` (a Sharesight write is that user's own, but a
+  // Yahoo-compatible write is deployment-scope and can affect every owner
+  // -- see `buildValueHistoryInvalidationStatementsForSecurities`'s own doc
+  // comment). Only invalidate when a write actually happened (a guard-
+  // rejected overlay changed nothing, so there is nothing to invalidate).
+  // Deliberately a SEPARATE call, not the same atomic statement as the
+  // INSERT above (this repository does not otherwise batch) -- a rare
+  // failure between the two leaves a stored row stale for one extra read
+  // cycle at worst, self-healing on the next capture tick, never a
+  // financial-correctness gap.
+  if (written) {
+    const invalidationStatements =
+      await buildValueHistoryInvalidationStatementsForSecurities(
+        client,
+        [
+          {
+            securityId: input.securityId,
+            fromDate: input.point.marketDate,
+            toDate: input.point.marketDate,
+          },
+        ],
+        MAX_INVALIDATION_PORTFOLIOS_PER_ROLLUP,
+      );
+    if (invalidationStatements.length > 0) {
+      await client.batch(invalidationStatements);
+    }
+  }
+  return { ok: true, written };
 }
 
 const MARKET_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
