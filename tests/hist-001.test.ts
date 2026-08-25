@@ -19,7 +19,6 @@ import { deriveCashBalanceAtDate } from "../domain/dividends/shares-held.ts";
 import {
   computeHistoricalPortfolioValueAtDate,
   computeHistoricalPortfolioValueSeries,
-  type HistoricalValueCashFact,
   type HistoricalValueSecurityFact,
 } from "../domain/snapshots/historical-portfolio-value.ts";
 import {
@@ -154,7 +153,6 @@ test("HIST-001: computeHistoricalPortfolioValueAtDate -- exact-date pricing, no 
     portfolioTimezone: "Australia/Sydney",
     now: "2026-08-25T00:00:00.000Z",
     securities: facts,
-    cashAccounts: [],
     fxObservations: [],
     date: "2016-01-31",
   });
@@ -169,7 +167,6 @@ test("HIST-001: computeHistoricalPortfolioValueAtDate -- exact-date pricing, no 
     portfolioTimezone: "Australia/Sydney",
     now: "2026-08-25T00:00:00.000Z",
     securities: facts,
-    cashAccounts: [],
     fxObservations: [],
     date: "2016-02-15",
   });
@@ -215,7 +212,6 @@ test("HIST-001: computeHistoricalPortfolioValueAtDate -- a sold-out security con
     portfolioTimezone: "Australia/Sydney",
     now: "2026-08-25T00:00:00.000Z",
     securities: facts,
-    cashAccounts: [],
     fxObservations: [],
     date: "2020-07-01",
   });
@@ -229,7 +225,12 @@ test("HIST-001: computeHistoricalPortfolioValueAtDate -- a sold-out security con
   assert.equal(point.completeness, "complete");
 });
 
-test("HIST-001: computeHistoricalPortfolioValueAtDate -- FX-converted foreign holding + base-currency cash sum honestly; missing FX degrades to partial, never a silent zero or a wrong-currency number", () => {
+test("HIST-001: computeHistoricalPortfolioValueAtDate -- FX-converted foreign holding + a base-currency holding sum honestly; missing FX degrades to partial, never a silent zero or a wrong-currency number", () => {
+  // BUG-002 owner ruling: this derivation is securities-only (cash is
+  // deliberately excluded -- see the domain module's header). A second
+  // base-currency (AUD) security stands in for the OLD cash leg here, to
+  // keep pinning the SAME point: a different component's FX failure never
+  // drops an already-known, no-FX-needed component out of the total.
   const usdSecurity = security({
     portfolioSecurityId: "ps-usd",
     currencyCode: "USD",
@@ -249,21 +250,23 @@ test("HIST-001: computeHistoricalPortfolioValueAtDate -- FX-converted foreign ho
       { ...priceObservation("2022-06-01", "50.00"), currencyCode: "USD" },
     ],
   });
-  const cash: HistoricalValueCashFact[] = [
-    {
-      cashAccountId: "ca",
-      currencyCode: "AUD",
-      entries: [
-        {
-          id: "e1",
-          localDate: "2022-01-01",
-          signedAmountDecimal: "200",
-          status: "posted",
-          reversesEntryId: null,
-        },
-      ],
-    },
-  ];
+  const audSecurity = security({
+    portfolioSecurityId: "ps-aud",
+    currencyCode: "AUD",
+    transactions: [
+      {
+        id: "buy-aud",
+        type: "buy",
+        status: "posted",
+        localTradeDate: "2022-01-01",
+        tradeAt: "2022-01-01T00:00:00Z",
+        quantityDecimal: "20",
+        unitPriceDecimal: null,
+        reversesTransactionId: null,
+      },
+    ],
+    priceObservations: [priceObservation("2022-06-01", "10.00")], // 20 * 10.00 = 200
+  });
   const fx = [
     {
       kind: "fx" as const,
@@ -287,35 +290,33 @@ test("HIST-001: computeHistoricalPortfolioValueAtDate -- FX-converted foreign ho
     baseCurrencyCode: "AUD",
     portfolioTimezone: "Australia/Sydney",
     now: "2026-08-25T00:00:00.000Z",
-    securities: [usdSecurity],
-    cashAccounts: cash,
+    securities: [usdSecurity, audSecurity],
     fxObservations: fx,
     date: "2022-06-01",
   });
   assert.equal(withFx.completeness, "complete");
   assert.notEqual(withFx.valueDecimal, null);
-  // 200 AUD cash is definitely part of the total (never dropped just
-  // because a DIFFERENT component needed FX).
+  // The AUD security's $200 is definitely part of the total (never dropped
+  // just because a DIFFERENT component needed FX).
   assert.ok(
     Number(withFx.valueDecimal) > 200,
-    `expected the AUD cash to be included in the total, got ${withFx.valueDecimal}`,
+    `expected the AUD security's $200 to be included in the total, got ${withFx.valueDecimal}`,
   );
 
   // Same date, but with NO fx_rate_observations at all: the USD security
-  // cannot convert -- the point must degrade to partial (cash-only total),
-  // never silently drop to zero or fabricate a conversion.
+  // cannot convert -- the point must degrade to partial (AUD-security-only
+  // total), never silently drop to zero or fabricate a conversion.
   const withoutFx = computeHistoricalPortfolioValueAtDate({
     baseCurrencyCode: "AUD",
     portfolioTimezone: "Australia/Sydney",
     now: "2026-08-25T00:00:00.000Z",
-    securities: [usdSecurity],
-    cashAccounts: cash,
+    securities: [usdSecurity, audSecurity],
     fxObservations: [],
     date: "2022-06-01",
   });
   assert.equal(withoutFx.completeness, "partial");
   assert.equal(withoutFx.valueDecimal, "200");
-  assert.equal(withoutFx.pricedSecurityCount, 0);
+  assert.equal(withoutFx.pricedSecurityCount, 1);
 });
 
 test("HIST-001: computeHistoricalPortfolioValueSeries maps computeHistoricalPortfolioValueAtDate over every requested date, ascending, one point per date", () => {
@@ -345,7 +346,6 @@ test("HIST-001: computeHistoricalPortfolioValueSeries maps computeHistoricalPort
     now: "2026-08-25T00:00:00.000Z",
     dates: ["2020-01-01", "2020-01-15", "2020-02-01"],
     securities: facts,
-    cashAccounts: [],
     fxObservations: [],
   });
   assert.deepEqual(
@@ -389,7 +389,6 @@ test("HIST-001 review B2a: a Sharesight-provider price observation is used exact
     portfolioTimezone: "Australia/Sydney",
     now: "2026-08-25T00:00:00.000Z",
     securities: facts,
-    cashAccounts: [],
     fxObservations: [],
     date: "2026-06-01",
   });
@@ -424,7 +423,6 @@ test("HIST-001 review B3 ruling: FY-end valuation with priceToleranceDays=7 uses
     portfolioTimezone: "Australia/Sydney",
     now: "2026-08-25T00:00:00.000Z",
     securities: facts,
-    cashAccounts: [],
     fxObservations: [],
     date: "2023-06-30",
     priceToleranceDays: 7,
@@ -440,7 +438,6 @@ test("HIST-001 review B3 ruling: FY-end valuation with priceToleranceDays=7 uses
     portfolioTimezone: "Australia/Sydney",
     now: "2026-08-25T00:00:00.000Z",
     securities: facts,
-    cashAccounts: [],
     fxObservations: [],
     date: "2023-06-30",
   });
@@ -459,7 +456,6 @@ test("HIST-001 review B3 ruling: FY-end valuation with priceToleranceDays=7 uses
     portfolioTimezone: "Australia/Sydney",
     now: "2026-08-25T00:00:00.000Z",
     securities: factsFarther,
-    cashAccounts: [],
     fxObservations: [],
     date: "2023-06-30",
     priceToleranceDays: 7,
@@ -467,80 +463,6 @@ test("HIST-001 review B3 ruling: FY-end valuation with priceToleranceDays=7 uses
   assert.equal(beyondTolerance.valueDecimal, null);
   assert.equal(beyondTolerance.heldSecurityCount, 1);
   assert.equal(beyondTolerance.pricedSecurityCount, 0);
-});
-
-test("HIST-001 review B3 ruling: a total built ENTIRELY from cash (no security ever priced) that is NEGATIVE never renders as a portfolio value -- degrades to an honest gap", () => {
-  const facts: HistoricalValueSecurityFact[] = [
-    security({
-      transactions: [
-        {
-          id: "buy1",
-          type: "buy",
-          status: "posted",
-          localTradeDate: "2020-01-01",
-          tradeAt: "2020-01-01T00:00:00Z",
-          quantityDecimal: "10",
-          unitPriceDecimal: null,
-          reversesTransactionId: null,
-        },
-      ],
-      priceObservations: [], // never priced on this date
-    }),
-  ];
-  const cash: HistoricalValueCashFact[] = [
-    {
-      cashAccountId: "ca",
-      currencyCode: "AUD",
-      entries: [
-        {
-          id: "e1",
-          localDate: "2020-01-01",
-          signedAmountDecimal: "-500",
-          status: "posted",
-          reversesEntryId: null,
-        },
-      ],
-    },
-  ];
-  const point = computeHistoricalPortfolioValueAtDate({
-    baseCurrencyCode: "AUD",
-    portfolioTimezone: "Australia/Sydney",
-    now: "2026-08-25T00:00:00.000Z",
-    securities: facts,
-    cashAccounts: cash,
-    fxObservations: [],
-    date: "2020-06-01",
-  });
-  assert.equal(point.valueDecimal, null);
-  assert.equal(point.completeness, "partial");
-
-  // Sanity: a POSITIVE cash-only total (no security priced) is NOT
-  // suppressed by this guard -- only the negative case is nonsensical.
-  const positiveCash: HistoricalValueCashFact[] = [
-    {
-      cashAccountId: "ca",
-      currencyCode: "AUD",
-      entries: [
-        {
-          id: "e1",
-          localDate: "2020-01-01",
-          signedAmountDecimal: "500",
-          status: "posted",
-          reversesEntryId: null,
-        },
-      ],
-    },
-  ];
-  const positivePoint = computeHistoricalPortfolioValueAtDate({
-    baseCurrencyCode: "AUD",
-    portfolioTimezone: "Australia/Sydney",
-    now: "2026-08-25T00:00:00.000Z",
-    securities: facts,
-    cashAccounts: positiveCash,
-    fxObservations: [],
-    date: "2020-06-01",
-  });
-  assert.equal(positivePoint.valueDecimal, "500");
 });
 
 test("HIST-001 review fold: a THROWING deriveSharesHeldAtDate sets anyComponentMissing -- never silently reports the point as fully complete", () => {
@@ -602,7 +524,6 @@ test("HIST-001 review fold: a THROWING deriveSharesHeldAtDate sets anyComponentM
     portfolioTimezone: "Australia/Sydney",
     now: "2026-08-25T00:00:00.000Z",
     securities: [throwingSecurity, goodSecurity],
-    cashAccounts: [],
     fxObservations: [],
     date: "2020-06-01",
   });
@@ -610,46 +531,6 @@ test("HIST-001 review fold: a THROWING deriveSharesHeldAtDate sets anyComponentM
   // make this read as fully "complete" just because it silently dropped
   // out -- a real data-integrity gap, disclosed.
   assert.equal(point.valueDecimal, "50");
-  assert.equal(point.completeness, "partial");
-});
-
-test("HIST-001 review fold: a THROWING deriveCashBalanceAtDate sets anyComponentMissing -- never silently reports the point as fully complete", () => {
-  const goodSecurity = security({
-    portfolioSecurityId: "ps-good",
-    transactions: [
-      {
-        id: "buy-good",
-        type: "buy",
-        status: "posted",
-        localTradeDate: "2020-01-01",
-        tradeAt: "2020-01-01T00:00:00Z",
-        quantityDecimal: "10",
-        unitPriceDecimal: null,
-        reversesTransactionId: null,
-      },
-    ],
-    priceObservations: [priceObservation("2020-06-01", "5.00")],
-  });
-  const throwingCash: HistoricalValueCashFact[] = [
-    {
-      cashAccountId: "ca-throws",
-      currencyCode: "AUD",
-      // `null` entries array: `.filter()` throws inside
-      // `deriveCashBalanceAtDate` -- a deeper corruption than a single
-      // malformed entry (which that function already self-catches).
-      entries: null as unknown as [],
-    },
-  ];
-  const point = computeHistoricalPortfolioValueAtDate({
-    baseCurrencyCode: "AUD",
-    portfolioTimezone: "Australia/Sydney",
-    now: "2026-08-25T00:00:00.000Z",
-    securities: [goodSecurity],
-    cashAccounts: throwingCash,
-    fxObservations: [],
-    date: "2020-06-01",
-  });
-  assert.equal(point.valueDecimal, "50"); // the security's real value still counts
   assert.equal(point.completeness, "partial");
 });
 
@@ -674,10 +555,13 @@ async function migratedDatabase(): Promise<DatabaseSync> {
 
 /** One held security ("FMG") with SPARSE monthly closes 2016-2017 then
  * DAILY closes from 2020 onward -- the exact density-change shape the
- * owner's 18-file import produced. Plus a cash account flagged
- * `completeness = 'incomplete'` (real real-account shape found during
- * investigation) with a fully-known ledger balance, so the "value is not
- * understated" honesty fix has a concrete fixture to prove against. */
+ * owner's 18-file import produced. Also seeds a REAL cash account/ledger
+ * entry -- the ledger itself is retained (owner ruling, 2026-08-25: "Don't
+ * destroy the ledger, could be useful in future, but yes for now stocks
+ * only") -- deliberately present so the tests below can pin that this
+ * derivation truly never reads it (BUG-002 owner ruling: securities-only;
+ * see `domain/snapshots/historical-portfolio-value.ts`'s header), not just
+ * that it happens to compute the right number in its absence. */
 async function sparseHistoryFixture(): Promise<DatabaseSync> {
   const db = await migratedDatabase();
   db.exec(`
@@ -707,8 +591,9 @@ async function sparseHistoryFixture(): Promise<DatabaseSync> {
       ('price-2020-01','owner-import','user','a','a','mapping-owner-fmg','s-fmg','eod','2020-01-02T04:00:00Z','2020-01-02','Australia/Sydney','AUD','5.00','raw','observed','2026-08-24T00:00:00Z'),
       ('price-2020-02','owner-import','user','a','a','mapping-owner-fmg','s-fmg','eod','2020-01-03T04:00:00Z','2020-01-03','Australia/Sydney','AUD','5.10','raw','observed','2026-08-24T00:00:00Z');
 
-    -- Real-account shape: cash flagged completeness='incomplete' but the
-    -- ledger balance is fully known (400 posted).
+    -- A real cash account/ledger entry -- retained data (owner ruling), but
+    -- deliberately NEVER consumed by this securities-only derivation; the
+    -- tests below pin that its presence changes nothing.
     INSERT INTO cash_accounts(id,user_id,portfolio_id,currency_code,completeness,status) VALUES
       ('ca','a','pa','AUD','incomplete','active');
     INSERT INTO cash_ledger_entries(id,user_id,portfolio_id,cash_account_id,transaction_id,effective_at,local_effective_date,type,signed_amount_decimal,status,created_at) VALUES
@@ -717,7 +602,7 @@ async function sparseHistoryFixture(): Promise<DatabaseSync> {
   return db;
 }
 
-test("HIST-001: loadHistoricalPortfolioValueSeries -- sparse-monthly-then-daily series values only real observation dates, honestly, cash included", async () => {
+test("HIST-001/BUG-002: loadHistoricalPortfolioValueSeries -- sparse-monthly-then-daily series values only real observation dates, securities-only (a real cash account/ledger entry exists in the fixture but is never consumed)", async () => {
   const db = await sparseHistoryFixture();
   const client = createSqliteSqlClient(db);
   // "now" kept within a decade of 2016 so the sparse pre-2018 dates fall
@@ -740,15 +625,20 @@ test("HIST-001: loadHistoricalPortfolioValueSeries -- sparse-monthly-then-daily 
     result.points.map((point) => point.date),
     ["2016-01-31", "2016-02-29", "2020-01-02", "2020-01-03"],
   );
-  // 2016-01-31: 1000 shares * 2.00 + 400 cash = 2400.00
-  assert.equal(result.points[0]!.valueDecimal, "2400");
+  // BUG-002 owner ruling: securities-only -- 2016-01-31: 1000 shares * 2.00
+  // = 2000.00 (the fixture's own $400 cash ledger entry is deliberately
+  // NOT summed in). The security is fully priced on this exact date, so
+  // the point reads confidently "complete" regardless of the cash
+  // account's own `completeness = 'incomplete'` flag (that flag is simply
+  // never consulted here any more).
+  assert.equal(result.points[0]!.valueDecimal, "2000");
   assert.equal(result.points[0]!.completeness, "complete");
-  // 2020-01-02: 1000 * 5.00 + 400 = 5400.00
-  assert.equal(result.points[2]!.valueDecimal, "5400");
+  // 2020-01-02: 1000 * 5.00 = 5000.00
+  assert.equal(result.points[2]!.valueDecimal, "5000");
   assert.equal(result.datesTruncated, false);
 });
 
-test("HIST-001: loadHistoricalPortfolioValueAtDates -- targets specific FY-end dates against the same bounded fact set; a date with no observation on it reports an honest gap, never interpolated", async () => {
+test("HIST-001/BUG-002: loadHistoricalPortfolioValueAtDates -- targets specific FY-end dates against the same bounded fact set; a date with no observation on it reports an honest gap, never interpolated, and never falls back to the (retained but unconsumed) cash ledger", async () => {
   const db = await sparseHistoryFixture();
   const client = createSqliteSqlClient(db);
   const byDate = await loadHistoricalPortfolioValueAtDates(
@@ -760,16 +650,15 @@ test("HIST-001: loadHistoricalPortfolioValueAtDates -- targets specific FY-end d
   );
   assert.ok(byDate);
   if (!byDate) return;
-  assert.equal(byDate.get("2016-01-31")?.valueDecimal, "2400");
+  assert.equal(byDate.get("2016-01-31")?.valueDecimal, "2000");
   // 2016-06-30: no observation on this exact date for the SECURITY (between
   // the sparse Jan/Feb 2016 rows and the 2020 daily rows) -- an honest,
-  // disclosed PARTIAL point: the cash leg is still known (400, same
-  // currency, no FX needed) and is never dropped just because the security
-  // leg has a gap, but `completeness` flips to "partial" so the caller
-  // knows this total is real-but-understated, not a full snapshot.
-  assert.equal(byDate.get("2016-06-30")?.valueDecimal, "400");
+  // disclosed gap. BUG-002 owner ruling: this is now a genuine NULL/gap
+  // (never falls back to the fixture's own $400 cash ledger balance, which
+  // would have masked the gap under the OLD cash-inclusive derivation).
+  assert.equal(byDate.get("2016-06-30")?.valueDecimal, null);
   assert.equal(byDate.get("2016-06-30")?.completeness, "partial");
-  assert.equal(byDate.get("2020-01-02")?.valueDecimal, "5400");
+  assert.equal(byDate.get("2020-01-02")?.valueDecimal, "5000");
 });
 
 test("HIST-001 review: ownership isolation -- a cross-owner portfolio read is denied honestly (null), for BOTH loaders", async () => {
@@ -805,13 +694,14 @@ test("HIST-001 review: ownership isolation -- a cross-owner portfolio read is de
   assert.ok(seriesAsOwner);
 });
 
-test("HIST-001 review: MAX+1 fail-closed -- exceeding MAX_CASH_ACCOUNTS throws rather than silently truncating", async () => {
+test("HIST-001/BUG-002: a large number of cash accounts (well past the OLD MAX_CASH_ACCOUNTS cap this derivation used to enforce) never affects or fails this read -- cash_accounts is never queried at all", async () => {
   const db = await sparseHistoryFixture();
   // 50 MORE cash accounts (51 total including the fixture's own "ca") --
-  // one past MAX_CASH_ACCOUNTS. `cash_accounts` has a UNIQUE(portfolio_id,
-  // currency_code) constraint, so each needs its OWN currency code (and a
-  // matching `currencies` row for the FK) -- 50 synthetic 3-letter codes,
-  // none colliding with the fixture's own "AUD".
+  // one past the removed MAX_CASH_ACCOUNTS cap this module used to enforce
+  // when it still read `cash_accounts`. `cash_accounts` has a
+  // UNIQUE(portfolio_id, currency_code) constraint, so each needs its OWN
+  // currency code (and a matching `currencies` row for the FK) -- 50
+  // synthetic 3-letter codes, none colliding with the fixture's own "AUD".
   const codes = Array.from({ length: 50 }, (_, index) => {
     const first = String.fromCharCode(65 + Math.floor(index / 25));
     const second = String.fromCharCode(65 + (index % 25));
@@ -833,16 +723,19 @@ test("HIST-001 review: MAX+1 fail-closed -- exceeding MAX_CASH_ACCOUNTS throws r
     `INSERT INTO cash_accounts(id,user_id,portfolio_id,currency_code,completeness,status) VALUES ${accountRows};`,
   );
   const client = createSqliteSqlClient(db);
-  await assert.rejects(
-    () =>
-      loadHistoricalPortfolioValueSeries(
-        client,
-        "a",
-        "pa",
-        new Date("2020-06-01T00:00:00Z"),
-      ),
-    /too_many_cash_accounts/,
+  // BUG-002 owner ruling: securities-only -- this must succeed (no
+  // "too_many_cash_accounts"/any cash-related error) and read the SAME
+  // securities-only value as the sibling test above, proving cash_accounts
+  // is genuinely never consulted regardless of how many rows exist.
+  const result = await loadHistoricalPortfolioValueSeries(
+    client,
+    "a",
+    "pa",
+    new Date("2020-06-01T00:00:00Z"),
   );
+  assert.ok(result);
+  if (!result) return;
+  assert.equal(result.points[0]!.valueDecimal, "2000");
 });
 
 test("HIST-001 review fold: datesTruncated is set when the RANGE itself is clamped by the 10-year floor, even when the candidate-date COUNT never overflows", async () => {
@@ -971,7 +864,7 @@ async function multiYearFixture(): Promise<DatabaseSync> {
   return db;
 }
 
-test("HIST-001: Multi-Year historical FY rows are populated from the read-time derivation (one derivation, same as the graph) -- a genuinely unpriced FY-end date stays an honest gap, never fabricated", async () => {
+test("HIST-001/BUG-002: Multi-Year historical FY rows are populated from the read-time derivation (one derivation, same as the graph), securities-only -- a genuinely unpriced FY-end date stays an honest gap, never fabricated, and `multiYearFixture()`'s cash account (flagged 'incomplete') never taints an otherwise-fully-priced FY row", async () => {
   const db = await multiYearFixture();
   const client = createSqliteSqlClient(db);
   const projection = await loadOwnedIncomeProjection(
@@ -998,7 +891,7 @@ test("HIST-001: Multi-Year historical FY rows are populated from the read-time d
   assert.equal(fy24!.valueStatus, "unavailable");
 });
 
-test("HIST-001: the 'incorrect future years' fix -- currentPortfolioValueStatus is 'partial' solely from cash completeness (every security fully priced), so the disclosure honestly says so instead of falsely blaming unpriced holdings", async () => {
+test("HIST-001/BUG-002: currentPortfolioValueDecimal/portfolioValueStatus are securities-only -- the fixture's cash account (flagged 'incomplete', a real nonzero balance) no longer degrades the CURRENT figure at all (extends the historical 'incorrect future years' fix to the current-value read too, per the owner's 2026-08-25 ruling: 'give the value of the stock portfolio, no magic negative cash or anything')", async () => {
   const db = await multiYearFixture();
   const client = createSqliteSqlClient(db);
   const projection = await loadOwnedIncomeProjection(
@@ -1007,29 +900,55 @@ test("HIST-001: the 'incorrect future years' fix -- currentPortfolioValueStatus 
     "pa",
     new Date("2026-08-13T08:00:00Z"),
   );
-  assert.equal(projection.portfolioValueStatus, "partial");
+  // 100 shares * $10.00 (the fixture's 'price-now' row) = $1000 --
+  // securities-only, no cash summed in, and no longer degraded to
+  // "partial" by the cash account's own completeness flag.
+  assert.equal(projection.currentPortfolioValueDecimal, "1000");
+  assert.equal(projection.portfolioValueStatus, "available");
   assert.equal(projection.multiYear.ok, true);
   if (!projection.multiYear.ok) return;
   assert.equal(
     projection.multiYearBaselineInput!.assumptions.currentPortfolioValueStatus,
-    "partial",
+    "available",
   );
-  const reason =
+  assert.equal(
     projection.multiYearBaselineInput!.assumptions
-      .currentPortfolioValuePartialReason;
-  assert.ok(reason, "expected a partial reason to be computed");
-  // THE FIX: the real cause is cash-history completeness, not unpriced
-  // holdings (the fixture's one held security has a current price) -- the
-  // OLD blanket claim was the "N held securities are unpriced" shape;
-  // that specific claim must NOT appear here (0 securities are actually
-  // unpriced in this fixture).
-  assert.doesNotMatch(reason!, /held (?:security is|securities are) unpriced/);
-  assert.match(reason!, /not understated/);
-  // The row's own method string carries the SAME honest reason (DIV-011's
-  // "survive standalone consumption" precedent).
+      .currentPortfolioValuePartialReason,
+    null,
+  );
+  // The row's own method string carries no partial-value caveat at all --
+  // status is "available", so `projectMultiYearIncome`'s own conditional
+  // clause for that text never fires (see its own doc comment).
   for (const row of projection.multiYear.rows) {
-    assert.match(row.method, /current portfolio value is partial/);
+    assert.doesNotMatch(row.method, /current portfolio value is partial/);
     assert.doesNotMatch(row.method, /some holdings are unpriced/);
+  }
+  // BUG-002 owner-visible pin: this fixture's cash account is flagged
+  // `completeness = 'incomplete'` -- under the OLD (pre-owner-ruling)
+  // cash-inclusive derivation that flag would have degraded every
+  // Multi-Year past-FY row to "unavailable" (the 2-state fails-closed
+  // contract in `app/owned-income-projection.ts` never presents a
+  // "partial" figure as confident) AND the current-FY row too. Since both
+  // the historical AND current derivations are now securities-only, that
+  // flag is never even consulted here -- the FY23 row (exactly priced, 100
+  // shares * $8) reads AVAILABLE with its real securities-only value, and
+  // the current-FY row sits coherently ABOVE it (a growing portfolio),
+  // proving cash completeness genuinely cannot reach either path any more.
+  const pastRows = projection.pastFinancialYears;
+  assert.equal(pastRows.ok, true);
+  if (pastRows.ok) {
+    const fy23 = pastRows.rows.find((row) => row.endingYear === 2023);
+    assert.ok(fy23, "expected an FY23 row");
+    assert.equal(fy23!.valueStatus, "available");
+    assert.equal(fy23!.portfolioValueDecimal, "800");
+  }
+  assert.equal(projection.currentFinancialYear.ok, true);
+  if (projection.currentFinancialYear.ok) {
+    assert.equal(
+      projection.currentFinancialYear.row.portfolioValueDecimal,
+      "1000",
+    );
+    assert.equal(projection.currentFinancialYear.row.valueStatus, "available");
   }
 });
 
@@ -1062,16 +981,20 @@ test("HIST-001: existing DIV-011 fallback wording is preserved byte-identical wh
   );
 });
 
-test("HIST-001 review fold: an UNCONVERTED (FX-missing) cash account genuinely understates the current value -- the disclosure says so, distinct from the non-understating 'incomplete' cash-history case", async () => {
+test("HIST-001/BUG-002: an UNCONVERTED (FX-missing) cash account no longer affects currentPortfolioValueDecimal/portfolioValueStatus AT ALL -- cash is out of scope for this figure regardless of WHY it's incomplete (a genuine conversion failure, not just a completeness flag)", async () => {
   const db = await multiYearFixture();
   db.exec(`
     INSERT INTO currencies(code,numeric_code,name,minor_unit_digits) VALUES('USD',840,'US dollar',2);
     -- A SECOND, foreign-currency cash account with a real nonzero balance
-    -- but NO fx_rate_observations row for AUD/USD anywhere -- the ONLY way
-    -- loadOwnedHoldings's loadCash fails to CONVERT (as opposed to the
-    -- pre-existing 'ca' account's completeness='incomplete' flag, which
-    -- does NOT fail conversion at all, since AUD is already the base
-    -- currency).
+    -- but NO fx_rate_observations row for AUD/USD anywhere -- previously
+    -- the ONE way loadOwnedHoldings's loadCash fails to CONVERT (as
+    -- opposed to the pre-existing 'ca' account's completeness='incomplete'
+    -- flag, which never failed conversion at all, since AUD is already the
+    -- base currency). BUG-002: since cash is no longer summed into
+    -- currentPortfolioValueDecimal AT ALL, neither cash-shaped gap can
+    -- reach it any more -- this test now proves that for the STRICTER,
+    -- genuinely-value-understating cash gap too, not just the completeness
+    -- flag (already covered by the sibling test above).
     INSERT INTO cash_accounts(id,user_id,portfolio_id,currency_code,completeness,status) VALUES
       ('ca-usd','a','pa','USD','complete','active');
     INSERT INTO cash_ledger_entries(id,user_id,portfolio_id,cash_account_id,transaction_id,effective_at,local_effective_date,type,signed_amount_decimal,status,created_at) VALUES
@@ -1084,18 +1007,48 @@ test("HIST-001 review fold: an UNCONVERTED (FX-missing) cash account genuinely u
     "pa",
     new Date("2026-08-13T08:00:00Z"),
   );
-  assert.equal(projection.portfolioValueStatus, "partial");
+  // Still exactly the securities-only $1000 -- the unconverted $200 USD
+  // cash account contributes nothing and blocks nothing.
+  assert.equal(projection.currentPortfolioValueDecimal, "1000");
+  assert.equal(projection.portfolioValueStatus, "available");
   assert.equal(projection.multiYear.ok, true);
   if (!projection.multiYear.ok) return;
-  const reason =
+  assert.equal(
     projection.multiYearBaselineInput!.assumptions
-      .currentPortfolioValuePartialReason;
-  assert.ok(reason);
-  // THE FIX: an unconverted cash account IS a real value-understating gap
-  // -- named explicitly, never folded into the generic "not understated"
-  // fallback the pure cash-history-completeness case uses.
-  assert.match(reason!, /cash .*could not convert to the base currency/);
-  assert.doesNotMatch(reason!, /not understated/);
+      .currentPortfolioValuePartialReason,
+    null,
+  );
+});
+
+test("HIST-001/BUG-002: a DEEPLY NEGATIVE cash balance (the real owner account's exact shape -- an 'incomplete' account with only debits, no offsetting deposit ever recorded) never reaches currentPortfolioValueDecimal -- the headline reads the honest securities-only figure, not a huge negative number, and is not degraded to 'partial'", async () => {
+  const db = await multiYearFixture();
+  // Replace the fixture's modest cash entry with a large negative balance
+  // -- the real account investigated for this task had a NET -$830,082.54
+  // running balance (107 entries, all debits, zero deposits).
+  db.exec(`
+    UPDATE cash_ledger_entries SET signed_amount_decimal = '-830082.54' WHERE id = 'cle1';
+  `);
+  const client = createSqliteSqlClient(db);
+  const projection = await loadOwnedIncomeProjection(
+    client,
+    "a",
+    "pa",
+    new Date("2026-08-13T08:00:00Z"),
+  );
+  // 100 shares * $10.00 = $1000 -- exactly as with the fixture's ORIGINAL,
+  // modest cash entry above; the magnitude/sign of the cash balance makes
+  // NO difference at all, because it is never read for this figure.
+  assert.equal(projection.currentPortfolioValueDecimal, "1000");
+  assert.equal(projection.portfolioValueStatus, "available");
+});
+
+test("HIST-001/BUG-002: app/owned-income-projection.ts sources currentPortfolioValueDecimal from cash.securitiesSubtotal, never cash.knownTotal (source pin -- knownTotal still includes cash, and is otherwise unused)", async () => {
+  const source = await readFile(
+    new URL("../app/owned-income-projection.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /holdings\.cash\.securitiesSubtotal/);
+  assert.doesNotMatch(source, /holdings\.cash\.knownTotal/);
 });
 
 // ---------------------------------------------------------------------------
@@ -1262,6 +1215,102 @@ test("HIST-001 review B2b: a PARTIAL point renders VISUALLY DISTINCT from a comp
   assert.match(html, /partial \(2\/3 held securities priced\)/);
 });
 
+/** BUG-002 determinism pin: renders the SAME props TWICE, in the SAME
+ * subprocess invocation, and returns both markups -- catches any render-
+ * time non-determinism (`new Date()`/`Date.now()`/`Math.random()`, a
+ * default-locale `toLocaleString()`/`toLocaleDateString()` call, or any
+ * other impure read) that could make a client hydration re-render diverge
+ * from the server-rendered markup for identical props, per React's own
+ * hydration-mismatch warning ("Variable input such as Date.now() or
+ * Math.random() which changes each time it's called"). */
+function renderComponentTwice(
+  componentName: string,
+  componentPath: string,
+  props: unknown,
+): { first: string; second: string } {
+  const componentUrl = new URL(componentPath, import.meta.url).href;
+  const script = `
+    import { createElement } from "react";
+    import { renderToStaticMarkup } from "react-dom/server";
+    import { ${componentName} } from ${JSON.stringify(componentUrl)};
+    const props = ${JSON.stringify(props)};
+    const first = renderToStaticMarkup(createElement(${componentName}, props));
+    const second = renderToStaticMarkup(createElement(${componentName}, props));
+    process.stdout.write(JSON.stringify({ first, second }));
+  `;
+  const output = execFileSync(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "--eval", script],
+    { encoding: "utf8" },
+  );
+  return JSON.parse(output) as { first: string; second: string };
+}
+
+test("HIST-001/BUG-002 determinism pin: PortfolioValueChart renders BYTE-IDENTICAL markup across two renders of the SAME props (server-render-vs-hydration shape) -- guards against a stray new Date()/Date.now()/Math.random()/default-locale call reintroducing the Overview hydration-mismatch class of bug", () => {
+  const { first, second } = renderComponentTwice(
+    "PortfolioValueChart",
+    "../app/components/portfolio-value-chart.tsx",
+    {
+      history: {
+        status: "ok",
+        baseCurrencyCode: "AUD",
+        points: [
+          {
+            date: "2018-01-31",
+            valueDecimal: "5000.00",
+            completeness: "complete",
+            heldSecurityCount: 1,
+            pricedSecurityCount: 1,
+          },
+          {
+            date: "2020-06-30",
+            valueDecimal: "6000.00",
+            completeness: "partial",
+            heldSecurityCount: 2,
+            pricedSecurityCount: 1,
+          },
+          {
+            date: "2026-08-24",
+            valueDecimal: "10000.00",
+            completeness: "complete",
+            heldSecurityCount: 1,
+            pricedSecurityCount: 1,
+          },
+        ],
+        datesTruncated: true,
+      },
+      financialYearStartMonth: 7,
+      timezone: "Australia/Sydney",
+      nowInstant: "2026-08-25T04:00:00.000Z",
+    },
+  );
+  assert.equal(first, second);
+  // Sanity: this genuinely exercised the populated-chart branch, not one of
+  // the early-return empty/unavailable states (which would trivially match).
+  assert.match(first, /<svg/);
+});
+
+/** Strips line comments and block comments before a source-regex scan --
+ * several doc comments in this codebase deliberately DESCRIBE a forbidden
+ * pattern in prose (e.g. "never new Date() inside a client component"),
+ * which would otherwise false-positive a raw-text scan for that same
+ * pattern. */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
+
+test("HIST-001/BUG-002 determinism pin (source scan): PortfolioValueChart never calls Date.now()/Math.random(), and never a BARE (argument-less, i.e. wall-clock) new Date() -- the render-twice test above only proves determinism for the props it happens to cover; this proves the class of impurity itself is absent from the source. A `new Date(dateString)` parse of an ALREADY-FIXED date string (this file's own `chartDate` helper) is deliberately allowed -- that is deterministic, not a wall-clock read.", async () => {
+  const source = stripComments(
+    await readFile(
+      new URL("../app/components/portfolio-value-chart.tsx", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.doesNotMatch(source, /Date\.now\(/);
+  assert.doesNotMatch(source, /Math\.random\(/);
+  assert.doesNotMatch(source, /new Date\(\)/);
+});
+
 // ---------------------------------------------------------------------------
 // Part 7: review B1 compute-bound pin -- realistic-scale performance.
 // ---------------------------------------------------------------------------
@@ -1411,4 +1460,135 @@ test("HIST-001 review B1 compute-bound pin: 18 securities x ~1,500 shared tradin
   console.log(
     `HIST-001 B1 measurement: ${elapsedMs.toFixed(0)}ms elapsed, ${rowsRead()} total rows read for an 18-security/~1,500-date Overview load.`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Part 8 (BUG-002, owner ruling 2026-08-25, verbatim: "How is cash handled.
+// First step is to make it work for the stocks, give the value of the stock
+// portfolio. No magic negative cash or anything."): this derivation is
+// SECURITIES-ONLY. An earlier version of this task threaded
+// `cash_accounts.completeness` through so an account flagged 'incomplete'
+// degraded a historical point -- investigation on the real account found
+// the true problem one level up: that account's ledger has NO reliable
+// opening balance at all (over $800k of net debits, zero recorded
+// deposits), so REPLAYING it at every past date produced a large, growing,
+// and fundamentally not-a-balance negative number that dragged every
+// historical total down to a misleadingly small or negative figure -- no
+// confidence label could make that number honest. The owner ruled the
+// derivation should not attempt cash at all for now (ledger data itself is
+// RETAINED, not deleted -- see `docs/CALCULATIONS.md`'s HIST-001
+// subsection). These tests pin that a cash account/ledger entry, however
+// it's shaped, can never affect a computed point.
+// ---------------------------------------------------------------------------
+
+test("HIST-001/BUG-002: computeHistoricalPortfolioValueAtDate has no cashAccounts parameter at all -- securities-only by construction, not by a value happening to net to zero", () => {
+  const security: HistoricalValueSecurityFact = {
+    portfolioSecurityId: "ps",
+    currencyCode: "AUD",
+    transactions: [
+      {
+        id: "t1",
+        type: "buy",
+        status: "posted",
+        localTradeDate: "2020-01-01",
+        tradeAt: "2020-01-01T00:00:00Z",
+        quantityDecimal: "100",
+        unitPriceDecimal: null,
+        reversesTransactionId: null,
+      },
+    ],
+    priceObservations: [priceObservation("2020-06-30", "10.00")],
+  };
+  const point = computeHistoricalPortfolioValueAtDate({
+    baseCurrencyCode: "AUD",
+    portfolioTimezone: "Australia/Sydney",
+    now: "2026-08-25T00:00:00.000Z",
+    securities: [security],
+    fxObservations: [],
+    date: "2020-06-30",
+  });
+  // 100 shares * $10.00 = $1000.00 -- exactly the securities-only figure,
+  // never reduced by any cash leg (there is no parameter to supply one).
+  assert.equal(point.valueDecimal, "1000");
+  assert.equal(point.completeness, "complete");
+});
+
+test("HIST-001/BUG-002: app/historical-portfolio-value.ts never queries cash_accounts/cash_ledger_entries at all (source pin) -- a deeply-negative real cash ledger cannot silently resurface here", async () => {
+  const source = await readFile(
+    new URL("../app/historical-portfolio-value.ts", import.meta.url),
+    "utf8",
+  );
+  // SQL-shaped patterns only -- distinct from the module's own explanatory
+  // prose (its header/inline comments name these tables to document that
+  // they are deliberately NOT read).
+  assert.doesNotMatch(source, /FROM cash_accounts/);
+  assert.doesNotMatch(source, /FROM cash_ledger_entries/);
+  assert.doesNotMatch(source, /JOIN cash_accounts/);
+  assert.doesNotMatch(source, /JOIN cash_ledger_entries/);
+});
+
+test("HIST-001/BUG-002: domain/snapshots/historical-portfolio-value.ts has no cash-shaped types, fields, or logic left (source pin) -- the header's own explanation of the owner ruling is the only place the word 'cash' may still appear", async () => {
+  const source = await readFile(
+    new URL(
+      "../domain/snapshots/historical-portfolio-value.ts",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /HistoricalValueCashFact/);
+  assert.doesNotMatch(source, /cashAccounts/);
+  assert.doesNotMatch(source, /deriveCashBalanceAtDate/);
+  assert.doesNotMatch(source, /calculateCashConversion/);
+  assert.doesNotMatch(source, /LedgerCashFact/);
+  assert.doesNotMatch(source, /cashHistoryIncomplete/);
+});
+
+test("HIST-001/BUG-002: loadHistoricalPortfolioValueAtDates -- a real, deeply-negative cash ledger in the DB (the exact real-account shape investigation found) never reaches the computed point", async () => {
+  const db = await migratedDatabase();
+  db.exec(`
+    INSERT INTO currencies(code,numeric_code,name,minor_unit_digits) VALUES('AUD',36,'Australian dollar',2);
+    INSERT INTO users(id,status,primary_email,timezone,created_at,updated_at) VALUES
+      ('a','active','a@example.test','Australia/Sydney','2026-08-01','2026-08-01');
+    INSERT INTO user_settings(user_id,home_currency_code,timezone,financial_year_start_month,created_at,updated_at,version) VALUES
+      ('a','AUD','Australia/Sydney',7,'2026-08-01','2026-08-01',1);
+    INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at) VALUES
+      ('pa','a','A','A portfolio','AUD','Australia/Sydney','fifo','active','2026-08-01','2026-08-01');
+    INSERT INTO exchanges (id,mic,name,country_code,timezone,calendar_code) VALUES
+      ('asx','XASX','Australian Securities Exchange','AU','Australia/Sydney','XASX');
+    INSERT INTO securities(id,asset_type,exchange_id,primary_currency_code,canonical_name,created_at,updated_at) VALUES
+      ('s','equity','asx','AUD','Priced Co','2026-08-01','2026-08-01');
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at) VALUES
+      ('ps','a','pa','s','S','AUD','held','2026-08-01','2026-08-01');
+    INSERT INTO security_provider_mappings (id,security_id,provider_id,provider_exchange,provider_symbol,valid_from,status) VALUES
+      ('mapping-s','s','owner-import','ASX','S','2020-01-01','verified');
+    INSERT INTO transactions(id,user_id,portfolio_id,portfolio_security_id,type,status,trade_at,local_trade_date,quantity_decimal,unit_price_decimal,currency_code,gross_amount_decimal,fee_amount_decimal,tax_amount_decimal,source_type,created_by_user_id,calculation_version,created_at) VALUES
+      ('tx1','a','pa','ps','buy','posted','2020-01-01T00:00:00Z','2020-01-01','100','5','AUD','500','0','0','manual','a',1,'2020-01-01');
+    INSERT INTO price_observations (id,provider_id,access_scope,scope_user_id,scope_key,mapping_id,security_id,interval,observation_at,market_date,market_timezone,currency_code,close_decimal,adjustment_state,quality,ingested_at) VALUES
+      ('price1','owner-import','user','a','a','mapping-s','s','eod','2020-06-30T04:00:00Z','2020-06-30','Australia/Sydney','AUD','10.00','raw','observed','2026-08-24T00:00:00Z');
+    -- Real-account shape: a cash ledger with no offsetting deposit ever
+    -- recorded (only debits) -- exactly what investigation found on the
+    -- real account (over $800k net negative). This derivation must never
+    -- touch it.
+    INSERT INTO cash_accounts(id,user_id,portfolio_id,currency_code,completeness,status) VALUES
+      ('ca','a','pa','AUD','incomplete','active');
+    INSERT INTO cash_ledger_entries(id,user_id,portfolio_id,cash_account_id,transaction_id,effective_at,local_effective_date,type,signed_amount_decimal,status,created_at) VALUES
+      ('cle1','a','pa','ca',NULL,'2020-01-01T00:00:00Z','2020-01-01','cash_withdrawal','-5000000','posted','2020-01-01');
+  `);
+  const client = createSqliteSqlClient(db);
+  const byDate = await loadHistoricalPortfolioValueAtDates(
+    client,
+    "a",
+    "pa",
+    ["2020-06-30"],
+    new Date("2026-08-25T00:00:00Z"),
+  );
+  assert.ok(byDate);
+  if (!byDate) return;
+  const point = byDate.get("2020-06-30");
+  // 100 shares * $10.00 = $1000.00 -- NOT dragged to a huge negative
+  // number by the $5,000,000-negative cash ledger sitting right there in
+  // the DB, and confidently "available"/"complete" (the security is fully
+  // priced; the cash account's own 'incomplete' flag is irrelevant here).
+  assert.equal(point?.valueDecimal, "1000");
+  assert.equal(point?.completeness, "complete");
 });

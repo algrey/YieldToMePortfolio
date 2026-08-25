@@ -415,10 +415,15 @@ test("DIV-011: no held security has a usable 12-month forecast -- the multi-year
     INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at) VALUES
       ('pa','a','A','A portfolio','AUD','Australia/Sydney','fifo','active','2026-08-01','2026-08-01');
     -- Cash-only: loadOwnedHoldings takes its early cash-only return path
-    -- (no projection_publications/calculation_runs needed), giving a
-    -- real, known, non-zero portfolio value with ZERO held securities --
-    -- isolating "value known, no forecast coverage" (this test) from "value
-    -- unknown" (a different, already-covered typed reason).
+    -- (no projection_publications/calculation_runs needed) -- isolating
+    -- "value known, no forecast coverage" (this test) from "value unknown"
+    -- (a different, already-covered typed reason). BUG-002 owner ruling:
+    -- currentPortfolioValueDecimal is now securities-only, so this
+    -- cash-only portfolio's real value is an honest "$0" (zero securities
+    -- held is a KNOWN fact, not a gap -- the same convention a fully-SOLD
+    -- portfolio already used) -- the $5000 cash balance no longer appears
+    -- in it at all (it stays a real, retained cash fact, just not part of
+    -- THIS figure any more).
     INSERT INTO cash_accounts(id,user_id,portfolio_id,currency_code,completeness,status) VALUES
       ('ca','a','pa','AUD','complete','active');
     INSERT INTO cash_ledger_entries(id,user_id,portfolio_id,cash_account_id,transaction_id,effective_at,local_effective_date,type,signed_amount_decimal,status,created_at) VALUES
@@ -432,9 +437,9 @@ test("DIV-011: no held security has a usable 12-month forecast -- the multi-year
     new Date("2026-08-13T08:00:00Z"),
   );
   // No held securities at all -- an "empty" portfolio, never a fabricated
-  // projection, but a real known (cash-only) value.
+  // projection, but a real known (securities-only) value.
   assert.equal(projection.status, "empty");
-  assert.equal(projection.currentPortfolioValueDecimal, "5000");
+  assert.equal(projection.currentPortfolioValueDecimal, "0");
   assert.equal(projection.portfolioValueStatus, "available");
   assert.equal(projection.breakdown.status, "no_coverage");
   assert.deepEqual(projection.multiYear, {

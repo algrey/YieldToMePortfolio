@@ -1307,11 +1307,15 @@ test("B3: a portfolio with a known (cash-only) value but no security at all repo
   const db = await serviceFixture();
   // The zero-held-securities "pe" portfolio takes `loadOwnedHoldings`'s
   // early cash-only return path (no `projection_publications`/
-  // `calculation_runs` needed at all), so a real, known, non-zero portfolio
-  // value is achievable here without standing up the full holdings pipeline
-  // -- isolating "value known, yield coverage impossible" (there are no
-  // securities to resolve a yield for) from "value unknown" (B3's other
-  // typed reason, covered by the previous test).
+  // `calculation_runs` needed at all) -- isolating "value known, yield
+  // coverage impossible" (there are no securities to resolve a yield for)
+  // from "value unknown" (B3's other typed reason, covered by the previous
+  // test). BUG-002 owner ruling: `currentPortfolioValueDecimal` is now
+  // securities-only, so this cash-only portfolio's real value is an honest
+  // "$0" (zero securities held is a KNOWN fact, not a gap -- the same
+  // convention a fully-sold portfolio already used) -- the $5000 cash
+  // balance no longer appears in it at all (it stays a real, retained cash
+  // fact, just not part of THIS figure any more).
   db.exec(`
     INSERT INTO cash_accounts(id,user_id,portfolio_id,currency_code,completeness,status) VALUES
       ('ca-e','a','pe','AUD','complete','active');
@@ -1325,7 +1329,7 @@ test("B3: a portfolio with a known (cash-only) value but no security at all repo
     "pe",
     new Date("2026-08-13T00:00:00Z"),
   );
-  assert.equal(projection.currentPortfolioValueDecimal, "5000");
+  assert.equal(projection.currentPortfolioValueDecimal, "0");
   assert.equal(projection.portfolioValueStatus, "available");
   assert.equal(projection.aggregateYield.status, "no_coverage");
   assert.deepEqual(projection.multiYear, {

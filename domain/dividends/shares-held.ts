@@ -154,14 +154,23 @@ export function deriveSharesHeldAtDate(
 }
 
 // HIST-001: sibling reconstruction for a cash ACCOUNT's running balance at an
-// arbitrary historical date, from raw `cash_ledger_entries` facts -- reused
-// alongside `deriveSharesHeldAtDate` above so the historical-portfolio-value
-// derivation (`domain/snapshots/historical-portfolio-value.ts`) can honestly
+// arbitrary historical date, from raw `cash_ledger_entries` facts. Mirrors
+// `deriveSharesHeldAtDate`'s exclusion pattern: a reversed entry (`status
+// !== "posted"`) and the reversal record that points at it both contribute
+// zero.
+//
+// BUG-002: originally also reused by the historical-portfolio-value
+// derivation (`domain/snapshots/historical-portfolio-value.ts`) so it could
 // reconstruct "securities + cash" at a past date the SAME way
-// `app/owned-holdings.ts`'s `loadCash` sums entries for "now" -- one summing
-// rule, two callers. Mirrors `deriveSharesHeldAtDate`'s exclusion pattern: a
-// reversed entry (`status !== "posted"`) and the reversal record that points
-// at it both contribute zero.
+// `app/owned-holdings.ts`'s `loadCash` sums entries for "now". That
+// derivation is now securities-only (owner ruling, 2026-08-25 -- see
+// `docs/CALCULATIONS.md`'s HIST-001 subsection), so this function has NO
+// production consumer any more (a repo-wide grep finds none outside this
+// file; `tests/hist-001.test.ts`'s Part 1 still exercises it directly).
+// Deliberately KEPT, not deleted in a dead-code sweep: the owner's ruling
+// was to narrow what the "portfolio value" figure reads, not to remove the
+// cash ledger or its derivation logic ("don't destroy the ledger, could be
+// useful in future").
 export type LedgerCashFact = {
   id: string;
   /** Local calendar date (YYYY-MM-DD) the entry is effective on -- used for the `asOfDate` cutoff filter, matching `LedgerQuantityFact.localTradeDate`. */

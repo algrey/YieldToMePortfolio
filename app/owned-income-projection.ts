@@ -163,86 +163,55 @@ export async function loadOwnedIncomeProjection(
     holdings = null;
   }
   const baseCurrencyCode = holdings?.homeCurrencyCode ?? null;
+  // BUG-002 owner ruling (2026-08-25, verbatim: "How is cash handled. First
+  // step is to make it work for the stocks, give the value of the stock
+  // portfolio. No magic negative cash or anything."): extended from the
+  // historical derivation (`app/historical-portfolio-value.ts`) to the
+  // CURRENT portfolio-value figure too -- every surface labelled/
+  // functioning as "portfolio value" is securities-only for now. Sourced
+  // from `holdings.cash.securitiesSubtotal` (the securities-only subtotal
+  // `app/owned-holdings.ts` already computes internally, NOT
+  // `.knownTotal`, which additionally sums cash). `app/owned-holdings.ts`
+  // itself, `loadCash`, and every cash-specific consumer (the cash ledger,
+  // its own screens) are UNTOUCHED -- this narrows only what THIS figure
+  // reads, never deletes or degrades cash data.
   const currentPortfolioValueDecimal =
     holdings !== null && holdings.status !== "unavailable"
-      ? (holdings.cash.knownTotal ?? null)
+      ? (holdings.cash.securitiesSubtotal ?? null)
       : null;
-  // Review finding B2: `holdings.status` distinguishes "complete" from
-  // "partial" (some holdings unpriced, but a real known total exists) --
-  // both used to collapse into a single "available" here, presenting an
-  // understated partial total with full confidence. If, defensively, no
-  // total actually came through despite a non-degraded status, the status
-  // is forced back to "unavailable" so the two fields can never disagree.
+  // BUG-002: isolates the ONE gap that can understate the NOW-securities-
+  // only `currentPortfolioValueDecimal` -- a held security whose home
+  // VALUE (not basis, not cash) never converted. Computed BEFORE the
+  // status below so the status itself can be based on this signal
+  // directly, rather than the coarser `holdings.status` (which also flips
+  // "partial" for a cash account's own `completeness` flag or a held
+  // security's cost BASIS being unavailable -- neither of which affects
+  // this VALUE figure at all, the exact "incorrect future years"
+  // misattribution HIST-001 originally fixed for cash and now closes for
+  // basis too, by construction rather than a second special case).
+  const securitiesValueGapCount =
+    holdings !== null
+      ? Math.max(0, holdings.coverage.nonZero - holdings.coverage.converted)
+      : 0;
   const holdingsPortfolioValueStatus: PortfolioValueStatus =
     holdings === null
       ? "unavailable"
-      : holdings.status === "complete"
-        ? "available"
-        : holdings.status === "partial"
-          ? "partial"
-          : "unavailable";
+      : securitiesValueGapCount > 0
+        ? "partial"
+        : "available";
   const portfolioValueStatus: PortfolioValueStatus =
     currentPortfolioValueDecimal === null
       ? "unavailable"
       : holdingsPortfolioValueStatus;
   const portfolioValueCoverage: PortfolioValueCoverage | null =
     holdings?.coverage ?? null;
-  // HIST-001 (owner-reported "incorrect numbers for future years"):
-  // `portfolioValueStatus === "partial"` used to ALWAYS render as "some
-  // holdings are unpriced" downstream (`domain/dividends/projection.ts`'s
-  // method text, `income-multi-year.tsx`'s summary line) -- but
-  // `holdings.status` (the source of `portfolioValueStatus`) also flips to
-  // "partial" whenever `holdings.cash.status !== "complete"` (e.g. a cash
-  // account flagged `completeness = 'incomplete'`, a provenance caveat
-  // wholly unrelated to security pricing) OR a held security's cost BASIS
-  // is unavailable (`homeBasis`, which `currentPortfolioValueDecimal` never
-  // reads at all). Investigation on the real account found exactly the
-  // first case: 18/18 held securities fully priced, `portfolioValueStatus`
-  // "partial" solely from the cash account's completeness flag -- the OLD
-  // blanket copy told the owner their future-year numbers were understated
-  // because of unpriced holdings when nothing was actually unpriced,
-  // reading as "incorrect" even though the dollar figure itself was the
-  // full, correct total. `securitiesValueGapCount` isolates the ONE gap
-  // that genuinely understates `currentPortfolioValueDecimal` (a held
-  // security whose home VALUE -- not basis -- never converted); when it is
-  // zero, the disclosure says so honestly instead of naming a cause that
-  // is not real.
-  const securitiesValueGapCount =
-    holdings !== null
-      ? Math.max(0, holdings.coverage.nonZero - holdings.coverage.converted)
-      : 0;
-  // Review fold (HIST-001): a NONZERO cash account that failed to CONVERT
-  // (`cash.coverage.nonZero - cash.coverage.converted`, the SAME
-  // converted-vs-nonZero shape as `securitiesValueGapCount` above, sourced
-  // from `app/owned-holdings.ts`'s `loadCash` own coverage counts) DOES
-  // genuinely understate `currentPortfolioValueDecimal` -- real dollars are
-  // missing from the sum, not merely a provenance caveat. This is
-  // DIFFERENT from `cash.status !== "complete"` alone (which also flips
-  // for the `completeness = 'incomplete'` flag even when every account's
-  // balance summed and converted fine -- the real account this task
-  // investigated hit exactly that non-understating case). Only an actual
-  // conversion failure belongs in the "understated" branch below.
-  const cashValueGapCount =
-    holdings !== null
-      ? Math.max(
-          0,
-          holdings.cash.coverage.nonZero - holdings.cash.coverage.converted,
-        )
-      : 0;
+  // BUG-002: since `portfolioValueStatus` can now ONLY be "partial" via a
+  // security value-conversion gap (never cash, never basis -- see above),
+  // the reason is always exactly that gap; no cash-shaped or generic
+  // "other data incomplete" fallback clause is reachable any more.
   const currentPortfolioValuePartialReason: string | null =
     portfolioValueStatus === "partial"
-      ? securitiesValueGapCount > 0 || cashValueGapCount > 0
-        ? [
-            securitiesValueGapCount > 0
-              ? `${securitiesValueGapCount} held ${securitiesValueGapCount === 1 ? "security is" : "securities are"} unpriced`
-              : null,
-            cashValueGapCount > 0
-              ? `${cashValueGapCount} cash ${cashValueGapCount === 1 ? "account" : "accounts"} could not convert to the base currency`
-              : null,
-          ]
-            .filter((clause): clause is string => clause !== null)
-            .join(" and ")
-        : "other portfolio data (cash history or cost-basis provenance) is incomplete -- the value total itself is not understated by unpriced holdings or unconverted cash"
+      ? `${securitiesValueGapCount} held ${securitiesValueGapCount === 1 ? "security is" : "securities are"} unpriced`
       : null;
 
   // Fall back to the portfolio's own base currency for aggregation scope
@@ -544,11 +513,13 @@ export async function loadOwnedIncomeProjection(
           const point = valuesByDate.get(endDate);
           // `historicalPortfolioValueByYear` (and `computePastFinancialYearRows`
           // downstream) is a 2-state contract (available/unavailable) with
-          // no "partial" row state -- a PARTIAL point (e.g. cash known but
-          // the held security genuinely unpriced on this exact FY-end date)
-          // must never be presented as a confident, fully-known figure.
-          // Fails closed to "unavailable" for that year rather than
-          // silently upgrading a partial sum into an apparently-solid one.
+          // no "partial" row state -- a PARTIAL point (e.g. a held security
+          // genuinely unpriced on this exact FY-end date; BUG-002 owner
+          // ruling: this derivation is securities-only, so cash is never a
+          // cause -- see `app/historical-portfolio-value.ts`'s header) must
+          // never be presented as a confident, fully-known figure. Fails
+          // closed to "unavailable" for that year rather than silently
+          // upgrading a partial sum into an apparently-solid one.
           historicalPortfolioValueByYear.set(
             endingYear,
             point?.completeness === "complete" ? point.valueDecimal : null,

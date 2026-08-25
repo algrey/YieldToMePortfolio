@@ -24,10 +24,17 @@
  * Measured read budget (review fold; see `docs/ARCHITECTURE.md` §9.1 and
  * tests/hist-001.test.ts's B1 compute-bound pin for the full record): an
  * Overview load for an 18-security, ~1,500-shared-trading-date portfolio
- * measured 27,036 total rows across securities/transactions/price/cash/fx
- * -- against D1's free-tier ~5M rows/day read allowance that is ~185 such
+ * measured 27,036 total rows across securities/transactions/price/fx --
+ * against D1's free-tier ~5M rows/day read allowance that is ~185 such
  * loads per day of headroom, comfortably above a single owner's real usage
  * pattern.
+ *
+ * BUG-002 owner ruling: this feature is SECURITIES-ONLY -- `loadFacts`
+ * below deliberately never reads `cash_accounts`/`cash_ledger_entries` --
+ * see `domain/snapshots/historical-portfolio-value.ts`'s header for the
+ * full record (an earlier version replayed cash the same way it replays
+ * share transactions, which surfaced a real data-quality problem: the
+ * owner's actual cash ledger has no reliable opening balance).
  */
 import type { SqlClient } from "../db/repositories/sql-client.ts";
 import type {
@@ -38,13 +45,9 @@ import {
   computeHistoricalPortfolioValueAtDate,
   computeHistoricalPortfolioValueSeries,
   type HistoricalPortfolioValuePoint,
-  type HistoricalValueCashFact,
   type HistoricalValueSecurityFact,
 } from "../domain/snapshots/historical-portfolio-value.ts";
-import type {
-  LedgerCashFact,
-  LedgerQuantityFact,
-} from "../domain/dividends/shares-held.ts";
+import type { LedgerQuantityFact } from "../domain/dividends/shares-held.ts";
 
 // Bounds, documented (free-plan READ discipline -- this feature performs no
 // writes at all, so the binding budget is D1's per-request statement/row
@@ -52,8 +55,6 @@ import type {
 // alternative would have had to reckon with).
 const MAX_SECURITIES = 500;
 const MAX_TRANSACTIONS = 20_000;
-const MAX_CASH_ACCOUNTS = 50;
-const MAX_CASH_ENTRIES = 20_000;
 // One security's own daily-close history can be ~7,300 raw days (UI-018's
 // real 28-year fixture); a whole PORTFOLIO's price rows across many
 // securities scales with security count, hence the higher cap than
@@ -151,31 +152,6 @@ function mapTransaction(row: Row): LedgerQuantityFact | null {
       typeof row.reverses_transaction_id === "string"
         ? row.reverses_transaction_id
         : null,
-  };
-}
-
-function mapCashEntry(row: Row): LedgerCashFact | null {
-  const id = row.id;
-  const localDate = row.local_effective_date;
-  const status = row.status;
-  const signed = row.signed_amount_decimal;
-  if (
-    typeof id !== "string" ||
-    typeof localDate !== "string" ||
-    !DATE.test(localDate) ||
-    (status !== "posted" && status !== "reversed") ||
-    typeof signed !== "string" ||
-    !DECIMAL.test(signed)
-  ) {
-    return null;
-  }
-  return {
-    id,
-    localDate,
-    signedAmountDecimal: signed,
-    status,
-    reversesEntryId:
-      typeof row.reverses_entry_id === "string" ? row.reverses_entry_id : null,
   };
 }
 
@@ -321,7 +297,6 @@ async function loadFacts(
   baseCurrencyCode: string;
   timezone: string;
   securities: HistoricalValueSecurityFact[];
-  cashAccounts: HistoricalValueCashFact[];
   fxObservations: FxObservation[];
   observedDates: string[];
 } | null> {
@@ -417,48 +392,15 @@ async function loadFacts(
     };
   });
 
-  const accountRows = await client.all<Row>(
-    `SELECT id, currency_code FROM cash_accounts WHERE user_id = ? AND portfolio_id = ? AND status = 'active' ORDER BY id LIMIT ?`,
-    [userId, portfolioId, MAX_CASH_ACCOUNTS + 1],
-  );
-  if (accountRows.length > MAX_CASH_ACCOUNTS)
-    throw new Error("too_many_cash_accounts");
-  const entryRows =
-    accountRows.length === 0
-      ? []
-      : await client.all<Row>(
-          `SELECT cle.id, cle.cash_account_id, cle.local_effective_date,
-             cle.signed_amount_decimal, cle.status, cle.reverses_entry_id
-           FROM cash_ledger_entries cle
-           JOIN cash_accounts ca ON ca.id = cle.cash_account_id AND ca.user_id = cle.user_id AND ca.portfolio_id = cle.portfolio_id
-           WHERE cle.user_id = ? AND cle.portfolio_id = ? AND ca.status = 'active'
-             AND cle.local_effective_date <= ?
-           ORDER BY cle.cash_account_id, cle.local_effective_date, cle.id LIMIT ?`,
-          [userId, portfolioId, rangeTo, MAX_CASH_ENTRIES + 1],
-        );
-  if (entryRows.length > MAX_CASH_ENTRIES)
-    throw new Error("too_many_cash_entries");
-  const entriesByAccount = new Map<string, LedgerCashFact[]>();
-  for (const row of entryRows) {
-    const mapped = mapCashEntry(row);
-    if (!mapped) continue;
-    const accountId = row.cash_account_id;
-    if (typeof accountId !== "string") continue;
-    const list = entriesByAccount.get(accountId) ?? [];
-    list.push(mapped);
-    entriesByAccount.set(accountId, list);
-  }
-  const cashAccounts: HistoricalValueCashFact[] = accountRows.map((row) => ({
-    cashAccountId: String(row.id ?? ""),
-    currencyCode: String(row.currency_code ?? ""),
-    entries: entriesByAccount.get(String(row.id ?? "")) ?? [],
-  }));
-
+  // BUG-002 owner ruling: `cash_accounts`/`cash_ledger_entries` are
+  // deliberately NOT read here -- this feature is securities-only (see this
+  // module's header). The cash ledger itself, `app/owned-holdings.ts`'s
+  // `loadCash`, and every other current-value consumer are unaffected and
+  // untouched by this decision.
   const foreignCurrencies = new Set(
-    [
-      ...securities.map((security) => security.currencyCode),
-      ...cashAccounts.map((account) => account.currencyCode),
-    ].filter((currency) => currency && currency !== baseCurrencyCode),
+    securities
+      .map((security) => security.currencyCode)
+      .filter((currency) => currency && currency !== baseCurrencyCode),
   );
   let fxObservations: FxObservation[] = [];
   if (foreignCurrencies.size > 0) {
@@ -492,7 +434,6 @@ async function loadFacts(
     baseCurrencyCode,
     timezone,
     securities,
-    cashAccounts,
     fxObservations,
     observedDates: [...observedDateSet].sort(),
   };
@@ -602,7 +543,6 @@ export async function loadHistoricalPortfolioValueSeries(
     now: nowIso,
     dates,
     securities: facts.securities,
-    cashAccounts: facts.cashAccounts,
     fxObservations: facts.fxObservations,
   });
 
@@ -689,7 +629,6 @@ export async function loadHistoricalPortfolioValueAtDates(
         portfolioTimezone: facts.timezone,
         now: nowIso,
         securities: facts.securities,
-        cashAccounts: facts.cashAccounts,
         fxObservations: facts.fxObservations,
         date,
         priceToleranceDays: MULTI_YEAR_PRICE_TOLERANCE_DAYS,

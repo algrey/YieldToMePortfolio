@@ -49,18 +49,32 @@
  * point's `completeness` flips to `"partial"` and the exclusion is counted
  * (`heldSecurityCount` vs `pricedSecurityCount`), mirroring
  * `app/owned-holdings.ts`'s own known-total-is-never-null-just-because-
- * something's-missing convention. Cash reconstructs the same way via
- * `deriveCashBalanceAtDate`, FX-converted with the identical tolerance rule
- * (identity conversion when the cash account's currency already matches the
- * base currency -- see `resolveFxRate`). A date with ZERO priced components
- * (nothing held, or everything held is unpriced within tolerance) reports
- * `valueDecimal: null` -- a genuine gap, never a fabricated zero. Review B3
- * ruling: a total built ENTIRELY from cash (no security priced at all,
- * `pricedSecurityCount === 0`) that comes out NEGATIVE is never rendered as
- * a "portfolio value" -- a negative net worth built from cash alone, while
- * every held security's price is simply unknown, is not a trustworthy
- * figure; it degrades to an honest gap instead (see the guard at the end of
- * `computeHistoricalPortfolioValueAtDate`).
+ * something's-missing convention.
+ *
+ * BUG-002 owner ruling (2026-08-25, verbatim: "How is cash handled. First
+ * step is to make it work for the stocks, give the value of the stock
+ * portfolio. No magic negative cash or anything."): this derivation is
+ * SECURITIES-ONLY -- cash is deliberately NOT reconstructed or summed here,
+ * for either the Overview graph or Multi-Year's FY-end lookups. An earlier
+ * version of this module replayed `cash_ledger_entries` the same way it
+ * replays share transactions, which surfaced a real data-quality problem on
+ * investigation: the owner's actual cash ledger has no reliable opening
+ * balance (every account observed is flagged `cash_accounts.completeness =
+ * 'incomplete'`), so the replayed "balance" was really a since-import-start
+ * NET FLOW -- a large, growing, and fundamentally not-a-balance negative
+ * number (over $800k negative on the real account) that dragged every
+ * historical total down to a misleadingly small, or even negative, figure
+ * with no honest way to label it as anything other than wrong. Cash
+ * valuation returns to this derivation later, once real deposit/opening-
+ * balance data exists to reconstruct a trustworthy balance from -- see
+ * `docs/CALCULATIONS.md`'s HIST-001 subsection and `docs/ARCHITECTURE.md`
+ * §9.1 for the full record. `completeness`/point availability here is
+ * therefore driven ONLY by price/FX coverage on the held securities -- see
+ * the field's own doc comment below. This is independent of the CURRENT-
+ * value read (`app/owned-holdings.ts`'s `loadCash`), which still sums cash
+ * for TODAY's headline figure and is unaffected by this decision; the two
+ * screens can disagree on scope (securities-only history vs
+ * securities-plus-cash today) until cash history returns here.
  *
  * Performance (review B1, BLOCKING): observations are indexed by exact
  * `marketDate` ONCE per security/FX-pair (`indexByMarketDate`, O(rows)),
@@ -87,7 +101,6 @@
  */
 import {
   addDecimal,
-  compareDecimal,
   formatDecimalExact,
   fromInteger,
   isZero,
@@ -95,14 +108,11 @@ import {
   type DecimalFraction,
 } from "../calculations/decimal.ts";
 import {
-  calculateCashConversion,
   calculateNativeHomeHolding,
   type FxEvidence,
 } from "../calculations/multi-currency.ts";
 import {
-  deriveCashBalanceAtDate,
   deriveSharesHeldAtDate,
-  type LedgerCashFact,
   type LedgerQuantityFact,
 } from "../dividends/shares-held.ts";
 import {
@@ -115,7 +125,6 @@ import type {
   PriceObservation,
 } from "../market-data/contracts.ts";
 
-const ZERO = fromInteger(0n);
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 /** One held (or once-held) security's ledger + price facts, already bounded
@@ -127,25 +136,17 @@ export type HistoricalValueSecurityFact = {
   priceObservations: readonly PriceObservation[];
 };
 
-/** One cash account's ledger facts, already bounded/scoped by the caller. */
-export type HistoricalValueCashFact = {
-  cashAccountId: string;
-  currencyCode: string;
-  entries: readonly LedgerCashFact[];
-};
-
 export type HistoricalPortfolioValuePoint = {
   date: string;
-  /** The portfolio's total value on this date in the base currency, or
-   * `null` when NOTHING priceable existed within tolerance of this date (a
-   * genuine gap -- never a fabricated zero), OR the B3 cash-only-negative
-   * guard suppressed a nonsensical figure. */
+  /** The portfolio's SECURITIES-ONLY total value on this date in the base
+   * currency (BUG-002 owner ruling: cash is deliberately excluded -- see
+   * this module's header), or `null` when NOTHING priceable existed within
+   * tolerance of this date (a genuine gap -- never a fabricated zero). */
   valueDecimal: string | null;
-  /** `"complete"` only when every currently-nonzero-held security AND every
-   * nonzero cash account resolved a price/FX within tolerance of this date;
-   * `"partial"` whenever `valueDecimal` is a real but understated sum (some
-   * held component excluded), OR always `"partial"` when the cash-only-
-   * negative guard fired. Mirrors `portfolio_daily_snapshots.completeness`'s
+  /** `"complete"` only when every currently-nonzero-held security resolved
+   * a price/FX within tolerance of this date; `"partial"` whenever
+   * `valueDecimal` is a real but understated sum (some held security
+   * excluded). Mirrors `portfolio_daily_snapshots.completeness`'s
    * two-value shape, minus `"incomplete"` -- this derivation never persists
    * a placeholder row, so there is no third "queued but not yet computed"
    * state to represent. */
@@ -254,8 +255,9 @@ export type ComputeHistoricalPortfolioValueInput = {
    * has one. */
   dates: readonly string[];
   securities: readonly HistoricalValueSecurityFact[];
-  cashAccounts: readonly HistoricalValueCashFact[];
-  /** Owner-visible-scoped FX observations already bounded by the caller. */
+  /** Owner-visible-scoped FX observations already bounded by the caller
+   * (needed for a foreign-currency SECURITY -- cash is out of scope, see
+   * this module's header). */
   fxObservations: readonly FxObservation[];
   /** How many calendar days BEFORE the target date a price/FX observation
    * may still count (0 = exact-date only). Review B3 ruling: the Overview
@@ -276,10 +278,9 @@ function valuePointAtDate(
   baseCurrencyCode: string,
   portfolioTimezone: string,
   securities: readonly IndexedSecurity[],
-  cashAccounts: readonly HistoricalValueCashFact[],
   fxByDate: ReadonlyMap<string, readonly FxObservation[]>,
 ): HistoricalPortfolioValuePoint {
-  let total: DecimalFraction = ZERO;
+  let total: DecimalFraction = fromInteger(0n);
   let heldSecurityCount = 0;
   let pricedSecurityCount = 0;
   let anyComponentKnown = false;
@@ -372,69 +373,10 @@ function valuePointAtDate(
     anyComponentKnown = true;
   }
 
-  for (const account of cashAccounts) {
-    let balance: string;
-    try {
-      balance = deriveCashBalanceAtDate(account.entries, date);
-    } catch {
-      anyComponentMissing = true;
-      continue;
-    }
-    let parsedBalance: DecimalFraction;
-    try {
-      parsedBalance = parseDecimal(balance);
-    } catch {
-      anyComponentMissing = true;
-      continue;
-    }
-    if (isZero(parsedBalance)) continue; // a genuinely zero account never contributes a gap
-
-    let fxSelection: FxSelection | null = null;
-    if (account.currencyCode !== baseCurrencyCode) {
-      fxSelection = resolveFx(account.currencyCode);
-      if (!fxSelection.selected) {
-        anyComponentMissing = true;
-        continue;
-      }
-    }
-
-    const converted = calculateCashConversion({
-      balanceDecimal: balance,
-      currencyCode: account.currencyCode,
-      homeCurrencyCode: baseCurrencyCode,
-      valuationFx: fxSelection ? toFxEvidence(fxSelection) : null,
-    });
-    if (converted.compact.homeValue.status !== "available") {
-      anyComponentMissing = true;
-      continue;
-    }
-    try {
-      total = addDecimal(
-        total,
-        parseDecimal(converted.compact.homeValue.valueDecimal),
-      );
-    } catch {
-      anyComponentMissing = true;
-      continue;
-    }
-    anyComponentKnown = true;
-  }
-
-  let valueDecimal = anyComponentKnown ? formatDecimalExact(total) : null;
-  let completeness: "complete" | "partial" = anyComponentMissing
+  const valueDecimal = anyComponentKnown ? formatDecimalExact(total) : null;
+  const completeness: "complete" | "partial" = anyComponentMissing
     ? "partial"
     : "complete";
-  // Review B3 ruling: a total built ENTIRELY from cash (no security ever
-  // priced, however many are held) that is NEGATIVE is never presented as
-  // "the portfolio's value" -- degrades to an honest gap instead.
-  if (
-    pricedSecurityCount === 0 &&
-    valueDecimal !== null &&
-    compareDecimal(parseDecimal(valueDecimal), ZERO) < 0
-  ) {
-    valueDecimal = null;
-    completeness = "partial";
-  }
 
   return {
     date,
@@ -480,7 +422,6 @@ export function computeHistoricalPortfolioValueAtDate(
     input.baseCurrencyCode,
     input.portfolioTimezone,
     indexedSecurities,
-    input.cashAccounts,
     fxByDate,
   );
 }
@@ -517,7 +458,6 @@ export function computeHistoricalPortfolioValueSeries(
           input.baseCurrencyCode,
           input.portfolioTimezone,
           indexedSecurities,
-          input.cashAccounts,
           fxByDate,
         ),
   );

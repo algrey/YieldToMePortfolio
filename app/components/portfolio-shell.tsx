@@ -269,8 +269,11 @@ export type OwnedOverviewData = {
 // HIST-001: one read-time-derived point (never persisted) -- see
 // `domain/snapshots/historical-portfolio-value.ts`'s header for the
 // valuation rule. `valueDecimal: null` is a genuine gap (no priceable
-// holding/cash on this exact date), rendered as a chart gap, never
-// interpolated.
+// holding on this exact date), rendered as a chart gap, never interpolated.
+// BUG-002 owner ruling: this series is SECURITIES-ONLY (cash is
+// deliberately excluded -- see the domain module's header for the full
+// record); it therefore does not necessarily reconcile to the CURRENT
+// headline value shown elsewhere on Overview (which still sums cash).
 export type OwnedPortfolioValueHistoryPoint = {
   date: string;
   valueDecimal: string | null;

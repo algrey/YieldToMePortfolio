@@ -546,7 +546,15 @@ export async function loadOwnedHoldings(
             : "partial",
       homeCurrencyCode,
       rows: [],
-      cash,
+      // BUG-002: this early-return path (zero `portfolio_securities` rows
+      // held) bypasses the later combiner below that normally fills in
+      // `securitiesSubtotal` -- `loadCash` itself always returns that field
+      // `null` (it knows nothing about securities). Zero held securities is
+      // a KNOWN fact here (a real DB count, not a coverage/conversion gap),
+      // so the securities-only figure is an honest "0", never `null`/
+      // unavailable -- matches the "all sold out" convention the later
+      // combiner already uses for the same reason.
+      cash: { ...cash, securitiesSubtotal: "0" },
       coverage: {
         total: 0,
         nonZero: 0,
@@ -1307,9 +1315,18 @@ export async function loadOwnedHoldings(
       addDecimal(total, parseDecimalResult(row.homeValue.value ?? "0")),
     parseDecimalResult("0"),
   );
+  // BUG-002: `nonZero === 0` alone is a known-zero securities value -- a
+  // fully-SOLD holding set is a real, known "$0", never an unknown gap.
+  // Simplified from the old `total > 0 && nonZero === 0` (the `total > 0`
+  // clause was always true on THIS path -- `heldCount === 0` already
+  // returns early, well above, before any code here runs -- so dropping
+  // it is a harmless simplification, not a behaviour change here: it does
+  // NOT fix the cash-only (zero-securities-ever) portfolio case, since
+  // that case never reaches this line at all. That fix is the early
+  // `heldCount === 0` return path's OWN `securitiesSubtotal: "0"`
+  // override, below.
   const securitiesKnown =
-    securityCoverage.converted > 0 ||
-    (securityCoverage.total > 0 && securityCoverage.nonZero === 0);
+    securityCoverage.converted > 0 || securityCoverage.nonZero === 0;
   const cashKnown = cash.cashSubtotal !== null;
   const knownComponentCount = (securitiesKnown ? 1 : 0) + (cashKnown ? 1 : 0);
   const knownTotal =

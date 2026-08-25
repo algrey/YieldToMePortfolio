@@ -14,6 +14,15 @@ export type OwnedCashSummary = {
   currencyCode: string;
   securitiesSubtotal: string | null;
   cashSubtotal: string | null;
+  /** BUG-002: has no production consumer any more (a repo-wide grep found
+   * exactly one, `app/owned-income-projection.ts`'s
+   * `currentPortfolioValueDecimal`, which now reads `securitiesSubtotal`
+   * instead -- see `docs/ARCHITECTURE.md` §9.1's BUG-002 extension entry).
+   * Deliberately KEPT, not deleted in a dead-code sweep: the owner's
+   * ruling was to narrow what the "portfolio value" figure reads, not to
+   * remove the cash ledger or its computed totals ("don't destroy the
+   * ledger, could be useful in future"). Still securities + cash, still
+   * computed correctly. */
   knownTotal: string | null;
   status: "complete" | "partial" | "unavailable";
   explanation: string;
