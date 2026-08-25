@@ -22,6 +22,7 @@ import { BrandMark } from "./brand-mark";
 import { AccountLifecycleRecovery } from "./account-lifecycle-recovery";
 import { AccountLifecycleControls } from "./account-lifecycle-controls";
 import { OwnedPortfolioDetails } from "./portfolio-details";
+import { PortfolioValueChart } from "./portfolio-value-chart";
 import { ServiceWorkerRegistration } from "./service-worker-registration";
 import { subtractCalendarMonths } from "../overview-range";
 import { sampleOverviewChartPoints } from "../overview-chart";
@@ -202,6 +203,13 @@ export type OwnedWorkspace = {
   quotes?: WatchlistRow[];
   quoteViewState?: ViewState;
   overview?: OwnedOverviewData;
+  // HIST-001: portfolio value over time, derived READ-TIME from
+  // `price_observations`/ledger facts (`app/historical-portfolio-value.ts`)
+  // -- deliberately independent of `overview` above (which stays sourced
+  // from the CALC-003/CALC-004 persisted snapshot pipeline). See
+  // `docs/ARCHITECTURE.md`'s HIST-001 entry for why these are two separate
+  // reads rather than one.
+  portfolioValueHistory?: OwnedPortfolioValueHistory;
   holdings?: OwnedHoldingRow[];
   cash?: OwnedCashSummary;
   // UI-032: the securities-coverage-counts field the retired "Cash
@@ -257,6 +265,28 @@ export type OwnedOverviewData = {
       percent: string | null;
     }[];
   };
+};
+// HIST-001: one read-time-derived point (never persisted) -- see
+// `domain/snapshots/historical-portfolio-value.ts`'s header for the
+// valuation rule. `valueDecimal: null` is a genuine gap (no priceable
+// holding/cash on this exact date), rendered as a chart gap, never
+// interpolated.
+export type OwnedPortfolioValueHistoryPoint = {
+  date: string;
+  valueDecimal: string | null;
+  completeness: "complete" | "partial";
+  /** Held-vs-priced counts (review B2b: the caption/table must name the
+   * count of unpriced HELD securities, never just say "partial"). */
+  heldSecurityCount: number;
+  pricedSecurityCount: number;
+};
+export type OwnedPortfolioValueHistory = {
+  status: "ok" | "empty" | "unavailable";
+  baseCurrencyCode: string;
+  points: readonly OwnedPortfolioValueHistoryPoint[];
+  /** `true` when more distinct observation dates existed than the loader's
+   * bound could hold -- the OLDEST dates were dropped, most-recent-first. */
+  datesTruncated: boolean;
 };
 export type OwnedOverviewPoint = {
   date: string;
@@ -1946,12 +1976,14 @@ function OwnedOverviewScreen({
   financialYearStartMonth,
   timezone,
   nowInstant,
+  portfolioValueHistory,
 }: {
   data: OwnedOverviewData;
   portfolioId: string;
   portfolioName: string;
   financialYearStartMonth: number;
   timezone: string;
+  portfolioValueHistory: OwnedPortfolioValueHistory;
   // A full ISO-8601 instant resolved server-side when the workspace was
   // assembled (see OwnedWorkspace.nowInstant). FY is an ABSOLUTE named
   // period -- unlike the relative 1M/3M/12M cutoffs, which are safe to
@@ -2025,23 +2057,47 @@ function OwnedOverviewScreen({
 
   if (data.status === "unavailable") {
     return (
-      <section
-        className="empty-state"
-        aria-labelledby="overview-unavailable-title"
-      >
-        <p className="eyebrow">Private workspace</p>
-        <h1 id="overview-unavailable-title">Overview unavailable</h1>
-        <p>Published valuation data could not be loaded. Try again shortly.</p>
-      </section>
+      <>
+        <section
+          className="empty-state"
+          aria-labelledby="overview-unavailable-title"
+        >
+          <p className="eyebrow">Private workspace</p>
+          <h1 id="overview-unavailable-title">Overview unavailable</h1>
+          <p>
+            Published valuation data could not be loaded. Try again shortly.
+          </p>
+        </section>
+        {/* HIST-001: the graph is a SEPARATE, independent read from the
+            "Published value" panel above (see this file's HIST-001 import
+            comment) -- it renders even when the older persisted-snapshot
+            pipeline is unavailable, since investigation found that
+            pipeline can stay unavailable indefinitely on a real account
+            while price history is fully present. */}
+        <PortfolioValueChart
+          history={portfolioValueHistory}
+          financialYearStartMonth={financialYearStartMonth}
+          timezone={timezone}
+          nowInstant={nowInstant}
+        />
+      </>
     );
   }
 
   if (data.status === "empty" || current === null) {
     return (
-      <EmptyState
-        title="No valuation history yet"
-        message="Add posted transactions and validated market observations to publish portfolio value."
-      />
+      <>
+        <EmptyState
+          title="No valuation history yet"
+          message="Add posted transactions and validated market observations to publish portfolio value."
+        />
+        <PortfolioValueChart
+          history={portfolioValueHistory}
+          financialYearStartMonth={financialYearStartMonth}
+          timezone={timezone}
+          nowInstant={nowInstant}
+        />
+      </>
     );
   }
 
@@ -2096,6 +2152,13 @@ function OwnedOverviewScreen({
           <OverviewFact label="Realised" value={current.realised} signed />
         </dl>
       </section>
+
+      <PortfolioValueChart
+        history={portfolioValueHistory}
+        financialYearStartMonth={financialYearStartMonth}
+        timezone={timezone}
+        nowInstant={nowInstant}
+      />
 
       <section className="history-panel" aria-labelledby="owned-history-title">
         <div className="section-heading compact">
@@ -4739,6 +4802,15 @@ export function PortfolioShell({
               // client-side Date() fallback: an absent instant must fail
               // FY window resolution closed (empty state), never guess.
               nowInstant={ownedWorkspace.nowInstant ?? ""}
+              portfolioValueHistory={
+                ownedWorkspace.portfolioValueHistory ?? {
+                  status: "unavailable",
+                  baseCurrencyCode:
+                    ownedWorkspace.activePortfolio.baseCurrencyCode,
+                  points: [],
+                  datesTruncated: false,
+                }
+              }
             />
           ) : activeSection === "holdings" && ownedWorkspace.activePortfolio ? (
             <OwnedHoldingsScreen

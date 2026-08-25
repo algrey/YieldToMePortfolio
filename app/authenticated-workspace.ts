@@ -22,6 +22,7 @@ import {
   createOverviewData,
   createUnavailableOverviewData,
 } from "./overview-read-model";
+import { loadHistoricalPortfolioValueSeries } from "./historical-portfolio-value.ts";
 
 function isPrincipal(value: unknown): value is VerifiedAccessPrincipal {
   if (typeof value !== "object" || value === null) return false;
@@ -228,6 +229,47 @@ export async function loadAuthenticatedWorkspace(
       }
     }
     if (options.includeOverview) {
+      // HIST-001: the "portfolio value over time" graph is a SEPARATE,
+      // best-effort read from the `overview`/`loadPublishedOverview` block
+      // below -- it never depends on the CALC-003/CALC-004 persisted
+      // snapshot pipeline (investigation found that pipeline had never
+      // published for the real account under review; see
+      // `docs/ARCHITECTURE.md`'s HIST-001 entry). A failure here must never
+      // take down the existing Overview hero/coverage sections, so it gets
+      // its OWN try/catch and its own honest "unavailable" fallback,
+      // mirroring the `realisedGains` best-effort pattern above.
+      const portfolioValueHistory = await loadHistoricalPortfolioValueSeries(
+        client,
+        result.context.user.id,
+        configuredWorkspace.activePortfolio.id,
+        new Date(nowInstant),
+      )
+        .then((result) =>
+          result === null
+            ? {
+                status: "unavailable" as const,
+                points: [],
+                baseCurrencyCode:
+                  configuredWorkspace.activePortfolio!.baseCurrencyCode,
+                datesTruncated: false,
+              }
+            : {
+                status:
+                  result.points.length === 0
+                    ? ("empty" as const)
+                    : ("ok" as const),
+                points: result.points,
+                baseCurrencyCode: result.baseCurrencyCode,
+                datesTruncated: result.datesTruncated,
+              },
+        )
+        .catch(() => ({
+          status: "unavailable" as const,
+          points: [],
+          baseCurrencyCode:
+            configuredWorkspace.activePortfolio!.baseCurrencyCode,
+          datesTruncated: false,
+        }));
       try {
         const snapshotRepo = createHistoricalSnapshotRepository(client);
         const userId = result.context.user.id;
@@ -266,6 +308,7 @@ export async function loadAuthenticatedWorkspace(
         return {
           ...configuredWorkspace,
           overview: createOverviewData(overview),
+          portfolioValueHistory,
         };
       } catch {
         return {
@@ -273,6 +316,7 @@ export async function loadAuthenticatedWorkspace(
           overview: createUnavailableOverviewData(
             configuredWorkspace.activePortfolio.baseCurrencyCode,
           ),
+          portfolioValueHistory,
         };
       }
     }

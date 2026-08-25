@@ -628,6 +628,22 @@ export type MultiYearProjectionAssumptions = {
    */
   currentPortfolioValueStatus: "available" | "partial";
   /**
+   * HIST-001 (owner-reported "incorrect numbers for future years"): a
+   * caller-supplied, HONEST description of why `currentPortfolioValueStatus`
+   * is `"partial"` -- e.g. "N held securities are unpriced" when a
+   * security's home value genuinely didn't convert, or an explicit
+   * statement that the value total is NOT understated when the gap is
+   * something else entirely (cash-history completeness, cost-basis
+   * provenance) that merely happens to share the same status flag. `null`
+   * whenever `currentPortfolioValueStatus === "available"` (nothing to
+   * explain) OR a caller has not supplied one -- the method text below
+   * falls back to a generic, still-honest phrase rather than the OLD
+   * hardcoded "some holdings are unpriced" claim, which investigation
+   * showed could be flatly wrong (see `app/owned-income-projection.ts`'s
+   * `currentPortfolioValuePartialReason`).
+   */
+  currentPortfolioValuePartialReason?: string | null;
+  /**
    * DIV-011 (owner directive, 2026-08-23): year 1's dividend base -- the
    * SAME per-security 12-month forecast sum feeding `computeIncomeBreakdown`'s
    * Next-12-months headline (`IncomeBreakdownResult.totalGrossDecimal`/
@@ -876,7 +892,17 @@ export function projectMultiYearIncome(
           // be) rendered standalone by a caller that never sees the
           // original `OwnedIncomeProjection.portfolioValueStatus`, so the
           // disclosure has to travel with the row itself to survive that.
-          `; based on a partial (understated) current portfolio value -- some holdings are unpriced`
+          // HIST-001: a caller-supplied `currentPortfolioValuePartialReason`
+          // replaces the OLD unconditional "some holdings are unpriced"
+          // claim, which investigation showed could be flatly wrong (the
+          // status can flip to "partial" for reasons -- cash-history
+          // completeness, cost-basis provenance -- that never touch the
+          // value total at all). Omitted (`undefined`, the default for
+          // every existing caller/fixture) keeps the ORIGINAL wording
+          // byte-identical.
+          assumptions.currentPortfolioValuePartialReason
+          ? `; current portfolio value is partial -- ${assumptions.currentPortfolioValuePartialReason}`
+          : `; based on a partial (understated) current portfolio value -- some holdings are unpriced`
         : "") +
       // DIV-011 review fix (B3): a security EXCLUDED ENTIRELY from the
       // reused forecast sum (foreign currency or insufficient history) is a

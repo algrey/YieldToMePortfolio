@@ -23,7 +23,7 @@ import type { SqlClient } from "../db/repositories/sql-client.ts";
 import { loadOwnedDividendHistory } from "./owned-dividend-history.ts";
 import { loadOwnedHoldings } from "./owned-holdings.ts";
 import { createDividendAssumptionsRepository } from "../db/repositories/dividends.ts";
-import { createHistoricalSnapshotRepository } from "../db/repositories/snapshots.ts";
+import { loadHistoricalPortfolioValueAtDates } from "./historical-portfolio-value.ts";
 import { fyWindowForDate } from "../domain/dividends/fy-window.ts";
 import { deriveYieldFromResolvedTtm } from "../domain/market-data/dividend-yield.ts";
 import {
@@ -187,6 +187,63 @@ export async function loadOwnedIncomeProjection(
       : holdingsPortfolioValueStatus;
   const portfolioValueCoverage: PortfolioValueCoverage | null =
     holdings?.coverage ?? null;
+  // HIST-001 (owner-reported "incorrect numbers for future years"):
+  // `portfolioValueStatus === "partial"` used to ALWAYS render as "some
+  // holdings are unpriced" downstream (`domain/dividends/projection.ts`'s
+  // method text, `income-multi-year.tsx`'s summary line) -- but
+  // `holdings.status` (the source of `portfolioValueStatus`) also flips to
+  // "partial" whenever `holdings.cash.status !== "complete"` (e.g. a cash
+  // account flagged `completeness = 'incomplete'`, a provenance caveat
+  // wholly unrelated to security pricing) OR a held security's cost BASIS
+  // is unavailable (`homeBasis`, which `currentPortfolioValueDecimal` never
+  // reads at all). Investigation on the real account found exactly the
+  // first case: 18/18 held securities fully priced, `portfolioValueStatus`
+  // "partial" solely from the cash account's completeness flag -- the OLD
+  // blanket copy told the owner their future-year numbers were understated
+  // because of unpriced holdings when nothing was actually unpriced,
+  // reading as "incorrect" even though the dollar figure itself was the
+  // full, correct total. `securitiesValueGapCount` isolates the ONE gap
+  // that genuinely understates `currentPortfolioValueDecimal` (a held
+  // security whose home VALUE -- not basis -- never converted); when it is
+  // zero, the disclosure says so honestly instead of naming a cause that
+  // is not real.
+  const securitiesValueGapCount =
+    holdings !== null
+      ? Math.max(0, holdings.coverage.nonZero - holdings.coverage.converted)
+      : 0;
+  // Review fold (HIST-001): a NONZERO cash account that failed to CONVERT
+  // (`cash.coverage.nonZero - cash.coverage.converted`, the SAME
+  // converted-vs-nonZero shape as `securitiesValueGapCount` above, sourced
+  // from `app/owned-holdings.ts`'s `loadCash` own coverage counts) DOES
+  // genuinely understate `currentPortfolioValueDecimal` -- real dollars are
+  // missing from the sum, not merely a provenance caveat. This is
+  // DIFFERENT from `cash.status !== "complete"` alone (which also flips
+  // for the `completeness = 'incomplete'` flag even when every account's
+  // balance summed and converted fine -- the real account this task
+  // investigated hit exactly that non-understating case). Only an actual
+  // conversion failure belongs in the "understated" branch below.
+  const cashValueGapCount =
+    holdings !== null
+      ? Math.max(
+          0,
+          holdings.cash.coverage.nonZero - holdings.cash.coverage.converted,
+        )
+      : 0;
+  const currentPortfolioValuePartialReason: string | null =
+    portfolioValueStatus === "partial"
+      ? securitiesValueGapCount > 0 || cashValueGapCount > 0
+        ? [
+            securitiesValueGapCount > 0
+              ? `${securitiesValueGapCount} held ${securitiesValueGapCount === 1 ? "security is" : "securities are"} unpriced`
+              : null,
+            cashValueGapCount > 0
+              ? `${cashValueGapCount} cash ${cashValueGapCount === 1 ? "account" : "accounts"} could not convert to the base currency`
+              : null,
+          ]
+            .filter((clause): clause is string => clause !== null)
+            .join(" and ")
+        : "other portfolio data (cash history or cost-basis provenance) is incomplete -- the value total itself is not understated by unpriced holdings or unconverted cash"
+      : null;
 
   // Fall back to the portfolio's own base currency for aggregation scope
   // even when the holdings pipeline is unavailable (e.g. no published
@@ -414,6 +471,7 @@ export async function loadOwnedIncomeProjection(
         // base in its own row `method` labels.
         currentPortfolioValueStatus: portfolioValueStatus as
           "available" | "partial",
+        currentPortfolioValuePartialReason,
         baseForecastGrossDecimal: breakdown.totalGrossDecimal,
         baseForecastCashDecimal: breakdown.totalCashDecimal!,
         // DIV-009 review fix (B1), identical B4 precedent, SURVIVING the
@@ -449,32 +507,51 @@ export async function loadOwnedIncomeProjection(
   let historicalPortfolioValueByYear = new Map<number, string | null>();
   if (yearsBack > 0) {
     try {
-      // CALC-004 review-round B3: unlike `app/authenticated-workspace.ts`'s
-      // Overview branch, this secondary best-effort read has NO read-time
-      // self-heal trigger -- a `null` overview here just leaves this
-      // function's per-year values `"unavailable"` (never fabricated), and
-      // the pipeline advances only when the owner visits the Overview page
-      // itself (or the cron sweep runs).
-      const overview = await createHistoricalSnapshotRepository(
+      // HIST-001: previously read from `createHistoricalSnapshotRepository()
+      // .loadPublishedOverview()` (the CALC-003/CALC-004 persisted
+      // `portfolio_daily_snapshots` pipeline). Investigation (see
+      // `docs/ARCHITECTURE.md`'s HIST-001 entry) found that pipeline had
+      // NEVER published for the real account under review -- a resumable,
+      // budgeted, multi-day-advancing background rebuild that started
+      // before the owner's price-history import landed, so its early
+      // progress recorded zero priced holdings for those dates and, being
+      // cursor-based, never revisits them -- which is why every historical
+      // year read "unavailable" regardless of how much price history now
+      // exists. This now reads a per-FY-end-date value from the READ-TIME
+      // derivation (`app/historical-portfolio-value.ts`), the SAME
+      // derivation the Overview graph uses (one derivation for both
+      // surfaces) -- bounded, no writes, no dependency on any background
+      // pipeline ever completing.
+      const anchorMonth = history.financialYearStartMonth;
+      const endDatesByYear = new Map<number, string>();
+      for (let yearsAgo = 1; yearsAgo <= yearsBack; yearsAgo += 1) {
+        const endingYear = currentEndingYear - yearsAgo;
+        const anchorYear = anchorMonth === 1 ? endingYear : endingYear - 1;
+        const anchorDate = `${String(anchorYear).padStart(4, "0")}-${String(anchorMonth).padStart(2, "0")}-01`;
+        const windowResult = fyWindowForDate(anchorDate, anchorMonth);
+        if (!windowResult.ok) continue;
+        endDatesByYear.set(endingYear, windowResult.window.endDate);
+      }
+      const valuesByDate = await loadHistoricalPortfolioValueAtDates(
         client,
-      ).loadPublishedOverview(userId, portfolioId);
-      if (overview) {
-        const byDate = new Map(
-          overview.history.map((point) => [
-            point.date,
-            point.totalValueDecimal,
-          ]),
-        );
-        for (let yearsAgo = 1; yearsAgo <= yearsBack; yearsAgo += 1) {
-          const endingYear = currentEndingYear - yearsAgo;
-          const anchorMonth = history.financialYearStartMonth;
-          const anchorYear = anchorMonth === 1 ? endingYear : endingYear - 1;
-          const anchorDate = `${String(anchorYear).padStart(4, "0")}-${String(anchorMonth).padStart(2, "0")}-01`;
-          const windowResult = fyWindowForDate(anchorDate, anchorMonth);
-          if (!windowResult.ok) continue;
+        userId,
+        portfolioId,
+        [...endDatesByYear.values()],
+        now,
+      );
+      if (valuesByDate) {
+        for (const [endingYear, endDate] of endDatesByYear) {
+          const point = valuesByDate.get(endDate);
+          // `historicalPortfolioValueByYear` (and `computePastFinancialYearRows`
+          // downstream) is a 2-state contract (available/unavailable) with
+          // no "partial" row state -- a PARTIAL point (e.g. cash known but
+          // the held security genuinely unpriced on this exact FY-end date)
+          // must never be presented as a confident, fully-known figure.
+          // Fails closed to "unavailable" for that year rather than
+          // silently upgrading a partial sum into an apparently-solid one.
           historicalPortfolioValueByYear.set(
             endingYear,
-            byDate.get(windowResult.window.endDate) ?? null,
+            point?.completeness === "complete" ? point.valueDecimal : null,
           );
         }
       }

@@ -1497,6 +1497,19 @@ dd {
   opacity: 0.75;
 }
 
+/* HIST-001 review B2b: a PARTIAL point (a real, known-but-understated
+   value -- some held securities/cash could not price/convert that day) is
+   a DIFFERENT concept from a `.price-history-gap` date-hole above (no
+   observation at all) and must never render solid-identical to a
+   `complete` point. Distinguished by SHAPE (a tighter dash pattern) AND
+   color (the same `--warning` hue the intraday-uncertain marker below
+   uses for "uncertain"), never color alone. */
+.price-history-line.price-history-partial {
+  stroke: var(--warning);
+  stroke-dasharray: 2 2;
+  opacity: 0.85;
+}
+
 .price-history-dot {
   fill: var(--green-bright);
 }
@@ -1505,6 +1518,17 @@ dd {
   fill: var(--cream);
   stroke: var(--green-bright);
   stroke-width: 1.5;
+}
+
+/* HIST-001 review B2b: a partial point's own marker is HOLLOW with a
+   dashed outline -- mirrors `.price-history-intraday-uncertain` below's
+   established "uncertain tier" convention (shape/pattern distinct, not
+   color alone). */
+.price-history-dot.price-history-partial {
+  fill: none;
+  stroke: var(--warning);
+  stroke-width: 1.5;
+  stroke-dasharray: 1.5 1;
 }
 
 .price-history-axis {

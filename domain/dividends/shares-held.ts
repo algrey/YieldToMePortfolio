@@ -152,3 +152,54 @@ export function deriveSharesHeldAtDate(
   }
   return formatDecimalExact(total);
 }
+
+// HIST-001: sibling reconstruction for a cash ACCOUNT's running balance at an
+// arbitrary historical date, from raw `cash_ledger_entries` facts -- reused
+// alongside `deriveSharesHeldAtDate` above so the historical-portfolio-value
+// derivation (`domain/snapshots/historical-portfolio-value.ts`) can honestly
+// reconstruct "securities + cash" at a past date the SAME way
+// `app/owned-holdings.ts`'s `loadCash` sums entries for "now" -- one summing
+// rule, two callers. Mirrors `deriveSharesHeldAtDate`'s exclusion pattern: a
+// reversed entry (`status !== "posted"`) and the reversal record that points
+// at it both contribute zero.
+export type LedgerCashFact = {
+  id: string;
+  /** Local calendar date (YYYY-MM-DD) the entry is effective on -- used for the `asOfDate` cutoff filter, matching `LedgerQuantityFact.localTradeDate`. */
+  localDate: string;
+  signedAmountDecimal: string;
+  status: "posted" | "reversed";
+  /** Set on a reversal record; points at the entry it reverses. */
+  reversesEntryId: string | null;
+};
+
+/**
+ * Signed cash balance for one cash account as of `asOfDate` (inclusive),
+ * from raw ledger entry facts. Returns the exact decimal sum ("0" when
+ * nothing qualifies) -- never a separate "no history" state, matching
+ * `deriveSharesHeldAtDate`'s own convention.
+ */
+export function deriveCashBalanceAtDate(
+  entries: readonly LedgerCashFact[],
+  asOfDate: string,
+): string {
+  const reversedIds = new Set(
+    entries
+      .filter((entry) => entry.reversesEntryId !== null)
+      .map((entry) => entry.reversesEntryId as string),
+  );
+  const usable = entries
+    .filter((entry) => entry.status === "posted")
+    .filter((entry) => entry.reversesEntryId === null)
+    .filter((entry) => !reversedIds.has(entry.id))
+    .filter((entry) => entry.localDate <= asOfDate);
+
+  let total: DecimalFraction = ZERO;
+  for (const entry of usable) {
+    try {
+      total = addDecimal(total, parseDecimal(entry.signedAmountDecimal));
+    } catch {
+      continue; // malformed amount: excluded, never fabricated
+    }
+  }
+  return formatDecimalExact(total);
+}

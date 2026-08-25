@@ -1083,7 +1083,18 @@ export function IncomeMultiYear({
           the yield shown is derived (dividend ÷ value), not a projection input,
           so it can rise OR fall even while dividends compound upward.
           {activeAssumptions?.currentPortfolioValueStatus === "partial"
-            ? " Projected years are based on a partial (understated) current portfolio value -- some holdings are unpriced."
+            ? // HIST-001: the OLD copy unconditionally claimed "some
+              // holdings are unpriced" -- investigation found real accounts
+              // where the status is "partial" for an unrelated reason (cash
+              // history completeness, cost-basis provenance) while every
+              // holding is fully priced and the value total is NOT
+              // understated. `currentPortfolioValuePartialReason` (threaded
+              // from `app/owned-income-projection.ts`) names the REAL cause
+              // when supplied; the fallback keeps the ORIGINAL wording
+              // byte-identical for a caller that never sets it.
+              activeAssumptions.currentPortfolioValuePartialReason
+              ? ` Projected years are based on a partial current portfolio value -- ${activeAssumptions.currentPortfolioValuePartialReason}.`
+              : " Projected years are based on a partial (understated) current portfolio value -- some holdings are unpriced."
             : ""}
           {/* DIV-013 review (fold): the parcel-applied disclosure used to
               live ONLY in the "Add/Remove Capital" section's own marker,
