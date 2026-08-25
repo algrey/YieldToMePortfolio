@@ -49,10 +49,8 @@
 // the new carried breakdown for that year.
 import Link from "next/link";
 import { useEffect, useRef, useState, type RefObject } from "react";
-import {
-  buildCapitalGainsDisplayRows,
-  type OwnedCapitalGainsHistory,
-} from "../owned-capital-gains.ts";
+import type { OwnedCapitalGainsHistory } from "../owned-capital-gains.ts";
+import { buildCapitalGainsDisplayRows } from "../capital-gains-display-format.ts";
 import {
   CGT_CARRY_FORWARD_NOTE,
   CGT_METHOD_LABELS,
