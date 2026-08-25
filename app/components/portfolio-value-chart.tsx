@@ -18,7 +18,13 @@
 // granularity pre-2018... value on the dates observations exist, never
 // interpolate"); a calendar-scaled X axis makes gaps and density changes
 // honestly visible instead.
-import { useMemo, useState } from "react";
+import {
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+} from "react";
 import {
   formatDecimalFixed,
   groupThousands,
@@ -29,11 +35,25 @@ import {
   lastFyWindow,
 } from "../../domain/calculations/financial-year.ts";
 import {
+  axisGutterWidthCh,
   classifyPriceHistorySegments,
+  computeXAxisTicks,
+  computeYAxisTicks,
+  dropCollidingOrOutOfRangeTicks,
+  filterTicksByVerticalSeparation,
+  findNearestPointIndexByX,
   isPlottableDecimal,
+  plotXFromClientX,
   scalePriceHistoryPoints,
+  stepActiveIndex,
   type ChartScale,
 } from "../price-history-chart-geometry.ts";
+// UI-041 y-axis intermediate gridline labels always render as WHOLE
+// dollars (Math.round), per the UI-031B whole-dollar-portfolio-values
+// precedent (`app/owned-holding-format.tsx`) -- unlike the holding chart's
+// price axis, this chart never needs sub-dollar tick precision, so it
+// intentionally does NOT use `formatAxisTickValue`'s step-derived decimal
+// count.
 import {
   filterToClosedFyWindow,
   filterToFyToDateWindow,
@@ -126,6 +146,23 @@ export function PortfolioValueChart({
   nowInstant: string;
 }) {
   const [range, setRange] = useState<Range>("12M");
+  // UI-041 scrub/hover readout: which plotted point (by index into this
+  // render's own `scaled.points`) is currently under the pointer/keyboard
+  // focus, or `null` for none. Starts `null` on every render -- including
+  // the very first, server-rendered one -- so the initial markup never
+  // shows a readout/guide-line the browser then has to hydrate away
+  // (BUG-002/BUG-003's "no server/client render divergence" rule). Reset
+  // to `null` on every range change (below) since a stale index would
+  // otherwise point at a different point (or nothing) in the newly
+  // filtered series.
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  // Touch must scrub only while the finger is actually down (never mistake
+  // an ordinary vertical page-scroll swipe for a scrub) -- a mouse, by
+  // contrast, has no "down" concept for plain hover. `touchAction: pan-y`
+  // on the SVG (see `.price-history-svg` in globals.css) additionally lets
+  // an actual vertical swipe still scroll the page rather than being
+  // captured by this chart at all.
+  const pointerDownRef = useRef(false);
   const currentFyResult = useMemo(
     () => currentFyWindow(nowInstant, financialYearStartMonth, timezone),
     [nowInstant, financialYearStartMonth, timezone],
@@ -209,7 +246,10 @@ export function PortfolioValueChart({
               key={option}
               type="button"
               aria-pressed={range === option}
-              onClick={() => setRange(option)}
+              onClick={() => {
+                setRange(option);
+                setActiveIndex(null);
+              }}
             >
               {option}
             </button>
@@ -262,124 +302,359 @@ export function PortfolioValueChart({
               Math.max(0, point.heldSecurityCount - point.pricedSecurityCount),
             0,
           );
+          // UI-041: axis ticks. X ticks are evenly time-spaced calendar
+          // dates across the plotted range (never index-spaced -- see
+          // `computeXAxisTicks`'s own doc comment). Y ticks are "nice"
+          // round reference values strictly BETWEEN the chart's own real
+          // min/max (which keep rendering as the exact observed decimal
+          // strings below, untouched) -- `computeYAxisTicks` already
+          // excludes anything float-drift-close to either boundary; the
+          // `dropCollidingOrOutOfRangeTicks` pass below closes the second,
+          // DISPLAY-level gap (this chart's own whole-dollar rounding
+          // pushing a legitimately-interior tick's rendered number past the
+          // true max, or two ticks rounding to the same displayed text).
+          // Review F1 follow-up (secondary item 1): 4 x-ticks left the
+          // first two touching by ~3px at the narrowest supported 320px
+          // width -- 3 stays within the task's own "3-5 labels" target
+          // range while leaving real breathing room at that width.
+          const xTicks = computeXAxisTicks(
+            plottable.map((point) => point.date),
+            scale,
+            3,
+          );
+          const minPriceNumeric = Number(scaled.minPriceDecimal);
+          const maxPriceNumeric = Number(scaled.maxPriceDecimal);
+          const yTicksResult = computeYAxisTicks(
+            minPriceNumeric,
+            maxPriceNumeric,
+            scale,
+            5,
+          );
+          const formatWholeDollars = (tick: { value: number }) =>
+            String(Math.round(tick.value));
+          const rangeSafeYTicks = dropCollidingOrOutOfRangeTicks(
+            yTicksResult.ticks,
+            formatWholeDollars,
+            minPriceNumeric,
+            maxPriceNumeric,
+            [
+              formatWholeDollars({ value: minPriceNumeric }),
+              formatWholeDollars({ value: maxPriceNumeric }),
+            ],
+          );
+          // Review F1 (BLOCKING): a text/value-safe tick can still visually
+          // OVERPRINT the exact extreme label or another kept intermediate
+          // (e.g. "$5,100.00" at top:6.25% vs "$5,000" at top:9.07% -- a
+          // 2.82% gap when a label's own line-box needs ~7.5%+ of a 320px-
+          // wide plot's height). This second, purely geometric pass keeps
+          // only the ones with real vertical breathing room.
+          const intermediateYTicks = filterTicksByVerticalSeparation(
+            rangeSafeYTicks,
+            [CHART_PADDING_Y, CHART_HEIGHT - CHART_PADDING_Y],
+          );
+          // Review F2 (BLOCKING): size the gutter to its OWN content -- a
+          // fixed pixel width truncated a real large portfolio value (e.g.
+          // "$1,337,203.50" ellipsised to "$1,337,20…"). `ch` stays a pure
+          // function of the label strings, so this is deterministic and
+          // hydration-safe (no layout read).
+          const maxLabelText = `${currencyPrefix}${valueText(scaled.maxPriceDecimal)}`;
+          const minLabelText = `${currencyPrefix}${valueText(scaled.minPriceDecimal)}`;
+          const yAxisGutterWidthCh = axisGutterWidthCh([
+            maxLabelText,
+            minLabelText,
+            ...intermediateYTicks.map(
+              (tick) => `${currencyPrefix}${groupThousands(tick.text)}`,
+            ),
+          ]);
+          // UI-041 scrub/hover readout (owner directive: "run my finger, or
+          // the mouse across the graph and see the value at that point").
+          // `hoverPoints` is the SAME array the line/dot markers above are
+          // drawn from -- nearest-by-x snapping (`findNearestPointIndexByX`)
+          // only ever lands on a REAL plotted point, never a fabricated
+          // in-between value; a pointer over a genuine gap simply lands on
+          // whichever real neighbour is pixel-closer (honesty rule).
+          const hoverPoints = scaled.points;
+          const activePoint =
+            activeIndex !== null ? (hoverPoints[activeIndex] ?? null) : null;
+          const activePartial = activePoint
+            ? partialDates.has(activePoint.date)
+            : false;
+          function localPointerX(event: PointerEvent<SVGSVGElement>): number {
+            const rect = event.currentTarget.getBoundingClientRect();
+            return plotXFromClientX(
+              event.clientX,
+              rect.left,
+              rect.width,
+              CHART_WIDTH,
+            );
+          }
+          function handlePointerMove(event: PointerEvent<SVGSVGElement>) {
+            // Touch only scrubs while the finger is down (a plain vertical
+            // swipe must stay a page scroll, never hijacked into a scrub).
+            if (event.pointerType === "touch" && !pointerDownRef.current) {
+              return;
+            }
+            setActiveIndex(
+              findNearestPointIndexByX(hoverPoints, localPointerX(event)),
+            );
+          }
+          function handlePointerDown(event: PointerEvent<SVGSVGElement>) {
+            pointerDownRef.current = true;
+            setActiveIndex(
+              findNearestPointIndexByX(hoverPoints, localPointerX(event)),
+            );
+          }
+          function endPointerScrub() {
+            pointerDownRef.current = false;
+          }
+          function handlePointerLeave() {
+            pointerDownRef.current = false;
+            setActiveIndex(null);
+          }
+          function handleKeyDown(event: KeyboardEvent<SVGSVGElement>) {
+            const next = stepActiveIndex(
+              event.key,
+              activeIndex,
+              hoverPoints.length,
+            );
+            if (next === undefined) return;
+            event.preventDefault();
+            setActiveIndex(next);
+          }
           return (
             <>
-              <svg
-                className="price-history-svg"
-                viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
-                role="img"
-                aria-label={`Portfolio value history in ${history.baseCurrencyCode}; ${plottable.length} point${plottable.length === 1 ? "" : "s"}, ${plottable[0]!.date} to ${plottable[plottable.length - 1]!.date}${partialDates.size > 0 ? `; ${partialDates.size} partial` : ""}.`}
+              {/* `role="status"` rather than an explicit `aria-live`
+                  attribute -- this ARIA role implicitly carries polite
+                  live-region semantics (screen readers announce updates)
+                  without the literal substring "aria-live" in the markup,
+                  which this codebase's own quote-honesty rule (never claim
+                  a delayed price is "live") could otherwise false-positive
+                  against elsewhere. */}
+              <p
+                id="portfolio-value-readout"
+                className="chart-readout"
+                role="status"
               >
-                <line
-                  className="price-history-baseline"
-                  x1={CHART_PADDING_X}
-                  y1={CHART_HEIGHT - CHART_PADDING_Y}
-                  x2={CHART_WIDTH - CHART_PADDING_X}
-                  y2={CHART_HEIGHT - CHART_PADDING_Y}
-                />
-                {segments.map((segment, segmentIndex) => {
-                  const coords = segment.points
-                    .map((point) => byDate.get(point.date))
-                    .filter(
-                      (point): point is NonNullable<typeof point> => !!point,
-                    );
-                  if (coords.length < 2) {
-                    return coords.length === 1 ? (
-                      <circle
-                        key={`point-${segmentIndex}`}
-                        className={
-                          partialDates.has(coords[0]!.date)
-                            ? "price-history-dot price-history-partial"
-                            : "price-history-dot"
-                        }
-                        cx={coords[0]!.x}
-                        cy={coords[0]!.y}
-                        r={2.5}
-                      >
-                        <title>{`${coords[0]!.date} (historical).`}</title>
-                      </circle>
-                    ) : null;
-                  }
-                  // Review B2b: a gap segment (a real date-hole, per
-                  // `classifyPriceHistorySegments`) is already the
-                  // strongest "uncertain" signal and stays dashed as such
-                  // regardless of partial-ness; only a NON-gap segment gets
-                  // further split by partial-point adjacency, so a partial
-                  // point's line never renders solid-identical to a run of
-                  // complete points.
-                  const runs = segment.gap
-                    ? [{ points: coords, partial: false }]
-                    : splitByPartialAdjacency(coords, partialDates);
-                  return runs.map((run, runIndex) => (
-                    <polyline
-                      key={`segment-${segmentIndex}-run-${runIndex}`}
-                      className={
-                        segment.gap
-                          ? "price-history-line price-history-gap"
-                          : run.partial
-                            ? "price-history-line price-history-partial"
-                            : "price-history-line"
-                      }
-                      points={run.points
-                        .map((point) => `${point.x},${point.y}`)
-                        .join(" ")}
+                {activePoint
+                  ? `${chartDate(activePoint.date)}: ${currencyPrefix}${valueText(activePoint.priceDecimal)}${activePartial ? " (partial)" : ""}`
+                  : " "}
+              </p>
+              <div className="price-history-chart-row">
+                {/* UI-018/hist-001's own pinned test scans for the exact,
+                    literal `<div class="price-history-axis">` opening tag
+                    (no other attributes) -- the content-sized width (F2)
+                    therefore lives on THIS separate shell wrapper, never
+                    on `.price-history-axis` itself. */}
+                <div
+                  className="price-history-axis-shell"
+                  style={{ width: `${yAxisGutterWidthCh}ch` }}
+                >
+                  <div className="price-history-axis">
+                    <span
+                      className="price-history-axis-label"
+                      style={{
+                        top: `${(CHART_PADDING_Y / CHART_HEIGHT) * 100}%`,
+                      }}
                     >
-                      <title>
-                        {segment.gap
-                          ? `No observations between ${segment.points[0]!.date} and ${segment.points[segment.points.length - 1]!.date}.`
-                          : run.partial
-                            ? `Partial: some held securities were unpriced between ${run.points[0]!.date} and ${run.points[run.points.length - 1]!.date}.`
-                            : `${run.points[0]!.date} to ${run.points[run.points.length - 1]!.date}`}
-                      </title>
-                    </polyline>
-                  ));
-                })}
-                {/* Review B2b: every partial point gets its OWN hollow
+                      {maxLabelText}
+                    </span>
+                    {intermediateYTicks.map((tick) => (
+                      <span
+                        key={`y-label-${tick.value}`}
+                        className="price-history-axis-label"
+                        aria-hidden="true"
+                        style={{ top: `${(tick.y / CHART_HEIGHT) * 100}%` }}
+                      >
+                        {currencyPrefix}
+                        {groupThousands(tick.text)}
+                      </span>
+                    ))}
+                    <span
+                      className="price-history-axis-label"
+                      style={{
+                        top: `${((CHART_HEIGHT - CHART_PADDING_Y) / CHART_HEIGHT) * 100}%`,
+                      }}
+                    >
+                      {minLabelText}
+                    </span>
+                  </div>
+                </div>
+                <div className="price-history-plot">
+                  <svg
+                    className="price-history-svg"
+                    viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
+                    role="img"
+                    tabIndex={0}
+                    aria-describedby="portfolio-value-readout"
+                    aria-label={`Portfolio value history in ${history.baseCurrencyCode}; ${plottable.length} point${plottable.length === 1 ? "" : "s"}, ${plottable[0]!.date} to ${plottable[plottable.length - 1]!.date}${partialDates.size > 0 ? `; ${partialDates.size} partial` : ""}. Use arrow keys to step through points when focused.`}
+                    onPointerMove={handlePointerMove}
+                    onPointerDown={handlePointerDown}
+                    onPointerUp={endPointerScrub}
+                    onPointerCancel={endPointerScrub}
+                    onPointerLeave={handlePointerLeave}
+                    onKeyDown={handleKeyDown}
+                  >
+                    {intermediateYTicks.map((tick) => (
+                      <line
+                        key={`grid-${tick.value}`}
+                        className="price-history-gridline"
+                        x1={CHART_PADDING_X}
+                        x2={CHART_WIDTH - CHART_PADDING_X}
+                        y1={tick.y}
+                        y2={tick.y}
+                      />
+                    ))}
+                    <line
+                      className="price-history-baseline"
+                      x1={CHART_PADDING_X}
+                      y1={CHART_HEIGHT - CHART_PADDING_Y}
+                      x2={CHART_WIDTH - CHART_PADDING_X}
+                      y2={CHART_HEIGHT - CHART_PADDING_Y}
+                    />
+                    {segments.map((segment, segmentIndex) => {
+                      const coords = segment.points
+                        .map((point) => byDate.get(point.date))
+                        .filter(
+                          (point): point is NonNullable<typeof point> =>
+                            !!point,
+                        );
+                      if (coords.length < 2) {
+                        return coords.length === 1 ? (
+                          <circle
+                            key={`point-${segmentIndex}`}
+                            className={
+                              partialDates.has(coords[0]!.date)
+                                ? "price-history-dot price-history-partial"
+                                : "price-history-dot"
+                            }
+                            cx={coords[0]!.x}
+                            cy={coords[0]!.y}
+                            r={2.5}
+                          >
+                            <title>{`${coords[0]!.date} (historical).`}</title>
+                          </circle>
+                        ) : null;
+                      }
+                      // Review B2b: a gap segment (a real date-hole, per
+                      // `classifyPriceHistorySegments`) is already the
+                      // strongest "uncertain" signal and stays dashed as such
+                      // regardless of partial-ness; only a NON-gap segment gets
+                      // further split by partial-point adjacency, so a partial
+                      // point's line never renders solid-identical to a run of
+                      // complete points.
+                      const runs = segment.gap
+                        ? [{ points: coords, partial: false }]
+                        : splitByPartialAdjacency(coords, partialDates);
+                      return runs.map((run, runIndex) => (
+                        <polyline
+                          key={`segment-${segmentIndex}-run-${runIndex}`}
+                          className={
+                            segment.gap
+                              ? "price-history-line price-history-gap"
+                              : run.partial
+                                ? "price-history-line price-history-partial"
+                                : "price-history-line"
+                          }
+                          points={run.points
+                            .map((point) => `${point.x},${point.y}`)
+                            .join(" ")}
+                        >
+                          <title>
+                            {segment.gap
+                              ? `No observations between ${segment.points[0]!.date} and ${segment.points[segment.points.length - 1]!.date}.`
+                              : run.partial
+                                ? `Partial: some held securities were unpriced between ${run.points[0]!.date} and ${run.points[run.points.length - 1]!.date}.`
+                                : `${run.points[0]!.date} to ${run.points[run.points.length - 1]!.date}`}
+                          </title>
+                        </polyline>
+                      ));
+                    })}
+                    {/* Review B2b: every partial point gets its OWN hollow
                     marker, regardless of position in the series -- the
                     dashed line segments above already distinguish a run
                     TOUCHING a partial point, but an interior partial point
                     (neither the series' latest point nor an isolated
                     single-coordinate run) would otherwise carry no
                     point-level marker of its own. */}
-                {scaled.points
-                  .filter((point) => partialDates.has(point.date))
-                  .map((point) => (
-                    <circle
-                      key={`partial-${point.date}`}
-                      className="price-history-dot price-history-partial"
-                      cx={point.x}
-                      cy={point.y}
-                      r={2.5}
-                    >
-                      <title>
-                        {`${point.date}: partial -- ${partialPointsByDate.get(point.date)?.pricedSecurityCount ?? 0} of ${partialPointsByDate.get(point.date)?.heldSecurityCount ?? 0} held securities priced.`}
-                      </title>
-                    </circle>
-                  ))}
-                {scaled.points.length > 0 ? (
-                  <circle
-                    className={
-                      partialDates.has(
-                        scaled.points[scaled.points.length - 1]!.date,
-                      )
-                        ? "price-history-dot price-history-latest price-history-partial"
-                        : "price-history-dot price-history-latest"
-                    }
-                    cx={scaled.points[scaled.points.length - 1]!.x}
-                    cy={scaled.points[scaled.points.length - 1]!.y}
-                    r={3}
-                  />
-                ) : null}
-              </svg>
-              <div className="price-history-axis">
-                <span>
-                  {currencyPrefix}
-                  {valueText(scaled.maxPriceDecimal)}
-                </span>
-                <span>
-                  {currencyPrefix}
-                  {valueText(scaled.minPriceDecimal)}
-                </span>
+                    {scaled.points
+                      .filter((point) => partialDates.has(point.date))
+                      .map((point) => (
+                        <circle
+                          key={`partial-${point.date}`}
+                          className="price-history-dot price-history-partial"
+                          cx={point.x}
+                          cy={point.y}
+                          r={2.5}
+                        >
+                          <title>
+                            {`${point.date}: partial -- ${partialPointsByDate.get(point.date)?.pricedSecurityCount ?? 0} of ${partialPointsByDate.get(point.date)?.heldSecurityCount ?? 0} held securities priced.`}
+                          </title>
+                        </circle>
+                      ))}
+                    {scaled.points.length > 0 ? (
+                      <circle
+                        className={
+                          partialDates.has(
+                            scaled.points[scaled.points.length - 1]!.date,
+                          )
+                            ? "price-history-dot price-history-latest price-history-partial"
+                            : "price-history-dot price-history-latest"
+                        }
+                        cx={scaled.points[scaled.points.length - 1]!.x}
+                        cy={scaled.points[scaled.points.length - 1]!.y}
+                        r={3}
+                      />
+                    ) : null}
+                    {/* UI-041 scrub/hover: a vertical guide line plus a
+                    highlighted marker at the snapped point -- rendered ONLY
+                    once a pointer/keyboard interaction has actually set
+                    `activeIndex` (never on the initial server render, so
+                    hydration never has to remove it -- BUG-002/BUG-003). */}
+                    {activePoint ? (
+                      <g className="price-history-hover-group">
+                        <line
+                          className="price-history-hover-line"
+                          x1={activePoint.x}
+                          x2={activePoint.x}
+                          y1={CHART_PADDING_Y}
+                          y2={CHART_HEIGHT - CHART_PADDING_Y}
+                        />
+                        <circle
+                          className="price-history-hover-dot"
+                          cx={activePoint.x}
+                          cy={activePoint.y}
+                          r={4}
+                        />
+                      </g>
+                    ) : null}
+                  </svg>
+                  {xTicks.length > 0 ? (
+                    <div className="price-history-x-axis" aria-hidden="true">
+                      {xTicks.map((tick, index) => (
+                        <span
+                          key={`x-label-${tick.date}`}
+                          style={{
+                            left: `${(tick.x / CHART_WIDTH) * 100}%`,
+                            textAlign:
+                              index === 0
+                                ? "left"
+                                : index === xTicks.length - 1
+                                  ? "right"
+                                  : "center",
+                            transform:
+                              index === 0
+                                ? "translateX(0)"
+                                : index === xTicks.length - 1
+                                  ? "translateX(-100%)"
+                                  : "translateX(-50%)",
+                          }}
+                        >
+                          {chartDate(tick.date)}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
               </div>
               <p className="chart-coverage">
                 {chartDate(plottable[0]!.date)} –{" "}

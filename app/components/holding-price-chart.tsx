@@ -7,7 +7,13 @@
 // are private to that file, and this component's timeout applies to a plain
 // read, not a mutation submit racing a keyboard trap, so it is kept local
 // rather than forcing a shared export across an unrelated concern.
-import { useEffect, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+} from "react";
 import {
   formatDecimalTrimmed,
   groupThousands,
@@ -19,11 +25,20 @@ import {
   type PriceHistoryRange,
 } from "../price-history-range.ts";
 import {
+  axisGutterWidthCh,
   calendarColumnWidth,
   classifyPriceHistorySegments,
+  computeXAxisTicks,
+  computeYAxisTicks,
+  dropCollidingOrOutOfRangeTicks,
+  filterTicksByVerticalSeparation,
+  findNearestPointIndexByX,
+  formatAxisTickValue,
   isPlottableDecimal,
+  plotXFromClientX,
   positionTodayPointsByObservedTime,
   scalePriceHistoryPoints,
+  stepActiveIndex,
   type ChartScale,
   type PlottedTimeAxisPoint,
 } from "../price-history-chart-geometry.ts";
@@ -306,6 +321,13 @@ export function PriceHistoryChartView({
         </p>
       ) : (
         <ChartBody
+          // UI-041: remounts (resetting its own scrub/hover `activeIndex`
+          // state) whenever the selected range changes -- the React-
+          // endorsed way to reset a component's state on a prop change
+          // without an effect (`react-hooks/set-state-in-effect`) or a
+          // render-time ref read/write (`react-hooks/refs`), both of which
+          // this codebase's lint config forbids.
+          key={range}
           symbol={symbol}
           range={range}
           state={state}
@@ -345,6 +367,25 @@ export function ChartBody({
    * itself for why those are NOT migrated. */
   baseCurrencyCode: string;
 }) {
+  // UI-041 scrub/hover readout (owner directive: "run my finger, or the
+  // mouse across the graph and see the value at that point"). Hooks are
+  // called unconditionally, before this component's own early-return below,
+  // per React's rules-of-hooks. `activeIndex` starts `null` on every
+  // render -- including the first, server-rendered one -- so the initial
+  // markup never shows a readout/guide-line the browser then has to
+  // hydrate away (BUG-002/BUG-003's "no server/client render divergence"
+  // rule). This component is remounted (via `key={range}` at its call site
+  // in `PriceHistoryChartView`) whenever the selected range changes, which
+  // resets this state back to `null` for free -- a stale index would
+  // otherwise point at a different point (or nothing) in the newly fetched
+  // series.
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  // Touch must scrub only while the finger is actually down (a plain
+  // vertical swipe stays a page scroll, never hijacked into a scrub) --
+  // `touchAction: pan-y` on the SVG (`.price-history-svg` in globals.css)
+  // additionally lets a real vertical swipe keep scrolling the page.
+  const pointerDownRef = useRef(false);
+
   const plottable = state.points.filter((point) =>
     isPlottableDecimal(point.priceDecimal),
   );
@@ -571,188 +612,443 @@ export function ChartBody({
     ? marketLocalTimeLabel(state.latestDelayed.observedAt, marketTimezone)
     : null;
 
+  // UI-041: axis ticks. Y ticks are "nice" round reference values between
+  // the chart's own real (possibly today-set) min/max -- the two EXACT
+  // extreme labels below (from `scaled.min/maxPriceDecimal`, unchanged)
+  // keep rendering the real observed decimal strings, never a rounded
+  // approximation. X ticks are evenly time-spaced calendar dates -- only
+  // rendered for a genuine calendar-date x-axis range; the Day/Week ranges'
+  // sub-day TIME axis (`timeAxisRange` above) uses a different pixel scale
+  // for today's overlaid ticks, so a calendar-date axis row there would
+  // mislabel where those repositioned points actually sit.
+  const minPriceNumeric = Number(scaled.minPriceDecimal);
+  const maxPriceNumeric = Number(scaled.maxPriceDecimal);
+  const yTicksResult = computeYAxisTicks(
+    minPriceNumeric,
+    maxPriceNumeric,
+    SCALE,
+    5,
+  );
+  // Review B3 (BLOCKING): `computeYAxisTicks` already excludes anything
+  // float-drift-close to either boundary; this second pass closes the
+  // DISPLAY-level gap -- this chart's own step-derived decimal precision
+  // could still round two distinct interior ticks to the same text, or
+  // (less likely here than the whole-dollar portfolio chart, but still
+  // possible for a coarse step) push a rounded value past the true
+  // min/max. `reservedTexts` uses the SAME formatting as the intermediates
+  // so a same-magnitude intermediate is recognised as colliding with an
+  // extreme even though the extreme's own visible label keeps its full
+  // (finer) decimal precision.
+  const formatYTickText = (tick: { value: number }) =>
+    formatAxisTickValue(tick.value, yTicksResult.step);
+  const rangeSafeYTicks = dropCollidingOrOutOfRangeTicks(
+    yTicksResult.ticks,
+    formatYTickText,
+    minPriceNumeric,
+    maxPriceNumeric,
+    [
+      formatYTickText({ value: minPriceNumeric }),
+      formatYTickText({ value: maxPriceNumeric }),
+    ],
+  );
+  // Review F1 (BLOCKING): a text/value-safe tick can still visually
+  // OVERPRINT the exact extreme label or another kept intermediate (e.g.
+  // an exact max at top:6.25% vs a "nice" intermediate at top:9.07% -- a
+  // gap narrower than one label's own line-box needs at the narrowest
+  // supported 320px chart width). This second, purely geometric pass
+  // keeps only the ones with real vertical breathing room.
+  const intermediateYTicks = filterTicksByVerticalSeparation(rangeSafeYTicks, [
+    CHART_PADDING_Y,
+    CHART_HEIGHT - CHART_PADDING_Y,
+  ]);
+  // Review F2 (BLOCKING): size the gutter to its OWN content -- a fixed
+  // pixel width truncated a real, larger price label. `ch` stays a pure
+  // function of the label strings (never the "(today, intraday)"
+  // attribution, which review F2 moved to an sr-only suffix below so it
+  // no longer inflates the VISIBLE gutter width at all), so this is
+  // deterministic and hydration-safe (no layout read).
+  const currencyPrefix = currencyDisplayPrefix(
+    state.currencyCode,
+    baseCurrencyCode,
+  );
+  const maxLabelText = `${currencyPrefix}${priceText(scaled.maxPriceDecimal)}`;
+  const minLabelText = `${currencyPrefix}${priceText(scaled.minPriceDecimal)}`;
+  const yAxisGutterWidthCh = axisGutterWidthCh([
+    maxLabelText,
+    minLabelText,
+    ...intermediateYTicks.map(
+      (tick) => `${currencyPrefix}${groupThousands(tick.text)}`,
+    ),
+  ]);
+  const xTickDates =
+    plottable.length > 0
+      ? plottable.map((point) => point.date)
+      : todayPlottable.map((point) => point.date);
+  // Review F1 follow-up (secondary item 1): 4 x-ticks left the first two
+  // touching by ~3px at the narrowest supported 320px width -- 3 stays
+  // within the task's own "3-5 labels" target range while leaving real
+  // breathing room at that width.
+  const xTicks = timeAxisRange ? [] : computeXAxisTicks(xTickDates, SCALE, 3);
+
+  // UI-041 scrub/hover readout (owner directive: "run my finger, or the
+  // mouse across the graph and see the value at that point"). `hoverPoints`
+  // is built from the SAME already-plotted coordinates the line/markers
+  // above draw from -- nearest-by-x snapping only ever lands on a REAL
+  // point, never a fabricated in-between value (honesty rule); a pointer
+  // over a genuine gap simply lands on whichever real neighbour is
+  // pixel-closer. Historical and today points are distinguished so the
+  // readout can carry today's own "(today, intraday)"/quality-caveat
+  // disclosures, matching the axis labels' own `maxFromToday`/`minFromToday`
+  // convention above.
+  const hoverPoints = [
+    ...historicalScaled.map((point) => ({ ...point, today: false as const })),
+    ...todayFinal.map((point) => ({
+      date: point.date,
+      priceDecimal: point.priceDecimal,
+      x: point.x,
+      y: point.y,
+      quality: point.quality,
+      today: true as const,
+    })),
+  ];
+  const activePoint =
+    activeIndex !== null ? (hoverPoints[activeIndex] ?? null) : null;
+  const activeCaveat =
+    activePoint && activePoint.today
+      ? qualityCaveatLabel(activePoint.quality)
+      : null;
+  function localPointerX(event: PointerEvent<SVGSVGElement>): number {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return plotXFromClientX(event.clientX, rect.left, rect.width, CHART_WIDTH);
+  }
+  function handlePointerMove(event: PointerEvent<SVGSVGElement>) {
+    if (event.pointerType === "touch" && !pointerDownRef.current) return;
+    setActiveIndex(findNearestPointIndexByX(hoverPoints, localPointerX(event)));
+  }
+  function handlePointerDown(event: PointerEvent<SVGSVGElement>) {
+    pointerDownRef.current = true;
+    setActiveIndex(findNearestPointIndexByX(hoverPoints, localPointerX(event)));
+  }
+  function endPointerScrub() {
+    pointerDownRef.current = false;
+  }
+  function handlePointerLeave() {
+    pointerDownRef.current = false;
+    setActiveIndex(null);
+  }
+  function handleKeyDown(event: KeyboardEvent<SVGSVGElement>) {
+    const next = stepActiveIndex(event.key, activeIndex, hoverPoints.length);
+    if (next === undefined) return;
+    event.preventDefault();
+    setActiveIndex(next);
+  }
+
   return (
     <>
-      <svg
-        className="price-history-svg"
-        viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
-        role="img"
-        aria-label={`${symbol} price history in ${state.currencyCode}; ${totalPointCount} point${
-          totalPointCount === 1 ? "" : "s"
-        }, ${ariaFromDate ?? "unknown"} to ${ariaToDate ?? "unknown"}${
-          todayPlottable.length > 0
-            ? " (includes today's intraday capture, delayed, not a close)"
-            : ""
-        }.`}
-      >
-        <line
-          className="price-history-baseline"
-          x1={CHART_PADDING_X}
-          y1={CHART_HEIGHT - CHART_PADDING_Y}
-          x2={CHART_WIDTH - CHART_PADDING_X}
-          y2={CHART_HEIGHT - CHART_PADDING_Y}
-        />
-        {segments.map((segment, index) => {
-          const coords = segment.points
-            .map((point) => byDate.get(point.date))
-            .filter((point): point is NonNullable<typeof point> => !!point);
-          if (coords.length < 2) {
-            // Review round-1 fix (F2, BLOCKING): a lone historical point
-            // (e.g. the DAY range's "previous close" context supplement)
-            // previously rendered with NO accessible title at all -- a
-            // pre-existing gap that became actively harmful once the DAY
-            // range's time axis could place a same-pixel intraday tick
-            // right next to (or, before the F2 gap fix above, literally
-            // on top of) it: a different calendar date with nothing to
-            // distinguish it. Names the point's own date explicitly.
-            return coords.length === 1 ? (
-              <circle
-                key={`point-${index}`}
-                className="price-history-dot"
-                cx={coords[0]!.x}
-                cy={coords[0]!.y}
-                r={2.5}
-              >
-                <title>{`${coords[0]!.date} (historical).`}</title>
-              </circle>
-            ) : null;
-          }
-          return (
-            <polyline
-              key={`segment-${index}`}
-              className={
-                segment.gap
-                  ? "price-history-line price-history-gap"
-                  : "price-history-line"
-              }
-              points={coords.map((point) => `${point.x},${point.y}`).join(" ")}
+      {/* `role="status"` rather than an explicit `aria-live` attribute --
+          this ARIA role implicitly carries polite live-region semantics
+          (screen readers announce updates), and MKT-011B's own pinned
+          regression test scans this component's ENTIRE rendered HTML for
+          the literal substring "live" (guarding against ever claiming a
+          delayed quote is a "live" price) -- an explicit `aria-live="..."`
+          attribute would false-positive that guard. */}
+      <p id="price-history-readout" className="chart-readout" role="status">
+        {activePoint
+          ? `${chartDate(activePoint.date)}: ${currencyDisplayPrefix(state.currencyCode, baseCurrencyCode)}${priceText(activePoint.priceDecimal)}${activePoint.today ? " (today, intraday)" : ""}${activeCaveat ? ` — ${activeCaveat}` : ""}`
+          : " "}
+      </p>
+      <div className="price-history-chart-row">
+        {/* UI-018/MKT-011C's own pinned tests scan for the exact, literal
+            `<div class="price-history-axis">` opening tag (no other
+            attributes) -- the content-sized width (F2) therefore lives on
+            THIS separate shell wrapper, never on `.price-history-axis`
+            itself. */}
+        <div
+          className="price-history-axis-shell"
+          style={{ width: `${yAxisGutterWidthCh}ch` }}
+        >
+          <div className="price-history-axis">
+            <span
+              className="price-history-axis-label"
+              style={{ top: `${(CHART_PADDING_Y / CHART_HEIGHT) * 100}%` }}
             >
-              <title>
-                {segment.gap
-                  ? bucketSize > 1
-                    ? // Review round-2 fix: downsampling means the RETURNED
-                      // points are already sparse, so a wide delta between
-                      // two of them is not proof the raw data has zero rows
-                      // in between -- only that it exceeds this series'
-                      // normal sampling spacing. "No observations" would be
-                      // a false claim here; the coverage line one element
-                      // below already discloses the real raw/shown counts.
-                      // Review round-3 fix: the threshold used to classify
-                      // this AS a gap (see `classifyPriceHistorySegments`)
-                      // is NOT the same thing as this series' actual
-                      // observed cadence -- stating it as "about one point
-                      // per N days" overstated sparsity (the FMG "All" view
-                      // is really ~27 calendar days apart, not the ~76-day
-                      // threshold). State the comparison, not a fabricated
-                      // cadence figure.
-                      `Downsampled: a hole in the stored data wider than this series' sampling spacing (between ${segment.points[0]!.date} and ${segment.points[segment.points.length - 1]!.date}).`
-                    : `No observations between ${segment.points[0]!.date} and ${segment.points[segment.points.length - 1]!.date}.`
-                  : `${segment.points[0]!.date} to ${segment.points[segment.points.length - 1]!.date}`}
-              </title>
-            </polyline>
-          );
-        })}
-        {/* MKT-011B: when today's intraday overlay has data, ITS latest
+              {maxLabelText}
+              {/* Review F2 (BLOCKING): this attribution used to be VISIBLE
+                  text glued onto the label itself, forcing the whole gutter
+                  wide enough to fit it and making the price text unreadable
+                  in the process. It stays disclosed (sr-only, still present
+                  in the rendered HTML/accessibility tree, satisfying
+                  MKT-011C's own disclosure requirement) without consuming
+                  any visible gutter width. */}
+              {maxFromToday ? (
+                <span className="sr-only"> (today, intraday)</span>
+              ) : null}
+            </span>
+            {intermediateYTicks.map((tick) => (
+              <span
+                key={`y-label-${tick.value}`}
+                className="price-history-axis-label"
+                aria-hidden="true"
+                style={{ top: `${(tick.y / CHART_HEIGHT) * 100}%` }}
+              >
+                {currencyPrefix}
+                {groupThousands(tick.text)}
+              </span>
+            ))}
+            <span
+              className="price-history-axis-label"
+              style={{
+                top: `${((CHART_HEIGHT - CHART_PADDING_Y) / CHART_HEIGHT) * 100}%`,
+              }}
+            >
+              {minLabelText}
+              {minFromToday ? (
+                <span className="sr-only"> (today, intraday)</span>
+              ) : null}
+            </span>
+          </div>
+        </div>
+        <div className="price-history-plot">
+          <svg
+            className="price-history-svg"
+            viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
+            role="img"
+            tabIndex={0}
+            aria-describedby="price-history-readout"
+            aria-label={`${symbol} price history in ${state.currencyCode}; ${totalPointCount} point${
+              totalPointCount === 1 ? "" : "s"
+            }, ${ariaFromDate ?? "unknown"} to ${ariaToDate ?? "unknown"}${
+              todayPlottable.length > 0
+                ? " (includes today's intraday capture, delayed, not a close)"
+                : ""
+            }. Use arrow keys to step through points when focused.`}
+            onPointerMove={handlePointerMove}
+            onPointerDown={handlePointerDown}
+            onPointerUp={endPointerScrub}
+            onPointerCancel={endPointerScrub}
+            onPointerLeave={handlePointerLeave}
+            onKeyDown={handleKeyDown}
+          >
+            {intermediateYTicks.map((tick) => (
+              <line
+                key={`grid-${tick.value}`}
+                className="price-history-gridline"
+                x1={CHART_PADDING_X}
+                x2={CHART_WIDTH - CHART_PADDING_X}
+                y1={tick.y}
+                y2={tick.y}
+              />
+            ))}
+            <line
+              className="price-history-baseline"
+              x1={CHART_PADDING_X}
+              y1={CHART_HEIGHT - CHART_PADDING_Y}
+              x2={CHART_WIDTH - CHART_PADDING_X}
+              y2={CHART_HEIGHT - CHART_PADDING_Y}
+            />
+            {segments.map((segment, index) => {
+              const coords = segment.points
+                .map((point) => byDate.get(point.date))
+                .filter((point): point is NonNullable<typeof point> => !!point);
+              if (coords.length < 2) {
+                // Review round-1 fix (F2, BLOCKING): a lone historical point
+                // (e.g. the DAY range's "previous close" context supplement)
+                // previously rendered with NO accessible title at all -- a
+                // pre-existing gap that became actively harmful once the DAY
+                // range's time axis could place a same-pixel intraday tick
+                // right next to (or, before the F2 gap fix above, literally
+                // on top of) it: a different calendar date with nothing to
+                // distinguish it. Names the point's own date explicitly.
+                return coords.length === 1 ? (
+                  <circle
+                    key={`point-${index}`}
+                    className="price-history-dot"
+                    cx={coords[0]!.x}
+                    cy={coords[0]!.y}
+                    r={2.5}
+                  >
+                    <title>{`${coords[0]!.date} (historical).`}</title>
+                  </circle>
+                ) : null;
+              }
+              return (
+                <polyline
+                  key={`segment-${index}`}
+                  className={
+                    segment.gap
+                      ? "price-history-line price-history-gap"
+                      : "price-history-line"
+                  }
+                  points={coords
+                    .map((point) => `${point.x},${point.y}`)
+                    .join(" ")}
+                >
+                  <title>
+                    {segment.gap
+                      ? bucketSize > 1
+                        ? // Review round-2 fix: downsampling means the RETURNED
+                          // points are already sparse, so a wide delta between
+                          // two of them is not proof the raw data has zero rows
+                          // in between -- only that it exceeds this series'
+                          // normal sampling spacing. "No observations" would be
+                          // a false claim here; the coverage line one element
+                          // below already discloses the real raw/shown counts.
+                          // Review round-3 fix: the threshold used to classify
+                          // this AS a gap (see `classifyPriceHistorySegments`)
+                          // is NOT the same thing as this series' actual
+                          // observed cadence -- stating it as "about one point
+                          // per N days" overstated sparsity (the FMG "All" view
+                          // is really ~27 calendar days apart, not the ~76-day
+                          // threshold). State the comparison, not a fabricated
+                          // cadence figure.
+                          `Downsampled: a hole in the stored data wider than this series' sampling spacing (between ${segment.points[0]!.date} and ${segment.points[segment.points.length - 1]!.date}).`
+                        : `No observations between ${segment.points[0]!.date} and ${segment.points[segment.points.length - 1]!.date}.`
+                      : `${segment.points[0]!.date} to ${segment.points[segment.points.length - 1]!.date}`}
+                  </title>
+                </polyline>
+              );
+            })}
+            {/* MKT-011B: when today's intraday overlay has data, ITS latest
             tick (below) is the true "most recent known value" marker;
             the plain historical "latest" dot only applies when there is
             no overlay -- this branch is mathematically identical to the
             pre-MKT-011B behaviour in that case (`historicalScaled` alone
             is `scaled.points` when `todayScaled` is empty). */}
-        {historicalScaled.length > 0 && todayScaled.length === 0 ? (
-          <circle
-            className="price-history-dot price-history-latest"
-            cx={historicalScaled[historicalScaled.length - 1]!.x}
-            cy={historicalScaled[historicalScaled.length - 1]!.y}
-            r={3}
-          />
-        ) : null}
-        {todayScaled.length > 0 ? (
-          <g className="price-history-intraday-group">
-            {todayLinePoints.length >= 2 ? (
-              <polyline
-                className="price-history-intraday-line"
-                points={todayLinePoints
-                  .map((point) => `${point.x},${point.y}`)
-                  .join(" ")}
-              >
-                <title>
-                  {`Today${todayMarketDate ? ` (${todayMarketDate})` : ""}: intraday capture, delayed -- not a close. ${todayScaled.length} point${todayScaled.length === 1 ? "" : "s"} captured${todayProviders.length > 0 ? ` (${todayProviders.map(providerDisplayLabel).join(", ")})` : ""}.`}
-                </title>
-              </polyline>
+            {historicalScaled.length > 0 && todayScaled.length === 0 ? (
+              <circle
+                className="price-history-dot price-history-latest"
+                cx={historicalScaled[historicalScaled.length - 1]!.x}
+                cy={historicalScaled[historicalScaled.length - 1]!.y}
+                r={3}
+              />
             ) : null}
-            {todayFinal.map((point, index) => {
-              const caveat = qualityCaveatLabel(point.quality);
-              const time = marketLocalTimeLabel(
-                point.observedAt,
-                marketTimezone,
-              );
-              // MKT-011C: non-color distinction (QA-001B) -- ONLY the two
-              // LOWER-confidence tiers TASKS.md names ('indicative',
-              // 'stale_candidate') render HOLLOW with a dashed outline
-              // (`price-history-intraday-uncertain`); 'corrected' still gets
-              // its own textual caveat below (a correction is worth noting)
-              // but keeps the ordinary FILLED marker -- a correction is MORE
-              // trustworthy than a plain 'observed' tick, not less, so the
-              // "uncertain" visual language would misrepresent it.
-              const isUncertainQuality =
-                point.quality === "indicative" ||
-                point.quality === "stale_candidate";
-              const classNames = [
-                "price-history-intraday-dot",
-                index === todayFinal.length - 1
-                  ? "price-history-intraday-latest"
-                  : "",
-                isUncertainQuality ? "price-history-intraday-uncertain" : "",
-              ]
-                .filter(Boolean)
-                .join(" ");
-              // UI-026 ruling: this SVG <title> is accessible/provenance
-              // text (a hover/screen-reader tooltip), not the chart's
-              // visible price label -- keeps the exact "amount CODE"
-              // suffix form deliberately, so the full ISO code always
-              // stays reachable here even though the visible axis below
-              // uses the bare/flagged symbol. Never migrated to the
-              // symbol form.
-              const titleParts = [
-                time
-                  ? `${time} market-local`
-                  : `${chartDate(point.date)} (time unavailable)`,
-                `${priceText(point.priceDecimal)} ${state.currencyCode}`,
-              ];
-              if (caveat) titleParts.push(caveat);
-              if (point.clampedOutsideWindow) {
-                titleParts.push(
-                  "outside the 10:25-16:25 capture window -- shown at the nearest window edge, not its true relative time",
-                );
-              }
-              return (
-                <rect
-                  key={`today-${point.date}-${index}`}
-                  className={classNames}
-                  x={point.x - 2.5}
-                  y={point.y - 2.5}
-                  width={5}
-                  height={5}
-                  transform={`rotate(45 ${point.x} ${point.y})`}
+            {todayScaled.length > 0 ? (
+              <g className="price-history-intraday-group">
+                {todayLinePoints.length >= 2 ? (
+                  <polyline
+                    className="price-history-intraday-line"
+                    points={todayLinePoints
+                      .map((point) => `${point.x},${point.y}`)
+                      .join(" ")}
+                  >
+                    <title>
+                      {`Today${todayMarketDate ? ` (${todayMarketDate})` : ""}: intraday capture, delayed -- not a close. ${todayScaled.length} point${todayScaled.length === 1 ? "" : "s"} captured${todayProviders.length > 0 ? ` (${todayProviders.map(providerDisplayLabel).join(", ")})` : ""}.`}
+                    </title>
+                  </polyline>
+                ) : null}
+                {todayFinal.map((point, index) => {
+                  const caveat = qualityCaveatLabel(point.quality);
+                  const time = marketLocalTimeLabel(
+                    point.observedAt,
+                    marketTimezone,
+                  );
+                  // MKT-011C: non-color distinction (QA-001B) -- ONLY the two
+                  // LOWER-confidence tiers TASKS.md names ('indicative',
+                  // 'stale_candidate') render HOLLOW with a dashed outline
+                  // (`price-history-intraday-uncertain`); 'corrected' still gets
+                  // its own textual caveat below (a correction is worth noting)
+                  // but keeps the ordinary FILLED marker -- a correction is MORE
+                  // trustworthy than a plain 'observed' tick, not less, so the
+                  // "uncertain" visual language would misrepresent it.
+                  const isUncertainQuality =
+                    point.quality === "indicative" ||
+                    point.quality === "stale_candidate";
+                  const classNames = [
+                    "price-history-intraday-dot",
+                    index === todayFinal.length - 1
+                      ? "price-history-intraday-latest"
+                      : "",
+                    isUncertainQuality
+                      ? "price-history-intraday-uncertain"
+                      : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ");
+                  // UI-026 ruling: this SVG <title> is accessible/provenance
+                  // text (a hover/screen-reader tooltip), not the chart's
+                  // visible price label -- keeps the exact "amount CODE"
+                  // suffix form deliberately, so the full ISO code always
+                  // stays reachable here even though the visible axis below
+                  // uses the bare/flagged symbol. Never migrated to the
+                  // symbol form.
+                  const titleParts = [
+                    time
+                      ? `${time} market-local`
+                      : `${chartDate(point.date)} (time unavailable)`,
+                    `${priceText(point.priceDecimal)} ${state.currencyCode}`,
+                  ];
+                  if (caveat) titleParts.push(caveat);
+                  if (point.clampedOutsideWindow) {
+                    titleParts.push(
+                      "outside the 10:25-16:25 capture window -- shown at the nearest window edge, not its true relative time",
+                    );
+                  }
+                  return (
+                    <rect
+                      key={`today-${point.date}-${index}`}
+                      className={classNames}
+                      x={point.x - 2.5}
+                      y={point.y - 2.5}
+                      width={5}
+                      height={5}
+                      transform={`rotate(45 ${point.x} ${point.y})`}
+                    >
+                      <title>{`${titleParts.join("; ")}.`}</title>
+                    </rect>
+                  );
+                })}
+              </g>
+            ) : null}
+            {/* UI-041 scrub/hover: a vertical guide line plus a highlighted
+            marker at the snapped point -- rendered ONLY once a
+            pointer/keyboard interaction has actually set `activeIndex`
+            (never on the initial server render, so hydration never has to
+            remove it -- BUG-002/BUG-003). */}
+            {activePoint ? (
+              <g className="price-history-hover-group">
+                <line
+                  className="price-history-hover-line"
+                  x1={activePoint.x}
+                  x2={activePoint.x}
+                  y1={CHART_PADDING_Y}
+                  y2={CHART_HEIGHT - CHART_PADDING_Y}
+                />
+                <circle
+                  className="price-history-hover-dot"
+                  cx={activePoint.x}
+                  cy={activePoint.y}
+                  r={4}
+                />
+              </g>
+            ) : null}
+          </svg>
+          {xTicks.length > 0 ? (
+            <div className="price-history-x-axis" aria-hidden="true">
+              {xTicks.map((tick, index) => (
+                <span
+                  key={`x-label-${tick.date}`}
+                  style={{
+                    left: `${(tick.x / CHART_WIDTH) * 100}%`,
+                    textAlign:
+                      index === 0
+                        ? "left"
+                        : index === xTicks.length - 1
+                          ? "right"
+                          : "center",
+                    transform:
+                      index === 0
+                        ? "translateX(0)"
+                        : index === xTicks.length - 1
+                          ? "translateX(-100%)"
+                          : "translateX(-50%)",
+                  }}
                 >
-                  <title>{`${titleParts.join("; ")}.`}</title>
-                </rect>
-              );
-            })}
-          </g>
-        ) : null}
-      </svg>
-      <div className="price-history-axis">
-        <span>
-          {currencyDisplayPrefix(state.currencyCode, baseCurrencyCode)}
-          {priceText(scaled.maxPriceDecimal)}
-          {maxFromToday ? " (today, intraday)" : ""}
-        </span>
-        <span>
-          {currencyDisplayPrefix(state.currencyCode, baseCurrencyCode)}
-          {priceText(scaled.minPriceDecimal)}
-          {minFromToday ? " (today, intraday)" : ""}
-        </span>
+                  {chartDate(tick.date)}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
       </div>
       {/* MKT-011C: a today-only chart (no settled historical points survive
           this range, e.g. a brand-new listing on the "Day" view) must not

@@ -23,6 +23,7 @@ import { AccountLifecycleRecovery } from "./account-lifecycle-recovery";
 import { AccountLifecycleControls } from "./account-lifecycle-controls";
 import { OwnedPortfolioDetails } from "./portfolio-details";
 import { PortfolioValueChart } from "./portfolio-value-chart";
+import { hasUsableHistoryPoints } from "../price-history-chart-geometry";
 import { ServiceWorkerRegistration } from "./service-worker-registration";
 import { subtractCalendarMonths } from "../overview-range";
 import { sampleOverviewChartPoints } from "../overview-chart";
@@ -2105,18 +2106,43 @@ function OwnedOverviewScreen({
   }
 
   if (data.status === "empty" || current === null) {
+    // UI-041 (owner directive, verbatim: "The graph in overview should be
+    // moved up and replace the 'Empty State No Valuation History' which
+    // should only be displayed when we don't have the full valuation
+    // history"): `data` here is the CALC-003/CALC-004 persisted-snapshot
+    // read (`OwnedOverviewData`) -- its "empty" status simply means that
+    // pipeline has never published (CALC-005: it never runs for this
+    // owner), which is unconditionally true today regardless of whether
+    // real portfolio value history exists. `portfolioValueHistory` is a
+    // SEPARATE, independent HIST-001 read-time derivation (see this file's
+    // HIST-001 import comment) that can be genuinely populated even while
+    // `data.status` is always "empty" -- the old unconditional EmptyState
+    // above the chart therefore claimed "no valuation history" on screens
+    // where the chart right below it was visibly showing real history, a
+    // standing contradiction. The chart is now the PRIMARY element in this
+    // slot; the EmptyState renders only when the chart ALSO has nothing
+    // usable to show (its own `status !== "ok"` or zero plottable points),
+    // so the two surfaces never disagree with each other. The underlying
+    // CALC-003/CALC-004 published-snapshot machinery itself is untouched --
+    // only this redundant duplicate empty shell is conditioned.
+    const chartHasHistory = hasUsableHistoryPoints(
+      portfolioValueHistory.status,
+      portfolioValueHistory.points,
+    );
     return (
       <>
-        <EmptyState
-          title="No valuation history yet"
-          message="Add posted transactions and validated market observations to publish portfolio value."
-        />
         <PortfolioValueChart
           history={portfolioValueHistory}
           financialYearStartMonth={financialYearStartMonth}
           timezone={timezone}
           nowInstant={nowInstant}
         />
+        {chartHasHistory ? null : (
+          <EmptyState
+            title="No valuation history yet"
+            message="Add posted transactions and validated market observations to publish portfolio value."
+          />
+        )}
       </>
     );
   }

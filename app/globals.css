@@ -1472,15 +1472,169 @@ dd {
   border-top: 1px solid var(--divider);
 }
 
-.price-history-svg {
-  width: 100%;
-  height: auto;
+/* UI-041 review (B1/B2, BLOCKING): axis labels must sit AGAINST their own
+   computed tick position, not in a `justify-content: space-between` row
+   disconnected from the plot's real coordinate space (the original
+   layout visually paired the wrong value with the wrong date, and never
+   used the pure `tick.x` geometry it computed and unit-tested at all).
+   `.price-history-chart-row` is a flex row of [y-axis gutter, plot]; the
+   plot is a FIXED-ASPECT box (matching the SVG's own `viewBox` ratio)
+   so every label's `top`/`left` percentage, set inline from
+   `tick.y / CHART_HEIGHT` / `tick.x / CHART_WIDTH`, lands on the exact
+   same pixel its gridline/point does, at any rendered width. */
+.price-history-chart-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
   margin-top: 8px;
+  /* Reserves room for `.price-history-x-axis` below -- that row is
+     positioned absolutely (so its date labels can sit at their own exact
+     `tick.x` percentage) and therefore contributes no flow height of its
+     own; without this, its labels would overlap whatever renders next. */
+  margin-bottom: 20px;
+}
+
+/* UI-041 review F2 (BLOCKING): a CONTENT-sized y-axis label gutter. Split
+   across TWO elements rather than one: `.price-history-axis-shell` carries
+   the actual sizing (`width` set INLINE per render, from
+   `axisGutterWidthCh` -- the longest currently-rendered label's own
+   character count; a fixed pixel width here previously truncated a real
+   large value, "$1,337,203.50" ellipsised to "$1,337,20…"), while
+   `.price-history-axis` (the SAME class name the pre-UI-041 max/min
+   readout row used) stays a plain, attribute-minimal wrapper -- the
+   UI-018/MKT-011C pinned tests scan the rendered HTML for its exact,
+   literal `<div class="price-history-axis">` opening tag with no other
+   attributes, so the inline `style` cannot live there. `min-width`/
+   `max-width` on the shell are the only sizing values left in CSS: a
+   floor so a degenerate empty-label render never collapses the gutter to
+   nothing, and a defensive cap against a pathological content width
+   blowing out the row layout -- each individual label's own
+   `overflow: hidden`/ellipsis (below) is the FINAL safety net if a value
+   ever exceeds the cap. */
+.price-history-axis-shell {
+  position: relative;
+  min-width: 3ch;
+  max-width: 140px;
+  flex: 0 0 auto;
+  /* Reviewer fix: the inline `ch` width must resolve against the SAME font
+     size the labels actually render at (`.price-history-axis-label`, also
+     0.62rem) -- inheriting the ambient ~1rem made every `ch` ~1.6x too wide,
+     so a real large value's gutter took ~133px of a 320px screen and left
+     the plot only ~157px (42px tall). The labels set their own (rem-based,
+     so unchanged) size; this only fixes the `ch` basis. */
+  font-size: 0.62rem;
+}
+
+.price-history-axis {
+  position: absolute;
+  inset: 0;
+}
+
+.price-history-axis-label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  overflow: hidden;
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-size: 0.62rem;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* UI-041: the plot itself -- a fixed-aspect box (matching the SVG's own
+   600x160 `viewBox`) so the absolutely positioned SVG and x-axis label
+   overlay always share the SAME coordinate space as `tick.x`/`tick.y`,
+   regardless of the rendered width (incl. a 320px screen, QA-001B). */
+.price-history-plot {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  aspect-ratio: 600 / 160;
+}
+
+.price-history-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* UI-041: horizontal touch-scrub must never hijack the page's own
+     vertical scroll -- a vertical swipe still pans the page; only a drag
+     starting on/moving across the plot scrubs the readout. */
+  touch-action: pan-y;
+}
+
+.price-history-svg:focus-visible {
+  outline: 2px solid var(--green-bright);
+  outline-offset: 2px;
 }
 
 .price-history-baseline {
   stroke: var(--divider);
   stroke-width: 1;
+}
+
+/* UI-041: supplementary "nice round value" y-axis gridlines -- deliberately
+   subtle (low opacity, no dash) so they read as reference lines, never
+   competing with the real plotted line/markers above them. */
+.price-history-gridline {
+  stroke: var(--divider);
+  stroke-width: 1;
+  opacity: 0.4;
+}
+
+/* UI-041 scrub/hover: vertical guide line + snapped-point marker. Shape
+   (a larger hollow-ring dot) and a dashed guide line distinguish this from
+   the ordinary solid data markers above, not color alone (QA-001B). */
+.price-history-hover-line {
+  stroke: var(--muted);
+  stroke-width: 1;
+  stroke-dasharray: 2 2;
+}
+
+.price-history-hover-dot {
+  fill: var(--cream);
+  stroke: var(--green-bright);
+  stroke-width: 2;
+}
+
+/* UI-041: the scrub/hover readout text -- a reserved TWO-line min-height
+   (review follow-up) so a long holding-chart readout (date + flagged
+   foreign-currency price + a "(today, intraday)"/quality-caveat suffix)
+   wrapping to a second line mid-scrub, on a narrow screen, never shifts
+   the chart's own layout underneath it either. */
+.chart-readout {
+  min-height: 2.6em;
+  margin: 4px 0 0;
+  color: var(--cream);
+  font-size: 0.72rem;
+}
+
+/* UI-041 review (B2, BLOCKING): x-axis date labels, positioned absolutely
+   within `.price-history-plot` at each tick's OWN `tick.x / CHART_WIDTH`
+   percentage (set inline) -- the pure, unit-tested geometry `xTicks`
+   already computed, rather than a `justify-content: space-between` row
+   that silently discarded it (day-rounded ticks are not evenly spaced,
+   so that row could sit up to ~7% off the true scale position). */
+.price-history-x-axis {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  left: 0;
+  height: 1.3em;
+  margin-top: 3px;
+}
+
+.price-history-x-axis span {
+  position: absolute;
+  top: 0;
+  overflow: hidden;
+  max-width: 90px;
+  color: var(--muted);
+  font-size: 0.6rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .price-history-line {
@@ -1529,14 +1683,6 @@ dd {
   stroke: var(--warning);
   stroke-width: 1.5;
   stroke-dasharray: 1.5 1;
-}
-
-.price-history-axis {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 4px;
-  color: var(--muted);
-  font-size: 0.66rem;
 }
 
 /* MKT-011B: today's intraday overlay -- deliberately distinct from
