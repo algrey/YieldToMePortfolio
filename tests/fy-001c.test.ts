@@ -389,7 +389,16 @@ test("FY-001C: loadAuthenticatedWorkspace resolves nowInstant once server-side a
     "utf8",
   );
   assert.match(source, /timezone:\s*settings\.timezone,/);
-  assert.match(source, /const nowInstant = new Date\(\)\.toISOString\(\);/);
+  // BUG-002 (hydration half): nowInstant now comes from the Worker-stamped
+  // `REQUEST_NOW_HEADER` (falling back to `new Date()` only when absent),
+  // not a bare `new Date()` call here -- see `resolveRequestNow` in
+  // `domain/observability/request-correlation.ts` for why (Vinext's
+  // double per-request RSC invocation needs both passes to read the
+  // identical instant).
+  assert.match(
+    source,
+    /const nowInstant = resolveRequestNow\(\s*requestHeaders\.get\(REQUEST_NOW_HEADER\),\s*\);/,
+  );
   assert.match(source, /nowInstant,/);
 });
 

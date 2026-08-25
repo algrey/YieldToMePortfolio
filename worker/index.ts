@@ -16,6 +16,7 @@ import {
   addRequestId,
   createRequestId,
   emitStructuredLog,
+  REQUEST_NOW_HEADER,
 } from "../domain/observability/index.ts";
 import {
   runScheduledCalculationSweep,
@@ -128,6 +129,19 @@ const worker: ExportedHandler<Env> = {
       VERIFIED_PRINCIPAL_HEADER,
       encodeAccessJwtBase64Url(accessResult.principal),
     );
+    // BUG-002 (hydration half): stamp this request's canonical "now" ONCE,
+    // here, and carry it with the Request -- Vinext invokes the page's
+    // async Server Component twice per request (see
+    // `domain/observability/request-correlation.ts`'s module comment), and
+    // both passes must read the identical instant or a second/minute
+    // boundary crossed between them can desync the server-rendered HTML
+    // from the RSC flight payload. SECURITY: unconditionally delete any
+    // client-supplied copy of this header BEFORE setting our own -- same
+    // strip-before-stamp discipline as `VERIFIED_PRINCIPAL_HEADER` above --
+    // a client must never be able to inject the "now" a server render
+    // anchors on.
+    authenticatedHeaders.delete(REQUEST_NOW_HEADER);
+    authenticatedHeaders.set(REQUEST_NOW_HEADER, new Date().toISOString());
     const authenticatedRequest = new Request(request, {
       headers: authenticatedHeaders,
     });

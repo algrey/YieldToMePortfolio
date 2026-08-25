@@ -5,6 +5,10 @@ import {
 } from "../domain/auth/access-jwt";
 import { resolveAuthenticatedRequestContext } from "../domain/auth/request-context";
 import { VERIFIED_PRINCIPAL_HEADER } from "../domain/auth/verified-principal-header";
+import {
+  REQUEST_NOW_HEADER,
+  resolveRequestNow,
+} from "../domain/observability/index.ts";
 import { createOwnedPortfolioRepository } from "../db/repositories/owned-portfolios";
 import { createOwnedUserSettingsRepository } from "../db/repositories/owned-portfolios";
 import { createOwnedWorkspace } from "./owned-workspace";
@@ -59,7 +63,8 @@ export async function loadAuthenticatedWorkspace(
     includeHoldings?: boolean;
   } = {},
 ): Promise<OwnedWorkspace> {
-  const principalHeader = (await headers()).get(VERIFIED_PRINCIPAL_HEADER);
+  const requestHeaders = await headers();
+  const principalHeader = requestHeaders.get(VERIFIED_PRINCIPAL_HEADER);
   if (!principalHeader) {
     return unavailableWorkspace("Authentication is unavailable.");
   }
@@ -100,7 +105,23 @@ export async function loadAuthenticatedWorkspace(
     // history point's date (stale data would then falsely rename/mislabel
     // the FY) or recomputed client-side (non-deterministic across
     // server/client render, and drifts from the request's real "now").
-    const nowInstant = new Date().toISOString();
+    //
+    // BUG-002 (hydration half): read from the Worker-stamped
+    // `REQUEST_NOW_HEADER` (see `worker/index.ts` and
+    // `domain/observability/request-correlation.ts`) rather than calling
+    // `new Date()` directly here -- Vinext invokes this async Server
+    // Component TWICE per request (a discarded probe pass, then the real
+    // render), so a bare `new Date()` here could return two different
+    // instants for the SAME request if a second/minute boundary fell
+    // between the two invocations, desyncing the server-rendered HTML from
+    // the RSC flight payload (a React hydration mismatch). The header
+    // guarantees both invocations read the identical instant.
+    // `resolveRequestNow` falls back to a fresh `new Date()` only when the
+    // header is absent/malformed (tests, dev paths that bypass
+    // `worker/index.ts`) -- it never throws on a missing header.
+    const nowInstant = resolveRequestNow(
+      requestHeaders.get(REQUEST_NOW_HEADER),
+    );
     const configuredWorkspace = settings
       ? {
           ...workspace,
