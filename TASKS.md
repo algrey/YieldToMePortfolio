@@ -1149,6 +1149,18 @@ Scope (free-plan 100k-rows/day write budget; an 8k-row ticker × 18 holdings ≈
 - Docs: CSV_IMPORT_SPEC + ARCHITECTURE (write-budget rationale, shareable-database decision recorded); CALCULATIONS only if any consumer's semantics change (they should not — stop and report if they do).
 - Tests: delta-upload skip counts; identical-upsert write-avoidance (drill row-write counts via changes()/RETURNING); no-data omission counts; downsample month-boundary/last-trading-day fixtures incl. the 2018 boundary and a configurable boundary; MKT-018B gap classification with monthly pre-boundary history; chart render with sparse history; all existing import/rollup/converge suites unregressed.
 
+### UI-040 — "Hide Sold" toggle in the holdings summary footer (owner-directed)
+
+Status: READY (2026-08-25, owner directive, verbatim): "Let add a 'Hide Sold' button for the holdings. I don't want it to take up valuable screen realestate on the holdings page. I propose for the last two lines of the summary row in holdings (All Time and Realised): We move the values to the left side (ie just after the text, though I would like the dollar signs to line up), then on the right side in the same row have a Hide Sold button that turns into a Show Sold button when pressed. It should not cause the summary row to grow in vertical size. I think partially sold holdings should stay as they are."
+
+Orchestrator rulings:
+
+- Layout: the All Time and Realised lines' values move left, directly after their labels, with the DOLLAR SIGNS vertically aligned across the two lines (fixed-width label column or tabular alignment — state the mechanism); the toggle sits right-aligned within the Realised line's row (or spanning both lines' right side — worker judgment, but ONE control, no new line, footer height budget unchanged (--holdings-summary-h untouched or recomputed to the same value; pin no vertical growth).
+- Behaviour: Hide Sold hides FULLY-sold rows only (quantity exactly zero via the established ownedHoldingQuantityIsZero convention — UI-036's rule); partially-sold rows and their Realised lines stay; the toggle flips to "Show Sold" when active. Hiding affects the ROW LIST ONLY — the summary footer's totals (incl. All Time/Realised) are UNCHANGED by the toggle (they still include sold history; if hidden rows exist, the footer's sr/title notes N sold holdings hidden so the totals-vs-visible-rows relationship stays honest).
+- The toggle is display state, not a mutation: no isOnline gating, works offline; persists per portfolio for the session (sessionStorage per the DIV-013 pattern, try/catch, default SHOW).
+- QA-001B: 44px target, non-color state (the label text IS the state), accessible (aria-pressed).
+- Tests: hide/show round trip (sold rows disappear/reappear; partial rows never affected); footer totals byte-unchanged under the toggle; dollar-sign alignment pin (structural); no-vertical-growth pin; session persistence; sr disclosure when hiding.
+
 ### MKT-019 — Auto-download history when a new security is added (future)
 
 Status: PLANNED; blocked on MKT-018 (needs the server-fetch path to exist). When a new security resolves into the portfolio (BRK-009 resolver / first trade commit), automatically fetch its price history via MKT-018's pipeline (budgeted, staged, owner-visible — never silent direct writes). Requires an Orchestrator scoping pass before READY.
