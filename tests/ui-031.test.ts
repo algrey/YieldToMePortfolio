@@ -870,9 +870,24 @@ test("UI-031B render: the sticky/shaded summary row renders with all four lines,
   // Owner's literal example shape: sign before the currency symbol, whole
   // dollars only (UI-031B: "all amounts should be whole dollars only");
   // percentages stay 2dp exactly as they already were.
-  assert.match(html, /\+\$333,000\s*\(\+33\.19%\)/);
+  //
+  // UI-040 review (B1, BLOCKING, honest flip): the sign now renders in its
+  // own fixed-width `.summary-line-sign` element (the dollar-sign alignment
+  // fix -- a variable-or-absent sign character used to shift the "$" that
+  // followed it) rather than inline with the rest of the figure. The
+  // rendered TEXT a human/screen-reader hears is still the owner's exact
+  // "+$333,000 (+33.19%)" shape, adjacent with no gap -- only the DOM
+  // structure producing it changed, so these two assertions are updated to
+  // match across the (adjacent, no-gap) element boundary.
+  assert.match(
+    html,
+    /<span class="summary-line-sign">\+<\/span>\$333,000\s*\(\+33\.19%\)/,
+  );
   assert.doesNotMatch(html, /\$333,000\.00/);
-  assert.match(html, /\+\$700\s*\(\+20%\)/);
+  assert.match(
+    html,
+    /<span class="summary-line-sign">\+<\/span>\$700\s*\(\+20%\)/,
+  );
   assert.doesNotMatch(html, /\$700\.00/);
 });
 

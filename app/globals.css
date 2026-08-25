@@ -657,7 +657,14 @@ dd {
      `line-height`s (.row-primary 19px x3 + .row-secondary 17px = 74px)
      plus the flex column's 3 inter-line gaps (3px x3 = 9px), the
      footer's own padding (7px + 8px = 15px), and its 1px top border =
-     99px exactly; rounded up to 100px for a hair of headroom. */
+     99px exactly; rounded up to 100px for a hair of headroom.
+     UI-040 (owner directive: "It should not cause the summary row to grow
+     in vertical size"): the All Time/Realised lines are now wrapped in one
+     `.summary-lines-lower` container alongside the Hide Sold toggle -- the
+     wrapper trades one OUTER inter-line gap for one identical INNER gap
+     between those same two lines (net gap px unchanged) and the toggle
+     itself is `position: absolute` (out of flow, never contributes to this
+     height), so this budget stays byte-unchanged at 100px. */
   --holdings-summary-h: 100px;
 }
 
@@ -729,11 +736,133 @@ dd {
   align-items: baseline;
 }
 
+/* UI-040 (owner directive, verbatim, 2026-08-25): "We move the values to
+   the left side (ie just after the text, though I would like the dollar
+   signs to line up), then on the right side in the same row have a Hide
+   Sold button ... It should not cause the summary row to grow in vertical
+   size." Wraps the All Time/Realised lines together (`portfolio-shell.tsx`'s
+   `HoldingsSummaryFooterRow`) so the toggle can sit beside BOTH without
+   adding a third row: the two `.summary-line-combined` lines stay NORMAL
+   in-flow flex children (same line-height/`gap` as every other footer
+   line, so the `--holdings-summary-h` budget below is byte-unchanged), and
+   the toggle is `position: absolute` -- taken OUT of flow entirely, so its
+   own 44px QA-001B target can exceed the ~41px two-line block's height
+   without growing this container: an absolutely positioned element never
+   contributes to its parent's layout height. */
+.holdings-summary-footer .summary-lines-lower {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  /* Reserves room on the right so the (short) label+value text can never
+     render underneath the absolutely positioned toggle -- kept in sync
+     with `--hide-sold-toggle-w` below. Review B1 fold: shrunk from `+8px`
+     to `+2px` (pure visual buffer, not text-bearing -- the safest place to
+     free width) to make room for the new sign slot below without touching
+     the label column or the toggle's own text-bearing width. */
+  padding-right: calc(var(--hide-sold-toggle-w) + 2px);
+}
+
 .holdings-summary-footer .summary-line-combined {
   display: flex;
-  justify-content: space-between;
   align-items: baseline;
   gap: 8px;
+}
+
+/* Dollar-sign alignment mechanism (owner: "I would like the dollar signs to
+   line up") -- review B1 fix: this is HALF the mechanism, not the whole
+   thing (the B1-blocking defect: a fixed label column alone still let a
+   variable-or-absent SIGN character shift the "$" that follows it, since
+   the sign rendered inline with the rest of the figure). This rule fixes a
+   FIXED-width label column shared identically by BOTH lines -- `min-width`
+   in `em` (scales with the label's own font-size/text zoom, unlike a hard
+   px value) rather than sizing to each label's own content -- so the
+   SIGN SLOT below always starts at the exact same x offset on both lines,
+   regardless of "All Time"/"Realised" rendering at different natural
+   widths in this proportional font. See `.summary-line-sign` immediately
+   below for the second slot, which is what actually pins the "$" itself. */
+.holdings-summary-footer .summary-line-combined .summary-line-label {
+  min-width: 4.6em;
+}
+
+/* Review B1 fix (BLOCKING -- the owner's one explicit layout requirement):
+   `ownedHoldingAmountWhole`'s sign-before-symbol convention means the
+   figure's own leading character is "+", "-"/"−", or nothing at all (a
+   genuine zero) -- three DIFFERENT widths, so rendering the sign inline
+   with the rest of the text shifted the "$" that followed it (measured:
+   a mixed +/− pair 2.6px off, an unsigned "$0" Realised line 9.35px off).
+   `portfolio-shell.tsx`'s `ownedHoldingSplitLeadingSign` pulls the sign
+   character out into its OWN element (`.summary-line-sign`), which this
+   rule fixes to a single character-advance width regardless of whether it
+   is empty -- `tabular-nums` is inherited from `.row-primary.numeric`
+   below, so this `1ch` box measures the SAME digit-width the number
+   itself renders in, keeping the "+"/"−"/empty slot and the trailing
+   digits on one consistent metric. Scoped to `.summary-line-combined`
+   only -- every other signed figure in this app (holding rows, the
+   footer's own line 1) is unaffected, and the shared `ownedHoldingAmountWhole`/
+   `signPrefixed` formatters are NOT modified (per the review ruling). */
+.holdings-summary-footer .summary-line-combined .row-primary.numeric {
+  font-variant-numeric: tabular-nums;
+}
+
+.holdings-summary-footer .summary-line-combined .summary-line-sign {
+  display: inline-block;
+  width: 1ch;
+  text-align: right;
+}
+
+.holdings-summary-footer {
+  /* Review B1 fold (narrow-width budget re-check): the pre-fix reservation
+     was 92px (button) + 8px (gutter) = 100px, leaving the reviewer's
+     measured ~2px of slack at 320px on a six-figure-plus-partial-marker
+     line -- not enough headroom for the new sign slot's ~1ch (an
+     ESTIMATED ~9px at the value line's 0.97rem font-size; exact glyph
+     metrics are font-rendering-dependent and not knowable from CSS source
+     alone). Shrunk to 88px (button) + 2px (gutter) = 90px, freeing ~10px
+     -- covers the ~9px estimated cost with a small margin, taken entirely
+     from the button's own external width and the gutter buffer, NEVER
+     from the label column (`.summary-line-label`, unchanged at 4.6em) --
+     the button's internal padding was tightened to `6px` a side (see
+     `.hide-sold-toggle` below) so the visible "Hide Sold"/"Show Sold" text
+     (9 characters, identical length both states) still has ~74px of
+     content room inside the narrower 88px box, comfortably above its
+     estimated ~58-69px rendered width. This is a reasoned, documented
+     estimate -- this repo's Node test harness has no real browser/layout
+     engine to pixel-measure against (see tests/ui-040.test.ts's own budget
+     pin and worker report for the same caveat); a real-device/zoom
+     re-check remains a QA-001B-style manual follow-up if exact confirmation
+     is needed before the owner reviews it live. */
+  --hide-sold-toggle-w: 88px;
+}
+
+/* UI-040: text-as-state (QA-001B non-colour signal) -- the button's own
+   label ("Hide Sold" / "Show Sold") IS the state, no colour-only cue.
+   `width`/`min-height` meet the 44px QA-001B touch target without growing
+   the two-line block above it (see `.summary-lines-lower`'s own comment:
+   this is taken out of flow via `position: absolute`). */
+.holdings-summary-footer .hide-sold-toggle {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  width: var(--hide-sold-toggle-w);
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Review B1 fold: tightened from `10px` a side to `6px` -- frees interior
+     text room to compensate for the narrower `--hide-sold-toggle-w` above,
+     without changing the button's OUTER (reserved) width. */
+  padding: 0 6px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--cream);
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
 /* UI-031B (owner directive: "remove the extra explanatory text"): the

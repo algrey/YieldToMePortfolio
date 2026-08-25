@@ -626,6 +626,7 @@ test("QA-001B: interactive controls meet the 44×44 CSS-pixel touch-target minim
     ".navigation-drawer > a,\n.navigation-drawer > button",
     ".import-mapping-form button",
     ".action-feedback button",
+    ".holdings-summary-footer .hide-sold-toggle",
   ]) {
     const block = extractBlock(styles, selector);
     assert.match(

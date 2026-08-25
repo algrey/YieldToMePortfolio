@@ -292,6 +292,74 @@ export function ownedHoldingQuantityIsZero(value: string): boolean {
     return false;
   }
 }
+
+// UI-040 (owner directive, verbatim, 2026-08-25): "Let add a 'Hide Sold'
+// button for the holdings ... I think partially sold holdings should stay
+// as they are." Reuses `ownedHoldingQuantityIsZero` VERBATIM -- the exact
+// same UI-036 exact-decimal-zero convention decides which rows are "sold"
+// for both features, so a row that keeps its row-tertiary line (partially
+// sold, quantity > 0) is guaranteed to also survive this filter. Pure and
+// generic over any row shape carrying a `quantity` string so it can be unit
+// tested directly against plain fixtures, independent of `OwnedHoldingRow`'s
+// full shape.
+export function ownedHoldingVisibleWhenHideSold<T extends { quantity: string }>(
+  rows: readonly T[],
+  hideSold: boolean,
+): readonly T[] {
+  return hideSold
+    ? rows.filter((row) => !ownedHoldingQuantityIsZero(row.quantity))
+    : rows;
+}
+
+// Counts the fully-sold rows a `true` `hideSold` value would remove --
+// independent of the CURRENT toggle state, so the count stays accurate for
+// the sr-only disclosure regardless of whether the toggle is on or off.
+export function ownedHoldingHiddenSoldCount<T extends { quantity: string }>(
+  rows: readonly T[],
+): number {
+  return rows.filter((row) => ownedHoldingQuantityIsZero(row.quantity)).length;
+}
+
+// UI-040 review (B1, BLOCKING, owner's one explicit layout requirement: "I
+// would like the dollar signs to line up"): `ownedHoldingAmountWhole`'s
+// SHARED sign-before-symbol convention ("+$333,000" / "-$1,204" / "$0", no
+// sign for a genuine zero) is untouched by this task -- per the review
+// ruling, the shared formatter is never modified. Instead this LOCAL,
+// footer-only helper splits the formatter's own output back into its
+// leading sign (if any) and the rest of the string, so the caller can
+// render the sign inside a fixed one-character-wide slot: "+", "-"/"−", and
+// "" (no sign, e.g. a genuine "$0") all occupy the SAME slot width, so the
+// "$" that immediately follows always lands at the same x offset on both
+// the All Time and Realised lines regardless of which of the three sign
+// states either line is in. Before this fix, the sign was rendered inline
+// with the rest of the text, so its own (variable, or ABSENT) width shifted
+// every subsequent character -- the exact defect the review measured (a
+// mixed +/− pair 2.6px off, an unsigned "$0" Realised line 9.35px off).
+export function ownedHoldingSplitLeadingSign(text: string): {
+  sign: string;
+  rest: string;
+} {
+  if (text.startsWith("+") || text.startsWith("-") || text.startsWith("−")) {
+    return { sign: text.slice(0, 1), rest: text.slice(1) };
+  }
+  return { sign: "", rest: text };
+}
+
+// UI-040 Orchestrator ruling (owner follow-up, verbatim: "No explanatory
+// text on the screen please ... Preserving information density on the
+// holding screen is very important"): this text is NEVER rendered visibly --
+// it feeds ONLY an sr-only live region (no `title`/hover disclosure --
+// review B3: a hover tooltip is still visible text, forbidden by the same
+// ruling) so the totals-vs-visible-rows relationship stays honestly
+// reachable to assistive tech without adding a single visible word to the
+// row list. `null` when there is nothing to disclose (nothing hidden).
+export function ownedHoldingHiddenSoldDisclosureText(
+  count: number,
+): string | null {
+  if (count <= 0) return null;
+  return `${count} sold holding${count === 1 ? "" : "s"} hidden`;
+}
+
 export function ownedHoldingPercent(
   value: OwnedHoldingRow["dailyPercent"],
   signed = false,

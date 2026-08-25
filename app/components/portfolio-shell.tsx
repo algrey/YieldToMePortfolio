@@ -41,13 +41,22 @@ import {
   ownedHoldingAmount,
   ownedHoldingAmountWhole,
   ownedHoldingDecimalNeverFakeZero,
+  ownedHoldingHiddenSoldCount,
+  ownedHoldingHiddenSoldDisclosureText,
   ownedHoldingPercent,
   ownedHoldingQuantity,
   ownedHoldingQuantityIsZero,
   ownedHoldingRealisedGainLine,
+  ownedHoldingSplitLeadingSign,
   ownedHoldingToneFromDecimal,
   ownedHoldingTrimmed,
+  ownedHoldingVisibleWhenHideSold,
 } from "../owned-holding-format";
+import {
+  hideSoldStorageKey,
+  loadHideSoldSession,
+  saveHideSoldSession,
+} from "../owned-holdings-hide-sold";
 import type { SecurityRealisedGainTotal } from "../../domain/gains/index.ts";
 import type { HoldingsSummaryFooter } from "../owned-holdings-summary.ts";
 import { currencyDisplayPrefix } from "../currency-display.ts";
@@ -525,6 +534,69 @@ function OwnedHoldingsScreen({
     [direction, sortableRows, sortKey],
   );
 
+  // UI-040 (owner directive, verbatim, 2026-08-25): "Let add a 'Hide Sold'
+  // button for the holdings." Display state only -- never gated on
+  // `isOnline`, works offline -- persisted per PORTFOLIO for the session
+  // via the DIV-013 sessionStorage pattern. Default `false` ("Show Sold",
+  // the owner's explicit default) on every fresh mount/server render;
+  // `hydratedHideSoldKeyRef` below gates when it is safe to start WRITING
+  // to sessionStorage, mirroring `income-multi-year.tsx`'s
+  // `hydratedKeyRef` guard verbatim (DIV-013 review B3) -- this component
+  // can be re-rendered for a different `portfolioId` WITHOUT a full
+  // remount (client-side portfolio switch), so a naive save effect could
+  // otherwise clobber the newly-entered portfolio's real stored session
+  // with the just-left portfolio's still-in-state value.
+  const [hideSold, setHideSold] = useState(false);
+  const hydratedHideSoldKeyRef = useRef<string | null>(null);
+
+  // Declared BEFORE the load effect below -- same ordering rationale as
+  // DIV-013's own save/load pair: effects run in declaration order within a
+  // single render pass, so on the exact pass a `portfolioId` change re-runs
+  // both, this one must run FIRST and observe the STALE ref (still the
+  // previous portfolio's key) and early-return, rather than writing the
+  // just-left portfolio's value into the newly-entered portfolio's key.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (hydratedHideSoldKeyRef.current !== hideSoldStorageKey(portfolioId)) {
+      return;
+    }
+    saveHideSoldSession(
+      window.sessionStorage,
+      hideSoldStorageKey(portfolioId),
+      hideSold,
+    );
+  }, [hideSold, portfolioId]);
+
+  // Reads any Hide Sold state left over from earlier in THIS session -- or,
+  // on a portfolio switch, that OTHER portfolio's own separate key -- back
+  // in. Client-side only (an effect never runs during server render).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    // Indirected through a nested callback rather than calling setState
+    // directly in the effect body -- the same sanctioned
+    // `react-hooks/set-state-in-effect` workaround `QuoteCorrectionHistory`
+    // (below in this file) and DIV-013's own load effect already use.
+    (() => {
+      const key = hideSoldStorageKey(portfolioId);
+      setHideSold(loadHideSoldSession(window.sessionStorage, key));
+      hydratedHideSoldKeyRef.current = key;
+    })();
+  }, [portfolioId]);
+
+  // UI-040: hides FULLY-sold rows only (the UI-036 `ownedHoldingQuantityIsZero`
+  // convention, reused verbatim) -- partially-sold rows are exact-decimal
+  // non-zero and are never touched. `hiddenSoldCount` is computed from the
+  // FULL `sortedRows` regardless of the current toggle, so the sr-only
+  // disclosure below stays accurate whichever state the toggle is in.
+  const hiddenSoldCount = useMemo(
+    () => ownedHoldingHiddenSoldCount(sortedRows),
+    [sortedRows],
+  );
+  const visibleRows = useMemo(
+    () => ownedHoldingVisibleWhenHideSold(sortedRows, hideSold),
+    [sortedRows, hideSold],
+  );
+
   function handleSort(nextKey: "ticker" | "value" | "daily" | "gain") {
     if (nextKey === sortKey) {
       setDirection((current) =>
@@ -586,7 +658,7 @@ function OwnedHoldingsScreen({
           />
         </div>
         <div className="holding-rows">
-          {sortedRows.map((holding) => {
+          {visibleRows.map((holding) => {
             const rowView = view;
             const homeAvailable =
               holding.homeValue.status === "available" &&
@@ -755,6 +827,9 @@ function OwnedHoldingsScreen({
           <HoldingsSummaryFooterRow
             summary={summary}
             homeCurrencyCode={homeCurrencyCode}
+            hideSold={hideSold}
+            hiddenSoldCount={hiddenSoldCount}
+            onToggleHideSold={() => setHideSold((current) => !current)}
           />
         ) : null}
       </section>
@@ -806,9 +881,22 @@ function PartialMarker({ text }: { text: string | null }) {
 function HoldingsSummaryFooterRow({
   summary,
   homeCurrencyCode,
+  hideSold,
+  hiddenSoldCount,
+  onToggleHideSold,
 }: {
   summary: HoldingsSummaryFooter;
   homeCurrencyCode: string;
+  /** UI-040: display state only -- never derived from or fed back into
+   * `summary`, so the footer's own totals below are BYTE-UNCHANGED
+   * regardless of this value (they still include sold history). */
+  hideSold: boolean;
+  /** Count of fully-sold rows a `true` `hideSold` would remove -- feeds
+   * ONLY the sr-only live region (owner ruling: never visible text, and
+   * review B3: no `title`/hover disclosure either -- a hover tooltip is
+   * still visible text). */
+  hiddenSoldCount: number;
+  onToggleHideSold: () => void;
 }) {
   // UI-030's own tone rule (a plain decimal string's sign), reused
   // verbatim rather than re-implemented -- "unavailable" figures stay
@@ -824,6 +912,17 @@ function HoldingsSummaryFooterRow({
   const gainTone = toneOf(summary.unrealisedGain);
   const allTimeTone = toneOf(summary.allTimeGain);
   const realisedTone = toneOf(summary.realisedGain);
+  // UI-040 review (B1, BLOCKING): split ONCE per line into { sign, rest }
+  // (see `ownedHoldingSplitLeadingSign`'s own doc comment for the full
+  // alignment mechanism) -- computed here rather than inline in the JSX
+  // below so the same split is never recomputed (and can never diverge)
+  // between the sign slot and the rest of the figure.
+  const allTimeSplit = ownedHoldingSplitLeadingSign(
+    ownedHoldingAmountWhole(homeCurrencyCode, summary.allTimeGain, true),
+  );
+  const realisedSplit = ownedHoldingSplitLeadingSign(
+    ownedHoldingAmountWhole(homeCurrencyCode, summary.realisedGain, true),
+  );
 
   return (
     <div
@@ -904,33 +1003,92 @@ function HoldingsSummaryFooterRow({
           {ownedHoldingPercent(summary.totalPercent, true)}
         </ToneValue>
       </div>
-      <div
-        className="summary-line-combined"
-        role="group"
-        aria-label="All time gain"
-      >
-        <span className="row-primary symbol">All Time</span>
-        <ToneValue tone={allTimeTone} className="row-primary numeric">
-          {ownedHoldingAmountWhole(homeCurrencyCode, summary.allTimeGain, true)}{" "}
-          ({ownedHoldingPercent(summary.allTimePercent, true)})
-          <PartialMarker text={summary.allTimeQualifier} />
-        </ToneValue>
-      </div>
-      <div
-        className="summary-line-combined"
-        role="group"
-        aria-label="Realised gain"
-      >
-        <span className="row-primary symbol">Realised</span>
-        <ToneValue tone={realisedTone} className="row-primary numeric">
-          {ownedHoldingAmountWhole(
-            homeCurrencyCode,
-            summary.realisedGain,
-            true,
-          )}{" "}
-          ({ownedHoldingPercent(summary.realisedPercent, true)})
-          <PartialMarker text={summary.realisedQualifier} />
-        </ToneValue>
+      {/* UI-040 (owner directive, verbatim, 2026-08-25): "We move the
+          values to the left side (ie just after the text, though I would
+          like the dollar signs to line up), then on the right side in the
+          same row have a Hide Sold button ... It should not cause the
+          summary row to grow in vertical size." The two lines below stay
+          NORMAL in-flow flex children (same line-height/gap as before, so
+          `--holdings-summary-h` above is byte-unchanged) -- only the
+          toggle is taken OUT of flow (`position: absolute` in
+          `app/globals.css`, vertically centered across both lines), so its
+          own QA-001B 44px target can exceed the ~41px two-line block's
+          height without growing this wrapper at all. Alignment mechanism
+          (review B1 fix -- the FULL mechanism has TWO fixed-width slots,
+          not one): (1) each line's label carries the shared
+          `.summary-line-label` class, fixing an identical column width
+          (`min-width`, in `em`) on BOTH lines; (2) each line's SIGN
+          (`ownedHoldingSplitLeadingSign`, below) renders in its own fixed
+          one-character `.summary-line-sign` slot immediately after the
+          label -- "+", "-"/"−", and "" (no sign) all occupy the same slot
+          width, so the "$" that follows (the value's real first character
+          once the sign is pulled out) lands at the identical x offset on
+          both lines regardless of which of the three sign states either
+          line is in. Slot (1) alone was insufficient: the sign used to
+          render INLINE with the value, so its own variable (or absent)
+          width shifted the "$" itself -- pre-fix a mixed +/− pair
+          misaligned 2.6px and an unsigned "$0" Realised line misaligned
+          9.35px, both now zero. */}
+      <div className="summary-lines-lower">
+        <div
+          className="summary-line-combined"
+          role="group"
+          aria-label="All time gain"
+        >
+          <span className="row-primary symbol summary-line-label">
+            All Time
+          </span>
+          <ToneValue tone={allTimeTone} className="row-primary numeric">
+            <span className="summary-line-sign">{allTimeSplit.sign}</span>
+            {allTimeSplit.rest} (
+            {ownedHoldingPercent(summary.allTimePercent, true)})
+            <PartialMarker text={summary.allTimeQualifier} />
+          </ToneValue>
+        </div>
+        <div
+          className="summary-line-combined"
+          role="group"
+          aria-label="Realised gain"
+        >
+          <span className="row-primary symbol summary-line-label">
+            Realised
+          </span>
+          <ToneValue tone={realisedTone} className="row-primary numeric">
+            <span className="summary-line-sign">{realisedSplit.sign}</span>
+            {realisedSplit.rest} (
+            {ownedHoldingPercent(summary.realisedPercent, true)})
+            <PartialMarker text={summary.realisedQualifier} />
+          </ToneValue>
+        </div>
+        {/* UI-040 review (owner follow-up, verbatim: "No explanatory text
+            on the screen please ... Preserving information density on the
+            holding screen is very important"): the button's LABEL is the
+            entire visible surface of this feature -- text-as-state
+            (QA-001B non-colour signal), `aria-pressed` for assistive tech,
+            44px target. No visible helper sentence, count, or disclosure
+            line anywhere -- the honesty note below is sr-only ONLY, no
+            `title`/hover (review B3: a hover tooltip is still visible
+            text). */}
+        <button
+          type="button"
+          className="hide-sold-toggle"
+          aria-pressed={hideSold}
+          onClick={onToggleHideSold}
+        >
+          {hideSold ? "Show Sold" : "Hide Sold"}
+        </button>
+        {/* UI-040 review fold: the live region element is ALWAYS mounted
+            (never conditionally added/removed) -- only its TEXT content
+            changes with `hideSold`. Assistive tech reliably announces a
+            change to an EXISTING live region's content; a region that is
+            itself mounted-with-content on the same render (the previous
+            shape here) is not reliably announced, since there was no prior
+            state for the AT to diff against. */}
+        <span className="sr-only" role="status">
+          {hideSold
+            ? (ownedHoldingHiddenSoldDisclosureText(hiddenSoldCount) ?? "")
+            : ""}
+        </span>
       </div>
     </div>
   );
