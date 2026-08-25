@@ -13,6 +13,34 @@
 // binding ruling and the money-honesty rule (a bad price row must fail that
 // ROW, never coerce to a fabricated value).
 //
+// MKT-020 (2026-08-25, owner-directed): a SECOND format variant, AUTO-
+// DETECTED by an EXACT column-name signature (quoting optional -- detection
+// runs on the already quote-stripped header columns, so an unquoted header
+// with the same eight names in the same order matches identically; never
+// confused with the format above -- an unrecognised header still falls
+// through to that format's own honest `MISSING_HEADER` error): the owner's
+// other real export shape, an OHLCV-style daily CSV --
+//   "Date","Open","High","Low","Close","Volume","Daily Movement","Daily Movement (Percent)"
+//   "24 Aug 2026","$21.15","$21.68","$21.11","$21.44","2,420,147","0.29","1.37%"
+// Owner ruling (close-only, deliberately NOT storing OHLCV): this
+// deployment's free-plan constraint is ROW COUNT, not column count, so
+// adding Open/High/Low/Volume/Movement columns would buy nothing -- only
+// `Close` (this app's one price fact) is extracted; every other column is
+// read from the file and then discarded. This is REVERSIBLE, not a data
+// loss: the owner's original CSVs are retained outside this app (never
+// deleted by an import), so if OHLCV storage is ever wanted later, the
+// SAME files can be re-imported against a future schema/parser change --
+// nothing about today's close-only choice destroys the source data.
+// Ticker: this format carries NO ticker column (unlike the format above,
+// whose second header name IS the ticker) -- the ticker is instead derived
+// from the FILENAME, per the established `ASX-<TICKER>.csv` download
+// convention (`app/price-history-coverage-format.ts`'s `iiDownloadFilename`
+// names exactly this shape for the guided download flow). A misnamed file
+// is caught the same way a misidentified ticker always is: the preview's
+// matched-security confirmation names what it actually matched, so the
+// owner can catch a wrong filename before confirming, same as any other
+// mismatch.
+//
 // Text decoding (UTF-8/UTF-16 detection) lives in the shared
 // `./text-encoding.ts` module -- see that file's header comment for the
 // owner-reported UTF-16 bug this guards against (Excel-style "Unicode
@@ -161,9 +189,12 @@ export type PriceCsvMalformedRow = Readonly<{
 export type ParsePriceCsvResult =
   | {
       ok: true;
-      /** The raw ticker text from the header's second column, untouched
-       * (callers upper-case/trim for matching; this preserves what the file
-       * actually said for display). */
+      /** The raw ticker text -- from the header's second column for the
+       * original `DateTime,<TICKER>` format, or from the FILENAME's
+       * `ASX-<TICKER>.csv` segment for the MKT-020 OHLCV variant (that
+       * format's header carries no ticker column) -- untouched either way
+       * (callers upper-case/trim for matching; this preserves what the
+       * file/filename actually said for display). */
       ticker: string;
       delimiter: "," | "\t";
       rows: PriceCsvDataRow[];
@@ -195,6 +226,182 @@ function isValidCalendarDate(value: string): boolean {
   );
 }
 
+// ---------------------------------------------------------------------------
+// MKT-020: the OHLCV close-only variant -- see this module's header comment
+// for the owner ruling this section implements.
+// ---------------------------------------------------------------------------
+
+/** The variant's exact column-name signature, checked AFTER `splitCsvFields`
+ * (which already strips any surrounding quotes and trims whitespace) --
+ * quoting is therefore optional: an unquoted header with these same eight
+ * names in this same order matches identically to the owner's quoted
+ * sample. Detection is an EXACT array match, never a fuzzy/partial one, so a
+ * header that merely resembles this shape (different casing, extra/missing/
+ * reordered columns) honestly falls through to the format above's own
+ * `MISSING_HEADER` error rather than being silently misread. */
+const OHLCV_HEADER_SIGNATURE = [
+  "Date",
+  "Open",
+  "High",
+  "Low",
+  "Close",
+  "Volume",
+  "Daily Movement",
+  "Daily Movement (Percent)",
+] as const;
+
+const OHLCV_DATE_COLUMN_INDEX = 0;
+const OHLCV_CLOSE_COLUMN_INDEX = 4;
+
+function isOhlcvHeader(columns: readonly string[]): boolean {
+  return (
+    columns.length === OHLCV_HEADER_SIGNATURE.length &&
+    OHLCV_HEADER_SIGNATURE.every((name, index) => columns[index] === name)
+  );
+}
+
+/** Day-month-abbreviation-year date table ("24 Aug 2026" style). Exact,
+ * Title-case abbreviations ONLY -- a different casing ("AUG"/"aug"/"aUg")
+ * is a REJECTED, not silently normalized, form: this parser has exactly one
+ * real sample to go on (the owner's verbatim export), and guessing at case
+ * variants it has never actually seen would trade an honest error for a
+ * fabricated acceptance rule. */
+const OHLCV_MONTH_ABBREVIATIONS: Readonly<Record<string, string>> =
+  Object.freeze({
+    Jan: "01",
+    Feb: "02",
+    Mar: "03",
+    Apr: "04",
+    May: "05",
+    Jun: "06",
+    Jul: "07",
+    Aug: "08",
+    Sep: "09",
+    Oct: "10",
+    Nov: "11",
+    Dec: "12",
+  });
+
+const OHLCV_DATE_PATTERN = /^(\d{1,2}) ([A-Za-z]{3}) (\d{4})$/;
+
+/** Parses "24 Aug 2026" into `YYYY-MM-DD`, or `null` for anything
+ * unrecognised -- an unknown/mis-cased month abbreviation, a non-4-digit
+ * year (a 2-digit year is REJECTED outright: it is genuinely ambiguous
+ * which century it means, never guessed), or a day/month combination that
+ * is not a real calendar date (day 32, 30 Feb, ...), reusing the SAME
+ * `isValidCalendarDate` round-trip check the other format's date grammar
+ * already enforces -- one definition of "a real calendar date", not two. */
+function parseOhlcvDate(value: string): string | null {
+  const match = OHLCV_DATE_PATTERN.exec(value.trim());
+  if (!match) return null;
+  const [, dayRaw, monthAbbrev, year] = match;
+  const month = OHLCV_MONTH_ABBREVIATIONS[monthAbbrev!];
+  if (!month) return null;
+  const day = dayRaw!.padStart(2, "0");
+  const candidate = `${year}-${month}-${day}`;
+  return isValidCalendarDate(candidate) ? candidate : null;
+}
+
+/** Strips exactly one leading `$` (the owner's export prefixes every dollar
+ * figure this way); a cell with no leading `$` is passed through unchanged
+ * rather than rejected outright, since the grammar check right after this
+ * still catches anything that isn't actually a valid price. The result is
+ * NOT further massaged (no thousands-separator stripping): a close cell
+ * carrying a `,` (e.g. a hypothetical `"$1,234.56"`) fails the shared
+ * `isPositiveDecimal` grammar below and is honestly rejected as
+ * `invalid_price` -- the owner's sample only ever shows thousands
+ * separators in `Volume` (an ignored column), so accepting one in `Close`
+ * would be inventing a form no real file has shown yet; see this module's
+ * header comment. */
+function stripLeadingDollarSign(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.startsWith("$") ? trimmed.slice(1) : trimmed;
+}
+
+/** The established `ASX-<TICKER>.csv` download-filename convention
+ * (`app/price-history-coverage-format.ts`'s `iiDownloadFilename`) --
+ * case-insensitive on the "ASX-" prefix and ".csv" suffix (a filesystem
+ * concern, not a financial one -- some OSes/browsers alter filename case),
+ * but the captured ticker text itself is returned EXACTLY as written in
+ * the filename (never case-coerced), matching this module's existing
+ * "preserve what the file actually said" convention for the header-derived
+ * ticker in the other format. Tolerates exactly ONE trailing browser
+ * duplicate-download suffix (` (1)`, ` (2)`, ...) immediately before the
+ * extension -- the guided MKT-018B download flow routinely produces
+ * `ASX-SHL (1).csv` when the owner re-downloads the same ticker's export,
+ * and rejecting that real, common shape would defeat the whole guided
+ * workflow over a cosmetic OS/browser artifact, not a real ambiguity (the
+ * suffix is discarded, never folded into the returned ticker text). Only
+ * ONE such suffix is tolerated -- a doubled one (`ASX-SHL (1) (2).csv`)
+ * does not match, kept honestly tight rather than open-endedly permissive.
+ * Returns `null` for anything else that does not match -- an honest error,
+ * never a guessed ticker (e.g. a filename that never carried the `ASX-`
+ * prefix at all, such as a browser's own `download (1).csv` default, is
+ * NOT a "duplicate of an ASX ticker" and stays rejected). */
+const OHLCV_FILENAME_TICKER_PATTERN =
+  /^ASX-([A-Za-z0-9]{1,10})(?: \(\d+\))?\.csv$/i;
+
+function deriveTickerFromOhlcvFilename(
+  filename: string | undefined,
+): string | null {
+  if (typeof filename !== "string") return null;
+  const match = OHLCV_FILENAME_TICKER_PATTERN.exec(filename.trim());
+  return match ? match[1]! : null;
+}
+
+/** The OHLCV variant's own row loop -- structurally identical in shape to
+ * the format above's loop (malformed rows counted by reason, never
+ * dropped), differing only in: which columns are read (`Date`/`Close` by
+ * fixed index, everything else ignored per the owner's close-only ruling),
+ * the date grammar (`parseOhlcvDate` instead of the bare/timestamped
+ * `YYYY-MM-DD` grammar), and the `$`-strip before the SAME shared price
+ * grammar (`isNoDataPriceCell`/`isPositiveDecimal`) applies. */
+function parseOhlcvVariant(
+  lines: readonly string[],
+  delimiter: "," | "\t",
+  filename: string | undefined,
+): ParsePriceCsvResult {
+  const ticker = deriveTickerFromOhlcvFilename(filename);
+  if (!ticker) {
+    return {
+      ok: false,
+      code: "TICKER_INVALID",
+      message:
+        'Could not determine the ticker from the filename -- expected "ASX-<TICKER>.csv".',
+    };
+  }
+  const rows: PriceCsvDataRow[] = [];
+  const malformed: PriceCsvMalformedRow[] = [];
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    const physicalRowNumber = index + 1;
+    if (line.trim().length === 0) continue;
+    const columns = splitCsvFields(line, delimiter);
+    if (columns.length !== OHLCV_HEADER_SIGNATURE.length) {
+      malformed.push({ physicalRowNumber, reason: "wrong_column_count" });
+      continue;
+    }
+    const marketDate = parseOhlcvDate(columns[OHLCV_DATE_COLUMN_INDEX]!);
+    if (!marketDate) {
+      malformed.push({ physicalRowNumber, reason: "invalid_date" });
+      continue;
+    }
+    const closeCell = stripLeadingDollarSign(
+      columns[OHLCV_CLOSE_COLUMN_INDEX]!,
+    );
+    if (isNoDataPriceCell(closeCell)) {
+      malformed.push({ physicalRowNumber, reason: "no_data" });
+      continue;
+    }
+    if (!isPositiveDecimal(closeCell)) {
+      malformed.push({ physicalRowNumber, reason: "invalid_price" });
+      continue;
+    }
+    rows.push({ physicalRowNumber, marketDate, priceDecimal: closeCell });
+  }
+  return { ok: true, ticker, delimiter, rows, malformed };
+}
+
 function detectDelimiter(headerLine: string): "," | "\t" {
   // Tab takes priority when both are present -- Intelligent Investor's own
   // tab-separated export is one real shape this parser reads; the owner's
@@ -210,6 +417,13 @@ function detectDelimiter(headerLine: string): "," | "\t" {
 export function parsePriceCsv(
   bytes: Uint8Array,
   limits: PriceCsvLimits = DEFAULT_PRICE_CSV_LIMITS,
+  /** MKT-020: the uploaded file's own name, used ONLY to derive the ticker
+   * for the OHLCV close-only variant (that format's header carries no
+   * ticker column -- see this module's header comment). Ignored entirely
+   * for the original `DateTime,<TICKER>` format, whose ticker still comes
+   * from the header as before -- so every pre-existing call site (which
+   * never passed a third argument) keeps working unchanged. */
+  filename?: string,
 ): ParsePriceCsvResult {
   if (bytes.byteLength === 0) {
     return { ok: false, code: "EMPTY_FILE", message: "The file is empty." };
@@ -254,6 +468,15 @@ export function parsePriceCsv(
   const headerLine = lines[0]!;
   const delimiter = detectDelimiter(headerLine);
   const headerColumns = splitCsvFields(headerLine, delimiter);
+  // MKT-020: exact-signature detection runs FIRST, before the original
+  // format's own header check -- an exact match hands off to the OHLCV
+  // variant entirely; anything else (including a header that merely
+  // resembles it) falls through to the original format's detection,
+  // untouched, and its own honest `MISSING_HEADER` error for a truly
+  // unrecognised header.
+  if (isOhlcvHeader(headerColumns)) {
+    return parseOhlcvVariant(lines, delimiter, filename);
+  }
   if (headerColumns.length < 2 || headerColumns[0] !== "DateTime") {
     return {
       ok: false,

@@ -520,11 +520,29 @@ Parser selection is by exact normalized header signature -- tried in order, firs
 **This section is a SEPARATE, standalone specification** for the "Historical
 Data" section on the import page -- it shares NO parser, header contract, or
 staging table with §1-14 above (the ledger transaction CSV). Two distinct
-formats exist; both are comma- OR tab-delimited (auto-detected per-file from
-the header line, tab taking priority when both delimiters are present) and
-use a PLAIN delimiter split (no RFC4180 quote-escaping) -- appropriate for
-the narrow, simple numeric/date data both formats carry, unlike the ledger
-CSV's free-text fields.
+formats exist: the single-security price history (`domain/market-data/
+price-csv.ts`), itself now carrying TWO header-auto-detected variants as of
+`MKT-020` -- see §15.1/§15.1.1 -- and the full backup export/re-import
+(`domain/market-data/price-backup-csv.ts`, §15.2). The two formats do NOT
+share a splitting rule, and neither claim should be read onto the other:
+
+- §15.1/§15.1.1 (`price-csv.ts`) are comma- OR tab-delimited (auto-detected
+  per-file from the header line, tab taking priority when both delimiters
+  are present) using an RFC-4180-lite quote-aware split (a field starting
+  with `"` runs to its closing `"`, `""` unescapes to a literal `"`, and the
+  delimiter itself is inert inside quotes) -- not a full CSV library, but
+  enough for the narrow, simple numeric/date data these formats carry,
+  unlike the ledger CSV's free-text fields. (Corrected 2026-08-25: this
+  paragraph previously claimed a plain, quote-unaware split; that stopped
+  being true for §15.1 on 2026-08-21, when the owner's real `docs/FMG.csv`
+  export turned out to be RFC-4180-quoted -- see `price-csv.ts`'s header
+  comment for that fix's history.)
+- §15.2 (`price-backup-csv.ts`) is deliberately PLAIN comma-only, comma
+  taking no quote-escaping at all -- a DIFFERENT, narrower rule, not an
+  oversight: every field this format writes is a constrained token (see
+  §15.2 below), so a plain split stays lossless for it without RFC4180's
+  extra complexity. See `price-backup-csv.ts:15-24`'s header comment for the
+  exact rationale and its fail-closed behaviour on a hostile embedded comma.
 
 ### 15.1 Single-security price history (`domain/market-data/price-csv.ts`)
 
@@ -559,6 +577,76 @@ Settings accompanying the upload: exchange (defaults `ASX`) and currency
 (defaults `AUD`) -- free text, matching the existing `source_exchange_alias`
 convention, NOT validated against an `exchanges` table row (that table is
 unpopulated in this deployment; see `docs/MARKET_DATA_STRATEGY.md` §18).
+
+#### 15.1.1 OHLCV close-only variant (`MKT-020`, 2026-08-25, owner-directed)
+
+A SECOND owner-supplied export shape, auto-detected from an exact
+column-name signature (quoting optional -- detection runs AFTER the shared
+quote-aware split above, so an unquoted header with the same eight column
+names in the same order matches identically; an unrecognised header, or one
+that differs in name/order/count, falls through to §15.1's own honest
+`MISSING_HEADER` error, never a fuzzy/partial match against this signature):
+
+```
+"Date","Open","High","Low","Close","Volume","Daily Movement","Daily Movement (Percent)"
+"24 Aug 2026","$21.15","$21.68","$21.11","$21.44","2,420,147","0.29","1.37%"
+```
+
+- **Ticker.** This format's header carries no ticker column at all (unlike
+  §15.1's `DateTime,<TICKER>`, where the ticker IS the second header name).
+  The ticker is instead read from the uploaded FILENAME, per the established
+  `ASX-<TICKER>.csv` convention (`app/price-history-coverage-format.ts`'s
+  `iiDownloadFilename` -- the same name the MKT-018B guided-download panel
+  already tells the owner to expect). Exactly ONE trailing browser
+  duplicate-download suffix (` (1)`, ` (2)`, ...) immediately before `.csv`
+  is tolerated (`ASX-SHL (1).csv` -> `SHL`) -- the guided flow routinely
+  produces this shape on a re-download; a doubled suffix
+  (`ASX-SHL (1) (2).csv`) is NOT tolerated, kept deliberately tight. A
+  filename that does not match this shape is an honest `TICKER_INVALID`
+  error, never a guessed ticker; the preview's usual matched-security
+  confirmation is the misname guard beyond that (an owner who renamed the
+  file to the WRONG ticker still sees which security actually matched
+  before confirming).
+- **Date.** `<day> <Mon> <year>` (e.g. `24 Aug 2026`) -- a fixed, exact
+  Title-case month-abbreviation table (`Jan`...`Dec`); a different casing
+  (`AUG`, `aug`), an unrecognised abbreviation, a non-4-digit year (a 2-digit
+  year is genuinely ambiguous and is REJECTED, never guessed), or a
+  day/month combination that is not a real calendar date (`32 Aug`, `30
+Feb`) are all `invalid_date` -- honestly rejected, never coerced --
+  reusing the SAME calendar round-trip check §15.1's dates use. Produces the
+  identical internal `YYYY-MM-DD` form.
+- **Close, and ONLY Close (a deliberate owner ruling).** The `Close` column
+  is read by its header position; every other column (`Open`, `High`, `Low`,
+  `Volume`, `Daily Movement`, `Daily Movement (Percent)`) is read and then
+  discarded -- OHLCV storage was deliberately NOT added. This deployment's
+  Cloudflare free-plan constraint is ROW COUNT, not column count (see §15.5
+  and `EFF-001`), so extra columns would cost nothing to store but add
+  nothing the app currently uses either; owner ruling: close-only. This is
+  REVERSIBLE, not data loss -- the owner's original CSVs live outside this
+  app and are never deleted by an import, so the SAME files remain
+  re-importable against a future OHLCV-aware parser/schema if that is ever
+  wanted; today's choice costs nothing to undo later. A leading `$` is
+  stripped from the `Close` cell (`"$21.44"` -> `"21.44"`); the result must
+  then satisfy the EXACT SAME price grammar §15.1 already enforces
+  (`isPositiveDecimal`/`isNoDataPriceCell`, `domain/market-data/
+price-value-grammar.ts`) -- a stripped `"$0.00"` or a blank `Close` cell
+  fall into the SAME `no_data` classification §15.1 uses, and a `Close`
+  cell carrying a thousands separator (e.g. a hypothetical `"$1,234.56"`) is
+  REJECTED as `invalid_price`, not silently accepted: the owner's sample
+  shows thousands separators only in `Volume` (an ignored column); a real
+  file showing one in `Close` would be evidence to revisit this rule, not
+  something to quietly tolerate today.
+- **Quoting/delimiting/caps/malformed-row disclosure** are otherwise
+  identical to §15.1 (RFC-4180-lite quoted comma fields, the same
+  `wrong_column_count`/`invalid_date`/`invalid_price`/`no_data` reason
+  vocabulary, the same 2 MiB/20,000-row caps).
+- **Server parity.** The server-side re-validator
+  (`validateUploadedPriceCsvRow`/`validateUploadedPriceCsvPayload`) needed
+  NO format-specific change: both variants normalize to the identical
+  `{ marketDate: "YYYY-MM-DD", priceDecimal: "<positive decimal>" }` row
+  shape before a payload is ever sent, so the SAME shared grammar functions
+  that already re-validate §15.1's rows re-validate this variant's rows too
+  -- one shared module, never a fork.
 
 **Multi-file upload (MKT-018C):** the file picker accepts `multiple` --
 selecting more than one file at once runs each file through this SAME

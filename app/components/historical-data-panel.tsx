@@ -319,7 +319,10 @@ async function parseSingleCsvFile(
   | { ok: false; message: string }
 > {
   const bytes = new Uint8Array(await file.arrayBuffer());
-  const parsed = parsePriceCsv(bytes, DEFAULT_PRICE_CSV_LIMITS);
+  // MKT-020: `file.name` is passed through for the OHLCV variant's
+  // filename-derived ticker (`ASX-<TICKER>.csv`) -- inert for the original
+  // format, whose ticker still comes from the CSV header.
+  const parsed = parsePriceCsv(bytes, DEFAULT_PRICE_CSV_LIMITS, file.name);
   if (!parsed.ok) return { ok: false, message: parsed.message };
   const noDataOmittedCount = parsed.malformed.filter(
     (row) => row.reason === "no_data",
