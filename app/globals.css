@@ -305,8 +305,8 @@ dd {
   margin: 0;
   padding: 10px 12px;
   border: 1px solid var(--divider);
-  background: var(--surface-raised);
-  color: var(--text);
+  background: var(--forest-raised);
+  color: var(--cream);
   font-size: 0.78rem;
   line-height: 1.4;
 }
@@ -318,9 +318,9 @@ dd {
 .update-status button {
   min-height: 44px;
   padding: 0 12px;
-  border: 1px solid var(--accent);
+  border: 1px solid var(--green);
   background: transparent;
-  color: var(--accent);
+  color: var(--green);
   font: inherit;
 }
 
@@ -1218,14 +1218,22 @@ dd {
   font: inherit;
 }
 
+/* UI-044 (owner-reported: the two watchlist "Add a ..." buttons read as
+   empty boxes): this block referenced a surface token that was NEVER
+   defined in `:root`, so the background fell back to transparent and the
+   near-black `--ink` label sat on the dark page at ~1:1 contrast -- the
+   real button text was invisible. Now uses the defined dark-surface tokens
+   (`--forest-raised` + `--cream`), matching the app's other secondary
+   controls. Same dead-token fix applied to the quote dialog's own
+   inputs/selects/textarea and to the update toast above. */
 .quote-action-buttons button,
 .quote-dialog button {
   min-height: 44px;
   padding: 8px 12px;
   border: 1px solid var(--divider);
   border-radius: 2px;
-  background: var(--surface-raised);
-  color: var(--ink);
+  background: var(--forest-raised);
+  color: var(--cream);
 }
 
 .quote-action-status {
@@ -1238,8 +1246,8 @@ dd {
   width: min(440px, calc(100% - 24px));
   border: 1px solid var(--divider);
   padding: 24px;
-  background: var(--surface);
-  color: var(--ink);
+  background: var(--forest-soft);
+  color: var(--cream);
 }
 
 .quote-dialog::backdrop {
@@ -1269,8 +1277,8 @@ dd {
   border: 1px solid var(--divider);
   border-radius: 2px;
   padding: 9px 10px;
-  background: var(--surface-raised);
-  color: var(--ink);
+  background: var(--forest-raised);
+  color: var(--cream);
 }
 
 .quote-dialog textarea {
@@ -2224,7 +2232,7 @@ dd {
   min-width: 0;
   padding: 12px;
   border: 1px solid var(--divider);
-  background: var(--surface-raised);
+  background: var(--forest-raised);
 }
 
 .inspection-record.compact {
@@ -2338,8 +2346,8 @@ dd {
 .manual-ledger-result {
   margin-top: 32px;
   padding: 22px;
-  border: 1px solid var(--line);
-  background: var(--panel);
+  border: 1px solid var(--divider);
+  background: var(--forest-soft);
 }
 
 .manual-ledger-form fieldset {
@@ -2374,7 +2382,7 @@ dd {
   width: 100%;
   min-height: 44px;
   padding: 0 11px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--divider);
   border-radius: 3px;
   background: var(--ink);
   color: var(--cream);
@@ -2391,8 +2399,8 @@ dd {
 .manual-ledger-preview {
   margin-top: 4px;
   padding: 16px;
-  border: 1px solid var(--line);
-  background: color-mix(in srgb, var(--panel) 75%, var(--green));
+  border: 1px solid var(--divider);
+  background: color-mix(in srgb, var(--forest-soft) 75%, var(--green));
 }
 
 .manual-ledger-preview h2 {
@@ -2401,7 +2409,7 @@ dd {
 
 .manual-ledger-warning,
 .manual-ledger-error {
-  color: var(--orange);
+  color: var(--warning);
 }
 
 .manual-ledger-form button,
@@ -2423,7 +2431,7 @@ dd {
 }
 
 .manual-ledger-actions button + button {
-  border-color: var(--line-strong);
+  border-color: var(--divider);
   background: transparent;
   color: var(--cream);
 }
@@ -4925,7 +4933,7 @@ dd {
 .dividend-assumptions-actions button {
   min-height: 44px;
   padding: 0 14px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--divider);
   border-radius: 3px;
   background: transparent;
   color: var(--green-bright);
@@ -4978,7 +4986,7 @@ dd {
   width: 100%;
   min-height: 44px;
   padding: 0 11px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--divider);
   border-radius: 3px;
   background: var(--ink);
   color: var(--cream);
@@ -5002,7 +5010,7 @@ dd {
 .dividend-assumptions-save-bar button {
   min-height: 44px;
   padding: 0 18px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--divider);
   border-radius: 3px;
   background: var(--green);
   color: var(--ink);
@@ -5093,7 +5101,7 @@ dd {
   width: 120px;
   min-height: 44px;
   padding: 0 11px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--divider);
   border-radius: 3px;
   background: var(--ink);
   color: var(--cream);
@@ -5103,7 +5111,7 @@ dd {
 .dividend-franking-default button {
   min-height: 44px;
   padding: 0 14px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--divider);
   border-radius: 3px;
   background: transparent;
   color: var(--green-bright);
@@ -5212,7 +5220,7 @@ dd {
 .dividend-franking-override-form button {
   min-height: 32px;
   padding: 0 10px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--divider);
   border-radius: 3px;
   background: transparent;
   color: var(--green-bright);
