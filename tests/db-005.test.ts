@@ -332,26 +332,34 @@ test("dividend security and portfolio assumptions are versioned, owner-scoped, a
     dividendYieldPercentDecimal: "4.5",
     frankingPercentDecimal: "100",
     dividendGrowthPercentDecimal: null,
+    forceAssumption: false,
     expectedVersion: null,
     requestId: "r1",
   });
   assert.equal(created.ok, true);
+  if (created.ok) {
+    // DIV-016 part B: defaults to false, never implicitly forced.
+    assert.equal(created.assumptions.forceAssumption, false);
+  }
   // Creating again while a row already exists must fail (conflict), not
   // silently duplicate.
   const duplicate = await repo.saveSecurityAssumptions("a", "pa", "psa", {
     dividendYieldPercentDecimal: "5",
     frankingPercentDecimal: null,
     dividendGrowthPercentDecimal: null,
+    forceAssumption: false,
     expectedVersion: null,
     requestId: "r2",
   });
   assert.equal(duplicate.ok, false);
   if (!created.ok) return;
-  // Full replace with an explicit null clears a field back to "unknown".
+  // Full replace with an explicit null clears a field back to "unknown";
+  // DIV-016 part B: this same full-replace save also sets `forceAssumption`.
   const cleared = await repo.saveSecurityAssumptions("a", "pa", "psa", {
     dividendYieldPercentDecimal: null,
     frankingPercentDecimal: "100",
     dividendGrowthPercentDecimal: "2",
+    forceAssumption: true,
     expectedVersion: created.assumptions.version,
     requestId: "r3",
   });
@@ -359,6 +367,7 @@ test("dividend security and portfolio assumptions are versioned, owner-scoped, a
   if (cleared.ok) {
     assert.equal(cleared.assumptions.dividendYieldPercentDecimal, null);
     assert.equal(cleared.assumptions.dividendGrowthPercentDecimal, "2");
+    assert.equal(cleared.assumptions.forceAssumption, true);
   }
   // Cross-owner: user b cannot see or touch a's assumptions row.
   assert.equal(await repo.getSecurityAssumptions("b", "pb", "psa"), null);

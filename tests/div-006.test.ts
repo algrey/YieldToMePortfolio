@@ -978,7 +978,19 @@ test("BUG-004: a security with genuinely NO franking evidence anywhere (no assum
   assert.equal(forecast.totalCashDecimal, "150");
 });
 
-test("BUG-004: an owner-set franking assumption still wins outright over the security's own history evidence (existing precedence unchanged)", () => {
+// DIV-016 part B (owner-approved "override-as-bridge" ruling, TASKS.md
+// DIV-016): this precedence is no longer UNCONDITIONAL -- an owner
+// assumption only wins outright while the security has LESS THAN 12 months
+// of real dividend evidence (`hasFullYearHistoryEvidence`). This fixture's
+// single row is paid 2026-03-01, ~165 days before TODAY (2026-08-13) --
+// well under the 365-day threshold -- so the override still bridges here
+// and this pin's assertions are UNCHANGED; see
+// "DIV-016 part B: 12+ months of history makes the assumption DORMANT..."
+// below for the flip side of the same precedence, and
+// tests/div-016b.test.ts for the dedicated bridge/dormant/forced matrix
+// (11.9 vs 12.1 months, the "one 380-day-old row" edge case, and the
+// `force_assumption` override).
+test("BUG-004: an owner-set franking assumption still wins outright over the security's own history evidence while it is still BRIDGING (<12 months of real evidence -- DIV-016 part B)", () => {
   const rows = deriveDividendHistoryForSecurity({
     portfolioSecurityId: "ps1",
     securityCurrencyCode: "AUD",

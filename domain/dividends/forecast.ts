@@ -76,6 +76,38 @@
 // incompleteness/currency rules. `ttmSource` on the result discloses which
 // leg actually won so a consumer can label the figure "provider trailing 12
 // months" vs "your own recorded dividend history".
+//
+// DIV-016 part B (owner-approved "override-as-bridge" ruling, TASKS.md
+// DIV-016, recorded 2026-08-26): "an owner override
+// (`dividend_security_assumptions` yield / franking_percent_decimal) wins
+// only while the security has LESS THAN 12 months of real dividend
+// history; once a full trailing year of evidence exists, history takes
+// over automatically and the override is kept but marked SUPERSEDED
+// (visible, not deleted), still deliberately forceable" -- motivated by
+// the owner's own framing: "If I buy a new stock, I'll then want to set
+// the override, but once a year worth of dividends come in, the override
+// is no longer useful." `hasFullYearHistoryEvidence` below is the ONE
+// place this "12 months of real evidence" determination is made -- every
+// consumer (this module's own franking-tail gate, `projection.ts`'s
+// `resolveSecurityYield`/`resolveSecurityFranking`, and the assumptions
+// editor's per-security status column) reads THIS field rather than
+// re-deriving the rule. Exact definition (both conditions required --
+// span alone is NOT enough, see the "one old row" case below):
+//   (a) SPAN: this security's OLDEST non-excluded `"ex_date_passed"` row
+//       (post-supersession -- `historyRows` is already `list()`-filtered)
+//       is attributed (`paymentDate ?? exDate`) on or before
+//       `today - 365 days` -- i.e. a full year has genuinely ELAPSED
+//       since the earliest evidence.
+//   (b) CURRENCY: the CURRENT trailing-365-day window actually resolves a
+//       usable TTM rate (`ttmSource !== null` below) -- either leg.
+// Both must hold. A security with exactly one row dated 380 days ago and
+// nothing since satisfies (a) (its oldest evidence is old enough) but
+// fails (b) (the current trailing window is empty -- both TTM legs report
+// `insufficient_history`) -- it must NOT count as having a year of USABLE
+// evidence; a stale, single old data point never gets to outrank a live
+// owner override. This asymmetric AND (never OR) is deliberate: the rule
+// must never let a worse-evidence state (old-but-thin) beat a better one
+// (a fresh owner override) -- see `docs/CALCULATIONS.md` section 11.
 import {
   addDecimal,
   compareDecimal,
@@ -155,6 +187,28 @@ function sumDecimals(values: readonly string[]): string {
       ZERO,
     ),
   );
+}
+
+/**
+ * DIV-016 part B: the SPAN half of `hasFullYearHistoryEvidence` (see the
+ * module header) -- the earliest attribution date (`paymentDate ?? exDate`)
+ * among this security's non-excluded, actually-received (`"ex_date_passed"`)
+ * rows, or `null` when there is no such evidence at all. Every source
+ * (auto-derived, edited, receipt, owner-typed manual, imported) counts
+ * equally, matching `deriveHistoryTrailingTwelveMonthDividend`'s own
+ * qualifying-row convention.
+ */
+function deriveOldestDividendEvidenceDate(
+  historyRows: readonly DerivedDividendRow[],
+): string | null {
+  let oldest: string | null = null;
+  for (const row of historyRows) {
+    if (row.status !== "ex_date_passed" || row.excluded) continue;
+    const date = row.paymentDate ?? row.exDate;
+    if (date === null) continue;
+    if (oldest === null || date < oldest) oldest = date;
+  }
+  return oldest;
 }
 
 // BUG-005: `HistoryRowDpsResult`, `deriveHistoryRowDps`, and
@@ -362,6 +416,16 @@ export type SecurityDividendForecast = {
   ttmIncomplete: boolean;
   /** DIV-009: the resolved TTM PER-SHARE rate that actually fed this forecast (whichever leg `ttmSource` names), in `currencyCode` -- exposed so a consumer (the income-projection assumption grid/multi-year base) can derive its own per-share yield (rate / current price) from the SAME already-decided figure, rather than re-deriving a trailing yield from raw provider events alone and silently dropping the DIV-008 history fallback. `null` exactly when `ttmSource` is `null` (no leg produced a usable rate). */
   ttmPerShareDecimal: string | null;
+  /** DIV-016 part B (override-as-bridge): `true` exactly when this security
+   * has a FULL TRAILING YEAR of real, USABLE dividend evidence -- see the
+   * module header for the precise (span AND currently-usable-TTM) rule.
+   * The single source of truth every "does the owner's assumption
+   * override still bridge, or has history taken over automatically"
+   * decision reads (`projection.ts`'s `resolveSecurityYield`/
+   * `resolveSecurityFranking`, this function's own franking-tail gate
+   * below, and the assumptions editor's status column) -- never
+   * re-derived a second way. */
+  hasFullYearHistoryEvidence: boolean;
 };
 
 export type ComputeSecurityForecastInput = {
@@ -374,6 +438,12 @@ export type ComputeSecurityForecastInput = {
   /** Also feeds the DIV-006 history-TTM fallback's shares-held-at-payment-date derivation for a BRK-005 totals-mode row. */
   transactions: readonly LedgerQuantityFact[];
   defaultFrankingPercentDecimal: string | null;
+  /** DIV-016 part B: the security's `force_assumption` flag -- `true`
+   * restores the franking-tail assumption's win regardless of
+   * `hasFullYearHistoryEvidence`, a deliberate owner action taken via the
+   * assumptions editor. Defaults to `false` (the bridge default: history
+   * takes over automatically once 12 months of evidence exists). */
+  forceAssumption?: boolean;
   today: string;
   /** UI-046: overrides the forward window length (default `FORECAST_WINDOW_DAYS`,
    * 365) -- e.g. the days remaining in the current financial year, so this
@@ -449,78 +519,6 @@ export function computeSecurityDividendForecast(
     input.today,
   );
 
-  // `deriveSharesHeldAtDate` always returns a canonically-trimmed decimal
-  // string (see `formatDecimalExact`'s `trimFixed`), so a zero holding is
-  // always the literal string "0" -- no parse-and-compare needed.
-  if (currentSharesDecimal === "0") {
-    return {
-      portfolioSecurityId: input.portfolioSecurityId,
-      currencyCode: input.currencyCode,
-      windowFromDate,
-      windowToDate,
-      currentSharesDecimal,
-      status: "no_current_holding",
-      declaredCashDecimal: "0",
-      declaredFrankingKnownDecimal: "0",
-      declaredFrankingUnknownCount: 0,
-      declaredEventCount: 0,
-      declaredUnknownAmountCount: 0,
-      uncoveredDays: 0,
-      uncoveredCashDecimal: "0",
-      uncoveredFrankingKnownDecimal: "0",
-      uncoveredReason: null,
-      totalCashDecimal: "0",
-      totalFrankingKnownDecimal: "0",
-      totalFrankingIncomplete: false,
-      totalGrossDecimal: "0",
-      ttmSource: null,
-      ttmIncomplete: false,
-      ttmPerShareDecimal: null,
-    };
-  }
-
-  const declaredRows = input.historyRows.filter(
-    (row) =>
-      row.status === "declared_pending" &&
-      !row.excluded &&
-      row.exDate !== null &&
-      row.exDate >= windowFromDate &&
-      row.exDate <= windowToDate,
-  );
-  // A declared row with an unknown amount (defensive edge case -- see
-  // `history.ts`'s null `gross_per_share_decimal` handling) contributes to
-  // `declaredEventCount`/coverage-date math (it IS a known future event)
-  // but not to the cash sum, which must never fabricate a "0" for it.
-  const declaredKnownAmountRows = declaredRows.filter(
-    (row) => row.cashDecimal !== null,
-  );
-  const declaredCashDecimal = sumDecimals(
-    declaredKnownAmountRows.map((row) => row.cashDecimal!),
-  );
-  const declaredFrankingKnownRows = declaredKnownAmountRows.filter(
-    (row) => row.frankingTotalDecimal !== null,
-  );
-  const declaredFrankingKnownDecimal = sumDecimals(
-    declaredFrankingKnownRows.map((row) => row.frankingTotalDecimal!),
-  );
-  const declaredFrankingUnknownCount =
-    declaredKnownAmountRows.length - declaredFrankingKnownRows.length;
-  const declaredUnknownAmountCount =
-    declaredRows.length - declaredKnownAmountRows.length;
-  const declaredCoverageEndDate = declaredRows.reduce<string | null>(
-    (latest, row) =>
-      latest === null || row.exDate! > latest ? row.exDate! : latest,
-    null,
-  );
-
-  const uncoveredFromDate = declaredCoverageEndDate
-    ? addDays(declaredCoverageEndDate, 1)
-    : windowFromDate;
-  const uncoveredDays =
-    uncoveredFromDate > windowToDate
-      ? 0
-      : daysBetweenInclusive(uncoveredFromDate, windowToDate);
-
   // DIV-009 review fix (B2, BLOCKING): the TTM legs used to be resolved
   // AFTER the `uncoveredDays === 0` early return below, so a security fully
   // covered by declared events short-circuited with `ttmSource`/
@@ -530,13 +528,20 @@ export function computeSecurityDividendForecast(
   // "no usable TTM" (`insufficient_history`), a REGRESSION from pre-DIV-009
   // behaviour, which computed the provider yield independently of the
   // forecast's own declared-coverage status. Resolving both legs BEFORE the
-  // `fully_covered_by_declared` branch (moved up from just below it, logic
-  // unchanged) lets that branch expose the real resolved rate too -- the
-  // forecast's own `status`/totals math is UNCHANGED by this move, only the
-  // ttm* fields exposed alongside it are now populated whenever a leg
-  // resolved, regardless of whether the forecast itself needed the TTM to
-  // total (declared coverage may make it strictly unnecessary for the
-  // total, but the ASSUMPTION GRID/yield-% concern is a separate consumer).
+  // `fully_covered_by_declared` branch lets that branch expose the real
+  // resolved rate too -- the forecast's own `status`/totals math is
+  // UNCHANGED by this, only the ttm* fields exposed alongside it are now
+  // populated whenever a leg resolved, regardless of whether the forecast
+  // itself needed the TTM to total (declared coverage may make it strictly
+  // unnecessary for the total, but the ASSUMPTION GRID/yield-% concern is a
+  // separate consumer).
+  //
+  // DIV-016 part B: resolved even EARLIER than DIV-009 moved it to --
+  // before the zero-shares (`no_current_holding`) early return below -- so
+  // `hasFullYearHistoryEvidence` (which needs `resolvedTtmSource`, see the
+  // module header) can be honestly disclosed on EVERY branch, including a
+  // sold-out holding that still carries real dividend evidence from before
+  // the sale.
   //
   // DIV-006: provider events keep precedence; the history-derived fallback
   // is only even ATTEMPTED when the provider leg is unusable for this
@@ -592,6 +597,101 @@ export function computeSecurityDividendForecast(
   const resolvedTtmPerShareDecimal =
     ttmResolution.source === null ? null : ttmResolution.ttmPerShareDecimal;
 
+  // DIV-016 part B: see the module header for the exact rule -- SPAN (an
+  // old-enough oldest evidence row) AND a CURRENTLY-usable TTM rate, both
+  // required.
+  const oldestEvidenceDate = deriveOldestDividendEvidenceDate(
+    input.historyRows,
+  );
+  const fullYearSpanThresholdDate = subtractDays(
+    input.today,
+    TRAILING_WINDOW_DAYS,
+  );
+  const hasFullYearEvidenceSpan =
+    oldestEvidenceDate !== null &&
+    oldestEvidenceDate <= fullYearSpanThresholdDate;
+  const hasFullYearHistoryEvidence =
+    hasFullYearEvidenceSpan && resolvedTtmSource !== null;
+
+  // `deriveSharesHeldAtDate` always returns a canonically-trimmed decimal
+  // string (see `formatDecimalExact`'s `trimFixed`), so a zero holding is
+  // always the literal string "0" -- no parse-and-compare needed.
+  if (currentSharesDecimal === "0") {
+    return {
+      portfolioSecurityId: input.portfolioSecurityId,
+      currencyCode: input.currencyCode,
+      windowFromDate,
+      windowToDate,
+      currentSharesDecimal,
+      status: "no_current_holding",
+      declaredCashDecimal: "0",
+      declaredFrankingKnownDecimal: "0",
+      declaredFrankingUnknownCount: 0,
+      declaredEventCount: 0,
+      declaredUnknownAmountCount: 0,
+      uncoveredDays: 0,
+      uncoveredCashDecimal: "0",
+      uncoveredFrankingKnownDecimal: "0",
+      uncoveredReason: null,
+      totalCashDecimal: "0",
+      totalFrankingKnownDecimal: "0",
+      totalFrankingIncomplete: false,
+      totalGrossDecimal: "0",
+      ttmSource: null,
+      ttmIncomplete: false,
+      ttmPerShareDecimal: null,
+      hasFullYearHistoryEvidence,
+    };
+  }
+
+  const declaredRows = input.historyRows.filter(
+    (row) =>
+      row.status === "declared_pending" &&
+      !row.excluded &&
+      row.exDate !== null &&
+      row.exDate >= windowFromDate &&
+      row.exDate <= windowToDate,
+  );
+  // A declared row with an unknown amount (defensive edge case -- see
+  // `history.ts`'s null `gross_per_share_decimal` handling) contributes to
+  // `declaredEventCount`/coverage-date math (it IS a known future event)
+  // but not to the cash sum, which must never fabricate a "0" for it.
+  const declaredKnownAmountRows = declaredRows.filter(
+    (row) => row.cashDecimal !== null,
+  );
+  const declaredCashDecimal = sumDecimals(
+    declaredKnownAmountRows.map((row) => row.cashDecimal!),
+  );
+  const declaredFrankingKnownRows = declaredKnownAmountRows.filter(
+    (row) => row.frankingTotalDecimal !== null,
+  );
+  const declaredFrankingKnownDecimal = sumDecimals(
+    declaredFrankingKnownRows.map((row) => row.frankingTotalDecimal!),
+  );
+  const declaredFrankingUnknownCount =
+    declaredKnownAmountRows.length - declaredFrankingKnownRows.length;
+  const declaredUnknownAmountCount =
+    declaredRows.length - declaredKnownAmountRows.length;
+  const declaredCoverageEndDate = declaredRows.reduce<string | null>(
+    (latest, row) =>
+      latest === null || row.exDate! > latest ? row.exDate! : latest,
+    null,
+  );
+
+  const uncoveredFromDate = declaredCoverageEndDate
+    ? addDays(declaredCoverageEndDate, 1)
+    : windowFromDate;
+  const uncoveredDays =
+    uncoveredFromDate > windowToDate
+      ? 0
+      : daysBetweenInclusive(uncoveredFromDate, windowToDate);
+
+  // `providerTtm`/`historyTtm`/`ttmResolution`/`resolvedTtmSource`/
+  // `resolvedTtmIncomplete`/`resolvedTtmPerShareDecimal`/
+  // `hasFullYearHistoryEvidence` are all resolved ABOVE now (DIV-016 part
+  // B moved this block earlier still, ahead of the zero-shares early
+  // return -- see that block's own comment for why).
+
   if (uncoveredDays === 0) {
     return {
       portfolioSecurityId: input.portfolioSecurityId,
@@ -625,6 +725,7 @@ export function computeSecurityDividendForecast(
       ttmSource: resolvedTtmSource,
       ttmIncomplete: resolvedTtmIncomplete,
       ttmPerShareDecimal: resolvedTtmPerShareDecimal,
+      hasFullYearHistoryEvidence,
     };
   }
 
@@ -695,6 +796,11 @@ export function computeSecurityDividendForecast(
       ttmSource: null,
       ttmIncomplete,
       ttmPerShareDecimal: null,
+      // `resolvedTtmSource` is `null` in this branch (that is exactly why
+      // this branch was reached), so `hasFullYearHistoryEvidence` is always
+      // `false` here regardless of `hasFullYearEvidenceSpan` -- condition
+      // (b) in the module header's rule can never hold.
+      hasFullYearHistoryEvidence,
     };
   }
 
@@ -731,23 +837,35 @@ export function computeSecurityDividendForecast(
   // precedence for the uncovered tail's franking estimate, per-security,
   // never a portfolio-blanket ratio. (1) An owner-set franking-percent
   // ASSUMPTION (`dividend_security_assumptions.franking_percent_decimal`)
-  // still wins when present -- unchanged, the owner's explicit override
-  // always takes precedence over inferred history. (2) Otherwise, when the
-  // TTM leg that actually won is the HISTORY leg, this security's OWN
+  // wins -- while it is still BRIDGING (DIV-016 part B, owner-approved
+  // "override-as-bridge" ruling: it wins outright only while
+  // `hasFullYearHistoryEvidence` is `false`, or unconditionally when the
+  // owner has set `force_assumption` -- see the module header). (2)
+  // Otherwise (no assumption set at all, OR a real full year of history
+  // evidence has made the assumption DORMANT and it was not forced), when
+  // the TTM leg that actually won is the HISTORY leg, this security's OWN
   // trailing-window per-row franking EVIDENCE (`historyTtm.ttmFrankingPerShareDecimal`,
   // derived by `deriveHistoryTrailingTwelveMonthDividend` using the
   // identical per-row division discipline as the cash rate above -- real
   // recorded franking, e.g. from imported Sharesight totals, not a
   // fabricated percentage) is carried forward with the SAME
   // declared-displacement/proration math as cash just above, so a security
-  // that actually received franked dividends projects a franked estimate.
-  // (3) A `provider_ttm` leg carries no per-event franking data this
-  // codebase resolves, and a security with neither an assumption nor
-  // history franking evidence has nothing safe to total -- `null`
-  // (unavailable), never a fabricated "0" standing in for missing evidence.
+  // that actually received franked dividends projects a franked estimate --
+  // this is exactly the owner's stated motivation ("once a year worth of
+  // dividends come in, the override is no longer useful") taking effect
+  // automatically. (3) A `provider_ttm` leg carries no per-event franking
+  // data this codebase resolves, and a security with neither a winning
+  // assumption nor history franking evidence has nothing safe to total --
+  // `null` (unavailable), never a fabricated "0" standing in for missing
+  // evidence.
+  const frankingAssumptionBridging =
+    input.forceAssumption === true || !hasFullYearHistoryEvidence;
   let uncoveredFrankingKnownDecimal: string | null;
   let usedHistoryFrankingEvidence = false;
-  if (input.defaultFrankingPercentDecimal !== null) {
+  if (
+    input.defaultFrankingPercentDecimal !== null &&
+    frankingAssumptionBridging
+  ) {
     uncoveredFrankingKnownDecimal = computeDefaultFrankingCredit(
       uncoveredCashDecimal,
       input.defaultFrankingPercentDecimal,
@@ -827,5 +945,6 @@ export function computeSecurityDividendForecast(
     ttmSource: resolvedTtmSource,
     ttmIncomplete: resolvedTtmIncomplete,
     ttmPerShareDecimal: resolvedTtmPerShareDecimal,
+    hasFullYearHistoryEvidence,
   };
 }

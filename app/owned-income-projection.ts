@@ -281,8 +281,18 @@ export async function loadOwnedIncomeProjection(
       const ownerAssumptions = securityAssumptionsById.get(
         security.portfolioSecurityId,
       );
+      // DIV-016 part B: `hasFullYearHistoryEvidence` is the SAME field
+      // `security.forecast` (this security's `SecurityDividendForecast`,
+      // already computed by `loadOwnedDividendHistory`) already resolved --
+      // never re-derived here. `forceAssumption` is the owner's explicit
+      // per-security escape hatch, default off.
+      const hasFullYearHistoryEvidence =
+        security.forecast.hasFullYearHistoryEvidence;
+      const forceAssumption = ownerAssumptions?.forceAssumption ?? false;
       const frankingResolution = resolveSecurityFranking(
         ownerAssumptions?.frankingPercentDecimal ?? null,
+        hasFullYearHistoryEvidence,
+        forceAssumption,
       );
       const growthResolution = resolveSecurityDividendGrowth(
         ownerAssumptions?.dividendGrowthPercentDecimal ?? null,
@@ -327,6 +337,8 @@ export async function loadOwnedIncomeProjection(
         ownerAssumptions?.dividendYieldPercentDecimal ?? null,
         ttmYield,
         frankingResolution,
+        hasFullYearHistoryEvidence,
+        forceAssumption,
       );
       return {
         portfolioSecurityId: security.portfolioSecurityId,

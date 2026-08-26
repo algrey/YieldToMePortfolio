@@ -400,6 +400,13 @@
       "when": 1787718664166,
       "tag": "0056_div_016a_dividend_manual_record_supersession",
       "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "6",
+      "when": 1787723071354,
+      "tag": "0057_div_016b_force_assumption",
+      "breakpoints": true
     }
   ]
 }

@@ -33,12 +33,17 @@ import type { SqlClient } from "../db/repositories/sql-client.ts";
 import { createDividendAssumptionsRepository } from "../db/repositories/dividends.ts";
 import { createOwnedUserSettingsRepository } from "../db/repositories/owned-portfolios.ts";
 import { loadOwnedHoldings } from "./owned-holdings.ts";
+import { loadOwnedDividendHistory } from "./owned-dividend-history.ts";
 import { currentFyWindow } from "../domain/calculations/financial-year.ts";
 import {
   deriveTrailingDividendYield,
   type TrailingDividendEventInput,
   type TrailingDividendYieldResult,
 } from "../domain/market-data/dividend-yield.ts";
+import {
+  resolveAssumptionBridgeStatus,
+  type AssumptionBridgeStatus,
+} from "../domain/dividends/projection.ts";
 
 const MAX_SECURITIES = 500;
 const MAX_EVENTS_PER_PORTFOLIO = 20_000;
@@ -60,6 +65,21 @@ export type DividendAssumptionsSecurityRow = {
   ownerYieldPercentDecimal: string | null;
   ownerFrankingPercentDecimal: string | null;
   ownerGrowthPercentDecimal: string | null;
+  /** DIV-016 part B (override-as-bridge): the owner's explicit
+   * `force_assumption` flag -- `true` restores override-wins regardless of
+   * `hasFullYearHistoryEvidence`. Defaults to `false`. */
+  forceAssumption: boolean;
+  /** DIV-016 part B: this security's per-security bridge status, covering
+   * BOTH the yield and franking assumption fields together (they share the
+   * same evidence/force gate) -- `"not_set"` when neither is set,
+   * `"active"` while bridging (<12 months of history evidence),
+   * `"dormant"` once 12+ months of evidence exists and the override was
+   * not forced (still shown, excluded from the forecast/projection),
+   * `"forced"` when the owner's `force_assumption` flag is set. Derived
+   * from `SecurityDividendForecast.hasFullYearHistoryEvidence` --
+   * `computeSecurityDividendForecast`'s own already-computed evidence
+   * determination, never a second 12-months formula. */
+  bridgeStatus: AssumptionBridgeStatus;
   /** `null` when the owner has never saved assumptions for this security -- the grid save must send `expectedVersion: null` (create) for this row. */
   version: number | null;
 };
@@ -159,6 +179,34 @@ export async function loadOwnedDividendAssumptions(
     (holdings?.rows ?? []).map((row) => [row.id, row]),
   );
 
+  // DIV-016 part B: `hasFullYearHistoryEvidence` per security is
+  // `computeSecurityDividendForecast`'s OWN already-computed evidence
+  // determination (`loadOwnedDividendHistory`'s per-security `forecast`)
+  // -- reused here for the bridge-status column, never re-derived. A
+  // history-load failure degrades every row WITH an override to `"active"`
+  // (bridging -- evidence reads as absent, so the override keeps winning;
+  // conservative: never silently claims a live override has gone
+  // dormant when evidence genuinely could not be checked) rather than
+  // failing this whole screen, matching the holdings-pipeline degrade
+  // above.
+  let evidenceBySecurityId = new Map<string, boolean>();
+  try {
+    const history = await loadOwnedDividendHistory(
+      client,
+      userId,
+      portfolioId,
+      now,
+    );
+    evidenceBySecurityId = new Map(
+      history.securities.map((security) => [
+        security.portfolioSecurityId,
+        security.forecast.hasFullYearHistoryEvidence,
+      ]),
+    );
+  } catch {
+    evidenceBySecurityId = new Map();
+  }
+
   const securityIds = [...new Set(identities.map((row) => row.securityId))];
   const eventsBySecurityId = new Map<string, TrailingDividendEventInput[]>();
   const eventRows = await client.all<Row>(
@@ -197,6 +245,17 @@ export async function loadOwnedDividendAssumptions(
           : null,
       );
       const ownerAssumptions = securityAssumptionsById.get(identity.id);
+      const forceAssumption = ownerAssumptions?.forceAssumption ?? false;
+      const hasFullYearHistoryEvidence =
+        evidenceBySecurityId.get(identity.id) ?? false;
+      const hasAnyOverride =
+        (ownerAssumptions?.dividendYieldPercentDecimal ?? null) !== null ||
+        (ownerAssumptions?.frankingPercentDecimal ?? null) !== null;
+      const bridgeStatus = resolveAssumptionBridgeStatus(
+        hasAnyOverride,
+        hasFullYearHistoryEvidence,
+        forceAssumption,
+      );
       return {
         portfolioSecurityId: identity.id,
         symbol: identity.symbol,
@@ -207,6 +266,8 @@ export async function loadOwnedDividendAssumptions(
           ownerAssumptions?.dividendYieldPercentDecimal ?? null,
         ownerFrankingPercentDecimal:
           ownerAssumptions?.frankingPercentDecimal ?? null,
+        forceAssumption,
+        bridgeStatus,
         ownerGrowthPercentDecimal:
           ownerAssumptions?.dividendGrowthPercentDecimal ?? null,
         version: ownerAssumptions?.version ?? null,

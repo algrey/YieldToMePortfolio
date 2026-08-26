@@ -141,7 +141,7 @@ test("DIV-009 review fix (B2): neither TTM leg produced a rate BUT the forecast'
 // ---------------------------------------------------------------------------
 
 test("DIV-009: resolveSecurityYield's output source/method distinguishes a history-derived yield from a provider one", () => {
-  const franking = resolveSecurityFranking(null);
+  const franking = resolveSecurityFranking(null, false, false);
   const resolution = resolveSecurityYield(
     null,
     {
@@ -151,6 +151,8 @@ test("DIV-009: resolveSecurityYield's output source/method distinguishes a histo
       ttmIncomplete: false,
     },
     franking,
+    false,
+    false,
   );
   assert.equal(resolution.source, "history_ttm");
   assert.equal(resolution.status, "ok");
@@ -160,7 +162,7 @@ test("DIV-009: resolveSecurityYield's output source/method distinguishes a histo
 });
 
 test("DIV-009: resolveSecurityYield's provider-sourced output is worded exactly as before (no regression to the pre-DIV-009 provider method text)", () => {
-  const franking = resolveSecurityFranking("70");
+  const franking = resolveSecurityFranking("70", false, false);
   const resolution = resolveSecurityYield(
     null,
     {
@@ -170,6 +172,8 @@ test("DIV-009: resolveSecurityYield's provider-sourced output is worded exactly 
       ttmIncomplete: false,
     },
     franking,
+    false,
+    false,
   );
   assert.equal(resolution.source, "provider_ttm");
   assert.equal(
@@ -179,7 +183,7 @@ test("DIV-009: resolveSecurityYield's provider-sourced output is worded exactly 
 });
 
 test("DIV-009 review fix (B1): resolveSecurityYield names a PARTIALLY determinable history-derived yield in its own method text and typed flag, never presenting it as a clean, complete figure", () => {
-  const franking = resolveSecurityFranking(null);
+  const franking = resolveSecurityFranking(null, false, false);
   const resolution = resolveSecurityYield(
     null,
     {
@@ -189,6 +193,8 @@ test("DIV-009 review fix (B1): resolveSecurityYield names a PARTIALLY determinab
       ttmIncomplete: true,
     },
     franking,
+    false,
+    false,
   );
   assert.equal(resolution.source, "history_ttm");
   if (
@@ -831,8 +837,14 @@ test("DIV-009 review fix (round-2, BLOCKING): fully-covered-by-declared + a PART
   assert.equal(ttmYield.ttmSource, "history_ttm");
   assert.equal(ttmYield.ttmIncomplete, true);
 
-  const franking = resolveSecurityFranking(null);
-  const yieldResolution = resolveSecurityYield(null, ttmYield, franking);
+  const franking = resolveSecurityFranking(null, false, false);
+  const yieldResolution = resolveSecurityYield(
+    null,
+    ttmYield,
+    franking,
+    false,
+    false,
+  );
   assert.equal(yieldResolution.source, "history_ttm");
   assert.equal(yieldResolution.status, "ok");
   assert.equal(yieldResolution.ttmIncomplete, true);

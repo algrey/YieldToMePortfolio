@@ -41,6 +41,11 @@ type ProviderYield =
   | { ok: true; trailingYieldPercentDecimal: string }
   | { ok: false; reason: string };
 
+// DIV-016 part B (owner-approved "override-as-bridge" ruling): the
+// per-security bridge status -- covers both the yield and franking
+// override fields together (one security-level evidence/force gate).
+type BridgeStatus = "not_set" | "active" | "dormant" | "forced";
+
 export type DividendAssumptionsSecurityRowProps = {
   portfolioSecurityId: string;
   symbol: string;
@@ -50,6 +55,8 @@ export type DividendAssumptionsSecurityRowProps = {
   ownerYieldPercentDecimal: string | null;
   ownerFrankingPercentDecimal: string | null;
   ownerGrowthPercentDecimal: string | null;
+  forceAssumption: boolean;
+  bridgeStatus: BridgeStatus;
   version: number | null;
 };
 
@@ -77,8 +84,29 @@ type SecurityDraft = {
   yieldInput: string;
   frankingInput: string;
   growthInput: string;
+  /** DIV-016 part B: the owner's editable force-flag draft. */
+  forceInput: boolean;
+  /** DIV-016 part B: server-computed, read-only until the next save +
+   * reload (`router.refresh()`) -- not editable here, only DISPLAYED. */
+  bridgeStatus: BridgeStatus;
   version: number | null;
 };
+
+// DIV-016 part B: compact per-security status text -- "" (nothing) when no
+// override is configured at all, matching the density ruling (no
+// explanatory paragraphs).
+function bridgeStatusLabel(status: BridgeStatus): string {
+  switch (status) {
+    case "active":
+      return "active";
+    case "dormant":
+      return "superseded by history";
+    case "forced":
+      return "forced";
+    case "not_set":
+      return "";
+  }
+}
 
 // UI-008 review (carried from portfolio-shell.tsx's dialogs): both dialogs
 // below disable their submit button while a save is pending, so a fetch that
@@ -149,6 +177,8 @@ export function DividendAssumptionsEditor({
       yieldInput: row.ownerYieldPercentDecimal ?? "",
       frankingInput: row.ownerFrankingPercentDecimal ?? "",
       growthInput: row.ownerGrowthPercentDecimal ?? "",
+      forceInput: row.forceAssumption,
+      bridgeStatus: row.bridgeStatus,
       version: row.version,
     })),
   );
@@ -243,6 +273,19 @@ export function DividendAssumptionsEditor({
     );
   }
 
+  // DIV-016 part B: the force toggle, separate from `updateSecurityDraft`
+  // (a boolean, not a text input).
+  function toggleForceAssumption(portfolioSecurityId: string, value: boolean) {
+    setSaveState({ status: "idle" });
+    setSecurityDrafts((rows) =>
+      rows.map((row) =>
+        row.portfolioSecurityId === portfolioSecurityId
+          ? { ...row, forceInput: value }
+          : row,
+      ),
+    );
+  }
+
   async function saveGrid() {
     setSaveState({ status: "saving" });
     try {
@@ -257,6 +300,7 @@ export function DividendAssumptionsEditor({
               dividendYieldPercentDecimal: blankToNull(row.yieldInput),
               frankingPercentDecimal: blankToNull(row.frankingInput),
               dividendGrowthPercentDecimal: blankToNull(row.growthInput),
+              forceAssumption: row.forceInput,
               expectedVersion: row.version,
             })),
             portfolio: {
@@ -395,6 +439,7 @@ export function DividendAssumptionsEditor({
               <span role="columnheader">Yield %</span>
               <span role="columnheader">Franking %</span>
               <span role="columnheader">Dividend growth %</span>
+              <span role="columnheader">Status</span>
             </div>
             {securityDrafts.map((row) => (
               <div
@@ -489,6 +534,44 @@ export function DividendAssumptionsEditor({
                       }
                     />
                   </label>
+                </span>
+                {/* DIV-016 part B (override-as-bridge): compact status --
+                    "" (nothing) when no override is set at all; the force
+                    toggle only appears once 12+ months of history evidence
+                    exists (dormant or already forced) -- forcing has no
+                    effect while the override is still actively bridging,
+                    so the control is withheld rather than shown disabled. */}
+                <span className="dividend-assumptions-status" role="cell">
+                  <span className="mobile-only dividend-assumptions-static-label">
+                    Status{" "}
+                  </span>
+                  {bridgeStatusLabel(row.bridgeStatus) ? (
+                    <span
+                      className={
+                        row.bridgeStatus === "dormant"
+                          ? "unavailable"
+                          : undefined
+                      }
+                    >
+                      {bridgeStatusLabel(row.bridgeStatus)}
+                    </span>
+                  ) : null}
+                  {row.bridgeStatus === "dormant" ||
+                  row.bridgeStatus === "forced" ? (
+                    <label className="dividend-assumptions-force-label">
+                      <input
+                        type="checkbox"
+                        checked={row.forceInput}
+                        onChange={(event) =>
+                          toggleForceAssumption(
+                            row.portfolioSecurityId,
+                            event.target.checked,
+                          )
+                        }
+                      />
+                      Force override
+                    </label>
+                  ) : null}
                 </span>
               </div>
             ))}

@@ -71,37 +71,98 @@ const MAX_YEARS = 10;
 
 export type FrankingAssumptionSource = "owner_override" | "none";
 
+/**
+ * DIV-016 part B (owner-approved "override-as-bridge" ruling, TASKS.md
+ * DIV-016): the bridge status of an owner assumption, independent of
+ * whether it is currently WINNING a given resolution -- `"not_set"` when no
+ * override exists at all; `"active"` while it is winning because the
+ * security has less than 12 months of real dividend history
+ * (`hasFullYearHistoryEvidence: false`); `"dormant"` once a full trailing
+ * year of evidence exists and the override was NOT forced (it still
+ * exists, still shows on the assumptions editor, but is EXCLUDED from this
+ * resolution -- `source` reads as if unset); `"forced"` when the owner
+ * explicitly set `force_assumption` to restore override-wins regardless of
+ * evidence. Shared by `resolveSecurityYield`/`resolveSecurityFranking`
+ * below (one shared derivation, `resolveAssumptionBridgeStatus`) and by the
+ * assumptions editor's read service, which surfaces it as the per-security
+ * "active" / "superseded by history" / "forced" status column.
+ */
+export type AssumptionBridgeStatus =
+  "not_set" | "active" | "dormant" | "forced";
+
+/**
+ * The SINGLE place `hasOverride`/`hasFullYearHistoryEvidence`/
+ * `forceAssumption` combine into a bridge status -- reused identically by
+ * `resolveSecurityYield`, `resolveSecurityFranking`, and (for the editor's
+ * display-only per-security status column) any other caller that already
+ * has these three facts. Never re-derive this decision a second way.
+ */
+export function resolveAssumptionBridgeStatus(
+  hasOverride: boolean,
+  hasFullYearHistoryEvidence: boolean,
+  forceAssumption: boolean,
+): AssumptionBridgeStatus {
+  if (!hasOverride) return "not_set";
+  if (forceAssumption) return "forced";
+  return hasFullYearHistoryEvidence ? "dormant" : "active";
+}
+
 export type FrankingAssumptionResolution = {
   source: FrankingAssumptionSource;
   /** The percent actually used by downstream gross-up math -- "0" (never null) when `source` is `"none"`, so callers never need a separate null-check before arithmetic. */
   frankingPercentDecimal: string;
   method: string;
+  /** DIV-016 part B: see `AssumptionBridgeStatus`'s doc comment. */
+  bridgeStatus: AssumptionBridgeStatus;
 };
 
 /**
- * Franking % precedence: owner security assumption
- * (`dividend_security_assumptions.franking_percent_decimal`) wins when set;
- * otherwise there is no portfolio-level or provider-derived franking-percent
- * fallback in this codebase (a provider event's own per-event franking
- * field is a fact about ONE past dividend, not a forward assumption), so the
- * bottom tier is an explicit, disclosed "treated as unfranked" default --
- * never a silent zero pretending to be data.
+ * Franking % precedence (DIV-016 part B, owner-approved "override-as-bridge"
+ * ruling): the owner security assumption
+ * (`dividend_security_assumptions.franking_percent_decimal`) wins while it
+ * is still BRIDGING -- `bridgeStatus` is `"active"` (less than 12 months of
+ * real history) or `"forced"` (the owner's `force_assumption` flag). Once a
+ * full trailing year of real evidence exists and the assumption was NOT
+ * forced (`bridgeStatus === "dormant"`), it is EXCLUDED from this
+ * resolution -- there is no history-derived franking PERCENT tier in this
+ * codebase (only per-security dollar evidence, consumed directly by
+ * `computeSecurityDividendForecast`'s own uncovered-tail franking estimate
+ * -- see `forecast.ts`'s BUG-004 note), so a dormant assumption falls to
+ * the same explicit, disclosed "treated as unfranked" bottom tier as no
+ * assumption at all -- never a silent zero pretending to be data, and never
+ * silently re-applied without disclosure (`bridgeStatus` still reads
+ * `"dormant"`, distinct from `"not_set"`, so a caller can tell the two
+ * apart).
  */
 export function resolveSecurityFranking(
   ownerFrankingPercentDecimal: string | null,
+  hasFullYearHistoryEvidence: boolean,
+  forceAssumption: boolean,
 ): FrankingAssumptionResolution {
-  if (ownerFrankingPercentDecimal !== null) {
+  const bridgeStatus = resolveAssumptionBridgeStatus(
+    ownerFrankingPercentDecimal !== null,
+    hasFullYearHistoryEvidence,
+    forceAssumption,
+  );
+  if (bridgeStatus === "active" || bridgeStatus === "forced") {
     return {
       source: "owner_override",
-      frankingPercentDecimal: ownerFrankingPercentDecimal,
-      method: "owner-set franking assumption",
+      frankingPercentDecimal: ownerFrankingPercentDecimal!,
+      method:
+        bridgeStatus === "forced"
+          ? "owner-set franking assumption (forced to keep overriding 12+ months of real dividend history)"
+          : "owner-set franking assumption",
+      bridgeStatus,
     };
   }
   return {
     source: "none",
     frankingPercentDecimal: "0",
     method:
-      "no franking assumption set for this security -- treated as unfranked (0%) for projection purposes",
+      bridgeStatus === "dormant"
+        ? "a franking assumption is set for this security but is superseded by 12+ months of real dividend history -- treated as unfranked (0%) here; force it to restore the override"
+        : "no franking assumption set for this security -- treated as unfranked (0%) for projection purposes",
+    bridgeStatus,
   };
 }
 
@@ -240,6 +301,11 @@ export type YieldAssumptionResolution =
       // to narrow the union just to check completeness).
       ttmIncomplete: false;
       method: string;
+      /** DIV-016 part B: always `"active"` or `"forced"` here -- an owner
+       * override that WON this resolution is, by construction, currently
+       * bridging or forced (a `"dormant"`/`"not_set"` override never
+       * reaches the `"owner_override"` branch). */
+      bridgeStatus: Extract<AssumptionBridgeStatus, "active" | "forced">;
     }
   | {
       source: "provider_ttm" | "history_ttm";
@@ -257,6 +323,11 @@ export type YieldAssumptionResolution =
       // clean, complete figure.
       ttmIncomplete: boolean;
       method: string;
+      /** DIV-016 part B: `"not_set"` (no owner yield override at all) or
+       * `"dormant"` (an override IS set but 12+ months of evidence made
+       * history win automatically) -- never `"active"`/`"forced"` here,
+       * since a winning override never reaches this branch. */
+      bridgeStatus: Extract<AssumptionBridgeStatus, "not_set" | "dormant">;
     }
   | {
       source: "none";
@@ -269,6 +340,9 @@ export type YieldAssumptionResolution =
       // complete, so always `false`.
       ttmIncomplete: false;
       method: string;
+      /** DIV-016 part B: as the TTM-sourced variant above -- `"not_set"` or
+       * `"dormant"` only. */
+      bridgeStatus: Extract<AssumptionBridgeStatus, "not_set" | "dormant">;
     };
 
 /**
@@ -292,13 +366,32 @@ export type YieldAssumptionResolution =
  * `method` distinguish a provider- from a history-derived yield (DIV-006's
  * disclosure convention) so the assumption grid never presents a
  * history-derived figure as if it were provider data.
+ *
+ * DIV-016 part B (owner-approved "override-as-bridge" ruling): the owner
+ * override wins ONLY while it is still bridging (`bridgeStatus` `"active"`
+ * or `"forced"` -- see `resolveAssumptionBridgeStatus`). Once 12+ months of
+ * real dividend history exists and the override was not forced, it goes
+ * DORMANT -- excluded from this resolution exactly as if unset, falling
+ * through to the TTM leg below -- but `bridgeStatus` still reads
+ * `"dormant"` (never silently collapsed into `"not_set"`) so a consumer can
+ * disclose that a now-unused override still exists.
  */
 export function resolveSecurityYield(
   ownerYieldOverridePercentDecimal: string | null,
   ttmYield: ResolvedTtmYieldResult,
   frankingResolution: FrankingAssumptionResolution,
+  hasFullYearHistoryEvidence: boolean,
+  forceAssumption: boolean,
 ): YieldAssumptionResolution {
-  if (ownerYieldOverridePercentDecimal !== null) {
+  const bridgeStatus = resolveAssumptionBridgeStatus(
+    ownerYieldOverridePercentDecimal !== null,
+    hasFullYearHistoryEvidence,
+    forceAssumption,
+  );
+  if (
+    ownerYieldOverridePercentDecimal !== null &&
+    (bridgeStatus === "active" || bridgeStatus === "forced")
+  ) {
     return {
       source: "owner_override",
       status: "ok",
@@ -308,9 +401,18 @@ export function resolveSecurityYield(
       frankingSource: null,
       ttmIncomplete: false,
       method:
-        "owner-set total yield assumption (already includes franking credits)",
+        bridgeStatus === "forced"
+          ? "owner-set total yield assumption (forced to keep overriding 12+ months of real dividend history; already includes franking credits)"
+          : "owner-set total yield assumption (already includes franking credits)",
+      bridgeStatus,
     };
   }
+  // `bridgeStatus` is now provably `"not_set"` or `"dormant"` (the only two
+  // remaining `AssumptionBridgeStatus` values not returned above).
+  const nonWinningBridgeStatus = bridgeStatus as Extract<
+    AssumptionBridgeStatus,
+    "not_set" | "dormant"
+  >;
   if (!ttmYield.ok) {
     return {
       source: "none",
@@ -320,7 +422,11 @@ export function resolveSecurityYield(
       frankingPercentUsedDecimal: null,
       frankingSource: null,
       ttmIncomplete: false,
-      method: `no owner override and no usable trailing dividend yield is available (${ttmYield.reason})`,
+      method:
+        nonWinningBridgeStatus === "dormant"
+          ? `the owner's yield assumption is superseded by 12+ months of real dividend history, and no usable trailing dividend yield is available either (${ttmYield.reason})`
+          : `no owner override and no usable trailing dividend yield is available (${ttmYield.reason})`,
+      bridgeStatus: nonWinningBridgeStatus,
     };
   }
   const cashYieldPercentDecimal = ttmYield.trailingYieldPercentDecimal;
@@ -345,6 +451,10 @@ export function resolveSecurityYield(
   const incompleteNote = ttmYield.ttmIncomplete
     ? " (only PARTIALLY determinable -- at least one trailing-window history row's rate could not be established, so this may understate the true rate)"
     : "";
+  const dormantYieldNote =
+    nonWinningBridgeStatus === "dormant"
+      ? " (the owner's yield assumption is superseded by 12+ months of real dividend history and excluded here)"
+      : "";
   return {
     source: ttmYield.ttmSource,
     status: "ok",
@@ -356,8 +466,12 @@ export function resolveSecurityYield(
     method:
       (frankingResolution.source === "owner_override"
         ? `${legLabel} grossed up using the owner's franking assumption`
-        : `${legLabel}; no franking assumption set, so no franking credit is added (0%)`) +
-      incompleteNote,
+        : frankingResolution.bridgeStatus === "dormant"
+          ? `${legLabel}; the owner's franking assumption is superseded by 12+ months of real dividend history, so no franking credit is added here (0%)`
+          : `${legLabel}; no franking assumption set, so no franking credit is added (0%)`) +
+      incompleteNote +
+      dormantYieldNote,
+    bridgeStatus: nonWinningBridgeStatus,
   };
 }
 

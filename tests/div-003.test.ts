@@ -29,15 +29,34 @@ import type { FyDividendTotal } from "../domain/dividends/aggregations.ts";
 // a. Assumption resolution -- precedence matrices
 // ---------------------------------------------------------------------------
 
-test("franking resolution: owner override wins; blank falls back to an explicit unfranked default, never a silent zero pretending to be data", () => {
-  const overridden = resolveSecurityFranking("70");
+test("franking resolution: owner override wins while bridging (<12 months of evidence); blank falls back to an explicit unfranked default, never a silent zero pretending to be data", () => {
+  const overridden = resolveSecurityFranking("70", false, false);
   assert.equal(overridden.source, "owner_override");
   assert.equal(overridden.frankingPercentDecimal, "70");
+  assert.equal(overridden.bridgeStatus, "active");
 
-  const blank = resolveSecurityFranking(null);
+  const blank = resolveSecurityFranking(null, false, false);
   assert.equal(blank.source, "none");
   assert.equal(blank.frankingPercentDecimal, "0");
   assert.match(blank.method, /unfranked/);
+  assert.equal(blank.bridgeStatus, "not_set");
+});
+
+// DIV-016 part B (owner-approved "override-as-bridge" ruling, TASKS.md
+// DIV-016): once 12+ months of real dividend history exists, the franking
+// assumption goes DORMANT (excluded, `source` reads "none") unless forced.
+test("franking resolution: 12+ months of history evidence makes the assumption DORMANT (excluded, not silently reapplied); force_assumption restores it", () => {
+  const dormant = resolveSecurityFranking("70", true, false);
+  assert.equal(dormant.source, "none");
+  assert.equal(dormant.frankingPercentDecimal, "0");
+  assert.equal(dormant.bridgeStatus, "dormant");
+  assert.match(dormant.method, /superseded/);
+
+  const forced = resolveSecurityFranking("70", true, true);
+  assert.equal(forced.source, "owner_override");
+  assert.equal(forced.frankingPercentDecimal, "70");
+  assert.equal(forced.bridgeStatus, "forced");
+  assert.match(forced.method, /forced/);
 });
 
 test("dividend-growth resolution: owner security override > portfolio default > explicit 'no growth assumed' 0%", () => {
@@ -82,21 +101,57 @@ test("portfolio-level growth assumptions: set value falls through to source 'por
   });
 });
 
-test("yield resolution: owner override wins outright, no gross-up applied (owner value already means total yield)", () => {
-  const franking = resolveSecurityFranking("70");
+test("yield resolution: owner override wins outright while bridging, no gross-up applied (owner value already means total yield)", () => {
+  const franking = resolveSecurityFranking("70", false, false);
   const resolution = resolveSecurityYield(
     "12",
     { ok: false, reason: "insufficient_history" },
     franking,
+    false,
+    false,
   );
   assert.equal(resolution.source, "owner_override");
   assert.equal(resolution.status, "ok");
   assert.equal(resolution.grossedYieldPercentDecimal, "12");
   assert.equal(resolution.cashYieldPercentDecimal, null);
+  assert.equal(resolution.bridgeStatus, "active");
+});
+
+// DIV-016 part B: 12+ months of history evidence makes the yield override
+// DORMANT (excluded, falls through to the TTM leg) unless forced.
+test("yield resolution: 12+ months of history evidence makes the owner yield override DORMANT (falls through to the TTM leg); force_assumption restores it", () => {
+  const franking = resolveSecurityFranking(null, true, false);
+  const dormant = resolveSecurityYield(
+    "12",
+    {
+      ok: true,
+      trailingYieldPercentDecimal: "5",
+      ttmSource: "provider_ttm",
+      ttmIncomplete: false,
+    },
+    franking,
+    true,
+    false,
+  );
+  assert.equal(dormant.source, "provider_ttm");
+  assert.equal(dormant.grossedYieldPercentDecimal, "5");
+  assert.equal(dormant.bridgeStatus, "dormant");
+
+  const forced = resolveSecurityYield(
+    "12",
+    { ok: false, reason: "insufficient_history" },
+    franking,
+    true,
+    true,
+  );
+  assert.equal(forced.source, "owner_override");
+  assert.equal(forced.grossedYieldPercentDecimal, "12");
+  assert.equal(forced.bridgeStatus, "forced");
+  assert.match(forced.method, /forced/);
 });
 
 test("yield resolution: grossed-yield derivation from cash TTM + franking -- grossed = cash * (1 + frankingPct/100 * 30/70)", () => {
-  const franking = resolveSecurityFranking("70"); // 70% chosen so the ratio (70/100 * 30/70 = 0.3) terminates exactly, no rounding noise
+  const franking = resolveSecurityFranking("70", false, false); // 70% chosen so the ratio (70/100 * 30/70 = 0.3) terminates exactly, no rounding noise
   const resolution = resolveSecurityYield(
     null,
     {
@@ -106,6 +161,8 @@ test("yield resolution: grossed-yield derivation from cash TTM + franking -- gro
       ttmIncomplete: false,
     },
     franking,
+    false,
+    false,
   );
   assert.equal(resolution.source, "provider_ttm");
   assert.equal(resolution.status, "ok");
@@ -113,10 +170,11 @@ test("yield resolution: grossed-yield derivation from cash TTM + franking -- gro
   assert.equal(resolution.frankingPercentUsedDecimal, "70");
   // 10 * (1 + 0.3) = 13 exactly.
   assert.equal(resolution.grossedYieldPercentDecimal, "13");
+  assert.equal(resolution.bridgeStatus, "not_set");
 });
 
 test("yield resolution: no owner override and no franking assumption set -- provider cash yield passes through unfranked (0% assumed), not silently blocked", () => {
-  const franking = resolveSecurityFranking(null);
+  const franking = resolveSecurityFranking(null, false, false);
   const resolution = resolveSecurityYield(
     null,
     {
@@ -126,13 +184,15 @@ test("yield resolution: no owner override and no franking assumption set -- prov
       ttmIncomplete: false,
     },
     franking,
+    false,
+    false,
   );
   assert.equal(resolution.source, "provider_ttm");
   assert.equal(resolution.grossedYieldPercentDecimal, "5");
 });
 
 test("yield resolution: no owner override and no usable provider data -- explicit 'none' carrying the provider's own typed reason, never a fabricated yield", () => {
-  const franking = resolveSecurityFranking(null);
+  const franking = resolveSecurityFranking(null, false, false);
   for (const reason of [
     "insufficient_history",
     "price_unavailable",
@@ -144,6 +204,8 @@ test("yield resolution: no owner override and no usable provider data -- explici
       null,
       { ok: false, reason },
       franking,
+      false,
+      false,
     );
     assert.equal(resolution.source, "none");
     assert.equal(resolution.status, reason);
@@ -183,6 +245,7 @@ function yieldOk(percent: string): YieldAssumptionResolution {
     frankingSource: null,
     ttmIncomplete: false,
     method: "test",
+    bridgeStatus: "active",
   };
 }
 function yieldNone(
@@ -197,6 +260,7 @@ function yieldNone(
     frankingSource: null,
     ttmIncomplete: false,
     method: "test",
+    bridgeStatus: "not_set",
   };
 }
 function frankingPercent(percent: string): FrankingAssumptionResolution {
@@ -204,6 +268,7 @@ function frankingPercent(percent: string): FrankingAssumptionResolution {
     source: "owner_override",
     frankingPercentDecimal: percent,
     method: "test",
+    bridgeStatus: "active",
   };
 }
 
@@ -972,6 +1037,7 @@ function forecast(
     ttmSource: null,
     ttmIncomplete: false,
     ttmPerShareDecimal: null,
+    hasFullYearHistoryEvidence: false,
     ...overrides,
   };
 }

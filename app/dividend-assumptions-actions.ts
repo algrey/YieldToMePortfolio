@@ -116,6 +116,10 @@ export type DividendAssumptionsGridSecurityInput = {
   dividendYieldPercentDecimal: string | null;
   frankingPercentDecimal: string | null;
   dividendGrowthPercentDecimal: string | null;
+  /** DIV-016 part B (override-as-bridge): the owner's explicit per-security
+   * force flag. Omitted (not just `false`) on a request defaults to
+   * `false` -- never implicitly forced. */
+  forceAssumption: boolean;
   expectedVersion: number | null;
 };
 
@@ -167,11 +171,15 @@ function parseGridRow(
     input.dividendGrowthPercentDecimal,
   );
   if (!growthResult.ok) return { message: growthResult.message };
+  // DIV-016 part B: `forceAssumption` omitted or anything other than the
+  // literal boolean `true` reads as `false` -- never implicitly forced.
+  const forceAssumption = input.forceAssumption === true;
   return {
     portfolioSecurityId,
     dividendYieldPercentDecimal: yieldResult.value,
     frankingPercentDecimal: frankingResult.value,
     dividendGrowthPercentDecimal: growthResult.value,
+    forceAssumption,
     expectedVersion,
   };
 }
@@ -251,6 +259,7 @@ export async function saveDividendAssumptionsGridWithContext(
         dividendYieldPercentDecimal: row.dividendYieldPercentDecimal,
         frankingPercentDecimal: row.frankingPercentDecimal,
         dividendGrowthPercentDecimal: row.dividendGrowthPercentDecimal,
+        forceAssumption: row.forceAssumption,
         expectedVersion: row.expectedVersion,
         requestId: context.requestId,
       },

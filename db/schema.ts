@@ -2947,6 +2947,19 @@ export const dividendSecurityAssumptions = sqliteTable(
     dividendYieldPercentDecimal: text("dividend_yield_percent_decimal"),
     frankingPercentDecimal: text("franking_percent_decimal"),
     dividendGrowthPercentDecimal: text("dividend_growth_percent_decimal"),
+    /**
+     * DIV-016 part B (owner-approved "override-as-bridge" ruling, recorded
+     * in TASKS.md DIV-016): the yield/franking override above wins ONLY
+     * while this security has LESS THAN 12 months of real dividend
+     * evidence (`domain/dividends/forecast.ts`'s
+     * `hasFullYearHistoryEvidence`) -- once a full trailing year of
+     * evidence exists, history takes over automatically and this override
+     * becomes DORMANT (kept, visible, excluded from the computation).
+     * `forceAssumption = true` restores override-wins regardless of
+     * evidence, a deliberate owner action. `NULL`/`0` (the default) means
+     * "not forced" -- never implicitly true.
+     */
+    forceAssumption: integer("force_assumption", { mode: "boolean" }),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     version: integer("version").notNull().default(1),

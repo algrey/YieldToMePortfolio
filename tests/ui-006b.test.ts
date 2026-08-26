@@ -435,6 +435,7 @@ test("UI-006B: a mid-sequence grid failure (row 2 of 3 stale) commits row 1, lea
       dividendYieldPercentDecimal: "1",
       frankingPercentDecimal: null,
       dividendGrowthPercentDecimal: null,
+      forceAssumption: false,
       expectedVersion: null,
       requestId: "seed",
     },
@@ -1646,6 +1647,8 @@ const baseSecurities = [
     ownerYieldPercentDecimal: null,
     ownerFrankingPercentDecimal: null,
     ownerGrowthPercentDecimal: null,
+    forceAssumption: false,
+    bridgeStatus: "not_set",
     version: null,
   },
 ];

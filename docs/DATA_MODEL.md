@@ -546,9 +546,12 @@ Portfolio-scoped dividend/growth assumption overrides, versioned like `user_sett
 
 - `id`, `user_id`, `portfolio_id`, `portfolio_security_id`;
 - `dividend_yield_percent_decimal`, `franking_percent_decimal`, `dividend_growth_percent_decimal`;
+- `force_assumption` (nullable boolean, migration 0057, DIV-016 part B) — `NULL`/`0` (the default) means "not forced"; `1` restores the yield/franking override's win regardless of `hasFullYearHistoryEvidence` (see `docs/CALCULATIONS.md` section 11's "Override-as-bridge precedence (DIV-016 part B)"). Never governs `dividend_growth_percent_decimal`, which is unaffected by the bridge ruling;
 - `created_at`, `updated_at`, `version`.
 
-`franking_percent_decimal` doubles as the holding's "franking if not known" default consumed by DIV-001's per-dividend franking resolution chain (per-dividend override → this default → unknown/flagged).
+`franking_percent_decimal` doubles as the holding's "franking if not known" default consumed by DIV-001's per-dividend franking resolution chain (per-dividend override → this default → unknown/flagged) — that per-ROW chain is UNAFFECTED by `force_assumption`/the bridge ruling below, which governs FORWARD-looking forecast/projection assumption resolution only.
+
+**Override-as-bridge (DIV-016 part B, owner-approved ruling).** `dividend_yield_percent_decimal`/`franking_percent_decimal` win outright only while this security has LESS THAN 12 months of real dividend evidence (`domain/dividends/forecast.ts`'s `hasFullYearHistoryEvidence`) OR `force_assumption` is set; once 12+ months of evidence exists and the row was not forced, the override goes DORMANT for the forecast/projection chains that consult it — kept, visible on the assumptions editor, excluded from the computation, never deleted. See `docs/CALCULATIONS.md` section 11 for the exact rule and every consumer.
 
 `dividend_portfolio_assumptions` — one row per portfolio (`portfolio_id` primary key, same single-row-per-owner-key shape as `portfolio_settings`):
 

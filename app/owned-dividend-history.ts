@@ -385,10 +385,17 @@ export async function loadOwnedDividendHistory(
   const assumptionsRecords = await createDividendAssumptionsRepository(
     client,
   ).listSecurityAssumptions(userId, portfolioId);
+  // DIV-016 part B: `forceAssumption` travels alongside the franking
+  // default so `computeSecurityDividendForecast`'s own franking-tail
+  // bridge gate (see that function's module header) can read both without
+  // a second lookup.
   const assumptionsBySecurity = new Map(
     assumptionsRecords.map((row) => [
       row.portfolioSecurityId,
-      row.frankingPercentDecimal,
+      {
+        frankingPercentDecimal: row.frankingPercentDecimal,
+        forceAssumption: row.forceAssumption,
+      },
     ]),
   );
 
@@ -442,8 +449,17 @@ export async function loadOwnedDividendHistory(
       const manual = manualBySecurity.get(identity.id) ?? [];
       const receipts = receiptsBySecurity.get(identity.id) ?? [];
       const transactions = transactionsBySecurity.get(identity.id) ?? [];
+      const securityAssumption = assumptionsBySecurity.get(identity.id);
       const defaultFrankingPercentDecimal =
-        assumptionsBySecurity.get(identity.id) ?? null;
+        securityAssumption?.frankingPercentDecimal ?? null;
+      // DIV-016 part B: only consumed by `computeSecurityDividendForecast`
+      // below (the forward-looking forecast's franking-tail bridge) --
+      // `deriveDividendHistoryForSecurity` above resolves a DIFFERENT,
+      // per-ROW franking chain (DIV-001, backfilling unknown PAST franking
+      // facts) that the override-as-bridge ruling does not govern; it
+      // keeps using `defaultFrankingPercentDecimal` unconditionally,
+      // unchanged.
+      const forceAssumption = securityAssumption?.forceAssumption ?? false;
 
       const rows = deriveDividendHistoryForSecurity({
         portfolioSecurityId: identity.id,
@@ -497,6 +513,7 @@ export async function loadOwnedDividendHistory(
         ttmEvents,
         transactions,
         defaultFrankingPercentDecimal,
+        forceAssumption,
         today,
       });
       // UI-046: identical composition, windowed to the current FY's
@@ -509,6 +526,7 @@ export async function loadOwnedDividendHistory(
         ttmEvents,
         transactions,
         defaultFrankingPercentDecimal,
+        forceAssumption,
         today,
         windowDays: fyRemainderWindowDays,
         windowFromDate: fyRemainderWindowFromDate,

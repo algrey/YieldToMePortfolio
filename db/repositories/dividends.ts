@@ -1287,6 +1287,12 @@ export type DividendSecurityAssumptionsRecord = {
   dividendYieldPercentDecimal: string | null;
   frankingPercentDecimal: string | null;
   dividendGrowthPercentDecimal: string | null;
+  /** DIV-016 part B (override-as-bridge): `true` when the owner has
+   * explicitly forced this security's yield/franking override to keep
+   * winning regardless of `hasFullYearHistoryEvidence`. `false` (never
+   * `null` at this mapped layer -- the stored column is nullable but a
+   * NULL means exactly "not forced") is the default. */
+  forceAssumption: boolean;
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -1296,6 +1302,7 @@ export type SaveDividendSecurityAssumptionsInput = {
   dividendYieldPercentDecimal: string | null;
   frankingPercentDecimal: string | null;
   dividendGrowthPercentDecimal: string | null;
+  forceAssumption: boolean;
   expectedVersion: number | null;
   requestId: string;
 };
@@ -1303,7 +1310,8 @@ export type SaveDividendSecurityAssumptionsInput = {
 const DIVIDEND_SECURITY_ASSUMPTIONS_COLUMNS = `
   id, user_id, portfolio_id, portfolio_security_id,
   dividend_yield_percent_decimal, franking_percent_decimal,
-  dividend_growth_percent_decimal, created_at, updated_at, version
+  dividend_growth_percent_decimal, force_assumption, created_at, updated_at,
+  version
 `;
 
 function mapDividendSecurityAssumptions(
@@ -1326,6 +1334,8 @@ function mapDividendSecurityAssumptions(
       row.dividend_growth_percent_decimal === null
         ? null
         : String(row.dividend_growth_percent_decimal),
+    forceAssumption:
+      row.force_assumption === 1 || row.force_assumption === true,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     version: Number(row.version),
@@ -1442,9 +1452,10 @@ export function createDividendAssumptionsRepository(
           sql: `INSERT INTO dividend_security_assumptions (
             id, user_id, portfolio_id, portfolio_security_id,
             dividend_yield_percent_decimal, franking_percent_decimal,
-            dividend_growth_percent_decimal, created_at, updated_at, version
+            dividend_growth_percent_decimal, force_assumption, created_at,
+            updated_at, version
           )
-          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 1
+          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1
           WHERE NOT EXISTS (
             SELECT 1 FROM dividend_security_assumptions
             WHERE portfolio_security_id = ?
@@ -1457,6 +1468,7 @@ export function createDividendAssumptionsRepository(
             input.dividendYieldPercentDecimal,
             input.frankingPercentDecimal,
             input.dividendGrowthPercentDecimal,
+            input.forceAssumption ? 1 : 0,
             updatedAt,
             updatedAt,
             portfolioSecurityId,
@@ -1513,6 +1525,7 @@ export function createDividendAssumptionsRepository(
           dividend_yield_percent_decimal = ?,
           franking_percent_decimal = ?,
           dividend_growth_percent_decimal = ?,
+          force_assumption = ?,
           updated_at = ?, version = version + 1
         WHERE portfolio_security_id = ? AND user_id = ? AND portfolio_id = ?
           AND version = ?
@@ -1521,6 +1534,7 @@ export function createDividendAssumptionsRepository(
           input.dividendYieldPercentDecimal,
           input.frankingPercentDecimal,
           input.dividendGrowthPercentDecimal,
+          input.forceAssumption ? 1 : 0,
           updatedAt,
           portfolioSecurityId,
           userId,
