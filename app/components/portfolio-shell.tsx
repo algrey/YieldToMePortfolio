@@ -2016,6 +2016,7 @@ function OwnedOverviewScreen({
   timezone,
   nowInstant,
   portfolioValueHistory,
+  holdingsSummary,
 }: {
   data: OwnedOverviewData;
   portfolioId: string;
@@ -2035,6 +2036,16 @@ function OwnedOverviewScreen({
   // `new Date()`/`Date.now()` inside this client component -- it is always
   // threaded in as a prop from the server render.
   nowInstant: string;
+  // UI-047 (owner-reported): the hero headline's SOURCE OF TRUTH -- the
+  // same securities-only totals `app/owned-holdings-summary.ts`'s
+  // `buildHoldingsSummaryFooter` already composes for the Holdings tab
+  // (`app/authenticated-workspace.ts` now loads holdings for the Overview
+  // read too, best-effort). Never `data.current.value` below, which stays
+  // sourced from the cash-inclusive CALC-003/CALC-004 persisted snapshot
+  // (CALC-005 follow-up). `undefined` means the best-effort holdings load
+  // failed or there are no held securities -- the headline then reads
+  // "unavailable" rather than falling back to the wrong number.
+  holdingsSummary?: HoldingsSummaryFooter;
 }) {
   const [range, setRange] = useState<
     "1M" | "3M" | "12M" | "FY" | "Last FY" | "All"
@@ -2093,6 +2104,45 @@ function OwnedOverviewScreen({
     data.status === "incomplete";
   const chartSampled = chartHistory.length < history.length;
   const stateCopy = current ? overviewStateCopy(data, current) : null;
+  // UI-047: the hero headline's actual value -- see this component's
+  // `holdingsSummary` prop doc comment for why this is never `current.value`.
+  const headlineValue = holdingsSummary?.marketValue ?? {
+    status: "unavailable" as const,
+    currencyCode: data.currencyCode,
+    value: null,
+    reason: null,
+  };
+  // UI-047 review (B2, BLOCKING): the movement line directly beneath the
+  // headline must come from the SAME holdings read as the headline itself
+  // -- `current.daily` is the published snapshot's own day-over-day change,
+  // a different figure that can (and, on the account that triggered this
+  // report, does) disagree with a live securities-only total. `holdings
+  // Summary.dailyMovement` is `owned-holdings.ts`'s `composePortfolioDaily
+  // MovementTotal`, computed from the exact same `rows` the headline's
+  // `marketValue` is composed from -- no third derivation.
+  const headlineDailyMovement = holdingsSummary?.dailyMovement ?? {
+    status: "unavailable" as const,
+    currencyCode: data.currencyCode,
+    value: null,
+    reason: null,
+  };
+  // UI-047 review round 3 (C2, BLOCKING): the SAME holdings read carries a
+  // real daily percent (`owned-holdings-summary.ts`'s `buildHoldingsSummary
+  // Footer` composes it from the identical `unrealisedSummary.daily` this
+  // movement figure comes from) -- the hero must render it, not the
+  // hardcoded "Percentage unavailable" literal that used to sit there
+  // regardless of what was actually known.
+  const headlineDailyPercent = holdingsSummary?.dailyPercent ?? {
+    status: "unavailable" as const,
+    currencyCode: "%",
+    value: null,
+    reason: null,
+  };
+  const headlineDailyTone: Tone | null =
+    headlineDailyMovement.status === "available" &&
+    headlineDailyMovement.value !== null
+      ? ownedHoldingToneFromDecimal(headlineDailyMovement.value)
+      : null;
 
   if (data.status === "unavailable") {
     return (
@@ -2167,8 +2217,20 @@ function OwnedOverviewScreen({
 
   return (
     <div className="overview-screen owned-overview">
+      {/* UI-047 (owner ruling): the visible "Known value" / "Stale coverage"
+          box is removed -- it explained coverage of the CALC-003/CALC-004
+          persisted-snapshot read below (`data`/`current`), which no longer
+          drives the headline OR the movement line beside it (see
+          `headlineValue`/`headlineDailyMovement` above -- review B2: both
+          now come from the same live holdings read, so a stale/partial
+          SNAPSHOT no longer silently narrates a LIVE number). It still
+          genuinely describes the KPI facts below (Securities/Cash/
+          Unrealised/Cost/Realised, still snapshot-sourced), so the text
+          stays reachable to a screen-reader user rather than being deleted
+          outright -- sr-only, never a visible box, per the owner's
+          report. */}
       {stateCopy ? (
-        <p className="status-banner warning" role="status">
+        <p className="sr-only" role="status">
           <strong>
             {data.status === "stale"
               ? "Stale coverage"
@@ -2176,7 +2238,7 @@ function OwnedOverviewScreen({
                 ? "Value unavailable"
                 : "Known value"}
           </strong>
-          <span>{stateCopy}</span>
+          <span> -- {stateCopy}</span>
         </p>
       ) : null}
       <section className="overview-hero" aria-labelledby="owned-overview-title">
@@ -2185,23 +2247,63 @@ function OwnedOverviewScreen({
             {portfolioName} · {data.currencyCode}
           </p>
           <h1 id="owned-overview-title">
-            {current.value ?? "Value unavailable"}
+            {/* UI-047 review (minor 1): a headline-appropriate phrase, not
+                `ownedHoldingAmountWhole`'s bare lowercase "unavailable" --
+                this IS the page's accessible name (`aria-labelledby`
+                everything else in the hero points at). */}
+            {headlineValue.status === "available" &&
+            headlineValue.value !== null
+              ? ownedHoldingAmountWhole(data.currencyCode, headlineValue)
+              : "Value unavailable"}
+            <PartialMarker text={holdingsSummary?.valueQualifier ?? null} />
           </h1>
+          {/* UI-047 review round 3: no "as of ..." span here -- option 1
+              (reviewer's preferred call). `marketValue`/`dailyMovement` sum
+              each row's `homeValue`/`dailyMovement`, and a row's own
+              `priceState` can be stale/fallback (a days-old close); the
+              hero has no aggregate freshness read to disclose honestly, so
+              it makes no timestamp claim instead of a false "now" (deleted
+              outright, not relabelled -- a freshness aggregation is a
+              recorded follow-up, out of scope here). The movement text's
+              own "today" already states what it can back: today's change,
+              not a batch date. */}
           <p className="overview-movement">
             <span
               className={
-                current.daily === null
+                headlineDailyTone === null
                   ? "muted-copy"
-                  : current.daily.startsWith("−")
-                    ? "tone-negative"
-                    : "tone-positive"
+                  : `tone-${headlineDailyTone}`
               }
             >
-              {current.daily === null
+              {headlineDailyTone === null
                 ? "Daily movement unavailable"
-                : `${current.daily} today · Percentage unavailable`}
+                : ownedHoldingAmount(
+                    data.currencyCode,
+                    headlineDailyMovement,
+                    2,
+                    true,
+                  )}
+              {/* UI-047 review round 3 (C1, BLOCKING): the Holdings tab
+                  reaches this same field's qualifier right after the
+                  amount (`summary.dailyQualifier`, above) -- reused here
+                  verbatim rather than silently dropped. Self-guards on
+                  `null` (nothing excluded), so this is safe to render
+                  unconditionally. */}
+              <PartialMarker text={holdingsSummary?.dailyQualifier ?? null} />
+              {headlineDailyTone === null ? null : (
+                <>
+                  {" today · "}
+                  {/* UI-047 review round 3 (C2, BLOCKING): the SAME read
+                      carries a real percent -- rendering it honestly
+                      replaces the hardcoded "Percentage unavailable" that
+                      used to sit here regardless of what was actually
+                      known. `ownedHoldingPercent` itself falls back to
+                      that exact honest text for the genuinely-null case
+                      (e.g. a zero previous value). */}
+                  {ownedHoldingPercent(headlineDailyPercent, true)}
+                </>
+              )}
             </span>
-            <span>as of {overviewDate(current.date)}</span>
           </p>
         </div>
         <dl className="overview-kpis">
@@ -2217,12 +2319,19 @@ function OwnedOverviewScreen({
         </dl>
       </section>
 
-      <PortfolioValueChart
-        history={portfolioValueHistory}
-        financialYearStartMonth={financialYearStartMonth}
-        timezone={timezone}
-        nowInstant={nowInstant}
-      />
+      {/* UI-047: this wrapper is the grid item `.overview-screen` places --
+          NOT the chart's own `.history-panel` section inside it, which the
+          desktop 2-column grid pins to the narrower left column (shared
+          with the "Published value" section below). Full-width per owner
+          report ("the graph need to go back to being full width"). */}
+      <div className="overview-chart-full">
+        <PortfolioValueChart
+          history={portfolioValueHistory}
+          financialYearStartMonth={financialYearStartMonth}
+          timezone={timezone}
+          nowInstant={nowInstant}
+        />
+      </div>
 
       <section className="history-panel" aria-labelledby="owned-history-title">
         <div className="section-heading compact">
@@ -4876,6 +4985,7 @@ export function PortfolioShell({
                   backfillPending: false,
                 }
               }
+              holdingsSummary={ownedWorkspace.holdingsSummary}
             />
           ) : activeSection === "holdings" && ownedWorkspace.activePortfolio ? (
             <OwnedHoldingsScreen

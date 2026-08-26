@@ -294,6 +294,33 @@ export async function loadAuthenticatedWorkspace(
           datesTruncated: false,
           backfillPending: false,
         }));
+      // UI-047 (owner-reported): the Overview hero headline must show the
+      // SAME securities-only current portfolio value the Holdings tab
+      // (`buildHoldingsSummaryFooter`'s `marketValue`) and the HIST-001/
+      // BUG-002 value-history graph already show -- never the
+      // CALC-003/CALC-004 persisted-snapshot total below, which stays
+      // cash-inclusive (BUG-002 only touched the HIST-001 series and live
+      // holdings reads, not this dormant snapshot pipeline; the mismatch is
+      // recorded as the existing CALC-005 follow-up in TASKS.md). Loaded
+      // independently, mirroring `portfolioValueHistory` above: a failure
+      // here must never take down the rest of Overview, so the headline
+      // simply reads "unavailable" rather than dragging the whole screen
+      // down with it.
+      const holdingsSummary = await loadOwnedHoldings(
+        client,
+        result.context.user.id,
+        configuredWorkspace.activePortfolio.id,
+      )
+        .then((holdings) =>
+          holdings.unrealisedSummary
+            ? buildHoldingsSummaryFooter(
+                configuredWorkspace.activePortfolio!.baseCurrencyCode,
+                holdings.unrealisedSummary,
+                undefined,
+              )
+            : undefined,
+        )
+        .catch(() => undefined);
       try {
         const snapshotRepo = createHistoricalSnapshotRepository(client);
         const userId = result.context.user.id;
@@ -333,6 +360,7 @@ export async function loadAuthenticatedWorkspace(
           ...configuredWorkspace,
           overview: createOverviewData(overview),
           portfolioValueHistory,
+          holdingsSummary,
         };
       } catch {
         return {
@@ -341,6 +369,7 @@ export async function loadAuthenticatedWorkspace(
             configuredWorkspace.activePortfolio.baseCurrencyCode,
           ),
           portfolioValueHistory,
+          holdingsSummary,
         };
       }
     }

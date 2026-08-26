@@ -1419,7 +1419,15 @@ dd {
   padding: 9px 9px 10px 0;
 }
 
-.overview-kpis div + div {
+/* UI-047 (owner-reported): `div + div` gave every item AFTER the first in
+   DOM order a left border/padding, regardless of which grid COLUMN it
+   landed in -- with 5 facts in a 3-column grid, the 4th item ("Cost") is
+   the first cell of row 2 but still got a stray left border, so row 2's
+   left edge didn't line up with row 1's, and the divider grid looked
+   broken. `:nth-child(3n + 1)` selects only the actual first-of-row items
+   (1, 4, 7, ...) to exclude, so the divider lands exactly between columns
+   in every row. */
+.overview-kpis div:not(:nth-child(3n + 1)) {
   padding-left: 9px;
   border-left: 1px solid var(--divider);
 }
@@ -3951,6 +3959,31 @@ dd {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  /* UI-047 review (B1, BLOCKING): the base rule's `:nth-child(3n + 1)`
+     first-of-row exclusion is for the 3-column grid -- at 2 columns the
+     first-of-row (no-border) cells are (1, 3, 5, ...) instead. A plain
+     `.overview-kpis div` reset here is SPECIFICITY-INERT against the base
+     rule: `.overview-kpis div:not(:nth-child(3n + 1))` is (0,2,1), a bare
+     `.overview-kpis div` is only (0,1,1), so items 3 and 5 (excluded from
+     border by neither selector) kept the base rule's stray border-left --
+     the exact misalignment this task exists to fix, just relocated to
+     <350px. The reset below matches the base rule's specificity (0,2,1)
+     with `:not(:nth-child(2n))`, so its later source position actually
+     wins for every odd (left-column) item. */
+  .overview-kpis div:not(:nth-child(2n)) {
+    padding-left: 0;
+    border-left: none;
+  }
+
+  /* Redundant-but-harmless alongside the reset above for even items the
+     base rule already borders (2, 6, 10, ...), and load-bearing for the
+     even items the base rule EXCLUDES (4, 8, ...) -- both need the
+     right-column divider at this 2-column breakpoint. */
+  .overview-kpis div:nth-child(2n) {
+    padding-left: 9px;
+    border-left: 1px solid var(--divider);
+  }
+
   .overview-kpis dd {
     overflow: visible;
     overflow-wrap: anywhere;
@@ -4116,7 +4149,14 @@ dd {
     gap: 0 44px;
   }
 
-  .overview-hero {
+  .overview-hero,
+  /* UI-047 (owner-reported): the "Portfolio value over time" chart must
+     stay full width like the hero above it -- its OWN top-level element
+     shares `.history-panel` with the "Published value" section below,
+     which the very next rule pins to the narrower left column, so this
+     wrapper (see `OwnedOverviewScreen` in portfolio-shell.tsx) is what
+     actually receives this grid placement instead. */
+  .overview-chart-full {
     grid-column: 1 / -1;
   }
 
