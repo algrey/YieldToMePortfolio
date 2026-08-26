@@ -61,14 +61,14 @@ const INCOME_VIEWS: readonly {
 ];
 
 /**
- * FALLBACK target for the back control (UI-046 made the control itself
- * history-based). `overview` is the portfolio shell's default section
- * (`app/page.tsx` and `PortfolioShell`'s own `activeSection` default), so a
- * direct/no-JS arrival still lands back on the primary tab strip rather
- * than on a section the owner may never have visited.
+ * FALLBACK target for the back control, used only when no primary tab was
+ * remembered (a direct/deep-linked arrival, or blocked storage) -- UI-048
+ * makes the control itself return to the tab the owner entered from.
+ * `holdings` per the owner's own instruction: "just go back to Holdings,
+ * which is where I would usually call it from."
  */
 export function incomeBackHref(portfolioId: string): string {
-  return `/portfolio/${portfolioId}/overview`;
+  return `/portfolio/${portfolioId}/holdings`;
 }
 
 export function IncomeNav({
@@ -85,12 +85,14 @@ export function IncomeNav({
     <SubNav
       backHref={incomeBackHref(portfolioId)}
       backLabel="Back"
-      // UI-046 (owner-reported): Income is a PRIMARY tab, so it is opened
-      // from whichever tab the owner happened to be on -- always returning
-      // to Overview was wrong for every arrival but one. Steps back through
-      // real history instead; `backHref` stays the fallback for a direct or
-      // no-JS arrival.
-      backMode="history"
+      // UI-046/UI-048 (owner-reported, twice): Income is a PRIMARY tab, so
+      // it is opened from whichever tab the owner happened to be on --
+      // always returning to Overview was wrong for every arrival but one.
+      // Plain history-back then walked back through each Income sub-tab
+      // before leaving the area. `"exit"` leaves in ONE step, landing on the
+      // primary tab the owner entered from; `backHref` is the fallback when
+      // nothing was remembered.
+      backMode="exit"
       heading={<p className="eyebrow">Income</p>}
       tabs={INCOME_VIEWS.map((view) => ({
         key: view.key,

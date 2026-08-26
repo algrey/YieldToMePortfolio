@@ -1,5 +1,9 @@
 "use client";
 
+import Link from "next/link";
+import { useSyncExternalStore } from "react";
+import { readRememberedPrimaryTab } from "../last-primary-tab";
+
 // UI-037: the back control for full-screen pages reachable from MORE THAN
 // ONE place. The manual ledger entry page is linked from the Details
 // screen, from an empty-state prose link, and from the top bar's "+" menu
@@ -60,5 +64,54 @@ export function HistoryBackControl({
         <path d="M14.5 5 7.5 12l7 7" />
       </svg>
     </a>
+  );
+}
+
+/** The remembered tab only changes while the owner is on a PRIMARY tab --
+ * never while this control is mounted -- so there is nothing to subscribe
+ * to; the snapshot is read once per mount. */
+function subscribeToNothing(): () => void {
+  return () => {};
+}
+
+/**
+ * UI-048: the back control for a full-screen sub-area whose sub-tabs each
+ * push their own history entry (Income). Plain history-back walks those
+ * sub-tabs one at a time before leaving the area -- correct browser
+ * behaviour, but not what the owner wants from an area's own back arrow.
+ * This instead LEAVES the area, returning to the primary tab the owner was
+ * on when they entered it (recorded by `PortfolioShell`).
+ *
+ * Renders a real `<Link>`, so it works with JS disabled, supports
+ * cmd/middle-click, and needs no router mounted for a static render: the
+ * href starts as `fallbackHref` and is upgraded to the remembered tab
+ * after hydration.
+ */
+export function AreaExitBackControl({
+  fallbackHref,
+  label,
+}: {
+  /** Where to go when nothing was remembered (a direct/deep-linked arrival
+   * or blocked storage) -- the owner's usual entry point for the area. */
+  fallbackHref: string;
+  label: string;
+}) {
+  // `useSyncExternalStore` is the SSR-safe way to read external (storage)
+  // state: the server snapshot is the fallback href, so the static render
+  // and first paint agree, and the client snapshot upgrades to the
+  // remembered tab. Reading sessionStorage during render or setting state
+  // inside an effect would either break hydration or cascade a re-render.
+  const href = useSyncExternalStore(
+    subscribeToNothing,
+    () => readRememberedPrimaryTab() ?? fallbackHref,
+    () => fallbackHref,
+  );
+  return (
+    <Link className="subnav-back" href={href} aria-label={label}>
+      {/* Identical glyph/class to the other back controls. */}
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M14.5 5 7.5 12l7 7" />
+      </svg>
+    </Link>
   );
 }

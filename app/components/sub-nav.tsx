@@ -5,7 +5,7 @@
 // cannot drift apart the way the Income screens' hand-written tab rows did
 // (UI-022's originating defect).
 import Link from "next/link";
-import { HistoryBackControl } from "./back-control";
+import { AreaExitBackControl, HistoryBackControl } from "./back-control";
 
 export type SubNavTab = {
   key: string;
@@ -30,8 +30,12 @@ export function SubNav({
    * `"history"` steps back through the browser's own history and uses
    * `backHref` only as the fallback for a direct/no-JS/new-tab arrival --
    * right for an area reachable from many places (Income is a primary tab,
-   * so it can be opened from any other tab). */
-  backMode?: "link" | "history";
+   * so it can be opened from any other tab).
+   * UI-048: `"exit"` LEAVES the area in one step, returning to the primary
+   * tab the owner entered from -- right for an area whose own sub-tabs each
+   * push a history entry, where plain history-back would walk back through
+   * those sub-tabs first. */
+  backMode?: "link" | "history" | "exit";
   heading: React.ReactNode;
   tabs: readonly SubNavTab[];
   active: string;
@@ -41,7 +45,9 @@ export function SubNav({
   return (
     <div className="subnav">
       <div className="subnav-heading">
-        {backMode === "history" ? (
+        {backMode === "exit" ? (
+          <AreaExitBackControl fallbackHref={backHref} label={backLabel} />
+        ) : backMode === "history" ? (
           <HistoryBackControl fallbackHref={backHref} label={backLabel} />
         ) : (
           <Link className="subnav-back" href={backHref} aria-label={backLabel}>

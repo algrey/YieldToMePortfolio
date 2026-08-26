@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { rememberPrimaryTab } from "../last-primary-tab";
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
   historyBars,
@@ -2036,7 +2037,7 @@ function OwnedOverviewScreen({
   // `new Date()`/`Date.now()` inside this client component -- it is always
   // threaded in as a prop from the server render.
   nowInstant: string;
-  // UI-047 (owner-reported): the hero headline's SOURCE OF TRUTH -- the
+  // UI-048 (owner-reported): the hero headline's SOURCE OF TRUTH -- the
   // same securities-only totals `app/owned-holdings-summary.ts`'s
   // `buildHoldingsSummaryFooter` already composes for the Holdings tab
   // (`app/authenticated-workspace.ts` now loads holdings for the Overview
@@ -2104,7 +2105,7 @@ function OwnedOverviewScreen({
     data.status === "incomplete";
   const chartSampled = chartHistory.length < history.length;
   const stateCopy = current ? overviewStateCopy(data, current) : null;
-  // UI-047: the hero headline's actual value -- see this component's
+  // UI-048: the hero headline's actual value -- see this component's
   // `holdingsSummary` prop doc comment for why this is never `current.value`.
   const headlineValue = holdingsSummary?.marketValue ?? {
     status: "unavailable" as const,
@@ -2112,7 +2113,7 @@ function OwnedOverviewScreen({
     value: null,
     reason: null,
   };
-  // UI-047 review (B2, BLOCKING): the movement line directly beneath the
+  // UI-048 review (B2, BLOCKING): the movement line directly beneath the
   // headline must come from the SAME holdings read as the headline itself
   // -- `current.daily` is the published snapshot's own day-over-day change,
   // a different figure that can (and, on the account that triggered this
@@ -2126,7 +2127,7 @@ function OwnedOverviewScreen({
     value: null,
     reason: null,
   };
-  // UI-047 review round 3 (C2, BLOCKING): the SAME holdings read carries a
+  // UI-048 review round 3 (C2, BLOCKING): the SAME holdings read carries a
   // real daily percent (`owned-holdings-summary.ts`'s `buildHoldingsSummary
   // Footer` composes it from the identical `unrealisedSummary.daily` this
   // movement figure comes from) -- the hero must render it, not the
@@ -2217,7 +2218,7 @@ function OwnedOverviewScreen({
 
   return (
     <div className="overview-screen owned-overview">
-      {/* UI-047 (owner ruling): the visible "Known value" / "Stale coverage"
+      {/* UI-048 (owner ruling): the visible "Known value" / "Stale coverage"
           box is removed -- it explained coverage of the CALC-003/CALC-004
           persisted-snapshot read below (`data`/`current`), which no longer
           drives the headline OR the movement line beside it (see
@@ -2247,7 +2248,7 @@ function OwnedOverviewScreen({
             {portfolioName} · {data.currencyCode}
           </p>
           <h1 id="owned-overview-title">
-            {/* UI-047 review (minor 1): a headline-appropriate phrase, not
+            {/* UI-048 review (minor 1): a headline-appropriate phrase, not
                 `ownedHoldingAmountWhole`'s bare lowercase "unavailable" --
                 this IS the page's accessible name (`aria-labelledby`
                 everything else in the hero points at). */}
@@ -2257,7 +2258,7 @@ function OwnedOverviewScreen({
               : "Value unavailable"}
             <PartialMarker text={holdingsSummary?.valueQualifier ?? null} />
           </h1>
-          {/* UI-047 review round 3: no "as of ..." span here -- option 1
+          {/* UI-048 review round 3: no "as of ..." span here -- option 1
               (reviewer's preferred call). `marketValue`/`dailyMovement` sum
               each row's `homeValue`/`dailyMovement`, and a row's own
               `priceState` can be stale/fallback (a days-old close); the
@@ -2283,7 +2284,7 @@ function OwnedOverviewScreen({
                     2,
                     true,
                   )}
-              {/* UI-047 review round 3 (C1, BLOCKING): the Holdings tab
+              {/* UI-048 review round 3 (C1, BLOCKING): the Holdings tab
                   reaches this same field's qualifier right after the
                   amount (`summary.dailyQualifier`, above) -- reused here
                   verbatim rather than silently dropped. Self-guards on
@@ -2293,7 +2294,7 @@ function OwnedOverviewScreen({
               {headlineDailyTone === null ? null : (
                 <>
                   {" today · "}
-                  {/* UI-047 review round 3 (C2, BLOCKING): the SAME read
+                  {/* UI-048 review round 3 (C2, BLOCKING): the SAME read
                       carries a real percent -- rendering it honestly
                       replaces the hardcoded "Percentage unavailable" that
                       used to sit here regardless of what was actually
@@ -2319,7 +2320,7 @@ function OwnedOverviewScreen({
         </dl>
       </section>
 
-      {/* UI-047: this wrapper is the grid item `.overview-screen` places --
+      {/* UI-048: this wrapper is the grid item `.overview-screen` places --
           NOT the chart's own `.history-panel` section inside it, which the
           desktop 2-column grid pins to the narrower left column (shared
           with the "Published value" section below). Full-width per owner
@@ -3997,6 +3998,14 @@ export function PortfolioShell({
 }) {
   const router = useRouter();
   const pathname = usePathname();
+  // UI-048: this shell renders on the primary tabs and nowhere else (the
+  // Income and holding areas render their own <main>), so recording the
+  // pathname here IS "the last primary tab the owner was on" -- which the
+  // Income area's back control returns to instead of walking back through
+  // its own sub-tabs. Path only; never portfolio values.
+  useEffect(() => {
+    if (pathname !== null) rememberPrimaryTab(pathname);
+  }, [pathname]);
   const portfolios = portfolioPrototypesOverride ?? portfolioPrototypes;
   const ownedMode = ownedWorkspace !== undefined;
   const selectorItems: Array<{
