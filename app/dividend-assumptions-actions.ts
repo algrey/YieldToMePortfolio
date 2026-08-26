@@ -36,6 +36,7 @@ import {
   createDividendImportFrankingOverrideRepository,
   createDividendManualRecordRepository,
   createDividendReceiptRepository,
+  type DividendManualRecordRecord,
   type SqlClient,
 } from "../db/repositories/index.ts";
 import { deriveSharesHeldAtDate } from "../domain/dividends/shares-held.ts";
@@ -343,25 +344,68 @@ export type DividendEntryActionResult =
       version: number;
       /** DIV-004: a non-blocking proximity warning when this payment date lands within `PROXIMITY_WINDOW_DAYS` days of another existing owner-typed entry for the same security. */
       proximityWarning: string | null;
-      /** UI-009 finishing item 1: set only on the manual-record CREATE
-       * path. `deduped` true means an idempotency-key retry matched an
-       * EXISTING record rather than creating a new one; `storedDiffers`
-       * true additionally means the incoming payload's material fields
-       * (payment date, shares, DPS, franking) differ from what is actually
-       * stored (e.g. the owner edited the form between the original save
-       * and a client-visible-timeout retry) -- `storedRecord` then carries
-       * the real persisted values so the caller can resync its form
-       * instead of silently claiming the just-submitted values were saved. */
+      /** UI-009 finishing item 1, extended by DIV-016 part A to the
+       * manual-record CORRECTION (supersede) path too: `deduped` true means
+       * an idempotency-key retry matched an EXISTING record (a fresh CREATE,
+       * or -- DIV-016 -- an already-applied correction) rather than
+       * creating a second one; `storedDiffers` additionally means the
+       * incoming payload's material fields differ from what is actually
+       * stored (e.g. the owner edited the form between the original
+       * save/edit and a client-visible-timeout retry) -- `storedRecord`
+       * then carries the real persisted values (whichever amount mode
+       * actually won) so the caller can resync its form instead of
+       * silently claiming the just-submitted values were saved. Disclosure
+       * parity: this applies identically whether the dedupe matched a
+       * CREATE or a correction (supersede) -- an owner who edits the form
+       * again during a timeout-triggered retry must see the same honest
+       * "this matched an earlier save" resync either way. */
       deduped?: boolean;
       storedDiffers?: boolean;
       storedRecord?: {
         paymentDate: string;
-        sharesDecimal: string;
-        dividendPerShareDecimal: string;
+        sharesDecimal: string | null;
+        dividendPerShareDecimal: string | null;
         frankingCreditPerShareDecimal: string | null;
+        totalCashDecimal: string | null;
+        totalFrankingDecimal: string | null;
       };
     }
   | ActionFailure;
+
+/**
+ * UI-009 finishing item 1 / DIV-016 part A: the STORED-truth disclosure
+ * shape for a `dividend_manual_records` row, shared by both the CREATE
+ * dedupe path and the supersede (correction) dedupe path so the two never
+ * drift -- reads whichever amount mode the record actually is (BRK-005
+ * totals vs. per-share) rather than assuming one.
+ */
+function manualRecordStoredDisclosure(record: DividendManualRecordRecord): {
+  paymentDate: string;
+  sharesDecimal: string | null;
+  dividendPerShareDecimal: string | null;
+  frankingCreditPerShareDecimal: string | null;
+  totalCashDecimal: string | null;
+  totalFrankingDecimal: string | null;
+} {
+  return record.sharesDecimal !== null &&
+    record.dividendPerShareDecimal !== null
+    ? {
+        paymentDate: record.paymentDate,
+        sharesDecimal: record.sharesDecimal,
+        dividendPerShareDecimal: record.dividendPerShareDecimal,
+        frankingCreditPerShareDecimal: record.frankingCreditPerShareDecimal,
+        totalCashDecimal: null,
+        totalFrankingDecimal: null,
+      }
+    : {
+        paymentDate: record.paymentDate,
+        sharesDecimal: null,
+        dividendPerShareDecimal: null,
+        frankingCreditPerShareDecimal: null,
+        totalCashDecimal: record.totalCashDecimal,
+        totalFrankingDecimal: record.totalFrankingDecimal,
+      };
+}
 
 export async function computeProximityWarning(
   client: SqlClient,
@@ -438,15 +482,45 @@ export async function saveDividendEntryWithContext(
       message: "A valid payment date is required.",
     };
   }
+  // B2 (review fix): `sharesDecimal`/`dividendPerShareDecimal`/
+  // `frankingCreditPerShareDecimal` keep the ORIGINAL strict semantics
+  // (an omitted key is malformed, 400) for EVERY branch, including the
+  // event-linked one -- these three fields predate DIV-016 and the
+  // event-linked path's tri-state save (`dividend_event_overrides.save()`)
+  // relies on `undefined` reading as "malformed", never as "omitted,
+  // clear this field" (a prior version of this change loosened all three
+  // uniformly, which let an event-linked save with an OMITTED sharesDecimal
+  // silently clear the stored override's shares field via the repository's
+  // `hasOwn` tri-state instead of failing closed with 400 -- reproduced and
+  // fixed). The dialog for BOTH branches always sends these three keys
+  // explicitly (a controlled form), so this strictness costs nothing in
+  // practice.
   const sharesDecimal = nullableString(input.sharesDecimal);
   const dividendPerShareDecimal = nullableString(input.dividendPerShareDecimal);
   const frankingCreditPerShareDecimal = nullableString(
     input.frankingCreditPerShareDecimal,
   );
+  // DIV-016 part A: the BRK-005 totals shape, now also reachable from the
+  // owner-facing manual-entry dialog (previously only the Sharesight
+  // import-commit path ever wrote these two fields) -- entirely NEW fields
+  // with no pre-DIV-016 caller, and never read by the event-linked branch
+  // at all, so an omitted key reads as `null` here (never malformed) --
+  // this is unlike the three fields above, which have an established
+  // "omission is malformed" contract on the event-linked path this change
+  // must not disturb.
+  const optionalNullableString = (value: unknown): string | null | undefined =>
+    value === undefined ? null : nullableString(value);
+  const totalCashDecimal = optionalNullableString(input.totalCashDecimal);
+  const totalFrankingDecimal = optionalNullableString(
+    input.totalFrankingDecimal,
+  );
+  const amountMode = input.amountMode === "totals" ? "totals" : "per_share";
   if (
     sharesDecimal === undefined ||
     dividendPerShareDecimal === undefined ||
-    frankingCreditPerShareDecimal === undefined
+    frankingCreditPerShareDecimal === undefined ||
+    totalCashDecimal === undefined ||
+    totalFrankingDecimal === undefined
   ) {
     return {
       ok: false,
@@ -541,23 +615,51 @@ export async function saveDividendEntryWithContext(
   }
 
   // No linked event: `dividend_manual_records`, either a brand-new record
-  // or an edit of an existing owner-typed one.
-  if (sharesDecimal === null || !isPositiveDecimalString(sharesDecimal)) {
-    return {
-      ok: false,
-      status: 400,
-      message: "Shares must be a positive number.",
-    };
-  }
-  if (
-    dividendPerShareDecimal === null ||
-    !isPositiveDecimalString(dividendPerShareDecimal)
-  ) {
-    return {
-      ok: false,
-      status: 400,
-      message: "Dividend per share must be a positive number.",
-    };
+  // or a correction (supersession, DIV-016 part A) of an existing
+  // owner-typed one. `amountMode` picks one of two mutually-exclusive
+  // shapes (mirrors `dividend_manual_records_amount_mode_check` and
+  // `validateManualRecordAmounts`'s re-validation of the same invariant at
+  // the repository boundary): PER-SHARE (shares + per-share amounts) or
+  // TOTALS (a BRK-005-shaped total cash + total franking figure).
+  let sharesForSave: string | null = null;
+  let dividendPerShareForSave: string | null = null;
+  let frankingPerShareForSave: string | null = null;
+  let totalCashForSave: string | null = null;
+  let totalFrankingForSave: string | null = null;
+  if (amountMode === "totals") {
+    if (
+      totalCashDecimal === null ||
+      !isPositiveDecimalString(totalCashDecimal)
+    ) {
+      return {
+        ok: false,
+        status: 400,
+        message: "Total cash must be a positive number.",
+      };
+    }
+    totalCashForSave = totalCashDecimal;
+    totalFrankingForSave = totalFrankingDecimal;
+  } else {
+    if (sharesDecimal === null || !isPositiveDecimalString(sharesDecimal)) {
+      return {
+        ok: false,
+        status: 400,
+        message: "Shares must be a positive number.",
+      };
+    }
+    if (
+      dividendPerShareDecimal === null ||
+      !isPositiveDecimalString(dividendPerShareDecimal)
+    ) {
+      return {
+        ok: false,
+        status: 400,
+        message: "Dividend per share must be a positive number.",
+      };
+    }
+    sharesForSave = sharesDecimal;
+    dividendPerShareForSave = dividendPerShareDecimal;
+    frankingPerShareForSave = frankingCreditPerShareDecimal;
   }
 
   const repository = createDividendManualRecordRepository(context.client);
@@ -570,15 +672,16 @@ export async function saveDividendEntryWithContext(
         message: "A valid version is required to edit an existing record.",
       };
     }
-    // B1 (UI-006B review fix): an IMPORTED row (`import_batch_id` set by
-    // IMP-006's CSV commit) is not owner-editable through this form -- its
-    // facts change only by reversing the import batch that created it
-    // (preserving IMP-006's reversal accounting and keeping the imported
-    // tier's numbers honestly attributed to the provider/import source,
-    // never blended with an owner edit). Checked explicitly here so the
-    // rejection carries a specific, actionable message; the repository's
-    // `import_batch_id IS NULL` predicate (added in this fix) is
-    // defense-in-depth against a future caller that skips this check.
+    // B1 (UI-006B review fix, still enforced under DIV-016 part A's
+    // supersede()): an IMPORTED row (`import_batch_id` set by IMP-006's CSV
+    // commit) is not owner-editable through this form -- its facts change
+    // only by reversing the import batch that created it (preserving
+    // IMP-006's reversal accounting and keeping the imported tier's numbers
+    // honestly attributed to the provider/import source, never blended with
+    // an owner edit). Checked explicitly here so the rejection carries a
+    // specific, actionable message; the repository's `import_batch_id IS
+    // NULL` predicate is defense-in-depth against a future caller that
+    // skips this check.
     const existing = await repository.get(
       context.userId,
       portfolioId,
@@ -592,16 +695,23 @@ export async function saveDividendEntryWithContext(
           "This is an imported dividend row. Imported rows can only be changed by reversing the import batch that created them.",
       };
     }
-    const result = await repository.update(
+    // DIV-016 part A: corrections are NEVER an in-place rewrite -- see
+    // `db/repositories/dividends.ts`'s `supersede()` (replaces the
+    // pre-DIV-016 `update()`). Success returns the NEW row's id/version;
+    // the original row is retained, unmodified, and marked superseded.
+    const result = await repository.supersede(
       context.userId,
       portfolioId,
       manualRecordId,
       {
         paymentDate,
-        sharesDecimal,
-        dividendPerShareDecimal,
-        frankingCreditPerShareDecimal,
+        sharesDecimal: sharesForSave,
+        dividendPerShareDecimal: dividendPerShareForSave,
+        frankingCreditPerShareDecimal: frankingPerShareForSave,
+        totalCashDecimal: totalCashForSave,
+        totalFrankingDecimal: totalFrankingForSave,
         expectedVersion,
+        idempotencyKey,
         requestId: context.requestId,
       },
     );
@@ -630,15 +740,22 @@ export async function saveDividendEntryWithContext(
       id: result.record.id,
       version: result.record.version,
       proximityWarning,
+      deduped: result.deduped,
+      storedDiffers: result.storedDiffers,
+      storedRecord: result.storedDiffers
+        ? manualRecordStoredDisclosure(result.record)
+        : undefined,
     };
   }
 
   const result = await repository.create(context.userId, portfolioId, {
     portfolioSecurityId,
     paymentDate,
-    sharesDecimal,
-    dividendPerShareDecimal,
-    frankingCreditPerShareDecimal,
+    sharesDecimal: sharesForSave,
+    dividendPerShareDecimal: dividendPerShareForSave,
+    frankingCreditPerShareDecimal: frankingPerShareForSave,
+    totalCashDecimal: totalCashForSave,
+    totalFrankingDecimal: totalFrankingForSave,
     idempotencyKey,
     requestId: context.requestId,
   });
@@ -657,28 +774,12 @@ export async function saveDividendEntryWithContext(
           : "The dividend record could not be saved.",
     };
   }
-  // BRK-005 note: `sharesDecimal`/`dividendPerShareDecimal` are nullable on
-  // `DividendManualRecordRecord` in general (a totals-mode Sharesight
-  // payout row has neither), but this repository's `create()` -- the only
-  // path that can reach here -- is the standalone owner-typed manual-entry
-  // form, which always supplies both; a totals-mode row is only ever
-  // created by the import-commit path, never this one. Narrowed with a
-  // typed check (never a `!` assertion) so a hypothetical totals-mode
-  // record reaching this branch degrades to `storedRecord: undefined`
-  // (the caller already tolerates that, per its own optional field) instead
-  // of a runtime type lie.
-  const storedRecord =
-    result.storedDiffers &&
-    result.record.sharesDecimal !== null &&
-    result.record.dividendPerShareDecimal !== null
-      ? {
-          paymentDate: result.record.paymentDate,
-          sharesDecimal: result.record.sharesDecimal,
-          dividendPerShareDecimal: result.record.dividendPerShareDecimal,
-          frankingCreditPerShareDecimal:
-            result.record.frankingCreditPerShareDecimal,
-        }
-      : undefined;
+  // BRK-005/DIV-016: the stored record is EITHER shape (per-share or
+  // totals) depending on `amountMode` above; disclose whichever one the
+  // STORED record actually is, never the just-submitted payload.
+  const storedRecord = result.storedDiffers
+    ? manualRecordStoredDisclosure(result.record)
+    : undefined;
   return {
     ok: true,
     target: "manual_record",

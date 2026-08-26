@@ -393,6 +393,13 @@
       "when": 1787709233497,
       "tag": "0055_mkt_021_seed_frankfurter_provider",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "6",
+      "when": 1787718664166,
+      "tag": "0056_div_016a_dividend_manual_record_supersession",
+      "breakpoints": true
     }
   ]
 }

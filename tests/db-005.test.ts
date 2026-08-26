@@ -448,6 +448,13 @@ test("dividend event override is sparse (nullable fields), keyed to one event pe
   assert.equal(mismatched.ok, false);
 });
 
+// DIV-016 part A: `update()` was replaced by `supersede()` -- a correction
+// creates a NEW row and marks the OLD one, never rewriting the old row's own
+// financial fields (AGENTS.md ledger-immutability rule). This test is the
+// DB-005-era CRUD smoke test, updated to assert the new shape: the ORIGINAL
+// row is retained unmodified and marked superseded; the correction lives at
+// a NEW id; `remove()` (exclude) targets the current head, never a
+// superseded ancestor.
 test("manual dividend records are owner-CRUD without any provider event link", async () => {
   const db = await ownedFixture();
   const repo = createDividendManualRecordRepository(createSqliteSqlClient(db));
@@ -462,17 +469,24 @@ test("manual dividend records are owner-CRUD without any provider event link", a
   assert.equal(created.ok, true);
   if (!created.ok) return;
   assert.equal(await repo.get("b", "pb", created.record.id), null);
-  const updated = await repo.update("a", "pa", created.record.id, {
+  const superseded = await repo.supersede("a", "pa", created.record.id, {
     sharesDecimal: "6",
     expectedVersion: created.record.version,
     requestId: "r2",
   });
-  assert.equal(updated.ok, true);
+  assert.equal(superseded.ok, true);
+  if (!superseded.ok) return;
+  assert.notEqual(superseded.record.id, created.record.id);
+  assert.equal(superseded.record.sharesDecimal, "6");
+  // The original row is retained, unmodified, and marked superseded.
+  const original = await repo.get("a", "pa", created.record.id);
+  assert.equal(original?.sharesDecimal, "5");
+  assert.equal(original?.supersededByRecordId, superseded.record.id);
   const removed = await repo.remove(
     "a",
     "pa",
-    created.record.id,
-    updated.ok ? updated.record.version : 1,
+    superseded.record.id,
+    superseded.record.version,
     "r3",
   );
   assert.equal(removed.ok, true);
@@ -660,7 +674,14 @@ test("dividend receipt partial update preserves franking on a shares-only edit; 
   if (cleared?.ok) assert.equal(cleared.receipt.frankingPerShareDecimal, null);
 });
 
-test("manual dividend record partial update preserves franking on a shares-only edit; explicit null still clears it", async () => {
+// DIV-016 part A: `update()` was replaced by `supersede()` (see the "owner-
+// CRUD" test above for the full rationale). A second correction targets the
+// CURRENT HEAD (the previous correction's own new id/version), never the
+// original id -- chaining two corrections proves the lineage advances
+// correctly, and the partial-patch ("omitted field carries forward")
+// semantics `resolveSupersedeAmounts` preserves from the pre-DIV-016
+// `update()` still hold at each step.
+test("manual dividend record correction preserves franking on a shares-only edit; explicit null still clears it", async () => {
   const db = await ownedFixture();
   const repo = createDividendManualRecordRepository(createSqliteSqlClient(db));
   const created = await repo.create("a", "pa", {
@@ -673,26 +694,50 @@ test("manual dividend record partial update preserves franking on a shares-only 
   });
   assert.equal(created.ok, true);
   if (!created.ok) return;
-  const sharesOnly = await repo.update("a", "pa", created.record.id, {
+  const sharesOnly = await repo.supersede("a", "pa", created.record.id, {
     sharesDecimal: "6",
     expectedVersion: created.record.version,
     requestId: "r2",
   });
   assert.equal(sharesOnly.ok, true);
   if (sharesOnly.ok) {
+    assert.notEqual(sharesOnly.record.id, created.record.id);
     assert.equal(sharesOnly.record.sharesDecimal, "6");
     assert.equal(sharesOnly.record.frankingCreditPerShareDecimal, "0.06");
   }
   const cleared = sharesOnly.ok
-    ? await repo.update("a", "pa", created.record.id, {
+    ? await repo.supersede("a", "pa", sharesOnly.record.id, {
         frankingCreditPerShareDecimal: null,
         expectedVersion: sharesOnly.record.version,
         requestId: "r3",
       })
     : null;
   assert.equal(cleared?.ok, true);
-  if (cleared?.ok)
+  if (cleared?.ok) {
+    assert.notEqual(cleared.record.id, sharesOnly.record?.id);
+    // The shares-only correction's own value carries forward untouched.
+    assert.equal(cleared.record.sharesDecimal, "6");
     assert.equal(cleared.record.frankingCreditPerShareDecimal, null);
+  }
+  // Both ancestors are retained, unmodified, and excluded from `list()`.
+  const original = await repo.get("a", "pa", created.record.id);
+  assert.equal(original?.sharesDecimal, "5");
+  assert.equal(original?.frankingCreditPerShareDecimal, "0.06");
+  assert.equal(
+    original?.supersededByRecordId,
+    sharesOnly.ok ? sharesOnly.record.id : null,
+  );
+  const middle = sharesOnly.ok
+    ? await repo.get("a", "pa", sharesOnly.record.id)
+    : null;
+  assert.equal(middle?.sharesDecimal, "6");
+  assert.equal(
+    middle?.supersededByRecordId,
+    cleared?.ok ? cleared.record.id : null,
+  );
+  const remaining = await repo.list("a", "pa", "psa");
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0]?.id, cleared?.ok ? cleared.record.id : null);
 });
 
 test("dividend event override partial update preserves franking (and other sparse fields) on a shares-only edit; explicit null still clears it", async () => {

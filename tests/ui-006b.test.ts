@@ -1331,7 +1331,12 @@ test("UI-006B: computeProximityWarning excludes the record being edited from its
   );
 });
 
-test('UI-006B: an owner-typed manual record\'s edit and delete ("Exclude this dividend" for the non-event-linked tier) both persist correctly', async () => {
+// DIV-016 part A: an edit is now a SUPERSESSION, never an in-place rewrite
+// (AGENTS.md ledger-immutability rule) -- `edited.id` is a NEW row's id, the
+// ORIGINAL (`created.id`) is retained unmodified and marked superseded, and
+// "Exclude this dividend" targets the CURRENT HEAD (`edited.id`), never a
+// superseded ancestor.
+test('UI-006B: an owner-typed manual record\'s edit (supersession) and delete ("Exclude this dividend" for the non-event-linked tier) both persist correctly', async () => {
   const db = await fixture();
   const client = createSqliteSqlClient(db);
   const ctx = contextFor(client, "a");
@@ -1361,26 +1366,34 @@ test('UI-006B: an owner-typed manual record\'s edit and delete ("Exclude this di
   });
   assert.equal(edited.ok, true);
   if (!edited.ok) return;
+  assert.notEqual(edited.id, created.id);
 
-  const afterEdit = await createDividendManualRecordRepository(client).get(
-    "a",
-    "pa",
-    created.id,
-  );
+  const repository = createDividendManualRecordRepository(client);
+  const afterEdit = await repository.get("a", "pa", edited.id);
   assert.equal(afterEdit?.sharesDecimal, "12");
   assert.equal(afterEdit?.dividendPerShareDecimal, "1.1");
 
+  // The original row is retained, unmodified, and excluded from evidence.
+  const original = await repository.get("a", "pa", created.id);
+  assert.equal(original?.sharesDecimal, "10");
+  assert.equal(original?.dividendPerShareDecimal, "1");
+  assert.equal(original?.supersededByRecordId, edited.id);
+  const list = await repository.list("a", "pa", "psa1");
+  assert.equal(list.length, 1);
+  assert.equal(list[0]?.id, edited.id);
+
   const deleted = await deleteDividendManualRecordWithContext(ctx, "pa", {
-    manualRecordId: created.id,
+    manualRecordId: edited.id,
     expectedVersion: edited.version,
   });
   assert.equal(deleted.ok, true);
-  const afterDelete = await createDividendManualRecordRepository(client).get(
-    "a",
-    "pa",
-    created.id,
-  );
+  const afterDelete = await repository.get("a", "pa", edited.id);
   assert.equal(afterDelete, null);
+  // The superseded original survives deletion of its successor -- it is
+  // never itself deletable (see `remove()`'s `superseded_by_record_id IS
+  // NULL` guard), preserving the audit trail.
+  const originalAfterDelete = await repository.get("a", "pa", created.id);
+  assert.notEqual(originalAfterDelete, null);
 });
 
 // B1 (UI-006B review fix): an IMPORTED row (`import_batch_id IS NOT NULL`,

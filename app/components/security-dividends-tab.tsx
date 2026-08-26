@@ -886,6 +886,11 @@ export function SecurityDividendsTab({
           initialFrankingCreditPerShareDecimal={
             recordPrefill.initialFrankingCreditPerShareDecimal
           }
+          initialAmountMode={recordPrefill.initialAmountMode}
+          initialTotalCashDecimal={recordPrefill.initialTotalCashDecimal}
+          initialTotalFrankingDecimal={
+            recordPrefill.initialTotalFrankingDecimal
+          }
           initialExpectedVersion={recordPrefill.initialExpectedVersion}
           initialExclude={recordPrefill.initialExclude}
           dominatedReceipt={recordDominated.dominatedReceipt}

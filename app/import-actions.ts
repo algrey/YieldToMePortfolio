@@ -84,9 +84,14 @@ async function loadReview(
     // DIV-004: existing OWNER-typed manual records only (import_batch_id
     // IS NULL) -- an imported-vs-imported near match is cross-batch
     // dedupe's job (source_reference idempotency), not this warning's.
+    // DIV-016 part A: excludes a superseded (historical) row -- only the
+    // CURRENT head of each lineage is "the" dividend on record; comparing
+    // against a superseded ancestor's payment date would raise a spurious
+    // near-duplicate warning against a fact the owner already corrected.
     client.all<Record<string, unknown>>(
       `SELECT portfolio_security_id, payment_date FROM dividend_manual_records
-       WHERE user_id = ? AND import_batch_id IS NULL`,
+       WHERE user_id = ? AND import_batch_id IS NULL
+         AND superseded_by_record_id IS NULL`,
       [userId],
     ),
     client.all<Record<string, unknown>>(

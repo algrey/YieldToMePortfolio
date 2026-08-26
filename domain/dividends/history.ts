@@ -163,11 +163,14 @@ export type DividendManualRecordFact = {
   // BRK-005: nullable -- a totals-mode Sharesight payout row (see
   // `db/schema.ts`'s `dividendManualRecords` header note) has no per-share
   // fact at all. `sharesDecimal`/`dividendPerShareDecimal` are null on that
-  // row alone, and `totalCashDecimal` is set instead; every owner-typed or
-  // CSV-imported per-share row still has both non-null and both `total*`
-  // fields null. Structurally, only the "imported" tier can ever carry a
-  // totals-mode fact (the manual-entry UI and `dividend_receipts` both only
-  // ever supply per-share facts).
+  // row alone, and `totalCashDecimal` is set instead; every per-share row
+  // still has both non-null and both `total*` fields null. DIV-016 part A:
+  // the "imported" tier is no longer the only one that can carry a
+  // totals-mode fact -- the owner-facing manual-entry dialog now offers a
+  // totals mode too (`app/dividend-assumptions-actions.ts`'s
+  // `saveDividendEntryWithContext`), so an `importBatchId === null`
+  // ("manual" tier) record can be totals-mode as well. `dividend_receipts`
+  // still only ever supplies per-share facts.
   sharesDecimal: string | null;
   dividendPerShareDecimal: string | null;
   frankingCreditPerShareDecimal: string | null;
@@ -308,9 +311,9 @@ export type DerivedDividendRow = {
   currencyCode: string;
   exDate: string | null;
   paymentDate: string | null;
-  /** `null` only for a BRK-005 totals-mode imported row (a Sharesight payout, which reports no share count at all) -- rendered as "Unknown", never fabricated by deriving a share count from unrelated ledger holdings. Non-null for every other tier/source. */
+  /** `null` only for a BRK-005 totals-mode row (a Sharesight payout, or -- DIV-016 part A -- an owner-typed totals-mode entry, neither of which reports a share count) -- rendered as "Unknown", never fabricated by deriving a share count from unrelated ledger holdings. Non-null for every other tier/source. */
   sharesDecimal: string | null;
-  /** `null` when the per-share amount is genuinely unknown -- no override/receipt/manual value AND the provider event's own amount is null, OR a BRK-005 totals-mode imported row (which has no per-share fact at all, only a total) -- never fabricated as "0". */
+  /** `null` when the per-share amount is genuinely unknown -- no override/receipt/manual value AND the provider event's own amount is null, OR a BRK-005 totals-mode row (which has no per-share fact at all, only a total) -- never fabricated as "0". */
   dividendPerShareDecimal: string | null;
   cashDecimal: string | null;
   franking: FrankingResolution;
@@ -320,7 +323,7 @@ export type DerivedDividendRow = {
   status: DerivedDividendRowLifecycleStatus;
   source: DerivedDividendRowSource;
   excluded: boolean;
-  /** True exactly when `cashDecimal` is `null` -- equivalent to `dividendPerShareDecimal === null` for every row EXCEPT a BRK-005 totals-mode imported row, whose per-share amount is unknown but whose cash total is known (so it is never counted as amount-unknown and its real total still contributes to lifetime sums). */
+  /** True exactly when `cashDecimal` is `null` -- equivalent to `dividendPerShareDecimal === null` for every row EXCEPT a BRK-005 totals-mode row, whose per-share amount is unknown but whose cash total is known (so it is never counted as amount-unknown and its real total still contributes to lifetime sums). */
   amountUnknown: boolean;
   /** The provider event's own, unedited per-share amount (present whenever an event backs the row, regardless of source), so a detail view can show "provider says X, you overrode to Y" (UI-006C). */
   providerGrossPerShareDecimal: string | null;
@@ -1158,8 +1161,15 @@ export function deriveDividendHistoryForSecurity(
         sharesDecimal: manual.sharesDecimal,
         dividendPerShareDecimal: manual.dividendPerShareDecimal,
         overrideFrankingPerShare: manual.frankingCreditPerShareDecimal,
-        totalCashDecimal: null,
-        totalFrankingDecimal: null,
+        // DIV-016 part A: an owner-typed record can now be a BRK-005
+        // totals-mode fact too (previously only the "imported" tier ever
+        // carried one -- see this module's header note and
+        // `DividendManualRecordFact`'s doc comment, both corrected by this
+        // change). Read through generically exactly like the "imported"
+        // branch below, so a totals-mode owner entry renders its real
+        // cash/franking total instead of reading as "Unknown".
+        totalCashDecimal: manual.totalCashDecimal ?? null,
+        totalFrankingDecimal: manual.totalFrankingDecimal ?? null,
         paymentDate: manual.paymentDate,
         dominatedReceipt: receiptResolution
           ? toDominatedReceipt(receiptResolution.latest)
@@ -1600,8 +1610,10 @@ export function deriveDividendHistoryForSecurity(
     sharesDecimal: string | null;
     dividendPerShareDecimal: string | null;
     overrideFrankingPerShare: string | null;
-    // BRK-005: only ever set when `source === "imported"` for a totals-mode
-    // Sharesight payout fact -- see `DividendManualRecordFact`'s header note.
+    // BRK-005: set for a totals-mode fact -- a Sharesight payout
+    // (`source === "imported"`) or, DIV-016 part A, an owner-typed
+    // totals-mode entry (`source === "manual"`) -- see
+    // `DividendManualRecordFact`'s header note.
     totalCashDecimal?: string | null;
     totalFrankingDecimal?: string | null;
     paymentDate: string;
@@ -1737,6 +1749,11 @@ export function deriveDividendHistoryForSecurity(
           sharesDecimal: record.sharesDecimal,
           dividendPerShareDecimal: record.dividendPerShareDecimal,
           overrideFrankingPerShare: record.frankingCreditPerShareDecimal,
+          // DIV-016 part A: see the header note's/`resolveOwnerFact`'s
+          // identical addition -- an owner-typed record can be
+          // totals-mode too now.
+          totalCashDecimal: record.totalCashDecimal ?? null,
+          totalFrankingDecimal: record.totalFrankingDecimal ?? null,
           paymentDate: record.paymentDate,
           dominatedImported: matchedImported
             ? toDominatedImported(matchedImported)
@@ -1807,6 +1824,11 @@ export function deriveDividendHistoryForSecurity(
         dividendPerShareDecimal: manualPick.winner.dividendPerShareDecimal,
         overrideFrankingPerShare:
           manualPick.winner.frankingCreditPerShareDecimal,
+        // DIV-016 part A: see the header note's/`resolveOwnerFact`'s
+        // identical addition -- an owner-typed record can be totals-mode
+        // too now.
+        totalCashDecimal: manualPick.winner.totalCashDecimal ?? null,
+        totalFrankingDecimal: manualPick.winner.totalFrankingDecimal ?? null,
         paymentDate: manualPick.winner.paymentDate,
         dominatedReceipt: receiptPick
           ? toDominatedReceipt(receiptPick.winner)

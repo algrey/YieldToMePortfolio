@@ -613,6 +613,9 @@ export function RecordDividendDialog({
   initialSharesDecimal = null,
   initialDividendPerShareDecimal = null,
   initialFrankingCreditPerShareDecimal = null,
+  initialAmountMode = "per_share",
+  initialTotalCashDecimal = null,
+  initialTotalFrankingDecimal = null,
   initialExpectedVersion = null,
   initialExclude = false,
   dominatedReceipt = null,
@@ -639,6 +642,14 @@ export function RecordDividendDialog({
   initialSharesDecimal?: string | null;
   initialDividendPerShareDecimal?: string | null;
   initialFrankingCreditPerShareDecimal?: string | null;
+  /** DIV-016 part A: "totals" only for a standalone (non-event-linked)
+   * manual/imported row already recorded in the BRK-005 totals shape --
+   * see `app/dividend-history-prefill.ts`'s `DialogPrefill` doc comment.
+   * An event-linked override never offers this mode (`dividend_event_
+   * overrides` has no totals shape). */
+  initialAmountMode?: "per_share" | "totals";
+  initialTotalCashDecimal?: string | null;
+  initialTotalFrankingDecimal?: string | null;
   initialExpectedVersion?: number | null;
   initialExclude?: boolean;
   /** UI-010: the row's dominated evidence (see the type alias comment above)
@@ -694,6 +705,17 @@ export function RecordDividendDialog({
   );
   const [frankingPerShare, setFrankingPerShare] = useState(
     initialFrankingCreditPerShareDecimal ?? "",
+  );
+  // DIV-016 part A: the amount-mode toggle -- only ever offered for a
+  // non-event-linked save (`dividend_event_overrides` has no totals shape,
+  // see `initialAmountMode`'s doc comment). Fixed at "per_share" for an
+  // event-linked dialog regardless of the prop, defensively.
+  const [amountMode, setAmountMode] = useState<"per_share" | "totals">(
+    isEventLinked ? "per_share" : initialAmountMode,
+  );
+  const [totalCash, setTotalCash] = useState(initialTotalCashDecimal ?? "");
+  const [totalFranking, setTotalFranking] = useState(
+    initialTotalFrankingDecimal ?? "",
   );
   // B3: "Exclude this dividend" for an event-linked row is a checkbox on
   // this same save (routes to `dividend_event_overrides.exclude`, which
@@ -772,26 +794,41 @@ export function RecordDividendDialog({
     };
   }, [portfolioId, portfolioSecurityId, paymentDate, sharesTouched]);
 
-  const cashTotal = safeCents(() =>
-    formatDecimalFixed(
-      multiplyDecimal(
-        parseDecimal(shares || "0"),
-        parseDecimal(dividendPerShare || "0"),
-      ),
-      2,
-    ),
-  );
-  const frankingTotal = frankingPerShare.trim()
-    ? safeCents(() =>
-        formatDecimalFixed(
-          multiplyDecimal(
-            parseDecimal(shares || "0"),
-            parseDecimal(frankingPerShare),
+  // DIV-016 part A: in "totals" mode the owner types the totals directly --
+  // no shares/per-share multiplication, mirroring how a Sharesight totals
+  // payout is stored/derived (`domain/dividends/history.ts`'s
+  // `computeCashGrossOrTotals`, totals-mode branch: the cash/franking
+  // totals ARE the raw inputs, never a derived product).
+  const cashTotal =
+    amountMode === "totals"
+      ? totalCash.trim()
+        ? safeCents(() => formatDecimalFixed(parseDecimal(totalCash), 2))
+        : null
+      : safeCents(() =>
+          formatDecimalFixed(
+            multiplyDecimal(
+              parseDecimal(shares || "0"),
+              parseDecimal(dividendPerShare || "0"),
+            ),
+            2,
           ),
-          2,
-        ),
-      )
-    : null;
+        );
+  const frankingTotal =
+    amountMode === "totals"
+      ? totalFranking.trim()
+        ? safeCents(() => formatDecimalFixed(parseDecimal(totalFranking), 2))
+        : null
+      : frankingPerShare.trim()
+        ? safeCents(() =>
+            formatDecimalFixed(
+              multiplyDecimal(
+                parseDecimal(shares || "0"),
+                parseDecimal(frankingPerShare),
+              ),
+              2,
+            ),
+          )
+        : null;
   const grossTotal =
     cashTotal !== null
       ? frankingTotal !== null
@@ -826,9 +863,21 @@ export function RecordDividendDialog({
           body: JSON.stringify({
             portfolioSecurityId,
             paymentDate,
-            sharesDecimal: shares,
-            dividendPerShareDecimal: dividendPerShare,
-            frankingCreditPerShareDecimal: blankToNull(frankingPerShare),
+            // DIV-016 part A: a non-event-linked save is EITHER mode --
+            // `amountMode` tells the server which of the two field groups
+            // below to validate/persist; the other group is sent as its
+            // "not applicable" value (blank shares/DPS/franking in totals
+            // mode, blank totals in per-share mode) but is never read
+            // server-side for the mode that isn't selected.
+            sharesDecimal: amountMode === "totals" ? null : shares,
+            dividendPerShareDecimal:
+              amountMode === "totals" ? null : dividendPerShare,
+            frankingCreditPerShareDecimal:
+              amountMode === "totals" ? null : blankToNull(frankingPerShare),
+            totalCashDecimal: amountMode === "totals" ? totalCash : null,
+            totalFrankingDecimal:
+              amountMode === "totals" ? blankToNull(totalFranking) : null,
+            amountMode,
             dividendEventId: initialDividendEventId,
             manualRecordId: isEventLinked ? null : savedManualRecordId,
             expectedVersion: savedVersion,
@@ -849,9 +898,11 @@ export function RecordDividendDialog({
             storedDiffers?: boolean;
             storedRecord?: {
               paymentDate: string;
-              sharesDecimal: string;
-              dividendPerShareDecimal: string;
+              sharesDecimal: string | null;
+              dividendPerShareDecimal: string | null;
               frankingCreditPerShareDecimal: string | null;
+              totalCashDecimal: string | null;
+              totalFrankingDecimal: string | null;
             };
           }
         | { ok: false; message: string };
@@ -860,6 +911,9 @@ export function RecordDividendDialog({
         return;
       }
       // F1: switch to update mode for any further submit in this dialog.
+      // DIV-016 part A: on a correction (supersede), `result.id` is the NEW
+      // (superseding) row's id, never the original -- a further submit in
+      // this same dialog session correctly targets that new row next.
       setSavedVersion(result.version);
       if (result.target === "manual_record") {
         setSavedManualRecordId(result.id);
@@ -870,14 +924,26 @@ export function RecordDividendDialog({
       // committed, then a client-visible timeout triggered a resubmit with
       // the NEW values) -- resync the form to the ACTUALLY-STORED values
       // rather than leaving the just-typed ones displayed as if they saved.
+      // DIV-016 part A: `storedRecord` reflects whichever mode actually won
+      // -- resync `amountMode` along with the fields so the form's shown
+      // inputs match the stored shape.
       if (result.storedDiffers && result.storedRecord) {
         setPaymentDate(result.storedRecord.paymentDate);
-        setShares(result.storedRecord.sharesDecimal);
-        setSharesTouched(true);
-        setDividendPerShare(result.storedRecord.dividendPerShareDecimal);
-        setFrankingPerShare(
-          result.storedRecord.frankingCreditPerShareDecimal ?? "",
-        );
+        if (result.storedRecord.totalCashDecimal !== null) {
+          setAmountMode("totals");
+          setTotalCash(result.storedRecord.totalCashDecimal);
+          setTotalFranking(result.storedRecord.totalFrankingDecimal ?? "");
+        } else {
+          setAmountMode("per_share");
+          setShares(result.storedRecord.sharesDecimal ?? "");
+          setSharesTouched(true);
+          setDividendPerShare(
+            result.storedRecord.dividendPerShareDecimal ?? "",
+          );
+          setFrankingPerShare(
+            result.storedRecord.frankingCreditPerShareDecimal ?? "",
+          );
+        }
       }
       setSubmitState({
         status: "saved",
@@ -1078,39 +1144,99 @@ export function RecordDividendDialog({
                 changed here.
               </p>
             ) : null}
-            <label>
-              Shares held at that date
-              <input
-                type="text"
-                inputMode="decimal"
-                value={shares}
-                onChange={(event) => {
-                  setSharesTouched(true);
-                  setShares(event.target.value);
-                }}
-                required
-              />
-            </label>
-            <label>
-              Dividend per share
-              <input
-                type="text"
-                inputMode="decimal"
-                value={dividendPerShare}
-                onChange={(event) => setDividendPerShare(event.target.value)}
-                required
-              />
-            </label>
-            <label>
-              Franking credit per share
-              <input
-                type="text"
-                inputMode="decimal"
-                placeholder="blank = unknown"
-                value={frankingPerShare}
-                onChange={(event) => setFrankingPerShare(event.target.value)}
-              />
-            </label>
+            {!isEventLinked ? (
+              // DIV-016 part A: a non-event-linked save is either PER-SHARE
+              // or the BRK-005 TOTALS shape -- `dividend_event_overrides`
+              // has no totals shape, so this toggle is never offered for an
+              // event-linked override.
+              <fieldset className="dividend-amount-mode-toggle">
+                <legend>Amount entry</legend>
+                <label>
+                  <input
+                    type="radio"
+                    name="dividend-amount-mode"
+                    value="per_share"
+                    checked={amountMode === "per_share"}
+                    onChange={() => setAmountMode("per_share")}
+                  />
+                  Per share
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="dividend-amount-mode"
+                    value="totals"
+                    checked={amountMode === "totals"}
+                    onChange={() => setAmountMode("totals")}
+                  />
+                  Total amount
+                </label>
+              </fieldset>
+            ) : null}
+            {amountMode === "per_share" ? (
+              <>
+                <label>
+                  Shares held at that date
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={shares}
+                    onChange={(event) => {
+                      setSharesTouched(true);
+                      setShares(event.target.value);
+                    }}
+                    required
+                  />
+                </label>
+                <label>
+                  Dividend per share
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={dividendPerShare}
+                    onChange={(event) =>
+                      setDividendPerShare(event.target.value)
+                    }
+                    required
+                  />
+                </label>
+                <label>
+                  Franking credit per share
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="blank = unknown"
+                    value={frankingPerShare}
+                    onChange={(event) =>
+                      setFrankingPerShare(event.target.value)
+                    }
+                  />
+                </label>
+              </>
+            ) : (
+              <>
+                <label>
+                  Total cash
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={totalCash}
+                    onChange={(event) => setTotalCash(event.target.value)}
+                    required
+                  />
+                </label>
+                <label>
+                  Total franking credit
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="blank = unknown"
+                    value={totalFranking}
+                    onChange={(event) => setTotalFranking(event.target.value)}
+                  />
+                </label>
+              </>
+            )}
             {isEventLinked ? (
               <label className="dividend-exclude-label">
                 <input

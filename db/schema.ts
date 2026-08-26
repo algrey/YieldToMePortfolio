@@ -3243,6 +3243,61 @@ export const dividendEventOverrides = sqliteTable(
  * (see `domain/sharesight-sync/transform.ts`); a payout whose security
  * currency differs from BOTH is never blocked (see the case-C reasoning
  * above).
+ *
+ * DIV-016 part A addition: `supersededByRecordId` is this table's
+ * ledger-immutability correction mechanism, mirroring `transactions`'
+ * `supersedesTransactionId`/`status='superseded'` convention (AGENTS.md:
+ * "Ledger facts are immutable; corrections use reversal/supersession...
+ * never silent history rewrites") but adapted to a SINGLE nullable
+ * self-referencing pointer rather than a separate `status` enum column --
+ * this table has no `status` field to reuse and adding one with a CHECK
+ * constraint would force a genuine table rebuild (the FY-001A hazard this
+ * table's own header note already documents repeatedly). Set ONLY on the
+ * OLD (superseded) row, pointing FORWARD to the NEW row that replaced it --
+ * `db/repositories/dividends.ts`'s `supersede()` sets it via a single
+ * guarded `UPDATE ... WHERE version = ? AND superseded_by_record_id IS
+ * NULL` (the optimistic-concurrency CAS) in the SAME atomic batch as the
+ * new row's conditional `INSERT ... SELECT ... WHERE EXISTS (...)`, so
+ * either both the mark and the new row are written or neither is -- no
+ * window where an original reads "superseded" with no successor. NULL means
+ * "this is the current head of its own lineage" (every pre-DIV-016 row, and
+ * the most recent row in every lineage going forward) -- `list()` filters
+ * `WHERE superseded_by_record_id IS NULL` so every evidence/aggregation
+ * consumer (forecast TTM, UI-046 rows, the per-security Dividends tab) sees
+ * exactly the winning row of each lineage, never a superseded ancestor,
+ * without each consumer re-implementing the exclusion itself. The full
+ * lineage stays reconstructable by walking this single column: forward from
+ * any row via its own `supersededByRecordId` to find the current head,
+ * backward from any row via `WHERE superseded_by_record_id = <that row's
+ * id>` to find what it replaced. Deliberately no FK constraint (plain `ADD
+ * COLUMN`, no rebuild, matching `importBatchId`/`sourceReference`/
+ * `idempotencyKey` above, none of which carry one either) -- validated in
+ * application code instead. An imported row (`importBatchId IS NOT NULL`)
+ * can never be superseded through this mechanism -- `supersede()` rejects
+ * it exactly like `update()`/`remove()` already did, preserving IMP-006's
+ * reversal-only correction path for that tier.
+ *
+ * DELETE semantics and the tombstone case (review follow-up): `remove()`
+ * refuses to delete a row that is ITSELF an ancestor
+ * (`superseded_by_record_id IS NOT NULL`) -- deleting one would destroy the
+ * only record of what it was eventually corrected TO, breaking the
+ * backward audit walk. `remove()` does NOT refuse to delete a CURRENT HEAD
+ * that has its own ancestor pointing at it (a correction, then "Exclude
+ * this dividend" on the corrected row -- an ordinary, intentional flow).
+ * That case leaves the ancestor's `superseded_by_record_id` naming a row
+ * that no longer exists -- a TOMBSTONE reference, not a bug: the ancestor
+ * was already, correctly, excluded from every evidence path (its column is
+ * non-NULL regardless of whether the named row still exists), and deleting
+ * a row is supposed to make its content genuinely gone. The only
+ * consequence is that a forward lineage walk starting from the ancestor
+ * terminates at a dangling id instead of a live row -- callers doing that
+ * walk must resolve each hop with `get()` and stop honestly (never throw,
+ * never fabricate) the moment a hop returns null. This is never resurrected
+ * as "this ancestor is head again" -- the ancestor's own
+ * `superseded_by_record_id` is never nulled back out, so it stays excluded
+ * from `list()` forever, exactly as if the correction had never been
+ * un-done (which it hasn't -- the correction itself was simply deleted
+ * afterward, a separate, later, deliberate act).
  */
 export const dividendManualRecords = sqliteTable(
   "dividend_manual_records",
@@ -3265,6 +3320,8 @@ export const dividendManualRecords = sqliteTable(
     currencyCode: text("currency_code"),
     fxRateToPortfolioDecimal: text("fx_rate_to_portfolio_decimal"),
     fxRateSource: text("fx_rate_source"),
+    // DIV-016 part A: supersession lineage pointer -- see the header note.
+    supersededByRecordId: text("superseded_by_record_id"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     version: integer("version").notNull().default(1),
@@ -3311,6 +3368,12 @@ export const dividendManualRecords = sqliteTable(
     uniqueIndex("dividend_manual_records_security_idempotency_unique").on(
       table.portfolioSecurityId,
       table.idempotencyKey,
+    ),
+    // DIV-016 part A: supports both directions of lineage traversal --
+    // `list()`'s `WHERE superseded_by_record_id IS NULL` exclusion filter,
+    // and `supersede()`'s reverse "what did this row replace" lookup.
+    index("dividend_manual_records_superseded_by_idx").on(
+      table.supersededByRecordId,
     ),
     check(
       "dividend_manual_records_amount_mode_check",

@@ -254,6 +254,14 @@ export type DialogPrefill = {
   initialSharesDecimal: string | null;
   initialDividendPerShareDecimal: string | null;
   initialFrankingCreditPerShareDecimal: string | null;
+  /** DIV-016 part A: "totals" only for a standalone (non-event-linked)
+   * manual/imported row whose own per-share amount is null -- a BRK-005
+   * totals-mode fact, now reachable for an owner-typed row too, not only an
+   * imported Sharesight payout. Always "per_share" for an event-linked row
+   * (`dividend_event_overrides` has no totals shape) and for a fresh entry. */
+  initialAmountMode: "per_share" | "totals";
+  initialTotalCashDecimal: string | null;
+  initialTotalFrankingDecimal: string | null;
   initialExpectedVersion: number | null;
   initialExclude: boolean;
 };
@@ -315,6 +323,9 @@ export function buildDialogPrefill(
         override?.dividendPerShareDecimal ?? row.dividendPerShareDecimal,
       initialFrankingCreditPerShareDecimal:
         override?.frankingCreditPerShareDecimal ?? rawFranking,
+      initialAmountMode: "per_share",
+      initialTotalCashDecimal: null,
+      initialTotalFrankingDecimal: null,
       initialExpectedVersion: override?.version ?? null,
       initialExclude: override?.exclude ?? row.excluded,
     };
@@ -324,6 +335,16 @@ export function buildDialogPrefill(
   const rawId = separatorIndex >= 0 ? row.id.slice(separatorIndex + 1) : "";
   const recordId = prefix === "manual" || prefix === "imported" ? rawId : null;
   const record = recordId ? (manualRecordsById[recordId] ?? null) : null;
+  // DIV-016 part A: `row.dividendPerShareDecimal === null` is this
+  // codebase's established totals-mode detection (matches
+  // `shouldOfferFrankingOverride`/`frankingDisplay`'s identical check) --
+  // for a totals-mode row, `row.cashDecimal`/`row.frankingTotalDecimal` ARE
+  // the raw total figures verbatim (see `computeCashGrossOrTotals`'s
+  // totals-mode branch in `domain/dividends/history.ts`: no per-share
+  // derivation ever runs for this shape, and an owner-typed row is never
+  // FX-converted the way an imported one can be), so they can be read
+  // straight into the totals prefill.
+  const isTotalsMode = row.dividendPerShareDecimal === null;
   return {
     initialPortfolioSecurityId: portfolioSecurityId,
     initialPaymentDate: row.paymentDate ?? today,
@@ -332,6 +353,9 @@ export function buildDialogPrefill(
     initialSharesDecimal: row.sharesDecimal,
     initialDividendPerShareDecimal: row.dividendPerShareDecimal,
     initialFrankingCreditPerShareDecimal: rawFranking,
+    initialAmountMode: isTotalsMode ? "totals" : "per_share",
+    initialTotalCashDecimal: isTotalsMode ? row.cashDecimal : null,
+    initialTotalFrankingDecimal: isTotalsMode ? row.frankingTotalDecimal : null,
     initialExpectedVersion: record?.version ?? null,
     initialExclude: false,
   };
@@ -346,6 +370,9 @@ export function freshEntryPrefill(portfolioSecurityId: string): DialogPrefill {
     initialSharesDecimal: null,
     initialDividendPerShareDecimal: null,
     initialFrankingCreditPerShareDecimal: null,
+    initialAmountMode: "per_share",
+    initialTotalCashDecimal: null,
+    initialTotalFrankingDecimal: null,
     initialExpectedVersion: null,
     initialExclude: false,
   };

@@ -2328,6 +2328,11 @@ export type DividendManualRecordRecord = {
   currencyCode: string | null;
   fxRateToPortfolioDecimal: string | null;
   fxRateSource: string | null;
+  // DIV-016 part A: non-null exactly when a LATER correction superseded
+  // this row -- the id of that successor row. NULL means this row is the
+  // current head of its own lineage (every pre-DIV-016 row, and the most
+  // recent row of every lineage). See `db/schema.ts`'s header note.
+  supersededByRecordId: string | null;
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -2337,9 +2342,26 @@ export type SaveDividendManualRecordInput = {
   id?: string;
   portfolioSecurityId: string;
   paymentDate: string;
-  sharesDecimal: string;
-  dividendPerShareDecimal: string;
+  // DIV-016 part A: exactly one of the two modes below, mirroring
+  // `BuildDividendManualRecordImportInsertInput`'s established disjunction
+  // (`validateManualRecordAmounts` re-validates the same
+  // `dividend_manual_records_amount_mode_check` invariant this function
+  // enforces at the import-commit boundary) -- PER-SHARE supplies
+  // `sharesDecimal`/`dividendPerShareDecimal` (optionally
+  // `frankingCreditPerShareDecimal`); TOTALS supplies `totalCashDecimal`
+  // (optionally `totalFrankingDecimal`), leaving the per-share fields
+  // unset. Both are still declared required-non-nullable below for
+  // backward compatibility with every pre-DIV-016 caller, which always
+  // supplies both per-share fields; a totals-mode caller passes `undefined`
+  // for them via a structurally-widened call site (TypeScript does not
+  // enforce this disjunction at the type level, matching the import
+  // builder's own equivalent input type -- enforcement is runtime, in
+  // `validateManualRecordAmounts`).
+  sharesDecimal?: string | null;
+  dividendPerShareDecimal?: string | null;
   frankingCreditPerShareDecimal?: string | null;
+  totalCashDecimal?: string | null;
+  totalFrankingDecimal?: string | null;
   // UI-009: when supplied (non-empty), `create()` dedupes on
   // (portfolioSecurityId, idempotencyKey) -- a retry with the same key
   // after a client-visible timeout returns the ALREADY-CREATED record as a
@@ -2349,12 +2371,50 @@ export type SaveDividendManualRecordInput = {
   requestId: string;
 };
 
-export type UpdateDividendManualRecordInput = {
+/**
+ * DIV-016 part A: the owner-facing CORRECTION path for `dividend_manual_
+ * records`, replacing the pre-DIV-016 `update()` (a genuine in-place
+ * `UPDATE ... SET shares_decimal = ...`, which violated AGENTS.md's
+ * ledger-immutability rule -- "corrections use reversal/supersession...
+ * never silent history rewrites"). `supersede()` below creates a NEW row
+ * carrying the corrected facts and marks the OLD row's
+ * `supersededByRecordId` (never rewriting the old row's own financial
+ * fields), mirroring `db/repositories/ledger.ts`'s `supersede()` for
+ * `transactions`. Every field is OPTIONAL (tri-state via `hasOwn`,
+ * mirroring the pre-DIV-016 `update()`'s partial-patch convention exactly)
+ * -- an omitted field carries forward the ORIGINAL row's own value; an
+ * explicit `null` on a nullable field clears it. Supplying either
+ * `totalCashDecimal` or a per-share field switches the corrected row's
+ * MODE even if the original was the other mode -- see
+ * `resolveSupersedeAmounts`'s doc comment.
+ */
+export type SupersedeDividendManualRecordInput = {
   paymentDate?: string;
-  sharesDecimal?: string;
-  dividendPerShareDecimal?: string;
+  sharesDecimal?: string | null;
+  dividendPerShareDecimal?: string | null;
   frankingCreditPerShareDecimal?: string | null;
+  totalCashDecimal?: string | null;
+  totalFrankingDecimal?: string | null;
   expectedVersion: number;
+  // UI-009 extension (DIV-016 part A): the SAME dialog-session key used for
+  // the standalone CREATE path (`app/components/dividend-assumptions-
+  // editor.tsx`'s `dialogIdempotencyKey`) is also sent on an edit submit.
+  // Review fix (B1, BLOCKING): storing this RAW key verbatim on the
+  // successor row collided with `dividend_manual_records_security_
+  // idempotency_unique` (`portfolio_security_id`, `idempotency_key`) --
+  // that pair is ALREADY claimed by the record's own original CREATE (the
+  // dialog reuses one key for the whole session), so a create-then-edit or
+  // edit-then-edit in one dialog session aborted the supersede batch with
+  // an opaque 503, silently losing the correction. `supersede()` instead
+  // derives and stores `` `supersede:${id}:${key}` `` (`id` = the record
+  // BEING superseded) -- unique per correction STEP, never colliding with
+  // the CREATE's own stored key or another step's. A retry-after-timeout
+  // of THIS exact step re-derives the IDENTICAL key (same `id`, same raw
+  // key) and dedupes; a SECOND, deliberate edit later in the same dialog
+  // session targets the NEW row `supersede()` just created (a different
+  // `id`), so its derived key differs even though the raw dialog key is
+  // identical, and is never mistaken for a retry of the first.
+  idempotencyKey?: string | null;
   requestId: string;
 };
 
@@ -2364,7 +2424,7 @@ const DIVIDEND_MANUAL_RECORD_COLUMNS = `
   franking_credit_per_share_decimal, import_batch_id, source_reference,
   idempotency_key, total_cash_decimal, total_franking_decimal,
   currency_code, fx_rate_to_portfolio_decimal, fx_rate_source,
-  created_at, updated_at, version
+  superseded_by_record_id, created_at, updated_at, version
 `;
 
 function mapDividendManualRecord(
@@ -2405,6 +2465,10 @@ function mapDividendManualRecord(
         : String(row.fx_rate_to_portfolio_decimal),
     fxRateSource:
       row.fx_rate_source === null ? null : String(row.fx_rate_source),
+    supersededByRecordId:
+      row.superseded_by_record_id === null
+        ? null
+        : String(row.superseded_by_record_id),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     version: Number(row.version),
@@ -2436,28 +2500,50 @@ function manualRecordDecimalsEqual(left: string, right: string): boolean {
  * save and a client-visible-timeout retry -- e.g. edited the amount after
  * the first submit appeared to hang, then resubmitted. Comparing ONLY the
  * fields that determine the dividend's financial meaning (payment date,
- * shares, dividend per share, franking); `id`/`version`/timestamps are
- * never part of this comparison. A `true` result means the caller must
- * disclose that the STORED values (not the just-submitted ones) are what
- * actually persisted, never silently claim the new payload was saved.
+ * shares, dividend per share, franking -- or, DIV-016 part A, the totals-
+ * mode equivalents); `id`/`version`/timestamps are never part of this
+ * comparison. A `true` result means the caller must disclose that the
+ * STORED values (not the just-submitted ones) are what actually persisted,
+ * never silently claim the new payload was saved.
  */
 function manualRecordMaterialFieldsDiffer(
   existing: DividendManualRecordRecord,
   input: SaveDividendManualRecordInput,
 ): boolean {
   if (existing.paymentDate !== input.paymentDate) return true;
-  // BRK-005 defensive guard: the standalone manual-entry idempotency-key
-  // retry path this function serves never creates a totals-mode row (only
-  // the Sharesight import commit path does, and that path never supplies an
-  // idempotency key), so `existing.sharesDecimal`/`dividendPerShareDecimal`
-  // are never actually null here -- but the DB-level type is nullable now
-  // (see `DividendManualRecordRecord`'s header note), so a genuinely
-  // totals-mode row reaching this comparison (which should be impossible)
-  // reads as "differs" rather than crashing on a non-nullable decimal
-  // comparison.
+  const existingIsTotals = existing.sharesDecimal === null;
+  const inputIsTotals =
+    input.totalCashDecimal !== undefined && input.totalCashDecimal !== null;
+  // DIV-016 part A: a retry that switched mode from what is actually stored
+  // is never the SAME save -- reads as "differs" so the caller discloses
+  // the stored (unchanged) truth rather than silently accepting the new
+  // shape as if it were the original save.
+  if (existingIsTotals !== inputIsTotals) return true;
+  if (existingIsTotals) {
+    if (existing.totalCashDecimal === null || input.totalCashDecimal == null) {
+      return true;
+    }
+    if (
+      !manualRecordDecimalsEqual(
+        existing.totalCashDecimal,
+        input.totalCashDecimal,
+      )
+    )
+      return true;
+    const inputTotalFranking = input.totalFrankingDecimal ?? null;
+    if (existing.totalFrankingDecimal === null || inputTotalFranking === null) {
+      return existing.totalFrankingDecimal !== inputTotalFranking;
+    }
+    return !manualRecordDecimalsEqual(
+      existing.totalFrankingDecimal,
+      inputTotalFranking,
+    );
+  }
   if (
     existing.sharesDecimal === null ||
-    existing.dividendPerShareDecimal === null
+    existing.dividendPerShareDecimal === null ||
+    input.sharesDecimal == null ||
+    input.dividendPerShareDecimal == null
   ) {
     return true;
   }
@@ -2480,6 +2566,240 @@ function manualRecordMaterialFieldsDiffer(
   return !manualRecordDecimalsEqual(
     existing.frankingCreditPerShareDecimal,
     inputFranking,
+  );
+}
+
+/**
+ * DIV-016 part A: the shared amount-mode validator for a fully-specified
+ * (non-partial) manual-record write -- `create()`'s CREATE path, where
+ * every field is always freshly supplied (there is no "original" to carry
+ * a field forward from). Mirrors `buildDividendManualRecordImportInsertStatements`'s
+ * exact disjunction (`totalsMode === perShareMode` rejects both-or-neither)
+ * so this table's ONE amount-mode invariant
+ * (`dividend_manual_records_amount_mode_check`) has a single re-validation
+ * shape shared by every write path, never a second drifted copy. Returns
+ * `null` on any invalid shape/value.
+ */
+function validateManualRecordAmounts(input: {
+  sharesDecimal?: string | null;
+  dividendPerShareDecimal?: string | null;
+  frankingCreditPerShareDecimal?: string | null;
+  totalCashDecimal?: string | null;
+  totalFrankingDecimal?: string | null;
+}): {
+  sharesDecimal: string | null;
+  dividendPerShareDecimal: string | null;
+  frankingCreditPerShareDecimal: string | null;
+  totalCashDecimal: string | null;
+  totalFrankingDecimal: string | null;
+} | null {
+  const totalsMode =
+    input.totalCashDecimal !== undefined && input.totalCashDecimal !== null;
+  const perShareMode =
+    (input.sharesDecimal !== undefined && input.sharesDecimal !== null) ||
+    (input.dividendPerShareDecimal !== undefined &&
+      input.dividendPerShareDecimal !== null);
+  if (totalsMode === perShareMode) return null;
+  if (perShareMode) {
+    if (
+      !isPositiveDecimalString(input.sharesDecimal) ||
+      !isPositiveDecimalString(input.dividendPerShareDecimal) ||
+      !isNullable(
+        input.frankingCreditPerShareDecimal ?? null,
+        isNonNegativeDecimalString,
+      )
+    ) {
+      return null;
+    }
+    return {
+      sharesDecimal: input.sharesDecimal,
+      dividendPerShareDecimal: input.dividendPerShareDecimal,
+      frankingCreditPerShareDecimal:
+        input.frankingCreditPerShareDecimal ?? null,
+      totalCashDecimal: null,
+      totalFrankingDecimal: null,
+    };
+  }
+  if (
+    !isPositiveDecimalString(input.totalCashDecimal) ||
+    !isNullable(input.totalFrankingDecimal ?? null, isNonNegativeDecimalString)
+  ) {
+    return null;
+  }
+  return {
+    sharesDecimal: null,
+    dividendPerShareDecimal: null,
+    frankingCreditPerShareDecimal: null,
+    totalCashDecimal: input.totalCashDecimal,
+    totalFrankingDecimal: input.totalFrankingDecimal ?? null,
+  };
+}
+
+/**
+ * DIV-016 part A: `supersede()`'s amount-mode resolver -- unlike
+ * `validateManualRecordAmounts` above (a fully-specified CREATE), a
+ * correction is a PARTIAL patch (mirrors the pre-DIV-016 `update()`'s own
+ * `hasOwn`-gated tri-state convention exactly, see
+ * `SupersedeDividendManualRecordInput`'s doc comment): any field the
+ * caller does not mention carries forward from `original`. The target MODE
+ * is whichever the caller's present fields imply; if the caller mentions
+ * neither a total nor a per-share field at all, the mode carries forward
+ * from `original` too (a pure date/franking-only correction that never
+ * touches the amount shape).
+ */
+function resolveSupersedeAmounts(
+  original: DividendManualRecordRecord,
+  input: SupersedeDividendManualRecordInput,
+): {
+  sharesDecimal: string | null;
+  dividendPerShareDecimal: string | null;
+  frankingCreditPerShareDecimal: string | null;
+  totalCashDecimal: string | null;
+  totalFrankingDecimal: string | null;
+} | null {
+  const suppliesTotals =
+    hasOwn(input, "totalCashDecimal") && input.totalCashDecimal != null;
+  const suppliesPerShare =
+    (hasOwn(input, "sharesDecimal") && input.sharesDecimal != null) ||
+    (hasOwn(input, "dividendPerShareDecimal") &&
+      input.dividendPerShareDecimal != null);
+  if (suppliesTotals && suppliesPerShare) return null;
+  const originalIsTotals = original.sharesDecimal === null;
+  const useTotals = suppliesTotals
+    ? true
+    : suppliesPerShare
+      ? false
+      : originalIsTotals;
+
+  if (useTotals) {
+    const totalCashDecimal = hasOwn(input, "totalCashDecimal")
+      ? (input.totalCashDecimal ?? null)
+      : original.totalCashDecimal;
+    const totalFrankingDecimal = hasOwn(input, "totalFrankingDecimal")
+      ? (input.totalFrankingDecimal ?? null)
+      : original.totalFrankingDecimal;
+    if (
+      !isPositiveDecimalString(totalCashDecimal) ||
+      !isNullable(totalFrankingDecimal, isNonNegativeDecimalString)
+    ) {
+      return null;
+    }
+    return {
+      sharesDecimal: null,
+      dividendPerShareDecimal: null,
+      frankingCreditPerShareDecimal: null,
+      totalCashDecimal,
+      totalFrankingDecimal,
+    };
+  }
+  const sharesDecimal = hasOwn(input, "sharesDecimal")
+    ? (input.sharesDecimal ?? null)
+    : original.sharesDecimal;
+  const dividendPerShareDecimal = hasOwn(input, "dividendPerShareDecimal")
+    ? (input.dividendPerShareDecimal ?? null)
+    : original.dividendPerShareDecimal;
+  const frankingCreditPerShareDecimal = hasOwn(
+    input,
+    "frankingCreditPerShareDecimal",
+  )
+    ? (input.frankingCreditPerShareDecimal ?? null)
+    : original.frankingCreditPerShareDecimal;
+  if (
+    !isPositiveDecimalString(sharesDecimal) ||
+    !isPositiveDecimalString(dividendPerShareDecimal) ||
+    !isNullable(frankingCreditPerShareDecimal, isNonNegativeDecimalString)
+  ) {
+    return null;
+  }
+  return {
+    sharesDecimal,
+    dividendPerShareDecimal,
+    frankingCreditPerShareDecimal,
+    totalCashDecimal: null,
+    totalFrankingDecimal: null,
+  };
+}
+
+/**
+ * DIV-016 part A follow-up (UI-009 disclosure parity): the supersede-path
+ * equivalent of `manualRecordMaterialFieldsDiffer` above, comparing an
+ * ALREADY-DEDUPED successor row against the RESOLVED (mode-aware, tri-state
+ * partial-patch already applied) amounts a retry just submitted -- never
+ * the raw request input, since `resolveSupersedeAmounts` may have carried
+ * an omitted field forward from `original` rather than the caller
+ * re-sending it. `paymentDate`/`amounts` here are always the SAME values
+ * `supersede()` itself would have persisted for this exact request, so a
+ * `true` result means the stored successor was created by a DIFFERENT
+ * request (the owner edited the form between the original attempt and this
+ * retry) and the caller must disclose the STORED truth instead of silently
+ * claiming the just-submitted values were saved.
+ */
+function supersedeStoredDiffers(
+  stored: DividendManualRecordRecord,
+  paymentDate: string,
+  amounts: {
+    sharesDecimal: string | null;
+    dividendPerShareDecimal: string | null;
+    frankingCreditPerShareDecimal: string | null;
+    totalCashDecimal: string | null;
+    totalFrankingDecimal: string | null;
+  },
+): boolean {
+  if (stored.paymentDate !== paymentDate) return true;
+  const storedIsTotals = stored.sharesDecimal === null;
+  const intendedIsTotals = amounts.totalCashDecimal !== null;
+  if (storedIsTotals !== intendedIsTotals) return true;
+  if (storedIsTotals) {
+    if (stored.totalCashDecimal === null || amounts.totalCashDecimal === null) {
+      return true;
+    }
+    if (
+      !manualRecordDecimalsEqual(
+        stored.totalCashDecimal,
+        amounts.totalCashDecimal,
+      )
+    )
+      return true;
+    if (
+      stored.totalFrankingDecimal === null ||
+      amounts.totalFrankingDecimal === null
+    ) {
+      return stored.totalFrankingDecimal !== amounts.totalFrankingDecimal;
+    }
+    return !manualRecordDecimalsEqual(
+      stored.totalFrankingDecimal,
+      amounts.totalFrankingDecimal,
+    );
+  }
+  if (
+    stored.sharesDecimal === null ||
+    stored.dividendPerShareDecimal === null ||
+    amounts.sharesDecimal === null ||
+    amounts.dividendPerShareDecimal === null
+  ) {
+    return true;
+  }
+  if (!manualRecordDecimalsEqual(stored.sharesDecimal, amounts.sharesDecimal))
+    return true;
+  if (
+    !manualRecordDecimalsEqual(
+      stored.dividendPerShareDecimal,
+      amounts.dividendPerShareDecimal,
+    )
+  )
+    return true;
+  if (
+    stored.frankingCreditPerShareDecimal === null ||
+    amounts.frankingCreditPerShareDecimal === null
+  ) {
+    return (
+      stored.frankingCreditPerShareDecimal !==
+      amounts.frankingCreditPerShareDecimal
+    );
+  }
+  return !manualRecordDecimalsEqual(
+    stored.frankingCreditPerShareDecimal,
+    amounts.frankingCreditPerShareDecimal,
   );
 }
 
@@ -2511,9 +2831,22 @@ export function createDividendManualRecordRepository(
     const params = portfolioSecurityId
       ? [userId, portfolioId, portfolioSecurityId]
       : [userId, portfolioId];
+    // DIV-016 part A: the SINGLE choke point every evidence/aggregation
+    // consumer of this table reads through (`app/owned-dividend-history.ts`
+    // -- forecast TTM, UI-046 rows -- and `app/owned-security-dividends.ts`
+    // -- the per-security Dividends tab). Excluding a superseded row here,
+    // once, means every consumer downstream automatically sees exactly the
+    // current head of each lineage without re-implementing the exclusion
+    // -- see `db/schema.ts`'s `dividendManualRecords` header note.
+    // `get()`/`getByIdempotencyKey` below deliberately do NOT filter --
+    // `supersede()` needs to fetch a row regardless of its lineage state to
+    // decide the correct outcome (already-superseded vs a fresh
+    // correction), and a superseded ancestor must still be directly
+    // fetchable for audit reconstruction.
     const rows = await client.all<Record<string, unknown>>(
       `SELECT ${DIVIDEND_MANUAL_RECORD_COLUMNS} FROM dividend_manual_records
        WHERE user_id = ? AND portfolio_id = ? ${predicate}
+         AND superseded_by_record_id IS NULL
        ORDER BY payment_date DESC, id DESC`,
       params,
     );
@@ -2558,16 +2891,11 @@ export function createDividendManualRecordRepository(
       }
     | DividendOwnerMutationFailure
   > {
-    if (
-      !isPositiveDecimalString(input.sharesDecimal) ||
-      !isPositiveDecimalString(input.dividendPerShareDecimal) ||
-      !isNullable(
-        input.frankingCreditPerShareDecimal ?? null,
-        isNonNegativeDecimalString,
-      ) ||
-      !isValidDateString(input.paymentDate)
-    )
+    if (!isValidDateString(input.paymentDate)) {
       return { ok: false, reason: "invalid_input" };
+    }
+    const amounts = validateManualRecordAmounts(input);
+    if (!amounts) return { ok: false, reason: "invalid_input" };
     const idempotencyKey =
       input.idempotencyKey && input.idempotencyKey.length > 0
         ? input.idempotencyKey
@@ -2609,18 +2937,21 @@ export function createDividendManualRecordRepository(
         sql: `INSERT INTO dividend_manual_records (
           id, user_id, portfolio_id, portfolio_security_id, payment_date,
           shares_decimal, dividend_per_share_decimal,
-          franking_credit_per_share_decimal, idempotency_key, created_at,
+          franking_credit_per_share_decimal, total_cash_decimal,
+          total_franking_decimal, idempotency_key, created_at,
           updated_at, version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         params: [
           id,
           userId,
           portfolioId,
           input.portfolioSecurityId,
           input.paymentDate,
-          input.sharesDecimal,
-          input.dividendPerShareDecimal,
-          input.frankingCreditPerShareDecimal ?? null,
+          amounts.sharesDecimal,
+          amounts.dividendPerShareDecimal,
+          amounts.frankingCreditPerShareDecimal,
+          amounts.totalCashDecimal,
+          amounts.totalFrankingDecimal,
           idempotencyKey,
           createdAt,
           createdAt,
@@ -2674,95 +3005,246 @@ export function createDividendManualRecordRepository(
       : { ok: false, reason: "atomic_failure" };
   }
 
-  async function update(
+  /**
+   * DIV-016 part A: replaces the pre-DIV-016 `update()` (an in-place
+   * `UPDATE ... SET shares_decimal = ...`) with a correction that creates a
+   * NEW row and marks the OLD one, never rewriting the old row's own
+   * financial fields -- see `SupersedeDividendManualRecordInput`'s doc
+   * comment and `db/schema.ts`'s `dividendManualRecords` header note.
+   *
+   * Atomicity: the guarded `UPDATE` (statement 1) and the new row's
+   * conditional `INSERT ... SELECT ... WHERE EXISTS` (statement 2) run in
+   * ONE `client.batch()` call. The INSERT's `EXISTS` clause checks the
+   * ORIGINAL row's POST-update state (`superseded_by_record_id = newId AND
+   * version = expectedVersion + 1`) -- state that can only exist if
+   * statement 1's own CAS guard (`WHERE version = ? AND
+   * superseded_by_record_id IS NULL`) actually matched and applied within
+   * this same transaction. If the CAS guard fails (stale version, already
+   * superseded, or an imported row), statement 1 changes nothing, the
+   * original's state never reaches that post-update shape, and the INSERT
+   * correctly inserts zero rows -- no compensating rollback statement is
+   * needed; either both the mark and the new row commit, or neither does.
+   */
+  async function supersede(
     userId: string,
     portfolioId: string,
     id: string,
-    input: UpdateDividendManualRecordInput,
+    input: SupersedeDividendManualRecordInput,
   ): Promise<
-    | { ok: true; record: DividendManualRecordRecord }
+    | {
+        ok: true;
+        record: DividendManualRecordRecord;
+        deduped: boolean;
+        // UI-009 disclosure parity (review follow-up): mirrors `create()`'s
+        // `storedDiffers` -- true only on a `deduped: true` result whose
+        // stored successor's material fields differ from what THIS request
+        // just submitted (the owner edited the form between the original
+        // attempt and a client-visible-timeout retry). Always `false` on a
+        // fresh (non-deduped) success.
+        storedDiffers: boolean;
+      }
     | DividendOwnerMutationFailure
   > {
-    const frankingProvided = hasOwn(input, "frankingCreditPerShareDecimal");
+    if (typeof input.expectedVersion !== "number") {
+      return { ok: false, reason: "invalid_input" };
+    }
     if (
       !isNullable(input.paymentDate, (value) =>
         isValidDateString(String(value)),
-      ) ||
-      !isNullable(input.sharesDecimal, isPositiveDecimalString) ||
-      !isNullable(input.dividendPerShareDecimal, isPositiveDecimalString) ||
-      (frankingProvided &&
-        !isNullable(
-          input.frankingCreditPerShareDecimal ?? null,
-          isNonNegativeDecimalString,
-        ))
-    )
+      )
+    ) {
       return { ok: false, reason: "invalid_input" };
-    const updatedAt = now();
-    // See dividend_receipts.update() above for why franking is tri-state
-    // (omitted = unchanged, explicit null = clear) while the other fields
-    // use a plain COALESCE partial update (DB-005 review finding B2).
-    const franking = triStateAssignment(
-      "franking_credit_per_share_decimal",
-      frankingProvided,
-      input.frankingCreditPerShareDecimal,
-    );
+    }
+    const original = await get(userId, portfolioId, id);
+    if (!original) return { ok: false, reason: "not_found" };
+    // Same imported-row immutability guard `update()`/`remove()` already
+    // enforced -- an imported row corrects only via import-batch reversal
+    // (IMP-006), never through this owner-facing path. Defense-in-depth:
+    // the action layer already rejects this before reaching here.
+    if (original.importBatchId !== null) {
+      return { ok: false, reason: "invalid_input" };
+    }
+    const paymentDate = input.paymentDate ?? original.paymentDate;
+    const resolvedAmounts = resolveSupersedeAmounts(original, input);
+    if (!resolvedAmounts) return { ok: false, reason: "invalid_input" };
+    // Re-bound to a variable whose STATIC type is already non-nullable
+    // (rather than referencing the narrowed-but-still-`| null`-typed
+    // `resolvedAmounts` directly) so the nested `dedupedResult` closure
+    // below -- which TypeScript's control-flow narrowing does not reach
+    // into -- can use it without a redundant null check.
+    const amounts: {
+      sharesDecimal: string | null;
+      dividendPerShareDecimal: string | null;
+      frankingCreditPerShareDecimal: string | null;
+      totalCashDecimal: string | null;
+      totalFrankingDecimal: string | null;
+    } = resolvedAmounts;
+
+    const rawIdempotencyKey =
+      input.idempotencyKey && input.idempotencyKey.length > 0
+        ? input.idempotencyKey
+        : null;
+    // B1 (BLOCKING review fix): see `SupersedeDividendManualRecordInput`'s
+    // doc comment -- the raw dialog-session key is scoped PER SESSION, not
+    // per correction step, so storing it verbatim would collide with the
+    // record's own original CREATE (or an earlier step) under
+    // `dividend_manual_records_security_idempotency_unique`'s
+    // `(portfolio_security_id, idempotency_key)` uniqueness. Deriving a key
+    // scoped to (the id BEING superseded, the raw key) keeps every
+    // correction step's stored key globally unique for this security.
+    const idempotencyKey =
+      rawIdempotencyKey !== null
+        ? `supersede:${id}:${rawIdempotencyKey}`
+        : null;
+
+    // UI-009 extension: whether `originalRow`'s lineage already has a
+    // successor matching THIS exact request's derived key -- either a
+    // retry-after-timeout of this same correction (dedupe) or, if the key
+    // doesn't match (or none was supplied), a genuine version conflict
+    // (someone/something else corrected it first). Never dedupes by
+    // re-comparing amounts -- a deliberate second edit could legitimately
+    // resubmit identical values.
+    async function dedupedResult(
+      originalRow: DividendManualRecordRecord,
+    ): Promise<{
+      ok: true;
+      record: DividendManualRecordRecord;
+      deduped: true;
+      storedDiffers: boolean;
+    } | null> {
+      if (
+        originalRow.supersededByRecordId === null ||
+        idempotencyKey === null
+      ) {
+        return null;
+      }
+      const successor = await get(
+        userId,
+        portfolioId,
+        originalRow.supersededByRecordId,
+      );
+      if (!successor || successor.idempotencyKey !== idempotencyKey) {
+        return null;
+      }
+      return {
+        ok: true,
+        record: successor,
+        deduped: true,
+        storedDiffers: supersedeStoredDiffers(successor, paymentDate, amounts),
+      };
+    }
+
+    if (original.supersededByRecordId !== null) {
+      const deduped = await dedupedResult(original);
+      if (deduped) return deduped;
+      return { ok: false, reason: "version_conflict" };
+    }
+    if (original.version !== input.expectedVersion) {
+      return { ok: false, reason: "version_conflict" };
+    }
+
+    const newId = randomUUID();
+    const occurredAt = now();
+    const nextVersion = input.expectedVersion + 1;
     const statements: SqlStatement[] = [
-      createConditionalAuditInsertStatement(
-        {
-          actorUserId: userId,
-          targetOwnerUserId: userId,
-          action: "dividend.manual_record.update",
-          targetType: "dividend_manual_record",
-          targetId: id,
-          requestId: input.requestId,
-          result: "success",
-          occurredAt: updatedAt,
-        },
-        "EXISTS (SELECT 1 FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ? AND version = ? AND import_batch_id IS NULL)",
-        [id, userId, portfolioId, input.expectedVersion],
-        now,
-      ),
       {
-        // B1 (UI-006B review fix): an IMPORTED row (`import_batch_id IS NOT
-        // NULL`, created by IMP-006's CSV commit) is never mutable through
-        // this owner-facing update path -- its facts change only by
-        // reversing the import batch that created it (preserving IMP-006's
-        // reversal accounting) and it must never carry an owner-typed edit
-        // while still being labelled the imported tier. This predicate is
-        // defense-in-depth: the action layer
-        // (`app/dividend-assumptions-actions.ts`) already rejects an
-        // imported-row edit explicitly before reaching here.
-        sql: `UPDATE dividend_manual_records SET
-          payment_date = COALESCE(?, payment_date),
-          shares_decimal = COALESCE(?, shares_decimal),
-          dividend_per_share_decimal = COALESCE(?, dividend_per_share_decimal),
-          ${franking.fragment},
-          updated_at = ?, version = version + 1
-        WHERE id = ? AND user_id = ? AND portfolio_id = ? AND version = ?
-          AND import_batch_id IS NULL
-        RETURNING ${DIVIDEND_MANUAL_RECORD_COLUMNS}`,
+        sql: `UPDATE dividend_manual_records
+          SET superseded_by_record_id = ?, updated_at = ?, version = version + 1
+          WHERE id = ? AND user_id = ? AND portfolio_id = ? AND version = ?
+            AND import_batch_id IS NULL AND superseded_by_record_id IS NULL`,
         params: [
-          input.paymentDate ?? null,
-          input.sharesDecimal ?? null,
-          input.dividendPerShareDecimal ?? null,
-          ...franking.params,
-          updatedAt,
+          newId,
+          occurredAt,
           id,
           userId,
           portfolioId,
           input.expectedVersion,
         ],
       },
+      {
+        sql: `INSERT INTO dividend_manual_records (
+          id, user_id, portfolio_id, portfolio_security_id, payment_date,
+          shares_decimal, dividend_per_share_decimal,
+          franking_credit_per_share_decimal, total_cash_decimal,
+          total_franking_decimal, idempotency_key, created_at, updated_at,
+          version
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1
+        WHERE EXISTS (
+          SELECT 1 FROM dividend_manual_records
+          WHERE id = ? AND user_id = ? AND portfolio_id = ?
+            AND superseded_by_record_id = ? AND version = ?
+        )`,
+        params: [
+          newId,
+          userId,
+          portfolioId,
+          original.portfolioSecurityId,
+          paymentDate,
+          amounts.sharesDecimal,
+          amounts.dividendPerShareDecimal,
+          amounts.frankingCreditPerShareDecimal,
+          amounts.totalCashDecimal,
+          amounts.totalFrankingDecimal,
+          idempotencyKey,
+          occurredAt,
+          occurredAt,
+          // The EXISTS guard above: only fires once statement 1's CAS has
+          // actually applied within this same atomic batch.
+          id,
+          userId,
+          portfolioId,
+          newId,
+          nextVersion,
+        ],
+      },
+      createConditionalAuditInsertStatement(
+        {
+          actorUserId: userId,
+          targetOwnerUserId: userId,
+          action: "dividend.manual_record.supersede",
+          targetType: "dividend_manual_record",
+          targetId: newId,
+          requestId: input.requestId,
+          result: "success",
+          occurredAt,
+          metadata: { supersedesRecordId: id },
+        },
+        "EXISTS (SELECT 1 FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ?)",
+        [newId, userId, portfolioId],
+        now,
+      ),
     ];
-    const rows = await client.batch(statements);
-    const row = rows[rows.length - 1]?.results[0];
-    if (!row)
-      return await resolveOwnerMutationFailure(
-        client,
-        "SELECT id FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ? AND import_batch_id IS NULL",
-        [id, userId, portfolioId],
-      );
-    return { ok: true, record: mapDividendManualRecord(row) };
+    try {
+      await client.batch(statements);
+    } catch {
+      // Race: a concurrent request may have won the CAS between our
+      // pre-check above and this batch. Re-check idempotency the same way
+      // as the pre-check before failing closed.
+      const refreshedOriginal = await get(userId, portfolioId, id);
+      const deduped = refreshedOriginal
+        ? await dedupedResult(refreshedOriginal)
+        : null;
+      if (deduped) return deduped;
+      return { ok: false, reason: "atomic_failure" };
+    }
+    const record = await get(userId, portfolioId, newId);
+    if (record)
+      return { ok: true, record, deduped: false, storedDiffers: false };
+    // The guard failed silently (a concurrent request won the CAS with no
+    // exception -- the conditional INSERT above simply inserted nothing).
+    // Re-check dedupe once more before falling back to a generic
+    // not_found/version_conflict resolution.
+    const refreshedOriginal = await get(userId, portfolioId, id);
+    const deduped = refreshedOriginal
+      ? await dedupedResult(refreshedOriginal)
+      : null;
+    if (deduped) return deduped;
+    return await resolveOwnerMutationFailure(
+      client,
+      "SELECT id FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ? AND import_batch_id IS NULL",
+      [id, userId, portfolioId],
+    );
   }
 
   async function remove(
@@ -2785,15 +3267,31 @@ export function createDividendManualRecordRepository(
           result: "success",
           occurredAt,
         },
-        "EXISTS (SELECT 1 FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ? AND version = ? AND import_batch_id IS NULL)",
+        "EXISTS (SELECT 1 FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ? AND version = ? AND import_batch_id IS NULL AND superseded_by_record_id IS NULL)",
         [id, userId, portfolioId, expectedVersion],
         now,
       ),
       {
-        // B1: same imported-row immutability guard as update() above.
+        // B1: same imported-row immutability guard as pre-DIV-016
+        // `update()` had. DIV-016 part A addition
+        // (`superseded_by_record_id IS NULL`): a superseded (historical)
+        // ancestor row can never be deleted directly -- it is already
+        // excluded from every evidence path by `list()`'s filter, and
+        // deleting it would destroy the ONLY record of what it was
+        // eventually corrected TO (the backward audit-walk
+        // `WHERE superseded_by_record_id = <successor id>` would return
+        // nothing). This guard does NOT prevent deleting a CURRENT HEAD
+        // that itself has an ancestor pointing at it (a correction, then
+        // "Exclude this dividend" on the corrected row) -- see
+        // `db/schema.ts`'s `dividendManualRecords` header note for the
+        // accurate, documented consequence of that case (the ancestor's
+        // own `superseded_by_record_id` becomes a tombstone reference; it
+        // stays correctly excluded from evidence either way, but a forward
+        // lineage walk from it finds no row, since the row it names was
+        // deliberately deleted).
         sql: `DELETE FROM dividend_manual_records
               WHERE id = ? AND user_id = ? AND portfolio_id = ? AND version = ?
-                AND import_batch_id IS NULL
+                AND import_batch_id IS NULL AND superseded_by_record_id IS NULL
               RETURNING id`,
         params: [id, userId, portfolioId, expectedVersion],
       },
@@ -2803,13 +3301,13 @@ export function createDividendManualRecordRepository(
     if (!row)
       return await resolveOwnerMutationFailure(
         client,
-        "SELECT id FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ? AND import_batch_id IS NULL",
+        "SELECT id FROM dividend_manual_records WHERE id = ? AND user_id = ? AND portfolio_id = ? AND import_batch_id IS NULL AND superseded_by_record_id IS NULL",
         [id, userId, portfolioId],
       );
     return { ok: true };
   }
 
-  return { get, list, create, update, remove };
+  return { get, list, create, supersede, remove };
 }
 
 // ---------------------------------------------------------------------------

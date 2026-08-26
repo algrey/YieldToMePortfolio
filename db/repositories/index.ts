@@ -255,7 +255,7 @@ export {
   type SplitEventMutationResult,
   type SplitEventRecord,
   type SplitEventStatus,
-  type UpdateDividendManualRecordInput,
+  type SupersedeDividendManualRecordInput,
   type UpdateDividendReceiptInput,
 } from "./dividends.ts";
 export {
