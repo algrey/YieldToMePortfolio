@@ -1559,7 +1559,7 @@ function OwnedWatchlistScreen({
       </div>
       {addMode === "security" ? (
         <section
-          className="quote-history"
+          className="quote-history watchlist-add-panel"
           aria-labelledby="watchlist-add-security-title"
         >
           <div className="quote-history-heading">
@@ -1572,8 +1572,11 @@ function OwnedWatchlistScreen({
               Close
             </button>
           </div>
-          <form onSubmit={(event) => void runSearch(event)}>
-            <label>
+          <form
+            className="watchlist-add-form"
+            onSubmit={(event) => void runSearch(event)}
+          >
+            <label className="watchlist-add-field wide">
               <span>Search by symbol or name</span>
               <input
                 ref={securityInputRef}
@@ -1617,7 +1620,7 @@ function OwnedWatchlistScreen({
       ) : null}
       {addMode === "currency" ? (
         <section
-          className="quote-history"
+          className="quote-history watchlist-add-panel"
           aria-labelledby="watchlist-add-currency-title"
         >
           <div className="quote-history-heading">
@@ -1630,13 +1633,24 @@ function OwnedWatchlistScreen({
               Close
             </button>
           </div>
-          <form onSubmit={(event) => void addCurrencyPair(event)}>
-            <label>
-              <span>Base currency (e.g. AUD)</span>
+          {/* UI-045: two compact 3-character code fields and the Add
+              button sit on ONE row (wrapping only when the viewport cannot
+              hold them), matching the page's dense row/table rhythm rather
+              than the full-width stacked form this used to render. */}
+          <form
+            className="watchlist-add-form"
+            onSubmit={(event) => void addCurrencyPair(event)}
+          >
+            <label className="watchlist-add-field">
+              <span>Base</span>
               <input
                 ref={currencyInputRef}
                 type="text"
+                inputMode="text"
+                autoCapitalize="characters"
+                spellCheck={false}
                 maxLength={3}
+                placeholder="AUD"
                 value={baseCurrencyCode}
                 onChange={(event) =>
                   setBaseCurrencyCode(event.target.value.toUpperCase())
@@ -1644,11 +1658,15 @@ function OwnedWatchlistScreen({
                 required
               />
             </label>
-            <label>
-              <span>Quote currency (e.g. USD)</span>
+            <label className="watchlist-add-field">
+              <span>Quote</span>
               <input
                 type="text"
+                inputMode="text"
+                autoCapitalize="characters"
+                spellCheck={false}
                 maxLength={3}
+                placeholder="USD"
                 value={quoteCurrencyCode}
                 onChange={(event) =>
                   setQuoteCurrencyCode(event.target.value.toUpperCase())

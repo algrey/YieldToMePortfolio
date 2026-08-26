@@ -68,3 +68,52 @@ test("UI-044: the watchlist add buttons render readable text on their own surfac
   assert.match(block![1], /color:\s*var\(--cream\)/);
   assert.doesNotMatch(block![1], /color:\s*var\(--ink\)/);
 });
+
+/** UI-045 — the watchlist add panels are styled, compact rows.
+ *
+ * Owner: "add a currency pair ... is a bit ugly ... should give you two
+ * boxes and an add button ... in the style of the rest of the page and
+ * compact." They previously rendered bare labels and inputs with no CSS of
+ * their own, flowing inline against the page background.
+ */
+test("UI-045: the currency-pair form renders two labelled code fields and an Add button in one compact row", async () => {
+  const [shell, css] = await Promise.all([
+    readFile(
+      new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  // Both add panels share the styled panel + form classes.
+  assert.equal(
+    (shell.match(/quote-history watchlist-add-panel/g) ?? []).length,
+    2,
+  );
+  assert.equal(
+    (shell.match(/className="watchlist-add-form"/g) ?? []).length,
+    2,
+  );
+  // Two currency fields, each a labelled 3-character code box.
+  assert.equal(
+    (shell.match(/className="watchlist-add-field"/g) ?? []).length,
+    2,
+  );
+  assert.match(shell, /<span>Base<\/span>/);
+  assert.match(shell, /<span>Quote<\/span>/);
+
+  // Compact row: the form lays out inline and the code fields are fixed to
+  // a 3-letter width so the pair plus Add fit one line.
+  const form = css.match(/\.watchlist-add-form \{([^}]*)\}/);
+  assert.ok(form, "expected a .watchlist-add-form rule");
+  assert.match(form![1], /display:\s*flex/);
+  assert.match(form![1], /flex-wrap:\s*wrap/);
+  assert.match(
+    css,
+    /\.watchlist-add-form \.watchlist-add-field:not\(\.wide\) \{[^}]*flex:\s*0 0 \d+px/,
+  );
+  // Inputs keep the 44px touch target (QA-001B) and readable contrast.
+  const input = css.match(/\.watchlist-add-field input \{([^}]*)\}/);
+  assert.ok(input, "expected a .watchlist-add-field input rule");
+  assert.match(input![1], /min-height:\s*44px/);
+  assert.match(input![1], /color:\s*var\(--cream\)/);
+});

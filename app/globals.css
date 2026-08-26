@@ -1210,6 +1210,89 @@ dd {
   gap: 8px;
 }
 
+/* UI-045 (owner: "a bit ugly ... should be in the style of the rest of the
+   page and compact"): the watchlist add panels had NO styling of their own
+   -- bare labels and inputs flowed inline against the page background. They
+   now read as one dense strip in the app's established row rhythm: fine
+   divider, raised surface, label above a small field, everything on one
+   line until the viewport genuinely cannot hold it. */
+.watchlist-add-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-bottom: 1px solid var(--divider);
+  background: var(--forest-soft);
+}
+
+.watchlist-add-panel h2 {
+  font-size: 0.82rem;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+}
+
+.watchlist-add-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+}
+
+.watchlist-add-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* The stock search takes the remaining width; currency codes never need it. */
+.watchlist-add-field.wide {
+  flex: 1 1 200px;
+}
+
+.watchlist-add-field > span {
+  color: var(--muted);
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.watchlist-add-field input {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--divider);
+  border-radius: 2px;
+  background: var(--forest);
+  color: var(--cream);
+  font: inherit;
+}
+
+/* Exactly wide enough for a 3-letter ISO code, so the pair plus Add fit one
+   line at phone widths. */
+.watchlist-add-form .watchlist-add-field:not(.wide) {
+  flex: 0 0 92px;
+}
+
+.watchlist-add-form .watchlist-add-field:not(.wide) input {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.watchlist-add-form > button {
+  min-height: 44px;
+  flex: 0 0 auto;
+  padding: 0 14px;
+  border: 1px solid var(--divider);
+  border-radius: 2px;
+  background: var(--forest-raised);
+  color: var(--cream);
+  cursor: pointer;
+}
+
+.watchlist-add-form > button:disabled {
+  color: var(--muted-dark);
+  cursor: not-allowed;
+}
+
 .quote-action-buttons button,
 .quote-dialog button,
 .quote-dialog input,
