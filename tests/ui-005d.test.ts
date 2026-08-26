@@ -135,4 +135,14 @@ test("reversed import renders an operable corrected-successor upload", () => {
   assert.match(html, /name="correctedFile"/);
   assert.match(html, /accept="\.csv,text\/csv"/);
   assert.match(html, />Stage corrected successor</);
+  // UI-048 (owner-reported): this file input now uses the same
+  // button-styled file-picker pattern as the ledger/price-history/backup
+  // file inputs, rather than the browser's own default file-input chrome.
+  const correctedLabelBlock = html.match(
+    /Corrected CSV file[\s\S]*?<\/label>/,
+  )?.[0];
+  assert.ok(correctedLabelBlock, "expected the Corrected CSV file label block");
+  assert.match(correctedLabelBlock!, /class="file-picker"/);
+  assert.match(correctedLabelBlock!, /class="file-picker-input"/);
+  assert.match(correctedLabelBlock!, /class="file-picker-button"/);
 });

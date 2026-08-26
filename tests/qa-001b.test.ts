@@ -627,6 +627,8 @@ test("QA-001B: interactive controls meet the 44×44 CSS-pixel touch-target minim
     ".import-mapping-form button",
     ".action-feedback button",
     ".holdings-summary-footer .hide-sold-toggle",
+    // UI-048 fold: every CSV/backup file input's button-look control.
+    ".file-picker-button",
   ]) {
     const block = extractBlock(styles, selector);
     assert.match(

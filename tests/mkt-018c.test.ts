@@ -460,10 +460,17 @@ test("MKT-018C: a malformed file in a real multi-file run never blocks its sibli
 
 test("MKT-018C: the price-history CSV file input accepts multiple files", async () => {
   const source = await readFile(new URL(PANEL_PATH, import.meta.url), "utf8");
-  const inputBlock = source.match(/Price history CSV\s*<input[\s\S]*?\/>/)?.[0];
+  // UI-048: the label text is no longer immediately followed by the raw
+  // `<input>` -- it now wraps a `.file-picker` (hidden input + styled
+  // button, see globals.css) -- so the gap between the label text and the
+  // `<input>` tag is matched non-greedily rather than as pure whitespace.
+  const inputBlock = source.match(
+    /Price history CSV[\s\S]*?<input[\s\S]*?\/>/,
+  )?.[0];
   assert.ok(inputBlock, "expected to find the price-history CSV file input");
   assert.match(inputBlock!, /\bmultiple\b/);
   assert.match(inputBlock!, /type="file"/);
+  assert.match(inputBlock!, /className="file-picker-input"/);
 });
 
 test("MKT-018C review fold: the Exchange, Currency, and Source label inputs are all disabled while a multi-file run is in progress (editing them mid-run would silently diverge provenance from what's displayed)", async () => {
@@ -538,8 +545,11 @@ test("MKT-018C / IMP-010A: single-file behaviour is UX-unchanged -- previewSingl
 
 test("MKT-018C: selecting exactly one file (even from the now-multiple picker) takes the original single-file state path, not the multi-file run", async () => {
   const source = await readFile(new URL(PANEL_PATH, import.meta.url), "utf8");
+  // UI-048: the input is now nested one level deeper inside `.file-picker`,
+  // shifting its indentation -- matched by content, not by a fixed column
+  // count, so a purely cosmetic reindent doesn't break this pin.
   const onChangeBlock = source.match(
-    /onChange=\{\(event\) => \{\s*const selected = Array\.from[\s\S]*?\n {12}\}\}/,
+    /onChange=\{\(event\) => \{\s*const selected = Array\.from[\s\S]*?\n\s*\}\}/,
   )?.[0];
   assert.ok(
     onChangeBlock,
@@ -686,7 +696,9 @@ test("MKT-018C: HistoricalDataPanel still renders the retitled import section an
   const html = renderComponent("HistoricalDataPanel", PANEL_PATH, {
     portfolioId: "portfolio-a",
   });
-  assert.match(html, /Import security price history/);
+  // UI-048: "Import security price history" -> "Per-ticker price history
+  // (CSV files)".
+  assert.match(html, /Per-ticker price history \(CSV files\)/);
   assert.match(
     html,
     /Exchange, Currency, and Source label settings above and below\s*apply to every file in the run/,

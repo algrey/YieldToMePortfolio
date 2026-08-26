@@ -88,6 +88,12 @@ export function ImportHistoryDetailPanel({
   onStageSuccessor: (file: File) => void;
 }) {
   const [confirmation, setConfirmation] = useState(false);
+  // UI-048: matches import-review.tsx's `selectedFileName` -- the file
+  // picker's native input is visually hidden, so this drives the
+  // replacement "chosen file" readback next to the styled button.
+  const [correctedFileName, setCorrectedFileName] = useState<string | null>(
+    null,
+  );
   const resumable =
     detail.batch.status === "committing" &&
     detail.progress.idempotencyKey !== null;
@@ -170,12 +176,26 @@ export function ImportHistoryDetailPanel({
                 >
                   <label>
                     Corrected CSV file
-                    <input
-                      name="correctedFile"
-                      type="file"
-                      accept=".csv,text/csv"
-                      required
-                    />
+                    <span className="file-picker">
+                      <input
+                        name="correctedFile"
+                        type="file"
+                        accept=".csv,text/csv"
+                        required
+                        className="file-picker-input"
+                        onChange={(event) =>
+                          setCorrectedFileName(
+                            event.target.files?.[0]?.name ?? null,
+                          )
+                        }
+                      />
+                      <span className="file-picker-button">
+                        Choose CSV file…
+                      </span>
+                      <span className="file-picker-filename">
+                        {correctedFileName ?? "No file selected"}
+                      </span>
+                    </span>
                   </label>
                   <button type="submit" disabled={successorPending}>
                     {successorPending

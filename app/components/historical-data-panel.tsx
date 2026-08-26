@@ -746,6 +746,11 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
   // `file`/`singlePreview`/... state path above, byte-for-byte unchanged,
   // so a single-file upload behaves exactly as it did before this task.
   const [multiRunning, setMultiRunning] = useState(false);
+  // Review fold: the file-picker's readback (below) shows the real
+  // selected-file count from the onChange's own already-parsed list,
+  // rather than only a generic "Multiple files selected" gated on
+  // `multiRunning` (which can lag the selection by a tick).
+  const [multiFileCount, setMultiFileCount] = useState<number | null>(null);
   const [multiTotal, setMultiTotal] = useState(0);
   const [multiIndex, setMultiIndex] = useState(0);
   const [multiCurrentFilename, setMultiCurrentFilename] = useState<
@@ -1329,7 +1334,7 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
         className="historical-data-import"
         id="historical-data-single-upload"
       >
-        <h3>Import security price history</h3>
+        <h3>Per-ticker price history (CSV files)</h3>
         <p>
           Select one file to import it directly below, or select several at once
           to import them one at a time, in order.
@@ -1340,35 +1345,48 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
         </p>
         <label>
           Price history CSV
-          <input
-            type="file"
-            accept=".csv,text/csv,text/tab-separated-values"
-            multiple
-            disabled={multiRunning}
-            onChange={(event) => {
-              const selected = Array.from(event.target.files ?? []);
-              // MKT-018C: exactly one file (including one chosen from a
-              // multi-select picker) takes the ORIGINAL single-file state
-              // path below, unchanged -- only picking more than one file
-              // switches into the sequential multi-file run.
-              if (selected.length > 1) {
-                setFile(null);
+          <span className="file-picker">
+            <input
+              type="file"
+              accept=".csv,text/csv,text/tab-separated-values"
+              multiple
+              disabled={multiRunning}
+              className="file-picker-input"
+              onChange={(event) => {
+                const selected = Array.from(event.target.files ?? []);
+                // MKT-018C: exactly one file (including one chosen from a
+                // multi-select picker) takes the ORIGINAL single-file state
+                // path below, unchanged -- only picking more than one file
+                // switches into the sequential multi-file run.
+                if (selected.length > 1) {
+                  setFile(null);
+                  setSinglePreview(null);
+                  setSingleError(null);
+                  setSingleResult(null);
+                  setMultiFileCount(selected.length);
+                  void startMultiRun(selected);
+                  return;
+                }
+                setFile(selected[0] ?? null);
+                setMultiFileCount(null);
                 setSinglePreview(null);
                 setSingleError(null);
                 setSingleResult(null);
-                void startMultiRun(selected);
-                return;
-              }
-              setFile(selected[0] ?? null);
-              setSinglePreview(null);
-              setSingleError(null);
-              setSingleResult(null);
-              setMultiResults([]);
-              setMultiCancelled(false);
-              setMultiPhase(null);
-              setMultiCurrentPreview(null);
-            }}
-          />
+                setMultiResults([]);
+                setMultiCancelled(false);
+                setMultiPhase(null);
+                setMultiCurrentPreview(null);
+              }}
+            />
+            <span className="file-picker-button">Choose file(s)…</span>
+            <span className="file-picker-filename">
+              {file
+                ? file.name
+                : multiFileCount
+                  ? `${multiFileCount} files selected`
+                  : "No file selected"}
+            </span>
+          </span>
         </label>
         <label>
           Source label
@@ -1427,20 +1445,55 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
         />
       </div>
 
-      <div className="historical-data-import">
-        <h3>Import backup</h3>
+      {/* UI-048 (owner-reported): export and restore used to be two
+          separately-headed sections ("Import backup" / "Export") that read
+          as unrelated, generic upload areas -- the owner never found the
+          restore section at all. One heading, both actions co-located, so
+          "where's the restore" has a single place to look. */}
+      <section
+        className="historical-data-import"
+        id="historical-data-backup"
+        aria-labelledby="historical-data-backup-title"
+      >
+        <h3 id="historical-data-backup-title">
+          Price-history backup (export / restore)
+        </h3>
+        <p>
+          Export a full, re-importable backup of your imported price history, or
+          restore a previously exported backup file.
+        </p>
+        <h4>Export backup</h4>
+        {/* This targets a file-download API route (text/csv,
+            content-disposition: attachment), not a Next.js page -- a plain
+            anchor triggers the browser's normal download handling; `next/link`
+            would instead try to client-navigate/prefetch it as an app route. */}
+        {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
+        <a
+          className="historical-data-export-link"
+          href="/api/market-data/price-uploads/export"
+        >
+          Export price history
+        </a>
+        <h4>Restore from backup</h4>
         <label>
           Backup CSV
-          <input
-            type="file"
-            accept=".csv,text/csv"
-            onChange={(event) => {
-              setBackupFile(event.target.files?.[0] ?? null);
-              setBackupPreview(null);
-              setBackupError(null);
-              setBackupResult(null);
-            }}
-          />
+          <span className="file-picker">
+            <input
+              type="file"
+              accept=".csv,text/csv"
+              className="file-picker-input"
+              onChange={(event) => {
+                setBackupFile(event.target.files?.[0] ?? null);
+                setBackupPreview(null);
+                setBackupError(null);
+                setBackupResult(null);
+              }}
+            />
+            <span className="file-picker-button">Choose backup file…</span>
+            <span className="file-picker-filename">
+              {backupFile ? backupFile.name : "No file selected"}
+            </span>
+          </span>
         </label>
         <div className="historical-data-actions">
           <button
@@ -1475,25 +1528,7 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
             {backupResult}
           </p>
         ) : null}
-      </div>
-
-      <div className="historical-data-import">
-        <h3>Export</h3>
-        <p>
-          Download a full, re-importable backup of your imported price history.
-        </p>
-        {/* This targets a file-download API route (text/csv,
-            content-disposition: attachment), not a Next.js page -- a plain
-            anchor triggers the browser's normal download handling; `next/link`
-            would instead try to client-navigate/prefetch it as an app route. */}
-        {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
-        <a
-          className="historical-data-export-link"
-          href="/api/market-data/price-uploads/export"
-        >
-          Export price history
-        </a>
-      </div>
+      </section>
 
       <PriceUploadList
         batches={batches}

@@ -5486,6 +5486,17 @@ dd {
   font-size: 1.05rem;
 }
 
+/* Review B3 (BLOCKING): the "Export backup"/"Restore from backup" <h4>s
+   inside the merged backup section had no rule at all -- mirrors
+   `.historical-data-multi-run h4`'s serif/400-weight convention. */
+#historical-data-backup h4 {
+  margin-top: 16px;
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 0.95rem;
+  color: var(--cream);
+}
+
 .historical-data-settings,
 .historical-data-import {
   display: flex;
@@ -5699,6 +5710,105 @@ dd {
   background: transparent;
   color: var(--cream);
   cursor: pointer;
+}
+
+/* UI-048 (owner-reported): every CSV/backup file input on the import page
+   used to render the browser's own default file-input chrome ("sometimes
+   it has [text] you click to select a file" -- inconsistent with the rest
+   of the app's outline-button controls). `.file-picker` wraps a visually
+   hidden native `<input type="file">` with a sibling button-look span,
+   reusing this file's established outline-button shape
+   (`.historical-data-actions button` / `.import-upload-form button`) so
+   every file picker on the page looks and behaves the same way. The native
+   input stays focusable/keyboard-operable (never `display:none`);
+   `:focus-visible` on it draws the app's standard focus ring (matching the
+   root `:focus-visible` rule near the top of this file) onto the visible
+   button via the adjacent-sibling selector below.
+   `input[type="file"].file-picker-input`'s specificity is deliberately
+   raised (attribute + class, on top of the element type) so it overrides
+   `.import-upload-form input`'s and `.import-successor-form
+   input[type="file"]`'s own generic native-input width/border/padding/
+   min-height styling, which would otherwise fight the hidden-input
+   technique; this rule is also placed after both of those in file so any
+   remaining tied-specificity properties resolve in its favour too. */
+.file-picker {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  width: fit-content;
+  max-width: 100%;
+}
+
+input[type="file"].file-picker-input {
+  position: absolute;
+  width: 1px;
+  min-width: 0;
+  height: 1px;
+  min-height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.file-picker-button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--green);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--cream);
+  cursor: pointer;
+  font-size: 0.9rem;
+  /* Review B1 (BLOCKING): this button/filename live inside a `<label>`
+     that inherits `.import-upload-form label`'s/`.historical-data-panel
+     label`'s uppercase/bold/letter-spacing text styling (the old native
+     `<input>` reset all of that implicitly, being a form control, not
+     inherited text) -- reset explicitly so "Choose CSV file…" and the
+     selected filename render as normal sentence-case text, not
+     "CHOOSE CSV FILE" / an uppercased filename. */
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+}
+
+.file-picker:hover .file-picker-input:not(:disabled) + .file-picker-button {
+  background: rgb(99 200 120 / 10%);
+}
+
+.file-picker-input:focus-visible + .file-picker-button {
+  outline: 2px solid var(--green-bright);
+  outline-offset: 2px;
+}
+
+/* Review B2 (BLOCKING): during a multi-file run the price-history picker
+   is `disabled` but previously still looked and hovered like a live
+   control. */
+.file-picker-input:disabled + .file-picker-button {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.file-picker-filename {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  overflow-wrap: anywhere;
+}
+
+/* UI-048: the ledger-CSV upload's one-line format hint -- density ruling
+   permits exactly this, no more. */
+.import-upload-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
 }
 
 @media (prefers-reduced-motion: reduce) {

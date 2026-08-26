@@ -1680,11 +1680,35 @@ test("MKT-008 render: HistoricalDataPanel's default render shows the section hea
   assert.match(html, /Price history import/);
   assert.match(html, />Exchange</);
   assert.match(html, />Currency</);
-  assert.match(html, /Import security price history/);
-  assert.match(html, /Import backup/);
-  assert.match(html, />Export</);
+  // UI-048 (owner-reported): "Import security price history" ->
+  // "Per-ticker price history (CSV files)", and the previously separate
+  // "Import backup"/"Export" headings were merged into one co-located
+  // "Price-history backup (export / restore)" section (with "Export
+  // backup" / "Restore from backup" sub-headings) -- the owner had never
+  // found the restore control at all.
+  assert.match(html, /Per-ticker price history \(CSV files\)/);
+  assert.match(html, /Price-history backup \(export \/ restore\)/);
+  assert.match(html, />Export backup</);
+  assert.match(html, />Restore from backup</);
   assert.match(html, /Past uploads/);
   assert.match(html, /Loading past uploads…/);
+});
+
+// UI-048 (owner-reported): the backup-restore file input used to render as
+// the browser's own unstyled default file-input control (no CSS applied at
+// all -- `.historical-data-panel input:not([type="file"])` deliberately
+// excluded it) -- co-located discoverability alone does not help if the
+// control itself still looks like plain browser chrome once found. Now
+// uses the same `.file-picker`/`.file-picker-input`/`.file-picker-button`
+// pattern as the ledger-CSV and price-history file inputs.
+test("MKT-008 render: the backup-restore file input uses the app's button-styled file-picker pattern", () => {
+  const html = renderComponent("HistoricalDataPanel", PANEL_PATH, {});
+  const labelBlock = html.match(/Backup CSV[\s\S]*?<\/label>/)?.[0];
+  assert.ok(labelBlock, "expected the Backup CSV label block");
+  assert.match(labelBlock!, /class="file-picker"/);
+  assert.match(labelBlock!, /class="file-picker-input"/);
+  assert.match(labelBlock!, /class="file-picker-button"/);
+  assert.match(labelBlock!, /type="file"/);
 });
 
 test("MKT-008 render: SinglePreviewSummary shows the matched security, counts, and the overwrite consequence sentence", () => {

@@ -380,6 +380,12 @@ export function ImportReview({
   const [review, setReview] = useState<Review | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // UI-048: the ledger-CSV upload's file picker is a hidden native
+  // `<input type="file">` behind a styled button (see `.file-picker` in
+  // globals.css) -- the browser's own "chosen file" text disappears along
+  // with its default chrome, so this tracks the selected filename for the
+  // replacement readback shown next to the button.
+  const [selectedFileName, setSelectedFileName] = useState<string | null>(null);
   const [readyPending, setReadyPending] = useState(false);
   const [commitPending, setCommitPending] = useState(false);
   const [commit, setCommit] = useState<CommitResult | null>(null);
@@ -1607,9 +1613,27 @@ export function ImportReview({
       </p>
       <form className="import-upload-form" onSubmit={upload}>
         <label>
-          CSV file
-          <input name="file" type="file" accept=".csv,text/csv" required />
+          Portfolio transactions (CSV)
+          <span className="file-picker">
+            <input
+              name="file"
+              type="file"
+              accept=".csv,text/csv"
+              required
+              className="file-picker-input"
+              onChange={(event) =>
+                setSelectedFileName(event.target.files?.[0]?.name ?? null)
+              }
+            />
+            <span className="file-picker-button">Choose CSV file…</span>
+            <span className="file-picker-filename">
+              {selectedFileName ?? "No file selected"}
+            </span>
+          </span>
         </label>
+        <p className="import-upload-hint">
+          Trade rows, plus optional dividend rows (17- or 18-column CSV).
+        </p>
         <label>
           Target portfolio
           <select

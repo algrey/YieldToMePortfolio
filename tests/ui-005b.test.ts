@@ -28,7 +28,10 @@ test("import review exposes an authenticated, non-mutating preview workflow", as
   assert.match(action, /buildImportReviewPreview/);
   assert.match(action, /expectedPreviewVersion/);
   assert.doesNotMatch(action, /commitImportAction|commitLedgerAction/);
-  assert.match(component, /CSV file/);
+  // UI-048: relabelled "CSV file" -> "Portfolio transactions (CSV)" for
+  // clarity against the price-history/backup CSV areas elsewhere on the
+  // page (owner-reported naming ambiguity).
+  assert.match(component, /Portfolio transactions \(CSV\)/);
   assert.match(component, /Target portfolio/);
   assert.match(component, /Server-issued preview/);
   assert.match(component, /Review only/);
@@ -56,6 +59,47 @@ test("import review controls keep mapping and issue content operable on mobile",
   assert.match(styles, /\.import-counts[\s\S]*grid-template-columns: 1fr 1fr/);
   assert.match(styles, /\.import-upload-form input[\s\S]*min-height: 44px/);
   assert.match(styles, /:focus-visible[\s\S]*outline: 2px solid/);
+});
+
+// UI-048 (owner-reported): the ledger-CSV file input used to render as the
+// browser's own default file-input chrome. It is now a visually hidden
+// native `<input type="file">` (`.file-picker-input`) plus a sibling
+// button-look span (`.file-picker-button`), both wrapped in a `<label>` so
+// the association stays programmatic (no separate `htmlFor`/`id` needed) --
+// see `.file-picker`/`.file-picker-button`/`.file-picker-input` in
+// globals.css for the shared shape reused by the price-history and backup
+// file inputs too.
+test("UI-048: the ledger-CSV file input uses the app's button-styled file-picker pattern, not the browser's default file-input chrome", async () => {
+  const [component, styles] = await Promise.all([
+    readFile(
+      new URL("../app/components/import-review.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+
+  const labelBlock = component.match(
+    /Portfolio transactions \(CSV\)[\s\S]*?<\/label>/,
+  )?.[0];
+  assert.ok(labelBlock, "expected the ledger-CSV label block");
+  assert.match(labelBlock!, /className="file-picker"/);
+  assert.match(labelBlock!, /className="file-picker-input"/);
+  assert.match(labelBlock!, /className="file-picker-button"/);
+  assert.match(labelBlock!, /type="file"/);
+  // One-line format hint, per the density ruling.
+  assert.match(
+    component,
+    /Trade rows, plus optional dividend rows \(17- or 18-column CSV\)\./,
+  );
+
+  assert.match(
+    styles,
+    /input\[type="file"\]\.file-picker-input[\s\S]*?clip: rect\(0, 0, 0, 0\)/,
+  );
+  assert.match(
+    styles,
+    /\.file-picker-input:focus-visible \+ \.file-picker-button[\s\S]*?outline: 2px solid/,
+  );
 });
 
 test("import review can resolve pending mappings, reach readiness, and confirm commit", async () => {
