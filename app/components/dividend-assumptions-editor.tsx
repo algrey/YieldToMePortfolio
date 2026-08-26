@@ -14,8 +14,8 @@
 // collapses the grid to one block per security separated by dividers, no
 // filter box (the established `.desktop-only`/`.mobile-only` 700px
 // breakpoint, matching every other responsive surface in this app).
-import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { IncomeNav } from "./income-nav";
 import { useEffect, useRef, useState } from "react";
 import {
   addDecimal,
@@ -128,7 +128,6 @@ export function DividendAssumptionsEditor({
   securities,
   portfolio,
   fyOverrides,
-  incomeHref,
   initialOverrideYear,
 }: {
   portfolioId: string;
@@ -139,7 +138,6 @@ export function DividendAssumptionsEditor({
   securities: DividendAssumptionsSecurityRowProps[];
   portfolio: DividendAssumptionsPortfolioRowProps;
   fyOverrides: DividendAssumptionsFyOverrideProps[];
-  incomeHref: string;
   initialOverrideYear: number | null;
 }) {
   const [securityDrafts, setSecurityDrafts] = useState<SecurityDraft[]>(() =>
@@ -344,11 +342,13 @@ export function DividendAssumptionsEditor({
 
   return (
     <main className="income-screen">
-      <p className="eyebrow">Income</p>
+      {/* UI-042: the Assumptions page is a peer Income sub-tab (UI-039 added
+          it to the nav), so it renders the SAME five-tab bar and back
+          control as every other Income view instead of its own heading and
+          return-to-Income text link -- the "Next 12 months" tab is that
+          link now. */}
+      <IncomeNav portfolioId={portfolioId} active="assumptions" />
       <h1>Dividend assumptions</h1>
-      <p className="income-subtitle">
-        <Link href={incomeHref}>Back to Income</Link>
-      </p>
 
       <div className="dividend-assumptions-actions">
         <button

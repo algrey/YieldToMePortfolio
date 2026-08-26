@@ -548,11 +548,17 @@ test("UI-022: every Income screen renders the shared IncomeNav rather than its o
       "../app/components/income-multi-year.tsx",
       "../app/components/capital-gains-screen.tsx",
       "../app/components/owned-dividend-list.tsx",
+      // UI-042: Assumptions is a full peer sub-tab now, so it is held to
+      // the same rule as the other four.
+      "../app/components/dividend-assumptions-editor.tsx",
     ].map((path) => readFile(new URL(path, import.meta.url), "utf8")),
   );
   for (const source of sources) {
     assert.match(source, /<IncomeNav\b/);
     assert.doesNotMatch(source, /className="income-view-tabs"/);
+    // The old per-screen "Back to Income" text links are retired: the
+    // shared nav's own back control and "Next 12 months" tab replace them.
+    assert.doesNotMatch(source, /Back to Income/);
   }
 });
 

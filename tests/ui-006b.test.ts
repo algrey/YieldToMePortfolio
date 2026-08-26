@@ -1647,7 +1647,6 @@ const baseProps = {
     version: null,
   },
   fyOverrides: [],
-  incomeHref: "/portfolio/pa/income",
   initialOverrideYear: null,
 };
 

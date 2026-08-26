@@ -96,7 +96,7 @@ export function OwnedDividendList({
           it renders the SAME four-tab bar as every other Income view
           (owner-reported: "All dividends should be equal to the other
           Income sub-tabs. The list of dividends should have the sub-tab
-          bar at the top."). The old "Back to Income" text link below the
+          bar at the top."). The old return-to-Income text link below the
           heading is gone: the "Next 12 months" tab is that link now. */}
       <IncomeNav portfolioId={portfolioId} active="dividends" />
       <h1>{heading}</h1>

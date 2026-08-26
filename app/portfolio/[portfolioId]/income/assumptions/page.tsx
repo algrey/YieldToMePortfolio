@@ -95,7 +95,6 @@ export default async function DividendAssumptionsPage({
         frankingAmountDecimal: override.frankingAmountDecimal,
         version: override.version,
       }))}
-      incomeHref={`/portfolio/${portfolioId}/income`}
       initialOverrideYear={initialOverrideYear}
     />
   );
