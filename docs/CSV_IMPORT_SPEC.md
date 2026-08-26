@@ -1493,3 +1493,18 @@ check on `dividend_manual_records` fires BEFORE the reconciliation-write
 step is reached for an already-committed row, and a manual row that is
 already superseded is no longer a live candidate for any future batch's
 `revalidate()` query.
+
+## 18. Single-portfolio bundle export/import (`EXP-001`)
+
+The single-portfolio export/import bundle (transactions, dividend
+records, assumptions, overrides, saved what-if scenarios, portfolio
+identity) is a JSON format, not CSV, and spans many tables at once rather
+than one row shape per this document's sections above — its full
+specification (format, the owned-table classification table, the
+collision/reversibility policy, and the owner's acceptance sentence) lives
+in **`docs/BACKUP_FORMAT.md`** instead of a section here. It reuses this
+spec's established conventions where they apply directly: staged →
+previewed → validated → idempotent → batch-attributable → reversible
+(IMP-010B's browser-parses/server-is-sole-authority split), and the same
+security create-if-absent resolution machinery (BRK-009B) CSV/Sharesight
+imports use.
