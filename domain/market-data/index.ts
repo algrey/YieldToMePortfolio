@@ -8,6 +8,15 @@ export {
 export { createYahooCompatibleProvider } from "./yahoo-compatible.ts";
 export type { YahooCompatibleAdapterOptions } from "./yahoo-compatible.ts";
 export {
+  createFrankfurterFxClient,
+  FRANKFURTER_PROVIDER_ID,
+} from "./frankfurter.ts";
+export type {
+  FrankfurterFxClient,
+  FrankfurterFxClientOptions,
+  FrankfurterRateRequest,
+} from "./frankfurter.ts";
+export {
   createMarketDataRefreshService,
   DEFAULT_MARKET_DATA_REFRESH_CONFIG,
   MARKET_DATA_REFRESH_LIMITS,

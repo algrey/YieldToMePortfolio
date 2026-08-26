@@ -276,7 +276,7 @@ Calculation normalizes to native→portfolio-base with decimal arithmetic and re
 
 Never use a future date for transaction cost basis. Identity conversion is exact `1`. Forecast dividends may use the latest FX only when labelled estimated/as-of; actual receipts use payment-date FX.
 
-If the selected source’s FX quality or coverage fails, evaluate an authoritative daily central-bank source for supported AUD crosses or another capability-specific source through a separate decision. Do not silently triangulate through inconsistent timestamps without storing both legs and the formula.
+If the selected source’s FX quality or coverage fails, evaluate an authoritative daily central-bank source for supported AUD crosses or another capability-specific source through a separate decision. Do not silently triangulate through inconsistent timestamps without storing both legs and the formula. (§25: Frankfurter/ECB reference rates now implement exactly this for the watchlist's currency-pair rows, MKT-021.)
 
 ## 13. Rate limits, retries, and jobs
 
@@ -994,3 +994,256 @@ fetch of any kind against Intelligent Investor.
 - **UI**: a new "Download price history" panel inside `HistoricalDataPanel` (`app/components/historical-data-panel.tsx`, the import page's existing "Historical Data" section, MKT-008 §18) — above the existing upload controls, fetching `GET /api/portfolios/:portfolioId/price-history-coverage` (read-only, owner-scoped, no CSRF gate per this codebase's established GET convention) whenever the owner's "Target portfolio" selection changes. Zero-coverage securities list a guide link (`https://www.intelligentinvestor.com.au/shares/asx-{ticker}/`, `target="_blank"`, `rel="noopener noreferrer"`, `referrerPolicy="no-referrer"` — the same external-link discipline as the per-holding News tab's attribution link) plus the expected downloaded filename (`ASX-{TICKER}.csv`, the guide's own `exporting.filename` convention). Partial-coverage securities list their honest gap summary instead. One plain sentence states the honesty rule: "Downloads run in your own browser via the guide — this app never fetches Intelligent Investor's data directly." A "Download each CSV above, then import it below" link jumps to the EXISTING single-security importer (`#historical-data-single-upload`) — the downloaded CSVs feed the unmodified MKT-008 staged/preview/idempotent pipeline, never a forked one.
 - **Out of scope, explicitly**: no drop-zone/direct-upload shortcut was added to the coverage panel itself (the existing single-security uploader immediately below is trivially reachable via the jump link, so forking or duplicating that form was judged unnecessary — the Orchestrator has separately recorded that MKT-018C is expected to rework this exact input, making the jump link the right seam for now); no auto-backfill of partial gaps (the owner's own open question from MKT-018's binding ruling — a REPORT, not an action).
 - **EFF-001 follow-up (2026-08-25): does pre-boundary monthly downsampling confuse this classification?** No code change needed, verified honestly: `classifyPriceHistoryCoverage` (above) only ever compares the EARLIEST and LATEST observation dates against the holding's first-transaction date and today's staleness window — it never inspects the SPACING between observations, so a security whose pre-2018 (or whatever boundary the owner chose) history is monthly rather than daily classifies exactly as it would with full daily history: `covered` reaches across the holding period regardless of how sparse the middle of that range is. This is an observation about the function AS IT EXISTS TODAY, not a permanent guarantee — a future change that adds an internal-density/gap check to this function would need to be taught the boundary explicitly (see `docs/CSV_IMPORT_SPEC.md` §15.5 for the full EFF-001 write-up, including the analogous — but NOT fully clean — finding for the UI-018 chart's OWN gap classification, which can legitimately dash sparse pre-boundary segments in a long-range mixed-cadence view).
+
+## 25. Frankfurter FX-rate provider — currency watchlist rows (MKT-021, 2026-08-26)
+
+Owner directive (verbatim, 2026-08-26): "Currency quotes should display a
+value using the free source (with example AUD/USD):
+https://api.frankfurter.dev/v2/rate/AUD/USD." Frankfurter republishes the
+European Central Bank's daily reference rates. This closes the specific gap
+§12 already anticipated ("evaluate an authoritative daily central-bank
+source for supported AUD crosses… through a separate decision") and a real
+functional gap: WLT-001's currency-pair watchlist rows had NO write path at
+all populating `fx_rate_observations` for a watch-only pair (confirmed by
+inspection before this task — unlike a watch-only SECURITY, which gets a
+best-effort on-add price prime, `app/watchlist-actions.ts`'s
+`addWatchlistCurrencyPairWithContext` never called any provider), so every
+currency-pair row rendered `unavailable` regardless of pair.
+
+### Spike evidence (this task, 2026-08-26, live-verified)
+
+The owner's exact URL works as given and is the endpoint this
+implementation uses — no substitution needed:
+
+```
+$ curl https://api.frankfurter.dev/v2/rate/AUD/USD
+{"date":"2026-08-26","base":"AUD","quote":"USD","rate":0.71512}
+```
+
+Also verified live, this run:
+
+- **Historical query** (`?date=YYYY-MM-DD` on the same `/v2/rate/{base}/{quote}`
+  path) returns the same shape for a past reference date — Frankfurter DOES
+  support cheap historical lookups, but this implementation does not use
+  them (see "Change column" decision below).
+- **`/v2/latest?base=…&symbols=…`** (the v2 analogue of the widely-documented
+  v1 endpoint) returns HTTP 404 — the `/v2` API surface is `/rate/…` and
+  `/latest`/`/currencies` differ by version. `/v1/latest?base=AUD&symbols=USD`
+  DOES work (`{"amount":1.0,"base":"AUD","date":"2026-08-25","rates":{"USD":0.71533}}`)
+  and would have been the fallback had the owner's `/v2/rate/…` path not
+  worked, but it returns a nested `rates` object requiring an extra unwrap
+  step for no benefit here, so it is not used.
+- **`/v1/currencies`** lists Frankfurter's full supported-code set (30
+  currencies — the standard ECB reference-rate set: AUD, BRL, CAD, CHF, CNY,
+  CZK, DKK, EUR, GBP, HKD, HUF, IDR, ILS, INR, ISK, JPY, KRW, MXN, MYR, NOK,
+  NZD, PHP, PLN, RON, SEK, SGD, THB, TRY, USD, ZAR). A code in this
+  codebase's own `currencies` table but outside that set (there are none in
+  the seed data at the time of this task) would 422; this degrades exactly
+  like any other unavailable pair (see "Failure handling" below), never a
+  crash.
+- **Invalid currency code** (`/v2/rate/XXX/USD`): HTTP 422,
+  `{"status":422,"message":"invalid currency: XXX"}` — treated as
+  non-retryable `invalid_response`.
+- **Identity pair** (`/v2/rate/AUD/AUD`): HTTP 200, `rate: 1.0` — not
+  specially handled by the client (the existing `selectFxObservation`
+  identity short-circuit in `domain/market-data/selection.ts` already
+  returns an exact `"1"` for a same-currency pair before any observation is
+  ever consulted, and `addWatchlistCurrencyPairWithContext` already rejects
+  `baseCurrencyCode === quoteCurrencyCode` at the action layer, so this path
+  is unreachable in practice).
+
+**Permission to fetch programmatically**: `https://api.frankfurter.dev/robots.txt`
+and `https://frankfurter.dev/robots.txt` both return `Allow: /` for
+`User-agent: *` (the `frankfurter.dev` marketing/docs domain additionally
+allows `/llms.txt` and publishes a sitemap) — no `Disallow` of any kind,
+unlike MKT-018A's Intelligent Investor finding (§24). Frankfurter's own
+published purpose (per its docs at frankfurter.dev) is to be a free,
+open-source, no-API-key REST API for exactly this kind of programmatic
+lookup; requests need no authentication and its responses carry ordinary
+CDN cache headers (`cache-control: public, max-age=…`, served via
+Cloudflare), consistent with a service designed to be polled by automated
+clients within reasonable, non-abusive request volumes. This posture is
+closer to Sharesight's contractual API (§17) than to MKT-018A's Intelligent
+Investor finding (§24) — an explicit, machine-readable, unambiguous "yes."
+
+### Implementation
+
+`domain/market-data/frankfurter.ts` (`createFrankfurterFxClient`) is a
+narrow, FX-only client — NOT a full `MarketDataProvider` (no security
+search or dividend/split capability exists for this source to implement),
+following the transport/retry/validation SHAPE this codebase's existing
+adapters already establish rather than any shared helper module (there
+isn't one; see the task's own research, confirmed no extracted
+retry/backoff module exists anywhere in `domain/`):
+
+- **Transport**: `domain/market-data/frankfurter-transport.ts` mirrors
+  `domain/sharesight/transport.ts`'s BRK-003 GET-only structural enforcement
+  exactly (hard-coded `method: "GET"`, throws before ever calling the
+  fetcher if a `method` key or a method-override-shaped header is present).
+  Frankfurter carries no AGENTS.md non-negotiable of its own the way
+  Sharesight does, but the same defense-in-depth is applied so a future
+  edit can never accidentally widen a read-only public feed into a write
+  path.
+- **Retry/backoff**: mirrors `yahoo-compatible.ts`'s `fetchJson` shape
+  (bounded attempts, exponential backoff with jitter, `Retry-After` header
+  honoured, `AbortController`-based timeout) at smaller default bounds (2
+  attempts, 5s timeout) appropriate to a same-shaped-but-much-simpler single
+  small JSON GET with no chart-array parsing.
+- **Response validation**: `unknown` at the boundary — the parsed JSON body
+  is checked field-by-field (`base`/`quote` match the request, `date` is a
+  real calendar date, `rate` is a finite positive number) before being
+  handed to the SAME `normalizeFxObservation` (`domain/market-data/normalize.ts`)
+  every other FX source in this codebase validates through — no parallel
+  validation path.
+- **Decimal conversion**: Frankfurter's `rate` field is a JSON NUMBER (e.g.
+  `0.71512`), not a decimal string. `positiveDecimal(value) => String(value)`
+  is the IDENTICAL established precedent `yahoo-compatible.ts` already uses
+  for its own `close`/`previousClose` numbers — not a new convention
+  invented for this provider.
+- **`interval`**: `"eod"` — matches this codebase's OWN Yahoo-compatible FX
+  adapter, which already labels its daily FX bars `"eod"`
+  (`normalizeChartFx`). ECB publishes one reference rate per business day;
+  this is never `"delayed"` (reserved for a genuinely intraday capture some
+  known/estimated minutes behind a live market) and never anything
+  resembling "live" (AGENTS.md non-negotiable — ECB publishes once daily,
+  the opposite of live). `quality: "observed"`, `delayedMinutes: null` (not
+  applicable to a once-daily reference rate, distinct from "unknown delay
+  duration").
+- **`observedAt`**: since Frankfurter supplies only a reference DATE, no
+  intraday timestamp, `observedAt` anchors that date at UTC midnight — a
+  deterministic, re-fetch-stable instant, never a fabricated wall-clock
+  capture time. This mirrors MKT-008's "derive `observation_at`
+  deterministically from the bare trading date" convention for
+  owner-uploaded EOD closes (§18/`docs/DATA_MODEL.md`'s owner-import entry);
+  FX has no per-pair "exchange timezone" for MKT-008's midnight-in-exchange-
+  timezone convention to key off, so UTC midnight is the neutral anchor.
+  **Corrected (review B3, BLOCKING):** an earlier version of this entry
+  claimed "the owner never sees this instant" — false, and reviewer-
+  reproduced end-to-end. The VISIBLE row itself shows only the reference
+  date (`app/owned-watchlist.ts` renders a currency-pair row's
+  `marketDate`, never a time — `FxObservation` carries no market-timezone
+  field to convert one into), but the ACCESSIBLE explanation
+  (`app/watchlist-contract.ts`'s `watchlistExplanation`, surfaced via
+  `app/components/portfolio-shell.tsx`) DOES render this exact UTC-midnight
+  anchor verbatim as "observation timestamp: 2026-08-26T00:00:00Z". The
+  anchor choice itself remains the right one (deterministic, honestly a
+  derived date-anchor rather than a fabricated capture time, and it also
+  makes same-day re-primes converge onto one row — see
+  "Persistence/caching" below) — only the "never visible" claim was wrong.
+- **Scope**: `access_scope = 'deployment'` (like Yahoo's FX rows, never
+  `'user'` — ECB rates are public and identical for every owner, unlike
+  Sharesight's account-entitled data).
+- **`payloadSha256`**: SHA-256 of the raw response body text, mirroring
+  Sharesight's `sha256Hex` evidence convention
+  (`domain/sharesight/client.ts`).
+
+### Persistence/caching decision (investigated, not invented)
+
+Investigated how a watch-only SECURITY's Yahoo-compatible price gets into
+`price_observations` before designing this: it is NOT the durable
+`market_data_refresh_jobs` queue (`domain/market-data/ingestion.ts`, drained
+by the cron in `worker/scheduled-refresh.ts`) — that queue is enqueued only
+for portfolio-holding price/FX needs and has no enqueue path for a
+watch-only entry at all. The actual mechanism is
+`app/watchlist-actions.ts`'s `primeWatchlistSecurityPrice`: a synchronous,
+best-effort, ONE-request direct provider call made at add-time, writing
+straight into `price_observations` via a converging `ON CONFLICT DO UPDATE`
+— bypassing the queue entirely. Documented in that function's own comment
+as leaving the row to go stale afterward until "the next capture sweep or
+an owner-initiated refresh" — which, for a watch-only security, do not
+today exist either (both are scoped to held securities); this is an
+accepted, disclosed limitation of the EXISTING WLT-001 shape, not something
+this task introduced.
+
+MKT-021 mirrors that exact same shape for currency pairs rather than
+inventing a new persistence pattern or extending the refresh-job queue:
+`primeWatchlistCurrencyPairRate` (`app/watchlist-actions.ts`) is called
+once, best-effort, at `addWatchlistCurrencyPairWithContext` time, writing
+one row into `fx_rate_observations` via the SAME converging
+`ON CONFLICT DO UPDATE` technique. No new partial index was needed (unlike
+MKT-011A's Yahoo/Sharesight indexes) — `observed_at` is derived
+deterministically from the reference date alone (see above), so there is
+only ever ONE possible `observed_at` per calendar day per pair, and the
+table's PRE-EXISTING general unique index
+(`provider_id, scope_key, base_currency_code, quote_currency_code, interval,
+observed_at`) already targets it correctly; a same-day re-prime converges
+onto the identical row with no ordering guard needed (contrast
+Yahoo/Sharesight, which can legitimately receive several different
+same-day `observation_at` values from repeated intraday captures).
+Extending the currency-pair row into an ongoing on-view or queued refresh
+was judged OUT of this task's scope: it would be a genuinely new pattern
+(no "fetch-on-view" precedent exists anywhere in this codebase — every
+other quote surface reads only pre-populated observation tables), and the
+existing watch-only SECURITY path has the identical staleness gap, left
+disclosed rather than fixed. A future task could close both gaps together
+(e.g. widening MKT-011A's daily capture sweep to include watch-only
+targets); recorded as a follow-up, not implemented here.
+
+**Staleness reality, measured (review fold #4):** both a watch-only
+security's price and a watch-only currency pair's rate FREEZE at add-time
+under this shape and never refresh themselves afterward. Concretely, for a
+currency pair: a rate primed on day D is `interval: "eod"`, so
+`domain/market-data/selection.ts`'s `DEFAULT_MAX_EOD_AGE_DAYS` (2) marks it
+honestly `stale` (WLT-001's `WatchlistDisplayState`) starting D+3 — the real
+rate keeps DISPLAYING throughout, only the status label changes — and it
+stays selectable at all only through `app/owned-watchlist.ts`'s
+`MAX_LOOKBACK_DAYS`/`selection.ts`'s `DEFAULT_MAX_PRIOR_DAYS` (both 5); on
+D+6 the row falls entirely outside both windows and degrades to the same
+honest `unavailable` state as if it had never been primed — never a
+silently-stale display past that point. There IS a working manual refresh already, though, as a side effect
+of the existing shape rather than a purpose-built feature: `addCurrencyPair`
+(`db/repositories/watchlist.ts`) is idempotent (a repeat add of an
+already-watched pair returns the pre-existing row, never a duplicate), but
+`addWatchlistCurrencyPairWithContext` calls `primeWatchlistCurrencyPairRate`
+UNCONDITIONALLY after every successful add/re-add — so an owner who removes
+and re-adds a pair (or, more simply, submits "Add currency pair" again for
+a pair already on their watchlist) gets a genuine fresh Frankfurter fetch
+and an updated row, with no code change needed. This is documented here as
+the de facto manual-refresh path, NOT built out further (e.g. into a
+dedicated "Refresh" button) — a proper refresh-on-view or scheduled-refresh
+mechanism remains the recorded follow-up above, out of this task's scope.
+
+`market_data_providers` gains a FOURTH seeded row (`id`/`code` =
+`frankfurter`, migration `0055`, mirroring the 0037/0044 idempotent-seed
+technique) — required because `fx_rate_observations.provider_id` is a hard
+FK. Its `status` column doubles as this provider's only runtime
+enable/disable lever (`app/frankfurter-fx-service.ts`'s
+`frankfurterProviderEnabled`), since Frankfurter needs no credential/env
+config the way Yahoo/Sharesight do.
+
+### Change column: left honestly unavailable, not extended (explicit scope decision)
+
+`docs/DATA_MODEL.md`'s WLT-001 entry already documents, after three review
+rounds, that `FxObservation` carries no previous-rate field anywhere in
+this codebase's domain contracts, so a currency-pair row's Day-change
+column is ALWAYS the honest em-dash state — "documented, not a gap to
+silently fill later with a derived prior-date lookup." Frankfurter's
+historical endpoint (verified working, above) COULD supply a real
+previous-business-day rate cheaply (one extra request per pair), but wiring
+it in would mean extending the SHARED `FxObservation` contract and
+`fx_rate_observations` read/select path used by every FX source in this
+codebase (Yahoo included), not something scoped to Frankfurter alone — a
+reversal of a deliberate, three-times-reviewed WLT-001 architecture
+decision. That is a materially larger, cross-cutting change than "add one
+new provider," so this task leaves the Change column exactly as WLT-001
+left it (honest em-dash for every currency-pair row, Frankfurter-sourced or
+not) and reports the possibility as a follow-up requiring its own explicit
+owner/architecture decision, rather than silently reopening a settled
+question. This is the task's own permitted fallback ("if not cheaply
+available, show the rate with change honestly unavailable rather than
+fabricated") read as: cheaply available within a NEW, wider contract change,
+not within today's.
+
+### Failure handling
+
+Any Frankfurter failure (network error, timeout, 4xx/5xx, malformed body,
+unsupported currency code) degrades exactly like a watch-only security with
+no verified mapping: the add still succeeds, the row stays honestly
+`unavailable` (never a fabricated `0`/stale-silently value — AGENTS.md), and
+nothing blocks or surfaces as an error to the owner. A disabled
+`frankfurter` provider row, or the no-Worker-runtime fallback
+`resolveFrankfurterFxClient()` returns under `node --test`
+(`app/frankfurter-fx-service.ts`, mirroring `resolveConfiguredProvider`'s
+identical `cloudflare:workers` probe), is the same silent no-op — this is
+also what keeps every existing/new test hermetic with no real network call
+unless a test explicitly injects a fake client.

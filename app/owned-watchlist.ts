@@ -197,10 +197,20 @@ function mapFxObservation(row: Record<string, unknown>): FxObservation {
   return {
     kind: "fx",
     providerId: String(row.provider_id),
-    providerRevisionId:
-      row.provider_revision_id === null
-        ? null
-        : String(row.provider_revision_id),
+    // MKT-021 review (B1, BLOCKING): `fx_rate_observations` HAS NEITHER a
+    // `provider_revision_id` NOR a `delayed_minutes` column (see
+    // `docs/DATA_MODEL.md`'s `fx_rate_observations` entry) -- `row.x` for
+    // either is always `undefined`, never `null`, so the pre-existing
+    // `row.x === null ? null : ...` checks below silently fell through to
+    // `String(undefined)` / `Number(undefined)` ("undefined"/`NaN`) for
+    // EVERY fx row, not just Frankfurter's (reviewer-reproduced: rendered
+    // to assistive tech as "NaN minute delay" / provider revision
+    // "undefined" via `watchlistExplanation` -> `portfolio-shell.tsx`).
+    // Hard-nulled rather than switched to a `== null` check, since these
+    // fields are not merely sometimes-absent here -- the column itself
+    // does not exist, so `null` is the only honest value this mapper can
+    // ever produce for them.
+    providerRevisionId: null,
     scope:
       row.access_scope === "user"
         ? { kind: "user", userId: String(row.scope_user_id) }
@@ -212,8 +222,7 @@ function mapFxObservation(row: Record<string, unknown>): FxObservation {
     observedAt: String(row.observed_at),
     marketDate: String(row.market_date),
     quality: String(row.quality) as FxObservation["quality"],
-    delayedMinutes:
-      row.delayed_minutes === null ? null : Number(row.delayed_minutes),
+    delayedMinutes: null,
     ingestedAt: String(row.ingested_at),
     payloadSha256:
       row.payload_sha256 === null ? null : String(row.payload_sha256),

@@ -29,12 +29,19 @@ import {
   type SqlClient,
 } from "../db/repositories/index.ts";
 import { evaluateSecurityIdentityCandidates } from "../domain/securities/verify-identity.ts";
-import type { MarketDataProvider } from "../domain/market-data/index.ts";
+import type {
+  FrankfurterFxClient,
+  MarketDataProvider,
+} from "../domain/market-data/index.ts";
 import {
   PROVIDER_ID,
   providerFailureMessage,
   resolveConfiguredProvider,
 } from "./security-verification-service.ts";
+import {
+  frankfurterProviderEnabled,
+  resolveFrankfurterFxClient,
+} from "./frankfurter-fx-service.ts";
 
 // WLT-001 review (B2a, BLOCKING): a watch-only security has no portfolio
 // membership, so it is invisible to every EXISTING price-writing path in
@@ -142,6 +149,78 @@ async function primeWatchlistSecurityPrice(
     // Best-effort -- see the doc comment above. A freshly-added entry that
     // fails to prime here is never blocked from being added; it simply
     // stays honestly `unavailable` until the next successful refresh.
+  }
+}
+
+// MKT-021: currency-pair sibling of `primeWatchlistSecurityPrice` above --
+// the SAME best-effort, ONE-request, never-blocks-the-add shape, writing to
+// `fx_rate_observations` via the Frankfurter FX client
+// (`app/frankfurter-fx-service.ts`) rather than the durable
+// `market_data_refresh_jobs` queue (`domain/market-data/ingestion.ts`),
+// which is driven by portfolio-holding FX needs and has no enqueue path for
+// a watch-only currency-pair entry at all -- extending that queue was
+// judged out of MKT-021's scope (see this task's Worker report). A
+// disabled/missing `frankfurter` provider row, or the no-Worker-runtime
+// `resolveFrankfurterFxClient()` fallback under `node --test`, degrades
+// silently here exactly like an un-mapped watch-only security does above:
+// the entry is still added, honestly `unavailable` until this prime (or a
+// future refresh) succeeds.
+//
+// Unlike `primeWatchlistSecurityPrice`, no `WHERE excluded.observed_at >
+// ...` convergence guard is needed: `observed_at` is derived
+// DETERMINISTICALLY from the reference date alone
+// (`domain/market-data/frankfurter.ts`), so there is only ever ONE possible
+// `observed_at` for a given calendar day -- a same-day re-prime always
+// targets the exact same row via the table's pre-existing general unique
+// index (`provider_id, scope_key, base_currency_code, quote_currency_code,
+// interval, observed_at` -- review fold #3: corrected to match the actual
+// `fx_rate_observations` UNIQUE constraint's real column order,
+// `docs/DATA_MODEL.md`), never a second competing row the way
+// Yahoo/Sharesight's several intraday captures per day can produce.
+async function primeWatchlistCurrencyPairRate(
+  client: SqlClient,
+  fxClient: FrankfurterFxClient,
+  baseCurrencyCode: string,
+  quoteCurrencyCode: string,
+): Promise<void> {
+  try {
+    const result = await fxClient.getLatestRate({
+      baseCurrencyCode,
+      quoteCurrencyCode,
+    });
+    if (!result.ok) return;
+    const observation = result.value;
+    await client.run(
+      `INSERT INTO fx_rate_observations (
+         id, provider_id, access_scope, scope_user_id, scope_key,
+         base_currency_code, quote_currency_code, rate_decimal, interval,
+         observed_at, market_date, quality, ingested_at, payload_sha256
+       ) VALUES (?, ?, 'deployment', NULL, 'deployment', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (
+         provider_id, scope_key, base_currency_code, quote_currency_code,
+         interval, observed_at
+       ) DO UPDATE SET
+         rate_decimal = excluded.rate_decimal,
+         market_date = excluded.market_date,
+         quality = excluded.quality,
+         ingested_at = excluded.ingested_at,
+         payload_sha256 = excluded.payload_sha256`,
+      [
+        randomUUID(),
+        observation.providerId,
+        observation.baseCurrencyCode,
+        observation.quoteCurrencyCode,
+        observation.rateDecimal,
+        observation.interval,
+        observation.observedAt,
+        observation.marketDate,
+        observation.quality,
+        observation.ingestedAt,
+        observation.payloadSha256,
+      ],
+    );
+  } catch {
+    // Best-effort -- see the doc comment above.
   }
 }
 
@@ -367,9 +446,18 @@ export async function addWatchlistSecurityAction(
 // no provider search involved.
 // ---------------------------------------------------------------------------
 
+// MKT-021: mirrors `WatchlistSearchActionOptions.provider` (see that type's
+// own comment) -- lets tests inject a fake `FrankfurterFxClient` directly,
+// since `resolveFrankfurterFxClient()` always falls back to the disabled
+// stub under `node --test` (no `cloudflare:workers` runtime).
+export type WatchlistCurrencyPairActionOptions = {
+  fxClient?: FrankfurterFxClient;
+};
+
 export async function addWatchlistCurrencyPairWithContext(
   context: WatchlistActionContext,
   value: unknown,
+  options: WatchlistCurrencyPairActionOptions = {},
 ): Promise<WatchlistEntryActionResult> {
   const input = record(value);
   const baseCurrencyCode =
@@ -419,6 +507,28 @@ export async function addWatchlistCurrencyPairWithContext(
           ? "Unknown currency code."
           : "The currency pair could not be added to the watchlist.",
     };
+  }
+  // MKT-021: best-effort prime, never affects this result -- mirrors the
+  // security path's identical B2a call below. Review fold (cheap #1): the
+  // GATE check itself (`frankfurterProviderEnabled`, a SQL read) must sit
+  // INSIDE the same best-effort guard as the prime it gates -- the entry
+  // row above is already committed by this point, so a transient D1
+  // failure on this read must degrade silently too, never turn an
+  // already-successful add into an unhandled 5xx the way an un-caught
+  // throw here would.
+  try {
+    if (await frankfurterProviderEnabled(context.client)) {
+      const fxClient = options.fxClient ?? (await resolveFrankfurterFxClient());
+      await primeWatchlistCurrencyPairRate(
+        context.client,
+        fxClient,
+        baseCurrencyCode,
+        quoteCurrencyCode,
+      );
+    }
+  } catch {
+    // Best-effort -- see the comment above and
+    // `primeWatchlistCurrencyPairRate`'s own doc comment.
   }
   return { ok: true, entry: result.entry };
 }

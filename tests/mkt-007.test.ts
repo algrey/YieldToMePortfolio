@@ -79,17 +79,18 @@ test("full-chain migration seeds the yahoo-compatible provider row as enabled re
   assert.equal(row!.rate_limit_json, "{}");
   // BRK-012B (0044_seed_sharesight_provider.sql) adds a second seeded row
   // (id `sharesight`) via the same idempotent, hand-authored seed technique,
-  // and MKT-008 (0046_mkt_008_price_uploads.sql) adds a third (id
+  // MKT-008 (0046_mkt_008_price_uploads.sql) adds a third (id
   // `owner-import`, the "Historical Data" section's generic owner-upload
-  // provider) the same way -- the full migration chain now seeds 3
-  // providers, not 1.
+  // provider) the same way, and MKT-021 (0055_mkt_021_seed_frankfurter_provider.sql)
+  // adds a fourth (id `frankfurter`, the ECB-reference-rate FX feed) -- the
+  // full migration chain now seeds 4 providers, not 1.
   assert.equal(
     (
       database
         .prepare("SELECT COUNT(*) AS n FROM market_data_providers")
         .get() as { n: number }
     ).n,
-    3,
+    4,
   );
 });
 
@@ -103,17 +104,17 @@ test("re-applying the seeding migration is idempotent (ON CONFLICT DO NOTHING, n
   );
   database.exec(await readMigrationFile("0037_steady_signal.sql"));
 
-  // BRK-012B/MKT-008: the fully-migrated fixture also carries the
-  // sharesight (0044) and owner-import (0046) seed rows -- re-applying
-  // 0037's yahoo-compatible seed must leave those untouched too, so the
-  // count stays 3, not reset to 1.
+  // BRK-012B/MKT-008/MKT-021: the fully-migrated fixture also carries the
+  // sharesight (0044), owner-import (0046), and frankfurter (0055) seed
+  // rows -- re-applying 0037's yahoo-compatible seed must leave those
+  // untouched too, so the count stays 4, not reset to 1.
   assert.equal(
     (
       database
         .prepare("SELECT COUNT(*) AS n FROM market_data_providers")
         .get() as { n: number }
     ).n,
-    3,
+    4,
   );
   assert.equal(
     (
