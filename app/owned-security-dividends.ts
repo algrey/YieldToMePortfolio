@@ -88,8 +88,10 @@ import {
 import { loadOwnedDividendHistory } from "./owned-dividend-history.ts";
 import {
   computeLifetimeDividendTotals,
+  deriveHistoryRowDisplay,
   resolveEventOverrideForLineage,
   type DerivedDividendRow,
+  type DerivedHistoryRowDisplay,
   type EventOverrideFact,
   type EventOverrideLineageNode,
   type LifetimeDividendTotals,
@@ -156,6 +158,21 @@ export type OwnedSecurityDividendDetail = {
   currencyCode: string;
   today: string;
   rows: DerivedDividendRow[];
+  /** BUG-005 (owner-reported: the Dividends tab showed "Shares at ex-date"/
+   * "Per share" as "Unknown" for a BRK-005 totals-mode row even though the
+   * SAME derivation already powers the 12-month forecast): each visible
+   * row's display-ready shares/per-share figures, keyed by `row.id` --
+   * either the row's own recorded values, or `deriveHistoryRowDisplay`'s
+   * ledger-derived fallback for a totals-mode row. Kept SEPARATE from
+   * `rows` (never written back onto `DerivedDividendRow.sharesDecimal`/
+   * `dividendPerShareDecimal`) because those fields' null-ness is
+   * load-bearing elsewhere -- `dividend-history-prefill.ts`'s DIV-007
+   * totals-mode detection and `shouldOfferFrankingOverride` both key off
+   * `row.dividendPerShareDecimal === null` to recognise a totals-mode row;
+   * silently back-filling a derived value onto the row itself would break
+   * that detection and make the edit dialog pre-fill a fabricated
+   * per-share amount as though it were a recorded fact. */
+  rowDisplayById: Record<string, DerivedHistoryRowDisplay>;
   /** Count of post-exit zero-share auto rows suppressed from `rows` (see the
    * module header's Orchestrator ruling) -- lets the tab distinguish "no
    * dividend history at all" from "every dividend event for this security
@@ -332,6 +349,19 @@ export async function loadOwnedSecurityDividendDetail(
       ? security.lifetimeTotals
       : computeLifetimeDividendTotals(visibleRows, security.currencyCode);
 
+  // BUG-005: derive each visible row's display shares/per-share ONCE here,
+  // reusing the IDENTICAL division `security.forecast`'s history-TTM
+  // fallback already relies on (`deriveHistoryRowDisplay` ->
+  // `deriveHistoryRowDps`, both `domain/dividends/history-row-derivation.ts`)
+  // -- never a second/parallel formula.
+  const rowDisplayById: Record<string, DerivedHistoryRowDisplay> = {};
+  for (const row of visibleRows) {
+    rowDisplayById[row.id] = deriveHistoryRowDisplay(
+      row,
+      security.transactions,
+    );
+  }
+
   return {
     portfolioSecurityId: security.portfolioSecurityId,
     securityId: security.securityId,
@@ -339,6 +369,7 @@ export async function loadOwnedSecurityDividendDetail(
     currencyCode: security.currencyCode,
     today: full.today,
     rows: visibleRows,
+    rowDisplayById,
     filteredArtifactCount: security.rows.length - visibleRows.length,
     lifetimeTotals,
     overridesByEventId,

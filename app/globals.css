@@ -5141,6 +5141,15 @@ dd {
   font-size: 0.72rem;
 }
 
+/* BUG-005: marks a "Shares at ex-date"/"Per share" figure that was DERIVED
+   at the row's payment date (a BRK-005 totals-mode row, no recorded share
+   count/per-share amount) rather than recorded -- text, not colour, same
+   muted micro-label treatment as `.dividend-provider-note`. */
+.dividend-derived-note {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
 /* DIV-007: distinguishes a derived $0 franking figure (the imported
    Sharesight fact omitted its franking field entirely) from a genuine
    Sharesight-supplied explicit zero -- text, not colour, same muted

@@ -78,6 +78,14 @@ export type OwnedDividendSecurityHistory = {
   symbol: string;
   currencyCode: string;
   rows: DerivedDividendRow[];
+  /** BUG-005: this security's own ledger transactions (posted/reversed
+   * buy/sell/split quantity facts), already batched/grouped above -- exposed
+   * so a consumer (`app/owned-security-dividends.ts`, the per-security
+   * Dividends tab) can derive a BRK-005 totals-mode row's shares/per-share
+   * figures with the IDENTICAL `deriveHistoryRowDps` division this module's
+   * own `forecast` (history-TTM fallback) already uses, rather than
+   * re-fetching/re-deriving them separately. */
+  transactions: LedgerQuantityFact[];
   lifetimeTotals: LifetimeDividendTotals;
   /** Empty (never fabricated) when `fyTotalsStatus !== "ok"`. */
   fyTotals: FyDividendTotal[];
@@ -423,6 +431,7 @@ export async function loadOwnedDividendHistory(
         symbol: identity.symbol,
         currencyCode: identity.currencyCode,
         rows,
+        transactions,
         lifetimeTotals,
         fyTotals,
         fyTotalsStatus,

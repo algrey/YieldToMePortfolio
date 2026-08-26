@@ -98,6 +98,13 @@ import {
 } from "./shares-held.ts";
 import { computeDefaultFrankingCredit } from "./franking.ts";
 import type { DerivedDividendRow } from "./history.ts";
+// BUG-005: extracted so the Dividends tab's own display can reuse the
+// IDENTICAL per-row division rather than a second copy -- see that module's
+// header for the full rationale.
+import {
+  deriveHistoryRowDps,
+  deriveHistoryRowFrankingPerShare,
+} from "./history-row-derivation.ts";
 
 const FORECAST_WINDOW_DAYS = 365;
 const PRORATION_SCALE = 24;
@@ -115,7 +122,6 @@ const ZERO = fromInteger(0n);
 // looking trailing-history window -- conflating the two names would make a
 // future change to either read as touching both.
 const TRAILING_WINDOW_DAYS = 365;
-const HISTORY_DPS_SCALE = 24;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 function addDays(value: string, days: number): string {
@@ -151,159 +157,10 @@ function sumDecimals(values: readonly string[]): string {
   );
 }
 
-/** Discriminated per-row DPS derivation result -- `ok: false` always names
- * WHY the rate is indeterminate, distinguishing a genuinely unknown amount
- * from a PROVABLE ledger gap (see `deriveHistoryRowDps`'s doc comment)
- * rather than collapsing both into one opaque `null`. */
-export type HistoryRowDpsResult =
-  | { ok: true; dpsDecimal: string }
-  | {
-      ok: false;
-      /** `"unknown_amount"`: the row's cash figure or payment date is genuinely absent -- nothing to divide. `"history_gap"`: a real dividend was received (known cash, known payment date) but the ledger's OWN shares-held-at-payment-date resolves to zero or negative -- the ledger itself proves a gap (e.g. an early buy never imported), never silently treated the same as a plain unknown amount. */
-      reason: "unknown_amount" | "history_gap";
-    };
-
-/**
- * DIV-006/DIV-008: per-row DPS (dividend-per-share) derivation for the
- * history-TTM fallback. A per-share-mode row (the overwhelming majority --
- * owner-typed manual entries, receipts, per-share CSV imports, provider
- * auto-derived rows) already carries its own `dividendPerShareDecimal`
- * directly -- the row's OWN `sharesDecimal` is irrelevant to that figure (it
- * is a rate, not a total) and is deliberately never consulted here.
- *
- * A BRK-005 totals-mode row (`dividendPerShareDecimal === null` but
- * `cashDecimal !== null` -- a Sharesight payout reporting only a total cash
- * amount, no share count) has no stored rate at all; this derives one by
- * dividing that total by the shares HELD ON THE ROW'S OWN `paymentDate`
- * (`deriveSharesHeldAtDate`), never by today's current share count -- a
- * position bought/sold between that historical payment and today would
- * otherwise silently mis-scale the derived rate.
- *
- * DIV-008 (owner ruling, 2026-08-23, replacing DIV-006's original
- * `portfolios.history_complete_from` completeness gate -- see
- * `docs/CALCULATIONS.md` section 11): this division is trusted whenever the
- * ledger-derived
- * shares-held-at-payment-date resolves POSITIVE -- the ledger AS IT STANDS
- * is the evidence, no separate owner-declared boundary required. A
- * zero-or-negative resolved share count despite a real received dividend
- * (known cash, known payment date) is a PROVABLE gap -- the ledger itself
- * proves something is missing (e.g. an early buy the owner never imported)
- * -- and is reported as `"history_gap"`, distinguishable from a genuinely
- * unknown amount/payment date (`"unknown_amount"`). Never silently dropped,
- * never a fabricated "0".
- *
- * ACCEPTED RISK (owner-informed, stated plainly): a missing EARLY buy that
- * still leaves the ledger-derived share count POSITIVE at the payment date
- * (e.g. the owner held MORE shares than the ledger shows, but still some)
- * yields an OVERSTATED DPS this function cannot detect or flag -- there is
- * no ledger evidence of a gap in that case. The owner explicitly chose this
- * visible-and-crosscheckable figure over the prior design's permanently
- * gated $0/missing state: "A user might want to see an incomplete history
- * and it would be easier to cross ref and debug an incorrect value than a
- * $0 or missing value."
- */
-function deriveHistoryRowDps(
-  row: DerivedDividendRow,
-  transactions: readonly LedgerQuantityFact[],
-): HistoryRowDpsResult {
-  if (row.dividendPerShareDecimal !== null) {
-    return { ok: true, dpsDecimal: row.dividendPerShareDecimal };
-  }
-  if (row.cashDecimal === null) {
-    return { ok: false, reason: "unknown_amount" }; // genuinely unknown amount
-  }
-  const paymentDate = row.paymentDate;
-  if (paymentDate === null) return { ok: false, reason: "unknown_amount" };
-  const sharesAtPayment = deriveSharesHeldAtDate(transactions, paymentDate);
-  // A zero/negative ledger-derived share count at the payment date, despite
-  // a real received dividend, PROVES a gap in the ledger -- distinguishable
-  // from the generic "unknown_amount" reason above (see this function's doc
-  // comment).
-  if (compareDecimal(parseDecimal(sharesAtPayment), ZERO) <= 0) {
-    return { ok: false, reason: "history_gap" };
-  }
-  return {
-    ok: true,
-    dpsDecimal: formatDecimalExact(
-      roundDecimal(
-        divideDecimal(
-          parseDecimal(row.cashDecimal),
-          parseDecimal(sharesAtPayment),
-        ),
-        HISTORY_DPS_SCALE,
-      ),
-    ),
-  };
-}
-
-/**
- * BUG-004: per-row FRANKING-per-share derivation for the history-TTM
- * fallback, mirroring `deriveHistoryRowDps`'s exact precedence so franking
- * is carried forward by the SAME evidence discipline as cash (owner-reported
- * "estimated franking credits show $0" despite ~$9,082 of real trailing-12-
- * month franking evidence -- root cause: the uncovered-tail estimate only
- * ever consulted the security's OWNER-SET franking-percent ASSUMPTION,
- * `dividend_security_assumptions.franking_percent_decimal`, which this
- * account never set, and never consulted the REAL per-row franking evidence
- * already resolved onto every history row, `DerivedDividendRow.frankingTotalDecimal`
- * -- see `computeSecurityDividendForecast`'s `uncoveredFrankingKnownDecimal`).
- *
- * A per-share-mode row's OWN resolved franking rate
- * (`row.franking.perShareDecimal`, already computed at row-construction time
- * from real per-dividend evidence -- an imported/receipt/manual franking
- * fact, or the security's own default-percent assumption grossed up against
- * THIS row's own per-share amount) is used directly, exactly like
- * `deriveHistoryRowDps` prefers `row.dividendPerShareDecimal` over
- * re-deriving one. `row.franking.source === "unknown"` (no override, no
- * default assumption, or the per-share dividend amount itself was unknown)
- * means this row's franking is genuinely unresolved -- `"unknown_amount"`,
- * never a fabricated "0".
- *
- * A BRK-005 totals-mode row (`row.dividendPerShareDecimal === null` -- a
- * Sharesight payout reporting only totals, no share count) never resolves a
- * native `franking.perShareDecimal` (`resolveFrankingPerShare` requires a
- * known per-share dividend amount to gross up); its franking is instead a
- * TOTAL dollar figure (`row.frankingTotalDecimal`, the record's own imported
- * `total_franking_decimal` when present), divided by the ledger's
- * shares-held-at-payment-date -- the identical DIV-008 fallback
- * `deriveHistoryRowDps` uses for cash, never today's current share count (a
- * position bought/sold since that payment would otherwise mis-scale the
- * rate). A zero/negative resolved share count despite real recorded
- * franking is the same PROVABLE ledger gap `deriveHistoryRowDps` names
- * `"history_gap"`.
- */
-function deriveHistoryRowFrankingPerShare(
-  row: DerivedDividendRow,
-  transactions: readonly LedgerQuantityFact[],
-): HistoryRowDpsResult {
-  if (row.dividendPerShareDecimal !== null) {
-    if (row.franking.perShareDecimal === null) {
-      return { ok: false, reason: "unknown_amount" };
-    }
-    return { ok: true, dpsDecimal: row.franking.perShareDecimal };
-  }
-  if (row.frankingTotalDecimal === null) {
-    return { ok: false, reason: "unknown_amount" };
-  }
-  const paymentDate = row.paymentDate;
-  if (paymentDate === null) return { ok: false, reason: "unknown_amount" };
-  const sharesAtPayment = deriveSharesHeldAtDate(transactions, paymentDate);
-  if (compareDecimal(parseDecimal(sharesAtPayment), ZERO) <= 0) {
-    return { ok: false, reason: "history_gap" };
-  }
-  return {
-    ok: true,
-    dpsDecimal: formatDecimalExact(
-      roundDecimal(
-        divideDecimal(
-          parseDecimal(row.frankingTotalDecimal),
-          parseDecimal(sharesAtPayment),
-        ),
-        HISTORY_DPS_SCALE,
-      ),
-    ),
-  };
-}
+// BUG-005: `HistoryRowDpsResult`, `deriveHistoryRowDps`, and
+// `deriveHistoryRowFrankingPerShare` moved to `./history-row-derivation.ts`
+// (imported above) so the Dividends tab's own per-row display can reuse the
+// IDENTICAL division this fallback relies on -- see that module's header.
 
 export type HistoryTtmDividendResult =
   | {

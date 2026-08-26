@@ -15,6 +15,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import type {
   DerivedDividendRow,
+  DerivedHistoryRowDisplay,
   LifetimeDividendTotals,
 } from "../../domain/dividends/index.ts";
 import {
@@ -62,6 +63,7 @@ export function SecurityDividendsTab({
   baseCurrencyCode,
   today,
   rows,
+  rowDisplayById = {},
   filteredArtifactCount,
   lifetimeTotals,
   overridesByEventId,
@@ -80,6 +82,17 @@ export function SecurityDividendsTab({
   baseCurrencyCode: string;
   today: string;
   rows: DerivedDividendRow[];
+  /** BUG-005: each visible row's display-ready shares/per-share figures,
+   * keyed by `row.id` -- see `OwnedSecurityDividendDetail.rowDisplayById`'s
+   * doc comment (`app/owned-security-dividends.ts`) for why this is kept
+   * separate from `row.sharesDecimal`/`row.dividendPerShareDecimal` rather
+   * than written back onto the row. Optional (defaults to `{}`, so a row
+   * with no entry falls back to its own recorded -- possibly `null` --
+   * fields, the pre-BUG-005 behaviour) purely so fixtures/tests exercising
+   * unrelated behaviour need not supply it; the real page loader
+   * (`app/portfolio/.../dividends/page.tsx`) always provides a complete
+   * map keyed by every row in `rows`. */
+  rowDisplayById?: Record<string, DerivedHistoryRowDisplay>;
   /** Count of post-exit zero-share auto rows already suppressed from `rows`
    * -- distinguishes "no dividend history at all" from "every dividend for
    * this security was a post-exit artifact" for the empty-state message
@@ -562,6 +575,23 @@ export function SecurityDividendsTab({
                   row.fxRateToPortfolioDecimal !== null
                     ? `${row.originalCurrencyCode} @ ${formatFxRate(row.fxRateToPortfolioDecimal)}${row.fxRateSource ? ` (${row.fxRateSource})` : ""}`
                     : null;
+                // BUG-005: the row's own recorded shares/per-share when
+                // present, otherwise `deriveHistoryRowDisplay`'s
+                // ledger-derived fallback for a BRK-005 totals-mode row --
+                // never `row.sharesDecimal`/`row.dividendPerShareDecimal`
+                // directly, which stay `null` on a totals-mode row by
+                // design (see `rowDisplayById`'s doc comment). Falls back to
+                // the row's own (null) fields only if a display entry is
+                // somehow missing -- defensive, should not happen.
+                const display: DerivedHistoryRowDisplay = rowDisplayById[
+                  row.id
+                ] ?? {
+                  sharesDecimal: row.sharesDecimal,
+                  sharesDerivedAtPayment: false,
+                  dividendPerShareDecimal: row.dividendPerShareDecimal,
+                  dividendPerShareDerived: false,
+                  unresolvedReason: null,
+                };
                 return (
                   <tr
                     key={row.id}
@@ -592,18 +622,34 @@ export function SecurityDividendsTab({
                       )}
                     </th>
                     <td className="numeric">
-                      {row.sharesDecimal === null
+                      {display.sharesDecimal === null
                         ? "Unknown"
-                        : formatShares(row.sharesDecimal)}
+                        : formatShares(display.sharesDecimal)}
+                      {display.sharesDerivedAtPayment ? (
+                        <>
+                          <br />
+                          <span className="dividend-derived-note">
+                            derived at payment date
+                          </span>
+                        </>
+                      ) : null}
                     </td>
                     <td className="numeric">
-                      {row.dividendPerShareDecimal === null
+                      {display.dividendPerShareDecimal === null
                         ? "Unknown"
                         : formatIncomeMoney(
                             row.currencyCode,
                             baseCurrencyCode,
-                            row.dividendPerShareDecimal,
+                            display.dividendPerShareDecimal,
                           )}
+                      {display.dividendPerShareDerived ? (
+                        <>
+                          <br />
+                          <span className="dividend-derived-note">
+                            derived: total ÷ shares at payment date
+                          </span>
+                        </>
+                      ) : null}
                       {providerDiffers ? (
                         <>
                           <br />

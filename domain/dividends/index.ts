@@ -46,3 +46,13 @@ export {
   type HistoryTtmDividendResult,
   type SecurityDividendForecast,
 } from "./forecast.ts";
+// BUG-005: shared per-row shares/per-share derivation -- the same functions
+// `forecast.ts`'s history-TTM fallback uses, now also consumed by the
+// Dividends tab's own display (`app/owned-security-dividends.ts`).
+export {
+  deriveHistoryRowDisplay,
+  deriveHistoryRowDps,
+  deriveHistoryRowFrankingPerShare,
+  type DerivedHistoryRowDisplay,
+  type HistoryRowDpsResult,
+} from "./history-row-derivation.ts";
