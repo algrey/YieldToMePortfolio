@@ -491,6 +491,15 @@ dd {
   margin-inline: auto;
 }
 
+/* UI-043 (owner-reported): the Overview screen's content sat flush against
+   the viewport edge, unlike the holding/Income screens' 16px gutter
+   (`.income-screen`). Scoped to Overview only -- the other primary tabs are
+   full-bleed row/table layouts whose own children carry their padding and
+   whose dividers are meant to span the full width. */
+.screen-overview {
+  padding-inline: 16px;
+}
+
 .eyebrow {
   margin-bottom: 6px;
   color: var(--green);
