@@ -1038,6 +1038,38 @@ export async function commitPortfolioBundleImport(
     }
   }
 
+  // EXP-002 review (B2 ruling): an ARCHIVED source portfolio is restored
+  // archived too -- LAST, after every other write, so the full ledger/
+  // dividend/assumption/scenario replay above runs through the exact same
+  // write paths an active restore uses (nothing in this codebase's
+  // repositories checks portfolio status before writing). `resolveAndLink`/
+  // `ledger.post`/etc. never touch `portfolios.version`, so a fresh read
+  // immediately before archiving is the current value regardless of how
+  // many rows were replayed above.
+  if (bundle.portfolio.status === "archived") {
+    const currentPortfolio = await ctx.client.get<{ version: number }>(
+      "SELECT version FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1",
+      [portfolioId, ctx.userId],
+    );
+    if (!currentPortfolio) {
+      return commitFailure(
+        ctx,
+        batchId,
+        "The restored portfolio could not be found to archive it.",
+      );
+    }
+    const archived = await portfolios.archive(ctx.userId, portfolioId, {
+      expectedVersion: currentPortfolio.version,
+    });
+    if (!archived.ok) {
+      return commitFailure(
+        ctx,
+        batchId,
+        "The restored portfolio could not be archived to match its exported status.",
+      );
+    }
+  }
+
   await ctx.client.run(
     `UPDATE import_batches SET status = 'committed', committed_at = ?, updated_at = ?,
       total_rows = ?, transaction_rows = ?

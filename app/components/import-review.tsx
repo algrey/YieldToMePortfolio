@@ -13,6 +13,7 @@ import {
 import { SharesightSyncPanel } from "./sharesight-sync-panel.tsx";
 import { HistoricalDataPanel } from "./historical-data-panel.tsx";
 import { BundlePanel } from "./portfolio-bundle-panel.tsx";
+import { SystemBackupPanel } from "./system-backup-panel.tsx";
 import {
   mergeSharesightLinks,
   type SharesightLinkStatus,
@@ -1691,6 +1692,8 @@ export function ImportReview({
       <HistoricalDataPanel portfolioId={targetPortfolioId} />
 
       <BundlePanel portfolioId={targetPortfolioId} />
+
+      <SystemBackupPanel />
 
       {message ? (
         <p className="action-feedback" role="alert">

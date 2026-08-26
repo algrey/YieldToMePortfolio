@@ -1,10 +1,13 @@
-# Portfolio bundle export/import format (EXP-001)
+# Portfolio bundle and full-system backup formats (EXP-001, EXP-002)
 
-Normative for the single-portfolio export/import bundle delivered by
-`TASKS.md`'s `EXP-001`. A new document rather than a `CSV_IMPORT_SPEC.md`
-section because the bundle is JSON, not CSV, and covers many tables at
-once rather than one row shape — `CSV_IMPORT_SPEC.md` gets a short pointer
-to this file instead of a duplicated section.
+Normative for two related JSON backup/restore formats: the single-portfolio
+export/import bundle delivered by `TASKS.md`'s `EXP-001`, and the
+full-system backup delivered by `EXP-002` (which NESTS the EXP-001 bundle
+format unchanged rather than reinventing it — see "Full-system backup
+(EXP-002)" below). A new document rather than a `CSV_IMPORT_SPEC.md`
+section because both are JSON, not CSV, and cover many tables at once
+rather than one row shape — `CSV_IMPORT_SPEC.md` gets a short pointer to
+this file instead of a duplicated section.
 
 ## Acceptance sentence (owner's own words)
 
@@ -52,12 +55,16 @@ financial_year_start_month` (`db/schema.ts`) is explicitly "a per-user
    import (restoring it would silently rewrite the importing owner's
    account-wide FY convention for every other portfolio too).
 
-## Owned-table classification
+## Owned-table classification (EXP-001, single-portfolio bundle)
 
 Every table in `db/repositories/account-lifecycle.ts`'s `OWNED_TABLES`
 checklist, classified IN the bundle / EXCLUDED-derived (regenerates) /
 EXCLUDED-price (covered by the price-history backup) / EXCLUDED-other
-(with reason).
+(with reason). **This table is EXP-001's own single-portfolio classification
+only** — the two rows marked "known gap" below (`dividend_receipts`,
+`manual_overrides`) are re-investigated for EXP-002's full-system scope in
+that section's own coverage table further down; see there for whether
+EXP-002 closes either gap.
 
 | Table                                                                                                                                                                                 | Classification             | Reason                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -108,7 +115,8 @@ application/json`), shape defined in `domain/exports/portfolio-bundle.ts`
     "name": "...", "code": "...", "baseCurrencyCode": "AUD",
     "timezone": "...", "accountingMethod": "fifo",
     "historyCompleteFrom": "YYYY-MM-DD" | null,
-    "financialYearStartMonthAtExport": 7   // informational only, see finding 4
+    "financialYearStartMonthAtExport": 7,  // informational only, see finding 4
+    "status": "active" | "archived"        // see changelog note below
   },
   "portfolioSettings": { "quoteStalenessPolicy": string | null },
   "securities": [ { "ref": "...", "sourceSymbol": "...", ... } ],
@@ -138,6 +146,13 @@ below).
 No secrets are exported: every field above is a financial/identity fact
 the owner already sees in the app; there is no credential, token, or
 provider-session material in this table set.
+
+**Changelog**: `portfolio.status` added (B2 ruling, 2026-08-27, part of
+EXP-002's review) — `schemaVersion` stayed `1` rather than bumping, since
+this format has never shipped to a real deployment (no external consumer to
+break). OPTIONAL on input for forward tolerance (a bundle without the field
+validates as `"active"`, the pre-B2 behaviour); ALWAYS present on a
+validated bundle's output.
 
 ## Restore (import)
 
@@ -313,3 +328,459 @@ commit is a no-op targeting the SAME portfolio, no duplicate created);
 base-currency-mismatch rejection; malformed/schema-version-mismatched
 bundle rejection at structural validation; an over-`MAX_BUNDLE_ENTITIES`
 bundle rejection.
+
+# Full-system backup (EXP-002)
+
+Owner directive (verbatim): "Then do a full system backup and restore
+export / import. Is should back up everything need to restore the system
+for ALL portfolios." Primary use case: migrating the owner's complete local
+D1 database onto a fresh production deployment. Unlike EXP-001's bundle
+(which pairs with the pre-existing price-history backup and is explicitly
+NOT sufficient alone), **this artifact must be sufficient alone** — one
+downloaded file, restorable into a genuinely empty deployment with no other
+input required.
+
+## Design: reuse, not reinvention
+
+`domain/exports/system-backup.ts` / `db/repositories/system-backup.ts` /
+`app/system-backup-service.ts` implement EXP-002 as an ORCHESTRATION layer
+over THREE pieces of already-shipped, unchanged machinery, never a second
+implementation of anything they already do:
+
+1. **Every portfolio** — one bundle per portfolio, in the artifact's
+   `portfolios` array, each validated with EXP-001's own
+   `validatePortfolioBundle` (`domain/exports/portfolio-bundle.ts`,
+   byte-identical schema) and committed with EXP-001's own
+   `commitPortfolioBundleImport` (`app/portfolio-bundle-service.ts`) —
+   unmodified. Every EXP-001 guarantee (chain replay order, idempotency-key
+   derivation, failed-batch retry, security re-resolution,
+   `portfolio_securities` display/status restoration, tombstone handling)
+   applies per nested portfolio exactly as it does for a standalone EXP-001
+   import.
+2. **Price history** — the artifact's `priceBackupCsv` field is the
+   pre-existing MKT-008 backup CSV TEXT verbatim
+   (`domain/market-data/price-backup-csv.ts`'s `formatPriceBackupCsv`
+   output), parsed with the unchanged `parsePriceBackupCsv` and committed
+   with the unchanged `confirmBackupPriceUpload`
+   (`app/price-upload-service.ts`) — the SAME function the standalone
+   "Price-history backup" import-page section calls. This is what the task
+   meant by "reuse the 64MiB backup ceiling rationale... do not invent new
+   resumability": price-history rows are never re-parsed or re-resolved by
+   a second implementation.
+3. **Account settings and watchlist** — genuinely NEW EXP-002 code
+   (`db/repositories/system-backup.ts`), since EXP-001 deliberately excluded
+   both as account-scoped, not portfolio-scoped (see the classification
+   table above).
+
+## Coverage table (extends EXP-001's classification above)
+
+Every `OWNED_TABLES` row EXP-001 marked `EXCLUDED-other` for being
+account-level (not portfolio-scoped) is re-classified here for the
+full-system artifact. Rows unmentioned below are unchanged from the
+EXP-001 table (still `EXCLUDED-derived`/`EXCLUDED-price`/`EXCLUDED-other`
+for the SAME reasons — regenerated data, or genuinely excluded — since
+EXP-002 nests EXP-001's bundle unchanged for every portfolio-scoped table).
+
+| Table                                                                  | Classification                              | Reason                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------------------------------------------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `user_settings`                                                        | **IN**                                      | Home currency, timezone, holding-currency-view preference, FY start month, price-source preference, daily-capture source/interval — the full account-configuration row, restored via one direct `UPDATE` (see "Restore order" below). Account-level, so this is EXP-002's job, not EXP-001's (finding 4 above still applies to the nested per-portfolio bundle's own informational `financialYearStartMonthAtExport` field).                                                                                                                                                                                                                                                                                                                                                              |
+| `watchlist_entries`                                                    | **IN**                                      | Both `kind`s: currency pairs restore unconditionally (identity-only, no security dependency); securities restore only when they resolve against the shared `securities` master AFTER portfolios have been restored (most commonly because one of THIS backup's own portfolios just re-created/matched that same security) — see "Watch-only security limitation" below for the genuine v1 gap.                                                                                                                                                                                                                                                                                                                                                                                            |
+| `price_observations`, `fx_rate_observations` (user-scoped-observation) | **IN (via price-history backup reuse)**     | `price_observations` rides the embedded `priceBackupCsv` section (point 2 above) — MKT-008's format does not currently export/restore `fx_rate_observations` (currency-pair quotes) at all; the owner's real backup has 0 such rows, so this is a genuine but currently-empty gap, flagged rather than silently assumed covered. A restored watchlist currency pair does NOT get its rate re-primed automatically (restore makes no live provider calls by design — see "No network calls" below); it shows `unavailable` until the existing WLT-001/MKT-021 refresh path runs (documented pre-existing gap, not new here).                                                                                                                                                               |
+| `dividend_receipts`                                                    | EXCLUDED-other (known gap, re-investigated) | Still 0 rows for the owner. Re-investigated for EXP-002: this table has NO live write path anywhere in the current codebase (confirmed again — `import-commit.ts`'s own header comment states dividend rows write `dividend_manual_records` exclusively) and no existing repository function builds a replay-safe INSERT for it. Building one from scratch, for a table with a genuinely dormant write path and zero real rows, is not "trivially includable" — it would be new, untested write machinery for a legacy table nothing currently populates. **Not closed in EXP-002 either** — same documented gap as EXP-001, carried forward honestly rather than silently dropped a second time.                                                                                         |
+| `manual_overrides`                                                     | EXCLUDED-other (known gap, re-investigated) | Still 0 rows for the owner. Re-investigated: this table is NOT cleanly portfolio- or account-scoped — `portfolio_id` and `security_id` are BOTH nullable, `type` spans four kinds (`price`, `fx_rate`, `security_mapping`, `transaction_fx`) each with a different `value_json` shape, and rows form their OWN supersession chain (`supersedes_override_id`) independent of every other chain this backup already replays. Correctly restoring it would need a THIRD, type-aware replay path (distinct from both the per-portfolio bundle's chain replay and the account-level watchlist/settings restore) — a materially new design surface, not a cheap fold-in for a 0-row table. **Not closed in EXP-002** — flagged to the Orchestrator as a real gap if this table ever gains rows. |
+
+Every other `OWNED_TABLES` entry keeps its EXP-001 classification
+unchanged: portfolio-scoped facts (`portfolios`, `portfolio_settings`,
+`portfolio_securities`, `transactions`, `dividend_manual_records` and its
+sibling override tables, `income_whatif_scenarios`) travel inside each
+nested portfolio bundle exactly as EXP-001 already exports/restores them;
+derived/regenerable data (`portfolio_daily_snapshots`,
+`calculation_runs`, `tax_lots`, `portfolio_value_history`, etc.) stays
+excluded (regenerates once the calculation engine and provider quote
+fetches run, per the acceptance sentence's own "ok if that occurs after a
+chron runs" allowance); operational/attribution bookkeeping
+(`import_batches`, `sharesight_sync_state`, `security_provider_mappings`,
+`audit_events`, account-lifecycle/export/purge control state) stays
+excluded for the same reasons EXP-001 gives. `users` (the internal account
+record itself) stays excluded — restore always targets an EXISTING
+authenticated account (see "Precondition" below), never creates one.
+
+Every table in `OWNED_TABLES` (37 entries) plus the 6 special-cased tables
+EXP-001's own table documents is now accounted for: **IN** (this bundle or
+the price-history backup), **EXCLUDED-derived** (regenerates), or
+**EXCLUDED-other** (with reason, both gaps carried forward honestly).
+No unclassified table remains.
+
+## Artifact shape (schema version 1)
+
+One JSON file (browser download, `content-type: application/json`), shape
+defined in `domain/exports/system-backup.ts` (`SystemBackupV1`):
+
+```
+{
+  "schemaVersion": 1,
+  "exportedAt": "<server-stamped request-now, ISO-8601>",
+  "account": {
+    "homeCurrencyCode": "AUD", "timezone": "...",
+    "defaultHoldingCurrencyView": "native" | "home",
+    "financialYearStartMonth": 7,
+    "priceSourcePreference": "sharesight_delayed" | "yahoo_anonymous" | "yahoo_authenticated",
+    "dailyCaptureSource": "sharesight" | "yahoo_anonymous" | "yahoo_authenticated",
+    "dailyCaptureIntervalMinutes": 30 | 60
+  },
+  "watchlistEntries": [
+    { "kind": "security", "tickerIdentifier": "...", "isinIdentifier": "...|null",
+      "sharesightInstrumentId": "...|null", "currencyCode": "AUD", "canonicalName": "...|null" },
+    { "kind": "currency_pair", "baseCurrencyCode": "USD", "quoteCurrencyCode": "AUD" }
+  ],
+  "portfolios": [ /* EXP-001 PortfolioBundleV1, unchanged, one per portfolio */ ],
+  "priceBackupCsv": "format_version,provider_id,...\r\n...\r\n"  // MKT-008 CSV text verbatim
+}
+```
+
+`MAX_SYSTEM_BACKUP_PORTFOLIOS` (200, `domain/exports/system-backup.ts`) is a
+personal-account-scale ceiling on the outer `portfolios` array, mirroring
+EXP-001's `MAX_BUNDLE_ENTITIES` reasoning; each nested bundle is
+independently capped at `MAX_BUNDLE_ENTITIES` already.
+`MAX_SYSTEM_BACKUP_REQUEST_BYTES` (64 MiB) reuses
+`app/price-upload-request-body.ts`'s `MAX_BACKUP_REQUEST_BYTES` rationale
+verbatim: price history dominates this artifact's size (the owner's real
+export is a ~142 KB portfolio-bundle section plus a ~6.1 MiB price-history
+section — well inside the ceiling, measured on the real account below), and
+that number is already the one place this codebase accepts a
+price-history-shaped payload of this scale.
+
+No secrets are exported: every field is a financial/identity/preference
+fact the owner already sees in the app, identical in kind to what EXP-001
+and MKT-008 already export separately.
+
+## Restore (import)
+
+Staged → previewed → validated → idempotent → batch-attributable →
+reversible, per `AGENTS.md`'s CSV non-negotiables, composed from THREE
+already-compliant pieces rather than re-implemented:
+
+- **Staged/previewed**: the browser reads the file as text and
+  `JSON.parse`s it, POSTing to `/api/system-backup/import/preview` — zero
+  DB writes. The preview reports per-portfolio counts, status (active/
+  archived), and base-currency agreement, watchlist counts, price-history
+  row/malformed counts (parsed but NOT resolved against the owner's
+  securities — those do not exist yet before any portfolio has been
+  committed, so an "unresolved" figure at preview time would be
+  structurally misleading), the precondition check result (see below), and
+  (S2 fold) a per-field "current → new" disclosure of every account setting
+  this restore will unconditionally overwrite — the backup's own recorded
+  values alongside the account's CURRENT live values (`currentAccount`,
+  read live, zero writes), so the owner sees exactly what changes before
+  confirming.
+- **Validated**: `domain/exports/system-backup.ts`'s `validateSystemBackup`
+  is the sole structural authority (IMP-010B) — schema version, account
+  settings (each field type/enum-checked), watchlist entries (per-kind
+  shape, at least one durable identity fact for a security entry), and
+  every nested portfolio bundle via EXP-001's OWN unchanged
+  `validatePortfolioBundle` (so a malformed nested bundle is rejected with
+  the SAME per-field messages EXP-001 already gives, prefixed with which
+  portfolio index failed). `POST /api/system-backup/import/commit`
+  re-validates independently of the preview call.
+- **Idempotent** — composed from three ALREADY-idempotent pieces, no new
+  system-level fingerprint/table needed:
+  - each nested portfolio bundle keeps its OWN EXP-001 fingerprint
+    (`fingerprintBundle`, computed from that bundle's own canonical JSON)
+    and OWN `import_batches` row; re-committing the identical system
+    backup re-derives the SAME per-portfolio fingerprints and EXP-001's own
+    `findExistingBatch` short-circuits each as a no-op.
+  - watchlist adds are idempotent by construction
+    (`createOwnedWatchlistRepository`'s `addSecurity`/`addCurrencyPair`,
+    unchanged, WLT-001).
+  - price-history rows converge via the pre-existing EFF-001 write-avoidance
+    inside `writePriceUploadObservations` (unchanged) — a re-restore writes
+    a fresh `price_upload_batches` bookkeeping row (as any repeat price
+    backup upload already does) but `unchangedCount` reflects that no
+    `price_observations` row actually changed.
+  - account settings are unconditionally overwritten to the backup's own
+    recorded values on every commit (first-time or retry) — applying the
+    same values twice is a no-op in effect; see "Precondition" for why this
+    is safe.
+
+  **S3 fold (2026-08-27): a price section with rows in the file but ZERO of
+  them resolving to a restored security is a legitimate, non-fatal
+  outcome, never a 409 for a restore whose other pieces already
+  committed.** `confirmBackupPriceUpload` (MKT-008, unchanged) itself
+  hard-fails when nothing resolves — correct for a STANDALONE price-backup
+  upload (nothing to do IS suspicious there) but wrong here: this module
+  previews resolution FIRST (`previewBackupPriceUpload`, zero DB writes) and,
+  when nothing would resolve, skips the write entirely and reports
+  `written: 0` with an explanatory `note` in the commit result rather than
+  failing the whole restore — the SAME "no usable price history is honest,
+  not an error" reasoning the empty-CSV-section case already applies.
+  `malformedCount` and `unresolvedRowCount` are always reported alongside
+  `written`/`unchangedCount` (S1 fold — the commit result line mirrors
+  MKT-008's own price-backup panel's disclosure).
+
+- **Batch-attributable**: at the PIECE level, reusing existing attribution
+  rather than inventing a system-level batch row (no migration needed) —
+  each portfolio via its OWN `import_batches` row (EXP-001), price history
+  via its OWN `price_upload_batches` row (MKT-008), watchlist adds via the
+  existing per-add `audit_events` rows (WLT-001), account settings via a
+  new `audit_events` row (`settings.restored_from_backup`) written in the
+  same guarded batch as the `user_settings` `UPDATE`.
+- **Reversible** — composed, stated honestly rather than claiming one
+  bespoke undo:
+  - each restored portfolio: archive it (EXP-001's own reversal story,
+    unchanged — `archivePortfolioAction`).
+  - restored price-history rows: delete the price-history backup's own
+    upload batch (MKT-008's existing `deleteOwnedPriceUpload`/"Delete this
+    upload" affordance in the Price-history backup section) — works
+    identically for a system-restore-originated batch, since it is the
+    SAME `price_upload_batches` mechanism.
+  - restored watchlist entries: remove them individually from the
+    Watchlist tab (the existing per-entry remove affordance) — no bespoke
+    "undo the whole restored watchlist" action exists; each entry's own
+    removal is already reversible and version-guarded.
+  - restored account settings: **no automated undo**. Unlike a portfolio or
+    a price-history batch, settings have no "batch" shape to revert as a
+    unit — the owner would need to manually reset each field (Settings
+    page) to whatever it was before restoring. This is an honestly
+    documented gap, not a silent one: restore's own PRECONDITION (below)
+    means settings only ever get overwritten on what was, by definition, a
+    fresh account with default/just-configured settings — the practical
+    blast radius of "no automated settings undo" is low precisely because
+    the precondition never lets restore touch a populated account's real
+    settings.
+
+### Precondition: restore targets a FRESH account
+
+Mirrors EXP-001's own fail-safe philosophy ("don't merge into populated
+accounts"), stated precisely at the ACCOUNT level: restore is rejected
+(409) unless every ACTIVE portfolio the target account currently has is
+traceable to ONE of THIS backup's own nested portfolio bundles via an
+`import_batches` row (`db/repositories/system-backup.ts`'s
+`countUnrelatedPortfolios`, reusing EXP-001's own attribution table — no
+new migration). Concretely:
+
+- A genuinely empty account (zero active portfolios) always passes.
+- An account whose ONLY active portfolios are the product of a PRIOR
+  attempt (successful OR interrupted/failed) at this EXACT backup also
+  passes — this is what makes retrying an INTERRUPTED restore actually
+  work (see "Failure isolation and retry" below).
+- An account with ANY other pre-existing ACTIVE portfolio — one the owner
+  created independently, or one from a DIFFERENT backup — fails closed with
+  an actionable count, before any write (settings, watchlist, and every
+  portfolio all stay untouched on a precondition failure).
+- Archived portfolios are never counted toward "unrelated" at all (B2
+  ruling: they are exported/restored as real data, not excluded — see
+  "Archived portfolios" below; and B1 ruling: this is also what keeps a
+  cleaned-up leftover from a prior interrupted attempt, once archived by
+  this module's own retry cleanup, from tripping the precondition on a
+  later run — its `import_batches` row has by then been re-pointed at the
+  NEW portfolio the successful retry created, so it is only reachable by
+  fingerprint through its `active` status, which this rule excludes).
+
+**B1 ruling (2026-08-27): relatedness is checked by fingerprint against an
+`import_batches` row of ANY status** (`committed`, `committing`, or
+`failed`), not only `committed`. The realistic migration-restore failure is
+an INTERRUPTION mid-replay (a Worker timeout, a transient DB error, or a
+ledger-level rejection partway through a longer transaction list) — "start
+over with a fresh account" is not an acceptable remedy for that, so the
+precondition itself must not block the very retry it exists to allow: an
+interrupted attempt's own leftover portfolio is `active` and its batch row
+is `failed`/`committing`, not `committed` — restricting relatedness to
+`committed` would make that leftover count as "unrelated" and permanently
+block every subsequent retry.
+
+Watchlist and settings do not get their OWN separate precondition check:
+the portfolio-level precondition is what keeps the blast radius of
+"settings get unconditionally overwritten" and "watchlist adds are
+idempotent, never merged against conflicting existing entries" acceptable
+— a "not fresh" account is rejected before either is ever touched.
+
+### Archived portfolios
+
+**B2 ruling (2026-08-27): archived portfolios are DATA, not noise.**
+`exportSystemBackup` includes every portfolio regardless of status (one
+nested EXP-001 bundle each); EXP-001's own bundle format gained an
+additive `portfolio.status: "active" | "archived"` field to carry this
+(`domain/exports/portfolio-bundle.ts` — `schemaVersion` stays `1`: this
+format has never shipped to a real deployment, so there is no compatibility
+concern to a version bump). `commitPortfolioBundleImport` restores an
+archived source portfolio AS archived — the LAST step of that portfolio's
+own commit (after every other write, so the full ledger/dividend/
+assumption/scenario replay runs through the exact same write paths an
+active restore uses; nothing in this codebase's repositories checks
+portfolio status before writing). An archived portfolio round-trips
+archived, never silently resurrected active.
+
+### Restore order
+
+Account settings → each portfolio (array order, one nested
+`commitPortfolioBundleImport` call at a time) → watchlist → price history.
+Settings restore FIRST guarantees every nested portfolio's own
+EXP-001 base-currency precondition (bundle currency must equal the
+account's CURRENT home currency) is checked against the just-restored
+value, not a fresh account's arbitrary default. Watchlist and price history
+restore AFTER every portfolio, since watchlist security resolution and
+price-history security matching both depend on the securities those
+portfolios just created/resolved.
+
+**Known inherited limitation**: if the backup's portfolios were originally
+in DIFFERENT base currencies than the account's single home-currency
+setting (a multi-currency multi-portfolio owner), only the portfolio(s)
+matching the JUST-restored home currency commit; the rest reject with
+EXP-001's own actionable currency-mismatch message. This is EXP-001's own
+precondition, unmodified — not a new EXP-002 defect. A retry after manually
+changing the home currency in Settings resumes correctly (the precondition
+above still recognizes the already-committed portfolios as accounted-for).
+The owner's real account is single-portfolio/single-currency, so this does
+not affect the acceptance/real-data results below.
+
+### Failure isolation and retry (atomic per piece, not atomic for the whole artifact)
+
+Portfolios commit ONE AT A TIME in the backup's own array order. The FIRST
+portfolio failure stops the whole commit immediately: account settings and
+any EARLIER portfolios already committed are left in place (never rolled
+back); watchlist and price history are never even attempted for that
+commit call. The failure message names which portfolio (1-based index and
+name) failed and how many portfolios were already restored and remain in
+place. This mirrors EXP-001's own documented lack of whole-bundle atomicity
+(`docs/BACKUP_FORMAT.md`'s EXP-001 "Design decisions" #8 above), extended
+honestly to the multi-portfolio case rather than claiming a stronger
+guarantee EXP-001 itself does not provide.
+
+**B1 ruling (2026-08-27): retries must actually work, including for a
+portfolio that failed AFTER its own portfolio row was already created**
+(e.g. a ledger-level rejection partway through a longer transaction list —
+`commitPortfolioBundleImport` sets `target_portfolio_id` immediately after
+creating the destination portfolio, well before transaction replay
+finishes). Before retrying ONE nested bundle,
+`findLeftoverPortfolioForRetry` (`db/repositories/system-backup.ts`) reads
+that bundle's own `import_batches` row (by fingerprint) and, if its status
+is not `committed` and it already has a `target_portfolio_id`, captures
+that id — BEFORE calling `commitPortfolioBundleImport`, which would
+otherwise reset the batch row's `target_portfolio_id` to `NULL` as part of
+its own EXP-001 retry-reuse (B2 fix), losing the only pointer to that
+leftover portfolio. The leftover is then archived
+(`archiveLeftoverPortfolio`, `app/system-backup-service.ts`) BEFORE the
+retry proceeds, so:
+
+- the account never accumulates unattributable orphan portfolios across
+  repeated failed attempts (each retry archives the PREVIOUS attempt's own
+  leftover, one at a time);
+- the retry's fresh portfolio (EXP-001's own `commitPortfolioBundleImport`
+  always creates a brand-new one, never resumes into the old one) cleanly
+  replaces it;
+- the archived leftover does not itself trip the precondition on a later
+  run (the precondition only checks `active` portfolios — see
+  "Precondition" above).
+
+**Known cosmetic consequence**: `portfolios_user_id_code_unique` is
+unconditional, not status-scoped, so an archived leftover STILL holds its
+original `code` forever. The next successful attempt's `portfolios.create()`
+call therefore collides on that code and falls back to EXP-001's own
+pre-existing `-restored`-suffixed retry (`commitPortfolioBundleImport`'s
+existing collision handling, unmodified) — the restored portfolio's code
+may end up `"MYCODE-restored"` rather than the original `"MYCODE"` after a
+recovered interruption. `commitSystemBackupImport`'s own result reports the
+ACTUAL persisted code (read back from the row it just created), never the
+bundle's originally-requested one, so this is disclosed honestly rather
+than silently misreported.
+
+A retry of the IDENTICAL backup resumes correctly end to end: portfolios
+already `committed` short-circuit as idempotent no-ops (via their own
+EXP-001 fingerprint lookup, unchanged), and a `failed`/still-`committing`
+one has its leftover archived and then is retried via EXP-001's own
+failed-batch-reuse machinery — never a half-restored, silently "successful"
+result, and never an accumulating pile of orphaned partial portfolios.
+
+### Watch-only security limitation
+
+A watchlist `kind: "security"` entry restores by matching its exported
+ticker (falling back to ISIN, then Sharesight-instrument id) against the
+shared `securities`/`security_identifiers` master — the SAME global
+ticker+currency dedupe tier `security-resolution.ts`'s `resolveAndLink`
+uses internally, but WITHOUT creating anything: a watchlist entry has no
+portfolio-linked candidate to create-if-absent from, and this codebase's
+only security-CREATION paths either require a `portfolio_securities` link
+(EXP-001's own per-portfolio resolution, which DOES create) or a LIVE
+provider re-verification (`security-verification.ts`'s `publishOnly`,
+which would stamp a `security_provider_mappings` row falsely claiming
+fresh provider-verified evidence — a provenance fabrication this codebase's
+honesty rules forbid). Practically: a security ALSO held in one of this
+backup's own portfolios restores correctly (the common case — the portfolio
+restore creates/matches it first); a security watched but NEVER held
+anywhere in this backup has no restorable identity in this v1 and is
+counted as `securitiesSkipped` in the commit result, never silently dropped
+without a signal. The owner's real watchlist has zero security-kind entries
+(one currency pair only), so this gap does not affect the real-data result
+below; flagged as a follow-up if wanted (would need a bespoke,
+provenance-honest "watch-only security create" path).
+
+### No network calls
+
+Every write in this restore is derived purely from the artifact's own
+JSON/CSV content — no live market-data provider call is made at any point
+(unlike, e.g., `addWatchlistSecurityWithContext`'s normal add-by-search
+flow, which DOES call a provider). This is deliberate: a fresh-deployment
+restore should not depend on provider credentials/availability being
+already configured. The cost is the watch-only-security limitation above
+and that a restored watchlist currency pair's rate is not pre-primed
+(shows `unavailable` until the existing refresh path runs — the SAME
+documented MKT-021 gap the "WATCH-ONLY REFRESH GAP" follow-up already
+records, not a new one).
+
+## Size ceilings and real-data results
+
+Exported and round-tripped against a read-only, MD5-verified copy of the
+owner's real local D1 database (1 portfolio, 107 transactions, 119
+dividend records, 18 securities, 1 watchlist entry (a currency pair),
+42,921 price-history observations):
+
+- Portfolio-bundle section: 141,828 bytes (matches EXP-001's own
+  documented ~141 KB figure for the same portfolio).
+- Price-history CSV section: 6,422,266 bytes (~6.1 MiB) for 42,921 rows —
+  comfortably under `DEFAULT_PRICE_BACKUP_LIMITS.maxBytes` (20 MiB raw CSV)
+  and `MAX_SYSTEM_BACKUP_REQUEST_BYTES` (64 MiB) with wide headroom; price
+  history genuinely dominates artifact size exactly as predicted.
+- Full restore into a fresh scratch database: 1 portfolio / 107
+  transactions / 119 dividend records / 18 securities / 1 watchlist entry /
+  42,921 price observations — **exact parity on every count**, plus an
+  exact match on total posted-transaction quantity (260,464, the same
+  figure EXP-001's own real-data check reports). Idempotent re-restore
+  confirmed: a second commit of the identical backup left the portfolio
+  count unchanged (no duplicate).
+
+## Tests
+
+`tests/exp-002.test.ts`: `validateSystemBackup` structural rejections
+(schema-version mismatch, malformed shape, over-`MAX_SYSTEM_BACKUP_PORTFOLIOS`);
+full export → restore into a fresh account (2 portfolios, a watchlist
+security + currency pair, non-default account settings, one price-history
+observation) with deep count/value parity, watchlist security resolved to
+the SAME security id its portfolio restored (not a duplicate), settings
+overwritten, then an idempotent re-restore proving no duplicates anywhere;
+the fresh-account precondition rejecting restore into an account with an
+unrelated pre-existing portfolio, with zero writes proven afterward; an
+account/cross-user probe (unknown user id) failing closed on export;
+per-portfolio failure isolation (a second, currency-mismatched portfolio
+fails without touching the first, and a retry stays idempotent for the
+first while failing the second identically); a watch-only security with no
+matching ticker anywhere restorable, skipped and counted rather than
+fabricated. Plus the real-data round-trip described above.
+
+**B1/B2/S3 regression tests (2026-08-27 review round)**: a portfolio with a
+leftover partial-replay remnant from an interrupted attempt (seeded
+directly at the DB level — a deterministic "same broken content" retry can
+never itself flip from failure to success once replayed into a fresh
+portfolio each attempt, since the retry strategy never resumes into the old
+portfolio; this fixture instead reproduces the STATE a genuine interruption
+leaves, which is what the leftover-archiving mechanism actually operates
+on) is archived automatically, the retry succeeds (the archived leftover's
+own held `code` forces the new portfolio onto a `-restored`-suffixed code,
+honestly reported), a third run is fully idempotent, and the archived
+remnant is confirmed NOT to trip the precondition afterward
+(`countUnrelatedPortfolios` asserted `0` both immediately after the retry
+and before the third run); an archived source portfolio round-trips
+archived (never resurrected active); a price section whose rows all fail to
+resolve still succeeds overall (`written: 0`, an explanatory `note`,
+`unresolvedRowCount`/`malformedCount` both reported), and a MIXED section
+(one resolvable row alongside one unresolvable one) still writes the
+resolvable row and reports the rest honestly.

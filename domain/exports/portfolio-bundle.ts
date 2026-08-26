@@ -225,6 +225,17 @@ export type PortfolioBundleV1 = {
     // importing owner's account-wide FY convention for every OTHER
     // portfolio too).
     financialYearStartMonthAtExport: number;
+    // EXP-002 review (B2 ruling, 2026-08-27): added post-release-but-
+    // pre-ship (this format has never shipped to a real deployment, so
+    // `schemaVersion` stays 1 rather than bumping for an additive field --
+    // see `docs/BACKUP_FORMAT.md`'s changelog line). OPTIONAL on input --
+    // an older/hand-edited bundle without this field is treated as
+    // `"active"` (the pre-B2 behaviour) -- but ALWAYS present on a
+    // validated bundle's output. Restored via `portfolios.archive()` as the
+    // LAST commit step (see `commitPortfolioBundleImport`'s own comment) so
+    // an archived portfolio's full history still replays through the SAME
+    // ledger/dividend write paths an active one does.
+    status: "active" | "archived";
   };
   portfolioSettings: {
     // `portfolio_settings` is a genuinely optional row -- `db/repositories/
@@ -497,7 +508,10 @@ export function validatePortfolioBundle(raw: unknown): BundleValidationResult {
       !isDateString(portfolio.historyCompleteFrom)) ||
     typeof portfolio.financialYearStartMonthAtExport !== "number" ||
     portfolio.financialYearStartMonthAtExport < 1 ||
-    portfolio.financialYearStartMonthAtExport > 12
+    portfolio.financialYearStartMonthAtExport > 12 ||
+    (portfolio.status !== undefined &&
+      portfolio.status !== "active" &&
+      portfolio.status !== "archived")
   ) {
     return fail("The bundle's portfolio identity is invalid.");
   }
@@ -773,6 +787,8 @@ export function validatePortfolioBundle(raw: unknown): BundleValidationResult {
           (portfolio.historyCompleteFrom as string | null) ?? null,
         financialYearStartMonthAtExport:
           portfolio.financialYearStartMonthAtExport,
+        status:
+          portfolio.status === "archived" ? "archived" : ("active" as const),
       },
       portfolioSettings: {
         quoteStalenessPolicy:

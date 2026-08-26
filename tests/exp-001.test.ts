@@ -536,6 +536,7 @@ test("transaction chain replay is correct even when createdAt ties (same millise
       accountingMethod: "fifo",
       historyCompleteFrom: null,
       financialYearStartMonthAtExport: 7,
+      status: "active",
     },
     portfolioSettings: { quoteStalenessPolicy: null },
     securities: [
@@ -650,6 +651,7 @@ test("unseen-security creation: a security absent from every table is genuinely 
       accountingMethod: "fifo",
       historyCompleteFrom: null,
       financialYearStartMonthAtExport: 7,
+      status: "active",
     },
     portfolioSettings: { quoteStalenessPolicy: null },
     securities: [
@@ -751,6 +753,7 @@ test("an oversized bundle (over MAX_BUNDLE_ENTITIES) is rejected with an honest,
       accountingMethod: "fifo",
       historyCompleteFrom: null,
       financialYearStartMonthAtExport: 7,
+      status: "active",
     },
     portfolioSettings: { quoteStalenessPolicy: null },
     securities,

@@ -31,7 +31,7 @@ export async function readPortfolioBundle(
 ): Promise<PortfolioBundleV1> {
   const portfolioRow = await client.get<Row>(
     `SELECT p.name, p.code, p.base_currency_code, p.timezone,
-            p.accounting_method, p.history_complete_from,
+            p.accounting_method, p.history_complete_from, p.status,
             us.financial_year_start_month, ps.quote_staleness_policy
      FROM portfolios p
      JOIN user_settings us ON us.user_id = p.user_id
@@ -291,6 +291,8 @@ export async function readPortfolioBundle(
       financialYearStartMonthAtExport: Number(
         portfolioRow.financial_year_start_month,
       ),
+      status:
+        str(portfolioRow, "status") === "archived" ? "archived" : "active",
     },
     portfolioSettings: {
       quoteStalenessPolicy: strOrNull(portfolioRow, "quote_staleness_policy"),

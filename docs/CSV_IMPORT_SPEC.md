@@ -1508,3 +1508,17 @@ previewed → validated → idempotent → batch-attributable → reversible
 (IMP-010B's browser-parses/server-is-sole-authority split), and the same
 security create-if-absent resolution machinery (BRK-009B) CSV/Sharesight
 imports use.
+
+## 19. Full-system backup export/import (`EXP-002`)
+
+The full-system backup (every portfolio, account settings, watchlist, and
+price history in ONE JSON artifact — sufficient alone to restore onto a
+fresh deployment, unlike EXP-001's bundle) is also a JSON format, not CSV.
+It nests EXP-001's own single-portfolio bundle format UNCHANGED (one per
+portfolio) and reuses MKT-008's own price-history backup CSV format
+verbatim as one embedded field, rather than defining a third row shape —
+its full specification (artifact shape, the extended owned-table coverage
+table, the fresh-account precondition, restore ordering, per-portfolio
+failure isolation, and the reversal story for each piece) lives in
+**`docs/BACKUP_FORMAT.md`**'s "Full-system backup (EXP-002)" section
+instead of here.
