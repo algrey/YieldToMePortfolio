@@ -28,9 +28,11 @@ import { fyWindowForDate } from "../domain/dividends/fy-window.ts";
 import { deriveYieldFromResolvedTtm } from "../domain/market-data/dividend-yield.ts";
 import {
   aggregateSecurityYields,
+  computeCurrentFinancialYearEstimateRow,
   computeCurrentFinancialYearRow,
   computeIncomeBreakdown,
   computePastFinancialYearRows,
+  computeTrailingTwelveMonthActualDividendRow,
   projectMultiYearIncome,
   resolvePortfolioDividendGrowth,
   resolvePortfolioValueGrowth,
@@ -38,6 +40,7 @@ import {
   resolveSecurityFranking,
   resolveSecurityYield,
   type AggregateYieldResult,
+  type ComputeCurrentFinancialYearEstimateRowResult,
   type ComputeCurrentFinancialYearRowResult,
   type ComputePastFinancialYearRowsResult,
   type FrankingAssumptionResolution,
@@ -47,6 +50,7 @@ import {
   type MultiYearProjectionResult,
   type PastFinancialYearSecurityInput,
   type PortfolioGrowthAssumption,
+  type TrailingTwelveMonthActualRow,
   type YieldAssumptionResolution,
 } from "../domain/dividends/projection.ts";
 
@@ -113,6 +117,22 @@ export type OwnedIncomeProjection = {
   multiYearBaselineInput: MultiYearProjectionInput | null;
   /** The current, still-open FY's row (follow-up 2) -- financial-year-to-date, explicitly not a full-year figure, closing the gap between the last closed past FY and the first forward-projected year. */
   currentFinancialYear: ComputeCurrentFinancialYearRowResult;
+  /** UI-046: the current FY's FULL-YEAR estimate. NOT built from
+   * `currentFinancialYear` above (that row buckets declared-pending rows
+   * too, which would double-count against the remainder forecast's
+   * declared leg -- the review-reproduced B1 defect). Instead the row
+   * partitions raw history rows by EVENT: RECEIVED (paid on or before
+   * today) + GAP (ex-date passed, unpaid) + the `[today+1, FY end]`
+   * remainder forecast -- each dividend event counted exactly once.
+   * `ok: false` exactly when `currentFinancialYear` is (the same FY
+   * calendar failure). */
+  currentFinancialYearEstimate: ComputeCurrentFinancialYearEstimateRowResult;
+  /** UI-046: the trailing 365-day ACTUAL (received, non-projected) dividend
+   * total across every held security -- distinct from `breakdown` (a
+   * forward-looking, partly-projected Next 12 Months estimate) and from
+   * `currentFinancialYear` (bounded by the FY calendar, not a rolling
+   * window). */
+  trailingTwelveMonthActual: TrailingTwelveMonthActualRow;
   pastFinancialYears: ComputePastFinancialYearRowsResult;
   breakdown: IncomeBreakdownResult;
   /** DIV-013: the portfolio's own FY start month (1-12), threaded through so
@@ -409,6 +429,62 @@ export async function loadOwnedIncomeProjection(
     })),
   });
 
+  // UI-046: the SAME `computeIncomeBreakdown` aggregation as `breakdown`
+  // above, fed each security's FY-REMAINDER-windowed forecast instead of
+  // the fixed rolling-365-day one -- one aggregation function, two
+  // differently-windowed forecast inputs, never a second aggregation
+  // formula. Feeds the REMAINDER leg of the "FY{yy} Estimate" row's
+  // RECEIVED/GAP/REMAINDER event partition -- never combined with the
+  // `currentFinancialYear` display row, whose declared-pending bucketing
+  // would double-count the remainder's declared leg.
+  const fyRemainderBreakdown = computeIncomeBreakdown({
+    baseCurrencyCode: resolvedBaseCurrencyCode,
+    currentPortfolioValueDecimal,
+    currentPortfolioValueStatus: portfolioValueStatus,
+    securities: history.securities.map((security) => ({
+      portfolioSecurityId: security.portfolioSecurityId,
+      symbol: security.symbol,
+      currencyCode: security.currencyCode,
+      forecast: security.fyRemainderForecast,
+    })),
+  });
+  // UI-046 (B1 fix): computed directly from raw history rows (RECEIVED/GAP
+  // legs, event-partitioned -- see `domain/dividends/projection.ts`'s
+  // section header) rather than reusing `currentFinancialYear`'s own
+  // already-aggregated total, which attributes by `paymentDate ?? exDate`
+  // regardless of status and so can double-count a declared-but-not-yet-
+  // paid event against `fyRemainderBreakdown`'s declared leg.
+  const currentFinancialYearEstimate = computeCurrentFinancialYearEstimateRow({
+    baseCurrencyCode: resolvedBaseCurrencyCode,
+    startMonth: history.financialYearStartMonth,
+    currentEndingYear,
+    today,
+    securities: history.securities.map((security) => ({
+      portfolioSecurityId: security.portfolioSecurityId,
+      symbol: security.symbol,
+      currencyCode: security.currencyCode,
+      rows: security.rows,
+    })),
+    remainderBreakdown: fyRemainderBreakdown,
+  });
+
+  // UI-046: the trailing 365-day ACTUAL (received, non-projected) total --
+  // reuses each security's already-derived history rows (DIV-001) the same
+  // way `breakdown`/`currentFinancialYear` already do, just window-filtered
+  // instead of forecast/FY-filtered.
+  const trailingTwelveMonthActual = computeTrailingTwelveMonthActualDividendRow(
+    {
+      baseCurrencyCode: resolvedBaseCurrencyCode,
+      asOfDate: today,
+      securities: history.securities.map((security) => ({
+        portfolioSecurityId: security.portfolioSecurityId,
+        symbol: security.symbol,
+        currencyCode: security.currencyCode,
+        rows: security.rows,
+      })),
+    },
+  );
+
   let multiYear: MultiYearProjectionResult;
   let multiYearBaselineInput: MultiYearProjectionInput | null = null;
   if (
@@ -558,6 +634,8 @@ export async function loadOwnedIncomeProjection(
     multiYear,
     multiYearBaselineInput,
     currentFinancialYear,
+    currentFinancialYearEstimate,
+    trailingTwelveMonthActual,
     pastFinancialYears,
     breakdown,
     financialYearStartMonth: history.financialYearStartMonth,

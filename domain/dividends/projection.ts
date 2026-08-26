@@ -39,10 +39,12 @@ import {
   isValidFinancialYearStartMonth,
   type FyWindow,
 } from "../calculations/financial-year.ts";
-import type {
-  FyDividendOverrideFact,
-  FyDividendTotal,
+import {
+  computeLifetimeDividendTotals,
+  type FyDividendOverrideFact,
+  type FyDividendTotal,
 } from "./aggregations.ts";
+import type { DerivedDividendRow } from "./history.ts";
 import type { SecurityDividendForecast } from "./forecast.ts";
 import type { ResolvedTtmYieldResult } from "../market-data/dividend-yield.ts";
 
@@ -2301,5 +2303,571 @@ export function computeIncomeBreakdown(input: {
       }
       return `sum of ${includedCount} of ${includedCount + excludedSecurities.length} held securities' 12-month forecasts; ${clauses.join("; ")}`;
     })(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// e. UI-046: "Last 12 Months" (rolling, ACTUAL) and "FY{yy} Estimate" (FY-to-
+// date actuals + an evidence-based projection for the FY's remaining days)
+// rows on the Next 12 Months screen's "Recent financial years" table.
+//
+// B1 (Orchestrator ruling, blocking review finding -- a reproduced real
+// double-count: one declared $100 dividend inflated the estimate to $200).
+// ROOT CAUSE: the original design summed `computeCurrentFinancialYearRow`'s
+// FY-to-date total (which attributes every history row -- REGARDLESS OF
+// STATUS -- to the current FY via `paymentDate ?? exDate`) with the
+// remainder forecast's own declared-near-certain leg. A `declared_pending`
+// row commonly carries a real, provider-supplied FUTURE payment date
+// alongside its future ex-date -- so `computeFyDividendTotals` attributed
+// its cash to "so far" via that payment date, while the SAME row's ex-date
+// falling inside the remainder window ALSO fed the forecast's declared leg:
+// one event, two legs, double cash.
+//
+// FIX: PARTITION BY EVENT so every history row feeds the estimate through
+// EXACTLY ONE of three disjoint legs, keyed off `status` (a pure function
+// of `exDate <= today`, see `history.ts`'s `lifecycleStatus`) and, for an
+// ex-date-passed row, whether payment has actually landed:
+//   1. RECEIVED -- `status: "ex_date_passed"` AND a known `paymentDate`
+//      that is `<= today` (cash literally in hand). Attributed by
+//      `paymentDate` into the current FY window.
+//   2. GAP -- `status: "ex_date_passed"` but NOT (1): the ex-date has
+//      passed (economically committed) but payment has not yet posted
+//      (`paymentDate` unknown, or known but still in the future -- the
+//      reviewer's exact repro shape: ex 2026-08-01, pay 2026-09-20, today
+//      2026-08-13). Without this bucket such a row falls through BOTH the
+//      RECEIVED leg (fails the `paymentDate <= today` test) AND the
+//      REMAINDER leg's declared-near-certain sum (`computeSecurityDividendForecast`
+//      only ever considers `status: "declared_pending"` rows -- a row whose
+//      ex-date has already passed can never be `declared_pending` again),
+//      silently vanishing from the estimate entirely. Attributed by the
+//      established DIV-001 `paymentDate ?? exDate` fallback.
+//   3. REMAINDER -- `status: "declared_pending"` (ex-date still in the
+//      future) plus the uncovered-tail trailing-twelve-month estimate --
+//      `computeSecurityDividendForecast`'s EXISTING composition, unchanged,
+//      fed via `remainderBreakdown` (`computeIncomeBreakdown` over each
+//      security's FY-remainder-windowed forecast, computed by the caller
+//      and reused verbatim here -- one aggregation, not re-derived).
+// (1) and (2) partition every `"ex_date_passed"` row exactly once (mutually
+// exclusive by construction: a row's known-and-past-payment-date test
+// either holds or it doesn't). (3) can never overlap either leg, since
+// `"declared_pending"` and `"ex_date_passed"` are themselves mutually
+// exclusive statuses on any one row.
+//
+// ONE-DAY SEAM: `app/owned-dividend-history.ts` starts the remainder
+// forecast's own window at `today + 1`, not `today`
+// (`ComputeSecurityForecastInput.windowFromDate`) -- otherwise the forward
+// leg's smooth per-day trailing-twelve-month proration would implicitly
+// claim a fractional share of "today" on top of whatever (1)/(2) already
+// counted for that exact day. A row with `exDate === today` cannot be
+// `"declared_pending"` at all (the SAME `<=` boundary that ends the
+// backward RECEIVED/GAP legs' eligibility on `today` is also what flips
+// such a row's status to `"ex_date_passed"`), so it can only ever land in
+// (1) or (2) above -- never the remainder's declared leg -- independent of
+// the window shift; the shift's own job is purely to stop the SEPARATE
+// smooth TTM-tail estimate (which has no per-event awareness at all) from
+// also crediting "today" a second, statistical time.
+//
+// Both new rows reuse existing aggregation machinery rather than a second
+// formula: the trailing row and the RECEIVED/GAP legs all window/status-
+// filter raw history rows through `computeLifetimeDividendTotals` (DIV-001,
+// `aggregations.ts`) -- the exact aggregation the past-FY rows already rely
+// on; the REMAINDER leg reuses `computeIncomeBreakdown` verbatim, fed a
+// second, differently-windowed forecast.
+// ---------------------------------------------------------------------------
+
+function subtractDaysUi046(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() - days);
+  return date.toISOString().slice(0, 10);
+}
+
+// Mirrors `forecast.ts`'s identically-named/valued `TRAILING_WINDOW_DAYS`
+// and its exact inclusive-both-ends boundary (`asOfDate - 365` through
+// `asOfDate`) -- duplicated rather than imported, matching this codebase's
+// established convention of re-deriving small date primitives per module
+// (see `forecast.ts`'s own header on this). Using the IDENTICAL boundary
+// here is deliberate: this row and the Next 12 Months headline's own
+// history-TTM fallback must agree on what "last 12 months"/"trailing
+// twelve months" means, or the two adjacent figures would silently use
+// different windows.
+const UI046_TRAILING_WINDOW_DAYS = 365;
+
+export type TrailingTwelveMonthActualStatus = "ok" | "unavailable";
+
+export type TrailingTwelveMonthActualExclusionReason =
+  | "foreign_currency"
+  | "mixed_currency"
+  /** This security has NO derived dividend history rows at all (ever) --
+   * distinct from a security with real history but nothing paid in the
+   * trailing window (a genuine, disclosed "0" contribution -- see the
+   * function doc comment). Mirrors `computePastFinancialYearRows`'
+   * `"no_evidence"` reasoning, applied per-security instead of per-year. */
+  | "no_evidence";
+
+export type TrailingTwelveMonthActualExclusion = {
+  portfolioSecurityId: string;
+  symbol: string;
+  reason: TrailingTwelveMonthActualExclusionReason;
+};
+
+export type TrailingTwelveMonthActualRow = {
+  windowFromDate: string;
+  windowToDate: string;
+  status: TrailingTwelveMonthActualStatus;
+  dividendGrossDecimal: string | null;
+  dividendCashDecimal: string | null;
+  dividendFrankingKnownDecimal: string | null;
+  dividendFrankingIncomplete: boolean;
+  /** B2 (review finding): `true` whenever at least one included security
+   * had a windowed RECEIVED row whose CASH amount is genuinely unknown --
+   * `computeLifetimeDividendTotals` already excludes that row from the
+   * sums above (never fabricated as "0"), but its existence must never be
+   * silently invisible behind a confident `status: "ok"` total. Rendered
+   * the same "· partial" way `dividendFrankingIncomplete` already is. */
+  dividendAmountIncomplete: boolean;
+  includedSecurityCount: number;
+  excludedSecurities: TrailingTwelveMonthActualExclusion[];
+};
+
+export type TrailingTwelveMonthActualSecurityInput = {
+  portfolioSecurityId: string;
+  symbol: string;
+  currencyCode: string;
+  /** This security's full derived dividend history rows (DIV-001) --
+   * window-filtered internally to the trailing 365 days; an EMPTY array
+   * (no history at all, ever) is distinguished from "has history but none
+   * fell in the window" (see `TrailingTwelveMonthActualExclusionReason`). */
+  rows: readonly DerivedDividendRow[];
+};
+
+/**
+ * Portfolio-level "Last 12 Months" row: the sum of ACTUAL (received,
+ * `status: "ex_date_passed"`, non-excluded) dividend cash/franking across
+ * every base-currency held security over the trailing 365 days ending
+ * `asOfDate` -- never a projection, never TTM-annualised. Same
+ * base-currency-only aggregation scope as `computePastFinancialYearRows`/
+ * `computeIncomeBreakdown` (a foreign-currency security is excluded and
+ * named, never mis-summed or silently converted).
+ *
+ * A security with an EMPTY history (`rows.length === 0`) is excluded and
+ * named `"no_evidence"` -- AGENTS.md's "missing data is never zero" applies
+ * here exactly as it does to `computePastFinancialYearRows`' identically-
+ * motivated distinction: a security with literally no imported/derived
+ * dividend record could mean "genuinely never paid" or "history not yet
+ * imported", and this layer cannot tell which. A security that DOES have
+ * real history somewhere (even outside the trailing window) but nothing
+ * fell inside it is a real, CONFIRMED fact -- it received nothing in the
+ * last 12 months -- and contributes an honest "0", not an exclusion.
+ */
+export function computeTrailingTwelveMonthActualDividendRow(input: {
+  baseCurrencyCode: string;
+  asOfDate: string;
+  securities: readonly TrailingTwelveMonthActualSecurityInput[];
+}): TrailingTwelveMonthActualRow {
+  const windowFromDate = subtractDaysUi046(
+    input.asOfDate,
+    UI046_TRAILING_WINDOW_DAYS,
+  );
+  const windowToDate = input.asOfDate;
+  const foreignSecurities = input.securities.filter(
+    (security) => security.currencyCode !== input.baseCurrencyCode,
+  );
+  const homeCurrencySecurities = input.securities.filter(
+    (security) => security.currencyCode === input.baseCurrencyCode,
+  );
+  const excludedSecurities: TrailingTwelveMonthActualExclusion[] =
+    foreignSecurities.map((security) => ({
+      portfolioSecurityId: security.portfolioSecurityId,
+      symbol: security.symbol,
+      reason: "foreign_currency" as const,
+    }));
+
+  let includedCount = 0;
+  let cashTotal = ZERO;
+  let frankingTotal = ZERO;
+  let frankingIncomplete = false;
+  let amountIncomplete = false;
+  for (const security of homeCurrencySecurities) {
+    if (security.rows.length === 0) {
+      excludedSecurities.push({
+        portfolioSecurityId: security.portfolioSecurityId,
+        symbol: security.symbol,
+        reason: "no_evidence",
+      });
+      continue;
+    }
+    const windowedRows = security.rows.filter((row) => {
+      if (row.status !== "ex_date_passed" || row.excluded) return false;
+      const date = row.paymentDate ?? row.exDate;
+      return date !== null && date >= windowFromDate && date <= windowToDate;
+    });
+    const totals = computeLifetimeDividendTotals(
+      windowedRows,
+      security.currencyCode,
+    );
+    if (totals.status === "mixed_currency") {
+      excludedSecurities.push({
+        portfolioSecurityId: security.portfolioSecurityId,
+        symbol: security.symbol,
+        reason: "mixed_currency",
+      });
+      continue;
+    }
+    includedCount += 1;
+    cashTotal = addDecimal(
+      cashTotal,
+      parseDecimal(totals.receivedCashDecimal ?? "0"),
+    );
+    if (totals.receivedFrankingKnownDecimal !== null) {
+      frankingTotal = addDecimal(
+        frankingTotal,
+        parseDecimal(totals.receivedFrankingKnownDecimal),
+      );
+    }
+    if (totals.receivedFrankingUnknownCount > 0) frankingIncomplete = true;
+    // B2 (review finding): every row reaching `windowedRows` already has
+    // `status: "ex_date_passed"`, so any `unknownAmountCount` here is
+    // exclusively a RECEIVED-row cash-amount gap -- excluded from the sum
+    // above, never fabricated, but must not stay invisible under a
+    // confident `status: "ok"`.
+    if (totals.unknownAmountCount > 0) amountIncomplete = true;
+  }
+
+  if (includedCount === 0) {
+    return {
+      windowFromDate,
+      windowToDate,
+      status: "unavailable",
+      dividendGrossDecimal: null,
+      dividendCashDecimal: null,
+      dividendFrankingKnownDecimal: null,
+      dividendFrankingIncomplete: false,
+      dividendAmountIncomplete: false,
+      includedSecurityCount: 0,
+      excludedSecurities,
+    };
+  }
+
+  const dividendCashDecimal = formatDecimalExact(cashTotal);
+  const dividendFrankingKnownDecimal = formatDecimalExact(frankingTotal);
+  return {
+    windowFromDate,
+    windowToDate,
+    status: "ok",
+    dividendGrossDecimal: formatDecimalExact(
+      addDecimal(cashTotal, frankingTotal),
+    ),
+    dividendCashDecimal,
+    dividendFrankingKnownDecimal,
+    dividendFrankingIncomplete: frankingIncomplete,
+    dividendAmountIncomplete: amountIncomplete,
+    includedSecurityCount: includedCount,
+    excludedSecurities,
+  };
+}
+
+export type CurrentFinancialYearEstimateStatus =
+  "ok" | "partial" | "unavailable";
+
+export type CurrentFinancialYearEstimateExclusionReason =
+  PastFyExclusionReason | IncomeBreakdownExclusionReason;
+
+export type CurrentFinancialYearEstimateExclusion = {
+  portfolioSecurityId: string;
+  symbol: string;
+  reason: CurrentFinancialYearEstimateExclusionReason;
+};
+
+export type CurrentFinancialYearEstimateRow = {
+  endingYear: number;
+  label: string;
+  status: CurrentFinancialYearEstimateStatus;
+  dividendGrossDecimal: string | null;
+  dividendCashDecimal: string | null;
+  dividendFrankingKnownDecimal: string | null;
+  dividendFrankingIncomplete: boolean;
+  /** B2-style disclosure (Orchestrator ruling): `true` whenever the
+   * RECEIVED or GAP leg (computed directly from history rows below)
+   * excluded at least one row because its own cash amount is genuinely
+   * unknown -- a real, non-fabricated total that may still understate true
+   * income. Rendered the same "· partial" way `dividendFrankingIncomplete`
+   * already is. */
+  dividendAmountIncomplete: boolean;
+  excludedSecurities: CurrentFinancialYearEstimateExclusion[];
+  /** Included securities whose REMAINDER-of-FY forecast leg is only
+   * partially known (mirrors `IncomeBreakdownResult.partialTtmSecurities`
+   * exactly -- reused, not re-derived). */
+  partialTtmSecurities: IncomeBreakdownPartialTtmSecurity[];
+  method: string;
+};
+
+export type ComputeCurrentFinancialYearEstimateRowResult =
+  | { ok: true; row: CurrentFinancialYearEstimateRow }
+  | { ok: false; reason: "invalid_start_month" };
+
+export type CurrentFinancialYearEstimateSecurityInput = {
+  portfolioSecurityId: string;
+  symbol: string;
+  currencyCode: string;
+  /** This security's full derived dividend history rows (DIV-001). The
+   * RECEIVED and GAP legs below status/date-filter these directly --
+   * deliberately NEVER `computeFyDividendTotals`'s own already-aggregated
+   * (`paymentDate ?? exDate`)-attributed total, which sums rows regardless
+   * of status and so can double-count a `declared_pending` row (one whose
+   * provider-supplied payment date is already known) against the REMAINDER
+   * leg's own declared-near-certain sum (B1). */
+  rows: readonly DerivedDividendRow[];
+};
+
+function sumNullableDecimals(
+  left: string | null,
+  right: string | null,
+): string {
+  return formatDecimalExact(
+    addDecimal(parseDecimal(left ?? "0"), parseDecimal(right ?? "0")),
+  );
+}
+
+/**
+ * "FY{yy} Estimate" row: the current financial year's full-year estimate,
+ * PARTITIONED BY EVENT (B1 fix) so no dividend ever contributes twice --
+ * see this section's header comment for the full three-way (RECEIVED / GAP
+ * / REMAINDER) partition and why the naive "FY-to-date total + remainder
+ * forecast" design double-counted a declared-but-not-yet-paid event.
+ *
+ * RECEIVED and GAP are computed HERE, directly from each security's raw
+ * history rows (`input.securities[].rows`) -- reusing `computeLifetimeDividendTotals`
+ * (DIV-001, `aggregations.ts`) per bucket, never a second cash-summing
+ * formula. REMAINDER is the caller-supplied `remainderBreakdown`
+ * (`computeIncomeBreakdown` fed each security's FY-remainder-windowed
+ * forecast, windowed to `today + 1` through the FY's calendar end date) --
+ * reused verbatim, not re-derived.
+ *
+ * `ok: false` only when the current FY's calendar window itself cannot be
+ * resolved (`invalid_start_month`) -- the identical failure
+ * `computeCurrentFinancialYearRow`/`computePastFinancialYearRows` report
+ * for the same underlying reason.
+ */
+export function computeCurrentFinancialYearEstimateRow(input: {
+  baseCurrencyCode: string;
+  startMonth: number;
+  currentEndingYear: number;
+  today: string;
+  securities: readonly CurrentFinancialYearEstimateSecurityInput[];
+  remainderBreakdown: IncomeBreakdownResult;
+}): ComputeCurrentFinancialYearEstimateRowResult {
+  const anchorMonth = input.startMonth;
+  const anchorYear =
+    anchorMonth === 1 ? input.currentEndingYear : input.currentEndingYear - 1;
+  const anchorDate = `${String(anchorYear).padStart(4, "0")}-${String(anchorMonth).padStart(2, "0")}-01`;
+  const windowResult = fyWindowForDate(anchorDate, input.startMonth);
+  if (!windowResult.ok) {
+    return { ok: false, reason: "invalid_start_month" };
+  }
+  const window = windowResult.window;
+
+  const foreignSecurities = input.securities.filter(
+    (security) => security.currencyCode !== input.baseCurrencyCode,
+  );
+  const homeCurrencySecurities = input.securities.filter(
+    (security) => security.currencyCode === input.baseCurrencyCode,
+  );
+
+  const seen = new Set<string>();
+  const excludedSecurities: CurrentFinancialYearEstimateExclusion[] = [];
+  function addExclusion(
+    portfolioSecurityId: string,
+    symbol: string,
+    reason: CurrentFinancialYearEstimateExclusionReason,
+  ): void {
+    const key = `${portfolioSecurityId}:${reason}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    excludedSecurities.push({ portfolioSecurityId, symbol, reason });
+  }
+  for (const security of foreignSecurities) {
+    addExclusion(
+      security.portfolioSecurityId,
+      security.symbol,
+      "foreign_currency",
+    );
+  }
+  // The REMAINDER leg's own exclusions (foreign-currency or
+  // insufficient-history securities in the `computeIncomeBreakdown` call
+  // the caller already ran) are folded in here too, de-duplicated against
+  // the ones this function names itself.
+  for (const security of input.remainderBreakdown.excludedSecurities) {
+    addExclusion(
+      security.portfolioSecurityId,
+      security.symbol,
+      security.reason,
+    );
+  }
+
+  let cashTotal = ZERO;
+  let frankingTotal = ZERO;
+  let frankingIncomplete = false;
+  let amountIncomplete = false;
+  for (const security of homeCurrencySecurities) {
+    // RECEIVED: cash literally in hand -- `ex_date_passed` AND a known
+    // payment date on or before today, attributed by that payment date.
+    const receivedRows = security.rows.filter((row) => {
+      if (row.status !== "ex_date_passed" || row.excluded) return false;
+      if (row.paymentDate === null || row.paymentDate > input.today) {
+        return false;
+      }
+      return (
+        row.paymentDate >= window.startDate && row.paymentDate <= window.endDate
+      );
+    });
+    // GAP: the ex-date has passed (economically committed) but payment has
+    // not yet posted (unknown, or known but still in the future) -- see
+    // this section's header comment for why this bucket exists at all.
+    // Explicitly re-excludes anything the RECEIVED filter above already
+    // claimed, so the two sets are disjoint by construction, not merely by
+    // convention.
+    const gapRows = security.rows.filter((row) => {
+      if (row.status !== "ex_date_passed" || row.excluded) return false;
+      if (row.paymentDate !== null && row.paymentDate <= input.today) {
+        return false; // already counted as RECEIVED
+      }
+      const attributionDate = row.paymentDate ?? row.exDate;
+      return (
+        attributionDate !== null &&
+        attributionDate >= window.startDate &&
+        attributionDate <= window.endDate
+      );
+    });
+
+    const receivedTotals = computeLifetimeDividendTotals(
+      receivedRows,
+      security.currencyCode,
+    );
+    const gapTotals = computeLifetimeDividendTotals(
+      gapRows,
+      security.currencyCode,
+    );
+    if (
+      receivedTotals.status === "mixed_currency" ||
+      gapTotals.status === "mixed_currency"
+    ) {
+      addExclusion(
+        security.portfolioSecurityId,
+        security.symbol,
+        "mixed_currency",
+      );
+      continue;
+    }
+    cashTotal = addDecimal(
+      cashTotal,
+      parseDecimal(receivedTotals.receivedCashDecimal ?? "0"),
+    );
+    cashTotal = addDecimal(
+      cashTotal,
+      parseDecimal(gapTotals.receivedCashDecimal ?? "0"),
+    );
+    if (receivedTotals.receivedFrankingKnownDecimal !== null) {
+      frankingTotal = addDecimal(
+        frankingTotal,
+        parseDecimal(receivedTotals.receivedFrankingKnownDecimal),
+      );
+    }
+    if (gapTotals.receivedFrankingKnownDecimal !== null) {
+      frankingTotal = addDecimal(
+        frankingTotal,
+        parseDecimal(gapTotals.receivedFrankingKnownDecimal),
+      );
+    }
+    if (
+      receivedTotals.receivedFrankingUnknownCount > 0 ||
+      gapTotals.receivedFrankingUnknownCount > 0
+    ) {
+      frankingIncomplete = true;
+    }
+    // B2-style disclosure: a RECEIVED-or-GAP row whose CASH amount is
+    // itself unknown is excluded from the sum above (never fabricated),
+    // but must not stay invisible under a confident total.
+    if (
+      receivedTotals.unknownAmountCount > 0 ||
+      gapTotals.unknownAmountCount > 0
+    ) {
+      amountIncomplete = true;
+    }
+  }
+
+  const remainder = input.remainderBreakdown;
+  const receivedGapAvailable = homeCurrencySecurities.length > 0;
+  const remainderHasFigure = remainder.totalGrossDecimal !== null;
+  const receivedGapCashDecimal = receivedGapAvailable
+    ? formatDecimalExact(cashTotal)
+    : null;
+  const receivedGapFrankingDecimal = receivedGapAvailable
+    ? formatDecimalExact(frankingTotal)
+    : null;
+  const receivedGapGrossDecimal = receivedGapAvailable
+    ? formatDecimalExact(addDecimal(cashTotal, frankingTotal))
+    : null;
+
+  if (!receivedGapAvailable && !remainderHasFigure) {
+    return {
+      ok: true,
+      row: {
+        endingYear: windowResult.endingYear,
+        label: windowResult.label,
+        status: "unavailable",
+        dividendGrossDecimal: null,
+        dividendCashDecimal: null,
+        dividendFrankingKnownDecimal: null,
+        dividendFrankingIncomplete: true,
+        dividendAmountIncomplete: false,
+        excludedSecurities,
+        partialTtmSecurities: [],
+        method:
+          "no eligible (base-currency) security for this financial year, and no usable evidence-based projection for its remaining days",
+      },
+    };
+  }
+
+  const dividendGrossDecimal = sumNullableDecimals(
+    receivedGapGrossDecimal,
+    remainder.totalGrossDecimal,
+  );
+  const dividendCashDecimal = sumNullableDecimals(
+    receivedGapCashDecimal,
+    remainder.totalCashDecimal,
+  );
+  const dividendFrankingKnownDecimal = sumNullableDecimals(
+    receivedGapFrankingDecimal,
+    remainder.totalFrankingKnownDecimal,
+  );
+  const dividendFrankingIncomplete =
+    frankingIncomplete ||
+    remainder.totalFrankingIncomplete ||
+    !receivedGapAvailable ||
+    !remainderHasFigure;
+  const status: CurrentFinancialYearEstimateStatus =
+    excludedSecurities.length > 0 ||
+    amountIncomplete ||
+    remainder.partialTtmSecurities.length > 0 ||
+    !receivedGapAvailable ||
+    !remainderHasFigure
+      ? "partial"
+      : "ok";
+
+  return {
+    ok: true,
+    row: {
+      endingYear: windowResult.endingYear,
+      label: windowResult.label,
+      status,
+      dividendGrossDecimal,
+      dividendCashDecimal,
+      dividendFrankingKnownDecimal,
+      dividendFrankingIncomplete,
+      dividendAmountIncomplete: amountIncomplete,
+      excludedSecurities,
+      partialTtmSecurities: remainder.partialTtmSecurities,
+      method: `received-plus-pending-declared actuals for the financial year so far${receivedGapAvailable ? "" : " (unavailable)"} plus an evidence-based projection for its remaining days${remainderHasFigure ? "" : " (unavailable)"} -- every dividend event counted exactly once (received, ex-date-passed-but-unpaid, or future-declared/trailing-estimate)`,
+    },
   };
 }

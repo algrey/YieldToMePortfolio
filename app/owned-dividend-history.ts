@@ -44,6 +44,7 @@ import {
 } from "../db/repositories/dividends.ts";
 import { createOwnedUserSettingsRepository } from "../db/repositories/owned-portfolios.ts";
 import { currentFyWindow } from "../domain/calculations/financial-year.ts";
+import { fyWindowForDate } from "../domain/dividends/fy-window.ts";
 import {
   computeFyDividendTotals,
   computeLifetimeDividendTotals,
@@ -93,6 +94,22 @@ export type OwnedDividendSecurityHistory = {
   fyTotalsStatus:
     "ok" | "mixed_currency" | "invalid_start_month" | "invalid_date";
   forecast: SecurityDividendForecast;
+  /** UI-046: the SAME `computeSecurityDividendForecast` composition as
+   * `forecast` above, windowed to the current financial year's REMAINING
+   * days STARTING TOMORROW (`ComputeSecurityForecastInput.windowDays`/
+   * `windowFromDate`, both `today + 1`-anchored) instead of the fixed
+   * rolling 365-day-from-today Next-12-Months window -- feeds the Next 12
+   * Months screen's "FY{yy} Estimate" row (an actuals-only FY-to-date leg,
+   * computed separately and directly from history rows, PLUS this
+   * remainder), `app/owned-income-projection.ts`/
+   * `computeCurrentFinancialYearEstimateRow`. The `today + 1` start (B1
+   * fix) keeps "today" exclusively owned by the actuals leg -- starting
+   * this forward window AT today would double-attribute today's economic
+   * contribution to both legs. Computed here (not re-derived at the
+   * service layer) because the raw inputs (`ttmEvents`,
+   * `defaultFrankingPercentDecimal`) are private to this per-security
+   * derivation loop and never otherwise leave this module. */
+  fyRemainderForecast: SecurityDividendForecast;
 };
 
 export type OwnedDividendHistory = {
@@ -105,6 +122,24 @@ export type OwnedDividendHistory = {
 
 function inClause(count: number): string {
   return Array.from({ length: count }, () => "?").join(",");
+}
+
+// UI-046: mirrors `domain/dividends/forecast.ts`'s identically-implemented
+// `daysBetweenInclusive`/`addDays` -- duplicated rather than imported,
+// matching this codebase's established convention of re-deriving small date
+// primitives per module (see that file's own header note making the same
+// choice for `subtractDays`/`isValidDate`).
+function daysBetweenInclusive(fromDate: string, toDate: string): number {
+  const msPerDay = 86_400_000;
+  const diff =
+    (Date.parse(`${toDate}T00:00:00Z`) - Date.parse(`${fromDate}T00:00:00Z`)) /
+    msPerDay;
+  return Math.max(0, Math.round(diff) + 1);
+}
+function addDays(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 export async function loadOwnedDividendHistory(
@@ -143,6 +178,46 @@ export async function loadOwnedDividendHistory(
   if (!currentWindow.ok)
     throw new Error(`invalid_fy_window:${currentWindow.reason}`);
   const today = currentWindow.window.endDate;
+
+  // UI-046: the current FY's calendar end date (distinct from `today`,
+  // which is `currentFyWindow`'s FY-TO-DATE end -- i.e. "today" itself) --
+  // needed once, up front, to derive how many days remain in the current FY
+  // from today, so every security's `fyRemainderForecast` below windows to
+  // the SAME "rest of this FY" span. `settings.financialYearStartMonth` is
+  // already known valid at this point (`currentFyWindow` above validated it
+  // as part of resolving `currentWindow`), so `fyWindowForDate` here cannot
+  // newly fail on that account; the `ok: false` branch is a defensive-only
+  // fallback that keeps this module resilient rather than throwing, at the
+  // cost of `fyRemainderForecast` degrading to the same window `forecast`
+  // already uses in that unreachable-in-practice case.
+  //
+  // UI-046 (Orchestrator ruling, B1 double-count fix): the remainder window
+  // starts at `today + 1`, not `today` -- `computeCurrentFinancialYearEstimateRow`
+  // computes a SEPARATE actuals-only leg directly from history rows that
+  // owns "today" exclusively (received-or-gap, both anchored on dates
+  // `<= today`). Starting the forward/TTM-tail window at `today` too would
+  // double-attribute "today" to both legs (the forward leg's own smooth
+  // per-day TTM proration implicitly claims a fractional share of every day
+  // in its window, "today" included, on top of whatever real amount the
+  // actuals leg already counted for that exact day). `fyRemainderWindowFromDate`/
+  // `fyRemainderWindowDays` are threaded through unchanged when the FY
+  // calendar itself is unavailable (`currentFyEndWindow.ok === false`) --
+  // `computeSecurityDividendForecast` degrades that case to its own
+  // `today`-anchored default internally.
+  const fyRemainderWindowFromDate = addDays(today, 1);
+  const currentFyEndWindow = fyWindowForDate(
+    today,
+    settings.financialYearStartMonth,
+  );
+  const fyRemainderWindowDays = currentFyEndWindow.ok
+    ? Math.max(
+        0,
+        daysBetweenInclusive(
+          fyRemainderWindowFromDate,
+          currentFyEndWindow.window.endDate,
+        ),
+      )
+    : undefined;
 
   const identityRows = await client.all<Row>(
     `SELECT ps.id, ps.security_id, COALESCE(ps.display_symbol, ps.source_symbol) AS symbol,
@@ -424,6 +499,20 @@ export async function loadOwnedDividendHistory(
         defaultFrankingPercentDecimal,
         today,
       });
+      // UI-046: identical composition, windowed to the current FY's
+      // remaining days instead of the fixed rolling 365 -- see
+      // `OwnedDividendSecurityHistory.fyRemainderForecast`'s doc comment.
+      const fyRemainderForecast = computeSecurityDividendForecast({
+        portfolioSecurityId: identity.id,
+        currencyCode: identity.currencyCode,
+        historyRows: rows,
+        ttmEvents,
+        transactions,
+        defaultFrankingPercentDecimal,
+        today,
+        windowDays: fyRemainderWindowDays,
+        windowFromDate: fyRemainderWindowFromDate,
+      });
 
       return {
         portfolioSecurityId: identity.id,
@@ -436,6 +525,7 @@ export async function loadOwnedDividendHistory(
         fyTotals,
         fyTotalsStatus,
         forecast,
+        fyRemainderForecast,
       };
     },
   );

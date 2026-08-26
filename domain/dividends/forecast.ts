@@ -375,23 +375,75 @@ export type ComputeSecurityForecastInput = {
   transactions: readonly LedgerQuantityFact[];
   defaultFrankingPercentDecimal: string | null;
   today: string;
+  /** UI-046: overrides the forward window length (default `FORECAST_WINDOW_DAYS`,
+   * 365) -- e.g. the days remaining in the current financial year, so this
+   * SAME forecast composition (declared-near-certain, then a
+   * declared-displaced/prorated trailing-twelve-month tail) can produce a
+   * "rest of this FY" estimate instead of a rolling 12-month one, with no
+   * second formula. Only the window LENGTH changes; the tail is still
+   * prorated against a fixed 365-day annual denominator (an annual rate
+   * scaled by a shorter or longer uncovered span), and declared-event
+   * displacement/proration are otherwise unchanged. Must be a non-negative
+   * integer (`0` is a legitimate, explicit "no window at all" -- e.g. today
+   * IS the current FY's last day, so its remainder forecast covers zero
+   * days); any other value (including `undefined`) falls back to
+   * `FORECAST_WINDOW_DAYS`. */
+  windowDays?: number;
+  /** UI-046 (Orchestrator ruling, B1 double-count fix): overrides the
+   * forward window's START date (default `today`). The FY Estimate row
+   * combines this forecast's forward leg with a SEPARATE, actuals-only
+   * FY-to-date leg computed directly from history rows (`computeCurrentFinancialYearEstimateRow`)
+   * -- both legs would otherwise claim "today" (the forward window's
+   * inclusive start date overlaps the actuals leg's inclusive end date),
+   * double-counting whatever the trailing-TTM tail's smooth per-day
+   * proration implicitly attributes to that one day. Passing `today + 1`
+   * here (while `today` itself, used for `currentSharesDecimal` and the
+   * TTM legs' own BACKWARD-looking evidence windows, is UNCHANGED) makes
+   * "today" belong exclusively to the actuals leg. Declared-event
+   * inclusion/exclusion and the displacement/proration math are otherwise
+   * identical -- only the window boundary shifts. Falls back to `today`
+   * when omitted or invalid, so every pre-existing caller (the unshifted
+   * rolling Next 12 Months forecast) is unaffected. */
+  windowFromDate?: string;
 };
 
 export function computeSecurityDividendForecast(
   input: ComputeSecurityForecastInput,
 ): SecurityDividendForecast {
-  const windowFromDate = input.today;
+  // UI-046 (B1 fix): the forward window's START date defaults to `today` but
+  // a caller may shift it forward (e.g. `today + 1`, so the FY Estimate
+  // row's separately-computed actuals leg exclusively owns "today") --
+  // see `ComputeSecurityForecastInput.windowFromDate`'s doc comment. Falls
+  // back to `today` on anything invalid/omitted, so the standard rolling
+  // Next 12 Months forecast (no override) is byte-for-byte unchanged.
+  const windowFromDate =
+    input.windowFromDate !== undefined && isValidDate(input.windowFromDate)
+      ? input.windowFromDate
+      : input.today;
   // Follow-up fix (review round 3): `daysBetweenInclusive` counts BOTH
   // endpoints, so `addDays(today, 365)` produced a 366-DAY inclusive window
   // (today through today+365), which then divided a 365-day-denominated
   // proration (`/ 365` below) by too few uncovered days relative to the
   // window -- a stable payer with zero declared coverage got `uncoveredDays
   // = 366`, so `tail = ttmAnnual * 366 / 365 = 1002.74` for a 1000 TTM
-  // instead of exactly 1000. `addDays(today, FORECAST_WINDOW_DAYS - 1)`
-  // makes the inclusive window exactly `FORECAST_WINDOW_DAYS` (365) days
-  // long (today through today+364), so a fully-uncovered window divides out
-  // to exactly 1.0 against the `/ 365` proration denominator.
-  const windowToDate = addDays(input.today, FORECAST_WINDOW_DAYS - 1);
+  // instead of exactly 1000. `addDays(windowFromDate, windowDays - 1)` makes
+  // the inclusive window exactly `windowDays` days long (windowFromDate
+  // through windowFromDate+windowDays-1), so a fully-uncovered window
+  // divides out to exactly 1.0 against the `/ 365` proration denominator.
+  //
+  // UI-046: `windowDays` defaults to `FORECAST_WINDOW_DAYS` (365, the
+  // rolling Next 12 Months window) but a caller may override it (e.g. the
+  // days remaining in the current financial year) to get a "rest of this
+  // FY" estimate from this SAME formula -- see `ComputeSecurityForecastInput.windowDays`'s
+  // doc comment. `0` is honored explicitly (an intentionally empty window,
+  // e.g. today is the FY's last day) rather than falling back to the
+  // default -- only a genuinely invalid (non-integer or negative) value or
+  // an omitted field falls back.
+  const windowDays =
+    Number.isInteger(input.windowDays) && (input.windowDays as number) >= 0
+      ? (input.windowDays as number)
+      : FORECAST_WINDOW_DAYS;
+  const windowToDate = addDays(windowFromDate, windowDays - 1);
   const currentSharesDecimal = deriveSharesHeldAtDate(
     input.transactions,
     input.today,

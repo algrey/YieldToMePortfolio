@@ -4576,6 +4576,17 @@ dd {
   font-size: 0.82rem;
 }
 
+/* UI-046: a genuinely SHORT one-line method note (owner directive) --
+   deliberately styled like `.income-subtitle`'s already-established
+   secondary-text weight rather than a new visual tier, so it reads as part
+   of the existing headline block instead of an added paragraph of
+   explanatory text (the owner's standing density ruling). The fuller
+   explanation stays in the "Explain this estimate" dialog. */
+.income-method-note {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .income-explain-link {
   justify-self: start;
   min-height: 44px;

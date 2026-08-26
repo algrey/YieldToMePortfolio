@@ -130,6 +130,19 @@ export function IncomeLanding({
   const currentFyRow = projection.currentFinancialYear.ok
     ? projection.currentFinancialYear.row
     : null;
+  // UI-046: the two new rows. `?.` throughout -- older fixtures/props built
+  // before UI-046 (this exact screen's own test suites) never populate
+  // these fields, and a missing field must degrade to "row not shown" here,
+  // never a render crash. A degraded `currentFinancialYearEstimate`
+  // (`ok: false`, the identical `invalid_start_month` failure
+  // `currentFinancialYear` itself already surfaces via the banner above)
+  // is likewise simply not shown -- the existing "Current financial year
+  // unavailable" banner already discloses that case; a second, redundant
+  // row would not add information.
+  const estimateRow = projection.currentFinancialYearEstimate?.ok
+    ? projection.currentFinancialYearEstimate.row
+    : null;
+  const trailingActualRow = projection.trailingTwelveMonthActual ?? null;
 
   return (
     <main className="income-screen">
@@ -200,6 +213,19 @@ export function IncomeLanding({
                   · franking partially unknown
                 </span>
               ) : null}
+            </p>
+            {/* UI-046 (owner directive): a genuinely SHORT one-line note on
+                HOW the estimate is calculated, plus a direct link to the
+                per-security overrides -- the density ruling still applies
+                to everything ELSE on this screen, so this stays one line;
+                the fuller explanation lives in the "Explain this estimate"
+                dialog below, extended with the same note. */}
+            <p className="income-method-note">
+              Declared dividends counted directly; the rest projected from
+              trailing 12-month per-share rates × current shares.{" "}
+              <Link href={assumptionsHref} className="income-coverage-link">
+                Per-security overrides
+              </Link>
             </p>
             <button
               type="button"
@@ -318,6 +344,8 @@ export function IncomeLanding({
           </p>
         ) : null}
         {currentFyRow === null &&
+        estimateRow === null &&
+        trailingActualRow === null &&
         (!projection.pastFinancialYears.ok ||
           projection.pastFinancialYears.rows.length === 0) ? (
           <p>No financial years in range.</p>
@@ -396,6 +424,113 @@ export function IncomeLanding({
                           alone. */}
                       <span className="income-source">
                         {currentFySourceStatus(currentFyRow.dividendSource)}
+                      </span>
+                    </td>
+                  </tr>
+                ) : null}
+                {/* UI-046 (owner directive): "add 2 more rows: Last 12
+                    Months and FY27 Estimate ... between FY2026 and FY27
+                    (So far)" -- pinned order per the owner's own worked
+                    example: so-far, THEN the estimate, THEN the trailing
+                    actual, THEN the closed past-FY rows. Neither row is a
+                    real dividend-list window (the estimate is partly
+                    projected; even the trailing-actual row's window has no
+                    matching list filter today), so -- mirroring UI-017's
+                    "never link the projection itself" rule -- neither
+                    label is a link. */}
+                {estimateRow ? (
+                  <tr key={`fy-${estimateRow.endingYear}-estimate`}>
+                    <th scope="row">
+                      {estimateRow.label} Estimate
+                      {estimateRow.status !== "ok" ? (
+                        <span className="unavailable">
+                          {" "}
+                          ·{" "}
+                          {estimateRow.status === "unavailable"
+                            ? "unavailable"
+                            : "partial"}
+                        </span>
+                      ) : null}
+                    </th>
+                    <td className="numeric">
+                      {formatIncomeMoney(
+                        projection.baseCurrencyCode,
+                        projection.baseCurrencyCode,
+                        estimateRow.dividendGrossDecimal,
+                      )}
+                    </td>
+                    <td className="numeric">
+                      {formatIncomeMoney(
+                        projection.baseCurrencyCode,
+                        projection.baseCurrencyCode,
+                        estimateRow.dividendCashDecimal,
+                      )}
+                      {estimateRow.dividendAmountIncomplete ? (
+                        <span className="unavailable"> · partial</span>
+                      ) : null}
+                    </td>
+                    <td className="numeric">
+                      {formatIncomeMoney(
+                        projection.baseCurrencyCode,
+                        projection.baseCurrencyCode,
+                        estimateRow.dividendFrankingKnownDecimal,
+                      )}
+                      {estimateRow.dividendFrankingIncomplete ? (
+                        <span className="unavailable"> · partial</span>
+                      ) : null}
+                    </td>
+                    <td>
+                      <span className="income-source">
+                        {estimateRow.status === "unavailable"
+                          ? "unavailable"
+                          : "estimate"}
+                      </span>
+                    </td>
+                  </tr>
+                ) : null}
+                {trailingActualRow ? (
+                  <tr key="trailing-twelve-months">
+                    <th scope="row">
+                      Last 12 Months
+                      {trailingActualRow.status === "unavailable" ? (
+                        <span className="unavailable"> · unavailable</span>
+                      ) : trailingActualRow.excludedSecurities.length > 0 ||
+                        trailingActualRow.dividendAmountIncomplete ? (
+                        <span className="unavailable"> · partial</span>
+                      ) : null}
+                    </th>
+                    <td className="numeric">
+                      {formatIncomeMoney(
+                        projection.baseCurrencyCode,
+                        projection.baseCurrencyCode,
+                        trailingActualRow.dividendGrossDecimal,
+                      )}
+                    </td>
+                    <td className="numeric">
+                      {formatIncomeMoney(
+                        projection.baseCurrencyCode,
+                        projection.baseCurrencyCode,
+                        trailingActualRow.dividendCashDecimal,
+                      )}
+                      {trailingActualRow.dividendAmountIncomplete ? (
+                        <span className="unavailable"> · partial</span>
+                      ) : null}
+                    </td>
+                    <td className="numeric">
+                      {formatIncomeMoney(
+                        projection.baseCurrencyCode,
+                        projection.baseCurrencyCode,
+                        trailingActualRow.dividendFrankingKnownDecimal,
+                      )}
+                      {trailingActualRow.dividendFrankingIncomplete ? (
+                        <span className="unavailable"> · partial</span>
+                      ) : null}
+                    </td>
+                    <td>
+                      <span className="income-source">
+                        {trailingActualRow.status === "unavailable"
+                          ? "unavailable"
+                          : "actual"}
                       </span>
                     </td>
                   </tr>
@@ -493,6 +628,10 @@ export function IncomeLanding({
           </button>
           <p className="eyebrow" id="income-explain-title">
             How this estimate is calculated
+          </p>
+          <p>
+            Declared dividends counted directly; the rest projected from
+            trailing 12-month per-share rates × current shares.
           </p>
           <p>{breakdown.method}</p>
           {breakdown.excludedSecurities.length > 0 ? (
