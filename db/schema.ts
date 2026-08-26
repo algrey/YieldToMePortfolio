@@ -3290,6 +3290,24 @@ export const dividendEventOverrides = sqliteTable(
  * it exactly like `update()`/`remove()` already did, preserving IMP-006's
  * reversal-only correction path for that tier.
  *
+ * DIV-016 part C (imported-successor case): the SUCCESSOR side of this
+ * pointer is NOT restricted to a manual correction -- Sharesight
+ * reconciliation (`db/repositories/import-commit.ts`'s commit loop) sets an
+ * existing MANUAL row's `superseded_by_record_id` to point at a NEWLY
+ * IMPORTED row for the same distribution, so the manual fact and the later
+ * Sharesight fact are never both counted (owner ruling: "if I later synced
+ * with sharesight it should not double count"; "sharesight should take
+ * precedence from there forward"). Only the ORIGINAL row being pointed FROM
+ * must be manual (`importBatchId IS NULL`, matching `supersede()`'s own
+ * guard) -- the row pointed TO may be either kind, so this column always
+ * means exactly "what replaced me," never "what kind replaced me." Reversing
+ * the import batch that created that successor row RESTORES the manual
+ * ancestor (`db/repositories/import-reversal.ts`'s `finalize()` nulls
+ * `superseded_by_record_id` back out for every manual row pointing at one of
+ * the batch's own rows, in the SAME atomic statement set as the DELETE that
+ * removes them) -- the manual row becomes the head of its lineage again,
+ * never silently lost.
+ *
  * DELETE semantics and the tombstone case (review follow-up): `remove()`
  * refuses to delete a row that is ITSELF an ancestor
  * (`superseded_by_record_id IS NOT NULL`) -- deleting one would destroy the

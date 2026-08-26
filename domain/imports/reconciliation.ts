@@ -2,6 +2,13 @@ import type { NormalizedImportRow } from "./strict-versioned-parser.ts";
 // DIV-004: reuse DIV-001's documented proximity window rather than
 // re-deriving a second "how close counts as a duplicate" constant.
 import { PROXIMITY_WINDOW_DAYS } from "../dividends/history.ts";
+// DIV-016 part C: the shared matching algorithm -- see that module's header
+// comment for the owner rulings and tolerance decision it implements.
+import {
+  cashTotalsWithinTolerance,
+  computeDividendCashTotal,
+  computeDividendReconciliation,
+} from "./dividend-reconciliation.ts";
 
 type Decimal = { coefficient: bigint; scale: number };
 
@@ -119,7 +126,21 @@ export type ImportReconciliationIssue = Readonly<{
     | "OVERSELL"
     | "INCOMPLETE_HISTORY"
     | "ROW_UNSUPPORTED"
-    | "DIVIDEND_NEAR_EXISTING_ENTRY";
+    | "DIVIDEND_NEAR_EXISTING_ENTRY"
+    // DIV-016 part C: advisory, preview-only disclosure of the reconciliation
+    // this batch's commit would apply (PROPOSED) or could not safely decide
+    // (AMBIGUOUS) -- see `ImportPreviewDividendReconciliationCandidate`'s doc
+    // comment for scope and `domain/imports/review.ts` for why these codes,
+    // like `DIVIDEND_NEAR_EXISTING_ENTRY`, are excluded from `previewVersion`.
+    | "DIVIDEND_RECONCILIATION_PROPOSED"
+    | "DIVIDEND_RECONCILIATION_AMBIGUOUS"
+    // DIV-016 part C, review round 1 B1 (BLOCKING): a row whose OWN
+    // cross-batch identity was already committed in a PRIOR import can
+    // never actually reconcile (only a row THIS batch actually inserts can
+    // supersede a manual record) -- this code states that truth instead of
+    // a false `DIVIDEND_RECONCILIATION_PROPOSED` promise. See the matching
+    // block's own comment in `createImportReconciliationPreview` below.
+    | "DIVIDEND_ALREADY_IMPORTED_MANUAL_DUPLICATE";
   severity: "error" | "warning" | "info";
   rowId?: string;
   physicalRowNumber?: number;
@@ -140,6 +161,24 @@ export type ImportPreviewExistingDividendEntry = Readonly<{
   paymentDate: string;
 }>;
 
+// DIV-016 part C: an existing OWNER-TYPED, non-superseded manual dividend
+// record (`dividend_manual_records`, `import_batch_id IS NULL AND
+// superseded_by_record_id IS NULL`) eligible to be matched and SUPERSEDED by
+// an incoming Sharesight payout row. Deliberately narrower than
+// `ImportPreviewExistingDividendEntry` above: `dividend_receipts` rows are
+// never reconciliation candidates (only a manually entered fact can be
+// superseded, per the DIV-016 owner ruling), and this shape carries the
+// comparable cash amount the AMOUNT leg of the matching rule needs (see
+// `domain/imports/dividend-reconciliation.ts`), not just security+date.
+export type ImportPreviewDividendReconciliationCandidate = Readonly<{
+  id: string;
+  portfolioSecurityId: string;
+  paymentDate: string;
+  totalCashDecimal: string | null;
+  sharesDecimal: string | null;
+  dividendPerShareDecimal: string | null;
+}>;
+
 export type ImportReconciliationPreview = Readonly<{
   ready: boolean;
   counts: Readonly<{
@@ -151,6 +190,19 @@ export type ImportReconciliationPreview = Readonly<{
   }>;
   projectedQuantities: Readonly<Record<string, string>>;
   unresolvedCandidates: readonly ImportPreviewSecurityCandidate[];
+  // DIV-016 part C: advisory disclosure of the safe (unambiguous) proposed
+  // reconciliations this batch's rows resolve to against
+  // `input.reconciliationCandidates` -- see that field's doc comment for
+  // scope. Always `[]` when `reconciliationCandidates` is omitted (never
+  // fabricates a match without candidate evidence). Excluded from
+  // `previewVersion` by `domain/imports/review.ts` -- see its doc comment.
+  proposedReconciliations: readonly Readonly<{
+    rowId: string;
+    physicalRowNumber: number;
+    manualRecordId: string;
+    portfolioSecurityId: string;
+    paymentDate: string;
+  }>[];
   resolvedTargets: Readonly<
     Record<
       string,
@@ -176,6 +228,20 @@ export type ImportReconciliationInput = Readonly<{
   // near-duplicate dividend row before commit -- see
   // `ImportPreviewExistingDividendEntry`'s doc comment for scope.
   existingDividendEntries?: readonly ImportPreviewExistingDividendEntry[];
+  // DIV-016 part C: existing manual dividend rows eligible for reconciliation
+  // -- see `ImportPreviewDividendReconciliationCandidate`'s doc comment.
+  reconciliationCandidates?: readonly ImportPreviewDividendReconciliationCandidate[];
+  // DIV-016 part C, review round 1 B1 (BLOCKING): the set of
+  // `${portfolioId}::${sourceReference}` composite keys ALREADY committed
+  // to `dividend_manual_records` from a PRIOR import (any batch) -- the
+  // EXACT identity `db/repositories/import-commit.ts`'s dividend branch
+  // checks before it ever reaches the supersede step. A row whose own
+  // computed `import-fingerprint:<fingerprint>` identity is in this set can
+  // never actually insert (the cross-batch idempotency short-circuit fires
+  // first), so it is excluded from the reconciliation matching pool
+  // entirely -- see `createImportReconciliationPreview`'s own comment at
+  // the `freshRows`/`alreadyImportedRows` split for why.
+  existingDividendSourceReferences?: ReadonlySet<string>;
 }>;
 
 function decisionFor(
@@ -577,6 +643,162 @@ export function createImportReconciliationPreview(
     }
   }
 
+  // DIV-016 part C: advisory-only preview disclosure of the reconciliation
+  // this batch's commit would apply. Built from `resolvedRows` (rows that
+  // already cleared portfolio/security resolution, in the SAME shape
+  // `resolvedTargets` above reflects) rather than re-walking `input.rows`,
+  // so a dividend row's `membershipId` here is always the identical,
+  // genuinely-resolved portfolio-security id commit-time reconciliation
+  // will use. Never blocks readiness (`PROPOSED`/`AMBIGUOUS`/`ALREADY_
+  // IMPORTED_MANUAL_DUPLICATE` are `info`/`warning`, never `error`) --
+  // reconciliation is a commit-time decision, not a precondition for
+  // staging.
+  //
+  // B1 (review round 1 BLOCKING fix): a row whose OWN cross-batch identity
+  // (`import-fingerprint:<fingerprint>`, the exact `source_reference`
+  // `db/repositories/import-commit.ts`'s dividend branch checks against
+  // `dividend_manual_records` BEFORE it ever reaches the supersede step)
+  // already exists from a PRIOR import never actually inserts a new row --
+  // the commit loop's pre-existing cross-batch idempotency short-circuit
+  // fires first and `continue`s. Proposing a reconciliation for such a row
+  // was a FALSE PROMISE: the owner would read "committing will supersede
+  // the manual record," commit, and get neither -- a real double count left
+  // silently in place. Fixed at the root: `dividendReconciliationRows` is
+  // split into `freshRows` (eligible to actually insert and therefore
+  // actually reconcile) and `alreadyImportedRows` (dedupe-bound, excluded
+  // from the matching pool ENTIRELY -- so they can also never wrongly
+  // consume/poison a manual candidate that a sibling fresh row could
+  // otherwise have cleanly, unambiguously matched). Ruling (ORCHESTRATOR,
+  // ambiguous-preview-vs-commit review B1): "Reconciliation supersedes ONLY
+  // via rows the CURRENT batch actually inserts."
+  const dividendReconciliationRowsAll = resolvedRows
+    .filter(
+      ({ row }) =>
+        row.rowClass === "transaction" &&
+        row.normalized.type === "dividend" &&
+        row.normalized.cashEvent === null &&
+        row.normalized.localTradeDate !== null,
+    )
+    .map(({ row, portfolio, membershipId }) => ({
+      rowId: row.id,
+      physicalRowNumber: row.physicalRowNumber,
+      portfolioId: portfolio.id,
+      portfolioSecurityId: membershipId,
+      paymentDate: row.normalized.localTradeDate as string,
+      sourceReference: `import-fingerprint:${row.fingerprint}`,
+      cashTotalDecimal: computeDividendCashTotal({
+        totalCashDecimal: row.normalized.totalCashDecimal ?? null,
+        sharesDecimal: row.normalized.sharesOwned,
+        dividendPerShareDecimal: row.normalized.costPerShare,
+      }),
+    }))
+    .filter(
+      (entry): entry is typeof entry & { cashTotalDecimal: string } =>
+        entry.cashTotalDecimal !== null,
+    );
+  const existingDividendSourceReferences =
+    input.existingDividendSourceReferences ?? new Set<string>();
+  const freshRows = dividendReconciliationRowsAll.filter(
+    (row) =>
+      !existingDividendSourceReferences.has(
+        `${row.portfolioId}::${row.sourceReference}`,
+      ),
+  );
+  const alreadyImportedRows = dividendReconciliationRowsAll.filter((row) =>
+    existingDividendSourceReferences.has(
+      `${row.portfolioId}::${row.sourceReference}`,
+    ),
+  );
+  const reconciliationCandidates = (input.reconciliationCandidates ?? []).map(
+    (candidate) => ({
+      id: candidate.id,
+      portfolioSecurityId: candidate.portfolioSecurityId,
+      paymentDate: candidate.paymentDate,
+      cashTotalDecimal: computeDividendCashTotal({
+        totalCashDecimal: candidate.totalCashDecimal,
+        sharesDecimal: candidate.sharesDecimal,
+        dividendPerShareDecimal: candidate.dividendPerShareDecimal,
+      }),
+    }),
+  );
+  const dividendCandidatesWithCash = reconciliationCandidates.filter(
+    (candidate): candidate is typeof candidate & { cashTotalDecimal: string } =>
+      candidate.cashTotalDecimal !== null,
+  );
+  const dividendReconciliation = computeDividendReconciliation(
+    freshRows,
+    dividendCandidatesWithCash,
+  );
+  const rowById = new Map(freshRows.map((row) => [row.rowId, row]));
+  const proposedReconciliations = dividendReconciliation.matches.map(
+    (match) => {
+      const source = rowById.get(match.rowId)!;
+      return {
+        rowId: match.rowId,
+        physicalRowNumber: source.physicalRowNumber,
+        manualRecordId: match.manualRecordId,
+        portfolioSecurityId: source.portfolioSecurityId,
+        paymentDate: source.paymentDate,
+      };
+    },
+  );
+  for (const match of proposedReconciliations) {
+    issues.push({
+      code: "DIVIDEND_RECONCILIATION_PROPOSED",
+      severity: "info",
+      rowId: match.rowId,
+      physicalRowNumber: match.physicalRowNumber,
+      sourceKey: match.manualRecordId,
+      message:
+        "This Sharesight dividend matches an existing manually entered record for the same security and payment date -- committing will supersede the manual record so the distribution is not double-counted.",
+    });
+  }
+  for (const rowId of dividendReconciliation.ambiguousRowIds) {
+    const source = rowById.get(rowId);
+    if (!source) continue;
+    issues.push({
+      code: "DIVIDEND_RECONCILIATION_AMBIGUOUS",
+      severity: "warning",
+      rowId,
+      physicalRowNumber: source.physicalRowNumber,
+      sourceKey: source.portfolioSecurityId,
+      message:
+        "This dividend matches more than one existing entry (or an existing entry matches more than one incoming dividend) closely enough to reconcile automatically -- nothing will be linked automatically; check which record is correct before committing.",
+    });
+  }
+  // B1 fix: a dedupe-bound row (its own source_reference already committed
+  // from a PRIOR import) that WOULD otherwise have matched a manual
+  // candidate gets the TRUTH instead of a false PROPOSED promise -- this
+  // distribution already exists both as a previously-imported row and as a
+  // manual row, and stays double-counted until the owner acts (delete the
+  // manual row -- it is a deletable head -- or reverse the earlier batch and
+  // re-import). Checked directly against the matching predicate (security +
+  // payment date + tolerance), not through `computeDividendReconciliation`'s
+  // ambiguity machinery -- this row can never actually reconcile regardless
+  // of how many candidates it resembles, so "would it match at least one"
+  // is the only relevant question.
+  for (const row of alreadyImportedRows) {
+    const wouldHaveMatched = dividendCandidatesWithCash.some(
+      (candidate) =>
+        candidate.portfolioSecurityId === row.portfolioSecurityId &&
+        candidate.paymentDate === row.paymentDate &&
+        cashTotalsWithinTolerance(
+          row.cashTotalDecimal,
+          candidate.cashTotalDecimal,
+        ),
+    );
+    if (!wouldHaveMatched) continue;
+    issues.push({
+      code: "DIVIDEND_ALREADY_IMPORTED_MANUAL_DUPLICATE",
+      severity: "warning",
+      rowId: row.rowId,
+      physicalRowNumber: row.physicalRowNumber,
+      sourceKey: row.portfolioSecurityId,
+      message:
+        "This distribution was already imported in a previous batch AND exists as a manually entered record -- it remains double-counted. This commit will not reconcile them (only rows this batch actually inserts can supersede a manual record). Delete the manual record, or reverse the earlier import batch and re-import, to resolve it.",
+    });
+  }
+
   return {
     ready: !issues.some((issue) => issue.severity === "error"),
     counts: {
@@ -588,6 +810,7 @@ export function createImportReconciliationPreview(
     },
     projectedQuantities,
     unresolvedCandidates,
+    proposedReconciliations,
     resolvedTargets,
     issues,
   };

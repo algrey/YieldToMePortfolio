@@ -29,6 +29,7 @@ import {
 } from "./import-row-exclusion-service.ts";
 import { classifyImportRows, DEFAULT_IMPORT_LIMITS } from "../domain/imports";
 import type {
+  ImportPreviewDividendReconciliationCandidate,
   ImportPreviewExistingDividendEntry,
   ImportPreviewPortfolio,
   ImportPreviewSecurityCandidate,
@@ -67,6 +68,8 @@ async function loadReview(
     candidateRows,
     existingManualRows,
     existingReceiptRows,
+    reconciliationCandidateRows,
+    existingSourceReferenceRows,
   ] = await Promise.all([
     staging.listRows(userId, batchId),
     staging.listIssues(userId, batchId),
@@ -99,6 +102,35 @@ async function loadReview(
        WHERE user_id = ?`,
       [userId],
     ),
+    // DIV-016 part C: existing owner-typed, non-superseded manual dividend
+    // records eligible to be matched and superseded by an incoming
+    // Sharesight payout row -- see `ImportPreviewDividendReconciliationCandidate`'s
+    // doc comment. Narrower than `existingManualRows` above (no receipts;
+    // carries amounts): this is the advisory PREVIEW-only disclosure --
+    // `db/repositories/import-commit.ts`'s `revalidate()` runs the
+    // authoritative, live-DB-state equivalent independently at commit time.
+    client.all<Record<string, unknown>>(
+      `SELECT id, portfolio_security_id, payment_date, shares_decimal,
+              dividend_per_share_decimal, total_cash_decimal
+       FROM dividend_manual_records
+       WHERE user_id = ? AND import_batch_id IS NULL
+         AND superseded_by_record_id IS NULL`,
+      [userId],
+    ),
+    // DIV-016 part C, review round 1 B1 (BLOCKING): every dividend row
+    // ALREADY imported (any prior batch) by this owner, keyed by the exact
+    // `(portfolio_id, source_reference)` identity
+    // `db/repositories/import-commit.ts`'s cross-batch idempotency check
+    // uses -- a row whose own computed identity is already here can never
+    // actually insert this commit, so it must never be offered a
+    // `DIVIDEND_RECONCILIATION_PROPOSED` promise (see
+    // `ImportReconciliationInput.existingDividendSourceReferences`'s doc
+    // comment).
+    client.all<Record<string, unknown>>(
+      `SELECT portfolio_id, source_reference FROM dividend_manual_records
+       WHERE user_id = ? AND source_reference IS NOT NULL`,
+      [userId],
+    ),
   ]);
   const previewPortfolios: ImportPreviewPortfolio[] = portfolios.map(
     (item) => ({
@@ -127,6 +159,25 @@ async function loadReview(
     portfolioSecurityId: String(row.portfolio_security_id),
     paymentDate: String(row.payment_date),
   }));
+  const reconciliationCandidates: ImportPreviewDividendReconciliationCandidate[] =
+    reconciliationCandidateRows.map((row) => ({
+      id: String(row.id),
+      portfolioSecurityId: String(row.portfolio_security_id),
+      paymentDate: String(row.payment_date),
+      totalCashDecimal:
+        row.total_cash_decimal === null ? null : String(row.total_cash_decimal),
+      sharesDecimal:
+        row.shares_decimal === null ? null : String(row.shares_decimal),
+      dividendPerShareDecimal:
+        row.dividend_per_share_decimal === null
+          ? null
+          : String(row.dividend_per_share_decimal),
+    }));
+  const existingDividendSourceReferences = new Set(
+    existingSourceReferenceRows.map(
+      (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
+    ),
+  );
   const linkedSecurityIds = securityCandidates
     .map((candidate) => candidate.securityId)
     .filter((id): id is string => id !== null);
@@ -154,6 +205,8 @@ async function loadReview(
     portfolios: previewPortfolios,
     securityCandidates,
     existingDividendEntries,
+    reconciliationCandidates,
+    existingDividendSourceReferences,
     attestedSecurityIds,
     securityNames,
     autoCreatedSecurityIds,

@@ -3,7 +3,10 @@ import {
   buildLedgerPostingStatements,
   type LedgerPostingPersistenceInput,
 } from "./ledger.ts";
-import { createAuditInsertStatement } from "./audit.ts";
+import {
+  createAuditInsertStatement,
+  createConditionalAuditInsertStatement,
+} from "./audit.ts";
 import { valueHistoryInvalidationFromDateStatement } from "./portfolio-value-history.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 import { prepareLedgerPosting } from "../../domain/ledger/posting.ts";
@@ -22,6 +25,12 @@ import {
   SHARESIGHT_SYNC_PARSER_FORMAT,
   SHARESIGHT_SYNC_PARSER_VERSION,
 } from "../../domain/sharesight-sync/index.ts";
+import {
+  computeDividendCashTotal,
+  computeDividendReconciliation,
+  type DividendReconciliationCandidate,
+  type DividendReconciliationIncomingRow,
+} from "../../domain/imports/dividend-reconciliation.ts";
 
 // BRK-005: mirrors `app/import-ready-service.ts`'s identical widening of the
 // CSV parser's `(parserFormat, parserVersion)` allowlist by exactly one
@@ -323,6 +332,18 @@ export function createOwnedImportCommitRepository(
           >
         >;
         skippedRowIds: ReadonlySet<string>;
+        // DIV-016 part C: the AUTHORITATIVE reconciliation decision, maps an
+        // incoming dividend row's id to the existing `dividend_manual_records`
+        // row it safely, unambiguously matches (see
+        // `domain/imports/dividend-reconciliation.ts`'s matching rule) --
+        // deliberately computed independently of `buildImportReview`'s
+        // (advisory-only, hash-excluded) `proposedReconciliations`, so this
+        // decision is never affected by which callers happen to supply
+        // preview-display evidence. Recomputed fresh from LIVE database state
+        // on every `revalidate()` call (every `commit()` invocation,
+        // including resumed/repeated ones), so an already-superseded
+        // candidate never matches twice.
+        dividendReconciliation: Readonly<Record<string, string>>;
         state: {
           rowCount: number;
           rowVersionTotal: number;
@@ -337,24 +358,56 @@ export function createOwnedImportCommitRepository(
     const staging = createOwnedImportStagingRepository(client);
     const ownedBatch = await staging.get(userId, batchId);
     if (!ownedBatch) return { ok: false, reason: "not_found" };
-    const [rows, issues, mappings, portfolios, candidateRows] =
-      await Promise.all([
-        staging.listRows(userId, batchId),
-        staging.listIssues(userId, batchId),
-        createOwnedImportMappingDecisionRepository(client).list(
-          userId,
-          batchId,
-        ),
-        createOwnedPortfolioRepository(client).list(userId),
-        client.all<Record<string, unknown>>(
-          `SELECT id, portfolio_id, source_symbol, source_exchange_alias,
+    const [
+      rows,
+      issues,
+      mappings,
+      portfolios,
+      candidateRows,
+      manualCandidateRows,
+      existingSourceReferenceRows,
+    ] = await Promise.all([
+      staging.listRows(userId, batchId),
+      staging.listIssues(userId, batchId),
+      createOwnedImportMappingDecisionRepository(client).list(userId, batchId),
+      createOwnedPortfolioRepository(client).list(userId),
+      client.all<Record<string, unknown>>(
+        `SELECT id, portfolio_id, source_symbol, source_exchange_alias,
                   source_currency_code, security_id
            FROM portfolio_securities
            WHERE user_id = ?
            ORDER BY source_symbol ASC, id ASC`,
-          [userId],
-        ),
-      ]);
+        [userId],
+      ),
+      // DIV-016 part C: the LIVE candidate set for the authoritative
+      // reconciliation decision below -- see `dividendReconciliation`'s
+      // doc comment. Recomputed on every `revalidate()` call, so a
+      // manual row already superseded by an earlier chunk/commit
+      // invocation of THIS SAME batch is correctly no longer a candidate.
+      client.all<Record<string, unknown>>(
+        `SELECT id, portfolio_security_id, payment_date, shares_decimal,
+                  dividend_per_share_decimal, total_cash_decimal
+           FROM dividend_manual_records
+           WHERE user_id = ? AND import_batch_id IS NULL
+             AND superseded_by_record_id IS NULL`,
+        [userId],
+      ),
+      // DIV-016 part C, review round 1 B1 (BLOCKING): every dividend row
+      // ALREADY committed by this owner (any prior batch), keyed by the
+      // EXACT `(portfolio_id, source_reference)` identity the per-row
+      // cross-batch idempotency check below (`resolveInput`'s existingRecord
+      // lookup) uses. A row whose own computed identity is already here can
+      // never actually insert THIS commit -- excluded from the matching
+      // pool entirely below, so it can neither wrongly get proposed as a
+      // reconciliation nor wrongly consume/poison a candidate a sibling row
+      // could otherwise have cleanly matched (ruling: "reconciliation
+      // supersedes ONLY via rows the CURRENT batch actually inserts").
+      client.all<Record<string, unknown>>(
+        `SELECT portfolio_id, source_reference FROM dividend_manual_records
+           WHERE user_id = ? AND source_reference IS NOT NULL`,
+        [userId],
+      ),
+    ]);
     const securityCandidates: ImportPreviewSecurityCandidate[] =
       candidateRows.map((row) => ({
         id: String(row.id),
@@ -418,15 +471,101 @@ export function createOwnedImportCommitRepository(
     if (!built.preview.ready || hasBlockingPersistedState) {
       return { ok: false, reason: "revalidation_failed" };
     }
+    const skippedRowIds = new Set(
+      built.preview.issues
+        .filter((issue) => issue.code === "DUPLICATE_ROW")
+        .flatMap((issue) => (issue.rowId ? [issue.rowId] : [])),
+    );
+    const existingDividendSourceReferences = new Set(
+      existingSourceReferenceRows.map(
+        (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
+      ),
+    );
+    // DIV-016 part C: the authoritative reconciliation decision -- see
+    // `dividendReconciliation`'s doc comment above. Built from `rows`
+    // (every staged row for the WHOLE batch, not just one commit chunk) and
+    // `built.preview.resolvedTargets` (the identical resolved
+    // portfolio-security id the commit loop itself uses for each row), so
+    // ambiguity across the entire batch is detected even when a batch
+    // commits across multiple chunked `commit()` invocations.
+    //
+    // B1 (review round 1 BLOCKING fix): a row whose own cross-batch
+    // identity (`import-fingerprint:<fingerprint>`, EXACTLY the
+    // `source_reference` `resolveInput`'s existingRecord check below
+    // compares against) already exists never reaches the supersede step --
+    // it is excluded from the matching pool here, at the source, rather
+    // than merely relying on the per-row existingRecord skip (which still
+    // fires independently, defense-in-depth) -- see the query above's own
+    // comment for why this also protects a sibling row's clean match from
+    // being wrongly poisoned into ambiguity.
+    const dividendIncomingRows: DividendReconciliationIncomingRow[] = [];
+    for (const row of rows) {
+      if (row.excludedByOwnerAt !== null) continue;
+      if (row.rowClass !== "transaction") continue;
+      if (skippedRowIds.has(row.id)) continue;
+      const normalized = row.normalizedFields;
+      if (!normalized || normalized.type !== "dividend") continue;
+      if (normalized.cashEvent !== null) continue;
+      if (!normalized.localTradeDate) continue;
+      const target = built.preview.resolvedTargets[row.id];
+      if (!target || !target.portfolioSecurityId) continue;
+      const sourceReference = `import-fingerprint:${row.normalizedFingerprint ?? row.id}`;
+      if (
+        existingDividendSourceReferences.has(
+          `${target.portfolioId}::${sourceReference}`,
+        )
+      )
+        continue;
+      const cashTotalDecimal = computeDividendCashTotal({
+        totalCashDecimal: normalized.totalCashDecimal ?? null,
+        sharesDecimal: normalized.sharesOwned,
+        dividendPerShareDecimal: normalized.costPerShare,
+      });
+      if (cashTotalDecimal === null) continue;
+      dividendIncomingRows.push({
+        rowId: row.id,
+        portfolioSecurityId: target.portfolioSecurityId,
+        paymentDate: normalized.localTradeDate,
+        cashTotalDecimal,
+      });
+    }
+    const dividendCandidates: DividendReconciliationCandidate[] =
+      manualCandidateRows
+        .map((row) => ({
+          id: String(row.id),
+          portfolioSecurityId: String(row.portfolio_security_id),
+          paymentDate: String(row.payment_date),
+          cashTotalDecimal: computeDividendCashTotal({
+            totalCashDecimal:
+              row.total_cash_decimal === null
+                ? null
+                : String(row.total_cash_decimal),
+            sharesDecimal:
+              row.shares_decimal === null ? null : String(row.shares_decimal),
+            dividendPerShareDecimal:
+              row.dividend_per_share_decimal === null
+                ? null
+                : String(row.dividend_per_share_decimal),
+          }),
+        }))
+        .filter(
+          (candidate): candidate is DividendReconciliationCandidate =>
+            candidate.cashTotalDecimal !== null,
+        );
+    const reconciled = computeDividendReconciliation(
+      dividendIncomingRows,
+      dividendCandidates,
+    );
+    const dividendReconciliation: Record<string, string> = {};
+    for (const match of reconciled.matches) {
+      dividendReconciliation[match.rowId] = match.manualRecordId;
+    }
     return {
       ok: true,
       previewVersion: built.previewVersion,
       targets: built.preview.resolvedTargets,
-      skippedRowIds: new Set(
-        built.preview.issues
-          .filter((issue) => issue.code === "DUPLICATE_ROW")
-          .flatMap((issue) => (issue.rowId ? [issue.rowId] : [])),
-      ),
+      skippedRowIds,
+      dividendReconciliation,
       state: {
         rowCount: rows.length,
         rowVersionTotal: rows.reduce((total, row) => total + row.version, 0),
@@ -1169,6 +1308,59 @@ export function createOwnedImportCommitRepository(
               continue;
             }
             statements.push(...resolved.statements);
+            // DIV-016 part C: `validation.dividendReconciliation` (computed
+            // fresh, batch-wide, in `revalidate()` above) names the existing
+            // manual row THIS incoming row safely, unambiguously reconciles
+            // to -- when present, mark it superseded by the row just
+            // inserted (`resolved.recordId`), in the SAME atomic chunk as
+            // the insert, mirroring `dividends.ts`'s `supersede()` CAS
+            // convention (`import_batch_id IS NULL AND
+            // superseded_by_record_id IS NULL`). Owner ruling: "sharesight
+            // should take precedence from there forward" -- Part A's own
+            // import-row edit block already prevents any further manual
+            // edit from landing on the new (imported) head. A lost race
+            // (the manual row was superseded/deleted between `revalidate()`
+            // and this batch executing) leaves the guard matching zero
+            // rows -- the dividend row still commits, simply unreconciled;
+            // never a reason to fail the whole commit.
+            const supersedesManualRecordId =
+              validation.dividendReconciliation[row.id];
+            if (supersedesManualRecordId) {
+              statements.push({
+                sql: `UPDATE dividend_manual_records
+                  SET superseded_by_record_id = ?, updated_at = ?, version = version + 1
+                  WHERE id = ? AND user_id = ? AND import_batch_id IS NULL
+                    AND superseded_by_record_id IS NULL`,
+                params: [
+                  resolved.recordId,
+                  nowIso(now),
+                  supersedesManualRecordId,
+                  userId,
+                ],
+              });
+              statements.push(
+                createConditionalAuditInsertStatement(
+                  {
+                    actorUserId: userId,
+                    targetOwnerUserId: userId,
+                    action: "dividend.manual_record.supersede",
+                    targetType: "dividend_manual_record",
+                    targetId: resolved.recordId,
+                    requestId: input.requestId,
+                    result: "success",
+                    occurredAt: nowIso(now),
+                    metadata: {
+                      supersedesRecordId: supersedesManualRecordId,
+                      source: "import_reconciliation",
+                      batchId: batch.id,
+                    },
+                  },
+                  "EXISTS (SELECT 1 FROM dividend_manual_records WHERE id = ? AND user_id = ? AND superseded_by_record_id = ?)",
+                  [supersedesManualRecordId, userId, resolved.recordId],
+                  () => nowIso(now),
+                ),
+              );
+            }
             statements.push({
               sql: `UPDATE import_rows SET commit_status = 'committed', commit_transaction_id = ?, updated_at = ?, version = version + 1
                 WHERE id = ? AND user_id = ? AND batch_id = ? AND commit_status = 'staged'`,

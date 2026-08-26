@@ -1445,6 +1445,21 @@ export function createDividendAssumptionsRepository(
     )
       return { ok: false, reason: "not_found" };
     const updatedAt = now();
+    // DIV-016 part B follow-up (b): `force_assumption` bridges an override
+    // past 12+ months of history evidence (see `resolveAssumptionBridgeStatus`)
+    // -- it is meaningless once NEITHER override field is set (`hasAnyOverride`
+    // in `app/owned-dividend-assumptions.ts` is exactly "yield OR franking
+    // non-null"), and the editor's force checkbox only renders while the
+    // status is dormant/forced, i.e. while an override still exists. Without
+    // this clamp, clearing both fields left the stored flag `true` with no
+    // owner-visible control to unset it, and a LATER value re-entered into
+    // either field would silently resurrect "forced" -- clamped here,
+    // server-side, so the invariant holds regardless of what any caller
+    // (grid save, a future direct API call) actually submits.
+    const forceAssumption =
+      input.forceAssumption &&
+      (input.dividendYieldPercentDecimal !== null ||
+        input.frankingPercentDecimal !== null);
     if (input.expectedVersion === null) {
       const id = randomUUID();
       const statements: SqlStatement[] = [
@@ -1468,7 +1483,7 @@ export function createDividendAssumptionsRepository(
             input.dividendYieldPercentDecimal,
             input.frankingPercentDecimal,
             input.dividendGrowthPercentDecimal,
-            input.forceAssumption ? 1 : 0,
+            forceAssumption ? 1 : 0,
             updatedAt,
             updatedAt,
             portfolioSecurityId,
@@ -1534,7 +1549,7 @@ export function createDividendAssumptionsRepository(
           input.dividendYieldPercentDecimal,
           input.frankingPercentDecimal,
           input.dividendGrowthPercentDecimal,
-          input.forceAssumption ? 1 : 0,
+          forceAssumption ? 1 : 0,
           updatedAt,
           portfolioSecurityId,
           userId,

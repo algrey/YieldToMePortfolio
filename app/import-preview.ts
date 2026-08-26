@@ -1,4 +1,5 @@
 import type {
+  ImportPreviewDividendReconciliationCandidate,
   ImportPreviewExistingDividendEntry,
   ImportPreviewPortfolio,
   ImportPreviewSecurityCandidate,
@@ -111,6 +112,8 @@ export function buildImportReviewPreview(input: {
   portfolios: ImportPreviewPortfolio[];
   securityCandidates: ImportPreviewSecurityCandidate[];
   existingDividendEntries?: ImportPreviewExistingDividendEntry[];
+  reconciliationCandidates?: ImportPreviewDividendReconciliationCandidate[];
+  existingDividendSourceReferences?: ReadonlySet<string>;
   attestedSecurityIds?: readonly string[];
   // BRK-009C: pre-fetched inputs to `deriveSharesightSecuritiesSummary` --
   // this function stays a synchronous, DB-free builder (like every other
@@ -130,6 +133,8 @@ export function buildImportReviewPreview(input: {
     portfolios: input.portfolios,
     securityCandidates: input.securityCandidates,
     existingDividendEntries: input.existingDividendEntries,
+    reconciliationCandidates: input.reconciliationCandidates,
+    existingDividendSourceReferences: input.existingDividendSourceReferences,
   });
   const excludedRows = input.rows
     .filter((row) => row.excludedByOwnerAt !== null)

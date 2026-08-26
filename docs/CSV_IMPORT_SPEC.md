@@ -1289,3 +1289,207 @@ allowance), and stays well under Cloudflare's ~100 MB platform request-body
 limit; `db/repositories/import-staging.ts`'s existing single atomic
 `client.batch()` write remains bounded by the unchanged `maxRows` cap (see
 §7's "Known risk" note).
+
+## 17. Sharesight dividend reconciliation (`DIV-016` part C)
+
+Owner rulings that govern this section (verbatim, TASKS.md `DIV-016`): "If I
+later synced with sharesight it should not double count" and, once
+reconciled, "sharesight should take precedence from there forward." A
+manually entered dividend row and the same real-world distribution arriving
+later via a Sharesight import must never both count as income evidence; once
+reconciled, the Sharesight-sourced row is authoritative going forward.
+
+**Current-behaviour finding before this task.** An imported dividend row and
+an existing manual row for the same distribution were previously INDEPENDENT
+facts: `db/repositories/import-commit.ts`'s dividend branch checked only
+`dividend_manual_records.source_reference` for cross-BATCH (imported-vs-
+imported) idempotency and never looked at owner-typed rows at all, so a
+Sharesight sync of a distribution the owner had already entered by hand
+created a SECOND row and both counted (DIV-004's `DIVIDEND_NEAR_EXISTING_ENTRY`
+warning, §3a above, flags this case in the preview but is advisory-only and
+never blocks commit).
+
+**Matching rule.** An incoming Sharesight payout row matches an existing
+manual (`dividend_manual_records`, `import_batch_id IS NULL`), non-superseded
+(`superseded_by_record_id IS NULL`), same-owner row when all three hold:
+
+1. same `portfolio_security_id` (currency is DELIBERATELY not a separate
+   matching leg -- `portfolio_security_id` already pins the exact security,
+   which this codebase's own single-currency-per-security invariant means a
+   BRK-010 foreign-currency payout's `currency_code`/FX-rate provenance
+   describes only HOW its cash total was converted into that one security
+   currency, never a second identity to match on; a known, accepted
+   asymmetry, matching DIV-004's near-duplicate warning's own scope);
+2. same payment date, exact string equality. Sharesight payouts carry only
+   `paidOnDate` (`domain/sharesight-sync/transform.ts` maps it straight to
+   `localTradeDate`, live-confirmed against the transform code) -- there is
+   no separate ex-date on a payout row at all, so payment date is the only
+   date this matching can use, which also matches the owner's ruling to
+   match on payment date rather than ex-date;
+3. their comparable CASH TOTALS agree within tolerance (below). The
+   comparable total for a totals-mode row (BRK-005 Sharesight shape) is
+   `total_cash_decimal` verbatim; for a per-share-mode row (a manually
+   entered fact, or a legacy per-share CSV import) it is `shares_decimal x
+dividend_per_share_decimal`, computed via exact decimal multiplication
+   (`domain/imports/dividend-reconciliation.ts`'s `computeDividendCashTotal`
+   -- money is never routed through JavaScript binary floating point, per
+   AGENTS.md).
+
+**Tolerance decision: exact-match OR within 1% relative difference of the
+larger absolute magnitude.** A wider band risked reconciling two genuinely
+different distributions that happen to share a security and payment date; an
+exact-only match risked NEVER reconciling the common real case where a
+manual per-share entry's `shares x price` recombination does not reduce to
+the exact cents Sharesight's own totals-mode figure reports (independent
+rounding at the source, not a data error). 1% absorbs that rounding noise
+while staying tight enough that a coincidental same-security/same-date match
+between two materially different amounts is not silently reconciled.
+Implemented in `domain/imports/dividend-reconciliation.ts`'s
+`cashTotalsWithinTolerance`, using the same exact-decimal primitives as every
+other financial comparison in this codebase.
+
+Known, accepted limit (review round 1 F3): Sharesight's own payout
+`amountDecimal` -- the `total_cash_decimal` this tolerance compares -- is not
+confirmed to be a GROSS figure (`domain/sharesight-sync/transform.ts`'s own
+open question), while a manual per-share-mode row's derived total is gross
+by construction. Where withholding tax makes the two genuinely diverge by
+more than 1%, this is a FAIL-SAFE outcome, not a mis-reconciliation: the
+rows simply never match, the double count this feature exists to fix
+persists for that one distribution, and DIV-004's `DIVIDEND_NEAR_EXISTING_ENTRY`
+proximity warning (payment-date-only, no amount check) still fires to flag
+it. The tolerance can only ever PREVENT a match, never fabricate one.
+
+**Ambiguity is fail-safe -- never guessed.** A manual row matching MORE THAN
+ONE incoming row, or an incoming row matching more than one manual row, is
+NEVER auto-reconciled: `computeDividendReconciliation` only returns a match
+for a mutual 1:1 pair (the incoming row matched exactly this one candidate,
+and this candidate matched exactly this one incoming row); every row on
+either side of an ambiguous match is instead surfaced to the owner (see
+"Preview disclosure" below) as requiring their own judgement, and the
+dividend rows involved still commit as ordinary, independent, UNRECONCILED
+facts (both keep counting) rather than the commit failing outright -- the
+owner can resolve the ambiguity afterward through the existing
+supersede/exclude affordances.
+
+**Preview disclosure (staged/previewed, per the CSV-import non-negotiables).**
+Before commit, the reconciliation preview
+(`domain/imports/reconciliation.ts`) computes the SAME matching rule against
+`reconciliationCandidates` -- existing manual rows, loaded only by the page/
+refresh preview path (`app/import-actions.ts`'s `loadReview`), mirroring
+`existingDividendEntries`/`DIVIDEND_NEAR_EXISTING_ENTRY`'s exact scoping
+(§3a above) -- and raises one `info`-severity `DIVIDEND_RECONCILIATION_PROPOSED`
+issue per safe match ("committing will supersede the manual record...") and
+one `warning`-severity `DIVIDEND_RECONCILIATION_AMBIGUOUS` issue per row
+involved in an ambiguous match ("nothing will be linked automatically; check
+which record is correct"). Both codes are, like `DIVIDEND_NEAR_EXISTING_ENTRY`,
+advisory DISPLAY evidence excluded from `previewVersion`'s hash
+(`domain/imports/review.ts`) -- the ACTUAL, commit-consequential
+reconciliation decision is computed independently and authoritatively at
+commit time, straight from live database state, by
+`db/repositories/import-commit.ts`'s `revalidate()`, so omitting these
+fields from any of the other `buildImportReview` callers (ready-service,
+security-verification-service, mapping/exclusion services) never changes
+what a commit actually does -- only what the owner sees disclosed before
+approving it. The existing generic issue-rendering UI
+(`app/components/import-review.tsx`) surfaces both codes with no changes
+needed.
+
+Asymmetry disclosure (review round 1 F1): because `revalidate()` is the sole
+authority at commit time and queries live state fresh on every call, a
+manual row created AFTER this preview was last shown can still be
+reconciled at commit -- correctly, atomically, batch-attributably, audited,
+and reversibly -- without ever having appeared here as
+`DIVIDEND_RECONCILIATION_PROPOSED`. The preview is a best-effort,
+point-in-time disclosure of what commit is LIKELY to do, not a contract of
+exactly what it will do; the reverse case (a manual row deleted or edited
+after preview) is symmetric and equally expected.
+
+**Dedupe-skipped rows never get a false promise (review round 1 B1,
+BLOCKING).** A row whose OWN cross-batch identity
+(`import-fingerprint:<fingerprint>`, exactly the `source_reference`
+`resolveInput`'s existingRecord check below tests) already exists from a
+PRIOR import never actually inserts -- the commit loop's pre-existing
+cross-batch idempotency short-circuit fires first and `continue`s BEFORE
+ever reaching the supersede step. Before this fix, the preview's matching
+pool did not know this and could still emit `DIVIDEND_RECONCILIATION_PROPOSED`
+for such a row, promising a supersession the commit would never actually
+perform -- a real double count left silently in place while the owner
+believed it was resolved. Ruling (Orchestrator, review round 1 B1): "Reconciliation
+supersedes ONLY via rows the CURRENT batch actually inserts." Fixed at the
+root, identically in BOTH the preview (`createImportReconciliationPreview`)
+and the authoritative commit-time computation (`revalidate()`): every
+dividend row's matching pool is split into rows still eligible to insert
+(`freshRows`) and rows already committed from a prior batch
+(`alreadyImportedRows`, identified by `existingDividendSourceReferences`,
+a `${portfolio_id}::${source_reference}` set queried against ALL of the
+owner's `dividend_manual_records`, any batch) -- only `freshRows` ever enter
+the matching algorithm, so a dedupe-bound row can neither be wrongly
+proposed itself NOR wrongly consume/poison a manual candidate a sibling
+fresh row could otherwise have cleanly, unambiguously matched. A
+dedupe-bound row that WOULD have matched a candidate (checked directly
+against the same security+date+tolerance predicate, since it can never
+actually reconcile regardless of how many candidates it resembles) instead
+raises a `warning`-severity `DIVIDEND_ALREADY_IMPORTED_MANUAL_DUPLICATE`
+issue: "This distribution was already imported in a previous batch AND
+exists as a manually entered record -- it remains double-counted... Delete
+the manual record, or reverse the earlier import batch and re-import, to
+resolve it." Same hash-exclusion treatment as `PROPOSED`/`AMBIGUOUS`
+(advisory display evidence only).
+
+**Commit mechanics (atomic, batch-attributable).** `revalidate()` computes
+`dividendReconciliation: Record<rowId, manualRecordId>` fresh on every
+invocation (every `commit()` call, including resumed/repeated ones), from
+the FULL batch's staged rows (not just the current commit chunk, so
+ambiguity across chunk boundaries is still caught) and a live query of
+candidate manual rows. When the commit loop inserts a matched incoming
+dividend row, it ALSO -- in the SAME atomic `client.batch()` chunk -- marks
+the matched existing manual row `superseded_by_record_id = <new row's id>`,
+guarded identically to `db/repositories/dividends.ts`'s owner-facing
+`supersede()` CAS (`import_batch_id IS NULL AND superseded_by_record_id IS
+NULL`), and appends a `dividend.manual_record.supersede` audit row
+(`metadata.source: "import_reconciliation"`, the batch id, and the
+superseded record's id). A lost race (the candidate was superseded or
+deleted between `revalidate()` and this chunk executing) leaves the guard
+matching zero rows -- the dividend row still commits, simply unreconciled;
+never a reason to fail the whole commit. Idempotent re-commit/resume: once a
+manual row is superseded, it no longer satisfies `superseded_by_record_id IS
+NULL` and drops out of the LIVE candidate query on the next `revalidate()`
+call, so a retried chunk cannot re-supersede it -- in practice the retried
+row's own pre-existing `source_reference` short-circuits to the `commit_status
+= 'skipped'` path before reconciliation is even considered again.
+
+**From-then-forward precedence.** A reconciled-away manual row becomes an
+ordinary superseded ancestor: excluded from every evidence consumer
+(`dividend_manual_records.list()`'s single choke point), retained for audit,
+and included in OPS-003 exports like any other ancestor. Its superseding row
+is import-sourced, so Part A's own import-row edit block already prevents a
+further manual edit from landing on top of it (`supersede()` rejects any
+original with `import_batch_id IS NOT NULL`) -- this alone delivers the
+owner's "Sharesight takes precedence from there forward" ruling; no separate
+mechanism was needed.
+
+**Reversal restores the manual row's evidence (never a silent loss).**
+Reversing a Sharesight batch already hard-DELETEs the `dividend_manual_records`
+rows it created (§12 above; this table is owner-mutable, not a ledger-
+immutable one -- there is no "reversed" status to write). Before that
+DELETE, in the SAME atomic statement set,
+`db/repositories/import-reversal.ts`'s `finalize()` now also NULLs
+`superseded_by_record_id` back to `NULL` on every manual row currently
+pointing at one of the batch's own rows (statement ordering matters: the
+restoring `UPDATE`'s subquery must run before the `DELETE` removes the rows
+it is matching against) -- the manual row becomes the head of its own
+lineage again and reappears in every evidence consumer immediately. Both
+statements are self-guarded (only rows still in the matching state are
+touched), so a resumed/repeated reversal invocation is a safe no-op. The
+reversal's audit metadata gains `restoredManualRecordCount`, read the same
+way `reversedDividendRecordCount` already is (before `finalize` executes),
+so the audit trail never reports zero restorations for a batch that actually
+restored evidence.
+
+**Idempotent re-import.** Re-syncing an already-committed batch (or resuming
+a partially-committed one) never re-reconciles or chains a second
+supersession: the pre-existing `source_reference` cross-batch idempotency
+check on `dividend_manual_records` fires BEFORE the reconciliation-write
+step is reached for an already-committed row, and a manual row that is
+already superseded is no longer a live candidate for any future batch's
+`revalidate()` query.

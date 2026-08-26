@@ -264,6 +264,30 @@ export function createOwnedImportReversalRepository(
     return Number(row?.count ?? 0);
   }
 
+  // DIV-016 part C: how many EXISTING manual records this batch's reversal
+  // is about to RESTORE (un-supersede) in THIS invocation -- read before
+  // `finalize` builds and executes the atomic UPDATE/DELETE pair, so the
+  // audit metadata honestly discloses the restoration alongside the
+  // deletion. Owner ruling: reversing a Sharesight batch must restore the
+  // manual row's evidence, never silently lose it -- a manual row this
+  // batch reconciled-away (superseded) becomes the head of its lineage
+  // again the moment its superseding (imported) row is reversed.
+  async function pendingRestoredManualRecordCount(
+    userId: string,
+    batchId: string,
+  ): Promise<number> {
+    const row = await client.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM dividend_manual_records
+       WHERE user_id = ?
+         AND superseded_by_record_id IN (
+           SELECT id FROM dividend_manual_records
+           WHERE user_id = ? AND import_batch_id = ?
+         )`,
+      [userId, userId, batchId],
+    );
+    return Number(row?.count ?? 0);
+  }
+
   async function finalize(
     userId: string,
     batchId: string,
@@ -318,6 +342,27 @@ export function createOwnedImportReversalRepository(
             AND json_extract(normalized_fields_json, '$.type') = 'dividend'
         `,
         params: [at, userId, batchId],
+      },
+      // DIV-016 part C: restore (un-supersede) any manual row this batch
+      // reconciled away BEFORE the DELETE below removes its superseding
+      // (imported) successor -- ordering matters, the subquery must still
+      // find the about-to-be-deleted rows. Owner ruling: "sharesight should
+      // take precedence from there forward" implies the reverse too --
+      // reversing that same sync must hand precedence back to the manual
+      // row, never silently lose it. Self-guarded like the statements
+      // around it: only rows still pointing at THIS batch's imported rows
+      // match, so a repeat/resumed reversal invocation is a safe no-op.
+      {
+        sql: `
+          UPDATE dividend_manual_records
+          SET superseded_by_record_id = NULL, updated_at = ?, version = version + 1
+          WHERE user_id = ?
+            AND superseded_by_record_id IN (
+              SELECT id FROM dividend_manual_records
+              WHERE user_id = ? AND import_batch_id = ?
+            )
+        `,
+        params: [at, userId, userId, batchId],
       },
       {
         sql: `
@@ -463,6 +508,10 @@ export function createOwnedImportReversalRepository(
         userId,
         batchId,
       );
+      const restoredManualRecordCount = await pendingRestoredManualRecordCount(
+        userId,
+        batchId,
+      );
       const finalized = await finalize(
         userId,
         batchId,
@@ -473,6 +522,7 @@ export function createOwnedImportReversalRepository(
           reversedTransactionCount: reversedTransactions,
           remainingTransactionCount: remaining,
           reversedDividendRecordCount,
+          restoredManualRecordCount,
           rebuildJobIds,
         },
       );
