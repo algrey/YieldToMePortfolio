@@ -61,10 +61,11 @@ const INCOME_VIEWS: readonly {
 ];
 
 /**
- * Where the back control returns to. `overview` is the portfolio shell's
- * default section (`app/page.tsx` and `PortfolioShell`'s own `activeSection`
- * default), so this lands the owner back on the primary tab strip rather
- * than on a section they may never have visited.
+ * FALLBACK target for the back control (UI-046 made the control itself
+ * history-based). `overview` is the portfolio shell's default section
+ * (`app/page.tsx` and `PortfolioShell`'s own `activeSection` default), so a
+ * direct/no-JS arrival still lands back on the primary tab strip rather
+ * than on a section the owner may never have visited.
  */
 export function incomeBackHref(portfolioId: string): string {
   return `/portfolio/${portfolioId}/overview`;
@@ -83,7 +84,13 @@ export function IncomeNav({
   return (
     <SubNav
       backHref={incomeBackHref(portfolioId)}
-      backLabel="Back to portfolio"
+      backLabel="Back"
+      // UI-046 (owner-reported): Income is a PRIMARY tab, so it is opened
+      // from whichever tab the owner happened to be on -- always returning
+      // to Overview was wrong for every arrival but one. Steps back through
+      // real history instead; `backHref` stays the fallback for a direct or
+      // no-JS arrival.
+      backMode="history"
       heading={<p className="eyebrow">Income</p>}
       tabs={INCOME_VIEWS.map((view) => ({
         key: view.key,

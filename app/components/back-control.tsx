@@ -12,7 +12,6 @@
 // Pages with a single definite parent (the holding area, the Income area)
 // keep their static SubNav back links instead -- a deterministic target is
 // better than history where one exists.
-import { useRouter } from "next/navigation";
 
 export function HistoryBackControl({
   fallbackHref,
@@ -24,7 +23,6 @@ export function HistoryBackControl({
   /** Accessible name for the icon-only control, e.g. "Back". */
   label: string;
 }) {
-  const router = useRouter();
   return (
     <a
       className="subnav-back"
@@ -43,14 +41,15 @@ export function HistoryBackControl({
         ) {
           return;
         }
-        event.preventDefault();
         // history.length === 1 means this tab has never navigated -- a
         // direct/deep-linked arrival where back() would be a no-op (or
-        // leave the app entirely on some browsers).
+        // leave the app entirely on some browsers). Falling THROUGH to the
+        // anchor's own href covers that case, and keeps this component
+        // free of any router hook so it renders in any tree (UI-046: the
+        // Income screens' many static-render tests mount no router).
         if (window.history.length > 1) {
-          router.back();
-        } else {
-          router.push(fallbackHref);
+          event.preventDefault();
+          window.history.back();
         }
       }}
     >

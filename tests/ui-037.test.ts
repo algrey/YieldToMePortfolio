@@ -71,10 +71,16 @@ test("UI-037: the control goes back in history only for an unmodified primary cl
   assert.match(source, /event\.shiftKey/);
   assert.match(source, /event\.altKey/);
   // history-back only when this tab has actually navigated; a fresh tab
-  // (history.length === 1) routes to the fallback instead of a no-op.
+  // (history.length === 1) falls through to the anchor's own href instead
+  // of a no-op. UI-046: no `useRouter` -- the control must render in trees
+  // that mount no router (the Income screens' static-render tests).
   assert.match(source, /window\.history\.length > 1/);
-  assert.match(source, /router\.back\(\)/);
-  assert.match(source, /router\.push\(fallbackHref\)/);
+  assert.match(source, /window\.history\.back\(\)/);
+  assert.doesNotMatch(source, /from "next\/navigation"/);
+  // preventDefault happens INSIDE the has-history branch, so the fallback
+  // arrival keeps the anchor's native navigation.
+  const branchIndex = source.indexOf("window.history.length > 1");
+  assert.ok(branchIndex > -1 && preventIndex > branchIndex);
 });
 
 test("UI-037: the manual ledger page and its degraded states all render the back control with the Details fallback; the old text link is gone", async () => {

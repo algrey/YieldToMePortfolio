@@ -5,6 +5,7 @@
 // cannot drift apart the way the Income screens' hand-written tab rows did
 // (UI-022's originating defect).
 import Link from "next/link";
+import { HistoryBackControl } from "./back-control";
 
 export type SubNavTab = {
   key: string;
@@ -15,6 +16,7 @@ export type SubNavTab = {
 export function SubNav({
   backHref,
   backLabel,
+  backMode = "link",
   heading,
   tabs,
   active,
@@ -23,6 +25,13 @@ export function SubNav({
   backHref: string;
   /** Accessible name for the icon-only back control, e.g. "Back to holdings". */
   backLabel: string;
+  /** UI-046: `"link"` always navigates to `backHref` -- right for an area
+   * with ONE definite parent (a holding is always entered from Holdings).
+   * `"history"` steps back through the browser's own history and uses
+   * `backHref` only as the fallback for a direct/no-JS/new-tab arrival --
+   * right for an area reachable from many places (Income is a primary tab,
+   * so it can be opened from any other tab). */
+  backMode?: "link" | "history";
   heading: React.ReactNode;
   tabs: readonly SubNavTab[];
   active: string;
@@ -32,14 +41,19 @@ export function SubNav({
   return (
     <div className="subnav">
       <div className="subnav-heading">
-        <Link className="subnav-back" href={backHref} aria-label={backLabel}>
-          {/* Style guide -- Iconography: thin-line, geometric, consistent
-              stroke weight, green on dark. Stroke colour/width come from
-              `.subnav-back svg` in globals.css. */}
-          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M14.5 5 7.5 12l7 7" />
-          </svg>
-        </Link>
+        {backMode === "history" ? (
+          <HistoryBackControl fallbackHref={backHref} label={backLabel} />
+        ) : (
+          <Link className="subnav-back" href={backHref} aria-label={backLabel}>
+            {/* Style guide -- Iconography: thin-line, geometric, consistent
+                stroke weight, green on dark. Stroke colour/width come from
+                `.subnav-back svg` in globals.css. HistoryBackControl renders
+                the identical glyph and class. */}
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M14.5 5 7.5 12l7 7" />
+            </svg>
+          </Link>
+        )}
         {heading}
       </div>
       <nav className="subnav-tabs" aria-label={tabsLabel}>
