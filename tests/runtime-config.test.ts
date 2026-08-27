@@ -197,14 +197,22 @@ test("wrangler source and generated worker config stay aligned with the task pro
     "CLOUDFLARE_ACCESS_ISSUER",
     "CLOUDFLARE_ACCESS_AUDIENCE",
   ]);
+  // DEP-002: production deploys onto the operator's existing dashboard
+  // Worker (`yieldtome-portfolio`, carrying its routes and Access config)
+  // and its real D1 database, with the Yahoo best-effort provider enabled.
   assert.deepEqual(sourceEnvs.production.d1_databases, [
     {
       binding: "DB",
-      database_name: "yieldtome-portfolio-production",
+      database_name: "yieldtome-portfolio",
+      database_id: "17b674b8-034a-4e78-9916-dab14499bb9c",
     },
   ]);
   assert.equal(sourceEnvs.production.vars.YIELDTOME_RUNTIME_ENV, "production");
   assert.equal(sourceEnvs.production.vars.YIELDTOME_WORKERS_PLAN, "paid");
+  assert.equal(
+    sourceEnvs.production.vars.MARKET_DATA_PROVIDER,
+    "yahoo-best-effort",
+  );
   assert.deepEqual(sourceEnvs.production.secrets.required, [
     "CLOUDFLARE_ACCESS_ISSUER",
     "CLOUDFLARE_ACCESS_AUDIENCE",

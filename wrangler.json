@@ -42,16 +42,18 @@
       }
     },
     "production": {
+      "name": "yieldtome-portfolio",
       "d1_databases": [
         {
           "binding": "DB",
-          "database_name": "yieldtome-portfolio-production"
+          "database_name": "yieldtome-portfolio",
+          "database_id": "17b674b8-034a-4e78-9916-dab14499bb9c"
         }
       ],
       "vars": {
         "YIELDTOME_RUNTIME_ENV": "production",
         "YIELDTOME_WORKERS_PLAN": "paid",
-        "MARKET_DATA_PROVIDER": "disabled"
+        "MARKET_DATA_PROVIDER": "yahoo-best-effort"
       },
       "secrets": {
         "required": ["CLOUDFLARE_ACCESS_ISSUER", "CLOUDFLARE_ACCESS_AUDIENCE"]
