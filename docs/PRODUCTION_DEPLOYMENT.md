@@ -32,11 +32,15 @@ fails closed on Access verification outside `local`), and enables
    - `SHARESIGHT_CLIENT_ID`, `SHARESIGHT_CLIENT_SECRET`
    - `YAHOO_COOKIE_T`, `YAHOO_COOKIE_Y`
 
-3. Confirm the Access application covers every hostname that should serve the
-   app (`portfolio.greeninvestments.au`). Requests that bypass Access (for
-   example the bare `workers.dev` URL, which cannot sit behind an Access app)
-   fail closed with an authentication error — safe, but not usable as an
-   entry point.
+3. Confirm the Access application covers every hostname that should serve
+   the app. As deployed (2026-08-28), `portfolio.greeninvestments.au` and
+   `yieldtome-portfolio.argreen.workers.dev` are each behind their OWN
+   Access application with DIFFERENT AUD tags; the Worker validates a
+   single configured audience (`domain/auth/access-jwt.ts`), so the custom
+   domain's AUD is the canonical `CLOUDFLARE_ACCESS_AUDIENCE` and
+   workers.dev arrivals fail closed on the audience check even after an
+   Access login — safe, but only `portfolio.greeninvestments.au` is a
+   usable entry point.
 
 ## Route shape warning
 
@@ -87,8 +91,17 @@ npx wrangler deploy --config dist/server/wrangler.json
 ```
 
 Deploying does not touch dashboard-managed routes/custom domains and
-preserves existing Worker secrets. Cron triggers (`0 * * * *`,
-`25,55 * * * *`) deploy with the Worker.
+preserves existing Worker secrets. `wrangler.json`'s `secrets.required`
+list is enforced at deploy time: the deploy refuses until
+`CLOUDFLARE_ACCESS_ISSUER`/`CLOUDFLARE_ACCESS_AUDIENCE` are set.
+
+Cron triggers (`0 * * * *`, `25,55 * * * *`) deploy with the Worker, BUT
+Workers Free allows only 5 cron triggers per ACCOUNT; the first production
+deploy (2026-08-28) hit that limit ("partially updated" — the script and
+bindings deployed, the crons did not). Until crons are freed elsewhere or
+the account upgrades, the scheduled market-data refresh does not run;
+interactive use is unaffected. Re-attempt with
+`npx wrangler triggers deploy --config dist/server/wrangler.json`.
 
 ## Post-deploy checks
 

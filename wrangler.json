@@ -52,7 +52,7 @@
       ],
       "vars": {
         "YIELDTOME_RUNTIME_ENV": "production",
-        "YIELDTOME_WORKERS_PLAN": "paid",
+        "YIELDTOME_WORKERS_PLAN": "free",
         "MARKET_DATA_PROVIDER": "yahoo-best-effort"
       },
       "secrets": {

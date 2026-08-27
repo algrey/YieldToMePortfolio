@@ -208,7 +208,9 @@ test("wrangler source and generated worker config stay aligned with the task pro
     },
   ]);
   assert.equal(sourceEnvs.production.vars.YIELDTOME_RUNTIME_ENV, "production");
-  assert.equal(sourceEnvs.production.vars.YIELDTOME_WORKERS_PLAN, "paid");
+  // DEP-002: recorded metadata only (no behavioural gate reads it since
+  // IMP-010B); the owner runs production on the free Workers plan.
+  assert.equal(sourceEnvs.production.vars.YIELDTOME_WORKERS_PLAN, "free");
   assert.equal(
     sourceEnvs.production.vars.MARKET_DATA_PROVIDER,
     "yahoo-best-effort",
