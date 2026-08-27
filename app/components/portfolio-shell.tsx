@@ -180,6 +180,10 @@ export type OwnedWorkspace = {
   // not rename the FY) and never recomputed client-side (see
   // docs/CALCULATIONS.md §9).
   nowInstant?: string;
+  // UI-049: the app-bar USD/AUD pill (`app/authenticated-fx-rate.ts`) --
+  // already formatted to 2 decimal places, or `null` when no usable
+  // observation exists (never a fabricated/zero rate).
+  usdAudRate?: string | null;
   settingsVersion?: number;
   message?: string;
   lifecycle?: "disabled" | "deletion_pending" | "purged";
@@ -4586,6 +4590,13 @@ export function PortfolioShell({
         {!ownedMode ? (
           <span className="prototype-chip desktop-only">
             {reviewBadgeLabel}
+          </span>
+        ) : null}
+
+        {ownedMode ? (
+          <span className="fx-rate-pill">
+            USD/AUD{" "}
+            <strong>{ownedWorkspace.usdAudRate ?? "unavailable"}</strong>
           </span>
         ) : null}
 

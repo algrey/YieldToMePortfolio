@@ -116,6 +116,27 @@ dd {
   backdrop-filter: blur(18px);
 }
 
+/* UI-049: the app-bar USD/AUD pill -- same rounded-pill treatment as
+   `.prototype-chip`, but sized to sit inline in the header row at every
+   width (no mobile/desktop split; the rate text is short enough to fit
+   next to the icon buttons even on a narrow screen). */
+.fx-rate-pill {
+  align-self: center;
+  margin: 0 6px 0 auto;
+  padding: 5px 8px;
+  border: 1px solid var(--divider);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.66rem;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.fx-rate-pill strong {
+  color: var(--cream);
+  font-weight: 600;
+}
+
 .icon-button,
 .portfolio-button {
   min-width: 44px;

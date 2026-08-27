@@ -27,6 +27,7 @@ import {
   createUnavailableOverviewData,
 } from "./overview-read-model";
 import { loadHistoricalPortfolioValueSeries } from "./historical-portfolio-value.ts";
+import { loadUsdAudRate } from "./authenticated-fx-rate.ts";
 
 function isPrincipal(value: unknown): value is VerifiedAccessPrincipal {
   if (typeof value !== "object" || value === null) return false;
@@ -122,6 +123,19 @@ export async function loadAuthenticatedWorkspace(
     const nowInstant = resolveRequestNow(
       requestHeaders.get(REQUEST_NOW_HEADER),
     );
+    // UI-049: the app-bar USD/AUD pill is USER-scoped and renders on every
+    // primary-tab page (the header itself, not any one section), so it is
+    // resolved here -- unconditionally, before `configuredWorkspace` is
+    // built and before the `options.includeX` branches below early-return
+    // -- and folded into `configuredWorkspace` so every branch's
+    // `...configuredWorkspace` spread carries it through. Best-effort: a
+    // failure here must never take down the rest of the workspace,
+    // mirroring `realisedGains`'s `.catch(() => undefined)` pattern below.
+    const usdAudRate = await loadUsdAudRate(
+      client,
+      result.context.user.id,
+      nowInstant.slice(0, 10),
+    ).catch(() => null);
     const configuredWorkspace = settings
       ? {
           ...workspace,
@@ -133,8 +147,9 @@ export async function loadAuthenticatedWorkspace(
           timezone: settings.timezone,
           settingsVersion: settings.version,
           nowInstant,
+          usdAudRate,
         }
-      : { ...workspace, nowInstant };
+      : { ...workspace, nowInstant, usdAudRate };
     // WLT-001: the watchlist is USER-scoped, not portfolio-scoped (owner
     // ruling, 2026-08-22) -- it must load whenever a real userId is known
     // (this point, `result.ok`), regardless of whether an active portfolio

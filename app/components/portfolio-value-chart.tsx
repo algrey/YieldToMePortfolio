@@ -68,8 +68,16 @@ const CHART_HEIGHT = 160;
 const CHART_PADDING_X = 8;
 const CHART_PADDING_Y = 10;
 
-type Range = "1M" | "3M" | "12M" | "FY" | "Last FY" | "All";
-const RANGES: readonly Range[] = ["1M", "3M", "12M", "FY", "Last FY", "All"];
+type Range = "1M" | "3M" | "12M" | "FY" | "Last FY" | "5Y" | "All";
+const RANGES: readonly Range[] = [
+  "1M",
+  "3M",
+  "12M",
+  "FY",
+  "Last FY",
+  "5Y",
+  "All",
+];
 
 function valueText(value: string): string {
   try {
@@ -182,7 +190,7 @@ export function PortfolioValueChart({
     if (!latest) return [];
     const cutoffDate = subtractCalendarMonths(
       latest.date,
-      range === "1M" ? 1 : range === "3M" ? 3 : 12,
+      range === "1M" ? 1 : range === "3M" ? 3 : range === "5Y" ? 60 : 12,
     );
     return points.filter((point) => point.date >= cutoffDate);
   }, [history.points, range, currentFyResult, lastFyResult]);
@@ -227,6 +235,30 @@ export function PortfolioValueChart({
     history.baseCurrencyCode,
   );
 
+  // Owner directive (2026-08-26): the range buttons sit just below the
+  // chart's own date-range/point-count caption rather than beside the
+  // heading -- extracted once so both the populated and the "no priced
+  // points in this range" branches render the SAME controls in that spot
+  // (switching range must stay possible even when the current range has
+  // nothing to plot).
+  const rangeControls = (
+    <div className="range-controls" aria-label="Portfolio value history range">
+      {RANGES.map((option) => (
+        <button
+          key={option}
+          type="button"
+          aria-pressed={range === option}
+          onClick={() => {
+            setRange(option);
+            setActiveIndex(null);
+          }}
+        >
+          {option}
+        </button>
+      ))}
+    </div>
+  );
+
   return (
     <section
       className="history-panel"
@@ -237,29 +269,14 @@ export function PortfolioValueChart({
           <p className="eyebrow">Portfolio value over time</p>
           <h2 id="portfolio-value-history-title">Portfolio value over time</h2>
         </div>
-        <div
-          className="range-controls"
-          aria-label="Portfolio value history range"
-        >
-          {RANGES.map((option) => (
-            <button
-              key={option}
-              type="button"
-              aria-pressed={range === option}
-              onClick={() => {
-                setRange(option);
-                setActiveIndex(null);
-              }}
-            >
-              {option}
-            </button>
-          ))}
-        </div>
       </div>
       {plottable.length === 0 ? (
-        <p className="muted-copy" role="status">
-          No priced points in this range.
-        </p>
+        <>
+          <p className="muted-copy" role="status">
+            No priced points in this range.
+          </p>
+          {rangeControls}
+        </>
       ) : (
         (() => {
           const scale: ChartScale = {
@@ -670,6 +687,7 @@ export function PortfolioValueChart({
                   ? " · still catching up — more history will appear on your next visit"
                   : ""}
               </p>
+              {rangeControls}
               <details className="chart-table-details">
                 <summary>View history as a table</summary>
                 <table>
