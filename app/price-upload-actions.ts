@@ -5,6 +5,7 @@ import {
   DEFAULT_SOURCE_LABEL,
   deleteOwnedPriceUpload,
   exportOwnerPriceHistoryCsv,
+  exportOwnerPriceHistoryPage,
   listOwnedPriceUploads,
   previewBackupPriceUpload,
   previewSinglePriceUpload,
@@ -182,4 +183,21 @@ export async function exportPriceHistoryAction(): Promise<
     userId: context.userId,
   });
   return { ok: true, csv };
+}
+
+export async function exportPriceHistoryPageAction(offset: number): Promise<
+  | {
+      ok: true;
+      rows: Awaited<ReturnType<typeof exportOwnerPriceHistoryPage>>["rows"];
+      nextOffset: number | null;
+    }
+  | ActionFailure
+> {
+  const context = await getAuthenticatedSqlContext();
+  if (!context.ok) return context;
+  const page = await exportOwnerPriceHistoryPage(
+    { client: context.client, userId: context.userId },
+    offset,
+  );
+  return { ok: true, ...page };
 }

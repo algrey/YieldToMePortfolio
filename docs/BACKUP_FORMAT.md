@@ -340,6 +340,34 @@ NOT sufficient alone), **this artifact must be sufficient alone** — one
 downloaded file, restorable into a genuinely empty deployment with no other
 input required.
 
+## Cloudflare Workers Free transfer protocol (EXP-003)
+
+The artifact remains `SystemBackupV1`; no schema version changed. Only the
+browser/server transfer protocol is different:
+
+- Export fetches the account/portfolio core once and owner-scoped price rows
+  in deterministic 500-row pages. The browser formats the existing
+  `yieldtome-price-backup-v1` CSV, embeds it in the existing
+  `priceBackupCsv` field, and downloads one JSON file.
+- Preview parses the price CSV in the browser with the shared MKT-008 parser
+  and sends the price-free core to the existing server validator. Every price
+  row is still revalidated by the server's unchanged MKT-008 validator before
+  any write.
+- Confirm restores the price-free core first, then sends price history in
+  sequential 200-row requests with a short browser yield between them. Each
+  request uses the existing owner-scoped resolution, natural-key upsert,
+  attribution, and value-history invalidation path.
+- The browser stores only `{nextChunk, written, unresolvedRowCount,
+unchangedCount}` under a SHA-256 digest of the selected file. No backup
+  contents, prices, names, or identifiers enter browser storage. Re-selecting
+  the identical file resumes at the first unacknowledged chunk; an ambiguous
+  last request is safe to retry because writes are natural-key idempotent.
+- D1 Free's daily row-write allowance can be lower than the physical writes
+  needed for a large price history once index writes are included. A restore
+  that reaches that allowance pauses honestly and can resume after the quota
+  resets at 00:00 UTC. This is resumability, not a claim that waiting seconds
+  increases the daily allowance.
+
 ## Design: reuse, not reinvention
 
 `domain/exports/system-backup.ts` / `db/repositories/system-backup.ts` /

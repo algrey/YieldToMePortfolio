@@ -6,6 +6,8 @@ import {
   listPriceUploadBatches,
   loadOwnerImportPriceObservationsForSecurity,
   loadOwnerPriceExportRows,
+  loadOwnerPriceExportRowsPage,
+  PRICE_EXPORT_PAGE_SIZE,
   loadSameUserSecurityEvidenceForTicker,
   updatePriceUploadBatchInsertedCount,
   writePriceUploadObservations,
@@ -491,6 +493,26 @@ export async function exportOwnerPriceHistoryCsv(
     delayedMinutes: row.delayedMinutes,
   }));
   return formatPriceBackupCsv(exportRows);
+}
+
+export async function exportOwnerPriceHistoryPage(
+  context: PriceUploadContext,
+  offset: number,
+): Promise<{
+  rows: PriceBackupExportRow[];
+  nextOffset: number | null;
+}> {
+  const rows = await loadOwnerPriceExportRowsPage(
+    context.client,
+    context.userId,
+    offset,
+    PRICE_EXPORT_PAGE_SIZE,
+  );
+  return {
+    rows,
+    nextOffset:
+      rows.length === PRICE_EXPORT_PAGE_SIZE ? offset + rows.length : null,
+  };
 }
 
 export type BackupUploadPreview = Readonly<{

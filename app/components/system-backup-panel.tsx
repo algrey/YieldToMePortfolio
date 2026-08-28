@@ -7,12 +7,23 @@
 // UI-048 conventions: one heading with Export/Restore sub-headings, the
 // shared file-picker recipe, and a preview-then-confirm staged flow.
 // Account-level (no `portfolioId` prop -- covers every portfolio of the
-// authenticated owner at once). The browser only reads the uploaded file as
-// text and `JSON.parse`s it -- the server re-validates everything
-// (IMP-010B: server is the sole validation authority).
+// authenticated owner at once). EXP-003 parses the large embedded price CSV
+// with the shared browser-safe parser and sends it in bounded parts; the
+// server re-validates every received row before writing (IMP-010B authority).
 import { useState } from "react";
+import {
+  DEFAULT_PRICE_BACKUP_LIMITS,
+  formatPriceBackupCsv,
+  parsePriceBackupCsv,
+  type PriceBackupDataRow,
+  type PriceBackupExportRow,
+  type PriceBackupMalformedReason,
+} from "../../domain/market-data/price-backup-csv.ts";
+import type { SystemBackupV1 } from "../../domain/exports/system-backup.ts";
 
 const FETCH_TIMEOUT_MS = 30_000;
+const PRICE_RESTORE_CHUNK_ROWS = 200;
+const CHUNK_PAUSE_MS = 100;
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
@@ -26,10 +37,20 @@ async function fetchJson<T>(
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
     const response = await fetch(input, { ...init, signal: controller.signal });
-    const result = (await response.json()) as
+    const text = await response.text();
+    let result: unknown;
+    try {
+      result = JSON.parse(text);
+    } catch {
+      return {
+        ok: false,
+        message: `Cloudflare ended the request (HTTP ${response.status}). Progress from completed chunks is saved; wait and retry the same backup.`,
+      };
+    }
+    const typed = result as
       ({ ok: true } & Record<string, unknown>) | { ok: false; message: string };
-    if (!result.ok) return { ok: false, message: result.message };
-    return { ok: true, value: result as T };
+    if (!typed.ok) return { ok: false, message: typed.message };
+    return { ok: true, value: typed as T };
   } catch (error) {
     return {
       ok: false,
@@ -39,6 +60,103 @@ async function fetchJson<T>(
     };
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+function waitBetweenChunks(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, CHUNK_PAUSE_MS));
+}
+
+function chunkRows<T>(rows: readonly T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < rows.length; index += size) {
+    chunks.push(rows.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function backupUploadRow(row: PriceBackupDataRow) {
+  return {
+    providerId: row.providerId,
+    sourceLabel: row.sourceLabel,
+    providerSymbol: row.providerSymbol,
+    providerExchange: row.providerExchange,
+    currencyCode: row.currencyCode,
+    marketDate: row.marketDate,
+    priceDecimal: row.priceDecimal,
+    observationAt: row.observationAt,
+    marketTimezone: row.marketTimezone,
+    interval: row.interval,
+    quality: row.quality,
+    adjustmentState: row.adjustmentState,
+    delayedMinutes: row.delayedMinutes,
+  };
+}
+
+type RestoreProgress = {
+  nextChunk: number;
+  written: number;
+  unresolvedRowCount: number;
+  unchangedCount: number;
+};
+
+type PreparedBackup = {
+  coreBackup: SystemBackupV1;
+  priceChunks: ReturnType<typeof backupUploadRow>[][];
+  malformedByReason: Partial<Record<PriceBackupMalformedReason, number>>;
+  malformedCount: number;
+  digest: string;
+};
+
+async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)]
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function progressKey(digest: string): string {
+  return `yieldtome-system-restore-v1:${digest}`;
+}
+
+function readRestoreProgress(digest: string): RestoreProgress {
+  try {
+    const parsed = JSON.parse(
+      localStorage.getItem(progressKey(digest)) ?? "null",
+    ) as Partial<RestoreProgress> | null;
+    if (
+      parsed &&
+      Number.isSafeInteger(parsed.nextChunk) &&
+      parsed.nextChunk! >= 0 &&
+      Number.isSafeInteger(parsed.written) &&
+      parsed.written! >= 0 &&
+      Number.isSafeInteger(parsed.unresolvedRowCount) &&
+      parsed.unresolvedRowCount! >= 0 &&
+      Number.isSafeInteger(parsed.unchangedCount) &&
+      parsed.unchangedCount! >= 0
+    ) {
+      return parsed as RestoreProgress;
+    }
+  } catch {
+    // Storage is an optional resume aid; idempotent server writes remain the
+    // source of truth when private browsing disables localStorage.
+  }
+  return { nextChunk: 0, written: 0, unresolvedRowCount: 0, unchangedCount: 0 };
+}
+
+function writeRestoreProgress(digest: string, progress: RestoreProgress): void {
+  try {
+    localStorage.setItem(progressKey(digest), JSON.stringify(progress));
+  } catch {
+    // See readRestoreProgress: losing the cursor costs time, never data.
+  }
+}
+
+function clearRestoreProgress(digest: string): void {
+  try {
+    localStorage.removeItem(progressKey(digest));
+  } catch {
+    // Optional browser-only resume metadata.
   }
 }
 
@@ -195,15 +313,61 @@ export function SystemBackupPanel() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SystemBackupCommitResult | null>(null);
+  const [progress, setProgress] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
 
-  async function readBackupText(): Promise<
-    { ok: true; text: string } | { ok: false; message: string }
+  async function prepareBackup(): Promise<
+    { ok: true; value: PreparedBackup } | { ok: false; message: string }
   > {
     if (!file) return { ok: false, message: "Choose a backup file first." };
     try {
-      const text = await file.text();
-      JSON.parse(text);
-      return { ok: true, text };
+      const bytes = await file.arrayBuffer();
+      const parsedJson = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+      if (
+        typeof parsedJson !== "object" ||
+        parsedJson === null ||
+        Array.isArray(parsedJson)
+      ) {
+        return { ok: false, message: "The backup file is not readable." };
+      }
+      const record = parsedJson as Record<string, unknown>;
+      if (typeof record.priceBackupCsv !== "string") {
+        return {
+          ok: false,
+          message: "The backup's price-history section is invalid.",
+        };
+      }
+      const parsedPrice = parsePriceBackupCsv(
+        new TextEncoder().encode(record.priceBackupCsv),
+        DEFAULT_PRICE_BACKUP_LIMITS,
+      );
+      const priceRows = parsedPrice.ok ? parsedPrice.rows : [];
+      if (!parsedPrice.ok && record.priceBackupCsv.length > 0) {
+        return { ok: false, message: parsedPrice.message };
+      }
+      const malformedByReason: Partial<
+        Record<PriceBackupMalformedReason, number>
+      > = {};
+      if (parsedPrice.ok) {
+        for (const malformed of parsedPrice.malformed) {
+          malformedByReason[malformed.reason] =
+            (malformedByReason[malformed.reason] ?? 0) + 1;
+        }
+      }
+      const backup = parsedJson as SystemBackupV1;
+      return {
+        ok: true,
+        value: {
+          coreBackup: { ...backup, priceBackupCsv: "" },
+          priceChunks: chunkRows(
+            priceRows.map(backupUploadRow),
+            PRICE_RESTORE_CHUNK_ROWS,
+          ),
+          malformedByReason,
+          malformedCount: parsedPrice.ok ? parsedPrice.malformed.length : 0,
+          digest: await sha256Hex(bytes),
+        },
+      };
     } catch {
       return {
         ok: false,
@@ -216,47 +380,178 @@ export function SystemBackupPanel() {
     setPending(true);
     setError(null);
     setResult(null);
-    const read = await readBackupText();
-    if (!read.ok) {
+    setProgress("Reading and checking the backup in your browser…");
+    const prepared = await prepareBackup();
+    if (!prepared.ok) {
       setPending(false);
-      setError(read.message);
+      setProgress(null);
+      setError(prepared.message);
       setPreview(null);
       return;
     }
     const outcome = await postJson<{ preview: SystemBackupPreview }>(
       "/api/system-backup/import/preview",
-      { backup: JSON.parse(read.text), filename: file?.name },
+      { backup: prepared.value.coreBackup, filename: file?.name },
     );
     setPending(false);
+    setProgress(null);
     if (!outcome.ok) {
       setError(outcome.message);
       setPreview(null);
       return;
     }
-    setPreview(outcome.value.preview);
+    setPreview({
+      ...outcome.value.preview,
+      priceBackup: {
+        rowCount: prepared.value.priceChunks.reduce(
+          (sum, chunk) => sum + chunk.length,
+          0,
+        ),
+        malformedCount: prepared.value.malformedCount,
+      },
+    });
   }
 
   async function confirm() {
     setPending(true);
     setError(null);
-    const read = await readBackupText();
-    if (!read.ok) {
+    setProgress("Preparing the resumable restore…");
+    const prepared = await prepareBackup();
+    if (!prepared.ok) {
       setPending(false);
-      setError(read.message);
+      setProgress(null);
+      setError(prepared.message);
       return;
     }
-    const outcome = await postJson<{ result: SystemBackupCommitResult }>(
+    const coreOutcome = await postJson<{ result: SystemBackupCommitResult }>(
       "/api/system-backup/import/commit",
-      { backup: JSON.parse(read.text), filename: file?.name },
+      { backup: prepared.value.coreBackup, filename: file?.name },
     );
-    setPending(false);
-    if (!outcome.ok) {
-      setError(outcome.message);
+    if (!coreOutcome.ok) {
+      setPending(false);
+      setProgress(null);
+      setError(coreOutcome.message);
       return;
     }
-    setResult(outcome.value.result);
+    const stored = readRestoreProgress(prepared.value.digest);
+    const progressState: RestoreProgress = {
+      ...stored,
+      nextChunk: Math.min(stored.nextChunk, prepared.value.priceChunks.length),
+    };
+    for (
+      let index = progressState.nextChunk;
+      index < prepared.value.priceChunks.length;
+      index += 1
+    ) {
+      const chunk = prepared.value.priceChunks[index]!;
+      const firstUnfinishedChunk = progressState.nextChunk === 0;
+      setProgress(
+        `Restoring price history: part ${index + 1} of ${prepared.value.priceChunks.length} (${index * PRICE_RESTORE_CHUNK_ROWS} of ${prepared.value.priceChunks.reduce((sum, part) => sum + part.length, 0)} rows processed)…`,
+      );
+      const chunkOutcome = await postJson<{
+        written: number;
+        unresolvedRowCount: number;
+        unchangedCount: number;
+      }>("/api/market-data/price-uploads/backup/confirm", {
+        rows: chunk,
+        malformedByReason: firstUnfinishedChunk
+          ? prepared.value.malformedByReason
+          : {},
+        filename: `${file?.name ?? "system-backup.json"} (price part ${index + 1})`,
+      });
+      if (!chunkOutcome.ok) {
+        writeRestoreProgress(prepared.value.digest, progressState);
+        setPending(false);
+        setProgress(null);
+        setError(
+          `Price-history restore paused after ${progressState.nextChunk} of ${prepared.value.priceChunks.length} part(s). Completed work is safe. Re-select this same backup and confirm again to resume; if the D1 daily write allowance was reached, retry after 00:00 UTC. ${chunkOutcome.message}`,
+        );
+        return;
+      }
+      progressState.nextChunk = index + 1;
+      progressState.written += chunkOutcome.value.written;
+      progressState.unresolvedRowCount += chunkOutcome.value.unresolvedRowCount;
+      progressState.unchangedCount += chunkOutcome.value.unchangedCount;
+      writeRestoreProgress(prepared.value.digest, progressState);
+      await waitBetweenChunks();
+    }
+    clearRestoreProgress(prepared.value.digest);
+    setPending(false);
+    setProgress(null);
+    setResult({
+      ...coreOutcome.value.result,
+      priceBackup:
+        prepared.value.priceChunks.length > 0
+          ? {
+              written: progressState.written,
+              unresolvedRowCount: progressState.unresolvedRowCount,
+              malformedCount: prepared.value.malformedCount,
+              unchangedCount: progressState.unchangedCount,
+              note: null,
+            }
+          : null,
+    });
     setPreview(null);
     setFile(null);
+  }
+
+  async function exportInBrowser() {
+    setExporting(true);
+    setError(null);
+    setProgress("Exporting account and portfolio data…");
+    const core = await fetchJson<{ backup: SystemBackupV1 }>(
+      "/api/system-backup/export?mode=core",
+    );
+    if (!core.ok) {
+      setExporting(false);
+      setProgress(null);
+      setError(core.message);
+      return;
+    }
+    const priceRows: PriceBackupExportRow[] = [];
+    let offset: number | null = 0;
+    while (offset !== null) {
+      setProgress(`Exporting price history (${priceRows.length} rows read)…`);
+      const page:
+        | {
+            ok: true;
+            rows: PriceBackupExportRow[];
+            nextOffset: number | null;
+          }
+        | { ok: false; message: string } = await fetchJson<{
+        rows: PriceBackupExportRow[];
+        nextOffset: number | null;
+      }>(`/api/system-backup/export?mode=prices&offset=${offset}`).then(
+        (outcome) =>
+          outcome.ok
+            ? { ok: true as const, ...outcome.value }
+            : { ok: false as const, message: outcome.message },
+      );
+      if (!page.ok) {
+        setExporting(false);
+        setProgress(null);
+        setError(page.message);
+        return;
+      }
+      priceRows.push(...page.rows);
+      offset = page.nextOffset;
+      if (offset !== null) await waitBetweenChunks();
+    }
+    const backup: SystemBackupV1 = {
+      ...core.value.backup,
+      priceBackupCsv: formatPriceBackupCsv(priceRows),
+    };
+    const blob = new Blob([JSON.stringify(backup)], {
+      type: "application/json;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `yieldtome-system-backup-${backup.exportedAt.slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setExporting(false);
+    setProgress(null);
   }
 
   return (
@@ -274,20 +569,27 @@ export function SystemBackupPanel() {
         portfolios outside this backup).
       </p>
       <h4>Export the full system</h4>
-      {/* File-download API route, not a Next.js page -- see
-          `HistoricalDataPanel`'s identical export-link comment. */}
-      <a
-        className="historical-data-export-link"
-        href="/api/system-backup/export"
+      <p>
+        The browser fetches the backup in small parts and assembles the same
+        single JSON file locally.
+      </p>
+      <button
+        type="button"
+        onClick={() => void exportInBrowser()}
+        disabled={exporting || pending}
+        aria-busy={exporting || undefined}
       >
-        Export full-system backup
-      </a>
+        {exporting ? "Exporting…" : "Export full-system backup"}
+      </button>
       <h4>Restore from a full-system backup</h4>
       <p>
         Restoring recreates every portfolio in the backup as a NEW portfolio,
         restores the watchlist and account settings, and restores price history.
         Undo by archiving the restored portfolios from Settings and removing the
         restored price history from the price-history backup section above.
+        Large price histories are restored in small, idempotent parts. If the
+        Free-plan daily D1 allowance is reached, re-select the same file after
+        00:00 UTC and the browser resumes from the last completed part.
       </p>
       <label>
         System backup JSON
@@ -301,6 +603,7 @@ export function SystemBackupPanel() {
               setPreview(null);
               setError(null);
               setResult(null);
+              setProgress(null);
             }}
           />
           <span className="file-picker-button">Choose backup file…</span>
@@ -329,6 +632,7 @@ export function SystemBackupPanel() {
           </button>
         ) : null}
       </div>
+      {progress ? <p role="status">{progress}</p> : null}
       {preview ? <SystemBackupPreviewSummary preview={preview} /> : null}
       {error ? (
         <p role="alert" className="historical-data-error">

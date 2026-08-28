@@ -632,6 +632,67 @@ export type PriceExportRow = Readonly<{
   delayedMinutes: number | null;
 }>;
 
+export const PRICE_EXPORT_PAGE_SIZE = 500;
+
+function priceExportRowFromSql(row: Record<string, unknown>): PriceExportRow {
+  return {
+    providerId: String(row.provider_id),
+    sourceLabel: String(row.source_label),
+    providerSymbol: String(row.provider_symbol),
+    providerExchange: String(row.provider_exchange),
+    currencyCode: String(row.currency_code),
+    marketDate: String(row.market_date),
+    priceDecimal: String(row.close_decimal),
+    observationAt: String(row.observation_at),
+    marketTimezone: String(row.market_timezone),
+    interval: String(row.interval),
+    quality: String(row.quality),
+    adjustmentState: String(row.adjustment_state),
+    delayedMinutes:
+      row.delayed_minutes === null ? null : Number(row.delayed_minutes),
+  };
+}
+
+const PRICE_EXPORT_SELECT = `SELECT po.provider_id AS provider_id,
+            COALESCE(pub.source_label, po.provider_id) AS source_label,
+            spm.provider_symbol AS provider_symbol,
+            spm.provider_exchange AS provider_exchange,
+            po.currency_code AS currency_code,
+            po.market_date AS market_date,
+            po.close_decimal AS close_decimal,
+            po.observation_at AS observation_at,
+            po.market_timezone AS market_timezone,
+            po.interval AS interval,
+            po.quality AS quality,
+            po.adjustment_state AS adjustment_state,
+            po.delayed_minutes AS delayed_minutes
+       FROM price_observations po
+       JOIN security_provider_mappings spm ON spm.id = po.mapping_id
+       LEFT JOIN price_upload_batches pub ON pub.id = po.upload_batch_id AND pub.user_id = po.scope_user_id
+      WHERE po.access_scope = 'user' AND po.scope_user_id = ?`;
+
+/**
+ * Free-plan system exports fetch price history in bounded pages. OFFSET is
+ * deliberately acceptable here: the format cap is 130,000 rows and the
+ * page size keeps each Worker response small; no cursor or private row id
+ * needs to cross the browser boundary.
+ */
+export async function loadOwnerPriceExportRowsPage(
+  client: SqlClient,
+  userId: string,
+  offset: number,
+  limit: number = PRICE_EXPORT_PAGE_SIZE,
+): Promise<PriceExportRow[]> {
+  const rows = await client.all<Record<string, unknown>>(
+    `${PRICE_EXPORT_SELECT}
+      ORDER BY po.provider_id ASC, spm.provider_symbol ASC, po.market_date ASC,
+               po.observation_at ASC, po.id ASC
+      LIMIT ? OFFSET ?`,
+    [userId, limit, offset],
+  );
+  return rows.map(priceExportRowFromSql);
+}
+
 /**
  * The full backup export: every one of the owner's USER-SCOPED
  * `price_observations` rows (never deployment-scoped rows -- those are not
@@ -648,40 +709,10 @@ export async function loadOwnerPriceExportRows(
   userId: string,
 ): Promise<PriceExportRow[]> {
   const rows = await client.all<Record<string, unknown>>(
-    `SELECT po.provider_id AS provider_id,
-            COALESCE(pub.source_label, po.provider_id) AS source_label,
-            spm.provider_symbol AS provider_symbol,
-            spm.provider_exchange AS provider_exchange,
-            po.currency_code AS currency_code,
-            po.market_date AS market_date,
-            po.close_decimal AS close_decimal,
-            po.observation_at AS observation_at,
-            po.market_timezone AS market_timezone,
-            po.interval AS interval,
-            po.quality AS quality,
-            po.adjustment_state AS adjustment_state,
-            po.delayed_minutes AS delayed_minutes
-       FROM price_observations po
-       JOIN security_provider_mappings spm ON spm.id = po.mapping_id
-       LEFT JOIN price_upload_batches pub ON pub.id = po.upload_batch_id AND pub.user_id = po.scope_user_id
-      WHERE po.access_scope = 'user' AND po.scope_user_id = ?
-      ORDER BY po.provider_id ASC, spm.provider_symbol ASC, po.market_date ASC`,
+    `${PRICE_EXPORT_SELECT}
+      ORDER BY po.provider_id ASC, spm.provider_symbol ASC, po.market_date ASC,
+               po.observation_at ASC, po.id ASC`,
     [userId],
   );
-  return rows.map((row) => ({
-    providerId: String(row.provider_id),
-    sourceLabel: String(row.source_label),
-    providerSymbol: String(row.provider_symbol),
-    providerExchange: String(row.provider_exchange),
-    currencyCode: String(row.currency_code),
-    marketDate: String(row.market_date),
-    priceDecimal: String(row.close_decimal),
-    observationAt: String(row.observation_at),
-    marketTimezone: String(row.market_timezone),
-    interval: String(row.interval),
-    quality: String(row.quality),
-    adjustmentState: String(row.adjustment_state),
-    delayedMinutes:
-      row.delayed_minutes === null ? null : Number(row.delayed_minutes),
-  }));
+  return rows.map(priceExportRowFromSql);
 }

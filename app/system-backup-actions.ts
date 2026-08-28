@@ -13,6 +13,7 @@ import {
 import {
   commitSystemBackupImport,
   exportSystemBackup,
+  exportSystemBackupCore,
   previewSystemBackupImport,
   type SystemBackupCommitResult,
   type SystemBackupPreview,
@@ -31,6 +32,18 @@ export async function exportSystemBackupAction(): Promise<
   const context = await getAuthenticatedSqlContext();
   if (!context.ok) return context;
   return exportSystemBackup({
+    client: context.client,
+    userId: context.userId,
+    requestId: context.requestId,
+  });
+}
+
+export async function exportSystemBackupCoreAction(): Promise<
+  { ok: true; backup: SystemBackupV1 } | ActionFailure
+> {
+  const context = await getAuthenticatedSqlContext();
+  if (!context.ok) return context;
+  return exportSystemBackupCore({
     client: context.client,
     userId: context.userId,
     requestId: context.requestId,

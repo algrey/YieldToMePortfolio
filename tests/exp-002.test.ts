@@ -30,6 +30,7 @@ import {
 import {
   commitSystemBackupImport,
   exportSystemBackup,
+  exportSystemBackupCore,
   previewSystemBackupImport,
   type SystemBackupServiceContext,
 } from "../app/system-backup-service.ts";
@@ -37,6 +38,7 @@ import { fingerprintBundle } from "../app/portfolio-bundle-service.ts";
 import { countUnrelatedPortfolios } from "../db/repositories/system-backup.ts";
 import { PRICE_BACKUP_FORMAT_VERSION } from "../domain/market-data/price-backup-csv.ts";
 import type { SqlClient } from "../db/repositories/sql-client.ts";
+import { loadOwnerPriceExportRowsPage } from "../db/repositories/price-uploads.ts";
 
 async function migratedDatabase(): Promise<DatabaseSync> {
   const db = new DatabaseSync(":memory:");
@@ -233,6 +235,37 @@ test("validateSystemBackup: schema-version mismatch, malformed shape, and over-c
   const result = validateSystemBackup(oversized);
   assert.equal(result.ok, false);
   if (!result.ok) assert.match(result.message, /200/);
+});
+
+test("Free-plan export core omits the expensive price section while bounded price pages preserve its rows", async () => {
+  const { client } = await fixture();
+  const core = await exportSystemBackupCore(ctxFor(client, "a"));
+  assert.equal(core.ok, true);
+  if (!core.ok) return;
+  assert.equal(core.backup.priceBackupCsv, "");
+  assert.equal(core.backup.portfolios.length, 2);
+  assert.equal(core.backup.watchlistEntries.length, 2);
+
+  const first = await loadOwnerPriceExportRowsPage(client, "a", 0, 1);
+  const after = await loadOwnerPriceExportRowsPage(client, "a", 1, 1);
+  assert.equal(first.length, 1);
+  assert.equal(first[0]?.providerSymbol, "ALPHA");
+  assert.equal(first[0]?.priceDecimal, "12.34");
+  assert.deepEqual(after, []);
+});
+
+test("Free-plan browser flow assembles export pages and restores resumable price chunks without uploading the full price CSV", async () => {
+  const source = await readFile(
+    new URL("../app/components/system-backup-panel.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /const PRICE_RESTORE_CHUNK_ROWS = 200/);
+  assert.match(source, /coreBackup: \{ \.\.\.backup, priceBackupCsv: "" \}/);
+  assert.match(source, /\/api\/system-backup\/export\?mode=core/);
+  assert.match(source, /mode=prices&offset=/);
+  assert.match(source, /\/api\/market-data\/price-uploads\/backup\/confirm/);
+  assert.match(source, /yieldtome-system-restore-v1:/);
+  assert.match(source, /retry after 00:00 UTC/);
 });
 
 test("export -> restore into a fresh account (full flow)", async () => {

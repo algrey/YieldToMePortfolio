@@ -761,6 +761,15 @@ This log records durable architecture decisions previously maintained in `AGENTS
 
 ## Decision log
 
+- `2026-08-28` (`EXP-003`): keep the full-system backup as one portable
+  `SystemBackupV1` JSON artifact, but never make its largest section one
+  Worker invocation on the owner-facing path. The browser assembles export
+  price pages and restores price rows sequentially through the existing
+  idempotent MKT-008 write path. Resume state is non-financial browser-local
+  metadata keyed by the file SHA-256; no new Cloudflare product, binding, or
+  persistence layer is introduced. This directly targets Workers Free's
+  10 ms CPU ceiling and permits an honest multi-day resume when D1's daily
+  indexed-row write allowance is exhausted.
 - `2026-07-28`: Vinext/Next-compatible App Router on Cloudflare Workers is the application foundation.
 - `2026-07-28`: D1 is the system of record and initial cache; no R2/KV/Queues at scaffold stage.
 - `2026-07-28`: Cloudflare Access is acceptable for a private, administrator-invited first release, but is not an in-app account-management system.

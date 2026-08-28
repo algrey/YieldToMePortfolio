@@ -108,7 +108,7 @@ function totalPortfolioEntities(bundle: {
   );
 }
 
-export async function exportSystemBackup(
+async function exportSystemBackupWithoutPrices(
   ctx: SystemBackupServiceContext,
 ): Promise<{ ok: true; backup: SystemBackupV1 } | SystemBackupServiceFailure> {
   const settings = await readAccountSettingsForBackup(ctx.client, ctx.userId);
@@ -152,11 +152,6 @@ export async function exportSystemBackup(
     portfolios.push(bundle);
   }
 
-  const priceBackupCsv = await exportOwnerPriceHistoryCsv({
-    client: ctx.client,
-    userId: ctx.userId,
-  });
-
   return {
     ok: true,
     backup: {
@@ -165,9 +160,35 @@ export async function exportSystemBackup(
       account: settings,
       watchlistEntries,
       portfolios,
-      priceBackupCsv,
+      priceBackupCsv: "",
     },
   };
+}
+
+export async function exportSystemBackup(
+  ctx: SystemBackupServiceContext,
+): Promise<{ ok: true; backup: SystemBackupV1 } | SystemBackupServiceFailure> {
+  const result = await exportSystemBackupWithoutPrices(ctx);
+  if (!result.ok) return result;
+  const priceBackupCsv = await exportOwnerPriceHistoryCsv({
+    client: ctx.client,
+    userId: ctx.userId,
+  });
+  return {
+    ok: true,
+    backup: { ...result.backup, priceBackupCsv },
+  };
+}
+
+/** The browser-driven Free-plan export assembles price pages onto this
+ * bounded core. Keeping the artifact shape identical preserves restore
+ * compatibility with every existing full-system backup. */
+export async function exportSystemBackupCore(
+  ctx: SystemBackupServiceContext,
+): Promise<{ ok: true; backup: SystemBackupV1 } | SystemBackupServiceFailure> {
+  const result = await exportSystemBackupWithoutPrices(ctx);
+  if (!result.ok) return result;
+  return { ok: true, backup: { ...result.backup, priceBackupCsv: "" } };
 }
 
 export type SystemBackupPreview = {
