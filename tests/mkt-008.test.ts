@@ -1375,6 +1375,88 @@ test("MKT-008 export -> wipe -> import-backup: a full round trip is lossless and
   assert.equal(sharesightRow!.close_decimal, "19.42");
 });
 
+// ---------------------------------------------------------------------------
+// Review B2 fix (BLOCKING, 2026-08-28), commit 7616f75 "EXP-003: make system
+// backup free-plan resumable": EXP-003's chunked full-system restore sends
+// this backup CSV in bounded ~200-row parts, ordered provider/symbol/date --
+// a single consecutively-unresolvable symbol can fill an entire part. The
+// unconditional 400 below used to permanently deadlock that resume (the
+// panel wrote its cursor at the failed index and every retry re-failed the
+// SAME chunk). `tolerateAllUnresolved` (set only via the `chunked: true`
+// request field from `system-backup-panel.tsx`, see
+// `confirmBackupPriceUploadAction`) lets the chunked restore path advance
+// past it; the standalone MKT-008 whole-file "Historical Data" backup
+// restore never sets it, so a genuinely unresolvable whole-file upload there
+// still fails loudly, unchanged.
+// ---------------------------------------------------------------------------
+
+function unresolvableBackupCsvRows(count: number): string {
+  const header =
+    "format_version,provider_id,source_label,provider_symbol,provider_exchange,currency_code,market_date,price_decimal,observation_at,market_timezone,interval,quality,adjustment_state,delayed_minutes";
+  const rows = Array.from({ length: count }, (_, index) => {
+    const date = `2020-01-${String((index % 28) + 1).padStart(2, "0")}`;
+    return `${PRICE_BACKUP_FORMAT_VERSION},owner-import,unit-test,UNKNOWNCO,ASX,AUD,${date},1.00,${date}T13:00:00.000Z,Australia/Sydney,eod,observed,raw,`;
+  });
+  return [header, ...rows].join("\n") + "\n";
+}
+
+test("MKT-008/EXP-003 B2: a chunk of 200 rows for an unresolvable symbol, marked chunked, advances with written 0 instead of hard-failing", async () => {
+  const db = await ownedFixture();
+  const client = createSqliteSqlClient(db);
+
+  const allUnresolved = await confirmBackupPriceUpload(
+    context(client, "user-a"),
+    backupPayloadOf(unresolvableBackupCsvRows(200)),
+    {
+      filename: "system-backup.json (price part 1)",
+      tolerateAllUnresolved: true,
+    },
+    () => "2026-08-28T00:00:00.000Z",
+  );
+  assert.equal(allUnresolved.ok, true);
+  if (!allUnresolved.ok) return;
+  assert.equal(allUnresolved.value.written, 0);
+  assert.equal(allUnresolved.value.unresolvedRowCount, 200);
+
+  // A SUBSEQUENT chunk with a genuinely resolvable row still writes --
+  // advancing past the bad chunk did not corrupt or short-circuit anything
+  // for the rest of the resumable restore.
+  const resolvableCsv =
+    [
+      "format_version,provider_id,source_label,provider_symbol,provider_exchange,currency_code,market_date,price_decimal,observation_at,market_timezone,interval,quality,adjustment_state,delayed_minutes",
+      `${PRICE_BACKUP_FORMAT_VERSION},owner-import,unit-test,FMG,ASX,AUD,2020-02-01,1.23,2020-02-01T13:00:00.000Z,Australia/Sydney,eod,observed,raw,`,
+    ].join("\n") + "\n";
+  const nextChunk = await confirmBackupPriceUpload(
+    context(client, "user-a"),
+    backupPayloadOf(resolvableCsv),
+    {
+      filename: "system-backup.json (price part 2)",
+      tolerateAllUnresolved: true,
+    },
+    () => "2026-08-28T00:00:01.000Z",
+  );
+  assert.equal(nextChunk.ok, true);
+  if (!nextChunk.ok) return;
+  assert.equal(nextChunk.value.written, 1);
+  assert.equal(nextChunk.value.unresolvedRowCount, 0);
+});
+
+test("MKT-008 B2 fold: the standalone (non-chunked) whole-file backup restore still hard-fails a totally unresolvable file, unchanged", async () => {
+  const db = await ownedFixture();
+  const client = createSqliteSqlClient(db);
+
+  const result = await confirmBackupPriceUpload(
+    context(client, "user-a"),
+    backupPayloadOf(unresolvableBackupCsvRows(5)),
+    { filename: "backup.csv" },
+    () => "2026-08-28T00:00:00.000Z",
+  );
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.status, 400);
+  assert.match(result.message, /No rows could be resolved/);
+});
+
 test("MKT-008 export scope: only the owner's own user-scoped rows export -- never another owner's, never deployment-scoped rows", async () => {
   const db = await ownedFixture();
   db.exec(`

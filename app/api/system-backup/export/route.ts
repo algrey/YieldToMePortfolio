@@ -3,6 +3,7 @@ import {
   exportSystemBackupCoreAction,
 } from "../../../system-backup-actions.ts";
 import { exportPriceHistoryPageAction } from "../../../price-upload-actions.ts";
+import { systemBackupCoreExportResponseShape } from "./response-shape.ts";
 
 // EXP-002: a plain authenticated GET download (no mutation, no CSRF gate),
 // mirroring `app/api/portfolio-bundle/[portfolioId]/export/route.ts`'s
@@ -26,10 +27,21 @@ export async function GET(request: Request): Promise<Response> {
       headers: { "cache-control": "private, no-store" },
     });
   }
-  const result =
-    mode === "core"
-      ? await exportSystemBackupCoreAction()
-      : await exportSystemBackupAction();
+  if (mode === "core") {
+    // Review B1 fix (BLOCKING, 2026-08-28): see `response-shape.ts` for the
+    // full rationale -- this must return the action's `{ ok: true, backup }`
+    // ENVELOPE, not the bare backup object, so the panel's `fetchJson`
+    // (`system-backup-panel.tsx`), which discriminates every response on a
+    // top-level `ok` field, can parse it. The legacy no-mode file-download
+    // branch below is left byte-identical for compatibility.
+    const result = await exportSystemBackupCoreAction();
+    const shape = systemBackupCoreExportResponseShape(result);
+    return Response.json(shape.body, {
+      status: shape.status,
+      headers: { "cache-control": "private, no-store" },
+    });
+  }
+  const result = await exportSystemBackupAction();
   if (!result.ok) {
     return Response.json(result, {
       status: result.status,

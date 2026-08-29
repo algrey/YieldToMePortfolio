@@ -747,7 +747,23 @@ export type BackupConfirmResult = Readonly<{
 export async function confirmBackupPriceUpload(
   context: PriceUploadContext,
   payload: BackupPriceUploadPayload,
-  input: Readonly<{ filename: string }>,
+  input: Readonly<{
+    filename: string;
+    /** Review B2 fix (BLOCKING, 2026-08-28): the EXP-003 resumable
+     * full-system restore sends this backup CSV in bounded ~200-row
+     * SEQUENTIAL parts, ordered provider/symbol/date -- a single
+     * consecutively-unresolvable symbol can fill an entire part, which is a
+     * routine, RECOVERABLE outcome for a chunk (there may be perfectly
+     * resolvable rows in the NEXT part), not the "this whole upload resolved
+     * nothing" failure the unconditional 400 below was written for. Set
+     * `true` ONLY by the chunked restore caller (`system-backup-panel.tsx`,
+     * via the `chunked` request field) so it can advance past an
+     * all-unresolved chunk with `written: 0`; the standalone MKT-008
+     * single-request "Historical Data" backup-restore path
+     * (`historical-data-panel.tsx`) never sets it, so a genuinely
+     * unresolvable whole-file upload there still fails loudly as before. */
+    tolerateAllUnresolved?: boolean;
+  }>,
   now: () => string = () => new Date().toISOString(),
 ): Promise<{ ok: true; value: BackupConfirmResult } | Failure> {
   const result = await parseAndResolveBackup(context, payload);
@@ -782,7 +798,7 @@ export async function confirmBackupPriceUpload(
       });
     }
   }
-  if (candidates.length === 0) {
+  if (candidates.length === 0 && !input.tolerateAllUnresolved) {
     return fail(400, "No rows could be resolved to a security you hold.");
   }
   const nowIso = now();

@@ -129,11 +129,18 @@ export async function confirmBackupPriceUploadAction(request: Request): Promise<
     client: context.client,
     userId: context.userId,
   };
+  // Review B2 fix (BLOCKING, 2026-08-28): only the EXP-003 chunked restore
+  // caller (`system-backup-panel.tsx`) sends `chunked: true` -- see
+  // `confirmBackupPriceUpload`'s `tolerateAllUnresolved` doc comment for why
+  // this must NOT apply to the standalone MKT-008 whole-file restore.
   const result: { ok: true; value: BackupConfirmResult } | ActionFailure =
     await confirmBackupPriceUpload(
       sqlContext,
       { rows: read.body.rows, malformedByReason: read.body.malformedByReason },
-      { filename: filenameFromBody(read.body) },
+      {
+        filename: filenameFromBody(read.body),
+        tolerateAllUnresolved: read.body.chunked === true,
+      },
     );
   if (!result.ok) return result;
   return {

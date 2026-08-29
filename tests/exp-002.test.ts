@@ -39,6 +39,13 @@ import { countUnrelatedPortfolios } from "../db/repositories/system-backup.ts";
 import { PRICE_BACKUP_FORMAT_VERSION } from "../domain/market-data/price-backup-csv.ts";
 import type { SqlClient } from "../db/repositories/sql-client.ts";
 import { loadOwnerPriceExportRowsPage } from "../db/repositories/price-uploads.ts";
+import { systemBackupCoreExportResponseShape } from "../app/api/system-backup/export/response-shape.ts";
+import {
+  EMPTY_RESTORE_PROGRESS,
+  isResumeCursorValid,
+  parseStoredRestoreProgress,
+  restoreProgressStorageKey,
+} from "../app/system-backup-restore-progress.ts";
 
 async function migratedDatabase(): Promise<DatabaseSync> {
   const db = new DatabaseSync(":memory:");
@@ -264,7 +271,13 @@ test("Free-plan browser flow assembles export pages and restores resumable price
   assert.match(source, /\/api\/system-backup\/export\?mode=core/);
   assert.match(source, /mode=prices&offset=/);
   assert.match(source, /\/api\/market-data\/price-uploads\/backup\/confirm/);
-  assert.match(source, /yieldtome-system-restore-v1:/);
+  // B3 fix: the resume-cursor key/parse/validate logic moved to the
+  // dependency-free `system-backup-restore-progress.ts` sibling (see the
+  // "B3:" tests above for direct behavioural coverage of that logic) --
+  // pin only the WIRING here, i.e. that the panel actually imports and uses
+  // it, mirroring `tests/div-013.test.ts`'s identical split.
+  assert.match(source, /from "\.\.\/system-backup-restore-progress\.ts"/);
+  assert.match(source, /verifyResumeCursorBatches/);
   assert.match(source, /retry after 00:00 UTC/);
 });
 
@@ -814,4 +827,109 @@ test("S3: a price section whose EVERY row fails to resolve still succeeds, hones
   assert.equal(commit.result.priceBackup?.written, 0);
   assert.equal(commit.result.priceBackup?.unresolvedRowCount, 1);
   assert.ok(commit.result.priceBackup?.note);
+});
+
+// ---------------------------------------------------------------------------
+// Review corrections (BLOCKING, 2026-08-28) to commit 7616f75 "EXP-003: make
+// system backup free-plan resumable". Behavioural tests (not source-regex)
+// per the reviewer's own instruction -- `app/api/system-backup/export/
+// route.ts` and `app/components/system-backup-panel.tsx` cannot be imported
+// directly under the plain Node test runner (the former transitively pulls
+// in `next/headers` via `system-backup-actions.ts` -> `portfolio-actions.ts`;
+// the latter is a `.tsx` file, an "Unknown file extension" under this
+// runner), so the exact logic each bug lived in was extracted into a plain,
+// dependency-free `.ts` sibling module purely so it could be exercised
+// directly -- mirroring `tests/div-013.test.ts`'s identical, pre-existing
+// pattern for this same constraint.
+// ---------------------------------------------------------------------------
+
+test("B1: mode=core success response is the {ok:true, backup} envelope the panel's fetchJson requires, not the bare backup object", async () => {
+  const { client } = await fixture();
+  const exported = await exportSystemBackupCore(ctxFor(client, "a"));
+  assert.equal(exported.ok, true);
+  if (!exported.ok) return;
+
+  const shape = systemBackupCoreExportResponseShape(exported);
+  assert.equal(shape.status, 200);
+  // Mirrors the panel's OWN discriminator (`fetchJson` in
+  // `system-backup-panel.tsx`): parse the body exactly as the browser would
+  // after it crosses the wire, then check it against the `{ok:true} & T`
+  // shape `fetchJson` requires before it will ever hand a `backup` back to
+  // the caller.
+  const wireBody = JSON.parse(JSON.stringify(shape.body)) as
+    { ok: true; backup: SystemBackupV1 } | { ok: false; message: string };
+  assert.equal(wireBody.ok, true);
+  if (!wireBody.ok) return;
+  assert.deepEqual(wireBody.backup, exported.backup);
+});
+
+test("B1: mode=core failure still carries its own status/message, not silently swallowed", () => {
+  const shape = systemBackupCoreExportResponseShape({
+    ok: false,
+    status: 404,
+    message: "Account settings were not found.",
+  });
+  assert.equal(shape.status, 404);
+  const wireBody = JSON.parse(JSON.stringify(shape.body)) as
+    { ok: true; backup: SystemBackupV1 } | { ok: false; message: string };
+  assert.equal(wireBody.ok, false);
+  if (wireBody.ok) return;
+  assert.equal(wireBody.message, "Account settings were not found.");
+});
+
+test("B3: a fresh cursor (nothing claimed yet) is vacuously valid; a cursor whose claimed batch still exists is valid; one whose claimed batch is gone is invalid", () => {
+  assert.equal(isResumeCursorValid([], new Set()), true);
+  assert.equal(
+    isResumeCursorValid(
+      ["batch-1", "batch-2"],
+      new Set(["batch-1", "batch-2", "batch-3"]),
+    ),
+    true,
+  );
+  // The exact B3 failure scenario: a resume claims parts 0..1 wrote
+  // batch-1/batch-2, but this deployment/database (fresh, or after the
+  // owner undid the earlier restore) has no record of batch-2 -- discard
+  // the whole cursor, never trust it partially.
+  assert.equal(
+    isResumeCursorValid(["batch-1", "batch-2"], new Set(["batch-1"])),
+    false,
+  );
+});
+
+test("B3: parseStoredRestoreProgress discards a pre-B3 cursor with no batchIds (unverifiable, not merely unverified) and any malformed/absent value, resetting to zero", () => {
+  assert.deepEqual(parseStoredRestoreProgress(null), EMPTY_RESTORE_PROGRESS);
+  assert.deepEqual(
+    parseStoredRestoreProgress("not json"),
+    EMPTY_RESTORE_PROGRESS,
+  );
+  assert.deepEqual(
+    parseStoredRestoreProgress(
+      JSON.stringify({
+        nextChunk: 3,
+        written: 600,
+        unresolvedRowCount: 0,
+        unchangedCount: 0,
+        // No `batchIds` -- a cursor written before this fix.
+      }),
+    ),
+    EMPTY_RESTORE_PROGRESS,
+  );
+  const validCursor = {
+    nextChunk: 2,
+    written: 400,
+    unresolvedRowCount: 0,
+    unchangedCount: 0,
+    batchIds: ["batch-1", "batch-2"],
+  };
+  assert.deepEqual(
+    parseStoredRestoreProgress(JSON.stringify(validCursor)),
+    validCursor,
+  );
+});
+
+test("B3: the storage key stays scoped to the file digest (unchanged), never data-bearing itself", () => {
+  assert.equal(
+    restoreProgressStorageKey("abc123"),
+    "yieldtome-system-restore-v1:abc123",
+  );
 });

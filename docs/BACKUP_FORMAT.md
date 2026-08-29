@@ -356,12 +356,25 @@ browser/server transfer protocol is different:
 - Confirm restores the price-free core first, then sends price history in
   sequential 200-row requests with a short browser yield between them. Each
   request uses the existing owner-scoped resolution, natural-key upsert,
-  attribution, and value-history invalidation path.
-- The browser stores only `{nextChunk, written, unresolvedRowCount,
-unchangedCount}` under a SHA-256 digest of the selected file. No backup
-  contents, prices, names, or identifiers enter browser storage. Re-selecting
-  the identical file resumes at the first unacknowledged chunk; an ambiguous
-  last request is safe to retry because writes are natural-key idempotent.
+  attribution, and value-history invalidation path. Rows within one file are
+  ordered provider/symbol/date, so a single consecutively-unresolvable symbol
+  can fill an entire 200-row part; each chunked request is marked `chunked:
+true` so a fully-unresolved part advances with `written: 0` instead of
+  hard-failing the whole restore (review B2 fix, 2026-08-28) — the standalone
+  "Historical Data" whole-file backup restore does not set this flag, so a
+  genuinely unresolvable whole-file upload there still fails closed as
+  before.
+- The browser stores `{nextChunk, written, unresolvedRowCount,
+unchangedCount, batchIds}` under a SHA-256 digest of the selected file — the
+  id of every price-upload batch the completed parts actually created, no
+  backup contents/prices/names. Because the digest depends only on the FILE,
+  not the restore target, a resume is honored only after a cheap owner-scoped
+  probe (`GET /api/market-data/price-uploads`) confirms every claimed batch
+  id still exists on the CURRENT server; any mismatch (a fresh deployment, or
+  the owner having undone the earlier restore) discards the cursor and
+  restarts at chunk 0 with zeroed totals rather than silently skipping
+  unwritten rows (review B3 fix, 2026-08-28). An ambiguous last request is
+  otherwise safe to retry because writes are natural-key idempotent.
 - D1 Free's daily row-write allowance can be lower than the physical writes
   needed for a large price history once index writes are included. A restore
   that reaches that allowance pauses honestly and can resume after the quota

@@ -20,6 +20,13 @@ import {
   type PriceBackupMalformedReason,
 } from "../../domain/market-data/price-backup-csv.ts";
 import type { SystemBackupV1 } from "../../domain/exports/system-backup.ts";
+import {
+  EMPTY_RESTORE_PROGRESS,
+  isResumeCursorValid,
+  parseStoredRestoreProgress,
+  restoreProgressStorageKey,
+  type RestoreProgress,
+} from "../system-backup-restore-progress.ts";
 
 const FETCH_TIMEOUT_MS = 30_000;
 const PRICE_RESTORE_CHUNK_ROWS = 200;
@@ -93,13 +100,6 @@ function backupUploadRow(row: PriceBackupDataRow) {
   };
 }
 
-type RestoreProgress = {
-  nextChunk: number;
-  written: number;
-  unresolvedRowCount: number;
-  unchangedCount: number;
-};
-
 type PreparedBackup = {
   coreBackup: SystemBackupV1;
   priceChunks: ReturnType<typeof backupUploadRow>[][];
@@ -115,38 +115,24 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
     .join("");
 }
 
-function progressKey(digest: string): string {
-  return `yieldtome-system-restore-v1:${digest}`;
-}
-
 function readRestoreProgress(digest: string): RestoreProgress {
   try {
-    const parsed = JSON.parse(
-      localStorage.getItem(progressKey(digest)) ?? "null",
-    ) as Partial<RestoreProgress> | null;
-    if (
-      parsed &&
-      Number.isSafeInteger(parsed.nextChunk) &&
-      parsed.nextChunk! >= 0 &&
-      Number.isSafeInteger(parsed.written) &&
-      parsed.written! >= 0 &&
-      Number.isSafeInteger(parsed.unresolvedRowCount) &&
-      parsed.unresolvedRowCount! >= 0 &&
-      Number.isSafeInteger(parsed.unchangedCount) &&
-      parsed.unchangedCount! >= 0
-    ) {
-      return parsed as RestoreProgress;
-    }
+    return parseStoredRestoreProgress(
+      localStorage.getItem(restoreProgressStorageKey(digest)),
+    );
   } catch {
     // Storage is an optional resume aid; idempotent server writes remain the
     // source of truth when private browsing disables localStorage.
+    return { ...EMPTY_RESTORE_PROGRESS };
   }
-  return { nextChunk: 0, written: 0, unresolvedRowCount: 0, unchangedCount: 0 };
 }
 
 function writeRestoreProgress(digest: string, progress: RestoreProgress): void {
   try {
-    localStorage.setItem(progressKey(digest), JSON.stringify(progress));
+    localStorage.setItem(
+      restoreProgressStorageKey(digest),
+      JSON.stringify(progress),
+    );
   } catch {
     // See readRestoreProgress: losing the cursor costs time, never data.
   }
@@ -154,10 +140,33 @@ function writeRestoreProgress(digest: string, progress: RestoreProgress): void {
 
 function clearRestoreProgress(digest: string): void {
   try {
-    localStorage.removeItem(progressKey(digest));
+    localStorage.removeItem(restoreProgressStorageKey(digest));
   } catch {
     // Optional browser-only resume metadata.
   }
+}
+
+/**
+ * Review B3 fix (BLOCKING, 2026-08-28): the impure half of
+ * `isResumeCursorValid` (`system-backup-restore-progress.ts`, unit-tested
+ * directly) -- fetches the cheap owner-scoped probe (`GET
+ * /api/market-data/price-uploads`, the SAME list the "Historical Data" panel
+ * already reads) and feeds its ids into that pure decision. The probe
+ * request itself failing is treated the same as a missing batch: any doubt
+ * discards the cursor rather than trusting it.
+ */
+async function verifyResumeCursorBatches(
+  batchIds: readonly string[],
+): Promise<boolean> {
+  if (batchIds.length === 0) return true;
+  const outcome = await fetchJson<{
+    batches: ReadonlyArray<{ id: string }>;
+  }>("/api/market-data/price-uploads");
+  if (!outcome.ok) return false;
+  return isResumeCursorValid(
+    batchIds,
+    new Set(outcome.value.batches.map((batch) => batch.id)),
+  );
 }
 
 function postJson<T>(
@@ -434,10 +443,23 @@ export function SystemBackupPanel() {
       return;
     }
     const stored = readRestoreProgress(prepared.value.digest);
-    const progressState: RestoreProgress = {
-      ...stored,
-      nextChunk: Math.min(stored.nextChunk, prepared.value.priceChunks.length),
-    };
+    // Review B3 fix (BLOCKING, 2026-08-28): a stored cursor is a RESUME
+    // CLAIM, not a fact -- honor it only once the batches it claims to have
+    // written are confirmed to still exist for this owner on the CURRENT
+    // server. `nextChunk === 0` (no resume in play) skips the round trip.
+    const cursorValid =
+      stored.nextChunk === 0 ||
+      (await verifyResumeCursorBatches(stored.batchIds));
+    if (!cursorValid) clearRestoreProgress(prepared.value.digest);
+    const progressState: RestoreProgress = cursorValid
+      ? {
+          ...stored,
+          nextChunk: Math.min(
+            stored.nextChunk,
+            prepared.value.priceChunks.length,
+          ),
+        }
+      : { ...EMPTY_RESTORE_PROGRESS };
     for (
       let index = progressState.nextChunk;
       index < prepared.value.priceChunks.length;
@@ -449,6 +471,7 @@ export function SystemBackupPanel() {
         `Restoring price history: part ${index + 1} of ${prepared.value.priceChunks.length} (${index * PRICE_RESTORE_CHUNK_ROWS} of ${prepared.value.priceChunks.reduce((sum, part) => sum + part.length, 0)} rows processed)…`,
       );
       const chunkOutcome = await postJson<{
+        batch: { id: string };
         written: number;
         unresolvedRowCount: number;
         unchangedCount: number;
@@ -458,6 +481,13 @@ export function SystemBackupPanel() {
           ? prepared.value.malformedByReason
           : {},
         filename: `${file?.name ?? "system-backup.json"} (price part ${index + 1})`,
+        // Review B2 fix (BLOCKING, 2026-08-28): tells the server this is one
+        // bounded part of a larger resumable restore, so a part where every
+        // row happens to be unresolvable (consecutive rows for one unknown
+        // symbol) advances with `written: 0` instead of hard-failing the
+        // whole restore -- see `confirmBackupPriceUpload`'s
+        // `tolerateAllUnresolved` doc comment.
+        chunked: true,
       });
       if (!chunkOutcome.ok) {
         writeRestoreProgress(prepared.value.digest, progressState);
@@ -472,6 +502,10 @@ export function SystemBackupPanel() {
       progressState.written += chunkOutcome.value.written;
       progressState.unresolvedRowCount += chunkOutcome.value.unresolvedRowCount;
       progressState.unchangedCount += chunkOutcome.value.unchangedCount;
+      progressState.batchIds = [
+        ...progressState.batchIds,
+        chunkOutcome.value.batch.id,
+      ];
       writeRestoreProgress(prepared.value.digest, progressState);
       await waitBetweenChunks();
     }
