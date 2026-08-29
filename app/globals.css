@@ -116,7 +116,7 @@ dd {
   backdrop-filter: blur(18px);
 }
 
-/* UI-049: the app-bar USD/AUD pill -- same rounded-pill treatment as
+/* UI-050: the app-bar USD/AUD pill -- same rounded-pill treatment as
    `.prototype-chip`, but sized to sit inline in the header row at every
    width (no mobile/desktop split; the rate text is short enough to fit
    next to the icon buttons even on a narrow screen). */

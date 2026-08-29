@@ -18,7 +18,7 @@ function tryParseDecimal(value: string): DecimalFraction | null {
   }
 }
 
-// UI-049 (owner-directed: a USD/AUD pill in the top app bar): the SAME
+// UI-050 (owner-directed: a USD/AUD pill in the top app bar): the SAME
 // selection machinery `owned-watchlist.ts`'s currency-pair rows use --
 // `selectFxObservation` over a merged deployment-scope + this-owner's-own-
 // user-scope observation set, bounded to a short lookback window (no

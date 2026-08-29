@@ -123,7 +123,7 @@ export async function loadAuthenticatedWorkspace(
     const nowInstant = resolveRequestNow(
       requestHeaders.get(REQUEST_NOW_HEADER),
     );
-    // UI-049: the app-bar USD/AUD pill is USER-scoped and renders on every
+    // UI-050: the app-bar USD/AUD pill is USER-scoped and renders on every
     // primary-tab page (the header itself, not any one section), so it is
     // resolved here -- unconditionally, before `configuredWorkspace` is
     // built and before the `options.includeX` branches below early-return

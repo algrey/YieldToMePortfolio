@@ -180,7 +180,7 @@ export type OwnedWorkspace = {
   // not rename the FY) and never recomputed client-side (see
   // docs/CALCULATIONS.md §9).
   nowInstant?: string;
-  // UI-049: the app-bar USD/AUD pill (`app/authenticated-fx-rate.ts`) --
+  // UI-050: the app-bar USD/AUD pill (`app/authenticated-fx-rate.ts`) --
   // already formatted to 2 decimal places, or `null` when no usable
   // observation exists (never a fabricated/zero rate).
   usdAudRate?: string | null;
