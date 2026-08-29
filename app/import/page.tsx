@@ -21,18 +21,13 @@ export default async function ImportPage() {
       </main>
     );
   }
-  if (workspace.portfolios.length === 0) {
-    return (
-      <main className="import-review-page">
-        <div className="subnav-heading">
-          <HistoryBackControl fallbackHref="/" label="Back" />
-          <p className="eyebrow">Import review</p>
-        </div>
-        <h1>Create a portfolio first</h1>
-        <p>No private portfolio is available to receive this import.</p>
-      </main>
-    );
-  }
+  // UI-049 (owner-reported): a fresh installation with zero portfolios used
+  // to dead-end here with "Create a portfolio first" -- but the full-system
+  // restore panel this page renders below (EXP-002/EXP-003) exists
+  // specifically to repopulate a fresh deployment, which IS this exact
+  // zero-portfolio state. The page must always render so restore stays
+  // reachable; `ImportReview` itself degrades the CSV-import section when
+  // `portfolios` is empty (see its own header note).
   // BRK-005B: `loadAuthenticatedWorkspace` already verified auth and D1
   // access above -- a second `getAuthenticatedSqlContext` failure here is a
   // rare double-failure, not a normal path. Review follow-up 1: degrading

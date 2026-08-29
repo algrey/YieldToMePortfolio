@@ -1613,47 +1613,63 @@ export function ImportReview({
         Upload, inspect, and resolve issues before an explicit financial commit
         can create reviewed facts.
       </p>
-      <form className="import-upload-form" onSubmit={upload}>
-        <label>
-          Portfolio transactions (CSV)
-          <span className="file-picker">
-            <input
-              name="file"
-              type="file"
-              accept=".csv,text/csv"
-              required
-              className="file-picker-input"
-              onChange={(event) =>
-                setSelectedFileName(event.target.files?.[0]?.name ?? null)
-              }
-            />
-            <span className="file-picker-button">Choose CSV file…</span>
-            <span className="file-picker-filename">
-              {selectedFileName ?? "No file selected"}
-            </span>
-          </span>
-        </label>
+      {portfolios.length === 0 ? (
+        // UI-049 (owner-reported): a fresh installation has no portfolio to
+        // receive a CSV yet -- the server action independently rejects a
+        // missing `targetPortfolioId` regardless (see `upload`'s "Choose a
+        // target portfolio." message), so offering the file/target controls
+        // here would only invite a flow that can never succeed. Point at the
+        // full-system restore section below instead, which is this page's
+        // actual fresh-installation path.
         <p className="import-upload-hint">
-          Trade rows, plus optional dividend rows (17- or 18-column CSV).
+          A portfolio is needed to receive a CSV import. If this is a fresh
+          installation, use <a href="#system-backup">full-system restore</a>{" "}
+          below to bring back an existing portfolio, or create a portfolio
+          first.
         </p>
-        <label>
-          Target portfolio
-          <select
-            value={targetPortfolioId}
-            onChange={(event) => setTargetPortfolioId(event.target.value)}
-            required
-          >
-            {portfolios.map((portfolio) => (
-              <option value={portfolio.id} key={portfolio.id}>
-                {portfolio.name} · {portfolio.homeCurrencyCode}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button type="submit" disabled={pending}>
-          {pending ? "Preparing preview…" : "Create review preview"}
-        </button>
-      </form>
+      ) : (
+        <form className="import-upload-form" onSubmit={upload}>
+          <label>
+            Portfolio transactions (CSV)
+            <span className="file-picker">
+              <input
+                name="file"
+                type="file"
+                accept=".csv,text/csv"
+                required
+                className="file-picker-input"
+                onChange={(event) =>
+                  setSelectedFileName(event.target.files?.[0]?.name ?? null)
+                }
+              />
+              <span className="file-picker-button">Choose CSV file…</span>
+              <span className="file-picker-filename">
+                {selectedFileName ?? "No file selected"}
+              </span>
+            </span>
+          </label>
+          <p className="import-upload-hint">
+            Trade rows, plus optional dividend rows (17- or 18-column CSV).
+          </p>
+          <label>
+            Target portfolio
+            <select
+              value={targetPortfolioId}
+              onChange={(event) => setTargetPortfolioId(event.target.value)}
+              required
+            >
+              {portfolios.map((portfolio) => (
+                <option value={portfolio.id} key={portfolio.id}>
+                  {portfolio.name} · {portfolio.homeCurrencyCode}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button type="submit" disabled={pending}>
+            {pending ? "Preparing preview…" : "Create review preview"}
+          </button>
+        </form>
+      )}
 
       {targetPortfolioId ? (
         <SharesightSyncPanel

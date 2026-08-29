@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-test("UI-038: the import review screen and both degraded page states render HistoryBackControl with the workspace-overview fallback", async () => {
+test("UI-038: the import review screen and the workspace-unavailable degraded state render HistoryBackControl with the workspace-overview fallback", async () => {
   const [review, page] = await Promise.all([
     readFile(
       new URL("../app/components/import-review.tsx", import.meta.url),
@@ -20,9 +20,11 @@ test("UI-038: the import review screen and both degraded page states render Hist
     review,
     /<HistoryBackControl fallbackHref="\/" label="Back" \/>/,
   );
-  // Both degraded states (workspace unavailable, no portfolios) keep the
-  // way out too.
+  // UI-049: the zero-portfolio degraded state was removed -- a fresh
+  // installation with no portfolios now renders `ImportReview` itself
+  // (whose own back control is asserted above), not a page-level dead end.
+  // Only the workspace-unavailable branch's back control remains here.
   const pageControls =
     page.match(/<HistoryBackControl fallbackHref="\/" label="Back" \/>/g) ?? [];
-  assert.equal(pageControls.length, 2);
+  assert.equal(pageControls.length, 1);
 });
