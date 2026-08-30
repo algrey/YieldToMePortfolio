@@ -715,8 +715,25 @@ export async function loadOwnedHoldings(
     // (`db/repositories/snapshots.ts`) keeps its OWN identical predicate --
     // that exclusion is untouched by this task (EOD semantics for
     // historical valuations, per TASKS.md's BRK-012C ruling).
-    `SELECT count(*) AS count FROM price_observations po WHERE po.adjustment_state = 'raw' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?)) AND EXISTS (SELECT 1 FROM portfolio_securities ps WHERE ps.security_id = po.security_id AND ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held')`,
-    [asOf, asOf, nowIso, nowIso, userId, userId, portfolioId],
+    //
+    // PRF-001 (owner-reported production CPU-limit failure): the ownership
+    // check used to be a correlated `EXISTS (... WHERE ps.security_id =
+    // po.security_id ...)`, which SQLite/D1 cannot answer via
+    // `price_observations_security_date_idx` (security_id, adjustment_state,
+    // market_date) -- there is no top-level `po.security_id` equality for
+    // the planner to seek on, only a per-row correlated check, so it fell
+    // back to a full table scan (`SCAN po`, confirmed via `EXPLAIN QUERY
+    // PLAN` against a production-shaped fixture; see TASKS.md "### PRF-001").
+    // Rewritten as a logically identical `po.security_id IN (SELECT ...)` --
+    // same predicate, same held-security scoping, same params, just
+    // reshaped so the planner can seek the existing index per held security
+    // id (`SEARCH po USING INDEX price_observations_security_date_idx
+    // (security_id=? AND adjustment_state=? AND market_date>? AND
+    // market_date<?)`) instead of scanning every row ever ingested. No
+    // schema/migration change; no widening of what this owner's read can
+    // see -- purely a query-shape fix.
+    `SELECT count(*) AS count FROM price_observations po WHERE po.security_id IN (SELECT ps.security_id FROM portfolio_securities ps WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held') AND po.adjustment_state = 'raw' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?))`,
+    [userId, portfolioId, asOf, asOf, nowIso, nowIso, userId],
   );
   const priceCount = integer(priceCountRow ?? {}, "count");
   if (priceCount > MAX_OBSERVATIONS)
@@ -724,16 +741,19 @@ export async function loadOwnedHoldings(
   const prices = await client.all<Row>(
     // See the count query above -- BRK-012C lifted the `provider_id <>
     // 'sharesight'` exclusion here too; both queries must agree or
-    // `priceCount`/`prices.length` could diverge.
-    `SELECT po.* FROM price_observations po WHERE po.adjustment_state = 'raw' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?)) AND EXISTS (SELECT 1 FROM portfolio_securities ps WHERE ps.security_id = po.security_id AND ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held') ORDER BY po.security_id, po.market_date DESC, po.observation_at DESC LIMIT ?`,
+    // `priceCount`/`prices.length` could diverge. PRF-001: same
+    // IN-subquery rewrite as the count query immediately above, for the
+    // same reason (identical predicate, index-seekable instead of a full
+    // scan).
+    `SELECT po.* FROM price_observations po WHERE po.security_id IN (SELECT ps.security_id FROM portfolio_securities ps WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held') AND po.adjustment_state = 'raw' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?)) ORDER BY po.security_id, po.market_date DESC, po.observation_at DESC LIMIT ?`,
     [
-      asOf,
-      asOf,
-      nowIso,
-      nowIso,
-      userId,
       userId,
       portfolioId,
+      asOf,
+      asOf,
+      nowIso,
+      nowIso,
+      userId,
       MAX_OBSERVATIONS + 1,
     ],
   );
