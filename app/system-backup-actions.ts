@@ -33,6 +33,7 @@ import {
   type SystemBackupScaffoldResult,
 } from "./system-backup-service.ts";
 import type { SystemBackupV1 } from "../domain/exports/system-backup.ts";
+import { emitStructuredLog } from "../domain/observability/logger.ts";
 
 type ActionFailure = {
   ok: false;
@@ -115,30 +116,63 @@ export async function commitSystemBackupCorePartAction(
     requestId: context.requestId,
   };
   const value = parsed.value;
-  if (value.phase === "scaffold") {
-    const result = await commitSystemBackupCoreScaffold(
-      ctx,
-      value.backup,
-      value.filename,
-    );
-    return result.ok
-      ? { ok: true, phase: "scaffold", result: result.result }
-      : result;
-  }
-  if (value.phase === "transactions") {
-    const result = await commitSystemBackupTransactionsPart(ctx, value);
-    return result.ok
-      ? { ok: true, phase: "transactions", result: result.result }
-      : result;
-  }
-  if (value.phase === "dividends") {
-    const result = await commitSystemBackupDividendsPart(ctx, value);
-    return result.ok
-      ? { ok: true, phase: "dividends", result: result.result }
-      : result;
-  }
-  const result = await commitSystemBackupFinalizePortfolioFromWire(ctx, value);
-  return result.ok
-    ? { ok: true, phase: "finalize", result: result.result }
-    : result;
+  // EXP-004 diagnostics: a request killed by the platform (CPU eviction)
+  // emits NO completion log of its own, so a phase-entry line is the only
+  // way `wrangler tail` can attribute such a death to a specific restore
+  // phase. Metadata is counts only -- never row contents or money values.
+  emitStructuredLog({
+    event: "restore.core",
+    action: `phase.${value.phase}.start`,
+    result: "success",
+    requestId: context.requestId,
+    // (scaffold's `backup` is still `unknown` here -- validated inside the
+    // service -- so its entry log carries no counts.)
+    metadata:
+      value.phase === "transactions"
+        ? { rows: value.transactions.length }
+        : value.phase === "dividends"
+          ? { rows: value.records.length }
+          : {},
+  });
+  const outcome =
+    await (async (): Promise<SystemBackupCorePartActionResult> => {
+      if (value.phase === "scaffold") {
+        const result = await commitSystemBackupCoreScaffold(
+          ctx,
+          value.backup,
+          value.filename,
+        );
+        return result.ok
+          ? { ok: true, phase: "scaffold", result: result.result }
+          : result;
+      }
+      if (value.phase === "transactions") {
+        const result = await commitSystemBackupTransactionsPart(ctx, value);
+        return result.ok
+          ? { ok: true, phase: "transactions", result: result.result }
+          : result;
+      }
+      if (value.phase === "dividends") {
+        const result = await commitSystemBackupDividendsPart(ctx, value);
+        return result.ok
+          ? { ok: true, phase: "dividends", result: result.result }
+          : result;
+      }
+      const result = await commitSystemBackupFinalizePortfolioFromWire(
+        ctx,
+        value,
+      );
+      return result.ok
+        ? { ok: true, phase: "finalize", result: result.result }
+        : result;
+    })();
+  emitStructuredLog({
+    level: outcome.ok ? "info" : "warn",
+    event: "restore.core",
+    action: `phase.${value.phase}.finish`,
+    result: outcome.ok ? "success" : "failure",
+    requestId: context.requestId,
+    metadata: outcome.ok ? {} : { status: outcome.status },
+  });
+  return outcome;
 }
