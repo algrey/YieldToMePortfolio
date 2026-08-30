@@ -25,6 +25,9 @@
   },
   "env": {
     "preview": {
+      "triggers": {
+        "crons": []
+      },
       "d1_databases": [
         {
           "binding": "DB",
