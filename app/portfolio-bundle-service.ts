@@ -1160,6 +1160,48 @@ export type BundleScaffoldResult = {
   committedDividendCount: number;
 };
 
+/**
+ * EXP-004 correction (production incident, 2026-08-31): the half-open byte
+ * range covering exactly the keys one bundle replay writes,
+ * `bundle:<fingerprint>:<ref>`.
+ *
+ * This MUST NOT be expressed as `idempotency_key LIKE 'bundle:<fp>:%'`.
+ * SQLite caps a LIKE/GLOB pattern at `SQLITE_LIMIT_LIKE_PATTERN_LENGTH`, and
+ * production D1 enforces the library DEFAULT of 50 bytes. This prefix is
+ * `"bundle:"` (7) + a 64-hex-character sha256 digest + `":%"` (2) = 73 bytes,
+ * so every such query fails on D1 with
+ * `D1_ERROR: LIKE or GLOB pattern too complex: SQLITE_ERROR` -- which is
+ * exactly how the full-system restore's scaffold phase 500'd on every
+ * production attempt. It is invisible to this repository's own test suite:
+ * `node:sqlite` raises that same limit to 50,000, so the identical query
+ * passes locally forever. Range comparison has no pattern limit at all.
+ *
+ * `;` is `:` + 1 in byte order (0x3B follows 0x3A), so
+ * `>= "bundle:<fp>:"` AND `< "bundle:<fp>;"` matches every key beginning
+ * with the prefix and nothing else -- including a SIBLING fingerprint that
+ * shares the `bundle:` prefix, which the upper bound excludes. No
+ * `idempotency_key` column declares a `COLLATE`, so SQLite's default BINARY
+ * collation applies and the comparison is a true byte-order range; that also
+ * makes it index-friendly on
+ * `transactions_owner_portfolio_idempotency_unique`
+ * (`user_id`, `portfolio_id`, `idempotency_key`).
+ *
+ * The switch is behaviour-preserving for real data: SQLite's LIKE is
+ * ASCII-case-INSENSITIVE by default, while this range is case-sensitive, but
+ * every key is written from this same lower-case template with a lower-case
+ * hex digest (`sha256Hex` enforces `^[0-9a-f]+$`), so no key that LIKE
+ * matched can fall outside the range.
+ */
+export function bundleKeyPrefixRange(fingerprint: string): {
+  start: string;
+  endExclusive: string;
+} {
+  return {
+    start: `bundle:${fingerprint}:`,
+    endExclusive: `bundle:${fingerprint};`,
+  };
+}
+
 async function countByIdempotencyPrefix(
   client: SqlClient,
   table: "transactions" | "dividend_manual_records",
@@ -1167,12 +1209,12 @@ async function countByIdempotencyPrefix(
   portfolioId: string,
   fingerprint: string,
 ): Promise<number> {
-  // `fingerprint` is always a `sha256Hex` digest (lowercase hex only), so it
-  // can never itself contain a `LIKE` wildcard -- no escaping needed.
+  const range = bundleKeyPrefixRange(fingerprint);
   const row = await client.get<{ count: number }>(
     `SELECT COUNT(*) AS count FROM ${table}
-     WHERE user_id = ? AND portfolio_id = ? AND idempotency_key LIKE ?`,
-    [userId, portfolioId, `bundle:${fingerprint}:%`],
+     WHERE user_id = ? AND portfolio_id = ?
+       AND idempotency_key >= ? AND idempotency_key < ?`,
+    [userId, portfolioId, range.start, range.endExclusive],
   );
   return Number(row?.count ?? 0);
 }

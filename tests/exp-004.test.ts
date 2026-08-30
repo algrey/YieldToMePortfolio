@@ -17,6 +17,8 @@
  */
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
@@ -33,6 +35,7 @@ import {
   exportPortfolioBundle,
   fingerprintBundle,
   fingerprintBundleWithByteLength,
+  bundleKeyPrefixRange,
   type BundleDividendLinkageItem,
   type BundleScaffoldSecurity,
   type BundleServiceContext,
@@ -898,6 +901,155 @@ test("a part whose browser-held fingerprint does not match its own batch is reje
     [scaffold.result.portfolioId],
   );
   assert.equal(written?.n, 0);
+});
+
+test("resume evidence uses a byte-RANGE, not LIKE: the prefix range is exact, and excludes a sibling fingerprint sharing the `bundle:` prefix", async () => {
+  const fingerprint = "a".repeat(64);
+  const range = bundleKeyPrefixRange(fingerprint);
+  assert.equal(range.start, `bundle:${fingerprint}:`);
+  // ';' is ':' + 1 in byte order, so the half-open range covers exactly the
+  // keys beginning with the prefix.
+  assert.equal(range.endExclusive, `bundle:${fingerprint};`);
+  assert.ok(`bundle:${fingerprint}:` >= range.start);
+  assert.ok(`bundle:${fingerprint}:zzzz` < range.endExclusive);
+  // A DIFFERENT fingerprint sharing only the literal `bundle:` prefix must
+  // fall outside the range in both directions.
+  const sibling = `bundle:${"b".repeat(64)}:ref`;
+  assert.ok(sibling < range.start || sibling >= range.endExclusive);
+});
+
+test("resume evidence counts only THIS bundle's rows when another bundle's rows share the `bundle:` prefix in the same portfolio", async () => {
+  const bundle = await buildBundle();
+  const db = await migratedDatabase();
+  seedFreshAccount(db, "target");
+  const client = createSqliteSqlClient(db);
+
+  const scaffold = await commitPortfolioBundleScaffold(
+    ctxFor(client, "target"),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(scaffold.ok, true);
+  if (!scaffold.ok) return;
+
+  const ordered = chainOrder(
+    bundle.transactions,
+    (tx) => tx.reversesRef ?? tx.supersedesRef,
+  );
+  const written = await commitPortfolioBundleTransactionsPart(
+    ctxFor(client, "target"),
+    {
+      portfolioId: scaffold.result.portfolioId,
+      batchId: scaffold.result.batchId,
+      fingerprint: scaffold.result.fingerprint,
+      securities: scaffold.result.securities,
+      transactions: ordered,
+    },
+  );
+  assert.equal(written.ok, true);
+
+  // A row from a DIFFERENT bundle replay, in the SAME owner+portfolio,
+  // whose key shares the literal `bundle:` prefix. The old
+  // `LIKE 'bundle:<fp>:%'` predicate and the range predicate must both
+  // exclude it -- and the range's exclusive upper bound is what does so.
+  const sibling = `bundle:${"f".repeat(64)}:other-ref`;
+  const ledger = createOwnedLedgerRepository(client);
+  const other = await ledger.post("target", {
+    portfolioId: scaffold.result.portfolioId,
+    type: "buy",
+    portfolioSecurityId: scaffold.result.securities[0]!.portfolioSecurityId,
+    quantityDecimal: "1",
+    unitPriceDecimal: "1",
+    grossAmountDecimal: "1",
+    feeAmountDecimal: "0",
+    taxAmountDecimal: "0",
+    fxRateToBaseDecimal: null,
+    sourceType: "manual",
+    idempotencyKey: sibling,
+    tradeAt: "2026-06-01T00:00:00.000Z",
+    localTradeDate: "2026-06-01",
+    settlementDate: null,
+    currencyCode: "AUD",
+    fxRateSource: null,
+    fxObservedAt: null,
+    requestId: randomUUID(),
+  });
+  assert.equal(other.ok, true);
+
+  const rescaffold = await commitPortfolioBundleScaffold(
+    ctxFor(client, "target"),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(rescaffold.ok, true);
+  if (!rescaffold.ok) return;
+  // Exactly this bundle's own rows -- the sibling is not counted, so the
+  // browser does not skip a row it never wrote.
+  assert.equal(
+    rescaffold.result.committedTransactionCount,
+    bundle.transactions.length,
+  );
+});
+
+test("guard: no restore-path SQL uses a LIKE/GLOB pattern that production D1 would reject at 50 bytes", async () => {
+  // Production D1 enforces SQLite's DEFAULT
+  // `SQLITE_LIMIT_LIKE_PATTERN_LENGTH` of 50 bytes;
+  // `node:sqlite` raises it to 50,000, so a behavioural test can NEVER catch
+  // this class of defect locally -- it has to be a structural one. A LIKE
+  // pattern supplied as a BOUND parameter has no statically knowable length
+  // at all, so it is banned outright in these modules; a literal pattern is
+  // allowed only while it is provably short.
+  const D1_LIKE_PATTERN_LIMIT_BYTES = 50;
+  const roots = ["../app", "../db/repositories"];
+  const files: string[] = [];
+  for (const root of roots) {
+    const base = fileURLToPath(new URL(`${root}/`, import.meta.url));
+    const entries = await readdir(base, {
+      recursive: true,
+      withFileTypes: true,
+    });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
+      files.push(join(entry.parentPath, entry.name));
+    }
+  }
+  assert.ok(
+    files.length > 20,
+    `expected to scan many modules, saw ${files.length}`,
+  );
+
+  const offences: string[] = [];
+  for (const file of files) {
+    const source = await readFile(file, "utf8");
+    for (const [index, line] of source.split("\n").entries()) {
+      // Ignore prose: only look at lines that are actually SQL-ish.
+      if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;
+      const bound = /\b(LIKE|GLOB)\s+\?/.exec(line);
+      if (bound) {
+        offences.push(
+          `${file}:${index + 1} uses a BOUND ${bound[1]} pattern (length unknowable; D1 rejects over ${D1_LIKE_PATTERN_LIMIT_BYTES} bytes)`,
+        );
+        continue;
+      }
+      const literal = /\b(LIKE|GLOB)\s+'([^']*)'/.exec(line);
+      if (
+        literal &&
+        new TextEncoder().encode(literal[2]!).length >
+          D1_LIKE_PATTERN_LIMIT_BYTES
+      ) {
+        offences.push(
+          `${file}:${index + 1} uses a ${literal[1]} pattern over ${D1_LIKE_PATTERN_LIMIT_BYTES} bytes`,
+        );
+      }
+    }
+  }
+  assert.deepEqual(
+    offences,
+    [],
+    `LIKE/GLOB patterns that production D1 can reject:\n${offences.join("\n")}`,
+  );
 });
 
 test("production leftover state: an OLD-code `committing` batch with partially replayed transactions resumes to a complete, non-duplicated restore", async () => {

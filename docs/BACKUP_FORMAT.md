@@ -433,6 +433,46 @@ one:
    portfolio's `import_batches` row `committed`. Small-cardinality data,
    bounded by override/scenario counts, not transaction count.
 
+### The actual production root cause: D1's LIKE pattern limit
+
+Confirmed from `wrangler tail` on 2026-08-31, after the part-size work below
+had already shipped: every scaffold request threw
+
+```
+D1_ERROR: LIKE or GLOB pattern too complex: SQLITE_ERROR
+```
+
+Resume evidence (`committedTransactionCount`/`committedDividendCount`) was
+counted with `idempotency_key LIKE 'bundle:<fingerprint>:%'`. That pattern is
+`"bundle:"` (7 bytes) + a 64-character sha256 digest + `":%"` (2 bytes) = **73
+bytes**, and production D1 enforces SQLite's default
+`SQLITE_LIMIT_LIKE_PATTERN_LENGTH` of **50 bytes**. Every scaffold therefore
+500'd before writing anything — which is why the owner's D1 never changed
+across attempts, and why this ALSO means the original EXP-004 code never got
+past scaffold in production: the part-size defect described below was real,
+but had never been reached.
+
+This was invisible to the test suite because `node:sqlite` raises the same
+limit to 50,000, so the identical query passes locally forever. The fix
+replaces the pattern match with a half-open byte range — no pattern matching,
+therefore no pattern limit:
+
+```sql
+idempotency_key >= 'bundle:<fp>:' AND idempotency_key < 'bundle:<fp>;'
+```
+
+`;` is `:` + 1 in byte order, so the range covers exactly the prefix and
+excludes a sibling fingerprint that shares the literal `bundle:` prefix. No
+`idempotency_key` column declares a `COLLATE`, so SQLite's default BINARY
+collation applies and the range is both exact and index-friendly on
+`transactions_owner_portfolio_idempotency_unique`. `bundleKeyPrefixRange`
+(`app/portfolio-bundle-service.ts`) owns the two bounds.
+
+`tests/exp-004.test.ts` guards the whole class structurally, since no
+behavioural test on `node:sqlite` ever can: it scans every module under
+`app/` and `db/repositories/` and fails on any `LIKE`/`GLOB` with a BOUND
+pattern (length unknowable) or a literal pattern over 50 bytes.
+
 ### Per-request work census (EXP-004 correction, 2026-08-30)
 
 EXP-004 originally shipped both part sizes at 100 rows as an unmeasured
