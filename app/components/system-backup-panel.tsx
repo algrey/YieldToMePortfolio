@@ -51,6 +51,11 @@ const PRICE_RESTORE_CHUNK_ROWS = 200;
 // calls / ~252 statements.
 const TRANSACTIONS_RESTORE_CHUNK_ROWS = 20;
 const DIVIDENDS_RESTORE_CHUNK_ROWS = 50;
+// Human-visible marker for the restore client generation, shown in progress
+// and failure copy so a stale cached browser bundle is instantly
+// distinguishable from the current one. Bump whenever the wire protocol or
+// part sizes change ("r3" = the 20/50-row parts).
+const RESTORE_PROTOCOL = "r3";
 const CHUNK_PAUSE_MS = 100;
 
 function defaultNonJsonMessage(httpStatus: number): string {
@@ -501,7 +506,13 @@ export function SystemBackupPanel() {
     // always picks up exactly where the account's own data actually is. See
     // `commitPortfolioBundleScaffold`'s header comment
     // (`app/portfolio-bundle-service.ts`) for the full design rationale.
-    setProgress("Preparing account settings, portfolios, and watchlist…");
+    // The protocol marker (r3 = the 20/50-row part sizes) is deliberately
+    // surfaced in this phase's progress AND failure copy: it lets the owner
+    // (and support) tell at a glance whether the browser is running the
+    // current restore client or a stale cached one.
+    setProgress(
+      `Preparing account settings, portfolios, and watchlist… (restore protocol ${RESTORE_PROTOCOL}, step 1)`,
+    );
     const scaffoldOutcome = await postJson<{ result: ScaffoldResult }>(
       "/api/system-backup/import/commit",
       {
@@ -510,7 +521,7 @@ export function SystemBackupPanel() {
         filename: file?.name,
       },
       (status) =>
-        `Cloudflare ended the request (HTTP ${status}) while preparing the restore. Nothing here is lost -- any portfolio already prepared stays prepared; re-select this same backup and confirm again to retry.`,
+        `Cloudflare ended the request (HTTP ${status}) at restore step 1 (protocol ${RESTORE_PROTOCOL}: prepare account settings, portfolios, and watchlist). Nothing here is lost -- any portfolio already prepared stays prepared; re-select this same backup and confirm again to retry.`,
     );
     if (!scaffoldOutcome.ok) {
       setPending(false);
