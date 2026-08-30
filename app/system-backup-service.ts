@@ -62,12 +62,13 @@ import { readPortfolioBundle } from "../db/repositories/portfolio-bundle.ts";
 import { createOwnedPortfolioRepository } from "../db/repositories/owned-portfolios.ts";
 import { chainOrder } from "../domain/exports/chain-order.ts";
 import {
-  commitPortfolioBundleScaffold,
+  commitValidatedPortfolioBundleScaffold,
   commitPortfolioBundleTransactionsPart,
   commitPortfolioBundleDividendsPart,
   commitPortfolioBundleFinalize,
   parseBundleFinalizeWireInput,
   fingerprintBundle,
+  fingerprintBundleWithByteLength,
   type BundleScaffoldSecurity,
   type BundleDividendLinkageItem,
   type BundleFinalizeInput,
@@ -390,13 +391,17 @@ export async function commitSystemBackupCoreScaffold(
     return { ok: false, status: 400, message: validation.message };
   const backup = validation.backup;
 
-  const fingerprints = await Promise.all(
-    backup.portfolios.map((bundle) => fingerprintBundle(bundle)),
+  // EXP-004 correction: ONE canonicalisation pass per nested bundle, reused
+  // for the fresh-account precondition AND for that bundle's own scaffold
+  // below (which used to redo the validation, the fingerprint, and a third
+  // full `JSON.stringify` for `byte_size` on the same 10ms CPU budget).
+  const identities = await Promise.all(
+    backup.portfolios.map((bundle) => fingerprintBundleWithByteLength(bundle)),
   );
   const unrelatedPortfolioCount = await countUnrelatedPortfolios(
     ctx.client,
     ctx.userId,
-    fingerprints,
+    identities.map((identity) => identity.fingerprint),
   );
   if (unrelatedPortfolioCount > 0) {
     return {
@@ -422,11 +427,13 @@ export async function commitSystemBackupCoreScaffold(
 
   const portfolios: SystemBackupScaffoldPortfolio[] = [];
   for (const [index, bundle] of backup.portfolios.entries()) {
-    const result = await commitPortfolioBundleScaffold(
+    const identity = identities[index]!;
+    const result = await commitValidatedPortfolioBundleScaffold(
       { client: ctx.client, userId: ctx.userId, requestId: ctx.requestId },
       bundle,
+      identity.fingerprint,
       filename,
-      new TextEncoder().encode(JSON.stringify(bundle)).length,
+      identity.byteLength,
     );
     if (!result.ok) {
       return {

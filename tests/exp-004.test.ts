@@ -32,12 +32,24 @@ import {
   commitPortfolioBundleTransactionsPart,
   exportPortfolioBundle,
   fingerprintBundle,
+  fingerprintBundleWithByteLength,
   type BundleDividendLinkageItem,
   type BundleScaffoldSecurity,
   type BundleServiceContext,
 } from "../app/portfolio-bundle-service.ts";
-import type { PortfolioBundleV1 } from "../domain/exports/portfolio-bundle.ts";
+import {
+  canonicalBundleJson,
+  sha256Hex,
+  type PortfolioBundleV1,
+} from "../domain/exports/portfolio-bundle.ts";
 import type { SqlClient } from "../db/repositories/sql-client.ts";
+
+/** The part sizes `app/components/system-backup-panel.tsx` drives the
+ * chunked core restore at -- declared once here so the per-request work
+ * census below and the panel wiring pin at the end of this file can never
+ * disagree about what "a full part" means. */
+const TRANSACTIONS_PART_ROWS = 20;
+const DIVIDENDS_PART_ROWS = 50;
 
 // ---------------------------------------------------------------------------
 // Pure logic: chainOrder / chunkRows.
@@ -647,6 +659,381 @@ test("fingerprintBundle: two scaffold calls for the SAME bundle content resolve 
 });
 
 // ---------------------------------------------------------------------------
+// EXP-004 correction (escalation, 2026-08-30). See TASKS.md "### EXP-004"
+// and docs/BACKUP_FORMAT.md's "Per-request work census".
+// ---------------------------------------------------------------------------
+
+test("fingerprint compatibility: the one-pass fingerprint+byteLength helper reproduces the FROZEN fingerprint and the previous byte_size, byte for byte", async () => {
+  const bundle = await buildBundle();
+  const combined = await fingerprintBundleWithByteLength(bundle);
+
+  // The fingerprint is the frozen `bundle:<fingerprint>:<ref>` idempotency
+  // namespace every already-restored row in a live account was keyed with --
+  // it must stay exactly `sha256Hex(canonicalBundleJson(bundle))`.
+  assert.equal(
+    combined.fingerprint,
+    await sha256Hex(canonicalBundleJson(bundle)),
+  );
+  assert.equal(combined.fingerprint, await fingerprintBundle(bundle));
+
+  // `byte_size` keeps its previous meaning: `sortKeysDeep` only REORDERS
+  // keys, so the canonical form's UTF-8 length equals the plain
+  // `JSON.stringify` length the scaffold used to compute with a second,
+  // separate serialisation pass.
+  assert.equal(
+    combined.byteLength,
+    new TextEncoder().encode(JSON.stringify(bundle)).length,
+  );
+});
+
+/** Counts D1 client calls and individual SQL statements, the unit that maps
+ * to a Cloudflare Workers request's CPU budget (each statement is marshalled
+ * and its results parsed in-isolate, whether or not it is sent in a batch). */
+function countingClient(client: SqlClient): {
+  client: SqlClient;
+  stats: { calls: number; statements: number };
+} {
+  const stats = { calls: 0, statements: 0 };
+  return {
+    stats,
+    client: {
+      all: (sql, params) => {
+        stats.calls += 1;
+        stats.statements += 1;
+        return client.all(sql, params);
+      },
+      get: (sql, params) => {
+        stats.calls += 1;
+        stats.statements += 1;
+        return client.get(sql, params);
+      },
+      run: (sql, params) => {
+        stats.calls += 1;
+        stats.statements += 1;
+        return client.run(sql, params);
+      },
+      batch: (statements) => {
+        stats.calls += 1;
+        stats.statements += statements.length;
+        return client.batch(statements);
+      },
+    },
+  };
+}
+
+/** Owner "big": one portfolio, one security, `count` plain buy transactions
+ * -- enough rows to fill a whole `TRANSACTIONS_RESTORE_CHUNK_ROWS` part, so
+ * the per-request work census below measures a REAL full-size part rather
+ * than extrapolating from a two-row fixture. */
+async function largeBundle(count: number): Promise<PortfolioBundleV1> {
+  const db = await migratedDatabase();
+  db.exec(`
+    INSERT INTO currencies(code,numeric_code,name,minor_unit_digits) VALUES
+      ('AUD',36,'Australian dollar',2);
+    INSERT INTO users(id,status,primary_email,timezone,created_at,updated_at) VALUES
+      ('big','active','big@example.test','Australia/Sydney','2026-08-01','2026-08-01');
+    INSERT INTO user_settings(user_id,home_currency_code,timezone,financial_year_start_month,created_at,updated_at,version) VALUES
+      ('big','AUD','Australia/Sydney',7,'2026-08-01','2026-08-01',1);
+    INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at) VALUES
+      ('pbig','big','BIG','Big Portfolio','AUD','Australia/Sydney','fifo','active','2026-08-01','2026-08-01');
+    INSERT INTO securities(id,asset_type,primary_currency_code,canonical_name,created_at,updated_at) VALUES
+      ('sbig','equity','AUD','Alpha Co','2026-08-01','2026-08-01');
+    INSERT INTO security_identifiers(id,security_id,scheme,value,valid_from,source) VALUES
+      ('sibig','sbig','ticker','ALPHA','2026-08-01','owner_attested');
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at) VALUES
+      ('psbig','big','pbig','sbig','ALPHA','AUD','held','2026-08-01','2026-08-01');
+  `);
+  const client = createSqliteSqlClient(db);
+  const ledger = createOwnedLedgerRepository(client);
+  const manualRecords = createDividendManualRecordRepository(client);
+  for (let index = 0; index < count; index += 1) {
+    const day = String((index % 27) + 1).padStart(2, "0");
+    const posted = await ledger.post("big", {
+      portfolioId: "pbig",
+      type: "buy",
+      portfolioSecurityId: "psbig",
+      quantityDecimal: "10",
+      unitPriceDecimal: "5",
+      grossAmountDecimal: "50",
+      feeAmountDecimal: "0",
+      taxAmountDecimal: "0",
+      fxRateToBaseDecimal: null,
+      sourceType: "manual",
+      idempotencyKey: randomUUID(),
+      tradeAt: `2026-01-${day}T00:00:00.000Z`,
+      localTradeDate: `2026-01-${day}`,
+      settlementDate: null,
+      currencyCode: "AUD",
+      fxRateSource: null,
+      fxObservedAt: null,
+      requestId: randomUUID(),
+    });
+    assert.equal(posted.ok, true);
+    const dividend = await manualRecords.create("big", "pbig", {
+      portfolioSecurityId: "psbig",
+      paymentDate: `2026-03-${day}`,
+      sharesDecimal: "100",
+      dividendPerShareDecimal: "1.0",
+      requestId: randomUUID(),
+    });
+    assert.equal(dividend.ok, true);
+  }
+  const exported = await exportPortfolioBundle(ctxFor(client, "big"), "pbig");
+  assert.equal(exported.ok, true);
+  if (!exported.ok) throw new Error("large export failed");
+  return exported.bundle;
+}
+
+test("per-request work census: a FULL-SIZE transactions/dividends part stays far below the database work of the single request Cloudflare already killed in production", async () => {
+  // Production reference (TASKS.md "### EXP-004"): the pre-EXP-004 single
+  // core-commit request performed a scaffold pass plus 63 `ledger.post`
+  // replays -- ~992 D1 client calls / ~1,534 SQL statements -- before
+  // Cloudflare terminated it on the Free plan's 10ms CPU budget with no
+  // exception logged. EXP-004's own 100-row transactions part was measured
+  // at ~1,302 calls / ~2,102 statements, i.e. MORE work than that
+  // known-fatal request, which is why the chunked protocol still could not
+  // finish. These ceilings are deliberately generous (they permit ~2x the
+  // measured cost) but would fail loudly on a return to that scale.
+  const KILLED_IN_PRODUCTION_CALLS = 992;
+  const bundle = await largeBundle(
+    Math.max(TRANSACTIONS_PART_ROWS, DIVIDENDS_PART_ROWS),
+  );
+  const db = await migratedDatabase();
+  seedFreshAccount(db, "target");
+  const raw = createSqliteSqlClient(db);
+
+  const scaffold = await commitPortfolioBundleScaffold(
+    ctxFor(raw, "target"),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(scaffold.ok, true);
+  if (!scaffold.ok) return;
+
+  const orderedTransactions = chainOrder(
+    bundle.transactions,
+    (tx) => tx.reversesRef ?? tx.supersedesRef,
+  ).slice(0, TRANSACTIONS_PART_ROWS);
+  assert.equal(orderedTransactions.length, TRANSACTIONS_PART_ROWS);
+  const txMeter = countingClient(raw);
+  const txResult = await commitPortfolioBundleTransactionsPart(
+    ctxFor(txMeter.client, "target"),
+    {
+      portfolioId: scaffold.result.portfolioId,
+      batchId: scaffold.result.batchId,
+      fingerprint: scaffold.result.fingerprint,
+      securities: scaffold.result.securities,
+      transactions: orderedTransactions,
+    },
+  );
+  assert.equal(txResult.ok, true);
+  assert.ok(
+    txMeter.stats.calls < KILLED_IN_PRODUCTION_CALLS / 2,
+    `a full ${TRANSACTIONS_PART_ROWS}-row transactions part issued ${txMeter.stats.calls} D1 client calls / ${txMeter.stats.statements} statements -- at or above half the work of the request Cloudflare already killed`,
+  );
+  assert.ok(txMeter.stats.statements < 900, String(txMeter.stats.statements));
+
+  const orderedDividends = chainOrder(
+    bundle.dividendManualRecords,
+    (record) => record.supersedesRef,
+  ).slice(0, DIVIDENDS_PART_ROWS);
+  assert.equal(orderedDividends.length, DIVIDENDS_PART_ROWS);
+  const divMeter = countingClient(raw);
+  const divResult = await commitPortfolioBundleDividendsPart(
+    ctxFor(divMeter.client, "target"),
+    {
+      portfolioId: scaffold.result.portfolioId,
+      batchId: scaffold.result.batchId,
+      fingerprint: scaffold.result.fingerprint,
+      securities: scaffold.result.securities,
+      records: orderedDividends,
+    },
+  );
+  assert.equal(divResult.ok, true);
+  assert.ok(
+    divMeter.stats.calls < KILLED_IN_PRODUCTION_CALLS / 2,
+    `a full ${DIVIDENDS_PART_ROWS}-row dividends part issued ${divMeter.stats.calls} D1 client calls / ${divMeter.stats.statements} statements`,
+  );
+});
+
+test("a part whose browser-held fingerprint does not match its own batch is rejected, never written under a second idempotency namespace", async () => {
+  const bundle = await buildBundle();
+  const db = await migratedDatabase();
+  seedFreshAccount(db, "target");
+  const client = createSqliteSqlClient(db);
+
+  const scaffold = await commitPortfolioBundleScaffold(
+    ctxFor(client, "target"),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(scaffold.ok, true);
+  if (!scaffold.ok) return;
+
+  const ordered = chainOrder(
+    bundle.transactions,
+    (tx) => tx.reversesRef ?? tx.supersedesRef,
+  );
+  const wrongFingerprint = await commitPortfolioBundleTransactionsPart(
+    ctxFor(client, "target"),
+    {
+      portfolioId: scaffold.result.portfolioId,
+      batchId: scaffold.result.batchId,
+      // A stale/garbled value held in the browser across an interruption.
+      // Trusted verbatim, this would silently start a SECOND copy of the
+      // ledger under `bundle:<other>:<ref>` keys instead of resuming.
+      fingerprint: "0".repeat(64),
+      securities: scaffold.result.securities,
+      transactions: ordered,
+    },
+  );
+  assert.equal(wrongFingerprint.ok, false);
+  if (wrongFingerprint.ok) return;
+  assert.equal(wrongFingerprint.status, 409);
+
+  const written = await client.get<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM transactions WHERE user_id = 'target' AND portfolio_id = ?",
+    [scaffold.result.portfolioId],
+  );
+  assert.equal(written?.n, 0);
+});
+
+test("production leftover state: an OLD-code `committing` batch with partially replayed transactions resumes to a complete, non-duplicated restore", async () => {
+  // Reproduces the exact shape found in the owner's production D1 on
+  // 2026-08-30: one destination portfolio, its securities already resolved,
+  // an `import_batches` row still `committing` with the pre-EXP-004 column
+  // values (`total_rows` 0, `commit_high_water_row` 1,
+  // `commit_idempotency_key` NULL), and part of the ledger already written
+  // under this bundle's own `bundle:<fingerprint>:<ref>` keys.
+  const bundle = await buildBundle();
+  const db = await migratedDatabase();
+  seedFreshAccount(db, "own");
+  const client = createSqliteSqlClient(db);
+
+  const first = await commitPortfolioBundleScaffold(
+    ctxFor(client, "own"),
+    bundle,
+    "yieldtome-system-backup-2026-08-30.json",
+    141409,
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+
+  const orderedTransactions = chainOrder(
+    bundle.transactions,
+    (tx) => tx.reversesRef ?? tx.supersedesRef,
+  );
+  assert.ok(orderedTransactions.length > 1);
+  const partial = await commitPortfolioBundleTransactionsPart(
+    ctxFor(client, "own"),
+    {
+      portfolioId: first.result.portfolioId,
+      batchId: first.result.batchId,
+      fingerprint: first.result.fingerprint,
+      securities: first.result.securities,
+      transactions: orderedTransactions.slice(0, 1),
+    },
+  );
+  assert.equal(partial.ok, true);
+  // Rewrite the batch row into the OLD code's own leftover shape.
+  await client.run(
+    `UPDATE import_batches
+     SET status = 'committing', total_rows = 0, transaction_rows = 0,
+         commit_high_water_row = 1, commit_idempotency_key = NULL
+     WHERE id = ? AND user_id = 'own'`,
+    [first.result.batchId],
+  );
+
+  // The owner re-selects the SAME backup file and confirms again: scaffold
+  // resumes IN PLACE (same batch, same destination portfolio) and reports
+  // live, server-derived resume evidence.
+  const resumed = await commitPortfolioBundleScaffold(
+    ctxFor(client, "own"),
+    bundle,
+    "yieldtome-system-backup-2026-08-30.json",
+    141409,
+  );
+  assert.equal(resumed.ok, true);
+  if (!resumed.ok) return;
+  assert.equal(resumed.result.idempotent, false);
+  assert.equal(resumed.result.batchId, first.result.batchId);
+  assert.equal(resumed.result.portfolioId, first.result.portfolioId);
+  assert.equal(resumed.result.fingerprint, first.result.fingerprint);
+  assert.equal(resumed.result.committedTransactionCount, 1);
+  assert.equal(resumed.result.committedDividendCount, 0);
+
+  // ...and the remaining parts complete the restore.
+  const rest = await commitPortfolioBundleTransactionsPart(
+    ctxFor(client, "own"),
+    {
+      portfolioId: resumed.result.portfolioId,
+      batchId: resumed.result.batchId,
+      fingerprint: resumed.result.fingerprint,
+      securities: resumed.result.securities,
+      transactions: orderedTransactions.slice(
+        resumed.result.committedTransactionCount,
+      ),
+    },
+  );
+  assert.equal(rest.ok, true);
+  const dividends = await commitPortfolioBundleDividendsPart(
+    ctxFor(client, "own"),
+    {
+      portfolioId: resumed.result.portfolioId,
+      batchId: resumed.result.batchId,
+      fingerprint: resumed.result.fingerprint,
+      securities: resumed.result.securities,
+      records: chainOrder(
+        bundle.dividendManualRecords,
+        (record) => record.supersedesRef,
+      ),
+    },
+  );
+  assert.equal(dividends.ok, true);
+  const finalized = await commitPortfolioBundleFinalize(ctxFor(client, "own"), {
+    portfolioId: resumed.result.portfolioId,
+    batchId: resumed.result.batchId,
+    fingerprint: resumed.result.fingerprint,
+    securities: resumed.result.securities,
+    dividendLinkage: dividendLinkageFor(bundle),
+    dividendSecurityAssumptions: bundle.dividendSecurityAssumptions,
+    dividendPortfolioAssumption: bundle.dividendPortfolioAssumption,
+    dividendFyOverrides: bundle.dividendFyOverrides,
+    dividendEventOverrides: bundle.dividendEventOverrides,
+    dividendImportFrankingOverrides: bundle.dividendImportFrankingOverrides,
+    whatifScenarios: bundle.whatifScenarios,
+    portfolioStatus: bundle.portfolio.status,
+    transactionsCount: bundle.transactions.length,
+    dividendRecordsCount: bundle.dividendManualRecords.length,
+  });
+  assert.equal(finalized.ok, true);
+
+  // Exactly the backup's own rows -- the partially replayed prefix was
+  // resumed, never duplicated -- in ONE portfolio, under ONE batch.
+  const transactionCount = await client.get<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM transactions WHERE user_id = 'own' AND portfolio_id = ?",
+    [resumed.result.portfolioId],
+  );
+  assert.equal(transactionCount?.n, bundle.transactions.length);
+  const dividendCount = await client.get<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM dividend_manual_records WHERE user_id = 'own' AND portfolio_id = ?",
+    [resumed.result.portfolioId],
+  );
+  assert.equal(dividendCount?.n, bundle.dividendManualRecords.length);
+  const portfolioCount = await client.get<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM portfolios WHERE user_id = 'own'",
+  );
+  assert.equal(portfolioCount?.n, 1);
+  const batches = await client.all<{ id: string; status: string }>(
+    "SELECT id, status FROM import_batches WHERE user_id = 'own'",
+  );
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0]?.status, "committed");
+});
+
+// ---------------------------------------------------------------------------
 // Wiring pins: `system-backup-panel.tsx` cannot be imported/executed under
 // the plain Node test runner (`.tsx`, and it transitively needs a DOM) --
 // mirrors tests/exp-002.test.ts's own identically-justified source-grep
@@ -659,8 +1046,18 @@ test("wiring: system-backup-panel.tsx drives all four EXP-004 core-restore phase
     new URL("../app/components/system-backup-panel.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /const TRANSACTIONS_RESTORE_CHUNK_ROWS = 100/);
-  assert.match(source, /const DIVIDENDS_RESTORE_CHUNK_ROWS = 100/);
+  assert.match(
+    source,
+    new RegExp(
+      `const TRANSACTIONS_RESTORE_CHUNK_ROWS = ${TRANSACTIONS_PART_ROWS}\\b`,
+    ),
+  );
+  assert.match(
+    source,
+    new RegExp(
+      `const DIVIDENDS_RESTORE_CHUNK_ROWS = ${DIVIDENDS_PART_ROWS}\\b`,
+    ),
+  );
   assert.match(source, /phase: "scaffold"/);
   assert.match(source, /phase: "transactions"/);
   assert.match(source, /phase: "dividends"/);

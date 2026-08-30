@@ -407,18 +407,21 @@ one:
    thereafter), `portfolio_settings`, and every security's `resolveAndLink`
    resolution/`portfolio_securities` restoration (`commitPortfolioBundleScaffold`,
    `app/portfolio-bundle-service.ts`) — then the watchlist. Bounded by
-   portfolio + security COUNT, never transaction/dividend count, so this
-   stays cheap even for a large ledger. Returns each portfolio's destination
-   id, its `securities` ref→id map (the browser needs this for every later
-   part), and LIVE resume evidence (`committedTransactionCount`/
-   `committedDividendCount` — see "Resume evidence" below).
-2. **Transactions part** (one portfolio, ~100 rows/request —
+   portfolio + security COUNT, never transaction/dividend count. Its
+   DATABASE work is what that bound describes: the request still receives,
+   parses, validates and fingerprints the whole core payload once (see
+   "What the scaffold actually costs" below). Returns each portfolio's
+   destination id, its `securities` ref→id map (the browser needs this for
+   every later part), and LIVE resume evidence
+   (`committedTransactionCount`/`committedDividendCount` — see "Resume
+   evidence" below).
+2. **Transactions part** (one portfolio, 20 rows/request —
    `TRANSACTIONS_RESTORE_CHUNK_ROWS`, `system-backup-panel.tsx`):
    `commitPortfolioBundleTransactionsPart` replays a bounded, already
    chain-ordered (`domain/exports/chain-order.ts`) slice via the SAME
    `ledger.post`/`reverse`/`supersede` calls the whole-bundle path always
    used.
-3. **Dividends part** (one portfolio, ~100 rows/request —
+3. **Dividends part** (one portfolio, 50 rows/request —
    `DIVIDENDS_RESTORE_CHUNK_ROWS`): `commitPortfolioBundleDividendsPart`
    replays a bounded, chain-ordered slice via the SAME manual-create/
    import-insert paths as before.
@@ -430,12 +433,79 @@ one:
    portfolio's `import_batches` row `committed`. Small-cardinality data,
    bounded by override/scenario counts, not transaction count.
 
-Both part sizes are a starting point (see the task that introduced this);
-tune down further if a real restore still exhausts its CPU budget at this
-size — the observed production failure hit its budget around transaction
-#63 in a request ALSO doing portfolio creation, security resolution, and 62
-other transactions, so ~100 pure transaction writes per request may still
-need lowering once measured against a real deployment.
+### Per-request work census (EXP-004 correction, 2026-08-30)
+
+EXP-004 originally shipped both part sizes at 100 rows as an unmeasured
+"starting point". Measured against a production-shaped payload (1 portfolio,
+18 securities, 107 transactions, 119 dividend records, ~124 KB core), that
+was the reason a restore STILL could not finish on the Free plan. The unit
+that matters is the number of D1 operations one request performs — each
+statement is marshalled and its results parsed inside the isolate, so it
+costs CPU whether or not it is sent inside a `batch()`:
+
+| Request                                                                                                        | D1 client calls | SQL statements |
+| -------------------------------------------------------------------------------------------------------------- | --------------- | -------------- |
+| **Reference: the pre-EXP-004 single core commit Cloudflare killed** (scaffold pass + 63 `ledger.post` replays) | ~992            | ~1,534         |
+| Scaffold (fresh account, 18 securities)                                                                        | 173             | 211            |
+| Scaffold (resume into an existing destination)                                                                 | 64              | 65             |
+| Transactions part, 100 rows (EXP-004 as shipped)                                                               | **1,303**       | **2,103**      |
+| Transactions part, 20 rows (now)                                                                               | 263             | 423            |
+| Dividends part, 100 rows (EXP-004 as shipped)                                                                  | 403             | 503            |
+| Dividends part, 50 rows (now)                                                                                  | 203             | 253            |
+| Finalize (119 dividend linkage items)                                                                          | 123             | 123            |
+| Price chunk, 200 rows (EXP-003, unchanged)                                                                     | 65              | 457            |
+
+One `ledger.post` replay costs ~13 client calls / ~21 statements: inventory
+and decimal validation, the transaction and its cash entry, audit rows, and
+the queued `calculation_runs` siblings. So EXP-004's own 100-row
+transactions part performed MORE database work in one request than the
+single old-code request that had already been terminated — the part size,
+not the payload handling, was the dominant defect. 20 transaction rows /
+50 dividend rows keep every core request at roughly a quarter of that
+known-fatal request, comparable to the 200-row price chunk EXP-003 already
+proved in the same budget. `tests/exp-004.test.ts`'s "per-request work
+census" test pins this: it meters a real full-size part and fails if either
+part ever approaches half the known-fatal figure again.
+
+Local timings are NOT Workers CPU accounting and are not used as the
+budget; the operation census above is the portable measure. For reference
+only, removing the scaffold's redundant passes (below) cut its own
+non-database JS from ~4.0 ms to ~2.9 ms per request on a development
+machine.
+
+### What the scaffold actually costs
+
+Correcting an overstatement in EXP-004's original text: the scaffold's
+_writes_ are bounded by portfolio + security count, but the REQUEST is not
+bounded that way. It receives the entire core payload and must, once:
+
+- read and JSON-parse the body (`readSystemBackupRequestBody`);
+- run `validateSystemBackup` over the whole artifact — the account block,
+  the watchlist, and every nested bundle's rows via the unchanged
+  `validatePortfolioBundle`;
+- canonicalise and SHA-256 each nested bundle (`fingerprintBundle`), because
+  the fingerprint is both the fresh-account precondition's relatedness key
+  and the `bundle:<fingerprint>:<ref>` namespace every later part writes
+  under.
+
+That work is O(total rows) and irreducible: the fingerprint is frozen (live
+accounts already hold rows keyed with it) and it is defined over the
+VALIDATED bundle, so it cannot be derived without validating. What was
+reducible was doing it more than once. Until this correction the scaffold
+ran `validateSystemBackup` AND `validatePortfolioBundle` over the same
+bundles, fingerprinted each bundle TWICE, and serialised each one a third
+time purely to compute `import_batches.byte_size`. It now validates once,
+canonicalises once (`fingerprintBundleWithByteLength`, which returns the
+byte size from the same canonical bytes — `sortKeysDeep` only reorders keys,
+so that length is byte-identical to the previous `JSON.stringify` length,
+pinned by test), and passes both into
+`commitValidatedPortfolioBundleScaffold`.
+
+Validation authority is unchanged by that split. `validatePortfolioBundle`
+is idempotent, so the removed second pass could only ever re-confirm the
+first; the scaffold passes the OUTPUT of validation onward, never a raw wire
+value; and every row-writing part still fully validates its own rows
+independently, as below.
 
 Every part independently re-validates its OWN inputs against the live
 database (IMP-010B: chunking must never move validation authority to the
@@ -445,6 +515,15 @@ browser) — `commitPortfolioBundleTransactionsPart`/`...DividendsPart` re-run
 verify the target portfolio belongs to the authenticated owner, and verify
 every `portfolioSecurityId` the browser echoes back from scaffold actually
 belongs to that owner/portfolio before writing anything.
+
+Since this correction they ALSO verify the browser-held
+`batchId`/`fingerprint`/`portfolioId` triple against the owner's own
+`import_batches` row (`requireOwnedRestoreBatch`, one indexed lookup). The
+fingerprint half had been trusted verbatim even though every idempotency key
+a part writes is derived from it — a stale or garbled value would not have
+failed, it would have silently begun a SECOND, unresumable copy of the
+owner's ledger beside the first. Finalize makes its already-`committed`
+decision from that same read rather than a second one.
 
 ### Idempotent identity per row type
 

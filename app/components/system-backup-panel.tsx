@@ -35,12 +35,22 @@ const PRICE_RESTORE_CHUNK_ROWS = 200;
 // EXP-004: the core restore's own part sizes. Deliberately smaller than the
 // price chunk above -- each transaction/dividend write does real ledger/
 // dividend-repository work (inventory validation, decimal parsing, audit
-// inserts), unlike a price row's simpler upsert, so the same CPU budget
-// affords fewer rows per request. Recommended starting point per the task
-// that introduced this (see docs/BACKUP_FORMAT.md); tune down further if a
-// real restore still times out at this size.
-const TRANSACTIONS_RESTORE_CHUNK_ROWS = 100;
-const DIVIDENDS_RESTORE_CHUNK_ROWS = 100;
+// inserts), unlike a price row's batched upsert, so the same CPU budget
+// affords far fewer rows per request.
+//
+// EXP-004 correction (measured, not estimated -- see docs/BACKUP_FORMAT.md's
+// "Per-request work census"): ONE `ledger.post` replay costs ~13 D1 client
+// calls / ~21 SQL statements, so the original 100-row part issued ~1,302
+// calls / ~2,102 statements -- MORE database work than the single old-code
+// request Cloudflare already killed in production (~992 calls / ~1,534
+// statements: a scaffold pass plus 63 transaction replays). The part size
+// was the defect, not a tuning preference. 20 rows keeps a transactions part
+// at ~262 calls / ~422 statements, roughly a quarter of that known-fatal
+// request and in line with the price chunk EXP-003 already proved. A
+// dividend replay costs ~4 calls / ~5 statements, so 50 rows sits at ~202
+// calls / ~252 statements.
+const TRANSACTIONS_RESTORE_CHUNK_ROWS = 20;
+const DIVIDENDS_RESTORE_CHUNK_ROWS = 50;
 const CHUNK_PAUSE_MS = 100;
 
 function defaultNonJsonMessage(httpStatus: number): string {

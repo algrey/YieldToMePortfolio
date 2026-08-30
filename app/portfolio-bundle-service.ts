@@ -231,7 +231,32 @@ async function findExistingBatch(
  * used for idempotent-re-import detection, over the SAME canonical bytes
  * both directions use. */
 export async function fingerprintBundle(bundle: unknown): Promise<string> {
-  return sha256Hex(canonicalBundleJson(bundle));
+  return (await fingerprintBundleWithByteLength(bundle)).fingerprint;
+}
+
+/**
+ * EXP-004 correction: the fingerprint AND the bundle's serialized byte size
+ * (`import_batches.byte_size`) from ONE canonicalisation pass, so a caller
+ * needing both stops serialising the same bundle twice per request.
+ *
+ * `byteLength` is UNCHANGED in meaning: `canonicalBundleJson`'s `sortKeysDeep`
+ * only REORDERS object keys -- it adds, drops and rewrites nothing -- so the
+ * canonical form's UTF-8 length is byte-for-byte the same number
+ * `new TextEncoder().encode(JSON.stringify(bundle)).length` produced before
+ * (pinned by `tests/exp-004.test.ts`'s byte-length equality test). The
+ * FINGERPRINT is likewise unchanged: it is still `sha256Hex` over exactly
+ * `canonicalBundleJson(bundle)`, the frozen input every existing
+ * `bundle:<fingerprint>:<ref>` idempotency key in a live account was derived
+ * from.
+ */
+export async function fingerprintBundleWithByteLength(
+  bundle: unknown,
+): Promise<{ fingerprint: string; byteLength: number }> {
+  const canonical = canonicalBundleJson(bundle);
+  return {
+    fingerprint: await sha256Hex(canonical),
+    byteLength: new TextEncoder().encode(canonical).length,
+  };
 }
 
 export async function exportPortfolioBundle(
@@ -1193,6 +1218,66 @@ async function verifyOwnedPortfolioSecurityIds(
   return new Set(rows.map((row) => row.id));
 }
 
+/**
+ * EXP-004 correction: every phase after `scaffold` carries a browser-held
+ * `batchId`/`fingerprint`/`portfolioId` triple. The FINGERPRINT half of that
+ * triple was previously trusted verbatim, even though every idempotency key
+ * the part goes on to write (`bundle:<fingerprint>:<ref>`) is derived from
+ * it -- so a wrong value would not fail, it would silently start a SECOND,
+ * unresumable copy of the owner's ledger alongside the first. The server
+ * already stores the authoritative fingerprint for the batch
+ * (`import_batches.file_sha256`, written by the scaffold), so one indexed,
+ * owner-scoped lookup re-derives it rather than trusting the wire.
+ *
+ * Returns the batch's own status so `commitPortfolioBundleFinalize` can make
+ * its already-committed decision from this same read instead of a second one.
+ */
+async function requireOwnedRestoreBatch(
+  ctx: BundleServiceContext,
+  input: { batchId: string; fingerprint: string; portfolioId: string },
+): Promise<{ ok: true; status: string } | BundleServiceFailure> {
+  const row = await ctx.client.get<{
+    status: string;
+    file_sha256: string;
+    target_portfolio_id: string | null;
+  }>(
+    `SELECT status, file_sha256, target_portfolio_id FROM import_batches
+     WHERE id = ? AND user_id = ? LIMIT 1`,
+    [input.batchId, ctx.userId],
+  );
+  if (!row) {
+    return {
+      ok: false,
+      status: 404,
+      message: "This restore batch was not found.",
+    };
+  }
+  if (String(row.file_sha256) !== input.fingerprint) {
+    return {
+      ok: false,
+      status: 409,
+      message:
+        "This restore part does not match the backup its batch was started for. Re-select the same backup file and confirm again to restart from a fresh scaffold.",
+    };
+  }
+  if (
+    row.target_portfolio_id !== null &&
+    String(row.target_portfolio_id) !== input.portfolioId
+  ) {
+    return {
+      ok: false,
+      status: 409,
+      message:
+        "This restore part targets a different portfolio than its batch. Re-select the same backup file and confirm again to restart from a fresh scaffold.",
+    };
+  }
+  return { ok: true, status: String(row.status) };
+}
+
+/**
+ * The whole-bundle entry point (EXP-001's own standalone import): validates
+ * the raw bundle, derives its fingerprint, then runs the scaffold below.
+ */
 export async function commitPortfolioBundleScaffold(
   ctx: BundleServiceContext,
   raw: unknown,
@@ -1204,7 +1289,37 @@ export async function commitPortfolioBundleScaffold(
     return { ok: false, status: 400, message: validation.message };
   const bundle = validation.bundle;
   const fingerprint = await fingerprintBundle(bundle);
+  return commitValidatedPortfolioBundleScaffold(
+    ctx,
+    bundle,
+    fingerprint,
+    filename,
+    bundleByteLength,
+  );
+}
 
+/**
+ * EXP-004 correction: the scaffold's actual work, taking a bundle its caller
+ * has ALREADY validated with `validatePortfolioBundle` and fingerprinted.
+ *
+ * This exists because a system restore's scaffold request used to validate
+ * and fingerprint every nested bundle TWICE -- once in
+ * `commitSystemBackupCoreScaffold` (which needs the fingerprints for the
+ * fresh-account precondition) and again here -- plus a third full
+ * serialisation for `byte_size`. Validation authority is NOT reduced by
+ * this split: `validatePortfolioBundle` is idempotent, so the second pass
+ * could only ever confirm what the first already established, and the
+ * caller passes the OUTPUT of that validation (never the raw wire value).
+ * `commitPortfolioBundleScaffold` above keeps the validate-then-scaffold
+ * shape for callers holding an unvalidated bundle.
+ */
+export async function commitValidatedPortfolioBundleScaffold(
+  ctx: BundleServiceContext,
+  bundle: PortfolioBundleV1,
+  fingerprint: string,
+  filename: string,
+  bundleByteLength: number,
+): Promise<{ ok: true; result: BundleScaffoldResult } | BundleServiceFailure> {
   const settings = await createOwnedUserSettingsRepository(ctx.client).get(
     ctx.userId,
   );
@@ -1487,6 +1602,8 @@ export async function commitPortfolioBundleTransactionsPart(
 ): Promise<
   { ok: true; result: BundleTransactionsPartResult } | BundleServiceFailure
 > {
+  const batch = await requireOwnedRestoreBatch(ctx, input);
+  if (!batch.ok) return batch;
   const portfolioRow = await ctx.client.get<{ id: string }>(
     "SELECT id FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1",
     [input.portfolioId, ctx.userId],
@@ -1690,6 +1807,8 @@ export async function commitPortfolioBundleDividendsPart(
 ): Promise<
   { ok: true; result: BundleDividendsPartResult } | BundleServiceFailure
 > {
+  const batch = await requireOwnedRestoreBatch(ctx, input);
+  if (!batch.ok) return batch;
   const portfolioRow = await ctx.client.get<{ id: string }>(
     "SELECT id FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1",
     [input.portfolioId, ctx.userId],
@@ -2051,17 +2170,8 @@ export async function commitPortfolioBundleFinalize(
   ctx: BundleServiceContext,
   input: BundleFinalizeInput,
 ): Promise<{ ok: true; result: BundleFinalizeResult } | BundleServiceFailure> {
-  const batchRow = await ctx.client.get<{ status: string }>(
-    "SELECT status FROM import_batches WHERE id = ? AND user_id = ? LIMIT 1",
-    [input.batchId, ctx.userId],
-  );
-  if (!batchRow) {
-    return {
-      ok: false,
-      status: 404,
-      message: "This restore batch was not found.",
-    };
-  }
+  const batch = await requireOwnedRestoreBatch(ctx, input);
+  if (!batch.ok) return batch;
   // EXP-004: a whole-finalize retry (the browser never saw this call's own
   // earlier success, e.g. a dropped response) is a total no-op once the
   // batch already reads `committed` -- every write below this point that has
@@ -2072,7 +2182,7 @@ export async function commitPortfolioBundleFinalize(
   // flip -- documented as a narrow, accepted residual gap in
   // `docs/BACKUP_FORMAT.md` (non-ledger planning data only; never a
   // transaction/dividend/holding figure).
-  if (batchRow.status === "committed") {
+  if (batch.status === "committed") {
     return { ok: true, result: { skippedDividendEventOverrides: 0 } };
   }
   const portfolioRow = await ctx.client.get<{ id: string }>(
