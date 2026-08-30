@@ -319,7 +319,15 @@ function validateSecurity(
   };
 }
 
-function validateTransaction(
+// EXP-004: exported so a chunked, resumable replay (a system-backup restore
+// part request carrying only a SLICE of one portfolio's transactions/
+// dividend records, never the whole bundle) can apply the IDENTICAL
+// structural validation each row gets when it arrives as part of a whole
+// bundle -- IMP-010B's "server is the sole validation authority" applies
+// exactly the same to a part as to a full bundle; a part must never trust
+// row shape merely because the browser derived it from an already-validated
+// file.
+export function validateTransaction(
   value: unknown,
   refs: Set<string>,
   securityRefs: ReadonlySet<string>,
@@ -382,7 +390,8 @@ function validateTransaction(
   };
 }
 
-function validateDividendManualRecord(
+// EXP-004: exported for the same reason as `validateTransaction` above.
+export function validateDividendManualRecord(
   value: unknown,
   refs: Set<string>,
   securityRefs: ReadonlySet<string>,
@@ -438,6 +447,164 @@ function validateDividendManualRecord(
     createdAt: value.createdAt,
     supersedesRef: (value.supersedesRef as string | null) ?? null,
     supersededByDeletedRecord: value.supersededByDeletedRecord,
+  };
+}
+
+// EXP-004: exported so `commitPortfolioBundleFinalize`'s standalone finalize
+// request (a system-backup restore part carrying only these small
+// supplementary arrays, sent as a SEPARATE HTTP request from the one that
+// originally validated the whole bundle) can apply the SAME structural
+// validation each row gets inside `validatePortfolioBundle` -- IMP-010B: a
+// later request is never trusted merely because an earlier one validated
+// similar-looking data.
+export function validateDividendSecurityAssumption(
+  value: unknown,
+  securityRefs: ReadonlySet<string>,
+): BundleDividendSecurityAssumption | null {
+  if (
+    !isPlainObject(value) ||
+    typeof value.securityRef !== "string" ||
+    !securityRefs.has(value.securityRef) ||
+    !isNullableDecimal(value.dividendYieldPercentDecimal) ||
+    !isNullableDecimal(value.frankingPercentDecimal) ||
+    !isNullableDecimal(value.dividendGrowthPercentDecimal) ||
+    (value.forceAssumption !== null &&
+      typeof value.forceAssumption !== "boolean")
+  ) {
+    return null;
+  }
+  return {
+    securityRef: value.securityRef,
+    dividendYieldPercentDecimal:
+      (value.dividendYieldPercentDecimal as string | null) ?? null,
+    frankingPercentDecimal:
+      (value.frankingPercentDecimal as string | null) ?? null,
+    dividendGrowthPercentDecimal:
+      (value.dividendGrowthPercentDecimal as string | null) ?? null,
+    forceAssumption: (value.forceAssumption as boolean | null) ?? null,
+  };
+}
+
+export function validateDividendPortfolioAssumption(
+  value: unknown,
+): BundleDividendPortfolioAssumption | null {
+  if (
+    !isPlainObject(value) ||
+    !isNullableDecimal(value.valueGrowthPercentDecimal) ||
+    !isNullableDecimal(value.portfolioDividendGrowthPercentDecimal)
+  ) {
+    return null;
+  }
+  return {
+    valueGrowthPercentDecimal:
+      (value.valueGrowthPercentDecimal as string | null) ?? null,
+    portfolioDividendGrowthPercentDecimal:
+      (value.portfolioDividendGrowthPercentDecimal as string | null) ?? null,
+  };
+}
+
+export function validateDividendFyOverride(
+  value: unknown,
+): BundleDividendFyOverride | null {
+  if (
+    !isPlainObject(value) ||
+    typeof value.financialYearEndingYear !== "number" ||
+    !Number.isInteger(value.financialYearEndingYear) ||
+    value.financialYearEndingYear < 1900 ||
+    value.financialYearEndingYear > 2999 ||
+    !isDecimalString(value.grossedAmountDecimal) ||
+    !isNullableDecimal(value.frankingAmountDecimal)
+  ) {
+    return null;
+  }
+  return {
+    financialYearEndingYear: value.financialYearEndingYear,
+    grossedAmountDecimal: value.grossedAmountDecimal,
+    frankingAmountDecimal:
+      (value.frankingAmountDecimal as string | null) ?? null,
+  };
+}
+
+export function validateDividendEventOverride(
+  value: unknown,
+  securityRefs: ReadonlySet<string>,
+): BundleDividendEventOverride | null {
+  if (
+    !isPlainObject(value) ||
+    typeof value.securityRef !== "string" ||
+    !securityRefs.has(value.securityRef) ||
+    typeof value.dividendEventId !== "string" ||
+    value.dividendEventId.length === 0 ||
+    !isNullableDecimal(value.sharesDecimal) ||
+    !isNullableDecimal(value.dividendPerShareDecimal) ||
+    !isNullableDecimal(value.frankingCreditPerShareDecimal) ||
+    typeof value.exclude !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    securityRef: value.securityRef,
+    dividendEventId: value.dividendEventId,
+    sharesDecimal: (value.sharesDecimal as string | null) ?? null,
+    dividendPerShareDecimal:
+      (value.dividendPerShareDecimal as string | null) ?? null,
+    frankingCreditPerShareDecimal:
+      (value.frankingCreditPerShareDecimal as string | null) ?? null,
+    exclude: value.exclude,
+  };
+}
+
+export function validateDividendImportFrankingOverride(
+  value: unknown,
+  securityRefs: ReadonlySet<string>,
+  dividendRefs: ReadonlySet<string>,
+): BundleDividendImportFrankingOverride | null {
+  if (
+    !isPlainObject(value) ||
+    typeof value.securityRef !== "string" ||
+    !securityRefs.has(value.securityRef) ||
+    typeof value.dividendManualRecordRef !== "string" ||
+    !dividendRefs.has(value.dividendManualRecordRef) ||
+    !isDecimalString(value.frankingTotalDecimal)
+  ) {
+    return null;
+  }
+  return {
+    securityRef: value.securityRef,
+    dividendManualRecordRef: value.dividendManualRecordRef,
+    frankingTotalDecimal: value.frankingTotalDecimal,
+  };
+}
+
+export function validateWhatifScenario(
+  value: unknown,
+): BundleWhatifScenario | null {
+  if (
+    !isPlainObject(value) ||
+    typeof value.name !== "string" ||
+    value.name.trim().length === 0 ||
+    typeof value.capitalRowsJson !== "string" ||
+    typeof value.reinvestDividends !== "boolean" ||
+    !isNullableDecimal(value.valueGrowthPercentDecimal) ||
+    !isNullableDecimal(value.dividendGrowthPercentDecimal) ||
+    !isIsoString(value.createdAt)
+  ) {
+    return null;
+  }
+  try {
+    JSON.parse(value.capitalRowsJson);
+  } catch {
+    return null;
+  }
+  return {
+    name: value.name,
+    capitalRowsJson: value.capitalRowsJson,
+    reinvestDividends: value.reinvestDividends,
+    valueGrowthPercentDecimal:
+      (value.valueGrowthPercentDecimal as string | null) ?? null,
+    dividendGrowthPercentDecimal:
+      (value.dividendGrowthPercentDecimal as string | null) ?? null,
+    createdAt: value.createdAt,
   };
 }
 
@@ -593,49 +760,23 @@ export function validatePortfolioBundle(raw: unknown): BundleValidationResult {
   }
   const dividendSecurityAssumptions: BundleDividendSecurityAssumption[] = [];
   for (const item of raw.dividendSecurityAssumptions) {
-    if (
-      !isPlainObject(item) ||
-      typeof item.securityRef !== "string" ||
-      !securityRefSet.has(item.securityRef) ||
-      !isNullableDecimal(item.dividendYieldPercentDecimal) ||
-      !isNullableDecimal(item.frankingPercentDecimal) ||
-      !isNullableDecimal(item.dividendGrowthPercentDecimal) ||
-      (item.forceAssumption !== null &&
-        typeof item.forceAssumption !== "boolean")
-    ) {
+    const parsed = validateDividendSecurityAssumption(item, securityRefSet);
+    if (!parsed) {
       return fail(
         "The bundle contains an invalid per-security assumption entry.",
       );
     }
-    dividendSecurityAssumptions.push({
-      securityRef: item.securityRef,
-      dividendYieldPercentDecimal:
-        (item.dividendYieldPercentDecimal as string | null) ?? null,
-      frankingPercentDecimal:
-        (item.frankingPercentDecimal as string | null) ?? null,
-      dividendGrowthPercentDecimal:
-        (item.dividendGrowthPercentDecimal as string | null) ?? null,
-      forceAssumption: (item.forceAssumption as boolean | null) ?? null,
-    });
+    dividendSecurityAssumptions.push(parsed);
   }
 
   let dividendPortfolioAssumption: BundleDividendPortfolioAssumption | null =
     null;
   if (raw.dividendPortfolioAssumption !== null) {
-    const item = raw.dividendPortfolioAssumption;
-    if (
-      !isPlainObject(item) ||
-      !isNullableDecimal(item.valueGrowthPercentDecimal) ||
-      !isNullableDecimal(item.portfolioDividendGrowthPercentDecimal)
-    ) {
-      return fail("The bundle's portfolio assumption is invalid.");
-    }
-    dividendPortfolioAssumption = {
-      valueGrowthPercentDecimal:
-        (item.valueGrowthPercentDecimal as string | null) ?? null,
-      portfolioDividendGrowthPercentDecimal:
-        (item.portfolioDividendGrowthPercentDecimal as string | null) ?? null,
-    };
+    const parsed = validateDividendPortfolioAssumption(
+      raw.dividendPortfolioAssumption,
+    );
+    if (!parsed) return fail("The bundle's portfolio assumption is invalid.");
+    dividendPortfolioAssumption = parsed;
   }
 
   if (!Array.isArray(raw.dividendFyOverrides)) {
@@ -643,23 +784,10 @@ export function validatePortfolioBundle(raw: unknown): BundleValidationResult {
   }
   const dividendFyOverrides: BundleDividendFyOverride[] = [];
   for (const item of raw.dividendFyOverrides) {
-    if (
-      !isPlainObject(item) ||
-      typeof item.financialYearEndingYear !== "number" ||
-      !Number.isInteger(item.financialYearEndingYear) ||
-      item.financialYearEndingYear < 1900 ||
-      item.financialYearEndingYear > 2999 ||
-      !isDecimalString(item.grossedAmountDecimal) ||
-      !isNullableDecimal(item.frankingAmountDecimal)
-    ) {
+    const parsed = validateDividendFyOverride(item);
+    if (!parsed)
       return fail("The bundle contains an invalid FY override entry.");
-    }
-    dividendFyOverrides.push({
-      financialYearEndingYear: item.financialYearEndingYear,
-      grossedAmountDecimal: item.grossedAmountDecimal,
-      frankingAmountDecimal:
-        (item.frankingAmountDecimal as string | null) ?? null,
-    });
+    dividendFyOverrides.push(parsed);
   }
 
   if (!Array.isArray(raw.dividendEventOverrides)) {
@@ -667,31 +795,13 @@ export function validatePortfolioBundle(raw: unknown): BundleValidationResult {
   }
   const dividendEventOverrides: BundleDividendEventOverride[] = [];
   for (const item of raw.dividendEventOverrides) {
-    if (
-      !isPlainObject(item) ||
-      typeof item.securityRef !== "string" ||
-      !securityRefSet.has(item.securityRef) ||
-      typeof item.dividendEventId !== "string" ||
-      item.dividendEventId.length === 0 ||
-      !isNullableDecimal(item.sharesDecimal) ||
-      !isNullableDecimal(item.dividendPerShareDecimal) ||
-      !isNullableDecimal(item.frankingCreditPerShareDecimal) ||
-      typeof item.exclude !== "boolean"
-    ) {
+    const parsed = validateDividendEventOverride(item, securityRefSet);
+    if (!parsed) {
       return fail(
         "The bundle contains an invalid dividend event override entry.",
       );
     }
-    dividendEventOverrides.push({
-      securityRef: item.securityRef,
-      dividendEventId: item.dividendEventId,
-      sharesDecimal: (item.sharesDecimal as string | null) ?? null,
-      dividendPerShareDecimal:
-        (item.dividendPerShareDecimal as string | null) ?? null,
-      frankingCreditPerShareDecimal:
-        (item.frankingCreditPerShareDecimal as string | null) ?? null,
-      exclude: item.exclude,
-    });
+    dividendEventOverrides.push(parsed);
   }
 
   if (!Array.isArray(raw.dividendImportFrankingOverrides)) {
@@ -700,21 +810,14 @@ export function validatePortfolioBundle(raw: unknown): BundleValidationResult {
   const dividendImportFrankingOverrides: BundleDividendImportFrankingOverride[] =
     [];
   for (const item of raw.dividendImportFrankingOverrides) {
-    if (
-      !isPlainObject(item) ||
-      typeof item.securityRef !== "string" ||
-      !securityRefSet.has(item.securityRef) ||
-      typeof item.dividendManualRecordRef !== "string" ||
-      !divRefs.has(item.dividendManualRecordRef) ||
-      !isDecimalString(item.frankingTotalDecimal)
-    ) {
+    const parsed = validateDividendImportFrankingOverride(
+      item,
+      securityRefSet,
+      divRefs,
+    );
+    if (!parsed)
       return fail("The bundle contains an invalid franking override entry.");
-    }
-    dividendImportFrankingOverrides.push({
-      securityRef: item.securityRef,
-      dividendManualRecordRef: item.dividendManualRecordRef,
-      frankingTotalDecimal: item.frankingTotalDecimal,
-    });
+    dividendImportFrankingOverrides.push(parsed);
   }
 
   if (!Array.isArray(raw.whatifScenarios)) {
@@ -722,33 +825,10 @@ export function validatePortfolioBundle(raw: unknown): BundleValidationResult {
   }
   const whatifScenarios: BundleWhatifScenario[] = [];
   for (const item of raw.whatifScenarios) {
-    if (
-      !isPlainObject(item) ||
-      typeof item.name !== "string" ||
-      item.name.trim().length === 0 ||
-      typeof item.capitalRowsJson !== "string" ||
-      typeof item.reinvestDividends !== "boolean" ||
-      !isNullableDecimal(item.valueGrowthPercentDecimal) ||
-      !isNullableDecimal(item.dividendGrowthPercentDecimal) ||
-      !isIsoString(item.createdAt)
-    ) {
+    const parsed = validateWhatifScenario(item);
+    if (!parsed)
       return fail("The bundle contains an invalid what-if scenario entry.");
-    }
-    try {
-      JSON.parse(item.capitalRowsJson);
-    } catch {
-      return fail("A what-if scenario's saved rows are corrupt.");
-    }
-    whatifScenarios.push({
-      name: item.name,
-      capitalRowsJson: item.capitalRowsJson,
-      reinvestDividends: item.reinvestDividends,
-      valueGrowthPercentDecimal:
-        (item.valueGrowthPercentDecimal as string | null) ?? null,
-      dividendGrowthPercentDecimal:
-        (item.dividendGrowthPercentDecimal as string | null) ?? null,
-      createdAt: item.createdAt,
-    });
+    whatifScenarios.push(parsed);
   }
 
   const totalEntities =

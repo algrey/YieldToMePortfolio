@@ -52,7 +52,6 @@ import type { PortfolioBundleV1 } from "../domain/exports/portfolio-bundle.ts";
 import { parsePriceBackupCsv } from "../domain/market-data/price-backup-csv.ts";
 import {
   countUnrelatedPortfolios,
-  findLeftoverPortfolioForRetry,
   readAccountSettingsForBackup,
   readWatchlistForBackup,
   restoreAccountSettings,
@@ -61,9 +60,18 @@ import {
 } from "../db/repositories/system-backup.ts";
 import { readPortfolioBundle } from "../db/repositories/portfolio-bundle.ts";
 import { createOwnedPortfolioRepository } from "../db/repositories/owned-portfolios.ts";
+import { chainOrder } from "../domain/exports/chain-order.ts";
 import {
-  commitPortfolioBundleImport,
+  commitPortfolioBundleScaffold,
+  commitPortfolioBundleTransactionsPart,
+  commitPortfolioBundleDividendsPart,
+  commitPortfolioBundleFinalize,
+  parseBundleFinalizeWireInput,
   fingerprintBundle,
+  type BundleScaffoldSecurity,
+  type BundleDividendLinkageItem,
+  type BundleFinalizeInput,
+  type BundleFinalizeWireInput,
 } from "./portfolio-bundle-service.ts";
 import {
   confirmBackupPriceUpload,
@@ -315,41 +323,67 @@ export type SystemBackupCommitResult = {
   } | null;
 };
 
-/** B1 ruling: archives a leftover portfolio from an earlier failed/
- * interrupted attempt at ONE nested bundle, before that bundle is retried
- * (which would otherwise re-point the batch's `target_portfolio_id` at a
- * NEW portfolio, leaving the old one an unattributable orphan -- see
- * `findLeftoverPortfolioForRetry`'s own comment). Failing to archive it is
- * treated as a hard failure for the whole commit: proceeding anyway would
- * let the account silently accumulate a duplicate, un-cleaned-up portfolio
- * that a later restore attempt could no longer even find via this
- * fingerprint.
- */
-async function archiveLeftoverPortfolio(
-  client: SqlClient,
-  userId: string,
-  portfolioId: string,
-  requestId: string,
-): Promise<{ ok: true } | { ok: false }> {
-  const current = await client.get<{ version: number }>(
-    "SELECT version FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1",
-    [portfolioId, userId],
-  );
-  // Already gone (e.g. the owner manually cleaned it up already) -- nothing
-  // left to archive, not a failure.
-  if (!current) return { ok: true };
-  const result = await createOwnedPortfolioRepository(client, undefined, {
-    requestId,
-  }).archive(userId, portfolioId, { expectedVersion: current.version });
-  return result.ok ? { ok: true } : { ok: false };
-}
+// ---------------------------------------------------------------------------
+// EXP-004: the resumable, chunked core-restore protocol, replacing the old
+// single-request `commitSystemBackupImport` as the path the BROWSER actually
+// drives (`app/components/system-backup-panel.tsx`). Each function below is
+// a thin, account-level wrapper around `app/portfolio-bundle-service.ts`'s
+// own EXP-004 functions -- see that module's header comment for the full
+// design rationale (resume-in-place, no in-process ref->id maps, live
+// server-derived resume evidence). `commitSystemBackupImport` (below) now
+// COMPOSES these same functions in one call rather than duplicating their
+// logic, so there is exactly ONE write path, not two -- it stays only as a
+// non-chunked convenience for tests and any future non-HTTP caller; nothing
+// in this app's HTTP surface (`app/system-backup-actions.ts`) exposes it any
+// more (that surface exposes the granular phases below instead), since the
+// whole point of chunking is that no SINGLE Worker invocation may attempt a
+// whole portfolio's replay under the Free plan's CPU budget.
+//
+// The B1 "archive a leftover portfolio and start over" ruling this
+// superseded assumed a single-shot commit, where ANY non-`committed` batch
+// could only be an abandoned attempt (nothing durable could exist beyond a
+// bare, empty destination portfolio). That is no longer true once a
+// portfolio's own restore is deliberately split across many requests: a
+// `committing` batch is the NORMAL state between parts, with real
+// transactions/dividends already durably written. `commitPortfolioBundleScaffold`
+// (see that module) reuses that same destination going forward, so this
+// module no longer needs `findLeftoverPortfolioForRetry`/an archival step at
+// all -- removed as dead code (AGENTS.md: delete rather than leave two
+// competing retry strategies).
+// ---------------------------------------------------------------------------
 
-export async function commitSystemBackupImport(
+export type SystemBackupScaffoldPortfolio = {
+  idempotent: boolean;
+  batchId: string;
+  fingerprint: string;
+  portfolioId: string;
+  portfolioName: string;
+  code: string;
+  securities: BundleScaffoldSecurity[];
+  committedTransactionCount: number;
+  committedDividendCount: number;
+  transactionsCount: number;
+  dividendRecordsCount: number;
+};
+
+export type SystemBackupScaffoldResult = {
+  watchlist: WatchlistRestoreCounts;
+  portfolios: SystemBackupScaffoldPortfolio[];
+};
+
+/** ONE bounded request covering every small-cardinality piece of a system
+ * restore: the fresh-account precondition, account settings, EVERY nested
+ * portfolio's own scaffold (destination portfolio + settings + security
+ * resolution -- bounded by security count, never transaction/dividend
+ * count), and the watchlist. Returns everything the browser needs to drive
+ * the transactions/dividends/finalize parts that follow, plus live resume
+ * evidence for a restore continuing after an earlier interruption. */
+export async function commitSystemBackupCoreScaffold(
   ctx: SystemBackupServiceContext,
   raw: unknown,
   filename: string,
 ): Promise<
-  { ok: true; result: SystemBackupCommitResult } | SystemBackupServiceFailure
+  { ok: true; result: SystemBackupScaffoldResult } | SystemBackupServiceFailure
 > {
   const validation = validateSystemBackup(raw);
   if (!validation.ok)
@@ -386,74 +420,33 @@ export async function commitSystemBackupImport(
     };
   }
 
-  const portfolioResults: Array<{
-    name: string;
-    code: string;
-    idempotent: boolean;
-    portfolioId: string;
-  }> = [];
+  const portfolios: SystemBackupScaffoldPortfolio[] = [];
   for (const [index, bundle] of backup.portfolios.entries()) {
-    // B1 ruling: capture (and archive) any leftover portfolio from an
-    // earlier failed/interrupted attempt at THIS bundle BEFORE calling
-    // `commitPortfolioBundleImport`, which would otherwise reset the
-    // batch's `target_portfolio_id` as part of its own retry-reuse,
-    // orphaning the leftover portfolio beyond this point.
-    const leftover = await findLeftoverPortfolioForRetry(
-      ctx.client,
-      ctx.userId,
-      fingerprints[index]!,
-    );
-    if (leftover) {
-      const archived = await archiveLeftoverPortfolio(
-        ctx.client,
-        ctx.userId,
-        leftover.portfolioId,
-        ctx.requestId,
-      );
-      if (!archived.ok) {
-        return {
-          ok: false,
-          status: 409,
-          message: `Portfolio #${index + 1} ("${bundle.portfolio.name}") has a leftover partial portfolio from an earlier attempt that could not be cleaned up automatically. ${portfolioResults.length} of ${backup.portfolios.length} portfolio(s) in this backup were already restored and remain in place. Re-run this restore after resolving the issue to resume.`,
-        };
-      }
-    }
-    const result = await commitPortfolioBundleImport(
-      {
-        client: ctx.client,
-        userId: ctx.userId,
-        requestId: ctx.requestId,
-      },
+    const result = await commitPortfolioBundleScaffold(
+      { client: ctx.client, userId: ctx.userId, requestId: ctx.requestId },
       bundle,
       filename,
-      // Byte length is only used for the `import_batches.byte_size`
-      // bookkeeping column -- reconstructing the nested bundle's own JSON
-      // length is more honest than the whole-artifact byte length.
       new TextEncoder().encode(JSON.stringify(bundle)).length,
     );
     if (!result.ok) {
       return {
         ok: false,
         status: 409,
-        message: `Portfolio #${index + 1} ("${bundle.portfolio.name}") could not be restored: ${result.message} ${portfolioResults.length} of ${backup.portfolios.length} portfolio(s) in this backup were already restored and remain in place. Re-run this restore after resolving the issue to resume -- any leftover partial portfolio from this attempt is archived automatically on the next retry.`,
+        message: `Portfolio #${index + 1} ("${bundle.portfolio.name}") could not be prepared for restore: ${result.message}`,
       };
     }
-    // The ACTUAL persisted code, not `bundle.portfolio.code` -- EXP-001's
-    // own `commitPortfolioBundleImport` silently falls back to a
-    // `-restored`-suffixed code on a collision (`portfolios_user_id_code_
-    // unique` is unconditional, not status-scoped, so even an ARCHIVED
-    // leftover from an earlier attempt at THIS SAME bundle can collide with
-    // its own requested code) -- reporting the requested code instead of
-    // what was actually stored would be a real (if minor) inaccuracy.
-    const persisted = await ctx.client.get<{ code: string }>(
-      "SELECT code FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1",
-      [result.result.portfolioId, ctx.userId],
-    );
-    portfolioResults.push({
-      name: result.result.portfolioName,
-      code: persisted?.code ?? bundle.portfolio.code,
+    portfolios.push({
       idempotent: result.result.idempotent,
+      batchId: result.result.batchId,
+      fingerprint: result.result.fingerprint,
       portfolioId: result.result.portfolioId,
+      portfolioName: result.result.portfolioName,
+      code: result.result.code,
+      securities: result.result.securities,
+      committedTransactionCount: result.result.committedTransactionCount,
+      committedDividendCount: result.result.committedDividendCount,
+      transactionsCount: bundle.transactions.length,
+      dividendRecordsCount: bundle.dividendManualRecords.length,
     });
   }
 
@@ -463,6 +456,207 @@ export async function commitSystemBackupImport(
     backup.watchlistEntries,
     ctx.requestId,
   );
+
+  return { ok: true, result: { watchlist, portfolios } };
+}
+
+export type SystemBackupTransactionsPartInput = {
+  portfolioId: string;
+  batchId: string;
+  fingerprint: string;
+  securities: readonly BundleScaffoldSecurity[];
+  transactions: readonly unknown[];
+};
+
+/** One bounded part of ONE portfolio's transactions, already in this
+ * portfolio's own chain order (`domain/exports/chain-order.ts`) -- see
+ * `commitPortfolioBundleTransactionsPart` for the write semantics. */
+export async function commitSystemBackupTransactionsPart(
+  ctx: SystemBackupServiceContext,
+  input: SystemBackupTransactionsPartInput,
+): Promise<
+  { ok: true; result: { committedCount: number } } | SystemBackupServiceFailure
+> {
+  return commitPortfolioBundleTransactionsPart(
+    { client: ctx.client, userId: ctx.userId, requestId: ctx.requestId },
+    input,
+  );
+}
+
+export type SystemBackupDividendsPartInput = {
+  portfolioId: string;
+  batchId: string;
+  fingerprint: string;
+  securities: readonly BundleScaffoldSecurity[];
+  records: readonly unknown[];
+};
+
+/** One bounded part of ONE portfolio's dividend manual records -- see
+ * `commitPortfolioBundleDividendsPart` for the write semantics. */
+export async function commitSystemBackupDividendsPart(
+  ctx: SystemBackupServiceContext,
+  input: SystemBackupDividendsPartInput,
+): Promise<
+  { ok: true; result: { committedCount: number } } | SystemBackupServiceFailure
+> {
+  return commitPortfolioBundleDividendsPart(
+    { client: ctx.client, userId: ctx.userId, requestId: ctx.requestId },
+    input,
+  );
+}
+
+/** The final, small-cardinality request for ONE portfolio, once every
+ * transactions/dividends part for it has completed: dividend supersession
+ * linkage, assumptions, FY/event/franking overrides, saved what-if
+ * scenarios, archiving to match the bundle's exported status, and marking
+ * this portfolio's `import_batches` row `committed`. See
+ * `commitPortfolioBundleFinalize` for the write semantics (including its
+ * own documented, narrow non-idempotent-retry residual gap for
+ * `whatifScenarios`). */
+export async function commitSystemBackupFinalizePortfolio(
+  ctx: SystemBackupServiceContext,
+  input: BundleFinalizeInput,
+): Promise<
+  | { ok: true; result: { skippedDividendEventOverrides: number } }
+  | SystemBackupServiceFailure
+> {
+  return commitPortfolioBundleFinalize(
+    { client: ctx.client, userId: ctx.userId, requestId: ctx.requestId },
+    input,
+  );
+}
+
+/** The HTTP-facing counterpart of `commitSystemBackupFinalizePortfolio` --
+ * validates the RAW wire fields (IMP-010B: this is a separate later request,
+ * never trusted merely because an earlier one validated similar-looking
+ * data) before delegating to the same write path. */
+export async function commitSystemBackupFinalizePortfolioFromWire(
+  ctx: SystemBackupServiceContext,
+  raw: BundleFinalizeWireInput,
+): Promise<
+  | { ok: true; result: { skippedDividendEventOverrides: number } }
+  | SystemBackupServiceFailure
+> {
+  const parsed = parseBundleFinalizeWireInput(raw);
+  if (!parsed.ok) return { ok: false, status: 400, message: parsed.message };
+  return commitSystemBackupFinalizePortfolio(ctx, parsed.value);
+}
+
+function dividendLinkageFor(
+  bundle: PortfolioBundleV1,
+): BundleDividendLinkageItem[] {
+  return bundle.dividendManualRecords.map((record) => ({
+    ref: record.ref,
+    securityRef: record.securityRef,
+    supersedesRef: record.supersedesRef,
+    supersededByDeletedRecord: record.supersededByDeletedRecord,
+  }));
+}
+
+export async function commitSystemBackupImport(
+  ctx: SystemBackupServiceContext,
+  raw: unknown,
+  filename: string,
+): Promise<
+  { ok: true; result: SystemBackupCommitResult } | SystemBackupServiceFailure
+> {
+  const validation = validateSystemBackup(raw);
+  if (!validation.ok)
+    return { ok: false, status: 400, message: validation.message };
+  const backup = validation.backup;
+
+  // EXP-004: composes the SAME scaffold/transactions-part/dividends-part/
+  // finalize functions the chunked HTTP path uses, in one call, for every
+  // portfolio's FULL transaction/dividend list at once -- a non-chunked
+  // convenience for tests and any future non-HTTP caller. See this module's
+  // own EXP-004 header comment for why this is no longer a second,
+  // independent write path.
+  const scaffold = await commitSystemBackupCoreScaffold(ctx, raw, filename);
+  if (!scaffold.ok) return scaffold;
+
+  const portfolioResults: Array<{
+    name: string;
+    code: string;
+    idempotent: boolean;
+    portfolioId: string;
+  }> = [];
+  for (const [index, portfolio] of scaffold.result.portfolios.entries()) {
+    const bundle = backup.portfolios[index]!;
+    if (!portfolio.idempotent) {
+      const orderedTransactions = chainOrder(
+        bundle.transactions,
+        (tx) => tx.reversesRef ?? tx.supersedesRef,
+      );
+      const txResult = await commitSystemBackupTransactionsPart(ctx, {
+        portfolioId: portfolio.portfolioId,
+        batchId: portfolio.batchId,
+        fingerprint: portfolio.fingerprint,
+        securities: portfolio.securities,
+        transactions: orderedTransactions,
+      });
+      if (!txResult.ok) {
+        return {
+          ok: false,
+          status: 409,
+          message: `Portfolio #${index + 1} ("${bundle.portfolio.name}") could not be restored: ${txResult.message} ${portfolioResults.length} of ${backup.portfolios.length} portfolio(s) in this backup were already restored and remain in place. Re-run this restore after resolving the issue to resume.`,
+        };
+      }
+      const orderedDividends = chainOrder(
+        bundle.dividendManualRecords,
+        (record) => record.supersedesRef,
+      );
+      const divResult = await commitSystemBackupDividendsPart(ctx, {
+        portfolioId: portfolio.portfolioId,
+        batchId: portfolio.batchId,
+        fingerprint: portfolio.fingerprint,
+        securities: portfolio.securities,
+        records: orderedDividends,
+      });
+      if (!divResult.ok) {
+        return {
+          ok: false,
+          status: 409,
+          message: `Portfolio #${index + 1} ("${bundle.portfolio.name}") could not be restored: ${divResult.message} ${portfolioResults.length} of ${backup.portfolios.length} portfolio(s) in this backup were already restored and remain in place. Re-run this restore after resolving the issue to resume.`,
+        };
+      }
+      const finalizeResult = await commitSystemBackupFinalizePortfolio(ctx, {
+        portfolioId: portfolio.portfolioId,
+        batchId: portfolio.batchId,
+        fingerprint: portfolio.fingerprint,
+        securities: portfolio.securities,
+        dividendLinkage: dividendLinkageFor(bundle),
+        dividendSecurityAssumptions: bundle.dividendSecurityAssumptions,
+        dividendPortfolioAssumption: bundle.dividendPortfolioAssumption,
+        dividendFyOverrides: bundle.dividendFyOverrides,
+        dividendEventOverrides: bundle.dividendEventOverrides,
+        dividendImportFrankingOverrides: bundle.dividendImportFrankingOverrides,
+        whatifScenarios: bundle.whatifScenarios,
+        portfolioStatus: bundle.portfolio.status,
+        transactionsCount: bundle.transactions.length,
+        dividendRecordsCount: bundle.dividendManualRecords.length,
+      });
+      if (!finalizeResult.ok) {
+        return {
+          ok: false,
+          status: 409,
+          message: `Portfolio #${index + 1} ("${bundle.portfolio.name}") could not be restored: ${finalizeResult.message} ${portfolioResults.length} of ${backup.portfolios.length} portfolio(s) in this backup were already restored and remain in place. Re-run this restore after resolving the issue to resume.`,
+        };
+      }
+    }
+    // The ACTUAL persisted code, not `bundle.portfolio.code` -- a code
+    // collision falls back to a `-restored`-suffixed code (see
+    // `commitPortfolioBundleScaffold`'s own comment) -- reporting the
+    // requested code instead of what was actually stored would be a real
+    // (if minor) inaccuracy.
+    portfolioResults.push({
+      name: portfolio.portfolioName,
+      code: portfolio.code,
+      idempotent: portfolio.idempotent,
+      portfolioId: portfolio.portfolioId,
+    });
+  }
+
+  const watchlist = scaffold.result.watchlist;
 
   // A genuinely empty section (`""`, never produced by `exportSystemBackup`
   // itself -- `formatPriceBackupCsv` always writes at least the header row

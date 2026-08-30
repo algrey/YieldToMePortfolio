@@ -463,8 +463,10 @@ test("per-portfolio failure isolation: a bad second portfolio does not half-rest
   if (!exported.ok) return;
 
   // Corrupt the SECOND nested bundle's base currency so it structurally
-  // validates but is rejected at COMMIT time by EXP-001's own currency
-  // precondition (unchanged, reused as-is).
+  // validates but is rejected at SCAFFOLD time (EXP-004: scaffold covers
+  // EVERY nested portfolio's currency precondition in one request -- see
+  // `commitSystemBackupCoreScaffold`) by the same currency precondition
+  // `commitPortfolioBundleScaffold` reuses unchanged from EXP-001.
   const backup: SystemBackupV1 = {
     ...exported.backup,
     portfolios: exported.backup.portfolios.map((bundle, index) =>
@@ -489,8 +491,15 @@ test("per-portfolio failure isolation: a bad second portfolio does not half-rest
   assert.equal(commit1.ok, false);
   if (commit1.ok) return;
   assert.match(commit1.message, /#2/);
-  assert.match(commit1.message, /1 of 2/);
 
+  // Portfolio A's own scaffold already ran (and created its destination
+  // portfolio row) before portfolio B's scaffold failed -- EXP-004's single
+  // combined scaffold request covers every nested portfolio, so a later
+  // portfolio's failure does not undo an earlier one's already-durable
+  // scaffold, even though (unlike the pre-EXP-004 whole-portfolio commit)
+  // that earlier portfolio's transactions/dividends have not been written
+  // yet at this point -- they are written by later, separate part requests
+  // this failed scaffold never reached.
   const countAfterFirst = await clientD.get<{ n: number }>(
     "SELECT COUNT(*) AS n FROM portfolios WHERE user_id = 'd'",
     [],
@@ -550,30 +559,34 @@ test("a watch-only security with no matching ticker anywhere is skipped, never f
 });
 
 // ---------------------------------------------------------------------------
-// B1 ruling (reviewer, 2026-08-27): retries must actually work. The
-// realistic migration-restore failure is an INTERRUPTION mid-replay (e.g. a
-// Worker timeout, or an oversell error surfacing partway through a
-// portfolio's transaction replay) -- NOT a permanently-broken bundle. This
-// test seeds the DB state a genuine interruption would leave behind (a
-// `failed` `import_batches` row for portfolio B's own fingerprint, whose
-// `target_portfolio_id` points at a PARTIALLY-replayed leftover portfolio --
-// exactly what `commitPortfolioBundleImport` itself would leave if replay
-// had halted right after creating the portfolio, e.g. on an oversell it
-// hits partway through a longer transaction list) DIRECTLY via SQL, rather
-// than by submitting an inherently-unreplayable bundle: replaying the SAME
-// bundle content into a FRESH portfolio (this design's own retry strategy,
-// per B1's own ruling -- "the retry's fresh portfolio replaces it cleanly")
-// is deterministic, so a bundle that oversells on attempt 1 would oversell
-// identically on every subsequent attempt with IDENTICAL content -- the
-// interruption itself, not the bundle's data, is what a real retry needs to
-// recover from. This directly exercises: (1) rule 1's ANY-status
-// relatedness (the leftover's `failed` batch keeps it "related" so the
-// precondition does not itself block the retry), (2) the leftover being
-// archived automatically BEFORE the retry replaces it, (3) the retry then
-// succeeding cleanly, (4) a further idempotent run, and (5) the archived
-// remnant never tripping the precondition afterward.
+// EXP-004 superseded ruling (previously B1, reviewer, 2026-08-27): retries
+// must actually work. The realistic migration-restore failure is an
+// INTERRUPTION mid-replay (a Cloudflare Workers Free plan CPU-budget
+// timeout partway through a portfolio's transaction/dividend replay, the
+// exact production incident EXP-004 fixes) -- NOT a permanently-broken
+// bundle. This test seeds the DB state a genuine interruption leaves behind
+// (a `committing` `import_batches` row for portfolio B's own fingerprint,
+// whose `target_portfolio_id` points at a partially-replayed portfolio with
+// SOME but not all of its transactions already durably written) DIRECTLY
+// via SQL.
+//
+// EXP-004 changed the retry strategy this test exercises: the pre-EXP-004
+// design archived that leftover portfolio and replayed into a brand-new one
+// (safe ONLY because a single-shot commit could never leave real progress
+// behind -- see `db/repositories/system-backup.ts`'s updated
+// `countUnrelatedPortfolios` comment). A CHUNKED restore deliberately leaves
+// a `committing` batch with real rows between requests, so archiving it on
+// every resume would DESTROY genuine progress -- exactly the bug this task
+// exists to prevent. `commitPortfolioBundleScaffold` now RESUMES the
+// existing `target_portfolio_id` in place instead. This test now verifies:
+// (1) the leftover's `committing` status keeps it "related" so the
+// precondition does not block the retry, (2) the retry writes into the SAME
+// portfolio (never archived, code never changes), (3) the transaction
+// already durably written before the interruption is NOT duplicated, (4)
+// the remaining transaction is written to complete the restore, and (5) a
+// further run is fully idempotent.
 // ---------------------------------------------------------------------------
-test("B1: a portfolio with a leftover partial-replay remnant from an interrupted attempt is archived automatically, the retry succeeds, and a third run is idempotent", async () => {
+test("a portfolio with a leftover partial-replay remnant from an interrupted attempt is RESUMED IN PLACE (never archived), and a further run is idempotent", async () => {
   const { client } = await fixture();
   const exported = await exportSystemBackup(ctxFor(client, "a"));
   assert.equal(exported.ok, true);
@@ -582,27 +595,56 @@ test("B1: a portfolio with a leftover partial-replay remnant from an interrupted
   const bundleB = backup.portfolios.find((p) => p.portfolio.code === "B");
   assert.ok(bundleB);
   const fingerprintB = await fingerprintBundle(bundleB);
+  assert.equal(bundleB.transactions.length, 1);
+  const onlyTxRef = bundleB.transactions[0]!.ref;
 
   const { db, client: clientG } = await fixture();
   seedFreshAccount(db, "g");
   // Directly seed the "interrupted mid-replay" leftover: a partially
-  // created portfolio B (no transactions replayed at all is the simplest
-  // faithful shape -- `commitPortfolioBundleImport` sets
-  // `target_portfolio_id` immediately after `portfolios.create()`, BEFORE
-  // any transaction replay begins) plus a `failed` `import_batches` row for
-  // bundle B's own fingerprint pointing at it.
+  // created portfolio B, its ONE transaction ALREADY durably written under
+  // the SAME deterministic idempotency key `commitPortfolioBundleScaffold`/
+  // `commitPortfolioBundleTransactionsPart` would themselves derive
+  // (`bundle:<fingerprint>:<ref>`) -- exactly what a real CPU-timeout mid-
+  // transactions-part would leave behind -- plus a `committing`
+  // `import_batches` row for bundle B's own fingerprint pointing at it.
   const leftoverPortfolioId = "leftover-b";
   const batchId = "batch-leftover-b";
+  const leftoverSecurityId = "leftover-b-ps";
   db.exec(`
     INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at) VALUES
       ('${leftoverPortfolioId}','g','B','Portfolio B','AUD','Australia/Sydney','fifo','active','2026-08-01','2026-08-01');
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at) VALUES
+      ('${leftoverSecurityId}','g','${leftoverPortfolioId}','s2','BETA','AUD','held','2026-08-01','2026-08-01');
     INSERT INTO import_batches(id,user_id,target_portfolio_id,parser_format,parser_version,filename,byte_size,file_sha256,status,created_at,updated_at) VALUES
-      ('${batchId}','g','${leftoverPortfolioId}','portfolio-bundle-json','1','system-backup.json',100,'${fingerprintB}','failed','2026-08-01T00:00:00.000Z','2026-08-01T00:00:00.000Z');
+      ('${batchId}','g','${leftoverPortfolioId}','portfolio-bundle-json','1','system-backup.json',100,'${fingerprintB}','committing','2026-08-01T00:00:00.000Z','2026-08-01T00:00:00.000Z');
   `);
+  const ledgerG = createOwnedLedgerRepository(clientG);
+  const leftoverPost = await ledgerG.post("g", {
+    portfolioId: leftoverPortfolioId,
+    type: "buy",
+    portfolioSecurityId: leftoverSecurityId,
+    quantityDecimal: "20",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "200",
+    feeAmountDecimal: "0",
+    taxAmountDecimal: "0",
+    fxRateToBaseDecimal: null,
+    sourceType: "manual",
+    idempotencyKey: `bundle:${fingerprintB}:${onlyTxRef}`,
+    tradeAt: "2026-01-15T00:00:00.000Z",
+    localTradeDate: "2026-01-15",
+    settlementDate: null,
+    currencyCode: "AUD",
+    fxRateSource: null,
+    fxObservedAt: null,
+    requestId: randomUUID(),
+  });
+  assert.equal(leftoverPost.ok, true);
 
-  // Sanity: the leftover, though not yet committed, is "related" (rule 1)
-  // and does not itself trip the precondition -- the retry is expected to
-  // proceed, not be rejected as "not a fresh account".
+  // Sanity: the leftover, though not yet committed, is "related" (still
+  // traceable by fingerprint) and does not itself trip the precondition --
+  // the retry is expected to proceed, not be rejected as "not a fresh
+  // account".
   const fingerprints = await Promise.all(
     backup.portfolios.map((bundle) => fingerprintBundle(bundle)),
   );
@@ -620,51 +662,48 @@ test("B1: a portfolio with a leftover partial-replay remnant from an interrupted
   );
   assert.equal(commit1.ok, true);
   if (!commit1.ok) return;
+  // Neither portfolio is reported "idempotent" -- A is a genuinely fresh
+  // restore, and B's batch had not reached `committed` yet (only a partial
+  // replay), so this run is the one that FINISHES it, not a no-op.
   assert.equal(
     commit1.result.portfolios.every((p) => !p.idempotent),
     true,
   );
 
-  // The leftover is now archived; exactly one ACTIVE portfolio exists for
-  // this retry's own result id (the new one the successful retry created --
-  // note `portfolios_user_id_code_unique` is unconditional, not
-  // status-scoped, so the archived leftover STILL holds the original code
-  // "B" forever; the new portfolio's `create()` call collides and falls
-  // back to EXP-001's own pre-existing "-restored" suffix retry, per its
-  // documented collision handling -- a real, honest, minor cosmetic
-  // consequence of archiving-not-deleting the leftover, not a defect).
-  const leftoverRow = await clientG.get<{ status: string }>(
-    "SELECT status FROM portfolios WHERE id = ?",
+  // The SAME portfolio is resumed in place -- never archived, code unchanged.
+  const resumedRow = await clientG.get<{ status: string; code: string }>(
+    "SELECT status, code FROM portfolios WHERE id = ?",
     [leftoverPortfolioId],
   );
-  assert.equal(leftoverRow?.status, "archived");
-  // Index-based, not code-based -- the persisted code is honestly reported
-  // (see `commitSystemBackupImport`'s own comment) but is now
-  // "B-restored" (or similar), not "B", precisely BECAUSE the archived
-  // leftover still holds "B" -- array order is still the backup's own
-  // portfolio order, so `[1]` is unambiguously portfolio B's result.
-  const newPortfolioId = commit1.result.portfolios[1]?.portfolioId;
-  assert.ok(newPortfolioId);
-  assert.notEqual(commit1.result.portfolios[1]?.code, "B");
-  assert.notEqual(newPortfolioId, leftoverPortfolioId);
-  const newPortfolioRow = await clientG.get<{ status: string }>(
-    "SELECT status FROM portfolios WHERE id = ?",
-    [newPortfolioId],
+  assert.equal(resumedRow?.status, "active");
+  assert.equal(resumedRow?.code, "B");
+  const bPortfolioResult = commit1.result.portfolios.find(
+    (p) => p.code === "B",
   );
-  assert.equal(newPortfolioRow?.status, "active");
-  const activePortfolioCount = await clientG.get<{ n: number }>(
-    "SELECT COUNT(*) AS n FROM portfolios WHERE user_id = 'g' AND status = 'active'",
-    [],
-  );
-  assert.equal(activePortfolioCount?.n, 2); // A, new active B (whatever its code)
+  assert.equal(bPortfolioResult?.portfolioId, leftoverPortfolioId);
   const totalPortfolioCount = await clientG.get<{ n: number }>(
     "SELECT COUNT(*) AS n FROM portfolios WHERE user_id = 'g'",
     [],
   );
-  assert.equal(totalPortfolioCount?.n, 3); // A, archived leftover B, new active B
+  assert.equal(totalPortfolioCount?.n, 2); // A, resumed B -- no leftover/orphan
 
-  // The archived remnant does not itself trip the precondition on a later
-  // (idempotent) run.
+  // The already-written transaction was NOT duplicated (idempotent by its
+  // derived key), and the restore's ONE transaction total is exactly one
+  // row for portfolio B.
+  const bTransactionCount = await clientG.get<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM transactions WHERE user_id = 'g' AND portfolio_id = ?",
+    [leftoverPortfolioId],
+  );
+  assert.equal(bTransactionCount?.n, 1);
+
+  const batchRow = await clientG.get<{ status: string }>(
+    "SELECT status FROM import_batches WHERE id = ?",
+    [batchId],
+  );
+  assert.equal(batchRow?.status, "committed");
+
+  // A further (idempotent) run does not trip the precondition and reports
+  // both portfolios as already-committed, with no new/duplicate portfolios.
   const unrelatedAfterRetry = await countUnrelatedPortfolios(
     clientG,
     "g",
@@ -672,7 +711,6 @@ test("B1: a portfolio with a leftover partial-replay remnant from an interrupted
   );
   assert.equal(unrelatedAfterRetry, 0);
 
-  // Third run: fully idempotent, no new portfolios, no duplicate leftover.
   const commit2 = await commitSystemBackupImport(
     ctxFor(clientG, "g"),
     backup,
@@ -688,7 +726,7 @@ test("B1: a portfolio with a leftover partial-replay remnant from an interrupted
     "SELECT COUNT(*) AS n FROM portfolios WHERE user_id = 'g'",
     [],
   );
-  assert.equal(totalAfterThirdRun?.n, 3);
+  assert.equal(totalAfterThirdRun?.n, 2);
 });
 
 // ---------------------------------------------------------------------------

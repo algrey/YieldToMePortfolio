@@ -50,8 +50,25 @@ import {
   PORTFOLIO_BUNDLE_SCHEMA_VERSION,
   sha256Hex,
   validatePortfolioBundle,
+  validateTransaction,
+  validateDividendManualRecord,
+  validateDividendSecurityAssumption,
+  validateDividendPortfolioAssumption,
+  validateDividendFyOverride,
+  validateDividendEventOverride,
+  validateDividendImportFrankingOverride,
+  validateWhatifScenario,
+  type BundleTransaction,
+  type BundleDividendManualRecord,
+  type BundleDividendSecurityAssumption,
+  type BundleDividendPortfolioAssumption,
+  type BundleDividendFyOverride,
+  type BundleDividendEventOverride,
+  type BundleDividendImportFrankingOverride,
+  type BundleWhatifScenario,
   type PortfolioBundleV1,
 } from "../domain/exports/portfolio-bundle.ts";
+import { chainOrder } from "../domain/exports/chain-order.ts";
 import { readPortfolioBundle } from "../db/repositories/portfolio-bundle.ts";
 import type { SqlClient } from "../db/repositories/sql-client.ts";
 import {
@@ -102,71 +119,6 @@ function asLedgerSourceType(value: string): LedgerSourceType | null {
   return (LEDGER_SOURCE_TYPES as readonly string[]).includes(value)
     ? (value as LedgerSourceType)
     : null;
-}
-
-type ChainItem = { ref: string; createdAt: string };
-
-/**
- * Orders `items` so every item is placed strictly after the (at most one)
- * other item it depends on -- a real topological (Kahn's-algorithm) order
- * over the chain graph `dependencyOf` describes, NOT a `createdAt` sort.
- *
- * A `createdAt`-only sort (the original implementation) is provably
- * unsafe: `ledger.post`/`reverse`/`supersede` and the dividend-record
- * writers all stamp `created_at` at MILLISECOND resolution, so two rows
- * created in the same millisecond (routine on fast/in-memory writes, and
- * reproduced by this module's own test suite as a real, non-deterministic
- * failure -- "A supersession's original transaction was not replayed
- * first") tie, and the previous ref-based tiebreak (`a.ref.localeCompare`)
- * compares random UUIDs with no relation to dependency order. This
- * function is driven purely by the bundle's own explicit `ref` graph, so
- * it is correct regardless of timestamp resolution or collisions.
- * `createdAt`/`ref` are used only to order otherwise-independent items
- * for readability/determinism, never to decide dependency order.
- */
-function chainOrder<T extends ChainItem>(
-  items: readonly T[],
-  dependencyOf: (item: T) => string | null,
-): T[] {
-  const byRef = new Map(items.map((item) => [item.ref, item]));
-  const stableCompare = (a: T, b: T): number =>
-    a.createdAt === b.createdAt
-      ? a.ref.localeCompare(b.ref)
-      : a.createdAt.localeCompare(b.createdAt);
-  const children = new Map<string, T[]>();
-  const queue: T[] = [];
-  for (const item of items) {
-    const dep = dependencyOf(item);
-    if (dep === null || !byRef.has(dep)) {
-      queue.push(item);
-      continue;
-    }
-    const siblings = children.get(dep);
-    if (siblings) siblings.push(item);
-    else children.set(dep, [item]);
-  }
-  queue.sort(stableCompare);
-  const ordered: T[] = [];
-  for (let cursor = 0; cursor < queue.length; cursor += 1) {
-    const item = queue[cursor];
-    ordered.push(item);
-    const kids = children.get(item.ref);
-    if (!kids) continue;
-    kids.sort(stableCompare);
-    queue.push(...kids);
-  }
-  // Defensive: a dangling/cyclic dependency should be structurally
-  // impossible (`validatePortfolioBundle` checks every `reversesRef`/
-  // `supersedesRef`/`supersedesRef` points at a ref the bundle actually
-  // contains, and rejects a transaction that is both a reversal and a
-  // supersession), but never silently drop a row if one somehow occurs --
-  // append it so the per-row dependency check downstream still fails
-  // closed with a clear message.
-  if (ordered.length < items.length) {
-    const placed = new Set(ordered.map((item) => item.ref));
-    for (const item of items) if (!placed.has(item.ref)) ordered.push(item);
-  }
-  return ordered;
 }
 
 export type BundleServiceContext = {
@@ -1108,6 +1060,1324 @@ async function commitFailure(
     [new Date().toISOString(), batchId, ctx.userId],
   );
   return { ok: false, status: 409, message };
+}
+
+// ---------------------------------------------------------------------------
+// EXP-004: a RESUMABLE, CHUNKED alternative to `commitPortfolioBundleImport`
+// above, used ONLY by the system-backup restore's core phase
+// (`app/system-backup-service.ts`). `commitPortfolioBundleImport` itself is
+// UNCHANGED and stays the single-shot path for EXP-001's own standalone
+// per-portfolio bundle import UI (`app/portfolio-bundle-actions.ts`), which
+// has no CPU-budget problem at its own (much smaller, one-portfolio-at-a-
+// time, interactively-triggered) scale.
+//
+// The production incident this exists to fix: a Cloudflare Workers Free
+// plan's 10ms-CPU-per-request budget was exhausted PARTWAY through
+// `commitSystemBackupImport`'s single request for one portfolio with 107
+// transactions + 119 dividend records, at transaction #63 -- an HTTP 500
+// with real partial rows already committed and no way to resume other than
+// starting the whole portfolio over.
+//
+// KEY DESIGN DIFFERENCE from `commitPortfolioBundleImport`'s own retry
+// handling: that function treats ANY non-`committed` `import_batches` row as
+// an ABANDONED attempt (resets `target_portfolio_id` to NULL and creates a
+// FRESH destination portfolio on retry -- safe there because a single-shot
+// commit can never leave real transaction/dividend progress on a
+// `committing` batch). Here, `committing` is the NORMAL state BETWEEN parts,
+// by design -- real rows legitimately exist on the current target portfolio
+// between requests. So `commitPortfolioBundleScaffold` below REUSES an
+// existing `target_portfolio_id` whenever one is recorded (never resets it),
+// and every part identifies rows purely by a deterministic, DB-derivable key
+// (`bundle:<fingerprint>:<ref>`) rather than an in-process ref->id `Map` --
+// no such map could survive a Worker request boundary anyway. This is also
+// exactly why this module never accumulates a "leftover portfolio" the way
+// the single-shot path's B1 archival logic does: there is no discarded
+// attempt to archive, because a resume always continues the SAME portfolio.
+//
+// RESUME EVIDENCE (binding design constraint from the task, satisfied
+// directly): `commitPortfolioBundleScaffold` reports `committedTransactionCount`/
+// `committedDividendCount` as LIVE counts of rows already durably written
+// under this bundle's own idempotency-key namespace -- never a client-
+// claimed cursor. The caller (browser) always re-derives "how much is left"
+// from this authoritative count on every scaffold call (fresh or resumed),
+// then slices the SAME chain-ordered array (`domain/exports/chain-order.ts`,
+// shared with the browser so both sides compute an IDENTICAL order) starting
+// at that count. A stale/incorrect client-side guess can therefore never
+// skip real, unwritten rows -- at worst it re-sends already-written rows,
+// which every write below tolerates as a no-op (via `ledger.post/reverse/
+// supersede`'s own built-in idempotency, and the dividend idempotency key
+// added by this task, see `db/repositories/dividends.ts`).
+// ---------------------------------------------------------------------------
+
+export type BundleScaffoldSecurity = {
+  ref: string;
+  portfolioSecurityId: string;
+};
+
+export type BundleScaffoldResult = {
+  /** true only when this EXACT bundle (by fingerprint) was already fully
+   * committed by an earlier attempt -- the caller must skip every
+   * transactions/dividends/finalize part entirely for this portfolio. */
+  idempotent: boolean;
+  batchId: string;
+  fingerprint: string;
+  portfolioId: string;
+  portfolioName: string;
+  code: string;
+  /** Empty when `idempotent` is true (nothing left for the caller to map). */
+  securities: BundleScaffoldSecurity[];
+  securitiesCreated: number;
+  securitiesMatched: number;
+  /** Live, server-derived resume evidence -- see this section's header
+   * comment. When `idempotent` is true these equal the bundle's own full
+   * counts. */
+  committedTransactionCount: number;
+  committedDividendCount: number;
+};
+
+async function countByIdempotencyPrefix(
+  client: SqlClient,
+  table: "transactions" | "dividend_manual_records",
+  userId: string,
+  portfolioId: string,
+  fingerprint: string,
+): Promise<number> {
+  // `fingerprint` is always a `sha256Hex` digest (lowercase hex only), so it
+  // can never itself contain a `LIKE` wildcard -- no escaping needed.
+  const row = await client.get<{ count: number }>(
+    `SELECT COUNT(*) AS count FROM ${table}
+     WHERE user_id = ? AND portfolio_id = ? AND idempotency_key LIKE ?`,
+    [userId, portfolioId, `bundle:${fingerprint}:%`],
+  );
+  return Number(row?.count ?? 0);
+}
+
+async function findTransactionIdByRef(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  fingerprint: string,
+  ref: string,
+): Promise<string | null> {
+  const row = await client.get<{ id: string }>(
+    `SELECT id FROM transactions WHERE user_id = ? AND portfolio_id = ? AND idempotency_key = ? LIMIT 1`,
+    [userId, portfolioId, `bundle:${fingerprint}:${ref}`],
+  );
+  return row?.id ?? null;
+}
+
+/**
+ * EXP-004: a transactions/dividends PART's `securities` field is browser-
+ * supplied (echoed back from an earlier `commitPortfolioBundleScaffold`
+ * response, held client-side across requests) -- unlike
+ * `commitPortfolioBundleImport`'s own in-process `securityRefToId`, which is
+ * always freshly derived from THIS SAME call's own server-side resolution
+ * and therefore inherently trustworthy, a part's id list must be
+ * independently re-verified before use (IMP-010B: a part is never allowed
+ * lesser validation authority than the whole-bundle path). Returns only the
+ * ids that genuinely belong to `(userId, portfolioId)`; the caller rejects
+ * the whole part if any supplied id is missing from this set.
+ */
+async function verifyOwnedPortfolioSecurityIds(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  ids: readonly string[],
+): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = await client.all<{ id: string }>(
+    `SELECT id FROM portfolio_securities WHERE user_id = ? AND portfolio_id = ? AND id IN (${placeholders})`,
+    [userId, portfolioId, ...ids],
+  );
+  return new Set(rows.map((row) => row.id));
+}
+
+export async function commitPortfolioBundleScaffold(
+  ctx: BundleServiceContext,
+  raw: unknown,
+  filename: string,
+  bundleByteLength: number,
+): Promise<{ ok: true; result: BundleScaffoldResult } | BundleServiceFailure> {
+  const validation = validatePortfolioBundle(raw);
+  if (!validation.ok)
+    return { ok: false, status: 400, message: validation.message };
+  const bundle = validation.bundle;
+  const fingerprint = await fingerprintBundle(bundle);
+
+  const settings = await createOwnedUserSettingsRepository(ctx.client).get(
+    ctx.userId,
+  );
+  if (!settings) {
+    return {
+      ok: false,
+      status: 404,
+      message: "Account settings were not found.",
+    };
+  }
+  if (settings.homeCurrencyCode !== bundle.portfolio.baseCurrencyCode) {
+    return {
+      ok: false,
+      status: 409,
+      message:
+        `This bundle's portfolio is in ${bundle.portfolio.baseCurrencyCode}, but your account's home currency is ` +
+        `${settings.homeCurrencyCode}. Change your home currency to ${bundle.portfolio.baseCurrencyCode} in Settings, ` +
+        `then re-import.`,
+    };
+  }
+
+  const existing = await findExistingBatch(ctx.client, ctx.userId, fingerprint);
+  if (
+    existing &&
+    existing.status === "committed" &&
+    existing.targetPortfolioId
+  ) {
+    const portfolioRow = await ctx.client.get<{ name: string; code: string }>(
+      "SELECT name, code FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1",
+      [existing.targetPortfolioId, ctx.userId],
+    );
+    return {
+      ok: true,
+      result: {
+        idempotent: true,
+        batchId: existing.id,
+        fingerprint,
+        portfolioId: existing.targetPortfolioId,
+        portfolioName: portfolioRow?.name ?? bundle.portfolio.name,
+        code: portfolioRow?.code ?? bundle.portfolio.code,
+        securities: [],
+        securitiesCreated: 0,
+        securitiesMatched: 0,
+        committedTransactionCount: bundle.transactions.length,
+        committedDividendCount: bundle.dividendManualRecords.length,
+      },
+    };
+  }
+
+  const now = new Date().toISOString();
+  let batchId: string;
+  let portfolioId: string | null = existing?.targetPortfolioId ?? null;
+  if (existing) {
+    batchId = existing.id;
+    if (existing.status !== "committing") {
+      await ctx.client.run(
+        `UPDATE import_batches SET status = 'committing', filename = ?, byte_size = ?, updated_at = ?
+         WHERE id = ? AND user_id = ?`,
+        [filename.slice(0, 255), bundleByteLength, now, batchId, ctx.userId],
+      );
+    }
+  } else {
+    batchId = randomUUID();
+    try {
+      await ctx.client.run(
+        `INSERT INTO import_batches (
+          id, user_id, parser_format, parser_version, filename, byte_size,
+          file_sha256, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'committing', ?, ?)`,
+        [
+          batchId,
+          ctx.userId,
+          PORTFOLIO_BUNDLE_PARSER_FORMAT,
+          String(PORTFOLIO_BUNDLE_SCHEMA_VERSION),
+          filename.slice(0, 255),
+          bundleByteLength,
+          fingerprint,
+          now,
+          now,
+        ],
+      );
+    } catch {
+      // A genuine race: two concurrent scaffold calls for the same NEW
+      // bundle.
+      return {
+        ok: false,
+        status: 409,
+        message: "This bundle is already being imported. Try again shortly.",
+      };
+    }
+  }
+
+  const portfolios = createOwnedPortfolioRepository(ctx.client, undefined, {
+    requestId: ctx.requestId,
+  });
+  let portfolioName: string;
+  let code: string;
+  if (portfolioId) {
+    // Resuming into an already-created destination -- read its ACTUAL
+    // persisted name/code (may carry a `-restored` suffix from the earlier
+    // attempt's own collision handling) rather than re-deriving them.
+    const row = await ctx.client.get<{ name: string; code: string }>(
+      "SELECT name, code FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1",
+      [portfolioId, ctx.userId],
+    );
+    if (!row) {
+      return commitFailure(
+        ctx,
+        batchId,
+        "The portfolio this restore was writing to no longer exists -- it may have been manually deleted. This bundle cannot be resumed; archive/clean up any remaining data for it and start a fresh restore.",
+      );
+    }
+    portfolioName = row.name;
+    code = row.code;
+  } else {
+    code = bundle.portfolio.code;
+    let portfolio = null;
+    for (let attempt = 0; attempt < 5 && !portfolio; attempt += 1) {
+      try {
+        portfolio = await portfolios.create(ctx.userId, {
+          code,
+          name: bundle.portfolio.name,
+          timezone: bundle.portfolio.timezone,
+          accountingMethod:
+            bundle.portfolio.accountingMethod === "fifo" ? "fifo" : undefined,
+          historyCompleteFrom: bundle.portfolio.historyCompleteFrom,
+        });
+      } catch {
+        code = `${bundle.portfolio.code}-restored${attempt > 0 ? `-${attempt + 1}` : ""}`;
+      }
+    }
+    if (!portfolio) {
+      return commitFailure(
+        ctx,
+        batchId,
+        "A destination portfolio could not be created for this bundle.",
+      );
+    }
+    portfolioId = portfolio.id;
+    portfolioName = portfolio.name;
+    await ctx.client.run(
+      "UPDATE import_batches SET target_portfolio_id = ? WHERE id = ? AND user_id = ?",
+      [portfolioId, batchId, ctx.userId],
+    );
+
+    if (bundle.portfolioSettings.quoteStalenessPolicy !== null) {
+      await ctx.client.run(
+        `INSERT INTO portfolio_settings (
+          portfolio_id, user_id, quote_staleness_policy, created_at, updated_at, version
+        ) VALUES (?, ?, ?, ?, ?, 1)`,
+        [
+          portfolioId,
+          ctx.userId,
+          bundle.portfolioSettings.quoteStalenessPolicy,
+          now,
+          now,
+        ],
+      );
+    }
+  }
+
+  // Securities: resolve-or-create -- ALWAYS safe to re-run whether this is a
+  // fresh scaffold or a resume. `resolveAndLink` is idempotent by natural
+  // key (`db/repositories/security-resolution.ts`'s `existingCandidateRow`
+  // check runs first), and the following UPDATE is a plain by-id UPDATE, so
+  // replaying this loop after a PRIOR scaffold call died partway through it
+  // converges on the exact same result. Bounded by security count, not
+  // transaction count -- cheap relative to the CPU budget this task exists
+  // to protect.
+  const securityResolution = createOwnedSecurityResolutionRepository(
+    ctx.client,
+  );
+  const securities: BundleScaffoldSecurity[] = [];
+  let securitiesCreated = 0;
+  let securitiesMatched = 0;
+  for (const security of bundle.securities) {
+    const result = await securityResolution.resolveAndLink(
+      ctx.userId,
+      {
+        symbol: security.tickerIdentifier ?? security.sourceSymbol,
+        exchangeAlias: security.sourceExchangeAlias,
+        currencyCode: security.sourceCurrencyCode,
+        sharesightInstrumentId: security.sharesightInstrumentId,
+        isin: security.isinIdentifier,
+        instrumentName:
+          security.canonicalName ??
+          security.sourceName ??
+          security.sourceSymbol,
+      },
+      {
+        portfolioId,
+        sourceSymbol: security.sourceSymbol,
+        sourceExchangeAlias: security.sourceExchangeAlias,
+        sourceCurrencyCode: security.sourceCurrencyCode,
+      },
+    );
+    if (!result.ok) {
+      return commitFailure(
+        ctx,
+        batchId,
+        `Security "${security.sourceSymbol}" could not be resolved (${result.reason}).`,
+      );
+    }
+    securities.push({
+      ref: security.ref,
+      portfolioSecurityId: result.portfolioSecurityId,
+    });
+    if (result.created) securitiesCreated += 1;
+    else securitiesMatched += 1;
+
+    await ctx.client.run(
+      `UPDATE portfolio_securities
+       SET status = ?, display_symbol = ?, display_name = ?,
+           first_relevant_date = ?, last_relevant_date = ?
+       WHERE id = ? AND user_id = ? AND portfolio_id = ?`,
+      [
+        security.status === "unresolved" ? "held" : security.status,
+        security.displaySymbol,
+        security.displayName,
+        security.firstRelevantDate,
+        security.lastRelevantDate,
+        result.portfolioSecurityId,
+        ctx.userId,
+        portfolioId,
+      ],
+    );
+  }
+
+  const committedTransactionCount = await countByIdempotencyPrefix(
+    ctx.client,
+    "transactions",
+    ctx.userId,
+    portfolioId,
+    fingerprint,
+  );
+  const committedDividendCount = await countByIdempotencyPrefix(
+    ctx.client,
+    "dividend_manual_records",
+    ctx.userId,
+    portfolioId,
+    fingerprint,
+  );
+
+  return {
+    ok: true,
+    result: {
+      idempotent: false,
+      batchId,
+      fingerprint,
+      portfolioId,
+      portfolioName,
+      code,
+      securities,
+      securitiesCreated,
+      securitiesMatched,
+      committedTransactionCount,
+      committedDividendCount,
+    },
+  };
+}
+
+export type BundleTransactionsPartInput = {
+  portfolioId: string;
+  batchId: string;
+  fingerprint: string;
+  securities: readonly BundleScaffoldSecurity[];
+  /** Unvalidated on the wire -- re-validated here exactly as a full bundle's
+   * transactions would be (IMP-010B: server is the sole validation
+   * authority for every part, not only the whole-file upload). Must already
+   * be in this portfolio's own chain order (`domain/exports/chain-order.ts`)
+   * -- the browser computes the SAME order this module would. */
+  transactions: readonly unknown[];
+};
+
+export type BundleTransactionsPartResult = { committedCount: number };
+
+export async function commitPortfolioBundleTransactionsPart(
+  ctx: BundleServiceContext,
+  input: BundleTransactionsPartInput,
+): Promise<
+  { ok: true; result: BundleTransactionsPartResult } | BundleServiceFailure
+> {
+  const portfolioRow = await ctx.client.get<{ id: string }>(
+    "SELECT id FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1",
+    [input.portfolioId, ctx.userId],
+  );
+  if (!portfolioRow) {
+    return { ok: false, status: 404, message: "Portfolio was not found." };
+  }
+  const ownedSecurityIds = await verifyOwnedPortfolioSecurityIds(
+    ctx.client,
+    ctx.userId,
+    input.portfolioId,
+    input.securities.map((s) => s.portfolioSecurityId),
+  );
+  if (
+    input.securities.some((s) => !ownedSecurityIds.has(s.portfolioSecurityId))
+  ) {
+    return {
+      ok: false,
+      status: 404,
+      message: "A referenced security does not belong to this portfolio.",
+    };
+  }
+  const securityRefs = new Set(input.securities.map((s) => s.ref));
+  const securityRefToId = new Map(
+    input.securities.map((s) => [s.ref, s.portfolioSecurityId]),
+  );
+  const seenRefs = new Set<string>();
+  const transactions: BundleTransaction[] = [];
+  for (const raw of input.transactions) {
+    const tx = validateTransaction(raw, seenRefs, securityRefs);
+    if (!tx) {
+      return {
+        ok: false,
+        status: 400,
+        message: "A transaction in this part is malformed.",
+      };
+    }
+    transactions.push(tx);
+  }
+
+  const ledger = createOwnedLedgerRepository(ctx.client);
+  let committedCount = 0;
+  for (const tx of transactions) {
+    const securityId = tx.securityRef
+      ? (securityRefToId.get(tx.securityRef) ?? null)
+      : null;
+    if (tx.securityRef && !securityId) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        "Transaction references a security that failed to resolve.",
+      );
+    }
+    const derivedKey = `bundle:${input.fingerprint}:${tx.ref}`;
+    const transactionType = asLedgerTransactionType(tx.type);
+    if (!transactionType) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        `Transaction has an unsupported type "${tx.type}".`,
+      );
+    }
+    if (tx.reversesRef !== null) {
+      const targetId = await findTransactionIdByRef(
+        ctx.client,
+        ctx.userId,
+        input.portfolioId,
+        input.fingerprint,
+        tx.reversesRef,
+      );
+      if (!targetId) {
+        return commitFailure(
+          ctx,
+          input.batchId,
+          "A reversal's original transaction was not replayed first.",
+        );
+      }
+      const result = await ledger.reverse(
+        ctx.userId,
+        input.portfolioId,
+        targetId,
+        derivedKey,
+        ctx.requestId,
+      );
+      if (!result.ok) {
+        return commitFailure(
+          ctx,
+          input.batchId,
+          `A transaction reversal could not be replayed (${result.reason}).`,
+        );
+      }
+      committedCount += 1;
+      continue;
+    }
+    if (tx.supersedesRef !== null) {
+      const targetId = await findTransactionIdByRef(
+        ctx.client,
+        ctx.userId,
+        input.portfolioId,
+        input.fingerprint,
+        tx.supersedesRef,
+      );
+      if (!targetId) {
+        return commitFailure(
+          ctx,
+          input.batchId,
+          "A supersession's original transaction was not replayed first.",
+        );
+      }
+      const result = await ledger.supersede(
+        ctx.userId,
+        input.portfolioId,
+        targetId,
+        {
+          portfolioId: input.portfolioId,
+          type: transactionType,
+          portfolioSecurityId: securityId,
+          quantityDecimal: tx.quantityDecimal,
+          unitPriceDecimal: tx.unitPriceDecimal,
+          grossAmountDecimal: tx.grossAmountDecimal,
+          feeAmountDecimal: tx.feeAmountDecimal,
+          taxAmountDecimal: tx.taxAmountDecimal,
+          fxRateToBaseDecimal: tx.fxRateToBaseDecimal,
+          sourceType: asLedgerSourceType(tx.sourceType) ?? "system",
+          sourceReference: tx.sourceReference,
+          idempotencyKey: derivedKey,
+          tradeAt: tx.tradeAt,
+          localTradeDate: tx.localTradeDate,
+          settlementDate: tx.settlementDate,
+          currencyCode: tx.currencyCode,
+          fxRateSource: tx.fxRateSource,
+          fxObservedAt: tx.fxObservedAt,
+          requestId: ctx.requestId,
+        },
+      );
+      if (!result.ok) {
+        return commitFailure(
+          ctx,
+          input.batchId,
+          `A transaction supersession could not be replayed (${result.reason}).`,
+        );
+      }
+      committedCount += 1;
+      continue;
+    }
+    const sourceType = asLedgerSourceType(tx.sourceType);
+    if (!sourceType) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        `Transaction has an unsupported source type "${tx.sourceType}".`,
+      );
+    }
+    const result = await ledger.post(ctx.userId, {
+      portfolioId: input.portfolioId,
+      type: transactionType,
+      portfolioSecurityId: securityId,
+      quantityDecimal: tx.quantityDecimal,
+      unitPriceDecimal: tx.unitPriceDecimal,
+      grossAmountDecimal: tx.grossAmountDecimal,
+      feeAmountDecimal: tx.feeAmountDecimal,
+      taxAmountDecimal: tx.taxAmountDecimal,
+      fxRateToBaseDecimal: tx.fxRateToBaseDecimal,
+      sourceType,
+      sourceReference: tx.sourceReference,
+      idempotencyKey: derivedKey,
+      tradeAt: tx.tradeAt,
+      localTradeDate: tx.localTradeDate,
+      settlementDate: tx.settlementDate,
+      currencyCode: tx.currencyCode,
+      fxRateSource: tx.fxRateSource,
+      fxObservedAt: tx.fxObservedAt,
+      requestId: ctx.requestId,
+    });
+    if (!result.ok) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        `A transaction could not be replayed (${result.reason}).`,
+      );
+    }
+    committedCount += 1;
+  }
+  return { ok: true, result: { committedCount } };
+}
+
+export type BundleDividendsPartInput = {
+  portfolioId: string;
+  batchId: string;
+  fingerprint: string;
+  securities: readonly BundleScaffoldSecurity[];
+  /** Unvalidated on the wire -- see `BundleTransactionsPartInput`'s comment. */
+  records: readonly unknown[];
+};
+
+export type BundleDividendsPartResult = { committedCount: number };
+
+export async function commitPortfolioBundleDividendsPart(
+  ctx: BundleServiceContext,
+  input: BundleDividendsPartInput,
+): Promise<
+  { ok: true; result: BundleDividendsPartResult } | BundleServiceFailure
+> {
+  const portfolioRow = await ctx.client.get<{ id: string }>(
+    "SELECT id FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1",
+    [input.portfolioId, ctx.userId],
+  );
+  if (!portfolioRow) {
+    return { ok: false, status: 404, message: "Portfolio was not found." };
+  }
+  const ownedSecurityIds = await verifyOwnedPortfolioSecurityIds(
+    ctx.client,
+    ctx.userId,
+    input.portfolioId,
+    input.securities.map((s) => s.portfolioSecurityId),
+  );
+  if (
+    input.securities.some((s) => !ownedSecurityIds.has(s.portfolioSecurityId))
+  ) {
+    return {
+      ok: false,
+      status: 404,
+      message: "A referenced security does not belong to this portfolio.",
+    };
+  }
+  const securityRefs = new Set(input.securities.map((s) => s.ref));
+  const securityRefToId = new Map(
+    input.securities.map((s) => [s.ref, s.portfolioSecurityId]),
+  );
+  const seenRefs = new Set<string>();
+  const records: BundleDividendManualRecord[] = [];
+  for (const raw of input.records) {
+    const record = validateDividendManualRecord(raw, seenRefs, securityRefs);
+    if (!record) {
+      return {
+        ok: false,
+        status: 400,
+        message: "A dividend record in this part is malformed.",
+      };
+    }
+    records.push(record);
+  }
+
+  const manualRecords = createDividendManualRecordRepository(ctx.client);
+  let committedCount = 0;
+  for (const record of records) {
+    const securityId = securityRefToId.get(record.securityRef);
+    if (!securityId) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        "A dividend record references a security that failed to resolve.",
+      );
+    }
+    const idempotencyKey = `bundle:${input.fingerprint}:${record.ref}`;
+    if (record.wasImported) {
+      const insert = buildDividendManualRecordImportInsertStatements({
+        userId: ctx.userId,
+        portfolioId: input.portfolioId,
+        portfolioSecurityId: securityId,
+        paymentDate: record.paymentDate,
+        sharesDecimal: record.sharesDecimal,
+        dividendPerShareDecimal: record.dividendPerShareDecimal,
+        frankingCreditPerShareDecimal: record.frankingCreditPerShareDecimal,
+        totalCashDecimal: record.totalCashDecimal,
+        totalFrankingDecimal: record.totalFrankingDecimal,
+        currencyCode: record.currencyCode,
+        fxRateToPortfolioDecimal: record.fxRateToPortfolioDecimal,
+        fxRateSource: record.fxRateSource,
+        importBatchId: input.batchId,
+        sourceReference: record.sourceReference ?? idempotencyKey,
+        idempotencyKey,
+        requestId: ctx.requestId,
+        now: new Date().toISOString(),
+      });
+      if (!insert.ok) {
+        return commitFailure(
+          ctx,
+          input.batchId,
+          "A dividend record could not be replayed (invalid amounts).",
+        );
+      }
+      try {
+        await ctx.client.batch(insert.statements);
+      } catch {
+        // EXP-004: a resumed/retried part can legitimately re-send a row
+        // this exact call already wrote (see this module's resumable-
+        // scaffold header comment) -- dedupe by the SAME idempotency key
+        // rather than treating the resulting unique-index hit as fatal.
+        const already = await manualRecords.getByIdempotencyKey(
+          ctx.userId,
+          input.portfolioId,
+          securityId,
+          idempotencyKey,
+        );
+        if (!already) {
+          return commitFailure(
+            ctx,
+            input.batchId,
+            "A dividend record could not be replayed (a conflicting row already exists).",
+          );
+        }
+      }
+    } else {
+      const saved = await manualRecords.create(ctx.userId, input.portfolioId, {
+        portfolioSecurityId: securityId,
+        paymentDate: record.paymentDate,
+        sharesDecimal: record.sharesDecimal,
+        dividendPerShareDecimal: record.dividendPerShareDecimal,
+        frankingCreditPerShareDecimal: record.frankingCreditPerShareDecimal,
+        totalCashDecimal: record.totalCashDecimal,
+        totalFrankingDecimal: record.totalFrankingDecimal,
+        idempotencyKey,
+        requestId: ctx.requestId,
+      });
+      if (!saved.ok) {
+        return commitFailure(
+          ctx,
+          input.batchId,
+          "A dividend record could not be replayed (invalid amounts).",
+        );
+      }
+    }
+    committedCount += 1;
+  }
+  return { ok: true, result: { committedCount } };
+}
+
+export type BundleDividendLinkageItem = {
+  ref: string;
+  securityRef: string;
+  supersedesRef: string | null;
+  supersededByDeletedRecord: boolean;
+};
+
+/** EXP-004: validates one wire `dividendLinkage` entry (IMP-010B -- the
+ * finalize request is a SEPARATE later request from the one that originally
+ * structurally validated the whole bundle, so it must be re-validated on its
+ * own terms, never trusted merely because an earlier request looked valid). */
+export function validateDividendLinkageItem(
+  value: unknown,
+  securityRefs: ReadonlySet<string>,
+): BundleDividendLinkageItem | null {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    typeof (value as Record<string, unknown>).ref !== "string" ||
+    ((value as Record<string, unknown>).ref as string).length === 0 ||
+    typeof (value as Record<string, unknown>).securityRef !== "string" ||
+    !securityRefs.has(
+      (value as Record<string, unknown>).securityRef as string,
+    ) ||
+    ((value as Record<string, unknown>).supersedesRef !== null &&
+      typeof (value as Record<string, unknown>).supersedesRef !== "string") ||
+    typeof (value as Record<string, unknown>).supersededByDeletedRecord !==
+      "boolean"
+  ) {
+    return null;
+  }
+  const item = value as Record<string, unknown>;
+  return {
+    ref: item.ref as string,
+    securityRef: item.securityRef as string,
+    supersedesRef: (item.supersedesRef as string | null) ?? null,
+    supersededByDeletedRecord: item.supersededByDeletedRecord as boolean,
+  };
+}
+
+export type BundleFinalizeInput = {
+  portfolioId: string;
+  batchId: string;
+  fingerprint: string;
+  securities: readonly BundleScaffoldSecurity[];
+  /** Slim metadata for EVERY dividend record in the bundle (not the
+   * financial amounts -- those were already written by the dividends parts)
+   * -- enough to re-derive `divRefToId` via each row's own idempotency key
+   * and replay the supersession-link-up / tombstone-exclusion passes. */
+  dividendLinkage: readonly BundleDividendLinkageItem[];
+  dividendSecurityAssumptions: readonly BundleDividendSecurityAssumption[];
+  dividendPortfolioAssumption: BundleDividendPortfolioAssumption | null;
+  dividendFyOverrides: readonly BundleDividendFyOverride[];
+  dividendEventOverrides: readonly BundleDividendEventOverride[];
+  dividendImportFrankingOverrides: readonly BundleDividendImportFrankingOverride[];
+  whatifScenarios: readonly BundleWhatifScenario[];
+  portfolioStatus: "active" | "archived";
+  transactionsCount: number;
+  dividendRecordsCount: number;
+};
+
+/** EXP-004: the RAW wire shape a finalize HTTP request carries -- every
+ * sub-array/field is `unknown` because it arrives as a SEPARATE request from
+ * the one that originally validated the whole bundle (IMP-010B: never
+ * trusted merely because an earlier request looked valid). */
+export type BundleFinalizeWireInput = {
+  portfolioId: string;
+  batchId: string;
+  fingerprint: string;
+  securities: readonly BundleScaffoldSecurity[];
+  dividendLinkage: unknown;
+  dividendSecurityAssumptions: unknown;
+  dividendPortfolioAssumption: unknown;
+  dividendFyOverrides: unknown;
+  dividendEventOverrides: unknown;
+  dividendImportFrankingOverrides: unknown;
+  whatifScenarios: unknown;
+  portfolioStatus: unknown;
+  transactionsCount: unknown;
+  dividendRecordsCount: unknown;
+};
+
+/** Structurally validates a finalize request's wire fields into a typed
+ * `BundleFinalizeInput`, reusing the SAME per-row validators
+ * `validatePortfolioBundle` itself uses for every one of these entity kinds. */
+export function parseBundleFinalizeWireInput(
+  raw: BundleFinalizeWireInput,
+): { ok: true; value: BundleFinalizeInput } | { ok: false; message: string } {
+  const securityRefs = new Set(raw.securities.map((s) => s.ref));
+
+  if (!Array.isArray(raw.dividendLinkage)) {
+    return { ok: false, message: "The dividend linkage list is malformed." };
+  }
+  const dividendLinkage: BundleDividendLinkageItem[] = [];
+  for (const item of raw.dividendLinkage) {
+    const parsed = validateDividendLinkageItem(item, securityRefs);
+    if (!parsed) {
+      return { ok: false, message: "The dividend linkage list is malformed." };
+    }
+    dividendLinkage.push(parsed);
+  }
+  const dividendRefs = new Set(dividendLinkage.map((item) => item.ref));
+
+  if (!Array.isArray(raw.dividendSecurityAssumptions)) {
+    return {
+      ok: false,
+      message: "The per-security assumptions list is malformed.",
+    };
+  }
+  const dividendSecurityAssumptions: BundleDividendSecurityAssumption[] = [];
+  for (const item of raw.dividendSecurityAssumptions) {
+    const parsed = validateDividendSecurityAssumption(item, securityRefs);
+    if (!parsed) {
+      return {
+        ok: false,
+        message: "A per-security assumption entry is malformed.",
+      };
+    }
+    dividendSecurityAssumptions.push(parsed);
+  }
+
+  let dividendPortfolioAssumption: BundleDividendPortfolioAssumption | null =
+    null;
+  if (
+    raw.dividendPortfolioAssumption !== null &&
+    raw.dividendPortfolioAssumption !== undefined
+  ) {
+    const parsed = validateDividendPortfolioAssumption(
+      raw.dividendPortfolioAssumption,
+    );
+    if (!parsed) {
+      return {
+        ok: false,
+        message: "The portfolio-level assumption is malformed.",
+      };
+    }
+    dividendPortfolioAssumption = parsed;
+  }
+
+  if (!Array.isArray(raw.dividendFyOverrides)) {
+    return { ok: false, message: "The FY override list is malformed." };
+  }
+  const dividendFyOverrides: BundleDividendFyOverride[] = [];
+  for (const item of raw.dividendFyOverrides) {
+    const parsed = validateDividendFyOverride(item);
+    if (!parsed)
+      return { ok: false, message: "An FY override entry is malformed." };
+    dividendFyOverrides.push(parsed);
+  }
+
+  if (!Array.isArray(raw.dividendEventOverrides)) {
+    return {
+      ok: false,
+      message: "The dividend event override list is malformed.",
+    };
+  }
+  const dividendEventOverrides: BundleDividendEventOverride[] = [];
+  for (const item of raw.dividendEventOverrides) {
+    const parsed = validateDividendEventOverride(item, securityRefs);
+    if (!parsed) {
+      return {
+        ok: false,
+        message: "A dividend event override entry is malformed.",
+      };
+    }
+    dividendEventOverrides.push(parsed);
+  }
+
+  if (!Array.isArray(raw.dividendImportFrankingOverrides)) {
+    return { ok: false, message: "The franking override list is malformed." };
+  }
+  const dividendImportFrankingOverrides: BundleDividendImportFrankingOverride[] =
+    [];
+  for (const item of raw.dividendImportFrankingOverrides) {
+    const parsed = validateDividendImportFrankingOverride(
+      item,
+      securityRefs,
+      dividendRefs,
+    );
+    if (!parsed) {
+      return { ok: false, message: "A franking override entry is malformed." };
+    }
+    dividendImportFrankingOverrides.push(parsed);
+  }
+
+  if (!Array.isArray(raw.whatifScenarios)) {
+    return { ok: false, message: "The what-if scenario list is malformed." };
+  }
+  const whatifScenarios: BundleWhatifScenario[] = [];
+  for (const item of raw.whatifScenarios) {
+    const parsed = validateWhatifScenario(item);
+    if (!parsed)
+      return { ok: false, message: "A what-if scenario entry is malformed." };
+    whatifScenarios.push(parsed);
+  }
+
+  if (raw.portfolioStatus !== "active" && raw.portfolioStatus !== "archived") {
+    return { ok: false, message: "The portfolio status is malformed." };
+  }
+  if (
+    !Number.isSafeInteger(raw.transactionsCount) ||
+    (raw.transactionsCount as number) < 0 ||
+    !Number.isSafeInteger(raw.dividendRecordsCount) ||
+    (raw.dividendRecordsCount as number) < 0
+  ) {
+    return { ok: false, message: "The restore counts are malformed." };
+  }
+
+  return {
+    ok: true,
+    value: {
+      portfolioId: raw.portfolioId,
+      batchId: raw.batchId,
+      fingerprint: raw.fingerprint,
+      securities: raw.securities,
+      dividendLinkage,
+      dividendSecurityAssumptions,
+      dividendPortfolioAssumption,
+      dividendFyOverrides,
+      dividendEventOverrides,
+      dividendImportFrankingOverrides,
+      whatifScenarios,
+      portfolioStatus: raw.portfolioStatus,
+      transactionsCount: raw.transactionsCount as number,
+      dividendRecordsCount: raw.dividendRecordsCount as number,
+    },
+  };
+}
+
+export type BundleFinalizeResult = { skippedDividendEventOverrides: number };
+
+export async function commitPortfolioBundleFinalize(
+  ctx: BundleServiceContext,
+  input: BundleFinalizeInput,
+): Promise<{ ok: true; result: BundleFinalizeResult } | BundleServiceFailure> {
+  const batchRow = await ctx.client.get<{ status: string }>(
+    "SELECT status FROM import_batches WHERE id = ? AND user_id = ? LIMIT 1",
+    [input.batchId, ctx.userId],
+  );
+  if (!batchRow) {
+    return {
+      ok: false,
+      status: 404,
+      message: "This restore batch was not found.",
+    };
+  }
+  // EXP-004: a whole-finalize retry (the browser never saw this call's own
+  // earlier success, e.g. a dropped response) is a total no-op once the
+  // batch already reads `committed` -- every write below this point that has
+  // no natural-key identity (most notably `whatifScenarios`, which is
+  // deliberately CREATE-ONLY -- see `income-scenarios.ts`'s own `save()`
+  // comment) would otherwise duplicate on a second pass. This does not cover
+  // a crash PARTWAY through this function's own body before the final status
+  // flip -- documented as a narrow, accepted residual gap in
+  // `docs/BACKUP_FORMAT.md` (non-ledger planning data only; never a
+  // transaction/dividend/holding figure).
+  if (batchRow.status === "committed") {
+    return { ok: true, result: { skippedDividendEventOverrides: 0 } };
+  }
+  const portfolioRow = await ctx.client.get<{ id: string }>(
+    "SELECT id FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1",
+    [input.portfolioId, ctx.userId],
+  );
+  if (!portfolioRow) {
+    return { ok: false, status: 404, message: "Portfolio was not found." };
+  }
+  const ownedSecurityIds = await verifyOwnedPortfolioSecurityIds(
+    ctx.client,
+    ctx.userId,
+    input.portfolioId,
+    input.securities.map((s) => s.portfolioSecurityId),
+  );
+  if (
+    input.securities.some((s) => !ownedSecurityIds.has(s.portfolioSecurityId))
+  ) {
+    return {
+      ok: false,
+      status: 404,
+      message: "A referenced security does not belong to this portfolio.",
+    };
+  }
+  const securityRefToId = new Map(
+    input.securities.map((s) => [s.ref, s.portfolioSecurityId]),
+  );
+
+  const manualRecords = createDividendManualRecordRepository(ctx.client);
+  const divRefToId = new Map<string, string>();
+  for (const item of input.dividendLinkage) {
+    const securityId = securityRefToId.get(item.securityRef);
+    if (!securityId) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        "A dividend record's security could not be resolved during finalize.",
+      );
+    }
+    const idempotencyKey = `bundle:${input.fingerprint}:${item.ref}`;
+    const record = await manualRecords.getByIdempotencyKey(
+      ctx.userId,
+      input.portfolioId,
+      securityId,
+      idempotencyKey,
+    );
+    if (!record) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        "A dividend record was not found during finalize -- restore its part before finalizing.",
+      );
+    }
+    divRefToId.set(item.ref, record.id);
+  }
+  for (const item of input.dividendLinkage) {
+    if (item.supersedesRef === null) continue;
+    const oldId = divRefToId.get(item.supersedesRef);
+    const newId = divRefToId.get(item.ref);
+    if (!oldId || !newId) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        "A dividend record's supersession chain could not be linked.",
+      );
+    }
+    await ctx.client.run(
+      `UPDATE dividend_manual_records SET superseded_by_record_id = ?
+       WHERE id = ? AND user_id = ? AND portfolio_id = ?`,
+      [newId, oldId, ctx.userId, input.portfolioId],
+    );
+  }
+  for (const item of input.dividendLinkage) {
+    if (!item.supersededByDeletedRecord) continue;
+    const ownId = divRefToId.get(item.ref);
+    if (!ownId) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        "A dividend record's tombstone exclusion could not be replayed.",
+      );
+    }
+    await ctx.client.run(
+      `UPDATE dividend_manual_records SET superseded_by_record_id = ?
+       WHERE id = ? AND user_id = ? AND portfolio_id = ?`,
+      [randomUUID(), ownId, ctx.userId, input.portfolioId],
+    );
+  }
+
+  const assumptions = createDividendAssumptionsRepository(ctx.client);
+  for (const item of input.dividendSecurityAssumptions) {
+    const securityId = securityRefToId.get(item.securityRef);
+    if (!securityId) continue;
+    const saved = await assumptions.saveSecurityAssumptions(
+      ctx.userId,
+      input.portfolioId,
+      securityId,
+      {
+        dividendYieldPercentDecimal: item.dividendYieldPercentDecimal,
+        frankingPercentDecimal: item.frankingPercentDecimal,
+        dividendGrowthPercentDecimal: item.dividendGrowthPercentDecimal,
+        forceAssumption: item.forceAssumption ?? false,
+        expectedVersion: null,
+        requestId: ctx.requestId,
+      },
+    );
+    if (!saved.ok) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        "A per-security assumption could not be replayed.",
+      );
+    }
+  }
+  if (input.dividendPortfolioAssumption) {
+    const saved = await assumptions.savePortfolioAssumptions(
+      ctx.userId,
+      input.portfolioId,
+      {
+        valueGrowthPercentDecimal:
+          input.dividendPortfolioAssumption.valueGrowthPercentDecimal,
+        portfolioDividendGrowthPercentDecimal:
+          input.dividendPortfolioAssumption
+            .portfolioDividendGrowthPercentDecimal,
+        expectedVersion: null,
+        requestId: ctx.requestId,
+      },
+    );
+    if (!saved.ok) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        "The portfolio-level assumption could not be replayed.",
+      );
+    }
+  }
+
+  const fyOverrides = createDividendFyOverrideRepository(ctx.client);
+  for (const item of input.dividendFyOverrides) {
+    const saved = await fyOverrides.save(
+      ctx.userId,
+      input.portfolioId,
+      item.financialYearEndingYear,
+      {
+        grossedAmountDecimal: item.grossedAmountDecimal,
+        frankingAmountDecimal: item.frankingAmountDecimal,
+        expectedVersion: null,
+        requestId: ctx.requestId,
+      },
+    );
+    if (!saved.ok) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        "An FY override could not be replayed.",
+      );
+    }
+  }
+
+  const eventOverrides = createDividendEventOverrideRepository(ctx.client);
+  let skippedDividendEventOverrides = 0;
+  for (const item of input.dividendEventOverrides) {
+    const securityId = securityRefToId.get(item.securityRef);
+    if (!securityId) continue;
+    const eventRow = await ctx.client.get<{ id: string }>(
+      "SELECT id FROM dividend_events WHERE id = ? LIMIT 1",
+      [item.dividendEventId],
+    );
+    if (!eventRow) {
+      skippedDividendEventOverrides += 1;
+      continue;
+    }
+    const saved = await eventOverrides.save(
+      ctx.userId,
+      input.portfolioId,
+      securityId,
+      item.dividendEventId,
+      {
+        sharesDecimal: item.sharesDecimal,
+        dividendPerShareDecimal: item.dividendPerShareDecimal,
+        frankingCreditPerShareDecimal: item.frankingCreditPerShareDecimal,
+        exclude: item.exclude,
+        expectedVersion: null,
+        requestId: ctx.requestId,
+      },
+    );
+    if (!saved.ok) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        "A dividend event override could not be replayed.",
+      );
+    }
+  }
+
+  const frankingOverrides = createDividendImportFrankingOverrideRepository(
+    ctx.client,
+  );
+  for (const item of input.dividendImportFrankingOverrides) {
+    const securityId = securityRefToId.get(item.securityRef);
+    const recordId = divRefToId.get(item.dividendManualRecordRef);
+    if (!securityId || !recordId) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        "A franking override references a record that failed to replay.",
+      );
+    }
+    const saved = await frankingOverrides.save(
+      ctx.userId,
+      input.portfolioId,
+      securityId,
+      recordId,
+      {
+        frankingTotalDecimal: item.frankingTotalDecimal,
+        expectedVersion: null,
+        requestId: ctx.requestId,
+      },
+    );
+    if (!saved.ok) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        "A franking override could not be replayed.",
+      );
+    }
+  }
+
+  const scenarios = createIncomeScenarioRepository(ctx.client);
+  for (const scenario of input.whatifScenarios) {
+    let rows: CapitalEventInput[];
+    try {
+      const parsed: unknown = JSON.parse(scenario.capitalRowsJson);
+      rows = Array.isArray(parsed)
+        ? parsed.filter((row): row is CapitalEventInput =>
+            isValidCapitalEventInputRow(row),
+          )
+        : [];
+    } catch {
+      rows = [];
+    }
+    const saved = await scenarios.save(ctx.userId, input.portfolioId, {
+      name: scenario.name,
+      rows,
+      reinvestDividends: scenario.reinvestDividends,
+      valueGrowthPercentDecimal: scenario.valueGrowthPercentDecimal,
+      dividendGrowthPercentDecimal: scenario.dividendGrowthPercentDecimal,
+      requestId: ctx.requestId,
+    });
+    if (!saved.ok) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        "A saved what-if scenario could not be replayed.",
+      );
+    }
+  }
+
+  if (input.portfolioStatus === "archived") {
+    const currentPortfolio = await ctx.client.get<{
+      version: number;
+      status: string;
+    }>(
+      "SELECT version, status FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1",
+      [input.portfolioId, ctx.userId],
+    );
+    if (!currentPortfolio) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        "The restored portfolio could not be found to archive it.",
+      );
+    }
+    if (currentPortfolio.status !== "archived") {
+      const portfolios = createOwnedPortfolioRepository(ctx.client, undefined, {
+        requestId: ctx.requestId,
+      });
+      const archived = await portfolios.archive(ctx.userId, input.portfolioId, {
+        expectedVersion: currentPortfolio.version,
+      });
+      if (!archived.ok) {
+        return commitFailure(
+          ctx,
+          input.batchId,
+          "The restored portfolio could not be archived to match its exported status.",
+        );
+      }
+    }
+  }
+
+  await ctx.client.run(
+    `UPDATE import_batches SET status = 'committed', committed_at = ?, updated_at = ?,
+      total_rows = ?, transaction_rows = ?
+     WHERE id = ? AND user_id = ?`,
+    [
+      new Date().toISOString(),
+      new Date().toISOString(),
+      input.transactionsCount + input.dividendRecordsCount,
+      input.transactionsCount,
+      input.batchId,
+      ctx.userId,
+    ],
+  );
+
+  return { ok: true, result: { skippedDividendEventOverrides } };
 }
 
 export { MAX_BUNDLE_REQUEST_BYTES };

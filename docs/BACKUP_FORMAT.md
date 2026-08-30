@@ -381,6 +381,208 @@ unchangedCount, batchIds}` under a SHA-256 digest of the selected file — the
   resets at 00:00 UTC. This is resumability, not a claim that waiting seconds
   increases the daily allowance.
 
+## Cloudflare Workers Free CORE transfer protocol (EXP-004)
+
+EXP-003 (above) paged only the PRICE section — the core commit (account
+settings, every portfolio's securities/transactions/dividends/overrides/
+scenarios, watchlist) remained one unbounded request, an explicitly recorded
+EXP-003 follow-up ("(i) the core commit remains one unbounded request; only
+the price section was paged"). This became a production incident on the
+Free plan: restoring a real backup (1 portfolio, 107 transactions, 119
+dividend records) hit HTTP 500 at transaction #63, the request's 10ms CPU
+budget exhausted mid-replay, leaving 63 transactions committed and no way to
+resume other than starting the whole portfolio over. EXP-004 makes the CORE
+commit resumable/chunked the same way EXP-003 already made price restore
+resumable/chunked, WITHOUT changing the `SystemBackupV1` artifact format —
+chunking is transport-level only, exactly like EXP-003's own price paging.
+
+### Part decomposition
+
+One system-backup restore now proceeds as four kinds of request instead of
+one:
+
+1. **Scaffold** (one request, covers every nested portfolio): the
+   fresh-account precondition, `user_settings` overwrite, and for EACH
+   portfolio bundle — its destination portfolio (create-once, reuse
+   thereafter), `portfolio_settings`, and every security's `resolveAndLink`
+   resolution/`portfolio_securities` restoration (`commitPortfolioBundleScaffold`,
+   `app/portfolio-bundle-service.ts`) — then the watchlist. Bounded by
+   portfolio + security COUNT, never transaction/dividend count, so this
+   stays cheap even for a large ledger. Returns each portfolio's destination
+   id, its `securities` ref→id map (the browser needs this for every later
+   part), and LIVE resume evidence (`committedTransactionCount`/
+   `committedDividendCount` — see "Resume evidence" below).
+2. **Transactions part** (one portfolio, ~100 rows/request —
+   `TRANSACTIONS_RESTORE_CHUNK_ROWS`, `system-backup-panel.tsx`):
+   `commitPortfolioBundleTransactionsPart` replays a bounded, already
+   chain-ordered (`domain/exports/chain-order.ts`) slice via the SAME
+   `ledger.post`/`reverse`/`supersede` calls the whole-bundle path always
+   used.
+3. **Dividends part** (one portfolio, ~100 rows/request —
+   `DIVIDENDS_RESTORE_CHUNK_ROWS`): `commitPortfolioBundleDividendsPart`
+   replays a bounded, chain-ordered slice via the SAME manual-create/
+   import-insert paths as before.
+4. **Finalize** (one portfolio, once every transactions/dividends part for
+   it has completed): `commitPortfolioBundleFinalize` — dividend
+   supersession linkage + tombstone exclusion, per-security/portfolio
+   assumptions, FY/event/franking overrides, saved what-if scenarios,
+   archiving to match the bundle's own exported status, and marking that
+   portfolio's `import_batches` row `committed`. Small-cardinality data,
+   bounded by override/scenario counts, not transaction count.
+
+Both part sizes are a starting point (see the task that introduced this);
+tune down further if a real restore still exhausts its CPU budget at this
+size — the observed production failure hit its budget around transaction
+#63 in a request ALSO doing portfolio creation, security resolution, and 62
+other transactions, so ~100 pure transaction writes per request may still
+need lowering once measured against a real deployment.
+
+Every part independently re-validates its OWN inputs against the live
+database (IMP-010B: chunking must never move validation authority to the
+browser) — `commitPortfolioBundleTransactionsPart`/`...DividendsPart` re-run
+`validateTransaction`/`validateDividendManualRecord`
+(`domain/exports/portfolio-bundle.ts`, exported for this reuse) on every row,
+verify the target portfolio belongs to the authenticated owner, and verify
+every `portfolioSecurityId` the browser echoes back from scaffold actually
+belongs to that owner/portfolio before writing anything.
+
+### Idempotent identity per row type
+
+Every write is either ALREADY idempotent by an EXISTING natural/derived key
+(reused unchanged), or gained one under this task per the binding design
+constraint ("if no idempotent identity exists for a row type, pick the
+smallest sound one and document it here"):
+
+- **Transactions**: unchanged — `bundle:<fingerprint>:<ref>` (already the
+  whole-bundle path's own derived `idempotencyKey`), enforced by
+  `transactions_owner_portfolio_idempotency_unique`. A reversal/
+  supersession's TARGET transaction is looked up by this SAME key via a
+  direct, owner/portfolio-scoped query rather than an in-process `Map` —
+  necessary because a `Map` cannot survive a Worker request boundary once
+  target lookup and the write that created the target land in DIFFERENT
+  HTTP requests.
+- **Dividend manual records**: EXTENDED. The whole-bundle path only ever set
+  `idempotency_key` for the owner-dialog CREATE path (`wasImported: false`);
+  the import-insert path (`wasImported: true`) relied solely on
+  `dividend_manual_records_portfolio_source_reference_unique` — sufficient
+  when a doomed retry always replayed into a brand-new portfolio (see
+  "Resume strategy" below), but NOT sufficient once a retry can legitimately
+  resend an already-written row into the SAME portfolio: a raw unique-index
+  hit is not itself a graceful "already done" signal. EXP-004 sets the SAME
+  derived key, `bundle:<fingerprint>:<ref>`, as `idempotency_key` on EVERY
+  dividend manual record this replay creates, regardless of path
+  (`buildDividendManualRecordImportInsertStatements` gained an optional
+  `idempotencyKey` field for this; `db/repositories/dividends.ts`'s
+  `createDividendManualRecordRepository` gained an exported
+  `getByIdempotencyKey` to look it up later, scoped by
+  `(portfolio_security_id, idempotency_key)` per the existing
+  `dividend_manual_records_security_idempotency_unique` index). This key is
+  purely a replay-dedupe mechanism; the row's own `source_reference`
+  (preserved verbatim when the ORIGINAL import already recorded one) is
+  untouched.
+- **Securities**: unchanged — `resolveAndLink`'s own natural-key
+  (`portfolio_id`, `source_symbol`, `source_exchange_alias`,
+  `source_currency_code`) check, safe to re-run on every scaffold call
+  including a resume.
+- **Watchlist / account settings**: unchanged from EXP-002 (already
+  idempotent by construction on every prior retry path too).
+- **What-if scenarios**: genuinely NO natural key (`income_whatif_scenarios`
+  is deliberately create-only — "an owner may genuinely want two scenarios
+  with the same name", `db/repositories/income-scenarios.ts`'s own `save()`
+  comment). `commitPortfolioBundleFinalize` short-circuits as a whole no-op
+  once its batch already reads `committed`, which covers the common retry
+  case (the browser never saw an earlier successful response). The narrow
+  residual gap — a crash PARTWAY through one finalize call's own body,
+  before the final status flip, followed by a retry — could duplicate a
+  what-if scenario. Accepted, not fixed: this is non-ledger planning data,
+  never a transaction/dividend/holding figure, and finalize's own body is
+  small (bounded by override/scenario counts) so this window is narrow.
+
+### Resume strategy: resume in place, not archive-and-recreate
+
+**Superseded design note**: EXP-002/EXP-003's own retry strategy (see
+"Failure isolation and retry" above) ARCHIVED a leftover portfolio from a
+failed/interrupted attempt and replayed into a BRAND-NEW one on every retry
+— correct and necessary for a single-shot whole-portfolio commit, where a
+non-`committed` batch could only mean an abandoned attempt (nothing durable
+beyond a possibly-empty destination portfolio could exist yet). EXP-004
+makes this the WRONG strategy: a chunked restore deliberately leaves a
+`committing` `import_batches` row with REAL, wanted transactions/dividends
+between every part request — archiving it on resume would DESTROY genuine
+progress, which is the exact failure mode this task exists to prevent.
+
+`commitPortfolioBundleScaffold` therefore REUSES an existing
+`target_portfolio_id` whenever one is already recorded for this bundle's
+fingerprint (regardless of `committing`/`failed`/`committed` status) rather
+than resetting it — the destination portfolio, its code, and every
+already-written row all stay exactly as they are; only the missing
+transactions/dividends get written by the parts that follow.
+`findLeftoverPortfolioForRetry`/`archiveLeftoverPortfolio` (the machinery
+this replaces) have been deleted as dead code, not left running alongside
+the new strategy. The fresh-account precondition
+(`countUnrelatedPortfolios`) is UNCHANGED in behavior (any-status
+relatedness still applies) but no longer needs its own "exclude an archived
+leftover" carve-out, since there is no longer a leftover to exclude.
+
+This is exactly what makes EXP-004 correct against the production
+incident's own aftermath: the account currently has a portfolio with ~63 of
+107 transactions committed under the OLD, unchunked code. Re-running the
+SAME backup file after this deploy computes the SAME fingerprint and the
+SAME per-row derived keys the old code already used, so scaffold recognizes
+and resumes into that exact portfolio, and the transactions/dividends parts
+write only the missing rows — no wipe, no duplication, no manual
+intervention required (though the owner may still choose to wipe and retry
+clean).
+
+### Resume evidence: server-derived, not a client-trusted cursor
+
+Unlike EXP-003's price-chunk cursor (a browser-held `{nextChunk, ...,
+batchIds}` claim, honored only after a separate server probe confirms the
+claimed batch ids still exist), the CORE restore needs no client-side cursor
+at all for correctness. Every scaffold call — fresh or resumed, even after a
+browser reload mid-restore — returns LIVE counts
+(`committedTransactionCount`/`committedDividendCount`, a direct
+`COUNT(*) ... WHERE idempotency_key LIKE 'bundle:<fingerprint>:%'` query
+against the target portfolio) of rows ALREADY durably written under this
+bundle's own derived-key namespace. The browser always re-derives "how much
+is left" by slicing its own chain-ordered array at that count
+(`orderedTransactions.slice(committedTransactionCount)`), never from
+anything stored in `localStorage`. A stale or wrong client-side guess can
+therefore never skip real, unwritten rows — at worst it would resend
+already-written rows, which every write tolerates as a cheap no-op via the
+idempotency keys above. `system-backup-panel.tsx` still relies on
+`ledger.post`/`reverse`/`supersede`'s existing built-in idempotency-key
+short-circuit for a mid-part interruption (the SAME part resent after a
+crash replays already-written rows as no-ops and continues from there),
+exactly as the whole-bundle path already did within one request.
+
+### Partial-failure messaging (per-phase, honest)
+
+Each phase reports failure with wording specific to what actually happened
+(`system-backup-panel.tsx`): a transactions/dividends part failure names the
+portfolio and part index and states that completed work is safe (naming the
+D1 daily-write-limit/00:00 UTC reset, mirroring EXP-003's own price-chunk
+message); a scaffold failure states that any already-prepared portfolio
+stays prepared; a finalize failure states that the portfolio's transactions/
+dividends are already safely restored and only its final annotations/status
+remain. This targets EXP-003's own recorded follow-up (g) ("`fetchJson`'s
+non-JSON error copy claims chunk progress was saved even on ... paths with
+no chunks") for the NEW core-restore call sites this task adds — the
+generic price-chunk wording was accurate only for price chunks; it is not
+reused verbatim for scaffold/finalize, which are not "chunks" in the same
+sense even though they ARE safely resumable.
+
+### Legacy whole-core commit path
+
+`commitSystemBackupImport` (`app/system-backup-service.ts`) still exists,
+but is no longer reachable over HTTP — `commitSystemBackupImportAction` and
+its dedicated route dispatch were removed; `/api/system-backup/import/commit`
+now dispatches the four phases above by a `phase` field
+(`system-backup-actions.ts`'s `commitSystemBackupCorePartAction`). The
+function itself was rewritten to COMPOSE the same scaffold/parts/finalize
+functions in one call (never a second, independent write path) and is kept
+only as a non-chunked convenience for tests and any future non-HTTP caller.
+
 ## Design: reuse, not reinvention
 
 `domain/exports/system-backup.ts` / `db/repositories/system-backup.ts` /
@@ -655,6 +857,13 @@ archived, never silently resurrected active.
 
 Account settings → each portfolio (array order, one nested
 `commitPortfolioBundleImport` call at a time) → watchlist → price history.
+**EXP-004 note**: this describes `commitSystemBackupImport`'s own (now
+test-only, non-HTTP) composed call order. The actual browser-driven HTTP
+protocol interleaves differently — ONE scaffold request covers account
+settings + every portfolio's own destination/securities + watchlist
+together, THEN each portfolio's transactions/dividends/finalize follow as
+separate requests — see "Cloudflare Workers Free CORE transfer protocol
+(EXP-004)" below for the real sequencing.
 Settings restore FIRST guarantees every nested portfolio's own
 EXP-001 base-currency precondition (bundle currency must equal the
 account's CURRENT home currency) is checked against the just-restored
@@ -675,6 +884,17 @@ The owner's real account is single-portfolio/single-currency, so this does
 not affect the acceptance/real-data results below.
 
 ### Failure isolation and retry (atomic per piece, not atomic for the whole artifact)
+
+**Superseded by EXP-004** (see "Cloudflare Workers Free CORE transfer
+protocol (EXP-004)" below): the archive-and-recreate retry strategy this
+section documents applied to the single-shot whole-core commit
+(`commitPortfolioBundleImport`, still used by EXP-001's own standalone
+per-portfolio bundle import UI, unaffected). The system-backup restore's OWN
+core commit now goes through EXP-004's resumable scaffold/transactions/
+dividends/finalize functions instead, which RESUME an interrupted portfolio
+in place rather than archiving it — this section is retained for historical
+context (why the original design worked the way it did) but no longer
+describes current CORE-restore behavior.
 
 Portfolios commit ONE AT A TIME in the backup's own array order. The FIRST
 portfolio failure stops the whole commit immediately: account settings and

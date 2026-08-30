@@ -1121,6 +1121,13 @@ export type BuildDividendManualRecordImportInsertInput = {
   fxRateSource?: string | null;
   importBatchId: string;
   sourceReference: string;
+  // EXP-004: unlike `sourceReference` (preserved verbatim from the row's
+  // ORIGINAL import evidence, when the row already carried one before this
+  // replay -- see the caller's own comment), this is purely an internal
+  // replay-dedupe key. Optional/omittable for every OTHER caller of this
+  // builder (`db/repositories/import-commit.ts`), which never needs it and
+  // leaves the column NULL as before.
+  idempotencyKey?: string | null;
   requestId: string;
   now: string;
 };
@@ -1226,8 +1233,8 @@ export function buildDividendManualRecordImportInsertStatements(
         franking_credit_per_share_decimal, import_batch_id, source_reference,
         total_cash_decimal, total_franking_decimal,
         currency_code, fx_rate_to_portfolio_decimal, fx_rate_source,
-        created_at, updated_at, version
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        idempotency_key, created_at, updated_at, version
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       params: [
         id,
         input.userId,
@@ -1244,6 +1251,7 @@ export function buildDividendManualRecordImportInsertStatements(
         currencyCode,
         fxRateToPortfolioDecimal,
         fxRateSource,
+        input.idempotencyKey ?? null,
         input.now,
         input.now,
       ],
@@ -3336,7 +3344,12 @@ export function createDividendManualRecordRepository(
     return { ok: true };
   }
 
-  return { get, list, create, supersede, remove };
+  // EXP-004: exposes the same idempotency-key lookup `create()` already uses
+  // internally so a resumable, chunked replay (`app/portfolio-bundle-service.ts`)
+  // can re-derive "the row already created for bundle ref X" across separate
+  // HTTP requests without holding an in-memory ref->id map, which cannot
+  // survive a Worker request boundary.
+  return { get, list, create, getByIdempotencyKey, supersede, remove };
 }
 
 // ---------------------------------------------------------------------------

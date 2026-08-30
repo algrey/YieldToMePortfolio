@@ -309,18 +309,22 @@ export async function restoreWatchlist(
  * than a new system-level batch table -- no migration needed.
  *
  * Only ACTIVE portfolios are checked against `nestedFingerprints` -- an
- * ARCHIVED one is never "in the way": either it is the owner's own
+ * ARCHIVED one is never "in the way": it is either the owner's own
  * pre-existing archived portfolio (already set aside, not a live conflict
- * with a fresh restore -- `commitPortfolioBundleImport`'s own code-collision
- * retry handles a colliding `code` regardless of the other portfolio's
- * status), or it is exactly the leftover partial-restore remnant this
- * module's OWN `archiveLeftoverPortfolio` (`app/system-backup-service.ts`)
- * just archived on an earlier retry -- once archived, its `import_batches`
- * row has already been re-pointed at the NEW portfolio the successful retry
- * created, so it is no longer traceable by fingerprint at all. Without this
- * exclusion, a cleaned-up leftover would itself trip THIS precondition on
- * every later restore attempt (idempotent or otherwise) -- the opposite of
- * what the cleanup was for.
+ * with a fresh restore -- `commitPortfolioBundleScaffold`'s own code-
+ * collision retry handles a colliding `code` regardless of the other
+ * portfolio's status), or a portfolio the backup's OWN bundle recorded as
+ * archived and this restore itself archived to match (EXP-002's B2 ruling).
+ *
+ * EXP-004 note: earlier revisions of this restore ARCHIVED a leftover
+ * partial-replay portfolio before every retry (a single-shot commit could
+ * only ever leave an abandoned attempt behind). `commitPortfolioBundleScaffold`
+ * (`app/portfolio-bundle-service.ts`) now RESUMES a `committing`/`failed`
+ * batch's existing `target_portfolio_id` in place instead -- a chunked
+ * restore leaves real, wanted progress on that batch between requests, not
+ * an abandoned attempt -- so this precondition no longer needs to special-
+ * case an archived leftover at all; every existing portfolio is either
+ * genuinely unrelated or still traceable, live, to its own bundle.
  */
 export async function countUnrelatedPortfolios(
   client: SqlClient,
@@ -359,35 +363,4 @@ async function accountedPortfolioIds(
       .map((row) => row.target_portfolio_id)
       .filter((id): id is string => id !== null && id !== undefined),
   );
-}
-
-/**
- * B1 ruling: reads the import_batches row (if any) for ONE nested bundle's
- * fingerprint BEFORE `commitPortfolioBundleImport` runs -- which, for a
- * `failed`/still-`committing` batch, RESETS `target_portfolio_id` to NULL as
- * part of its own retry-reuse (`app/portfolio-bundle-service.ts`'s B2 fix).
- * Capturing the pre-reset value here is what lets the caller archive that
- * leftover partial portfolio BEFORE it becomes an unattributable orphan (an
- * import_batches row can only ever point at ONE portfolio at a time, so
- * once the retry succeeds and re-points it at a NEW portfolio, the OLD one
- * would otherwise never be reachable through this fingerprint again).
- */
-export async function findLeftoverPortfolioForRetry(
-  client: SqlClient,
-  userId: string,
-  fingerprint: string,
-): Promise<{ portfolioId: string } | null> {
-  const row = await client.get<{
-    status: string;
-    target_portfolio_id: string | null;
-  }>(
-    `SELECT status, target_portfolio_id FROM import_batches
-     WHERE user_id = ? AND file_sha256 = ? AND parser_format = 'portfolio-bundle-json'
-     LIMIT 1`,
-    [userId, fingerprint],
-  );
-  if (!row) return null;
-  if (row.status === "committed") return null;
-  if (row.target_portfolio_id === null) return null;
-  return { portfolioId: row.target_portfolio_id };
 }

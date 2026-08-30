@@ -20,6 +20,8 @@ import {
   type PriceBackupMalformedReason,
 } from "../../domain/market-data/price-backup-csv.ts";
 import type { SystemBackupV1 } from "../../domain/exports/system-backup.ts";
+import { chainOrder } from "../../domain/exports/chain-order.ts";
+import { chunkRows } from "../../domain/exports/chunk-rows.ts";
 import {
   EMPTY_RESTORE_PROGRESS,
   isResumeCursorValid,
@@ -30,7 +32,20 @@ import {
 
 const FETCH_TIMEOUT_MS = 30_000;
 const PRICE_RESTORE_CHUNK_ROWS = 200;
+// EXP-004: the core restore's own part sizes. Deliberately smaller than the
+// price chunk above -- each transaction/dividend write does real ledger/
+// dividend-repository work (inventory validation, decimal parsing, audit
+// inserts), unlike a price row's simpler upsert, so the same CPU budget
+// affords fewer rows per request. Recommended starting point per the task
+// that introduced this (see docs/BACKUP_FORMAT.md); tune down further if a
+// real restore still times out at this size.
+const TRANSACTIONS_RESTORE_CHUNK_ROWS = 100;
+const DIVIDENDS_RESTORE_CHUNK_ROWS = 100;
 const CHUNK_PAUSE_MS = 100;
+
+function defaultNonJsonMessage(httpStatus: number): string {
+  return `Cloudflare ended the request (HTTP ${httpStatus}). Progress from completed chunks is saved; wait and retry the same backup.`;
+}
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
@@ -39,6 +54,14 @@ function isAbortError(error: unknown): boolean {
 async function fetchJson<T>(
   input: string,
   init?: RequestInit,
+  // EXP-004 (follow-up (g) from EXP-003's own recorded follow-ups): the
+  // generic "progress from completed chunks is saved" copy is only honest
+  // for a call site that is ACTUALLY chunked/resumable that way -- callers
+  // whose failure means something different (e.g. account-settings/
+  // watchlist scaffold-time work, which is idempotent to re-run but is not
+  // itself split into "chunks") pass their own accurate wording instead of
+  // inheriting this default.
+  nonJsonMessage?: (httpStatus: number) => string,
 ): Promise<{ ok: true; value: T } | { ok: false; message: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -51,7 +74,7 @@ async function fetchJson<T>(
     } catch {
       return {
         ok: false,
-        message: `Cloudflare ended the request (HTTP ${response.status}). Progress from completed chunks is saved; wait and retry the same backup.`,
+        message: (nonJsonMessage ?? defaultNonJsonMessage)(response.status),
       };
     }
     const typed = result as
@@ -72,14 +95,6 @@ async function fetchJson<T>(
 
 function waitBetweenChunks(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, CHUNK_PAUSE_MS));
-}
-
-function chunkRows<T>(rows: readonly T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let index = 0; index < rows.length; index += size) {
-    chunks.push(rows.slice(index, index + size));
-  }
-  return chunks;
 }
 
 function backupUploadRow(row: PriceBackupDataRow) {
@@ -172,12 +187,17 @@ async function verifyResumeCursorBatches(
 function postJson<T>(
   input: string,
   payload: unknown,
+  nonJsonMessage?: (httpStatus: number) => string,
 ): Promise<{ ok: true; value: T } | { ok: false; message: string }> {
-  return fetchJson<T>(input, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  return fetchJson<T>(
+    input,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    nonJsonMessage,
+  );
 }
 
 type AccountSettingsSnapshot = {
@@ -208,6 +228,33 @@ type SystemBackupPreview = {
   }>;
   priceBackup: { rowCount: number; malformedCount: number };
   precondition: { fresh: boolean; unrelatedPortfolioCount: number };
+};
+
+// EXP-004: mirrors `app/system-backup-service.ts`'s `SystemBackupScaffoldResult`/
+// `SystemBackupScaffoldPortfolio` -- redeclared here rather than imported,
+// matching this file's existing convention of never importing server-only
+// modules into a "use client" component (see `SystemBackupCommitResult`/
+// `SystemBackupPreview` below, which do the same for the pre-existing
+// server types).
+type ScaffoldSecurity = { ref: string; portfolioSecurityId: string };
+type ScaffoldPortfolio = {
+  idempotent: boolean;
+  batchId: string;
+  fingerprint: string;
+  portfolioId: string;
+  portfolioName: string;
+  code: string;
+  securities: ScaffoldSecurity[];
+  committedTransactionCount: number;
+  committedDividendCount: number;
+};
+type ScaffoldResult = {
+  watchlist: {
+    securitiesAdded: number;
+    securitiesSkipped: number;
+    pairsAdded: number;
+  };
+  portfolios: ScaffoldPortfolio[];
 };
 
 type SystemBackupCommitResult = {
@@ -432,16 +479,179 @@ export function SystemBackupPanel() {
       setError(prepared.message);
       return;
     }
-    const coreOutcome = await postJson<{ result: SystemBackupCommitResult }>(
+    // EXP-004: the CORE restore itself is now resumable/chunked, mirroring
+    // the price loop below -- ONE bounded scaffold request (account
+    // settings, every portfolio's own destination/settings/securities, and
+    // the watchlist), then each portfolio's transactions/dividends in
+    // bounded parts, then a small finalize request per portfolio. Resume
+    // evidence (`committedTransactionCount`/`committedDividendCount`) comes
+    // straight from the scaffold response's LIVE server-side counts, never
+    // from anything stored in this browser -- calling scaffold again after
+    // an interruption (even one that reloaded this page) is always safe and
+    // always picks up exactly where the account's own data actually is. See
+    // `commitPortfolioBundleScaffold`'s header comment
+    // (`app/portfolio-bundle-service.ts`) for the full design rationale.
+    setProgress("Preparing account settings, portfolios, and watchlist…");
+    const scaffoldOutcome = await postJson<{ result: ScaffoldResult }>(
       "/api/system-backup/import/commit",
-      { backup: prepared.value.coreBackup, filename: file?.name },
+      {
+        phase: "scaffold",
+        backup: prepared.value.coreBackup,
+        filename: file?.name,
+      },
+      (status) =>
+        `Cloudflare ended the request (HTTP ${status}) while preparing the restore. Nothing here is lost -- any portfolio already prepared stays prepared; re-select this same backup and confirm again to retry.`,
     );
-    if (!coreOutcome.ok) {
+    if (!scaffoldOutcome.ok) {
       setPending(false);
       setProgress(null);
-      setError(coreOutcome.message);
+      setError(scaffoldOutcome.message);
       return;
     }
+
+    const portfolioResults: Array<
+      SystemBackupCommitResult["portfolios"][number]
+    > = [];
+    for (const [
+      index,
+      portfolioScaffold,
+    ] of scaffoldOutcome.value.result.portfolios.entries()) {
+      const bundle = prepared.value.coreBackup.portfolios[index]!;
+      if (!portfolioScaffold.idempotent) {
+        const orderedTransactions = chainOrder(
+          bundle.transactions,
+          (tx) => tx.reversesRef ?? tx.supersedesRef,
+        );
+        const remainingTransactions = orderedTransactions.slice(
+          portfolioScaffold.committedTransactionCount,
+        );
+        const transactionParts = chunkRows(
+          remainingTransactions,
+          TRANSACTIONS_RESTORE_CHUNK_ROWS,
+        );
+        for (const [partIndex, part] of transactionParts.entries()) {
+          setProgress(
+            `Restoring "${portfolioScaffold.portfolioName}": transactions part ${partIndex + 1} of ${transactionParts.length}…`,
+          );
+          const partOutcome = await postJson<{
+            result: { committedCount: number };
+          }>(
+            "/api/system-backup/import/commit",
+            {
+              phase: "transactions",
+              portfolioId: portfolioScaffold.portfolioId,
+              batchId: portfolioScaffold.batchId,
+              fingerprint: portfolioScaffold.fingerprint,
+              securities: portfolioScaffold.securities,
+              transactions: part,
+            },
+            (status) =>
+              `Cloudflare ended the request (HTTP ${status}) while restoring "${portfolioScaffold.portfolioName}"'s transactions. Every transaction written so far is safe; re-select this same backup and confirm again to resume.`,
+          );
+          if (!partOutcome.ok) {
+            setPending(false);
+            setProgress(null);
+            setError(
+              `Restore paused while restoring "${portfolioScaffold.portfolioName}"'s transactions (part ${partIndex + 1} of ${transactionParts.length}). Completed work is safe. Re-select this same backup and confirm again to resume; if the D1 daily write allowance was reached, retry after 00:00 UTC. ${partOutcome.message}`,
+            );
+            return;
+          }
+          await waitBetweenChunks();
+        }
+
+        const orderedDividends = chainOrder(
+          bundle.dividendManualRecords,
+          (record) => record.supersedesRef,
+        );
+        const remainingDividends = orderedDividends.slice(
+          portfolioScaffold.committedDividendCount,
+        );
+        const dividendParts = chunkRows(
+          remainingDividends,
+          DIVIDENDS_RESTORE_CHUNK_ROWS,
+        );
+        for (const [partIndex, part] of dividendParts.entries()) {
+          setProgress(
+            `Restoring "${portfolioScaffold.portfolioName}": dividend records part ${partIndex + 1} of ${dividendParts.length}…`,
+          );
+          const partOutcome = await postJson<{
+            result: { committedCount: number };
+          }>(
+            "/api/system-backup/import/commit",
+            {
+              phase: "dividends",
+              portfolioId: portfolioScaffold.portfolioId,
+              batchId: portfolioScaffold.batchId,
+              fingerprint: portfolioScaffold.fingerprint,
+              securities: portfolioScaffold.securities,
+              records: part,
+            },
+            (status) =>
+              `Cloudflare ended the request (HTTP ${status}) while restoring "${portfolioScaffold.portfolioName}"'s dividend records. Every record written so far is safe; re-select this same backup and confirm again to resume.`,
+          );
+          if (!partOutcome.ok) {
+            setPending(false);
+            setProgress(null);
+            setError(
+              `Restore paused while restoring "${portfolioScaffold.portfolioName}"'s dividend records (part ${partIndex + 1} of ${dividendParts.length}). Completed work is safe. Re-select this same backup and confirm again to resume; if the D1 daily write allowance was reached, retry after 00:00 UTC. ${partOutcome.message}`,
+            );
+            return;
+          }
+          await waitBetweenChunks();
+        }
+
+        setProgress(`Finishing "${portfolioScaffold.portfolioName}"…`);
+        const finalizeOutcome = await postJson<{
+          result: { skippedDividendEventOverrides: number };
+        }>(
+          "/api/system-backup/import/commit",
+          {
+            phase: "finalize",
+            portfolioId: portfolioScaffold.portfolioId,
+            batchId: portfolioScaffold.batchId,
+            fingerprint: portfolioScaffold.fingerprint,
+            securities: portfolioScaffold.securities,
+            dividendLinkage: bundle.dividendManualRecords.map((record) => ({
+              ref: record.ref,
+              securityRef: record.securityRef,
+              supersedesRef: record.supersedesRef,
+              supersededByDeletedRecord: record.supersededByDeletedRecord,
+            })),
+            dividendSecurityAssumptions: bundle.dividendSecurityAssumptions,
+            dividendPortfolioAssumption: bundle.dividendPortfolioAssumption,
+            dividendFyOverrides: bundle.dividendFyOverrides,
+            dividendEventOverrides: bundle.dividendEventOverrides,
+            dividendImportFrankingOverrides:
+              bundle.dividendImportFrankingOverrides,
+            whatifScenarios: bundle.whatifScenarios,
+            portfolioStatus: bundle.portfolio.status,
+            transactionsCount: bundle.transactions.length,
+            dividendRecordsCount: bundle.dividendManualRecords.length,
+          },
+          (status) =>
+            `Cloudflare ended the request (HTTP ${status}) while finishing "${portfolioScaffold.portfolioName}". Its transactions and dividend records are already safely restored; re-select this same backup and confirm again to finish.`,
+        );
+        if (!finalizeOutcome.ok) {
+          setPending(false);
+          setProgress(null);
+          setError(
+            `Restore paused while finishing "${portfolioScaffold.portfolioName}". Its transactions and dividend records are already safely restored -- only account-level annotations (assumptions, overrides, saved scenarios) and its final status remain. Re-select this same backup and confirm again to resume. ${finalizeOutcome.message}`,
+          );
+          return;
+        }
+      }
+      portfolioResults.push({
+        name: portfolioScaffold.portfolioName,
+        code: portfolioScaffold.code,
+        idempotent: portfolioScaffold.idempotent,
+        portfolioId: portfolioScaffold.portfolioId,
+      });
+    }
+    const coreResult: SystemBackupCommitResult = {
+      portfolios: portfolioResults,
+      watchlist: scaffoldOutcome.value.result.watchlist,
+      priceBackup: null,
+    };
     const stored = readRestoreProgress(prepared.value.digest);
     // Review B3 fix (BLOCKING, 2026-08-28): a stored cursor is a RESUME
     // CLAIM, not a fact -- honor it only once the batches it claims to have
@@ -513,7 +723,7 @@ export function SystemBackupPanel() {
     setPending(false);
     setProgress(null);
     setResult({
-      ...coreOutcome.value.result,
+      ...coreResult,
       priceBackup:
         prepared.value.priceChunks.length > 0
           ? {
@@ -621,9 +831,11 @@ export function SystemBackupPanel() {
         restores the watchlist and account settings, and restores price history.
         Undo by archiving the restored portfolios from Settings and removing the
         restored price history from the price-history backup section above.
-        Large price histories are restored in small, idempotent parts. If the
-        Free-plan daily D1 allowance is reached, re-select the same file after
-        00:00 UTC and the browser resumes from the last completed part.
+        Large portfolios (many transactions or dividend records) and large price
+        histories are both restored in small, idempotent parts. If the Free-plan
+        daily D1 allowance is reached, or the restore is otherwise interrupted,
+        re-select the same file after 00:00 UTC and the browser resumes from
+        exactly where the account&rsquo;s own data actually is.
       </p>
       <label>
         System backup JSON
