@@ -391,13 +391,40 @@ export type HistoricalPortfolioValueResult = {
 
 /** Bounded owner-scoped read of every fact this feature needs, shared by
  * both the graph loader and the Multi-Year FY-end loader below so there is
- * ONE query set, not two divergent ones. */
+ * ONE query set, not two divergent ones.
+ *
+ * PRF-003 (owner-reported slow tab navigation, "shortest 3 seconds and
+ * longest 20 seconds" per tab change -- the confirmed 20-second outlier):
+ * `priceWindow` optionally narrows ONLY the `price_observations`/
+ * `fx_rate_observations` date bound below to something tighter than
+ * `[rangeFrom, rangeTo]` -- `transactions` stay bound by the full
+ * `rangeTo` regardless (computing shares held at a date genuinely needs
+ * every prior transaction, however old). The graph loader below passes the
+ * exact span of the dates it is about to derive (`toDerive`'s own
+ * min/max), since the series computation uses exact-date (tolerance-0)
+ * price/FX lookups only -- a date outside that span is NEVER consulted for
+ * ANY of `toDerive`'s points, so fetching it wastes both D1 rows-read and
+ * Worker marshalling CPU for data that is provably unused this call. This
+ * matters because the previous unconditional `[rangeFrom, rangeTo]` window
+ * spans a portfolio's ENTIRE multi-year history: after the daily cron price
+ * capture invalidates just ONE day's stored `portfolio_value_history` row
+ * (`invalidateStoredValueHistoryForSecurity`, called from the intraday/
+ * Yahoo-compatible capture paths), the very next Overview load had exactly
+ * ONE missing date but still paid for `loadFacts`'s full historical
+ * `price_observations` read (tens of thousands of rows at the owner's real
+ * scale) just to derive that single day -- the dominant cost behind the
+ * reported multi-second outlier. `loadHistoricalPortfolioValueAtDates`
+ * (Multi-Year) does not pass this -- it keeps its existing (already
+ * bounded-by-a-handful-of-FY-end-dates) full-range behaviour unchanged,
+ * since that path already widens/narrows its own range independently and
+ * is not implicated in this task's reported symptom. */
 async function loadFacts(
   client: SqlClient,
   userId: string,
   portfolioId: string,
   rangeFrom: string,
   rangeTo: string,
+  priceWindow?: { from: string; to: string },
 ): Promise<{
   baseCurrencyCode: string;
   timezone: string;
@@ -405,21 +432,29 @@ async function loadFacts(
   fxObservations: FxObservation[];
   observedDates: string[];
 } | null> {
-  const portfolio = await client.get<Row>(
-    `SELECT base_currency_code, timezone FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
-    [portfolioId, userId],
-  );
+  const priceRangeFrom = priceWindow ? priceWindow.from : rangeFrom;
+  const priceRangeTo = priceWindow ? priceWindow.to : rangeTo;
+  // PRF-003: `portfolio` and `securityRows` are independent reads (neither's
+  // SQL references the other) -- fetched concurrently rather than paying
+  // two sequential round trips before this function even knows how many
+  // securities it is dealing with.
+  const [portfolio, securityRows] = await Promise.all([
+    client.get<Row>(
+      `SELECT base_currency_code, timezone FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
+      [portfolioId, userId],
+    ),
+    client.all<Row>(
+      `SELECT ps.id AS portfolio_security_id, ps.security_id, ps.source_currency_code
+       FROM portfolio_securities ps WHERE ps.user_id = ? AND ps.portfolio_id = ?
+       ORDER BY ps.id LIMIT ?`,
+      [userId, portfolioId, MAX_SECURITIES + 1],
+    ),
+  ]);
   if (!portfolio) return null;
   const baseCurrencyCode = String(portfolio.base_currency_code ?? "");
   const timezone = String(portfolio.timezone ?? "");
   if (!CURRENCY.test(baseCurrencyCode) || !timezone) return null;
 
-  const securityRows = await client.all<Row>(
-    `SELECT ps.id AS portfolio_security_id, ps.security_id, ps.source_currency_code
-     FROM portfolio_securities ps WHERE ps.user_id = ? AND ps.portfolio_id = ?
-     ORDER BY ps.id LIMIT ?`,
-    [userId, portfolioId, MAX_SECURITIES + 1],
-  );
   if (securityRows.length > MAX_SECURITIES)
     throw new Error("too_many_securities");
   const securityIds = securityRows
@@ -427,11 +462,33 @@ async function loadFacts(
       typeof row.security_id === "string" ? row.security_id : null,
     )
     .filter((id): id is string => id !== null);
+  // Same predicate `foreignCurrencies` below (post-fetch) always used --
+  // computed here, from `securityRows` alone, ONLY to decide whether the FX
+  // query is worth issuing at all before `transactionRows`/`priceRows` (its
+  // siblings in the wave below) have resolved.
+  const foreignCurrenciesForQuery = new Set(
+    securityRows
+      .map((row) =>
+        typeof row.source_currency_code === "string"
+          ? row.source_currency_code
+          : "",
+      )
+      .filter((currency) => currency && currency !== baseCurrencyCode),
+  );
 
-  const transactionRows =
+  // PRF-003: `transactionRows`, `priceRows`, and `fxRows` are three more
+  // mutually independent reads -- `transactionRows` is scoped by
+  // portfolioId/userId alone (never by `securityIds`), `priceRows` needs
+  // only `securityIds` (resolved above), and `fxRows` needs only
+  // `foreignCurrenciesForQuery` (also resolved above, from `securityRows`
+  // directly -- it does NOT need `transactionRows`/`priceRows` to already
+  // exist). Collapsed into one wave instead of three sequential round
+  // trips.
+  const currencyList = [...foreignCurrenciesForQuery];
+  const [transactionRows, priceRows, rawFxRows] = await Promise.all([
     securityRows.length === 0
-      ? []
-      : await client.all<Row>(
+      ? Promise.resolve([] as Row[])
+      : client.all<Row>(
           `SELECT t.id, t.portfolio_security_id, t.type, t.status, t.trade_at,
              t.local_trade_date, t.quantity_decimal, t.unit_price_decimal,
              t.reverses_transaction_id
@@ -439,7 +496,44 @@ async function loadFacts(
              AND t.local_trade_date <= ?
            ORDER BY t.local_trade_date, t.trade_at, t.id LIMIT ?`,
           [userId, portfolioId, rangeTo, MAX_TRANSACTIONS + 1],
-        );
+        ),
+    securityIds.length === 0
+      ? Promise.resolve([] as Row[])
+      : client.all<Row>(
+          `SELECT po.* FROM price_observations po
+           WHERE po.security_id IN (${securityIds.map(() => "?").join(",")})
+             AND po.market_date BETWEEN ? AND ? AND ${PRICE_SCOPE}
+           ORDER BY po.security_id, po.market_date, po.observation_at, po.id
+           LIMIT ?`,
+          [
+            ...securityIds,
+            priceRangeFrom,
+            priceRangeTo,
+            userId,
+            MAX_PRICE_OBSERVATIONS + 1,
+          ],
+        ),
+    currencyList.length === 0
+      ? Promise.resolve([] as Row[])
+      : client.all<Row>(
+          `SELECT fx.* FROM fx_rate_observations fx
+           WHERE fx.market_date BETWEEN ? AND ?
+             AND ((fx.base_currency_code = ? AND fx.quote_currency_code IN (${currencyList.map(() => "?").join(",")}))
+               OR (fx.quote_currency_code = ? AND fx.base_currency_code IN (${currencyList.map(() => "?").join(",")})))
+             AND ${FX_SCOPE}
+           ORDER BY fx.market_date, fx.observed_at LIMIT ?`,
+          [
+            priceRangeFrom,
+            priceRangeTo,
+            baseCurrencyCode,
+            ...currencyList,
+            baseCurrencyCode,
+            ...currencyList,
+            userId,
+            MAX_FX_OBSERVATIONS + 1,
+          ],
+        ),
+  ]);
   if (transactionRows.length > MAX_TRANSACTIONS)
     throw new Error("too_many_transactions");
   const transactionsBySecurity = new Map<string, LedgerQuantityFact[]>();
@@ -453,23 +547,6 @@ async function loadFacts(
     transactionsBySecurity.set(portfolioSecurityId, list);
   }
 
-  const priceRows =
-    securityIds.length === 0
-      ? []
-      : await client.all<Row>(
-          `SELECT po.* FROM price_observations po
-           WHERE po.security_id IN (${securityIds.map(() => "?").join(",")})
-             AND po.market_date BETWEEN ? AND ? AND ${PRICE_SCOPE}
-           ORDER BY po.security_id, po.market_date, po.observation_at, po.id
-           LIMIT ?`,
-          [
-            ...securityIds,
-            rangeFrom,
-            rangeTo,
-            userId,
-            MAX_PRICE_OBSERVATIONS + 1,
-          ],
-        );
   if (priceRows.length > MAX_PRICE_OBSERVATIONS)
     throw new Error("too_many_price_observations");
   const pricesBySecurity = new Map<string, PriceObservation[]>();
@@ -482,6 +559,11 @@ async function loadFacts(
     pricesBySecurity.set(mapped.securityId, list);
     observedDateSet.add(mapped.marketDate);
   }
+  if (rawFxRows.length > MAX_FX_OBSERVATIONS)
+    throw new Error("too_many_fx_observations");
+  const fxObservations: FxObservation[] = rawFxRows
+    .map(mapFx)
+    .filter((row): row is FxObservation => row !== null);
 
   const securities: HistoricalValueSecurityFact[] = securityRows.map((row) => {
     const portfolioSecurityId = String(row.portfolio_security_id ?? "");
@@ -501,39 +583,9 @@ async function loadFacts(
   // deliberately NOT read here -- this feature is securities-only (see this
   // module's header). The cash ledger itself, `app/owned-holdings.ts`'s
   // `loadCash`, and every other current-value consumer are unaffected and
-  // untouched by this decision.
-  const foreignCurrencies = new Set(
-    securities
-      .map((security) => security.currencyCode)
-      .filter((currency) => currency && currency !== baseCurrencyCode),
-  );
-  let fxObservations: FxObservation[] = [];
-  if (foreignCurrencies.size > 0) {
-    const currencyList = [...foreignCurrencies];
-    const fxRows = await client.all<Row>(
-      `SELECT fx.* FROM fx_rate_observations fx
-       WHERE fx.market_date BETWEEN ? AND ?
-         AND ((fx.base_currency_code = ? AND fx.quote_currency_code IN (${currencyList.map(() => "?").join(",")}))
-           OR (fx.quote_currency_code = ? AND fx.base_currency_code IN (${currencyList.map(() => "?").join(",")})))
-         AND ${FX_SCOPE}
-       ORDER BY fx.market_date, fx.observed_at LIMIT ?`,
-      [
-        rangeFrom,
-        rangeTo,
-        baseCurrencyCode,
-        ...currencyList,
-        baseCurrencyCode,
-        ...currencyList,
-        userId,
-        MAX_FX_OBSERVATIONS + 1,
-      ],
-    );
-    if (fxRows.length > MAX_FX_OBSERVATIONS)
-      throw new Error("too_many_fx_observations");
-    fxObservations = fxRows
-      .map(mapFx)
-      .filter((row): row is FxObservation => row !== null);
-  }
+  // untouched by this decision. (`fxObservations` -- the FX read that would
+  // otherwise sit here -- is already resolved above, in the same wave as
+  // `transactionRows`/`priceRows`; see this function's PRF-003 comment.)
 
   return {
     baseCurrencyCode,
@@ -701,13 +753,29 @@ export async function loadHistoricalPortfolioValueSeries(
   const nowIso = now.toISOString();
   const range = await resolveRange(client, userId, portfolioId, nowIso);
   if (!range) return null;
-  const candidates = await loadCandidateDates(
-    client,
-    userId,
-    portfolioId,
-    range.rangeFrom,
-    range.rangeTo,
-  );
+  // PRF-003: `loadCandidateDates` and `loadStoredValueHistory` are
+  // independent reads -- both are keyed only by `range.rangeFrom`/
+  // `range.rangeTo` (already resolved above), neither consumes the other's
+  // output (the "missing = candidate but not stored" comparison below reads
+  // both results only AFTER they resolve) -- so they run concurrently
+  // instead of as two sequential round trips.
+  const [candidates, stored] = await Promise.all([
+    loadCandidateDates(
+      client,
+      userId,
+      portfolioId,
+      range.rangeFrom,
+      range.rangeTo,
+    ),
+    loadStoredValueHistory(
+      client,
+      userId,
+      portfolioId,
+      range.rangeFrom,
+      range.rangeTo,
+      MAX_CANDIDATE_DATES + 1,
+    ),
+  ]);
   if (!candidates) return null;
 
   let dates = candidates.observedDates;
@@ -721,14 +789,6 @@ export async function loadHistoricalPortfolioValueSeries(
     dates = dates.slice(dates.length - MAX_CANDIDATE_DATES); // keep the MOST RECENT dates
   }
 
-  const stored = await loadStoredValueHistory(
-    client,
-    userId,
-    portfolioId,
-    range.rangeFrom,
-    range.rangeTo,
-    MAX_CANDIDATE_DATES + 1,
-  );
   const missingDates = dates.filter((date) => !stored.has(date));
 
   if (missingDates.length === 0) {
@@ -746,18 +806,6 @@ export async function loadHistoricalPortfolioValueSeries(
     };
   }
 
-  // PRF-002: only NOW -- once real derivation work is known to exist --
-  // does this pay for the full `transactions`/`price_observations`/
-  // `fx_rate_observations` read.
-  const facts = await loadFacts(
-    client,
-    userId,
-    portfolioId,
-    range.rangeFrom,
-    range.rangeTo,
-  );
-  if (!facts) return null;
-
   // Newest-missing-first (dates/missingDates are ascending, so the tail is
   // the newest) -- matches MAX_CANDIDATE_DATES' own "keep the most recent"
   // convention and prioritises the range an owner is most likely viewing.
@@ -766,6 +814,24 @@ export async function loadHistoricalPortfolioValueSeries(
       ? missingDates.slice(-MAX_DERIVE_DATES_PER_READ)
       : missingDates;
   const backfillPending = toDerive.length < missingDates.length;
+
+  // PRF-002: only NOW -- once real derivation work is known to exist --
+  // does this pay for the full `transactions`/`price_observations`/
+  // `fx_rate_observations` read. PRF-003: the price/FX portion of that read
+  // is further narrowed to `toDerive`'s own span (`priceWindow` below) --
+  // see `loadFacts`'s own doc comment for why this is safe (exact-date-only
+  // lookups) and why it is the fix for the reported multi-second-outlier
+  // tab-navigation regression. `toDerive` is ascending (a tail slice of the
+  // ascending `missingDates`), so its first/last elements are its min/max.
+  const facts = await loadFacts(
+    client,
+    userId,
+    portfolioId,
+    range.rangeFrom,
+    range.rangeTo,
+    { from: toDerive[0]!, to: toDerive[toDerive.length - 1]! },
+  );
+  if (!facts) return null;
 
   const derived = computeHistoricalPortfolioValueSeries({
     baseCurrencyCode: facts.baseCurrencyCode,

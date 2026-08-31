@@ -262,15 +262,69 @@ export async function loadOwnedDividendHistory(
   const securityIds = [...new Set(identities.map((row) => row.securityId))];
   const portfolioSecurityIds = identities.map((row) => row.id);
 
-  const eventRows = await client.all<Row>(
-    `SELECT id, security_id, kind, status, ex_date, payment_date, currency_code,
-            gross_per_share_decimal, supersedes_event_id
-     FROM dividend_events
-     WHERE security_id IN (${inClause(securityIds.length)})
-     ORDER BY security_id, ex_date IS NULL, ex_date DESC, id DESC
-     LIMIT ?`,
-    [...securityIds, MAX_EVENTS_PER_PORTFOLIO + 1],
-  );
+  // PRF-003 (owner-reported slow tab navigation): every read in this
+  // "batched" section is scoped ONLY by userId/portfolioId (or
+  // securityIds/portfolioSecurityIds, both already resolved above from
+  // `identities`) -- none of the seven reads below consumes another's
+  // OUTPUT (each populates its own independent Map, merged together only
+  // once every read has resolved). `frankingOverrides` looks like it
+  // depends on `manualRecords` (the per-record `frankingOverrideByRecordId`
+  // lookup further down matches them together), but its OWN query is
+  // scoped by userId/portfolioId alone, not by any `manualRecords` id, so
+  // it is equally independent. Collapsed into one concurrent wave instead
+  // of seven sequential round trips.
+  const [
+    eventRows,
+    overrideRecords,
+    manualRecords,
+    frankingOverrides,
+    receiptRecords,
+    assumptionsRecords,
+    transactionRows,
+  ] = await Promise.all([
+    client.all<Row>(
+      `SELECT id, security_id, kind, status, ex_date, payment_date, currency_code,
+              gross_per_share_decimal, supersedes_event_id
+       FROM dividend_events
+       WHERE security_id IN (${inClause(securityIds.length)})
+       ORDER BY security_id, ex_date IS NULL, ex_date DESC, id DESC
+       LIMIT ?`,
+      [...securityIds, MAX_EVENTS_PER_PORTFOLIO + 1],
+    ),
+    createDividendEventOverrideRepository(client).list(userId, portfolioId),
+    createDividendManualRecordRepository(client).list(userId, portfolioId),
+    // BRK-011: owner-entered franking-currency overrides, one per imported
+    // record at most -- see db/schema.ts's header comment on
+    // `dividendImportFrankingOverrides`. Keyed by `dividendManualRecordId`
+    // below so the loop can attach each record's own override (if any) as
+    // it builds `DividendManualRecordFact`.
+    createDividendImportFrankingOverrideRepository(client).list(
+      userId,
+      portfolioId,
+    ),
+    createDividendReceiptRepository(client).list(userId, portfolioId),
+    createDividendAssumptionsRepository(client).listSecurityAssumptions(
+      userId,
+      portfolioId,
+    ),
+    client.all<Row>(
+      `SELECT id, portfolio_security_id, type, status, local_trade_date, trade_at,
+              quantity_decimal, unit_price_decimal, reverses_transaction_id
+       FROM transactions
+       WHERE user_id = ? AND portfolio_id = ?
+         AND portfolio_security_id IN (${inClause(portfolioSecurityIds.length)})
+         AND status IN ('posted', 'reversed')
+       ORDER BY portfolio_security_id, local_trade_date, trade_at, id
+       LIMIT ?`,
+      [
+        userId,
+        portfolioId,
+        ...portfolioSecurityIds,
+        MAX_TRANSACTIONS_PER_PORTFOLIO + 1,
+      ],
+    ),
+  ]);
+
   if (eventRows.length > MAX_EVENTS_PER_PORTFOLIO)
     throw new Error("too_many_dividend_events");
   const eventsBySecurity = new Map<string, ProviderDividendEventFact[]>();
@@ -296,9 +350,6 @@ export async function loadOwnedDividendHistory(
     eventsBySecurity.set(securityId, list);
   }
 
-  const overrideRecords = await createDividendEventOverrideRepository(
-    client,
-  ).list(userId, portfolioId);
   const overridesBySecurity = new Map<string, EventOverrideFact[]>();
   for (const override of overrideRecords) {
     const list = overridesBySecurity.get(override.portfolioSecurityId) ?? [];
@@ -312,20 +363,6 @@ export async function loadOwnedDividendHistory(
     overridesBySecurity.set(override.portfolioSecurityId, list);
   }
 
-  const manualRecords = await createDividendManualRecordRepository(client).list(
-    userId,
-    portfolioId,
-  );
-  // BRK-011: owner-entered franking-currency overrides, one per imported
-  // record at most -- see db/schema.ts's header comment on
-  // `dividendImportFrankingOverrides`. Keyed by `dividendManualRecordId` so
-  // the loop below can attach each record's own override (if any) as it
-  // builds `DividendManualRecordFact`.
-  const frankingOverrides =
-    await createDividendImportFrankingOverrideRepository(client).list(
-      userId,
-      portfolioId,
-    );
   const frankingOverrideByRecordId = new Map(
     frankingOverrides.map((override) => [
       override.dividendManualRecordId,
@@ -363,10 +400,6 @@ export async function loadOwnedDividendHistory(
     manualBySecurity.set(record.portfolioSecurityId, list);
   }
 
-  const receiptRecords = await createDividendReceiptRepository(client).list(
-    userId,
-    portfolioId,
-  );
   const receiptsBySecurity = new Map<string, DividendReceiptFact[]>();
   for (const receipt of receiptRecords) {
     const list = receiptsBySecurity.get(receipt.portfolioSecurityId) ?? [];
@@ -382,9 +415,6 @@ export async function loadOwnedDividendHistory(
     receiptsBySecurity.set(receipt.portfolioSecurityId, list);
   }
 
-  const assumptionsRecords = await createDividendAssumptionsRepository(
-    client,
-  ).listSecurityAssumptions(userId, portfolioId);
   // DIV-016 part B: `forceAssumption` travels alongside the franking
   // default so `computeSecurityDividendForecast`'s own franking-tail
   // bridge gate (see that function's module header) can read both without
@@ -399,22 +429,6 @@ export async function loadOwnedDividendHistory(
     ]),
   );
 
-  const transactionRows = await client.all<Row>(
-    `SELECT id, portfolio_security_id, type, status, local_trade_date, trade_at,
-            quantity_decimal, unit_price_decimal, reverses_transaction_id
-     FROM transactions
-     WHERE user_id = ? AND portfolio_id = ?
-       AND portfolio_security_id IN (${inClause(portfolioSecurityIds.length)})
-       AND status IN ('posted', 'reversed')
-     ORDER BY portfolio_security_id, local_trade_date, trade_at, id
-     LIMIT ?`,
-    [
-      userId,
-      portfolioId,
-      ...portfolioSecurityIds,
-      MAX_TRANSACTIONS_PER_PORTFOLIO + 1,
-    ],
-  );
   if (transactionRows.length > MAX_TRANSACTIONS_PER_PORTFOLIO) {
     throw new Error("too_many_transactions");
   }

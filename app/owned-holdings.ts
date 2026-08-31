@@ -509,10 +509,21 @@ export async function loadOwnedHoldings(
   unrealisedSummary?: OwnedHoldingsUnrealisedSummary;
 }> {
   const nowIso = now.toISOString();
-  const portfolio = await client.get<Row>(
-    `SELECT base_currency_code, timezone FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
-    [portfolioId, userId],
-  );
+  // PRF-003 (owner-reported slow tab navigation): `portfolio` and
+  // `heldCountRow` are independent reads (different tables, neither's SQL
+  // references the other's output) -- run concurrently rather than paying
+  // two sequential D1 round trips before this read can even decide which
+  // branch (empty-portfolio vs normal) to take.
+  const [portfolio, heldCountRow] = await Promise.all([
+    client.get<Row>(
+      `SELECT base_currency_code, timezone FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
+      [portfolioId, userId],
+    ),
+    client.get<Row>(
+      `SELECT count(*) AS count FROM portfolio_securities WHERE user_id = ? AND portfolio_id = ? AND status = 'held'`,
+      [userId, portfolioId],
+    ),
+  ]);
   if (!portfolio) throw new Error("not_owned");
   const timezone = requiredText(portfolio, "timezone");
   const asOf = localDate(now, timezone);
@@ -520,10 +531,6 @@ export async function loadOwnedHoldings(
     portfolio,
     "base_currency_code",
     CURRENCY,
-  );
-  const heldCountRow = await client.get<Row>(
-    `SELECT count(*) AS count FROM portfolio_securities WHERE user_id = ? AND portfolio_id = ? AND status = 'held'`,
-    [userId, portfolioId],
   );
   const heldCount = integer(heldCountRow ?? {}, "count");
   if (heldCount > MAX_HELD) throw new Error("too_many_holdings");
@@ -565,11 +572,29 @@ export async function loadOwnedHoldings(
       },
     };
   }
-  let publicationCount = await client.get<Row>(
-    `SELECT count(*) AS count FROM projection_publications pp WHERE pp.user_id = ? AND pp.portfolio_id = ?`,
-    [userId, portfolioId],
-  );
-  if (integer(publicationCount ?? {}, "count") !== 1) {
+  const PUBLICATION_COUNT_SQL = `SELECT count(*) AS count FROM projection_publications pp WHERE pp.user_id = ? AND pp.portfolio_id = ?`;
+  const PUBLICATION_SQL = `SELECT pp.calculation_run_id, pp.calculation_version, pp.ledger_high_water, r.status AS run_status, r.calculation_version AS run_version, r.ledger_high_water_end, p.base_currency_code FROM projection_publications pp JOIN portfolios p ON p.id = pp.portfolio_id AND p.user_id = pp.user_id JOIN calculation_runs r ON r.id = pp.calculation_run_id AND r.user_id = pp.user_id AND r.portfolio_id = pp.portfolio_id WHERE pp.user_id = ? AND pp.portfolio_id = ? LIMIT 1`;
+  const IDENTITIES_SQL = `SELECT ps.id, ps.security_id, COALESCE(ps.display_symbol, ps.source_symbol) AS symbol, COALESCE(ps.display_name, s.canonical_name, ps.source_name, ps.source_symbol) AS name, COALESCE(e.mic, e.name, ps.source_exchange_alias, 'N/A') AS exchange, s.primary_currency_code FROM portfolio_securities ps JOIN securities s ON s.id = ps.security_id LEFT JOIN exchanges e ON e.id = s.exchange_id WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held' ORDER BY ps.id LIMIT ?`;
+  // PRF-003: `publicationCountRow` (the gate), `publicationRow` (the data
+  // the gate protects), and `identities` are three mutually independent
+  // reads -- `identities` needs neither `publicationCountRow` nor
+  // `publicationRow`, and `publicationRow`'s OWN correctness is verified
+  // against `publicationCountRow` AFTER both resolve (below), not by
+  // sequencing -- so all three now run in one wave instead of two-to-three
+  // sequential round trips. In the RARE self-heal branch (a queued-but-
+  // unadvanced calculation run), both publication reads are simply redone
+  // together after `advanceCalculationRuns` -- `publicationRow` fetched
+  // BEFORE a self-heal is by definition stale once one runs, so it is
+  // never reused across that boundary.
+  const [firstPublicationCountRow, firstPublicationRow, identityRows] =
+    await Promise.all([
+      client.get<Row>(PUBLICATION_COUNT_SQL, [userId, portfolioId]),
+      client.get<Row>(PUBLICATION_SQL, [userId, portfolioId]),
+      client.all<Row>(IDENTITIES_SQL, [userId, portfolioId, MAX_HELD]),
+    ]);
+  let publicationCountRow = firstPublicationCountRow;
+  let publicationRow = firstPublicationRow;
+  if (integer(publicationCountRow ?? {}, "count") !== 1) {
     // CALC-003 trigger 2 (read-time self-heal): this is the single choke
     // point every owned-holdings read passes through (and, transitively via
     // `loadOwnedHoldings`, `owned-income-projection.ts` and
@@ -590,17 +615,14 @@ export async function loadOwnedHoldings(
         budget: READ_TIME_CALCULATION_BUDGET,
       },
     ).catch(() => undefined);
-    publicationCount = await client.get<Row>(
-      `SELECT count(*) AS count FROM projection_publications pp WHERE pp.user_id = ? AND pp.portfolio_id = ?`,
-      [userId, portfolioId],
-    );
+    [publicationCountRow, publicationRow] = await Promise.all([
+      client.get<Row>(PUBLICATION_COUNT_SQL, [userId, portfolioId]),
+      client.get<Row>(PUBLICATION_SQL, [userId, portfolioId]),
+    ]);
   }
-  if (integer(publicationCount ?? {}, "count") !== 1)
+  if (integer(publicationCountRow ?? {}, "count") !== 1)
     throw new Error("invalid_projection_publication_count");
-  const publication = await client.get<Row>(
-    `SELECT pp.calculation_run_id, pp.calculation_version, pp.ledger_high_water, r.status AS run_status, r.calculation_version AS run_version, r.ledger_high_water_end, p.base_currency_code FROM projection_publications pp JOIN portfolios p ON p.id = pp.portfolio_id AND p.user_id = pp.user_id JOIN calculation_runs r ON r.id = pp.calculation_run_id AND r.user_id = pp.user_id AND r.portfolio_id = pp.portfolio_id WHERE pp.user_id = ? AND pp.portfolio_id = ? LIMIT 1`,
-    [userId, portfolioId],
-  );
+  const publication = publicationRow;
   if (!publication) throw new Error("missing_projection_publication");
   const runId = requiredText(publication, "calculation_run_id");
   const version = integer(publication, "calculation_version");
@@ -612,12 +634,7 @@ export async function loadOwnedHoldings(
     requiredText(publication, "base_currency_code") !== homeCurrencyCode
   )
     throw new Error("invalid_projection_publication");
-  const identities = (
-    await client.all<Row>(
-      `SELECT ps.id, ps.security_id, COALESCE(ps.display_symbol, ps.source_symbol) AS symbol, COALESCE(ps.display_name, s.canonical_name, ps.source_name, ps.source_symbol) AS name, COALESCE(e.mic, e.name, ps.source_exchange_alias, 'N/A') AS exchange, s.primary_currency_code FROM portfolio_securities ps JOIN securities s ON s.id = ps.security_id LEFT JOIN exchanges e ON e.id = s.exchange_id WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held' ORDER BY ps.id LIMIT ?`,
-      [userId, portfolioId, MAX_HELD],
-    )
-  ).map((row): Identity => ({
+  const identities = identityRows.map((row): Identity => ({
     id: requiredText(row, "id"),
     securityId: requiredText(row, "security_id"),
     symbol: requiredText(row, "symbol"),
@@ -627,30 +644,43 @@ export async function loadOwnedHoldings(
   }));
   if (identities.length !== heldCount)
     throw new Error("invalid_held_security_count");
-  // BRK-012C read-time gate: before reading price_observations below, make
-  // sure this owner's Sharesight delayed-price data (if any) is no more
-  // than 10 minutes stale for their CURRENT holdings -- see
-  // `app/sharesight-price-gate-service.ts`'s module doc comment for the
-  // full four-gate design (credentials -> enabled link -> cache staleness
-  // -> single-flight lease). Best-effort, exactly like CALC-003's
-  // `advanceCalculationRuns(...).catch(() => undefined)` immediately below:
-  // a fetch failure, a lost lease race, or a genuine DB error here must
-  // never block this read -- the existing price selection below simply
-  // sees whatever data already exists, honestly.
-  await ensureSharesightPriceFreshness(
-    client,
-    userId,
-    identities.map((identity) => identity.securityId),
-    // The gate's own clock defaults to this SAME request's `nowIso` (not a
-    // fresh `new Date()`) so its 10-minute staleness comparison is anchored
-    // to the read's own "now", not real wall-clock time -- a caller-
-    // supplied `now` override (test-only) still wins via spread order.
-    { now: () => nowIso, ...sharesightGateOptions },
-  ).catch(() => undefined);
-  const projectionRows = await client.all<Row>(
-    `SELECT id, portfolio_security_id, quantity_decimal, native_open_basis_decimal, base_open_basis_decimal, completeness, status, calculation_run_id, calculation_version, last_ledger_high_water FROM holding_projections WHERE user_id = ? AND portfolio_id = ? AND calculation_run_id = ? AND status = 'ready' ORDER BY portfolio_security_id LIMIT ?`,
-    [userId, portfolioId, runId, MAX_PROJECTIONS + 1],
-  );
+  // PRF-003: `ensureSharesightPriceFreshness` and `projectionRows` (moved up
+  // from its previous spot, unchanged in every other respect) are
+  // independent of EACH OTHER -- the freshness gate only needs
+  // `identities`' security ids, `projectionRows` only needs `runId` -- so
+  // they run concurrently. `ensureSharesightPriceFreshness` must still
+  // complete before the price/FX/cash/trade read wave further below (the
+  // reason it existed here at all: freshen Sharesight data before the price
+  // read sees it) -- that ordering is preserved because THIS `Promise.all`
+  // is fully awaited before that wave starts; `projectionRows` merely rides
+  // along for free in the same wave.
+  const [, projectionRows] = await Promise.all([
+    // BRK-012C read-time gate: before reading price_observations below,
+    // make sure this owner's Sharesight delayed-price data (if any) is no
+    // more than 10 minutes stale for their CURRENT holdings -- see
+    // `app/sharesight-price-gate-service.ts`'s module doc comment for the
+    // full four-gate design (credentials -> enabled link -> cache
+    // staleness -> single-flight lease). Best-effort, exactly like
+    // CALC-003's `advanceCalculationRuns(...).catch(() => undefined)`
+    // above: a fetch failure, a lost lease race, or a genuine DB error here
+    // must never block this read -- the existing price selection below
+    // simply sees whatever data already exists, honestly.
+    ensureSharesightPriceFreshness(
+      client,
+      userId,
+      identities.map((identity) => identity.securityId),
+      // The gate's own clock defaults to this SAME request's `nowIso` (not
+      // a fresh `new Date()`) so its 10-minute staleness comparison is
+      // anchored to the read's own "now", not real wall-clock time -- a
+      // caller-supplied `now` override (test-only) still wins via spread
+      // order.
+      { now: () => nowIso, ...sharesightGateOptions },
+    ).catch(() => undefined),
+    client.all<Row>(
+      `SELECT id, portfolio_security_id, quantity_decimal, native_open_basis_decimal, base_open_basis_decimal, completeness, status, calculation_run_id, calculation_version, last_ledger_high_water FROM holding_projections WHERE user_id = ? AND portfolio_id = ? AND calculation_run_id = ? AND status = 'ready' ORDER BY portfolio_security_id LIMIT ?`,
+      [userId, portfolioId, runId, MAX_PROJECTIONS + 1],
+    ),
+  ]);
   if (
     projectionRows.length > MAX_PROJECTIONS ||
     projectionRows.length !== heldCount
@@ -693,89 +723,7 @@ export async function loadOwnedHoldings(
     projections.some((row) => !ids.has(row.portfolioSecurityId))
   )
     throw new Error("projection_identity_mismatch");
-  const priceCountRow = await client.get<Row>(
-    // BRK-012B review B1/B3 (2026-08-20) originally excluded
-    // `provider_id = 'sharesight'` rows here ("this slice is pure
-    // storage"). BRK-012C deliberately LIFTS that exclusion: a user-scoped
-    // Sharesight accretion row is a legitimate valuation input for CURRENT
-    // holdings, ranked by the EXISTING selection semantics
-    // (`domain/market-data/selection.ts`'s `providerRank`), under which
-    // `delayed` still outranks `eod` at equal date age. MKT-012 (owner
-    // ruling, 2026-08-22, round 2) does NOT change that ordinary interval
-    // tie-break -- it adds a NARROWER `OWNER_IMPORT_PROVIDER_ID` precedence
-    // tier ahead of it: a same-or-newer-date owner-uploaded CSV close (this
-    // combiner's `combineScopedPriceSelections`, above) now outranks a
-    // same-date Sharesight `delayed` accretion row, but an ordinary
-    // provider-vs-provider `eod`/`delayed` tie (e.g. two live sources, or
-    // owner-import absent) is UNCHANGED from BRK-012C's original ordering
-    // (`docs/CALCULATIONS.md` §2's MKT-012 note).
-    // Freshness is bounded by the read gate immediately above
-    // (`ensureSharesightPriceFreshness`), which piggybacks the SAME
-    // accretion write this query now reads. The snapshot/historical path
-    // (`db/repositories/snapshots.ts`) keeps its OWN identical predicate --
-    // that exclusion is untouched by this task (EOD semantics for
-    // historical valuations, per TASKS.md's BRK-012C ruling).
-    //
-    // PRF-001 (owner-reported production CPU-limit failure): the ownership
-    // check used to be a correlated `EXISTS (... WHERE ps.security_id =
-    // po.security_id ...)`, which SQLite/D1 cannot answer via
-    // `price_observations_security_date_idx` (security_id, adjustment_state,
-    // market_date) -- there is no top-level `po.security_id` equality for
-    // the planner to seek on, only a per-row correlated check, so it fell
-    // back to a full table scan (`SCAN po`, confirmed via `EXPLAIN QUERY
-    // PLAN` against a production-shaped fixture; see TASKS.md "### PRF-001").
-    // Rewritten as a logically identical `po.security_id IN (SELECT ...)` --
-    // same predicate, same held-security scoping, same params, just
-    // reshaped so the planner can seek the existing index per held security
-    // id (`SEARCH po USING INDEX price_observations_security_date_idx
-    // (security_id=? AND adjustment_state=? AND market_date>? AND
-    // market_date<?)`) instead of scanning every row ever ingested. No
-    // schema/migration change; no widening of what this owner's read can
-    // see -- purely a query-shape fix.
-    `SELECT count(*) AS count FROM price_observations po WHERE po.security_id IN (SELECT ps.security_id FROM portfolio_securities ps WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held') AND po.adjustment_state = 'raw' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?))`,
-    [userId, portfolioId, asOf, asOf, nowIso, nowIso, userId],
-  );
-  const priceCount = integer(priceCountRow ?? {}, "count");
-  if (priceCount > MAX_OBSERVATIONS)
-    throw new Error("too_many_price_observations");
-  const prices = await client.all<Row>(
-    // See the count query above -- BRK-012C lifted the `provider_id <>
-    // 'sharesight'` exclusion here too; both queries must agree or
-    // `priceCount`/`prices.length` could diverge. PRF-001: same
-    // IN-subquery rewrite as the count query immediately above, for the
-    // same reason (identical predicate, index-seekable instead of a full
-    // scan).
-    `SELECT po.* FROM price_observations po WHERE po.security_id IN (SELECT ps.security_id FROM portfolio_securities ps WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held') AND po.adjustment_state = 'raw' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?)) ORDER BY po.security_id, po.market_date DESC, po.observation_at DESC LIMIT ?`,
-    [
-      userId,
-      portfolioId,
-      asOf,
-      asOf,
-      nowIso,
-      nowIso,
-      userId,
-      MAX_OBSERVATIONS + 1,
-    ],
-  );
-  if (prices.length > MAX_OBSERVATIONS)
-    throw new Error("too_many_price_observations");
-  const priceObservations = prices.map(mapPrice);
-  const cashCurrencies = (
-    await client.all<Row>(
-      `SELECT currency_code FROM cash_accounts WHERE user_id = ? AND portfolio_id = ? AND status = 'active' ORDER BY id LIMIT ?`,
-      [userId, portfolioId, MAX_CASH_ACCOUNTS + 1],
-    )
-  ).map((row) => requiredText(row, "currency_code", CURRENCY));
-  if (cashCurrencies.length > MAX_CASH_ACCOUNTS)
-    throw new Error("too_many_cash_accounts");
-  const relevantCurrencies = [
-    ...new Set([
-      homeCurrencyCode,
-      ...identities.map((identity) => identity.currencyCode),
-      ...cashCurrencies,
-    ]),
-  ];
-  const fxPredicate = `(
+  const FX_PREDICATE = `(
     fx.base_currency_code <> fx.quote_currency_code AND
     (fx.base_currency_code = (SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ?)
       AND fx.quote_currency_code IN (
@@ -803,28 +751,153 @@ export async function loadOwnedHoldings(
     userId,
     portfolioId,
   ];
-  const fxCountRow = await client.get<Row>(
-    `SELECT count(*) AS count FROM fx_rate_observations fx WHERE fx.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND fx.observed_at <= ? AND fx.ingested_at <= ? AND ((fx.access_scope = 'deployment' AND fx.scope_user_id IS NULL) OR (fx.access_scope = 'user' AND fx.scope_user_id = ?)) AND ${fxPredicate}`,
-    [asOf, asOf, nowIso, nowIso, userId, ...fxPredicateParams],
-  );
-  const fxCount = integer(fxCountRow ?? {}, "count");
-  if (fxCount > MAX_OBSERVATIONS) throw new Error("too_many_fx_observations");
-  const fxRows = (
-    await client.all<Row>(
-      `SELECT fx.* FROM fx_rate_observations fx WHERE fx.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND fx.observed_at <= ? AND fx.ingested_at <= ? AND ((fx.access_scope = 'deployment' AND fx.scope_user_id IS NULL) OR (fx.access_scope = 'user' AND fx.scope_user_id = ?)) AND ${fxPredicate} ORDER BY fx.market_date DESC, fx.observed_at DESC LIMIT ?`,
-      [
-        asOf,
-        asOf,
-        nowIso,
-        nowIso,
-        userId,
-        ...fxPredicateParams,
-        MAX_OBSERVATIONS + 1,
-      ],
-    )
-  ).map(mapFx);
-  if (fxRows.length > MAX_OBSERVATIONS)
-    throw new Error("too_many_fx_observations");
+  // PRF-003 (owner-reported slow tab navigation): the four read "chains"
+  // below -- price (count-then-fetch), FX (count-then-fetch), cash-account
+  // currencies, and the trade-date window -- plus the user-settings lookup
+  // (moved up from its previous spot just before `rows` is built, unchanged
+  // in every other respect) are all mutually independent: none of their SQL
+  // text or JS logic references another chain's OUTPUT. In particular the
+  // FX predicate below re-derives its own "which currencies matter" answer
+  // via SQL subqueries against `portfolio_securities`/`cash_accounts`
+  // directly -- it never reads the `cashCurrencies` JS array -- so it does
+  // NOT need to wait for the cash-currencies fetch to finish, despite
+  // textually following `relevantCurrencies` (which DOES need
+  // `cashCurrencies`, for the LATER override-target list, not for this
+  // query). Each chain's own internal count-then-fetch order is preserved
+  // exactly (a count query must still resolve before its own row fetch, to
+  // keep the "fail closed on a pathological count before ever marshalling
+  // the full rows" bound each one documents) -- only the FOUR chains
+  // themselves now run as one concurrent wave instead of five-plus
+  // sequential round trips.
+  const [priceObservations, fxRows, cashCurrencies, tradeRows, userSettings] =
+    await Promise.all([
+      (async () => {
+        const priceCountRow = await client.get<Row>(
+          // BRK-012B review B1/B3 (2026-08-20) originally excluded
+          // `provider_id = 'sharesight'` rows here ("this slice is pure
+          // storage"). BRK-012C deliberately LIFTS that exclusion: a
+          // user-scoped Sharesight accretion row is a legitimate valuation
+          // input for CURRENT holdings, ranked by the EXISTING selection
+          // semantics (`domain/market-data/selection.ts`'s `providerRank`),
+          // under which `delayed` still outranks `eod` at equal date age.
+          // MKT-012 (owner ruling, 2026-08-22, round 2) does NOT change that
+          // ordinary interval tie-break -- it adds a NARROWER
+          // `OWNER_IMPORT_PROVIDER_ID` precedence tier ahead of it: a
+          // same-or-newer-date owner-uploaded CSV close (this combiner's
+          // `combineScopedPriceSelections`, above) now outranks a same-date
+          // Sharesight `delayed` accretion row, but an ordinary
+          // provider-vs-provider `eod`/`delayed` tie (e.g. two live sources,
+          // or owner-import absent) is UNCHANGED from BRK-012C's original
+          // ordering (`docs/CALCULATIONS.md` §2's MKT-012 note). Freshness
+          // is bounded by the read gate immediately above
+          // (`ensureSharesightPriceFreshness`), which piggybacks the SAME
+          // accretion write this query now reads. The snapshot/historical
+          // path (`db/repositories/snapshots.ts`) keeps its OWN identical
+          // predicate -- that exclusion is untouched by this task (EOD
+          // semantics for historical valuations, per TASKS.md's BRK-012C
+          // ruling).
+          //
+          // PRF-001 (owner-reported production CPU-limit failure): the
+          // ownership check used to be a correlated `EXISTS (... WHERE
+          // ps.security_id = po.security_id ...)`, which SQLite/D1 cannot
+          // answer via `price_observations_security_date_idx`
+          // (security_id, adjustment_state, market_date) -- there is no
+          // top-level `po.security_id` equality for the planner to seek on,
+          // only a per-row correlated check, so it fell back to a full
+          // table scan (`SCAN po`, confirmed via `EXPLAIN QUERY PLAN`
+          // against a production-shaped fixture; see TASKS.md
+          // "### PRF-001"). Rewritten as a logically identical
+          // `po.security_id IN (SELECT ...)` -- same predicate, same
+          // held-security scoping, same params, just reshaped so the
+          // planner can seek the existing index per held security id
+          // (`SEARCH po USING INDEX price_observations_security_date_idx
+          // (security_id=? AND adjustment_state=? AND market_date>? AND
+          // market_date<?)`) instead of scanning every row ever ingested.
+          // No schema/migration change; no widening of what this owner's
+          // read can see -- purely a query-shape fix.
+          `SELECT count(*) AS count FROM price_observations po WHERE po.security_id IN (SELECT ps.security_id FROM portfolio_securities ps WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held') AND po.adjustment_state = 'raw' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?))`,
+          [userId, portfolioId, asOf, asOf, nowIso, nowIso, userId],
+        );
+        const priceCount = integer(priceCountRow ?? {}, "count");
+        if (priceCount > MAX_OBSERVATIONS)
+          throw new Error("too_many_price_observations");
+        const prices = await client.all<Row>(
+          // See the count query above -- BRK-012C lifted the `provider_id
+          // <> 'sharesight'` exclusion here too; both queries must agree or
+          // `priceCount`/`prices.length` could diverge. PRF-001: same
+          // IN-subquery rewrite as the count query immediately above, for
+          // the same reason (identical predicate, index-seekable instead of
+          // a full scan).
+          `SELECT po.* FROM price_observations po WHERE po.security_id IN (SELECT ps.security_id FROM portfolio_securities ps WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held') AND po.adjustment_state = 'raw' AND po.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND po.observation_at <= ? AND po.ingested_at <= ? AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?)) ORDER BY po.security_id, po.market_date DESC, po.observation_at DESC LIMIT ?`,
+          [
+            userId,
+            portfolioId,
+            asOf,
+            asOf,
+            nowIso,
+            nowIso,
+            userId,
+            MAX_OBSERVATIONS + 1,
+          ],
+        );
+        if (prices.length > MAX_OBSERVATIONS)
+          throw new Error("too_many_price_observations");
+        return prices.map(mapPrice);
+      })(),
+      (async () => {
+        const fxCountRow = await client.get<Row>(
+          `SELECT count(*) AS count FROM fx_rate_observations fx WHERE fx.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND fx.observed_at <= ? AND fx.ingested_at <= ? AND ((fx.access_scope = 'deployment' AND fx.scope_user_id IS NULL) OR (fx.access_scope = 'user' AND fx.scope_user_id = ?)) AND ${FX_PREDICATE}`,
+          [asOf, asOf, nowIso, nowIso, userId, ...fxPredicateParams],
+        );
+        const fxCount = integer(fxCountRow ?? {}, "count");
+        if (fxCount > MAX_OBSERVATIONS)
+          throw new Error("too_many_fx_observations");
+        const rows = await client.all<Row>(
+          `SELECT fx.* FROM fx_rate_observations fx WHERE fx.market_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND fx.observed_at <= ? AND fx.ingested_at <= ? AND ((fx.access_scope = 'deployment' AND fx.scope_user_id IS NULL) OR (fx.access_scope = 'user' AND fx.scope_user_id = ?)) AND ${FX_PREDICATE} ORDER BY fx.market_date DESC, fx.observed_at DESC LIMIT ?`,
+          [
+            asOf,
+            asOf,
+            nowIso,
+            nowIso,
+            userId,
+            ...fxPredicateParams,
+            MAX_OBSERVATIONS + 1,
+          ],
+        );
+        if (rows.length > MAX_OBSERVATIONS)
+          throw new Error("too_many_fx_observations");
+        return rows.map(mapFx);
+      })(),
+      (async () => {
+        const rows = await client.all<Row>(
+          `SELECT currency_code FROM cash_accounts WHERE user_id = ? AND portfolio_id = ? AND status = 'active' ORDER BY id LIMIT ?`,
+          [userId, portfolioId, MAX_CASH_ACCOUNTS + 1],
+        );
+        const currencies = rows.map((row) =>
+          requiredText(row, "currency_code", CURRENCY),
+        );
+        if (currencies.length > MAX_CASH_ACCOUNTS)
+          throw new Error("too_many_cash_accounts");
+        return currencies;
+      })(),
+      client.all<Row>(
+        `SELECT portfolio_security_id, local_trade_date, trade_at, status FROM transactions WHERE user_id = ? AND portfolio_id = ? AND local_trade_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND status IN ('posted', 'reversed') ORDER BY local_trade_date, trade_at, id LIMIT ?`,
+        [userId, portfolioId, asOf, asOf, MAX_OBSERVATIONS + 1],
+      ),
+      // MKT-009B: one PK lookup, reused for every held security below
+      // rather than re-queried per row. Missing settings (should not happen
+      // for an owner with a live portfolio) fails HONEST, not silent -- the
+      // same `sharesight_delayed` default the column itself carries, never
+      // a thrown error over a preference lookup alone.
+      createOwnedUserSettingsRepository(client).get(userId),
+    ]);
+  const relevantCurrencies = [
+    ...new Set([
+      homeCurrencyCode,
+      ...identities.map((identity) => identity.currencyCode),
+      ...cashCurrencies,
+    ]),
+  ];
   const overrideRepo = createOwnedManualOverrideRepository(client);
   const overrideTargets = [
     ...identities.map((identity) => identity.securityId),
@@ -861,10 +934,6 @@ export async function loadOwnedHoldings(
   const projectionBySecurity = new Map(
     projections.map((row) => [row.portfolioSecurityId, row]),
   );
-  const tradeRows = await client.all<Row>(
-    `SELECT portfolio_security_id, local_trade_date, trade_at, status FROM transactions WHERE user_id = ? AND portfolio_id = ? AND local_trade_date BETWEEN date(?, '-${MAX_SELECTION_LOOKBACK_DAYS} days') AND ? AND status IN ('posted', 'reversed') ORDER BY local_trade_date, trade_at, id LIMIT ?`,
-    [userId, portfolioId, asOf, asOf, MAX_OBSERVATIONS + 1],
-  );
   if (tradeRows.length > MAX_OBSERVATIONS)
     throw new Error("too_many_trade_facts");
   const trades = tradeRows.map((row) => ({
@@ -876,13 +945,6 @@ export async function loadOwnedHoldings(
       "reversed",
     ]),
   }));
-  // MKT-009B: one PK lookup, reused for every held security below rather
-  // than re-queried per row. Missing settings (should not happen for an
-  // owner with a live portfolio) fails HONEST, not silent -- the same
-  // `sharesight_delayed` default the column itself carries, never a thrown
-  // error over a preference lookup alone.
-  const userSettings =
-    await createOwnedUserSettingsRepository(client).get(userId);
   const priceSourcePreference: PriceSourcePreference =
     userSettings?.priceSourcePreference ?? "sharesight_delayed";
   const preferredProviderIds = providerIdsForPreference(priceSourcePreference);
@@ -1422,18 +1484,50 @@ async function loadCash(
   asOf: string,
   nowIso: string,
   timezone: string,
-  fxRows: FxObservation[] = [],
-  overrides: Awaited<
+  // PRF-003 (owner-reported slow tab navigation): `undefined` (the
+  // heldCount===0 early-return caller, which never runs the main
+  // securities-scoped FX chain at all) means "fetch cash-specific FX/
+  // overrides myself, below" -- an EXPLICITLY supplied array (even an
+  // empty one, the non-empty-portfolio caller further down, which already
+  // ran a STRICTLY BROADER fx query covering both securities' AND cash
+  // accounts' currencies -- see that call site's own PRF-003 comment)
+  // means "trust it, never self-fetch a narrower query that could only
+  // ever find a SUBSET of what the caller's broader query already
+  // resolved to empty". Previously this defaulted both to `[]` and
+  // branched on `fxRows.length === 0`, which could not distinguish "caller
+  // never fetched" from "caller fetched and genuinely found nothing" --
+  // the non-empty-portfolio caller's `fxRows: []` case triggered a
+  // provably-redundant re-fetch (a narrower predicate against the SAME
+  // table, after a broader one had already returned zero rows) on every
+  // single-currency (e.g. all-AUD) portfolio.
+  fxRows?: FxObservation[],
+  overrides?: Awaited<
     ReturnType<ReturnType<typeof createOwnedManualOverrideRepository>["list"]>
-  > = [],
+  >,
 ): Promise<OwnedCashSummary> {
-  const accounts = await client.all<Row>(
-    `SELECT id, currency_code, completeness, status FROM cash_accounts WHERE user_id = ? AND portfolio_id = ? AND status = 'active' ORDER BY id LIMIT ?`,
-    [userId, portfolioId, MAX_CASH_ACCOUNTS + 1],
-  );
+  const fxRowsSupplied = fxRows !== undefined;
+  let resolvedFxRows: FxObservation[] = fxRows ?? [];
+  let resolvedOverrides: Awaited<
+    ReturnType<ReturnType<typeof createOwnedManualOverrideRepository>["list"]>
+  > = overrides ?? [];
+  // PRF-003: `accounts` and `entries` (below) are independent reads --
+  // `entries`' own SQL joins `cash_accounts` itself and never references
+  // this function's `accounts` JS array -- so both run in the same wave
+  // rather than two sequential round trips.
+  const [accounts, entries] = await Promise.all([
+    client.all<Row>(
+      `SELECT id, currency_code, completeness, status FROM cash_accounts WHERE user_id = ? AND portfolio_id = ? AND status = 'active' ORDER BY id LIMIT ?`,
+      [userId, portfolioId, MAX_CASH_ACCOUNTS + 1],
+    ),
+    client.all<Row>(
+      `SELECT cle.cash_account_id, cle.signed_amount_decimal, cle.status, cle.local_effective_date, cle.effective_at FROM cash_ledger_entries cle JOIN cash_accounts ca ON ca.id = cle.cash_account_id AND ca.user_id = cle.user_id AND ca.portfolio_id = cle.portfolio_id WHERE cle.user_id = ? AND cle.portfolio_id = ? AND ca.status = 'active' AND cle.local_effective_date <= ? AND cle.effective_at <= ? ORDER BY cle.cash_account_id, cle.local_effective_date, cle.effective_at, cle.id LIMIT ?`,
+      [userId, portfolioId, asOf, nowIso, MAX_CASH_ENTRIES + 1],
+    ),
+  ]);
   if (accounts.length > MAX_CASH_ACCOUNTS)
     throw new Error("cash_account_limit");
-  if (fxRows.length === 0) {
+  if (entries.length > MAX_CASH_ENTRIES) throw new Error("cash_entry_limit");
+  if (!fxRowsSupplied) {
     const currencies = [
       ...new Set([
         homeCurrencyCode,
@@ -1482,7 +1576,7 @@ async function loadCash(
     );
     if (cashFxRows.length > MAX_OBSERVATIONS)
       throw new Error("too_many_fx_observations");
-    fxRows = cashFxRows.map(mapFx);
+    resolvedFxRows = cashFxRows.map(mapFx);
     const overrideRepo = createOwnedManualOverrideRepository(client);
     const overrideTargets = currencies
       .filter((currency) => currency !== homeCurrencyCode)
@@ -1506,13 +1600,10 @@ async function loadCash(
       overrideLists.push(list);
       overrideRemaining -= list.length;
     }
-    overrides = overrideLists.flat().filter((row) => row.type === "fx_rate");
+    resolvedOverrides = overrideLists
+      .flat()
+      .filter((row) => row.type === "fx_rate");
   }
-  const entries = await client.all<Row>(
-    `SELECT cle.cash_account_id, cle.signed_amount_decimal, cle.status, cle.local_effective_date, cle.effective_at FROM cash_ledger_entries cle JOIN cash_accounts ca ON ca.id = cle.cash_account_id AND ca.user_id = cle.user_id AND ca.portfolio_id = cle.portfolio_id WHERE cle.user_id = ? AND cle.portfolio_id = ? AND ca.status = 'active' AND cle.local_effective_date <= ? AND cle.effective_at <= ? ORDER BY cle.cash_account_id, cle.local_effective_date, cle.effective_at, cle.id LIMIT ?`,
-    [userId, portfolioId, asOf, nowIso, MAX_CASH_ENTRIES + 1],
-  );
-  if (entries.length > MAX_CASH_ENTRIES) throw new Error("cash_entry_limit");
   const entriesByAccount = new Map<string, Row[]>();
   for (const entry of entries) {
     const id = requiredText(entry, "cash_account_id");
@@ -1566,8 +1657,8 @@ async function loadCash(
         targetKey: `${homeCurrencyCode}/${currency}`,
         userId,
         scope: { kind: "deployment", userId: null },
-        observations: fxRows,
-        overrides: overrides.filter(
+        observations: resolvedFxRows,
+        overrides: resolvedOverrides.filter(
           (row) =>
             row.type === "fx_rate" &&
             row.targetKey === `${homeCurrencyCode}/${currency}`,

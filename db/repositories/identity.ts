@@ -321,14 +321,33 @@ export function createIdentityRepository(client: SqlClient) {
           [record.identityId, record.userId],
         ),
       ]);
-      const updated = await this.findAccessIdentity(
-        record.issuer,
-        record.subject,
-      );
-      if (updated === null) {
-        throw new Error("Authenticated Access identity could not be reloaded.");
-      }
-      return updated;
+      // PRF-003 (owner-reported slow tab navigation): this used to re-run
+      // `findAccessIdentity` (a full SELECT round trip) purely to hand the
+      // CALLER back the record it just wrote -- on EVERY authenticated
+      // request, adding a full extra sequential D1 round trip to the
+      // identity-resolution step every single page pays before it can even
+      // start its own reads. Every field the caller actually consumes
+      // (`domain/auth/identity-lifecycle.ts`'s `toInternalUser` -- id,
+      // status, displayName, primaryEmail, locale, timezone, issuer,
+      // subject, identityStatus) is either UNCHANGED by this write or
+      // trivially known from the inputs already in hand (`email`,
+      // `authenticatedAt`), so the merged record below is byte-identical to
+      // what the reread would have produced for every field the caller
+      // reads. The one theoretical gap -- the `WHERE ... status = 'active'`
+      // predicates matching zero rows because the account was deactivated in
+      // the instant between `resolve()`'s own `isActive` check and this
+      // write -- is not a new gap this removes protection against: the
+      // caller (`resolve()`) never re-checks `updated.status`/
+      // `updated.identityStatus` after this call either before or after this
+      // change (only `updated.id` feeds anything downstream), so the reread
+      // was not actually enforcing anything in that race window.
+      return {
+        ...record,
+        primaryEmail: email,
+        userUpdatedAt: authenticatedAt,
+        userVersion: record.userVersion + 1,
+        lastAuthenticatedAt: authenticatedAt,
+      };
     },
   };
 }

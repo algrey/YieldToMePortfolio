@@ -494,6 +494,107 @@ function stageCensusClient(client: SqlClient): {
   };
 }
 
+/** PRF-003 (owner-reported slow tab navigation, "shortest 3 seconds and
+ * longest 20 seconds" per tab change): measures SEQUENTIAL DEPTH -- the
+ * number of non-overlapping "waves" of D1 round trips a page's REAL loader
+ * chain issues -- rather than raw call/statement counts (PRF-001/PRF-002's
+ * metric). On Cloudflare Workers Free, D1 is not co-located with every
+ * Worker invocation and has no read replication, so EACH sequential
+ * `await`ed round trip pays a real, non-negligible latency tax regardless
+ * of how few rows/statements it touches; two calls issued via `Promise.all`
+ * (or one `batch()`) pay that tax ONCE, together.
+ *
+ * Method: every `all`/`get`/`run`/`batch` call has an identical small delay
+ * (`DEPTH_PROBE_DELAY_MS`) appended AFTER it resolves, before this wrapper's
+ * own promise resolves -- large enough that two genuinely concurrent calls'
+ * [start, end) wall-clock intervals reliably overlap despite real-machine
+ * timing jitter (the underlying in-memory SQLite calls themselves resolve
+ * near-instantly, so without an added delay concurrent and sequential calls
+ * would be nearly indistinguishable by timestamp alone), small enough that
+ * even a few dozen calls finish in well under a second. After the page's
+ * loader chain completes, the captured intervals are merged: two intervals
+ * that overlap (a `Promise.all` pair, or more) collapse into ONE wave;
+ * non-overlapping intervals are separate, sequential waves. The wave COUNT
+ * is `depth`; `modeledWallMs` multiplies it by `MODELED_ROUND_TRIP_MS` -- a
+ * separate, assumed in-region Worker-to-D1 round-trip figure (see this
+ * task's TASKS.md entry) used ONLY for the printed table, decoupled from
+ * the small delay used to make concurrency detection reliable. */
+const DEPTH_PROBE_DELAY_MS = 8;
+const MODELED_ROUND_TRIP_MS = 40;
+function depthCensusClient(client: SqlClient): {
+  client: SqlClient;
+  waves(): {
+    depth: number;
+    modeledWallMs: number;
+    waveSizes: number[];
+    waveLabels: string[][];
+  };
+} {
+  const intervals: Array<{ start: number; end: number; label: string }> = [];
+  function label(sql: string): string {
+    const match = /\b(from|into|update)\s+(\w+)/i.exec(sql);
+    return match ? match[2]!.toLowerCase() : "batch";
+  }
+  async function timed<T>(run: () => Promise<T>, sql: string): Promise<T> {
+    const start = performance.now();
+    const result = await run();
+    await new Promise((resolve) => setTimeout(resolve, DEPTH_PROBE_DELAY_MS));
+    intervals.push({ start, end: performance.now(), label: label(sql) });
+    return result;
+  }
+  return {
+    client: {
+      all: <T extends Record<string, unknown>>(
+        sql: string,
+        params?: readonly unknown[],
+      ) => timed(() => client.all<T>(sql, params), sql),
+      get: <T extends Record<string, unknown>>(
+        sql: string,
+        params?: readonly unknown[],
+      ) => timed(() => client.get<T>(sql, params), sql),
+      run: (sql: string, params?: readonly unknown[]) =>
+        timed(() => client.run(sql, params), sql),
+      batch: (statements: readonly SqlStatement[]) =>
+        timed(() => client.batch(statements), statements[0]?.sql ?? ""),
+    },
+    waves() {
+      const sorted = [...intervals].sort((a, b) => a.start - b.start);
+      let depth = 0;
+      let currentEnd = -Infinity;
+      let currentSize = 0;
+      const waveSizes: number[] = [];
+      const waveLabels: string[][] = [];
+      let currentLabels: string[] = [];
+      for (const interval of sorted) {
+        if (interval.start >= currentEnd) {
+          if (currentSize > 0) {
+            waveSizes.push(currentSize);
+            waveLabels.push(currentLabels);
+          }
+          depth += 1;
+          currentEnd = interval.end;
+          currentSize = 1;
+          currentLabels = [interval.label];
+        } else {
+          currentEnd = Math.max(currentEnd, interval.end);
+          currentSize += 1;
+          currentLabels.push(interval.label);
+        }
+      }
+      if (currentSize > 0) {
+        waveSizes.push(currentSize);
+        waveLabels.push(currentLabels);
+      }
+      return {
+        depth,
+        modeledWallMs: depth * MODELED_ROUND_TRIP_MS,
+        waveSizes,
+        waveLabels,
+      };
+    },
+  };
+}
+
 /** Step 1's "flag ANY SCAN of price_observations, transactions,
  * portfolio_value_history, or dividend-related tables that isn't bounded by
  * a small table" instruction -- re-runs `EXPLAIN QUERY PLAN` on every
@@ -561,17 +662,22 @@ const NOW = new Date("2026-08-01T12:00:00.000Z");
 /** The "base workspace" cost EVERY `loadAuthenticatedWorkspace` call pays
  * once identity/ownership is already resolved -- user settings + the
  * UI-050 app-bar USD/AUD pill. Common to every page census below, mirroring
- * `app/authenticated-workspace.ts`'s own call order (settings, then
- * `loadUsdAudRate`) exactly. Deliberately excludes
+ * `app/authenticated-workspace.ts`'s own call SHAPE. Deliberately excludes
  * `resolveAuthenticatedRequestContext` itself (JWT/`next/headers`-dependent
  * and not `.ts`-importable under plain `node --test`; see this file's
  * header) -- that cost is measured separately, once, in the "auth
  * resolution" test below, since it is identical across every page and its
- * DUPLICATION (now fixed) was a page-independent defect.
+ * DUPLICATION (now fixed) was a page-independent defect. PRF-003: settings
+ * and the FX pill are now fetched CONCURRENTLY in the real loader (they are
+ * mutually independent reads keyed off the same userId -- see
+ * `authenticated-workspace.ts`'s own PRF-003 comment), so this mirrors that
+ * with a `Promise.all` rather than two sequential `await`s.
  */
 async function baseWorkspaceLoad(client: SqlClient): Promise<void> {
-  await createOwnedUserSettingsRepository(client).get(USER_ID);
-  await loadUsdAudRate(client, USER_ID, "2026-08-01");
+  await Promise.all([
+    createOwnedUserSettingsRepository(client).get(USER_ID),
+    loadUsdAudRate(client, USER_ID, "2026-08-01"),
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -594,41 +700,54 @@ async function baseWorkspaceLoad(client: SqlClient): Promise<void> {
  * overview state. `productionScaleFixture` still seeds a legacy queued
  * snapshot-pipeline row (`snapshot-run-1`, standing in for production's
  * real stuck run) specifically so this census proves it is truly inert
- * here -- present but never claimed, advanced, or paid for. */
+ * here -- present but never claimed, advanced, or paid for. PRF-003: these
+ * three reads are mutually independent (see `authenticated-workspace.ts`'s
+ * own PRF-003 comment) and now run concurrently in the real loader -- this
+ * mirrors that with a `Promise.all` rather than three sequential `await`s. */
 async function censusRootOverviewPage(client: SqlClient): Promise<void> {
   await baseWorkspaceLoad(client);
-  await loadHistoricalPortfolioValueSeries(client, USER_ID, PORTFOLIO_ID, NOW);
-  const holdings = await loadOwnedHoldings(
-    client,
-    USER_ID,
-    PORTFOLIO_ID,
-    NOW,
-    NOT_CONFIGURED_SHARESIGHT,
-  );
-  if (holdings.unrealisedSummary) {
-    buildHoldingsSummaryFooter("AUD", holdings.unrealisedSummary, undefined);
-  }
-  const snapshotRepo = createHistoricalSnapshotRepository(client);
-  await snapshotRepo.loadPublishedOverview(USER_ID, PORTFOLIO_ID);
+  await Promise.all([
+    loadHistoricalPortfolioValueSeries(client, USER_ID, PORTFOLIO_ID, NOW),
+    loadOwnedHoldings(
+      client,
+      USER_ID,
+      PORTFOLIO_ID,
+      NOW,
+      NOT_CONFIGURED_SHARESIGHT,
+    ).then((holdings) => {
+      if (holdings.unrealisedSummary) {
+        buildHoldingsSummaryFooter(
+          "AUD",
+          holdings.unrealisedSummary,
+          undefined,
+        );
+      }
+    }),
+    createHistoricalSnapshotRepository(client).loadPublishedOverview(
+      USER_ID,
+      PORTFOLIO_ID,
+    ),
+  ]);
 }
 
 /** `/portfolio/:id/holdings`: `loadAuthenticatedWorkspace(portfolioId,
- * {includeHoldings: true})`. */
+ * {includeHoldings: true})`. PRF-003: `holdings`/`realised` are mutually
+ * independent (see `authenticated-workspace.ts`'s own PRF-003 comment) and
+ * now run concurrently in the real loader. */
 async function censusHoldingsPage(client: SqlClient): Promise<void> {
   await baseWorkspaceLoad(client);
-  const holdings = await loadOwnedHoldings(
-    client,
-    USER_ID,
-    PORTFOLIO_ID,
-    NOW,
-    NOT_CONFIGURED_SHARESIGHT,
-  );
-  const realised = await loadOwnedRealisedGainTotals(
-    client,
-    USER_ID,
-    PORTFOLIO_ID,
-    NOW,
-  ).catch(() => undefined);
+  const [holdings, realised] = await Promise.all([
+    loadOwnedHoldings(
+      client,
+      USER_ID,
+      PORTFOLIO_ID,
+      NOW,
+      NOT_CONFIGURED_SHARESIGHT,
+    ),
+    loadOwnedRealisedGainTotals(client, USER_ID, PORTFOLIO_ID, NOW).catch(
+      () => undefined,
+    ),
+  ]);
   if (holdings.unrealisedSummary) {
     buildHoldingsSummaryFooter(
       "AUD",
@@ -997,5 +1116,170 @@ test("PRF-002/CALC-005: the root overview census never claims, advances, or othe
     0,
     `expected zero snapshot-pipeline statements, saw: ${snapshotPipelineCalls.map((c) => c.sql).join(" | ")}`,
   );
+  db.close();
+});
+
+test("PRF-003: per-page SEQUENTIAL DEPTH census -- non-overlapping D1 round-trip waves and modeled wall time at a simulated 40ms round trip", async () => {
+  const rows: string[] = [];
+  for (const page of PAGES) {
+    const db = await productionScaleFixture();
+    const { client, waves } = depthCensusClient(createSqliteSqlClient(db));
+    await page.run(client);
+    const { depth, modeledWallMs, waveSizes, waveLabels } = waves();
+    const waveSummary = waveLabels
+      .map((labels) => [...new Set(labels)].join("+"))
+      .join(" -> ");
+    rows.push(
+      `${page.name} -- depth=${depth} modeledWallMs=${modeledWallMs} waveSizes=[${waveSizes.join(",")}] waves=[${waveSummary}]`,
+    );
+    // Step 2's target: every page's sequential depth <= 6 (excluding the
+    // auth-resolution step this file cannot drive directly -- see the
+    // dedicated auth-resolution depth check below, which is now a single
+    // wave for an existing identity after PRF-003's `touchWithAudit` fix).
+    assert.ok(
+      depth <= 6,
+      `${page.name} has sequential depth ${depth} (waves: [${waveSizes.join(",")}]), expected <= 6`,
+    );
+    db.close();
+  }
+  console.log(
+    "\nPRF-003 per-page sequential-depth census (production-scale fixture, modeled at 40ms/round trip):",
+  );
+  for (const row of rows) console.log(`  ${row}`);
+});
+
+test("PRF-003: auth-resolution depth -- touchWithAudit no longer pays a reread round trip after its write, for an existing identity", async () => {
+  const { resolveAuthenticatedRequestContext } =
+    await import("../domain/auth/request-context.ts");
+  const db = await migratedDatabase();
+  const now = "2026-08-01T00:00:00.000Z";
+  db.exec(`
+    INSERT INTO currencies(code,numeric_code,name,minor_unit_digits) VALUES ('AUD',36,'Australian dollar',2);
+    INSERT INTO users(id,status,primary_email,timezone,created_at,updated_at) VALUES ('owner-1','active','owner1@example.test','Australia/Sydney','${now}','${now}');
+    INSERT INTO user_settings(user_id,home_currency_code,timezone,financial_year_start_month,created_at,updated_at,version) VALUES ('owner-1','AUD','Australia/Sydney',7,'${now}','${now}',1);
+    INSERT INTO user_identities(id,user_id,provider,issuer,subject,status,created_at,updated_at) VALUES ('identity-1','owner-1','cloudflare_access','https://issuer.example.test','subject-1','active','${now}','${now}');
+    INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at) VALUES ('portfolio-1','owner-1','P','Portfolio','AUD','Australia/Sydney','fifo','active','${now}','${now}');
+  `);
+  const principal = {
+    tokenType: "app" as const,
+    issuer: "https://issuer.example.test",
+    audience: "aud",
+    subject: "subject-1",
+    email: "owner1@example.test",
+    issuedAt: null,
+    notBefore: 0,
+    expiresAt: 9_999_999_999,
+    keyId: "kid-1",
+  };
+  const { client, waves } = depthCensusClient(createSqliteSqlClient(db));
+  const result = await resolveAuthenticatedRequestContext(
+    client,
+    principal,
+    "portfolio-1",
+  );
+  assert.equal(result.ok, true);
+  const { depth } = waves();
+  // Before this task: findAccessIdentity (wave 1) -> touchWithAudit's batch
+  // (wave 2) -> the reread findAccessIdentity (wave 3) -> the portfolio
+  // lookup (wave 4) = depth 4. After: the reread is gone entirely (merged
+  // in-memory from already-known fields -- see db/repositories/identity.ts's
+  // PRF-003 comment), so depth 3.
+  assert.equal(
+    depth,
+    3,
+    "expected identity findAccessIdentity + touchWithAudit batch + portfolio lookup, no reread wave",
+  );
+});
+
+test("PRF-003: the confirmed 20-second-outlier theory -- after a single cron-style invalidation, Overview's slow-path price read is bounded to the invalidated date, not the portfolio's entire multi-year history", async () => {
+  const db = await productionScaleFixture();
+  // Simulate the owner's report: the :25/:55 cron price capture lands a
+  // fresher price for one security on "today" (2026-08-01, this fixture's
+  // `now`), which invalidates that one stored portfolio_value_history row
+  // for every portfolio holding it (matches
+  // `intraday-price-capture.ts`/`market-data-refresh.ts`'s real
+  // single-security/single-date invalidation shape -- see
+  // `historical-portfolio-value.ts`'s `invalidateStoredValueHistoryForSecurity`
+  // doc comment). Only "security-0" is invalidated; every OTHER security's
+  // stored row for that date is untouched, so this reproduces the real
+  // shape exactly: ONE missing candidate date out of ~3,334 stored ones.
+  const client = createSqliteSqlClient(db);
+  const invalidated = await invalidateStoredValueHistoryForSecurity(
+    client,
+    USER_ID,
+    "security-0",
+    ["2026-08-01"],
+  );
+  assert.equal(invalidated.portfoliosInvalidated, 1);
+  assert.equal(invalidated.rowsDeleted, 1);
+
+  const { client: censusClient, stats } = stageCensusClient(
+    createSqliteSqlClient(db),
+  );
+  const result = await loadHistoricalPortfolioValueSeries(
+    censusClient,
+    USER_ID,
+    PORTFOLIO_ID,
+    NOW,
+  );
+  assert.ok(result);
+  // Exactly one date needed real derivation (2026-08-01) -- confirms this
+  // reproduces the reported shape (a single invalidated day), not a
+  // wholesale backfill.
+  assert.equal(result.backfillPending, false);
+
+  // THE FIX: the slow-path `po.*` read (loadFacts, identifiable by its
+  // `po.*` column list, as opposed to the fast-path/candidate-dates
+  // `SELECT DISTINCT po.market_date` query) is now bounded to the single
+  // derived date's span, not the portfolio's entire multi-year
+  // rangeFrom..rangeTo window.
+  const fullRowPriceCalls = stats.calls_.filter(
+    (call) =>
+      call.sql.includes("price_observations") && call.sql.includes("po.*"),
+  );
+  assert.equal(
+    fullRowPriceCalls.length,
+    1,
+    "expected exactly one loadFacts price read on the slow path",
+  );
+  const priceCall = fullRowPriceCalls[0]!;
+  // BETWEEN params sit right after the security-id IN-list placeholders;
+  // this fixture holds 18 securities.
+  const betweenFrom = priceCall.params?.[SECURITY_COUNT];
+  const betweenTo = priceCall.params?.[SECURITY_COUNT + 1];
+  assert.equal(betweenFrom, "2026-08-01");
+  assert.equal(betweenTo, "2026-08-01");
+
+  // Prove the ROW-COUNT consequence directly against the real fixture data,
+  // not just the query text: re-running the EXACT captured query returns
+  // one row per security for the single invalidated date (18), not
+  // anywhere near the fixture's ~60,012 total price_observations rows the
+  // UNBOUNDED [rangeFrom, rangeTo] window this task fixes would have read.
+  const rowsReturned = db
+    .prepare(priceCall.sql)
+    .all(...(priceCall.params as never[])) as unknown[];
+  assert.equal(rowsReturned.length, SECURITY_COUNT);
+
+  // Contrast figure (informational): what the OLD unconditional
+  // `[rangeFrom, rangeTo]` window would have read for the SAME predicate --
+  // this fixture's full ~10-year-capped history, matching the ~60,012 total
+  // seeded rows (minus the one invalidated/deleted date's worth, and
+  // clamped by the 10-year MAX_CANDIDATE_DATES floor `resolveRange`
+  // applies -- the exact count is not the point, only the order of
+  // magnitude versus the 18-row bounded read above).
+  const securityIds = Array.from(
+    { length: SECURITY_COUNT },
+    (_, index) => `security-${index}`,
+  );
+  const oldUnboundedCount = db
+    .prepare(
+      `SELECT count(*) AS count FROM price_observations po WHERE po.security_id IN (${securityIds.map(() => "?").join(",")}) AND po.market_date BETWEEN '2017-01-01' AND '2026-08-01' AND po.adjustment_state = 'raw' AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?))`,
+    )
+    .get(...securityIds, USER_ID) as { count: number };
+  console.log(
+    `\nPRF-003 20s-outlier fix: bounded slow-path read = ${rowsReturned.length} price_observations rows; the old unconditional full-range read would have been ${oldUnboundedCount.count} rows (~${Math.round(oldUnboundedCount.count / rowsReturned.length)}x more).`,
+  );
+  assert.ok(oldUnboundedCount.count > rowsReturned.length * 100);
+
   db.close();
 });

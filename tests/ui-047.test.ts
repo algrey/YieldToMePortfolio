@@ -491,24 +491,27 @@ test("UI-047 source: loadAuthenticatedWorkspace loads the same securities-only h
   const overviewBlock = excerptAfter(
     source,
     "if (options.includeOverview) {",
-    6000,
+    8000,
   );
+  // PRF-003 (owner-reported slow tab navigation): the value-history graph,
+  // this holdings-derived summary, and the snapshot-publication read all run
+  // concurrently now (one `Promise.all` wave instead of three sequential
+  // `await`s) -- `holdingsSummary` is destructured from that wave rather
+  // than bound by its own `await loadOwnedHoldings(` statement.
   assert.match(
     overviewBlock,
-    /const holdingsSummary = await loadOwnedHoldings\(/,
+    /const \[portfolioValueHistory, holdingsSummary, overviewResult\] =\s*\n?\s*await Promise\.all\(/,
   );
+  assert.match(overviewBlock, /loadOwnedHoldings\(/);
   assert.match(overviewBlock, /buildHoldingsSummaryFooter\(/);
-  // Attached on BOTH return paths -- the happy path and the catch-block
-  // honest-unavailable fallback -- so a snapshot-pipeline failure never
-  // silently reverts the headline to "unavailable" when the holdings read
-  // itself actually succeeded.
+  // Attached on BOTH outcomes of the snapshot-publication read -- the
+  // successful-publication branch and the honest-unavailable fallback --
+  // via a single return statement's ternary, so a snapshot-pipeline failure
+  // never silently drops the (independently loaded) holdings summary or
+  // value-history graph when THEY themselves actually succeeded.
   assert.match(
     overviewBlock,
-    /overview: createOverviewData\(overview\),\s*portfolioValueHistory,\s*holdingsSummary,/,
-  );
-  assert.match(
-    overviewBlock,
-    /overview: createUnavailableOverviewData\(\s*configuredWorkspace\.activePortfolio\.baseCurrencyCode,\s*\),\s*portfolioValueHistory,\s*holdingsSummary,/,
+    /overview: overviewResult\.ok\s*\?\s*createOverviewData\(overviewResult\.overview\)\s*:\s*createUnavailableOverviewData\(\s*configuredWorkspace\.activePortfolio\.baseCurrencyCode,\s*\),\s*portfolioValueHistory,\s*holdingsSummary,/,
   );
 });
 
