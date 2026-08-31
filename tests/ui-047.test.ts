@@ -491,7 +491,13 @@ test("UI-047 source: loadAuthenticatedWorkspace loads the same securities-only h
   const overviewBlock = excerptAfter(
     source,
     "if (options.includeOverview) {",
-    8000,
+    // PRF-006 (comment-honesty review fix): the block's leading comments
+    // grew substantially (marking now-stale HIST-001/PRF-003 text as
+    // HISTORY and recording the loadPublishedOverview removal's rationale
+    // and error-path behavior change) -- widened from 8000 so the excerpt
+    // still reaches the `overview,\n portfolioValueHistory,\n
+    // holdingsSummary,` return-object assertion below.
+    10000,
   );
   // PRF-003 (owner-reported slow tab navigation): the value-history graph
   // and this holdings-derived summary run concurrently (one `Promise.all`

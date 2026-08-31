@@ -314,68 +314,95 @@ export async function loadAuthenticatedWorkspace(
       }
     }
     if (options.includeOverview) {
-      // HIST-001: the "portfolio value over time" graph is a SEPARATE,
-      // best-effort read from the `overview`/`loadPublishedOverview` block
-      // below -- it never depends on the CALC-003/CALC-004 persisted
+      // HIST-001 (HISTORY -- PRF-006 below removed the third wave member
+      // this comment originally pointed at; the "`overview`/
+      // `loadPublishedOverview` block" referenced here no longer exists):
+      // the "portfolio value over time" graph is a SEPARATE, best-effort
+      // read -- it never depends on the CALC-003/CALC-004 persisted
       // snapshot pipeline (investigation found that pipeline had never
       // published for the real account under review; see
       // `docs/ARCHITECTURE.md`'s HIST-001 entry). A failure here must never
       // take down the existing Overview hero/coverage sections, so it gets
       // its OWN try/catch and its own honest "unavailable" fallback,
       // mirroring the `realisedGains` best-effort pattern above.
-      // PRF-003 (owner-reported slow tab navigation): `portfolioValueHistory`,
-      // `holdingsSummary`, and the snapshot-publication `overview` read below
-      // are THREE fully independent best-effort reads -- none consumes
-      // another's output, they are only combined together in the object
-      // literals returned at the end. Before this fix they ran as three
-      // separate sequential `await`s (three full D1 round trips end-to-end);
-      // collapsed into one `Promise.all` wave here. Each keeps its OWN
-      // failure handling exactly as before (`.catch` for all three) so a
-      // failure in any ONE of them still degrades only that piece, never
-      // the other two. Review round 2 (BLOCKING correction): `overview`'s
-      // `.catch` must cover `createOverviewData` itself, not just the
-      // `loadPublishedOverview` read -- the original pre-parallelization
-      // code had BOTH inside one try block, so a malformed-publication
-      // throw from `createOverviewData` degraded only the overview section.
-      // An earlier version of this refactor called `createOverviewData`
-      // OUTSIDE this `Promise.all` entirely, so that same throw would have
-      // escaped to the OUTER catch (below) and discarded the
-      // already-successful `portfolioValueHistory`/`holdingsSummary`
-      // alongside it -- a strictly worse degradation than before.
+      // PRF-003 (owner-reported slow tab navigation; HISTORY -- PRF-006
+      // below reduced this wave from three members to two, removing the
+      // snapshot-publication `overview` read this paragraph describes):
+      // `portfolioValueHistory`, `holdingsSummary`, and (at the time) the
+      // snapshot-publication `overview` read were THREE fully independent
+      // best-effort reads -- none consumed another's output, they were only
+      // combined together in the object literals returned at the end.
+      // Before this fix they ran as three separate sequential `await`s
+      // (three full D1 round trips end-to-end); collapsed into one
+      // `Promise.all` wave here. Each kept its OWN failure handling
+      // (`.catch` for all three) so a failure in any ONE of them degraded
+      // only that piece, never the others. Review round 2 (BLOCKING
+      // correction; HISTORY -- describes the now-removed `overview` wave
+      // member): `overview`'s `.catch` had to cover `createOverviewData`
+      // itself, not just the `loadPublishedOverview` read -- the original
+      // pre-parallelization code had BOTH inside one try block, so a
+      // malformed-publication throw from `createOverviewData` degraded only
+      // the overview section. An earlier version of this refactor called
+      // `createOverviewData` OUTSIDE this `Promise.all` entirely, so that
+      // same throw would have escaped to the OUTER catch (below) and
+      // discarded the already-successful `portfolioValueHistory`/
+      // `holdingsSummary` alongside it -- a strictly worse degradation than
+      // before.
       // PRF-006 (owner-directed final pass, 2026-08-31): the third wave
       // member used to be a `loadPublishedOverview` D1 read feeding
       // `createOverviewData`/`createUnavailableOverviewData`. CALC-005
       // (2026-08-31) already retired the snapshot pipeline's every writer --
       // `db/repositories/ledger.ts`, `import-commit.ts`, and this module's
       // own former self-heal all stopped queueing/claiming/advancing a
-      // `snapshot`-pipeline row -- so `snapshot_publications` can now never
-      // gain a row again in this codebase, not merely "confirmed empty for
-      // this account" (production verified 0 rows on 2026-08-31, per the
-      // CALC-005 entry). `loadPublishedOverview` therefore always resolves
-      // `null` and `createOverviewData(null)` is a pure, synchronous
-      // function -- computing it directly removes a permanently-wasted D1
-      // round trip from EVERY root-page load without changing the resolved
-      // value: `loadPublishedOverview` never actually threw in production
-      // (it is a plain indexed SELECT against an always-empty table), so the
-      // `.catch(() => createUnavailableOverviewData(...))` branch was never
-      // the code path real traffic took -- the observed output was, and
-      // remains, `createOverviewData(null)` (status "empty", not
-      // "unavailable" -- the two `create*OverviewData` helpers are NOT
-      // interchangeable; see `app/overview-read-model.ts`). Preserved
-      // byte-identical; `createHistoricalSnapshotRepository`/
-      // `createUnavailableOverviewData` are unused here now.
+      // `snapshot`-pipeline row -- so `snapshot_publications` has NO
+      // reachable production writer any more (its sole writer,
+      // `completeAndPublish`, is reached only via `pipeline: "snapshot"`,
+      // which no production caller passes; see `docs/ARCHITECTURE.md`'s
+      // dated PRF-006 correction under the CALC-005 entry for the full
+      // four-part proof), not merely "confirmed empty for this account"
+      // (production verified 0 rows on 2026-08-31, per the CALC-005 entry).
+      // `loadPublishedOverview` therefore always resolves `null` and
+      // `createOverviewData(null)` is a pure, synchronous function --
+      // computing it directly removes a permanently-wasted D1 round trip
+      // from EVERY root-page load (root overview census: 20/20 D1
+      // calls/statements -> 19/19, depth unchanged at 6 -- this read was
+      // concurrent with its two siblings, never the critical-path
+      // bottleneck).
+      //
+      // This IS a deliberate behavior change on the error path, not a
+      // byte-identical-output preservation: before this change, a genuine
+      // `loadPublishedOverview` D1 failure (a transient connectivity error,
+      // not a data-shape issue -- `createOverviewData` cannot throw on the
+      // `null` this call was always going to resolve to) reached
+      // `.catch(() => createUnavailableOverviewData(...))`, which rendered
+      // `OwnedOverviewScreen`'s `data.status === "unavailable"` branch
+      // (`app/components/portfolio-shell.tsx`): an "Overview unavailable /
+      // Published valuation data could not be loaded. Try again shortly."
+      // banner, shown alongside the independently-rendering HIST-001 graph.
+      // With the read removed, that failure mode is gone entirely -- the
+      // screen always takes the SAME `data.status === "empty"` path it
+      // already took on every successful call (the query always returned
+      // zero rows), which shows only the chart plus, if the chart itself
+      // also has nothing to plot, a "No valuation history yet" empty state
+      // -- never the "could not be loaded" banner, since there is no longer
+      // a read that can fail. A transient D1 hiccup against a permanently
+      // unwritable table can no longer disrupt the Overview screen at all.
+      // This is an improvement, not a preserved invariant --
+      // `createHistoricalSnapshotRepository`/`createUnavailableOverviewData`
+      // are unused here now.
       const overview = createOverviewData(null);
       const [portfolioValueHistory, holdingsSummary] = await Promise.all([
-        // HIST-001: the "portfolio value over time" graph is a SEPARATE,
-        // best-effort read from the `overview`/`loadPublishedOverview`
-        // read below -- it never depends on the CALC-003/CALC-004
-        // persisted snapshot pipeline (investigation found that pipeline
-        // had never published for the real account under review; see
-        // `docs/ARCHITECTURE.md`'s HIST-001 entry). A failure here must
-        // never take down the existing Overview hero/coverage sections,
-        // so it gets its OWN `.catch` and its own honest "unavailable"
-        // fallback, mirroring the `realisedGains` best-effort pattern
-        // above.
+        // HIST-001 (HISTORY -- see the PRF-006 comment above; the "read
+        // below" this originally pointed at is gone, only `holdingsSummary`
+        // remains as this read's sibling in the wave): the "portfolio value
+        // over time" graph is a SEPARATE, best-effort read -- it never
+        // depends on the CALC-003/CALC-004 persisted snapshot pipeline
+        // (investigation found that pipeline had never published for the
+        // real account under review; see `docs/ARCHITECTURE.md`'s HIST-001
+        // entry). A failure here must never take down the existing Overview
+        // hero/coverage sections, so it gets its OWN `.catch` and its own
+        // honest "unavailable" fallback, mirroring the `realisedGains`
+        // best-effort pattern above.
         loadHistoricalPortfolioValueSeries(
           client,
           result.context.user.id,
