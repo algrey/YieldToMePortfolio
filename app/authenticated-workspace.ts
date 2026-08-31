@@ -86,6 +86,28 @@ export async function loadAuthenticatedWorkspace(
   // resolved `client`/`userId` without a second, duplicate
   // `resolveAuthenticatedRequestContext` call.
   sqlContextOut?: { current: AuthenticatedWorkspaceSqlContext },
+  // UI-051 (owner-directed): the workspace root (`app/page.tsx`) now lands
+  // the owner on their first portfolio's Holdings tab instead of rendering
+  // Overview in place, once a portfolio exists. This output slot is filled
+  // the moment `result` (below) is known -- BEFORE the settings/usdAudRate/
+  // portfolio-list reads that follow -- with the SAME "first" portfolio id
+  // `result.context.activePortfolio` already resolved (identical ordering to
+  // every other caller's implicit default: `resolveAuthenticatedRequestContext`'s
+  // own `list(userId)[0]` fallback), or `null` when there is nothing to
+  // redirect to. When it resolves non-null, this function returns
+  // immediately with a throwaway placeholder workspace (the caller redirects
+  // before ever looking at it) rather than paying for the rest of this
+  // function's reads -- a populated-portfolio visit to `/` now costs nothing
+  // beyond the identity+portfolio lookup every authenticated page already
+  // pays. When it resolves `null` (no active portfolio -- a fresh install,
+  // UI-049 -- or the request failed auth/D1), this function falls through to
+  // its normal full load exactly as before, so those paths' cost is
+  // completely unchanged. Deliberately a SEPARATE output slot rather than a
+  // second call to this function or to `resolveAuthenticatedRequestContext`:
+  // that identity resolution's `touchWithAudit` write is not safe to run
+  // twice in one request (it would double-insert the audit-log row), so
+  // there must only ever be one resolution per request.
+  landingRedirectOut?: { current: string | null },
 ): Promise<OwnedWorkspace> {
   const requestHeaders = await headers();
   const principalHeader = requestHeaders.get(VERIFIED_PRINCIPAL_HEADER);
@@ -112,6 +134,15 @@ export async function loadAuthenticatedWorkspace(
       principal,
       requestedPortfolioId,
     );
+    // UI-051: see `landingRedirectOut`'s own doc comment above -- checked
+    // immediately once `result` is known, before any further D1 reads.
+    if (landingRedirectOut) {
+      landingRedirectOut.current =
+        result.ok && result.context.activePortfolio
+          ? result.context.activePortfolio.id
+          : null;
+      if (landingRedirectOut.current !== null) return unavailableWorkspace("");
+    }
     // Resolved once, server-side, per request -- this is the single "now"
     // FY window math anchors on (see domain/calculations/financial-year.ts
     // and docs/CALCULATIONS.md §9). It must never be re-derived from a

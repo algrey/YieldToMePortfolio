@@ -25,10 +25,27 @@ export default async function Home({ searchParams }: HomePageProps) {
   // `includeQuotes` here, a no-portfolio owner with real watch entries would
   // see a FALSE "No watch entries yet" empty state -- the exact class of bug
   // UI-024's review caught for overview/holdings/quotes previously.
-  const workspace = await loadAuthenticatedWorkspace(undefined, {
-    includeOverview: true,
-    includeQuotes: requestedSection === "quotes",
-  });
+  // UI-051 (owner-directed): once at least one portfolio exists, `/` is no
+  // longer its own landing surface -- every visit lands on the Holdings tab
+  // of the owner's first portfolio, regardless of any `?section=` on this
+  // request. `landingRedirect` is an output slot `loadAuthenticatedWorkspace`
+  // fills the moment its own (mandatory, unavoidable) identity+portfolio
+  // resolution below discovers an active portfolio -- see that slot's own
+  // doc comment in `authenticated-workspace.ts` for why this MUST stay a
+  // single call rather than a separate cheap pre-check.
+  const landingRedirect: { current: string | null } = { current: null };
+  const workspace = await loadAuthenticatedWorkspace(
+    undefined,
+    {
+      includeOverview: true,
+      includeQuotes: requestedSection === "quotes",
+    },
+    undefined,
+    landingRedirect,
+  );
+  if (landingRedirect.current) {
+    redirect(`/portfolio/${landingRedirect.current}/holdings`);
+  }
   // UI-024 review (BLOCKING fix): this loader only ever requests overview
   // data, so once an active portfolio exists, rendering a non-overview
   // section directly on this route would show a FALSE empty/unavailable
