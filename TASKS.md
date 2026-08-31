@@ -1327,6 +1327,18 @@ Follow-ups recorded (2026-08-30, non-blocking): (a) `PortfolioBundlePanel` rende
 
 Status: DONE (arrived in owner commit `2f1a2af`, "Couple of things done in agent sub sessions", with no TASKS.md entry). Recorded retroactively by the Orchestrator on 2026-08-30: a USER-scoped USD/AUD rate pill in the top app bar (`app/authenticated-fx-rate.ts`, rendered by `app/components/portfolio-shell.tsx`, styled in `app/globals.css`, workspace-loaded in `app/authenticated-workspace.ts`). Its source comments originally used the ID "UI-049", which later collided with the import-page unblock task above; per AGENTS.md stable-ID rules the pill's four comment references were renamed to UI-050 (comment-only change, no behavior). If the pill needs future work, use this ID.
 
+### UI-051 — Workspace root lands on Holdings when a portfolio exists (owner-directed)
+
+Status: DONE on 2026-08-31 (worker + reviewer round-1 FAIL with one blocking finding, round-2 correction prescription-exact per precedent; commits `b939d43` + `fc6365e`). Owner directive verbatim: "when the site first loads and has an existing portfolio it should start on the holdings tab."
+
+DELIVERED: authenticated `/` with ≥1 active portfolio redirects to `/portfolio/<firstPortfolioId>/holdings` (same first-portfolio ordering as every other implicit-default caller). Zero-portfolio (fresh-install/UI-049 import flow) and auth/D1-failure renderings byte-identical. Implementation: `loadAuthenticatedWorkspace` gained an optional `landingRedirectOut` output slot filled immediately after the single `resolveAuthenticatedRequestContext` (one `touchWithAudit`, never doubled) with an early return (non-empty sentinel message so a forgotten-redirect caller fails visible, per review); `app/page.tsx` calls `redirect()` outside the loader's try/catch (vinext NEXT_REDIRECT would otherwise be swallowed — recorded in worker memory). Redirect decision costs 3 D1 calls / 5 statements vs the prior 19/19 full root load (census-tested). Reviewer verified: no redirect loops (remembered `/`, back-control fallbacks, and `/?section=` are single extra hops), 307 carries `private, no-store`, service worker passes navigations through.
+
+Round-1 blocking finding (Orchestrator ruling: labels stay honest): four owned-mode chrome links (`topbar brand`, popover "All portfolios →", drawer brand, drawer "Overview") had `href="/"` and would have silently landed on Holdings against their own labels — now conditionally `/portfolio/<activeId>/overview` in owned mode with an active portfolio, `/` otherwise; `prefetch={false}` retained; pinned by test. The owner's directive covers the INITIAL load only; explicit Overview navigation stays Overview.
+
+Recorded supersession: UI-024's `/?section=X` root deep-link redirect is superseded at route level (only live producer emits it with NO active portfolio; a stale bookmark from the fresh-install window now lands on Holdings) — `ownedSectionRedirectPath` retained for the null-portfolio path, doc comments and ui-024 tests annotated, assertions untouched.
+
+Verification: `npm run format:check`/`npm run lint`/`npx tsc --noEmit`/`npm run build` clean; full `npm test` 2678 tests, 2668 pass, 10 env-gated skips, 0 fail.
+
 ### PRF-006 — Whole-site final optimization pass (owner-directed)
 
 Status: DONE on 2026-08-31 (worker + reviewer round-1 FAIL on doc/comment honesty, round-2 corrections prescription-exact per precedent; commits `f8b4af9` + `ce7083b`). Owner directive verbatim: "Do one last pass and look for any more issues or optimisations across the whole site."
