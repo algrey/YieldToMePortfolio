@@ -4600,7 +4600,15 @@ export function PortfolioShell({
                   ) : null}
                 </>
               ) : null}
-              <Link href="/" onClick={() => setOpenMenu(null)}>
+              {/* PRF-006 (owner-directed final pass): this popover mounts
+                  fresh, in-viewport, every time the portfolio menu opens
+                  (`openMenu === "portfolio"`), so vinext's auto-prefetch
+                  re-triggers a full root-page RSC fetch on every open --
+                  the same defect class PRF-004 fixed for the always-mounted
+                  topbar-brand link (see its comment above). `prefetch=
+                  {false}` stops that; the link still navigates normally on
+                  click. */}
+              <Link href="/" onClick={() => setOpenMenu(null)} prefetch={false}>
                 <span>All portfolios</span>
                 <span aria-hidden="true">→</span>
               </Link>
@@ -5214,7 +5222,20 @@ export function PortfolioShell({
             }}
           >
             <div className="drawer-heading">
-              <Link href="/" onClick={() => setDrawerOpen(false)}>
+              {/* PRF-006 (owner-directed final pass, closing PRF-004's own
+                  recorded follow-up (c)): the drawer mounts fresh, in-
+                  viewport, every time it opens (`{drawerOpen ? ... :
+                  null}`), so vinext's auto-prefetch re-triggers a full
+                  root-page RSC fetch on every open for BOTH of this
+                  drawer's `href="/"` links -- the same defect class PRF-004
+                  fixed for the always-mounted topbar-brand link (see its
+                  comment above). `prefetch={false}` stops that; both links
+                  still navigate normally on click. */}
+              <Link
+                href="/"
+                onClick={() => setDrawerOpen(false)}
+                prefetch={false}
+              >
                 <BrandMark />
                 <span className="wordmark">YieldToMe</span>
               </Link>
@@ -5228,7 +5249,11 @@ export function PortfolioShell({
               </button>
             </div>
             <p className="drawer-label">Workspace</p>
-            <Link href="/" onClick={() => setDrawerOpen(false)}>
+            <Link
+              href="/"
+              onClick={() => setDrawerOpen(false)}
+              prefetch={false}
+            >
               Overview
             </Link>
             <p className="drawer-label">Portfolios</p>

@@ -493,29 +493,23 @@ test("UI-047 source: loadAuthenticatedWorkspace loads the same securities-only h
     "if (options.includeOverview) {",
     8000,
   );
-  // PRF-003 (owner-reported slow tab navigation): the value-history graph,
-  // this holdings-derived summary, and the snapshot-publication read all run
-  // concurrently now (one `Promise.all` wave instead of three sequential
-  // `await`s) -- `holdingsSummary` is destructured from that wave rather
-  // than bound by its own `await loadOwnedHoldings(` statement.
+  // PRF-003 (owner-reported slow tab navigation): the value-history graph
+  // and this holdings-derived summary run concurrently (one `Promise.all`
+  // wave instead of sequential `await`s) -- `holdingsSummary` is
+  // destructured from that wave rather than bound by its own
+  // `await loadOwnedHoldings(` statement. PRF-006 (owner-directed final
+  // pass): the former THIRD wave member, a `loadPublishedOverview` D1 read,
+  // is gone -- CALC-005 already retired the snapshot pipeline's every
+  // writer, so that read always resolved `null`; `overview` is now computed
+  // directly as `createOverviewData(null)`, a pure synchronous value, ahead
+  // of the (now two-member) wave.
+  assert.match(overviewBlock, /const overview = createOverviewData\(null\);/);
   assert.match(
     overviewBlock,
-    /const \[portfolioValueHistory, holdingsSummary, overview\] =\s*\n?\s*await Promise\.all\(/,
+    /const \[portfolioValueHistory, holdingsSummary\] =\s*\n?\s*await Promise\.all\(/,
   );
   assert.match(overviewBlock, /loadOwnedHoldings\(/);
   assert.match(overviewBlock, /buildHoldingsSummaryFooter\(/);
-  // PRF-003 review round 2 (BLOCKING correction): `createOverviewData` and
-  // `createUnavailableOverviewData` must BOTH live inside the SAME
-  // `.then`/`.catch` pair as the `loadPublishedOverview` read -- an earlier
-  // version called `createOverviewData` OUTSIDE this wave entirely, so a
-  // malformed-publication throw from it would have escaped to the outer
-  // catch and discarded the already-successful `portfolioValueHistory`/
-  // `holdingsSummary` alongside it, a strictly worse degradation than the
-  // pre-parallelization code's single shared try block.
-  assert.match(
-    overviewBlock,
-    /\.then\(\(overview\) => createOverviewData\(overview\)\)\s*\n?\s*\.catch\(\(\) =>\s*\n?\s*createUnavailableOverviewData\(\s*\n?\s*configuredWorkspace\.activePortfolio!\.baseCurrencyCode,\s*\n?\s*\),\s*\n?\s*\),/,
-  );
   assert.match(
     overviewBlock,
     /overview,\s*\n?\s*portfolioValueHistory,\s*\n?\s*holdingsSummary,/,

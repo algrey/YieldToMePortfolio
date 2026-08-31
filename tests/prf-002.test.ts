@@ -85,7 +85,6 @@ import {
 import { loadUsdAudRate } from "../app/authenticated-fx-rate.ts";
 import { loadPortfolioInspectionSafely } from "../db/repositories/portfolio-inspection.ts";
 import { createOwnedUserSettingsRepository } from "../db/repositories/owned-portfolios.ts";
-import { createHistoricalSnapshotRepository } from "../db/repositories/snapshots.ts";
 // PRF-005: the Income area's uncensused pages (never covered by PRF-002,
 // which only censused `/income/dividends`).
 import { loadOwnedIncomeProjection } from "../app/owned-income-projection.ts";
@@ -564,6 +563,19 @@ function stageCensusClient(client: SqlClient): {
         entry.calls += 1;
         entry.ms += ms;
         stats.byStage.set("batch", entry);
+        // PRF-006 (closing CALC-005's own recorded review follow-up (a):
+        // "the census client misses batch calls"): each batched statement's
+        // sql/params is captured here too, exactly like `record()` does for
+        // `all`/`get`/`run` above -- without this, a call moved from
+        // `client.all` to `client.batch` (as PRF-006's `/income` rows_read
+        // fix does for loadFacts's 2+-window price/FX reads) would silently
+        // vanish from every `stats.calls_`-driven assertion (the
+        // EXPLAIN QUERY PLAN scan check, the "exactly one price read"
+        // filters below), not because the regression guard passed but
+        // because it never saw the query at all.
+        for (const statement of statements) {
+          stats.calls_.push({ sql: statement.sql, params: statement.params });
+        }
         return result;
       },
     },
@@ -813,20 +825,21 @@ async function baseWorkspaceLoad(client: SqlClient): Promise<void> {
  * {includeOverview: true})` -- ALWAYS requested for the root route
  * regardless of which section query param is present (see `app/page.tsx`).
  * Mirrors `authenticated-workspace.ts`'s `includeOverview` branch body
- * exactly: the HIST-001 value-history graph, a SEPARATE `loadOwnedHoldings`
- * call for the hero's securities-only summary (UI-047), and a single
- * `loadPublishedOverview` read. CALC-005 retired the snapshot pipeline (see
- * docs/ARCHITECTURE.md's CALC-005 entry) -- this no longer self-heals by
- * claiming/advancing a queued-but-unadvanced snapshot run when nothing has
- * published (that was the CALC-004 shape this census used to measure); a
- * null publication now falls straight through to the honest unavailable
- * overview state. `productionScaleFixture` still seeds a legacy queued
- * snapshot-pipeline row (`snapshot-run-1`, standing in for production's
- * real stuck run) specifically so this census proves it is truly inert
- * here -- present but never claimed, advanced, or paid for. PRF-003: these
- * three reads are mutually independent (see `authenticated-workspace.ts`'s
- * own PRF-003 comment) and now run concurrently in the real loader -- this
- * mirrors that with a `Promise.all` rather than three sequential `await`s. */
+ * exactly: the HIST-001 value-history graph and a SEPARATE `loadOwnedHoldings`
+ * call for the hero's securities-only summary (UI-047). PRF-006 (owner-
+ * directed final pass): the former THIRD wave member, a `loadPublishedOverview`
+ * D1 read, is gone -- CALC-005 already retired the snapshot pipeline's every
+ * writer, so `snapshot_publications` can never gain a row again in this
+ * codebase and that read always resolved `null`; `authenticated-workspace.ts`
+ * now computes `createOverviewData(null)` directly with zero D1 cost.
+ * `productionScaleFixture` still seeds a legacy queued snapshot-pipeline row
+ * (`snapshot-run-1`, standing in for production's real stuck run)
+ * specifically so the dedicated CALC-005 test below proves it is truly inert
+ * -- present but never read, claimed, advanced, or paid for. PRF-003: the
+ * two remaining reads are mutually independent (see
+ * `authenticated-workspace.ts`'s own PRF-003 comment) and run concurrently in
+ * the real loader -- this mirrors that with a `Promise.all` rather than two
+ * sequential `await`s. */
 async function censusRootOverviewPage(client: SqlClient): Promise<void> {
   await baseWorkspaceLoad(client);
   await Promise.all([
@@ -846,10 +859,6 @@ async function censusRootOverviewPage(client: SqlClient): Promise<void> {
         );
       }
     }),
-    createHistoricalSnapshotRepository(client).loadPublishedOverview(
-      USER_ID,
-      PORTFOLIO_ID,
-    ),
   ]);
 }
 

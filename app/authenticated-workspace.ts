@@ -20,11 +20,7 @@ import { loadOwnedWatchlist } from "./owned-watchlist";
 import { loadOwnedHoldings } from "./owned-holdings";
 import { loadOwnedRealisedGainTotals } from "./owned-capital-gains";
 import { buildHoldingsSummaryFooter } from "./owned-holdings-summary";
-import { createHistoricalSnapshotRepository } from "../db/repositories/snapshots.ts";
-import {
-  createOverviewData,
-  createUnavailableOverviewData,
-} from "./overview-read-model";
+import { createOverviewData } from "./overview-read-model";
 import { loadHistoricalPortfolioValueSeries } from "./historical-portfolio-value.ts";
 import { loadUsdAudRate } from "./authenticated-fx-rate.ts";
 import type { SqlClient } from "../db/repositories/sql-client.ts";
@@ -346,110 +342,105 @@ export async function loadAuthenticatedWorkspace(
       // escaped to the OUTER catch (below) and discarded the
       // already-successful `portfolioValueHistory`/`holdingsSummary`
       // alongside it -- a strictly worse degradation than before.
-      const [portfolioValueHistory, holdingsSummary, overview] =
-        await Promise.all([
-          // HIST-001: the "portfolio value over time" graph is a SEPARATE,
-          // best-effort read from the `overview`/`loadPublishedOverview`
-          // read below -- it never depends on the CALC-003/CALC-004
-          // persisted snapshot pipeline (investigation found that pipeline
-          // had never published for the real account under review; see
-          // `docs/ARCHITECTURE.md`'s HIST-001 entry). A failure here must
-          // never take down the existing Overview hero/coverage sections,
-          // so it gets its OWN `.catch` and its own honest "unavailable"
-          // fallback, mirroring the `realisedGains` best-effort pattern
-          // above.
-          loadHistoricalPortfolioValueSeries(
-            client,
-            result.context.user.id,
-            configuredWorkspace.activePortfolio.id,
-            new Date(nowInstant),
-          )
-            .then((result) =>
-              result === null
-                ? {
-                    status: "unavailable" as const,
-                    points: [],
-                    baseCurrencyCode:
-                      configuredWorkspace.activePortfolio!.baseCurrencyCode,
-                    datesTruncated: false,
-                    backfillPending: false,
-                  }
-                : {
-                    status:
-                      result.points.length === 0
-                        ? ("empty" as const)
-                        : ("ok" as const),
-                    points: result.points,
-                    baseCurrencyCode: result.baseCurrencyCode,
-                    datesTruncated: result.datesTruncated,
-                    backfillPending: result.backfillPending,
-                  },
-            )
-            .catch(() => ({
-              status: "unavailable" as const,
-              points: [],
-              baseCurrencyCode:
-                configuredWorkspace.activePortfolio!.baseCurrencyCode,
-              datesTruncated: false,
-              backfillPending: false,
-            })),
-          // UI-047 (owner-reported): the Overview hero headline must show
-          // the SAME securities-only current portfolio value the Holdings
-          // tab (`buildHoldingsSummaryFooter`'s `marketValue`) and the
-          // HIST-001/BUG-002 value-history graph already show -- never the
-          // CALC-003/CALC-004 persisted-snapshot total below, which stayed
-          // cash-inclusive (BUG-002 only touched the HIST-001 series and
-          // live holdings reads, not that dormant snapshot pipeline).
-          // CALC-005 retired the snapshot pipeline entirely, so that total
-          // can now never populate at all -- the divergence this comment
-          // used to flag as a follow-up is moot by construction. Loaded
-          // independently, mirroring `portfolioValueHistory` above: a
-          // failure here must never take down the rest of Overview, so the
-          // headline simply reads "unavailable" rather than dragging the
-          // whole screen down with it.
-          loadOwnedHoldings(
-            client,
-            result.context.user.id,
-            configuredWorkspace.activePortfolio.id,
-          )
-            .then((holdings) =>
-              holdings.unrealisedSummary
-                ? buildHoldingsSummaryFooter(
+      // PRF-006 (owner-directed final pass, 2026-08-31): the third wave
+      // member used to be a `loadPublishedOverview` D1 read feeding
+      // `createOverviewData`/`createUnavailableOverviewData`. CALC-005
+      // (2026-08-31) already retired the snapshot pipeline's every writer --
+      // `db/repositories/ledger.ts`, `import-commit.ts`, and this module's
+      // own former self-heal all stopped queueing/claiming/advancing a
+      // `snapshot`-pipeline row -- so `snapshot_publications` can now never
+      // gain a row again in this codebase, not merely "confirmed empty for
+      // this account" (production verified 0 rows on 2026-08-31, per the
+      // CALC-005 entry). `loadPublishedOverview` therefore always resolves
+      // `null` and `createOverviewData(null)` is a pure, synchronous
+      // function -- computing it directly removes a permanently-wasted D1
+      // round trip from EVERY root-page load without changing the resolved
+      // value: `loadPublishedOverview` never actually threw in production
+      // (it is a plain indexed SELECT against an always-empty table), so the
+      // `.catch(() => createUnavailableOverviewData(...))` branch was never
+      // the code path real traffic took -- the observed output was, and
+      // remains, `createOverviewData(null)` (status "empty", not
+      // "unavailable" -- the two `create*OverviewData` helpers are NOT
+      // interchangeable; see `app/overview-read-model.ts`). Preserved
+      // byte-identical; `createHistoricalSnapshotRepository`/
+      // `createUnavailableOverviewData` are unused here now.
+      const overview = createOverviewData(null);
+      const [portfolioValueHistory, holdingsSummary] = await Promise.all([
+        // HIST-001: the "portfolio value over time" graph is a SEPARATE,
+        // best-effort read from the `overview`/`loadPublishedOverview`
+        // read below -- it never depends on the CALC-003/CALC-004
+        // persisted snapshot pipeline (investigation found that pipeline
+        // had never published for the real account under review; see
+        // `docs/ARCHITECTURE.md`'s HIST-001 entry). A failure here must
+        // never take down the existing Overview hero/coverage sections,
+        // so it gets its OWN `.catch` and its own honest "unavailable"
+        // fallback, mirroring the `realisedGains` best-effort pattern
+        // above.
+        loadHistoricalPortfolioValueSeries(
+          client,
+          result.context.user.id,
+          configuredWorkspace.activePortfolio.id,
+          new Date(nowInstant),
+        )
+          .then((result) =>
+            result === null
+              ? {
+                  status: "unavailable" as const,
+                  points: [],
+                  baseCurrencyCode:
                     configuredWorkspace.activePortfolio!.baseCurrencyCode,
-                    holdings.unrealisedSummary,
-                    undefined,
-                  )
-                : undefined,
-            )
-            .catch(() => undefined),
-          // CALC-005: the snapshot pipeline is retired (see
-          // docs/ARCHITECTURE.md's CALC-005 entry) -- this used to
-          // self-heal by claiming/advancing a queued-but-unadvanced
-          // snapshot run (CALC-004 trigger 2) when nothing had published
-          // yet, which in production meant every Overview load re-claimed a
-          // permanently stuck run and spent its full read-time statement
-          // budget for nothing (that run could never complete: it started
-          // before a price-history import and its cursor-based rebuild
-          // never revisits already-processed dates). This now only ever
-          // READS `snapshot_publications` -- never claims/advances -- so a
-          // portfolio with no publication (production's permanent state
-          // today) renders the same honest unavailable overview state it
-          // always has; nothing about this read's OUTPUT changes, only its
-          // cost. The graph/hero above are unaffected either way
-          // (HIST-001): they already source from `price_observations`/
-          // ledger facts directly, never from this publication.
-          createHistoricalSnapshotRepository(client)
-            .loadPublishedOverview(
-              result.context.user.id,
-              configuredWorkspace.activePortfolio.id,
-            )
-            .then((overview) => createOverviewData(overview))
-            .catch(() =>
-              createUnavailableOverviewData(
-                configuredWorkspace.activePortfolio!.baseCurrencyCode,
-              ),
-            ),
-        ]);
+                  datesTruncated: false,
+                  backfillPending: false,
+                }
+              : {
+                  status:
+                    result.points.length === 0
+                      ? ("empty" as const)
+                      : ("ok" as const),
+                  points: result.points,
+                  baseCurrencyCode: result.baseCurrencyCode,
+                  datesTruncated: result.datesTruncated,
+                  backfillPending: result.backfillPending,
+                },
+          )
+          .catch(() => ({
+            status: "unavailable" as const,
+            points: [],
+            baseCurrencyCode:
+              configuredWorkspace.activePortfolio!.baseCurrencyCode,
+            datesTruncated: false,
+            backfillPending: false,
+          })),
+        // UI-047 (owner-reported): the Overview hero headline must show
+        // the SAME securities-only current portfolio value the Holdings
+        // tab (`buildHoldingsSummaryFooter`'s `marketValue`) and the
+        // HIST-001/BUG-002 value-history graph already show -- never the
+        // CALC-003/CALC-004 persisted-snapshot total below, which stayed
+        // cash-inclusive (BUG-002 only touched the HIST-001 series and
+        // live holdings reads, not that dormant snapshot pipeline).
+        // CALC-005 retired the snapshot pipeline entirely, so that total
+        // can now never populate at all -- the divergence this comment
+        // used to flag as a follow-up is moot by construction. Loaded
+        // independently, mirroring `portfolioValueHistory` above: a
+        // failure here must never take down the rest of Overview, so the
+        // headline simply reads "unavailable" rather than dragging the
+        // whole screen down with it.
+        loadOwnedHoldings(
+          client,
+          result.context.user.id,
+          configuredWorkspace.activePortfolio.id,
+        )
+          .then((holdings) =>
+            holdings.unrealisedSummary
+              ? buildHoldingsSummaryFooter(
+                  configuredWorkspace.activePortfolio!.baseCurrencyCode,
+                  holdings.unrealisedSummary,
+                  undefined,
+                )
+              : undefined,
+          )
+          .catch(() => undefined),
+      ]);
       return {
         ...configuredWorkspace,
         overview,
