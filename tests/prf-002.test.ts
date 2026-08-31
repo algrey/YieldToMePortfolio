@@ -1699,7 +1699,7 @@ test("PRF-003: the confirmed 20-second-outlier theory -- after a single cron-sty
   db.close();
 });
 
-test("PRF-005 (Error 1102 root cause): loadHistoricalPortfolioValueAtDates -- feeding the Income landing page's pastFinancialYears -- reads a bounded per-date window, not the portfolio's entire multi-year price history", async () => {
+test("PRF-005 (Error 1102 root cause): loadHistoricalPortfolioValueAtDates -- feeding the Income landing page's pastFinancialYears -- RETURNS/marshals a bounded number of rows per requested date, even though D1's own index-seek walks the full per-security range once 2+ windows are OR'd together (rows_read is NOT reduced -- see this test's own comment below)", async () => {
   // Reproduces `loadOwnedIncomeProjection`'s own `yearsBack: 5` FY-end date
   // set exactly (`/portfolio/:id/income`'s reported call shape) -- five
   // FY-end dates roughly a year apart, well within the fixture's ~9-year
@@ -1723,12 +1723,30 @@ test("PRF-005 (Error 1102 root cause): loadHistoricalPortfolioValueAtDates -- fe
   assert.ok(result);
   assert.equal(result.size, requestedDates.length);
 
-  // THE FIX: `loadFacts`'s full-row `po.*` price read is now ONE query
-  // covering `requestedDates.length` narrow (`MULTI_YEAR_PRICE_TOLERANCE_DAYS`
-  // + 1 = 8 calendar days each) OR'd windows, not the single unconditional
-  // `[boundedRangeFrom, range.rangeTo]` span that previously read
+  // THE FIX (corrected framing -- review B2, BLOCKING): `loadFacts`'s
+  // full-row `po.*` price read is now ONE query covering
+  // `requestedDates.length` narrow (`MULTI_YEAR_PRICE_TOLERANCE_DAYS` + 1 =
+  // 8 calendar days each) OR'd windows, instead of the single unconditional
+  // `[boundedRangeFrom, range.rangeTo]` span that previously RETURNED
   // essentially every seeded `price_observations` row (~60,012) on EVERY
-  // call regardless of how few dates were requested.
+  // call regardless of how few dates were requested. This bounds rows
+  // RETURNED/marshalled/JS-validated (`mapPrice`, and the D1->Worker
+  // response payload) -- the real Worker-CPU cost that caused Error 1102.
+  //
+  // It does NOT bound D1's own `rows_read` metering (what D1 bills against
+  // the Free plan's 5M-row/day allowance): the EXPLAIN QUERY PLAN assertion
+  // below confirms that once 2+ windows are OR'd together, SQLite drops
+  // `market_date` from the index seek itself (`security_id=? AND
+  // adjustment_state=?` only) instead of the SINGLE-window case's
+  // `security_id=? AND adjustment_state=? AND market_date>? AND
+  // market_date<?` -- the OR'd BETWEEN clauses become a residual filter
+  // applied AFTER walking every index entry for that security, so D1 still
+  // walks essentially the SAME ~60,012 index entries either way. UNION ALL
+  // (one BETWEEN-bounded seek per date, unioned) was evaluated and
+  // rejected: repeating the `security_id IN (...)` list once per branch
+  // would need `windows.length * securityIds.length` bound params -- 10
+  // windows x 18 securities = 180, over D1's ~100-bound-param cap well
+  // before `yearsBack`'s own 10-year ceiling is reached.
   const fullRowPriceCalls = stats.calls_.filter(
     (call) =>
       call.sql.includes("price_observations") && call.sql.includes("po.*"),
@@ -1738,35 +1756,122 @@ test("PRF-005 (Error 1102 root cause): loadHistoricalPortfolioValueAtDates -- fe
     1,
     "expected exactly one loadFacts price read for the whole multi-date call",
   );
+  const priceCall = fullRowPriceCalls[0]!;
   const rowsReturned = db
-    .prepare(fullRowPriceCalls[0]!.sql)
-    .all(...(fullRowPriceCalls[0]!.params as never[])) as unknown[];
+    .prepare(priceCall.sql)
+    .all(...(priceCall.params as never[])) as unknown[];
   // Upper bound: 5 dates * 8-day window * 18 securities = 720 rows max
   // (generously; most windows return far fewer since this fixture prices
   // every calendar day, so a `BETWEEN` window this narrow cannot return
-  // more than window-width rows per security).
+  // more than window-width rows per security). This is a rows-RETURNED
+  // bound, not a rows-read one.
   assert.ok(
     rowsReturned.length <= 5 * 8 * SECURITY_COUNT,
-    `expected a bounded per-date-window read, got ${rowsReturned.length} rows`,
+    `expected a bounded per-date-window RETURN, got ${rowsReturned.length} rows`,
   );
+
+  // Direct proof of the B2 correction: with 2+ OR'd windows, `market_date`
+  // is NOT part of the index seek -- D1 still walks the full per-security
+  // range (the `rows_read` cost), only the RETURNED row count is bounded.
+  const plan = db
+    .prepare(`EXPLAIN QUERY PLAN ${priceCall.sql}`)
+    .all(...(priceCall.params as never[])) as Array<{ detail: string }>;
+  const seekDetail =
+    plan.find((row) => row.detail.startsWith("SEARCH po"))?.detail ?? "";
+  assert.match(
+    seekDetail,
+    /^SEARCH po USING INDEX price_observations_security_date_idx \(security_id=\? AND adjustment_state=\?\)$/,
+    `expected market_date to be dropped from the index seek once 2+ windows are OR'd together (confirms D1 rows_read is NOT reduced by this fix), got: ${seekDetail}`,
+  );
+
   // Contrast figure: the fixture's full ~60,012-row multi-year history the
-  // OLD unconditional `[rangeFrom, rangeTo]` window would have read
-  // instead, for the identical predicate.
+  // OLD unconditional `[rangeFrom, rangeTo]` window would have RETURNED
+  // instead, for the identical predicate -- a rows-RETURNED comparison
+  // (the Worker-CPU/1102 fix), NOT a rows-READ one (D1's own metering is
+  // effectively unchanged, per the EXPLAIN assertion above).
   const securityIds = Array.from(
     { length: SECURITY_COUNT },
     (_, index) => `security-${index}`,
   );
-  const oldUnboundedCount = db
+  const oldUnboundedReturnedCount = db
     .prepare(
       `SELECT count(*) AS count FROM price_observations po WHERE po.security_id IN (${securityIds.map(() => "?").join(",")}) AND po.market_date BETWEEN '2017-01-01' AND '2026-08-01' AND po.adjustment_state = 'raw' AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?))`,
     )
     .get(...securityIds, USER_ID) as { count: number };
   console.log(
-    `\nPRF-005 /income root-cause fix: loadHistoricalPortfolioValueAtDates(yearsBack=5) bounded read = ${rowsReturned.length} price_observations rows; the old unconditional full-range read would have been ${oldUnboundedCount.count} rows (~${Math.round(oldUnboundedCount.count / rowsReturned.length)}x more).`,
+    `\nPRF-005 /income root-cause fix: loadHistoricalPortfolioValueAtDates(yearsBack=5) now RETURNS/marshals ${rowsReturned.length} price_observations rows instead of ${oldUnboundedReturnedCount.count} (~${Math.round(oldUnboundedReturnedCount.count / rowsReturned.length)}x fewer rows returned/validated -- the Worker-CPU win that fixes Error 1102). D1's own rows_read stays essentially UNCHANGED (~${oldUnboundedReturnedCount.count} index entries still walked, per the EXPLAIN QUERY PLAN assertion above) -- this fix does not reduce D1 read-row billing.`,
   );
-  assert.ok(oldUnboundedCount.count > rowsReturned.length * 50);
+  assert.ok(oldUnboundedReturnedCount.count > rowsReturned.length * 50);
 
-  // Every captured price/fx query still seeks the index, never scans.
+  // Every captured price/fx query still seeks the index by security_id
+  // (never a bare table SCAN), even though market_date itself falls out of
+  // the seek bound for the multi-window case above.
   assertNoLargeTableScans(db, stats.calls_);
+  db.close();
+});
+
+test("PRF-005 review F1 (honesty-material, non-blocking): a per-date tolerance window can reach BELOW the 10-year clamp floor where the old full-range read never could -- a floor-adjacent date with only a just-below-floor price now resolves complete instead of an honest-but-avoidable gap", async () => {
+  // Reviewer's exact reproduction: for `now = 2026-08-01` (this file's own
+  // NOW-shaped fixtures), `resolveRange`'s `MAX_CANDIDATE_DATES`-derived
+  // 10-year floor lands on 2016-07-25 -- confirmed by direct computation
+  // (`earliestAllowedMs = Date.parse('2026-08-01') - (3660-1)*86_400_000`).
+  // A portfolio whose earliest trade predates that floor (seeded below,
+  // 2010-01-01) gets `boundedRangeFrom` CLAMPED to 2016-07-25 exactly.
+  const db = await migratedDatabase();
+  const now = "2026-08-01T00:00:00.000Z";
+  const FLOOR_DATE = "2016-07-25";
+  // Within `MULTI_YEAR_PRICE_TOLERANCE_DAYS` (7) calendar days BEFORE the
+  // floor -- the OLD unconditional `[boundedRangeFrom, range.rangeTo]` read
+  // could never see this row (it sits BELOW `boundedRangeFrom`); the NEW
+  // per-date window (`FLOOR_DATE` minus 7 days through `FLOOR_DATE`) does.
+  const JUST_BELOW_FLOOR_PRICE_DATE = "2016-07-22";
+  db.exec(`
+    INSERT INTO currencies(code,numeric_code,name,minor_unit_digits) VALUES ('AUD',36,'Australian dollar',2);
+    INSERT INTO users(id,status,primary_email,timezone,created_at,updated_at) VALUES ('user-f1','active','f1@example.test','Australia/Sydney','${now}','${now}');
+    INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at) VALUES ('portfolio-f1','user-f1','F1','F1 portfolio','AUD','Australia/Sydney','fifo','active','${now}','${now}');
+    INSERT INTO securities(id,asset_type,primary_currency_code,canonical_name,created_at,updated_at) VALUES ('security-f1','equity','AUD','Security F1','${now}','${now}');
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at) VALUES ('ps-f1','user-f1','portfolio-f1','security-f1','SYM','AUD','held','${now}','${now}');
+    INSERT INTO security_provider_mappings (id,security_id,provider_id,provider_exchange,provider_symbol,valid_from,status) VALUES ('mapping-f1','security-f1','yahoo-compatible','ASX','SYM','2005-01-01','verified');
+    INSERT INTO transactions(id,user_id,portfolio_id,portfolio_security_id,type,status,trade_at,local_trade_date,quantity_decimal,unit_price_decimal,currency_code,gross_amount_decimal,fee_amount_decimal,tax_amount_decimal,source_type,created_by_user_id,calculation_version,created_at) VALUES ('tx-f1','user-f1','portfolio-f1','ps-f1','buy','posted','2010-01-01T00:00:00.000Z','2010-01-01','100','10','AUD','1000','0','0','manual','user-f1',1,'2010-01-01');
+    INSERT INTO price_observations (id,provider_id,access_scope,scope_user_id,scope_key,mapping_id,security_id,interval,observation_at,market_date,market_timezone,currency_code,close_decimal,adjustment_state,quality,ingested_at) VALUES
+      ('price-f1','yahoo-compatible','deployment',NULL,'deployment','mapping-f1','security-f1','eod','${JUST_BELOW_FLOOR_PRICE_DATE}T04:00:00Z','${JUST_BELOW_FLOOR_PRICE_DATE}','Australia/Sydney','AUD','10.00','raw','observed','${JUST_BELOW_FLOOR_PRICE_DATE}T04:00:00Z');
+  `);
+
+  const client = createSqliteSqlClient(db);
+  const result = await loadHistoricalPortfolioValueAtDates(
+    client,
+    "user-f1",
+    "portfolio-f1",
+    [FLOOR_DATE],
+    new Date("2026-08-01T12:00:00Z"),
+  );
+  assert.ok(result);
+  const point = result.get(FLOOR_DATE);
+  assert.ok(point);
+
+  // THE CORRECTED (new) behavior: complete, a real value -- the tolerance
+  // window reaches back to the just-below-floor price.
+  assert.equal(point.completeness, "complete");
+  assert.equal(point.pricedSecurityCount, 1);
+  assert.equal(point.valueDecimal, "1000"); // 100 shares * $10.00
+
+  // Prove the OLD behavior's gap directly: the OLD unconditional
+  // `[boundedRangeFrom, range.rangeTo]` = [FLOOR_DATE, '2026-08-01'] price
+  // read (no per-date window) finds ZERO rows for this security, since the
+  // only seeded price sits below `boundedRangeFrom` -- confirming the OLD
+  // read would have reported this exact date as an honest-but-avoidable
+  // gap (`valueDecimal: null`, `completeness: "partial"`,
+  // `pricedSecurityCount: 0`), never a fabricated value either way.
+  const oldRangeRowCount = db
+    .prepare(
+      `SELECT count(*) AS count FROM price_observations po WHERE po.security_id = 'security-f1' AND po.market_date BETWEEN ? AND '2026-08-01' AND po.adjustment_state = 'raw' AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?))`,
+    )
+    .get(FLOOR_DATE, "user-f1") as { count: number };
+  assert.equal(
+    oldRangeRowCount.count,
+    0,
+    "expected the OLD full-range-only bound to see zero rows for this security (proving the old read's gap)",
+  );
+
   db.close();
 });

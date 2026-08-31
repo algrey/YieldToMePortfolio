@@ -959,6 +959,24 @@ export async function loadHistoricalPortfolioValueAtDates(
   // (it is reported as an honest gap in the loop below without ever
   // touching `facts`), matching that same `date < boundedRangeFrom || date
   // > range.rangeTo` condition exactly.
+  //
+  // PRF-005 review F1 (honesty-material behavior change, documented rather
+  // than silently shipped): a window's `from` here can land BELOW
+  // `boundedRangeFrom` for a date sitting AT (or just above) the 10-year
+  // clamp floor -- `subtractDaysForWidening` subtracts
+  // `MULTI_YEAR_PRICE_TOLERANCE_DAYS` MORE calendar days below whatever
+  // `boundedRangeFrom` already clamped to, same as the `earliestRequested`
+  // widening above does for the overall range. The OLD unconditional
+  // `[boundedRangeFrom, range.rangeTo]` read could never see a price that
+  // far below the floor (it was excluded by the read's own outer bound);
+  // this per-date window CAN, and correctly resolves a floor-adjacent date
+  // that the old read reported as an honest gap even when a real,
+  // in-tolerance price existed just below the floor. This is MORE correct
+  // (never fabricates; simply stops manufacturing an artificial gap the
+  // tolerance rule would otherwise resolve), not a regression -- but is a
+  // real, previously-undocumented behavior change; see
+  // `docs/ARCHITECTURE.md`'s dated PRF-005/F1 correction note and
+  // `tests/prf-002.test.ts`'s dedicated clamp-floor regression test.
   const priceWindows = validDates
     .filter((date) => date >= boundedRangeFrom && date <= range.rangeTo)
     .map((date) => ({
