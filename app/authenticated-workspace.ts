@@ -334,10 +334,19 @@ export async function loadAuthenticatedWorkspace(
       // literals returned at the end. Before this fix they ran as three
       // separate sequential `await`s (three full D1 round trips end-to-end);
       // collapsed into one `Promise.all` wave here. Each keeps its OWN
-      // failure handling exactly as before (`.catch` for the first two, a
-      // dedicated try/catch shape for the third) so a failure in any ONE of
-      // them still degrades only that piece, never the other two.
-      const [portfolioValueHistory, holdingsSummary, overviewResult] =
+      // failure handling exactly as before (`.catch` for all three) so a
+      // failure in any ONE of them still degrades only that piece, never
+      // the other two. Review round 2 (BLOCKING correction): `overview`'s
+      // `.catch` must cover `createOverviewData` itself, not just the
+      // `loadPublishedOverview` read -- the original pre-parallelization
+      // code had BOTH inside one try block, so a malformed-publication
+      // throw from `createOverviewData` degraded only the overview section.
+      // An earlier version of this refactor called `createOverviewData`
+      // OUTSIDE this `Promise.all` entirely, so that same throw would have
+      // escaped to the OUTER catch (below) and discarded the
+      // already-successful `portfolioValueHistory`/`holdingsSummary`
+      // alongside it -- a strictly worse degradation than before.
+      const [portfolioValueHistory, holdingsSummary, overview] =
         await Promise.all([
           // HIST-001: the "portfolio value over time" graph is a SEPARATE,
           // best-effort read from the `overview`/`loadPublishedOverview`
@@ -434,16 +443,16 @@ export async function loadAuthenticatedWorkspace(
               result.context.user.id,
               configuredWorkspace.activePortfolio.id,
             )
-            .then((overview) => ({ ok: true as const, overview }))
-            .catch(() => ({ ok: false as const })),
+            .then((overview) => createOverviewData(overview))
+            .catch(() =>
+              createUnavailableOverviewData(
+                configuredWorkspace.activePortfolio!.baseCurrencyCode,
+              ),
+            ),
         ]);
       return {
         ...configuredWorkspace,
-        overview: overviewResult.ok
-          ? createOverviewData(overviewResult.overview)
-          : createUnavailableOverviewData(
-              configuredWorkspace.activePortfolio.baseCurrencyCode,
-            ),
+        overview,
         portfolioValueHistory,
         holdingsSummary,
       };

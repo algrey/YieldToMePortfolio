@@ -500,18 +500,25 @@ test("UI-047 source: loadAuthenticatedWorkspace loads the same securities-only h
   // than bound by its own `await loadOwnedHoldings(` statement.
   assert.match(
     overviewBlock,
-    /const \[portfolioValueHistory, holdingsSummary, overviewResult\] =\s*\n?\s*await Promise\.all\(/,
+    /const \[portfolioValueHistory, holdingsSummary, overview\] =\s*\n?\s*await Promise\.all\(/,
   );
   assert.match(overviewBlock, /loadOwnedHoldings\(/);
   assert.match(overviewBlock, /buildHoldingsSummaryFooter\(/);
-  // Attached on BOTH outcomes of the snapshot-publication read -- the
-  // successful-publication branch and the honest-unavailable fallback --
-  // via a single return statement's ternary, so a snapshot-pipeline failure
-  // never silently drops the (independently loaded) holdings summary or
-  // value-history graph when THEY themselves actually succeeded.
+  // PRF-003 review round 2 (BLOCKING correction): `createOverviewData` and
+  // `createUnavailableOverviewData` must BOTH live inside the SAME
+  // `.then`/`.catch` pair as the `loadPublishedOverview` read -- an earlier
+  // version called `createOverviewData` OUTSIDE this wave entirely, so a
+  // malformed-publication throw from it would have escaped to the outer
+  // catch and discarded the already-successful `portfolioValueHistory`/
+  // `holdingsSummary` alongside it, a strictly worse degradation than the
+  // pre-parallelization code's single shared try block.
   assert.match(
     overviewBlock,
-    /overview: overviewResult\.ok\s*\?\s*createOverviewData\(overviewResult\.overview\)\s*:\s*createUnavailableOverviewData\(\s*configuredWorkspace\.activePortfolio\.baseCurrencyCode,\s*\),\s*portfolioValueHistory,\s*holdingsSummary,/,
+    /\.then\(\(overview\) => createOverviewData\(overview\)\)\s*\n?\s*\.catch\(\(\) =>\s*\n?\s*createUnavailableOverviewData\(\s*\n?\s*configuredWorkspace\.activePortfolio!\.baseCurrencyCode,\s*\n?\s*\),\s*\n?\s*\),/,
+  );
+  assert.match(
+    overviewBlock,
+    /overview,\s*\n?\s*portfolioValueHistory,\s*\n?\s*holdingsSummary,/,
   );
 });
 

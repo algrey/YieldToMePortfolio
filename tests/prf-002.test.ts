@@ -496,13 +496,14 @@ function stageCensusClient(client: SqlClient): {
 
 /** PRF-003 (owner-reported slow tab navigation, "shortest 3 seconds and
  * longest 20 seconds" per tab change): measures SEQUENTIAL DEPTH -- the
- * number of non-overlapping "waves" of D1 round trips a page's REAL loader
- * chain issues -- rather than raw call/statement counts (PRF-001/PRF-002's
+ * length of the LONGEST CHAIN of D1 round trips a page's REAL loader chain
+ * issues, where each link in the chain genuinely waits for the previous one
+ * to finish -- rather than raw call/statement counts (PRF-001/PRF-002's
  * metric). On Cloudflare Workers Free, D1 is not co-located with every
- * Worker invocation and has no read replication, so EACH sequential
- * `await`ed round trip pays a real, non-negligible latency tax regardless
- * of how few rows/statements it touches; two calls issued via `Promise.all`
- * (or one `batch()`) pay that tax ONCE, together.
+ * Worker invocation and has no read replication, so EACH such link pays a
+ * real, non-negligible latency tax regardless of how few rows/statements it
+ * touches; two calls issued via `Promise.all` (or one `batch()`) pay that
+ * tax ONCE, together, and so do not extend the chain.
  *
  * Method: every `all`/`get`/`run`/`batch` call has an identical small delay
  * (`DEPTH_PROBE_DELAY_MS`) appended AFTER it resolves, before this wrapper's
@@ -511,20 +512,33 @@ function stageCensusClient(client: SqlClient): {
  * timing jitter (the underlying in-memory SQLite calls themselves resolve
  * near-instantly, so without an added delay concurrent and sequential calls
  * would be nearly indistinguishable by timestamp alone), small enough that
- * even a few dozen calls finish in well under a second. After the page's
- * loader chain completes, the captured intervals are merged: two intervals
- * that overlap (a `Promise.all` pair, or more) collapse into ONE wave;
- * non-overlapping intervals are separate, sequential waves. The wave COUNT
- * is `depth`; `modeledWallMs` multiplies it by `MODELED_ROUND_TRIP_MS` -- a
- * separate, assumed in-region Worker-to-D1 round-trip figure (see this
- * task's TASKS.md entry) used ONLY for the printed table, decoupled from
- * the small delay used to make concurrency detection reliable. */
+ * even a few dozen calls finish in well under a second.
+ *
+ * `depth` is computed via a longest-non-overlapping-chain DP over the
+ * captured intervals (review fold -- an EARLIER version of this harness
+ * instead merged any transitively-overlapping intervals into one
+ * "connected component" and called ITS count "depth": that undercounts
+ * whenever a short call sits beside a longer sibling and a third call
+ * starts after the short one ends but before the long one does -- the
+ * short-then-third pair is a genuine 2-deep SEQUENTIAL chain, but the
+ * merge conflates it with the long sibling's single wave and reports only
+ * 1. Sorted by END time ascending (no two intervals can mutually satisfy
+ * `end_j <= start_i` and `end_i <= start_j` for i != j, so this order is a
+ * valid evaluation order -- every `j` a given `i` could depend on has
+ * already been finalized by the time `i` is processed): `best[i] = 1 +
+ * max(best[j] | end_j <= start_i)`, `depth = max(best[i])`. This is the
+ * TRUE critical path length -- the number of round trips that could not
+ * have been avoided by ANY reordering/batching given the concurrency the
+ * code actually exhibited. `concurrencyGroups` (see `waveSizes`/
+ * `waveLabels` below) is kept as a SEPARATE, purely informational figure --
+ * the old merged-component count -- and must never be called "depth". */
 const DEPTH_PROBE_DELAY_MS = 8;
 const MODELED_ROUND_TRIP_MS = 40;
 function depthCensusClient(client: SqlClient): {
   client: SqlClient;
   waves(): {
     depth: number;
+    chain: string[];
     modeledWallMs: number;
     waveSizes: number[];
     waveLabels: string[][];
@@ -558,20 +572,49 @@ function depthCensusClient(client: SqlClient): {
         timed(() => client.batch(statements), statements[0]?.sql ?? ""),
     },
     waves() {
-      const sorted = [...intervals].sort((a, b) => a.start - b.start);
+      // TRUE depth: longest non-overlapping chain (critical path), per
+      // this function's own doc comment above.
+      const byEnd = [...intervals].sort((a, b) => a.end - b.end);
+      const best = new Array<number>(byEnd.length).fill(1);
+      const prevIndex = new Array<number>(byEnd.length).fill(-1);
+      for (let i = 0; i < byEnd.length; i += 1) {
+        for (let j = 0; j < i; j += 1) {
+          if (byEnd[j]!.end <= byEnd[i]!.start && best[j]! + 1 > best[i]!) {
+            best[i] = best[j]! + 1;
+            prevIndex[i] = j;
+          }
+        }
+      }
       let depth = 0;
+      let maxIndex = -1;
+      for (let i = 0; i < best.length; i += 1) {
+        if (best[i]! > depth) {
+          depth = best[i]!;
+          maxIndex = i;
+        }
+      }
+      const chain: string[] = [];
+      for (let cur = maxIndex; cur !== -1; cur = prevIndex[cur]!) {
+        chain.unshift(byEnd[cur]!.label);
+      }
+
+      // INFORMATIONAL ONLY, never "depth": the old merged-connected-
+      // component count -- how many maximal clusters of mutually
+      // overlapping intervals occurred, useful for eyeballing where
+      // concurrency happened, but NOT a sound measure of the critical
+      // path (see this function's doc comment).
+      const byStart = [...intervals].sort((a, b) => a.start - b.start);
       let currentEnd = -Infinity;
       let currentSize = 0;
       const waveSizes: number[] = [];
       const waveLabels: string[][] = [];
       let currentLabels: string[] = [];
-      for (const interval of sorted) {
+      for (const interval of byStart) {
         if (interval.start >= currentEnd) {
           if (currentSize > 0) {
             waveSizes.push(currentSize);
             waveLabels.push(currentLabels);
           }
-          depth += 1;
           currentEnd = interval.end;
           currentSize = 1;
           currentLabels = [interval.label];
@@ -587,6 +630,7 @@ function depthCensusClient(client: SqlClient): {
       }
       return {
         depth,
+        chain,
         modeledWallMs: depth * MODELED_ROUND_TRIP_MS,
         waveSizes,
         waveLabels,
@@ -1119,31 +1163,52 @@ test("PRF-002/CALC-005: the root overview census never claims, advances, or othe
   db.close();
 });
 
-test("PRF-003: per-page SEQUENTIAL DEPTH census -- non-overlapping D1 round-trip waves and modeled wall time at a simulated 40ms round trip", async () => {
+// PRF-003 review round 2 (BLOCKING correction): these ceilings are the REAL
+// measured critical-path depths after this task's parallelization fixes --
+// NOT the originally-drafted "<= 6 everywhere" target, which review found
+// was only true of the earlier, unsound merged-connected-component metric.
+// Root and Holdings both still carry an 8-deep critical path (the
+// `loadOwnedHoldings` chain: publication-count/publication-row/identities
+// -> Sharesight-gate/holding-projections -> price-count/price-fetch ->
+// manual_overrides -> cash_accounts/cash_ledger_entries, plus, on `/`
+// specifically, the parallel `resolveRange -> candidates/stored` chain from
+// `loadHistoricalPortfolioValueSeries` landing in the same critical path)
+// -- a real, named, NOT-YET-CLOSED follow-up (see docs/ARCHITECTURE.md's
+// PRF-003 correction entry). These bounds exist so a FUTURE
+// re-serialization regression still fires this guard, not to claim the
+// target was met.
+const DEPTH_CEILING: Record<string, number> = {
+  "/ (root overview)": 8,
+  "/portfolio/:id/holdings": 8,
+  "/portfolio/:id/quotes": 4,
+  "/portfolio/:id/details": 3,
+  "/portfolio/:id/gains": 4,
+  "/portfolio/:id/income/dividends": 6,
+};
+
+test("PRF-003: per-page SEQUENTIAL DEPTH census -- critical-path length (longest non-overlapping D1 round-trip chain) and modeled wall time at a simulated 40ms round trip", async () => {
   const rows: string[] = [];
   for (const page of PAGES) {
     const db = await productionScaleFixture();
     const { client, waves } = depthCensusClient(createSqliteSqlClient(db));
     await page.run(client);
-    const { depth, modeledWallMs, waveSizes, waveLabels } = waves();
-    const waveSummary = waveLabels
-      .map((labels) => [...new Set(labels)].join("+"))
-      .join(" -> ");
+    const { depth, chain, modeledWallMs, waveSizes } = waves();
     rows.push(
-      `${page.name} -- depth=${depth} modeledWallMs=${modeledWallMs} waveSizes=[${waveSizes.join(",")}] waves=[${waveSummary}]`,
+      `${page.name} -- depth=${depth} modeledWallMs=${modeledWallMs} concurrencyGroups=[${waveSizes.join(",")}] criticalPath=[${chain.join(" -> ")}]`,
     );
-    // Step 2's target: every page's sequential depth <= 6 (excluding the
-    // auth-resolution step this file cannot drive directly -- see the
-    // dedicated auth-resolution depth check below, which is now a single
-    // wave for an existing identity after PRF-003's `touchWithAudit` fix).
+    const ceiling = DEPTH_CEILING[page.name];
     assert.ok(
-      depth <= 6,
-      `${page.name} has sequential depth ${depth} (waves: [${waveSizes.join(",")}]), expected <= 6`,
+      ceiling !== undefined,
+      `no depth ceiling recorded for ${page.name}`,
+    );
+    assert.ok(
+      depth <= ceiling!,
+      `${page.name} has sequential depth ${depth} (critical path: [${chain.join(" -> ")}]), expected <= ${ceiling}`,
     );
     db.close();
   }
   console.log(
-    "\nPRF-003 per-page sequential-depth census (production-scale fixture, modeled at 40ms/round trip):",
+    "\nPRF-003 per-page critical-path depth census (production-scale fixture, modeled at 40ms/round trip):",
   );
   for (const row of rows) console.log(`  ${row}`);
 });
