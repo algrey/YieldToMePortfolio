@@ -79,12 +79,28 @@ import { loadOwnedWatchlist } from "../app/owned-watchlist.ts";
 import { buildHoldingsSummaryFooter } from "../app/owned-holdings-summary.ts";
 import {
   loadHistoricalPortfolioValueSeries,
+  loadHistoricalPortfolioValueAtDates,
   invalidateStoredValueHistoryForSecurity,
 } from "../app/historical-portfolio-value.ts";
 import { loadUsdAudRate } from "../app/authenticated-fx-rate.ts";
 import { loadPortfolioInspectionSafely } from "../db/repositories/portfolio-inspection.ts";
 import { createOwnedUserSettingsRepository } from "../db/repositories/owned-portfolios.ts";
 import { createHistoricalSnapshotRepository } from "../db/repositories/snapshots.ts";
+// PRF-005: the Income area's uncensused pages (never covered by PRF-002,
+// which only censused `/income/dividends`).
+import { loadOwnedIncomeProjection } from "../app/owned-income-projection.ts";
+import { loadOwnedIncomeScenarios } from "../app/owned-income-scenarios.ts";
+import { loadOwnedDividendAssumptions } from "../app/owned-dividend-assumptions.ts";
+import { createDividendFyOverrideRepository } from "../db/repositories/dividends.ts";
+import {
+  loadOwnedHoldingIdentity,
+  loadOwnedHoldingTransactions,
+} from "../app/owned-holding-transactions.ts";
+import { loadOwnedSecurityDividendDetail } from "../app/owned-security-dividends.ts";
+import {
+  DEFAULT_YEARS_BACK,
+  DEFAULT_YEARS_FORWARD,
+} from "../app/income-year-range.ts";
 import type { SqlClient, SqlStatement } from "../db/repositories/sql-client.ts";
 
 async function migratedDatabase(): Promise<DatabaseSync> {
@@ -113,6 +129,19 @@ const TRANSACTION_COUNT = 107;
 // being measured, only the row-scan volume (upward, conservatively).
 const ROWS_PER_SECURITY = 3_334;
 const DIVIDEND_MANUAL_RECORD_COUNT = 119;
+// PRF-005: one PAID provider `dividend_events` row per held security --
+// realistic coverage so the Income area's TTM-yield derivation
+// (`deriveYieldFromResolvedTtm`/`computeSecurityDividendForecast`) resolves
+// a REAL provider-sourced rate for every security instead of silently
+// falling through to the history-derived fallback for all 18 (which the
+// pre-existing `dividend_manual_records` fixture already exercises via
+// `/income/dividends`, but the projection/assumptions paths this task
+// censuses also read `dividend_events` directly -- see
+// `owned-income-projection.ts`'s DIV-009 header). One `dividend_security_assumptions`
+// override on a THIRD of the securities exercises the assumptions-editor
+// read path with real owner-entered rows, not just the empty-table case.
+const DIVIDEND_EVENT_COUNT = SECURITY_COUNT;
+const DIVIDEND_SECURITY_ASSUMPTION_COUNT = 6;
 
 /**
  * Production-shaped fixture, extending PRF-001's own: 1 owner, 1 portfolio,
@@ -285,6 +314,53 @@ async function productionScaleFixture(): Promise<DatabaseSync> {
   db.prepare(
     `INSERT INTO watchlist_entries (id,user_id,kind,security_id,display_order,created_at,version) VALUES (?,?,?,?,?,?,?)`,
   ).run("watch-1", "owner-1", "security", "security-0", 0, now, 1);
+
+  // PRF-005: one PAID `dividend_events` row per security -- see this
+  // function's own PRF-005 doc comment above.
+  const insertDividendEvent = db.prepare(
+    `INSERT INTO dividend_events (id,security_id,provider_id,kind,status,ex_date,record_date,payment_date,declaration_date,currency_code,gross_per_share_decimal,franking_percent_decimal,franking_credit_per_share_decimal,observed_at,ingested_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  );
+  for (let index = 0; index < DIVIDEND_EVENT_COUNT; index += 1) {
+    const securityId = `security-${index}`;
+    insertDividendEvent.run(
+      `dividend-event-${index}`,
+      securityId,
+      "yahoo-compatible",
+      "cash",
+      "paid",
+      "2026-06-01",
+      "2026-06-02",
+      "2026-06-15",
+      "2026-05-20",
+      "AUD",
+      "0.30",
+      "1.00",
+      "0.1286",
+      now,
+      now,
+      now,
+    );
+  }
+
+  // PRF-005: a real owner-entered assumption override on a third of the
+  // securities.
+  const insertSecurityAssumption = db.prepare(
+    `INSERT INTO dividend_security_assumptions (id,user_id,portfolio_id,portfolio_security_id,dividend_yield_percent_decimal,franking_percent_decimal,dividend_growth_percent_decimal,created_at,updated_at,version) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+  );
+  for (let index = 0; index < DIVIDEND_SECURITY_ASSUMPTION_COUNT; index += 1) {
+    insertSecurityAssumption.run(
+      `security-assumption-${index}`,
+      "owner-1",
+      "portfolio-1",
+      `holding-${index}`,
+      "4.50",
+      "100",
+      "2.00",
+      now,
+      now,
+      1,
+    );
+  }
 
   // ~60,012 price_observations across the 18 securities, one row per
   // calendar day ending at the fixture's "now" (2026-08-01).
@@ -702,6 +778,9 @@ const NOT_CONFIGURED_SHARESIGHT = {
 const USER_ID = "owner-1";
 const PORTFOLIO_ID = "portfolio-1";
 const NOW = new Date("2026-08-01T12:00:00.000Z");
+// PRF-005: an arbitrary held security for the per-holding sub-tab census
+// functions below -- any of `holding-0`..`holding-17` would do equally.
+const HOLDING_ID = "holding-0";
 
 /** The "base workspace" cost EVERY `loadAuthenticatedWorkspace` call pays
  * once identity/ownership is already resolved -- user settings + the
@@ -835,6 +914,122 @@ async function censusDividendsPage(client: SqlClient): Promise<void> {
   await loadOwnedDividendList(client, USER_ID, PORTFOLIO_ID, NOW);
 }
 
+// ---------------------------------------------------------------------------
+// PRF-005 -- the Income area's REMAINING pages (never censused by PRF-002,
+// which covered only `/income/dividends`): `/income` (the reported Error
+// 1102 -- "the first dividend tab"), `/income/multi-year`,
+// `/income/assumptions`, and the four per-holding sub-tab pages.
+// ---------------------------------------------------------------------------
+
+/** `/portfolio/:id/income` (Next 12 months landing -- PRF-005's reported
+ * Error 1102). Mirrors `app/portfolio/[portfolioId]/income/page.tsx`'s own
+ * `{yearsBack: 5, yearsForward: 1}` call exactly. */
+async function censusIncomePage(client: SqlClient): Promise<void> {
+  await baseWorkspaceLoad(client);
+  await loadOwnedIncomeProjection(client, USER_ID, PORTFOLIO_ID, NOW, {
+    yearsBack: 5,
+    yearsForward: 1,
+  });
+}
+
+/** `/portfolio/:id/income/multi-year`. Mirrors
+ * `app/portfolio/[portfolioId]/income/multi-year/page.tsx`'s default
+ * `{yearsBack: DEFAULT_YEARS_BACK, yearsForward: DEFAULT_YEARS_FORWARD}`
+ * (no `?yearsBack=`/`?yearsForward=` query overrides) PLUS its own
+ * concurrent `loadOwnedIncomeScenarios` read (PRF-005 parallelized this
+ * page's own two independent reads -- see that page's PRF-005 comment). */
+async function censusIncomeMultiYearPage(client: SqlClient): Promise<void> {
+  await baseWorkspaceLoad(client);
+  await Promise.all([
+    loadOwnedIncomeProjection(client, USER_ID, PORTFOLIO_ID, NOW, {
+      yearsBack: DEFAULT_YEARS_BACK,
+      yearsForward: DEFAULT_YEARS_FORWARD,
+    }),
+    loadOwnedIncomeScenarios(client, USER_ID, PORTFOLIO_ID),
+  ]);
+}
+
+/** `/portfolio/:id/income/assumptions`. Mirrors
+ * `app/portfolio/[portfolioId]/income/assumptions/page.tsx`'s own
+ * `loadOwnedDividendAssumptions` + FY-overrides-list pair, now concurrent
+ * (PRF-005 -- see that page's own PRF-005 comment). */
+async function censusIncomeAssumptionsPage(client: SqlClient): Promise<void> {
+  await baseWorkspaceLoad(client);
+  await Promise.all([
+    loadOwnedDividendAssumptions(client, USER_ID, PORTFOLIO_ID, NOW),
+    createDividendFyOverrideRepository(client).list(USER_ID, PORTFOLIO_ID),
+  ]);
+}
+
+/** `/portfolio/:id/holdings/:holdingId` (the holding-area Details tab, via
+ * `[section]/[holdingId]/page.tsx`, `includeHoldings: true`) -- mirrors
+ * `censusHoldingsPage`'s own holdings+realised wave (identical
+ * `loadAuthenticatedWorkspace({includeHoldings: true})` branch) PLUS the
+ * page's own `loadOwnedHoldingIdentity` call. `marketDataProviderEnabled()`
+ * is a `cloudflare:workers` env/runtime-config read, not a D1 call --
+ * deliberately not reproduced here. */
+async function censusHoldingDetailPage(client: SqlClient): Promise<void> {
+  await baseWorkspaceLoad(client);
+  await Promise.all([
+    loadOwnedHoldings(
+      client,
+      USER_ID,
+      PORTFOLIO_ID,
+      NOW,
+      NOT_CONFIGURED_SHARESIGHT,
+    ),
+    loadOwnedRealisedGainTotals(client, USER_ID, PORTFOLIO_ID, NOW).catch(
+      () => undefined,
+    ),
+  ]);
+  await loadOwnedHoldingIdentity(client, USER_ID, PORTFOLIO_ID, HOLDING_ID);
+}
+
+/** `/portfolio/:id/holdings/:holdingId/transactions`. Mirrors
+ * `[holdingId]/transactions/page.tsx`'s plain `loadAuthenticatedWorkspace(portfolioId)`
+ * (no `includeX` option, auth-gate only) + identity + transactions. */
+async function censusHoldingTransactionsPage(client: SqlClient): Promise<void> {
+  await baseWorkspaceLoad(client);
+  const identity = await loadOwnedHoldingIdentity(
+    client,
+    USER_ID,
+    PORTFOLIO_ID,
+    HOLDING_ID,
+  );
+  if (!identity) return;
+  await loadOwnedHoldingTransactions(client, USER_ID, PORTFOLIO_ID, HOLDING_ID);
+}
+
+/** `/portfolio/:id/holdings/:holdingId/news`. The page itself renders a
+ * static embed (no further D1 read) once identity resolves -- mirrors
+ * `[holdingId]/news/page.tsx`'s plain `loadAuthenticatedWorkspace(portfolioId)`
+ * + identity only. */
+async function censusHoldingNewsPage(client: SqlClient): Promise<void> {
+  await baseWorkspaceLoad(client);
+  await loadOwnedHoldingIdentity(client, USER_ID, PORTFOLIO_ID, HOLDING_ID);
+}
+
+/** `/portfolio/:id/holdings/:holdingId/dividends`. Mirrors
+ * `[holdingId]/dividends/page.tsx`'s plain `loadAuthenticatedWorkspace(portfolioId)`
+ * + identity + `loadOwnedSecurityDividendDetail`. */
+async function censusHoldingDividendsPage(client: SqlClient): Promise<void> {
+  await baseWorkspaceLoad(client);
+  const identity = await loadOwnedHoldingIdentity(
+    client,
+    USER_ID,
+    PORTFOLIO_ID,
+    HOLDING_ID,
+  );
+  if (!identity) return;
+  await loadOwnedSecurityDividendDetail(
+    client,
+    USER_ID,
+    PORTFOLIO_ID,
+    HOLDING_ID,
+    NOW,
+  );
+}
+
 const PAGES: Array<{
   name: string;
   run: (client: SqlClient) => Promise<void>;
@@ -845,6 +1040,28 @@ const PAGES: Array<{
   { name: "/portfolio/:id/details", run: censusDetailsPage },
   { name: "/portfolio/:id/gains", run: censusGainsPage },
   { name: "/portfolio/:id/income/dividends", run: censusDividendsPage },
+  { name: "/portfolio/:id/income", run: censusIncomePage },
+  { name: "/portfolio/:id/income/multi-year", run: censusIncomeMultiYearPage },
+  {
+    name: "/portfolio/:id/income/assumptions",
+    run: censusIncomeAssumptionsPage,
+  },
+  {
+    name: "/portfolio/:id/holdings/:holdingId",
+    run: censusHoldingDetailPage,
+  },
+  {
+    name: "/portfolio/:id/holdings/:holdingId/transactions",
+    run: censusHoldingTransactionsPage,
+  },
+  {
+    name: "/portfolio/:id/holdings/:holdingId/news",
+    run: censusHoldingNewsPage,
+  },
+  {
+    name: "/portfolio/:id/holdings/:holdingId/dividends",
+    run: censusHoldingDividendsPage,
+  },
 ];
 
 test("PRF-002: per-page census -- D1 calls/statements and EXPLAIN QUERY PLAN scan check at production scale (18 securities, 107 transactions, ~60k price_observations, 119 dividends, fully-backfilled portfolio_value_history)", async () => {
@@ -1198,6 +1415,25 @@ const DEPTH_CEILING: Record<string, number> = {
   "/portfolio/:id/details": 3,
   "/portfolio/:id/gains": 4,
   "/portfolio/:id/income/dividends": 6,
+  // PRF-005: `/income`/`/income/multi-year` layer `loadHistoricalPortfolioValueAtDates`
+  // (needed for `pastFinancialYears`) SEQUENTIALLY after the
+  // holdings/history wave -- it genuinely cannot start earlier, since it
+  // needs the FY window `loadOwnedDividendHistory`'s `today`/
+  // `financialYearStartMonth` resolves first to know WHICH FY-end dates to
+  // query -- stacking on top of `loadOwnedHoldings`' own already-recorded
+  // 6-deep internal chain (see the comment above `DEPTH_CEILING`). This
+  // task's fix targeted the dominant COST at this depth (row volume -- see
+  // `historical-portfolio-value.ts`'s PRF-005 comment, the loadFacts
+  // full-range-scan defect that caused the reported Error 1102, a CPU
+  // limit, not a latency one); further depth reduction here is a real,
+  // not-yet-closed PRF-003-class follow-up, not attempted in this task.
+  "/portfolio/:id/income": 11,
+  "/portfolio/:id/income/multi-year": 11,
+  "/portfolio/:id/income/assumptions": 8,
+  "/portfolio/:id/holdings/:holdingId": 7,
+  "/portfolio/:id/holdings/:holdingId/transactions": 3,
+  "/portfolio/:id/holdings/:holdingId/news": 2,
+  "/portfolio/:id/holdings/:holdingId/dividends": 9,
 };
 
 test("PRF-003: per-page SEQUENTIAL DEPTH census -- critical-path length (longest non-overlapping D1 round-trip chain) and modeled wall time at a simulated 40ms round trip", async () => {
@@ -1460,5 +1696,77 @@ test("PRF-003: the confirmed 20-second-outlier theory -- after a single cron-sty
   );
   assert.ok(oldUnboundedCount.count > rowsReturned.length * 100);
 
+  db.close();
+});
+
+test("PRF-005 (Error 1102 root cause): loadHistoricalPortfolioValueAtDates -- feeding the Income landing page's pastFinancialYears -- reads a bounded per-date window, not the portfolio's entire multi-year price history", async () => {
+  // Reproduces `loadOwnedIncomeProjection`'s own `yearsBack: 5` FY-end date
+  // set exactly (`/portfolio/:id/income`'s reported call shape) -- five
+  // FY-end dates roughly a year apart, well within the fixture's ~9-year
+  // seeded price history.
+  const db = await productionScaleFixture();
+  const { client, stats } = stageCensusClient(createSqliteSqlClient(db));
+  const requestedDates = [
+    "2026-06-30",
+    "2025-06-30",
+    "2024-06-30",
+    "2023-06-30",
+    "2022-06-30",
+  ];
+  const result = await loadHistoricalPortfolioValueAtDates(
+    client,
+    USER_ID,
+    PORTFOLIO_ID,
+    requestedDates,
+    NOW,
+  );
+  assert.ok(result);
+  assert.equal(result.size, requestedDates.length);
+
+  // THE FIX: `loadFacts`'s full-row `po.*` price read is now ONE query
+  // covering `requestedDates.length` narrow (`MULTI_YEAR_PRICE_TOLERANCE_DAYS`
+  // + 1 = 8 calendar days each) OR'd windows, not the single unconditional
+  // `[boundedRangeFrom, range.rangeTo]` span that previously read
+  // essentially every seeded `price_observations` row (~60,012) on EVERY
+  // call regardless of how few dates were requested.
+  const fullRowPriceCalls = stats.calls_.filter(
+    (call) =>
+      call.sql.includes("price_observations") && call.sql.includes("po.*"),
+  );
+  assert.equal(
+    fullRowPriceCalls.length,
+    1,
+    "expected exactly one loadFacts price read for the whole multi-date call",
+  );
+  const rowsReturned = db
+    .prepare(fullRowPriceCalls[0]!.sql)
+    .all(...(fullRowPriceCalls[0]!.params as never[])) as unknown[];
+  // Upper bound: 5 dates * 8-day window * 18 securities = 720 rows max
+  // (generously; most windows return far fewer since this fixture prices
+  // every calendar day, so a `BETWEEN` window this narrow cannot return
+  // more than window-width rows per security).
+  assert.ok(
+    rowsReturned.length <= 5 * 8 * SECURITY_COUNT,
+    `expected a bounded per-date-window read, got ${rowsReturned.length} rows`,
+  );
+  // Contrast figure: the fixture's full ~60,012-row multi-year history the
+  // OLD unconditional `[rangeFrom, rangeTo]` window would have read
+  // instead, for the identical predicate.
+  const securityIds = Array.from(
+    { length: SECURITY_COUNT },
+    (_, index) => `security-${index}`,
+  );
+  const oldUnboundedCount = db
+    .prepare(
+      `SELECT count(*) AS count FROM price_observations po WHERE po.security_id IN (${securityIds.map(() => "?").join(",")}) AND po.market_date BETWEEN '2017-01-01' AND '2026-08-01' AND po.adjustment_state = 'raw' AND ((po.access_scope = 'deployment' AND po.scope_user_id IS NULL) OR (po.access_scope = 'user' AND po.scope_user_id = ?))`,
+    )
+    .get(...securityIds, USER_ID) as { count: number };
+  console.log(
+    `\nPRF-005 /income root-cause fix: loadHistoricalPortfolioValueAtDates(yearsBack=5) bounded read = ${rowsReturned.length} price_observations rows; the old unconditional full-range read would have been ${oldUnboundedCount.count} rows (~${Math.round(oldUnboundedCount.count / rowsReturned.length)}x more).`,
+  );
+  assert.ok(oldUnboundedCount.count > rowsReturned.length * 50);
+
+  // Every captured price/fx query still seeks the index, never scans.
+  assertNoLargeTableScans(db, stats.calls_);
   db.close();
 });

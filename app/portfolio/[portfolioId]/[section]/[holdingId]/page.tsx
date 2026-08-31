@@ -3,8 +3,10 @@ import { PortfolioShell } from "../../../../components/portfolio-shell";
 import { type PortfolioSection } from "../../../../portfolio-sections";
 import { createPreviewPortfolioPrototypes } from "../../../../preview-route-data";
 import { loadPreviewValuationFixture } from "../../../../preview-valuation";
-import { loadAuthenticatedWorkspace } from "../../../../authenticated-workspace";
-import { getAuthenticatedSqlContext } from "../../../../portfolio-actions";
+import {
+  loadAuthenticatedWorkspace,
+  type AuthenticatedWorkspaceSqlContext,
+} from "../../../../authenticated-workspace";
 import { loadOwnedHoldingIdentity } from "../../../../owned-holding-transactions";
 import { marketDataProviderEnabled } from "../../../../market-data-provider-status";
 import { HoldingDetailScreen } from "../../../../components/holding-detail";
@@ -37,9 +39,21 @@ export default async function HoldingDetailPage({
   }
 
   if (portfolioId !== "preview") {
-    const workspace = await loadAuthenticatedWorkspace(portfolioId, {
-      includeHoldings: true,
-    });
+    // PRF-005 (Income area census follow-up: the same PRF-002 duplicate-
+    // identity-resolution defect, never fixed on the holding sub-tab
+    // pages): `sqlContextOut` recovers the client/userId
+    // `loadAuthenticatedWorkspace` already resolved instead of paying for
+    // a second, duplicate `getAuthenticatedSqlContext` identity
+    // resolution (which doubles `touchWithAudit`'s write batch on every
+    // load of this page).
+    const sqlContextOut: { current: AuthenticatedWorkspaceSqlContext } = {
+      current: { ok: false },
+    };
+    const workspace = await loadAuthenticatedWorkspace(
+      portfolioId,
+      { includeHoldings: true },
+      sqlContextOut,
+    );
     if (workspace.status === "unavailable") {
       return (
         <HoldingAreaUnavailable
@@ -54,7 +68,7 @@ export default async function HoldingDetailPage({
     }
     if (workspace.activePortfolio === null) notFound();
 
-    const context = await getAuthenticatedSqlContext(portfolioId);
+    const context = sqlContextOut.current;
     if (!context.ok) {
       return (
         <HoldingAreaUnavailable

@@ -77,6 +77,19 @@ export default async function DividendAssumptionsPage({
     );
   }
 
+  // PRF-005: `loadOwnedDividendAssumptions` and the FY-overrides list are
+  // mutually independent reads -- started concurrently instead of two
+  // sequential waterfalls. `fyOverrideRecordsPromise` must be observed on
+  // EVERY path, including the `assumptions` failure path below which
+  // returns early without ever awaiting it (the PRF-004 orphan-promise
+  // class) -- this side observer prevents an unhandled rejection; the
+  // ORIGINAL promise is still awaited (and any real rejection still
+  // propagates uncaught, exactly as before this change) further down.
+  const fyOverrideRecordsPromise = createDividendFyOverrideRepository(
+    context.client,
+  ).list(context.userId, portfolioId);
+  fyOverrideRecordsPromise.catch(() => {});
+
   let assumptions: Awaited<ReturnType<typeof loadOwnedDividendAssumptions>>;
   try {
     assumptions = await loadOwnedDividendAssumptions(
@@ -91,9 +104,7 @@ export default async function DividendAssumptionsPage({
     );
   }
 
-  const fyOverrideRecords = await createDividendFyOverrideRepository(
-    context.client,
-  ).list(context.userId, portfolioId);
+  const fyOverrideRecords = await fyOverrideRecordsPromise;
 
   return (
     <DividendAssumptionsEditor

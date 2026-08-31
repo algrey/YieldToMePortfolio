@@ -168,6 +168,23 @@ export async function loadOwnedIncomeProjection(
   );
   if (!portfolio) throw new Error("not_owned");
 
+  // PRF-005 (owner-reported Error 1102 on `/portfolio/:id/income`):
+  // `loadOwnedDividendHistory` and `loadOwnedHoldings` are mutually
+  // independent reads -- neither's SQL/output feeds the other (`today`
+  // below derives only from `history`; `baseCurrencyCode` below derives
+  // only from `holdings`) -- so they run concurrently instead of two
+  // sequential waterfalls, mirroring PRF-003's established pattern for this
+  // exact shape. `loadOwnedHoldings`'s failure stays LOCAL (`.catch` on the
+  // promise itself, matching the original try/catch's degrade-to-null
+  // behaviour) so a holdings failure never propagates through this
+  // Promise and never masks a genuine `loadOwnedDividendHistory` failure
+  // the caller still needs to see thrown.
+  const holdingsPromise = loadOwnedHoldings(
+    client,
+    userId,
+    portfolioId,
+    now,
+  ).catch(() => null);
   const history = await loadOwnedDividendHistory(
     client,
     userId,
@@ -175,13 +192,8 @@ export async function loadOwnedIncomeProjection(
     now,
   );
   const today = history.today;
-
-  let holdings: Awaited<ReturnType<typeof loadOwnedHoldings>> | null = null;
-  try {
-    holdings = await loadOwnedHoldings(client, userId, portfolioId, now);
-  } catch {
-    holdings = null;
-  }
+  const holdings: Awaited<ReturnType<typeof loadOwnedHoldings>> | null =
+    await holdingsPromise;
   const baseCurrencyCode = holdings?.homeCurrencyCode ?? null;
   // BUG-002 owner ruling (2026-08-25, verbatim: "How is cash handled. First
   // step is to make it work for the stocks, give the value of the stock
@@ -253,20 +265,21 @@ export async function loadOwnedIncomeProjection(
     (holdings?.rows ?? []).map((row) => [row.id, row]),
   );
 
+  // PRF-005: these two reads are mutually independent (both scoped by
+  // userId/portfolioId alone, neither consumes the other's output) --
+  // collapsed into one concurrent wave instead of two sequential round
+  // trips, matching the same pattern `loadOwnedDividendHistory` already
+  // applies to its own batch of independent per-portfolio reads.
   const assumptions = createDividendAssumptionsRepository(client);
-  const securityAssumptionsRecords = await assumptions.listSecurityAssumptions(
-    userId,
-    portfolioId,
-  );
+  const [securityAssumptionsRecords, portfolioAssumptions] = await Promise.all([
+    assumptions.listSecurityAssumptions(userId, portfolioId),
+    assumptions.getPortfolioAssumptions(userId, portfolioId),
+  ]);
   const securityAssumptionsById = new Map(
     securityAssumptionsRecords.map((record) => [
       record.portfolioSecurityId,
       record,
     ]),
-  );
-  const portfolioAssumptions = await assumptions.getPortfolioAssumptions(
-    userId,
-    portfolioId,
   );
 
   const portfolioValueGrowth = resolvePortfolioValueGrowth(

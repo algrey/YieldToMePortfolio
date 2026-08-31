@@ -758,8 +758,15 @@ test("UI-006C: the security dividends page loads via the owner-scoped context an
     ),
   ]);
   assert.match(page, /export const dynamic = "force-dynamic"/);
-  assert.match(page, /loadAuthenticatedWorkspace\(portfolioId\)/);
-  assert.match(page, /getAuthenticatedSqlContext\(portfolioId\)/);
+  assert.match(page, /loadAuthenticatedWorkspace\(/);
+  // PRF-005: this page used to call `getAuthenticatedSqlContext(portfolioId)`
+  // a SECOND time to recover the client/userId `loadAuthenticatedWorkspace`
+  // already resolved -- the same PRF-002 duplicate-identity-resolution
+  // defect PRF-002 fixed on the six named section pages, now fixed here too
+  // via the SAME `sqlContextOut` output slot.
+  assert.match(page, /sqlContextOut/);
+  assert.match(page, /AuthenticatedWorkspaceSqlContext/);
+  assert.doesNotMatch(page, /getAuthenticatedSqlContext\(/);
   assert.match(page, /loadOwnedSecurityDividendDetail\(/);
   assert.match(page, /workspace\.activePortfolio === null\) notFound\(\)/);
   assert.match(page, /error\.message === "not_found"\) notFound\(\)/);

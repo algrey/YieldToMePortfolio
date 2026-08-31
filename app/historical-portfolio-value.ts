@@ -395,36 +395,54 @@ export type HistoricalPortfolioValueResult = {
  *
  * PRF-003 (owner-reported slow tab navigation, "shortest 3 seconds and
  * longest 20 seconds" per tab change -- the confirmed 20-second outlier):
- * `priceWindow` optionally narrows ONLY the `price_observations`/
+ * `priceWindows` optionally narrows ONLY the `price_observations`/
  * `fx_rate_observations` date bound below to something tighter than
  * `[rangeFrom, rangeTo]` -- `transactions` stay bound by the full
  * `rangeTo` regardless (computing shares held at a date genuinely needs
- * every prior transaction, however old). The graph loader below passes the
- * exact span of the dates it is about to derive (`toDerive`'s own
- * min/max), since the series computation uses exact-date (tolerance-0)
- * price/FX lookups only -- a date outside that span is NEVER consulted for
- * ANY of `toDerive`'s points, so fetching it wastes both D1 rows-read and
- * Worker marshalling CPU for data that is provably unused this call. This
- * matters because the previous unconditional `[rangeFrom, rangeTo]` window
- * spans a portfolio's ENTIRE multi-year history: after the daily cron price
- * capture invalidates just ONE day's stored `portfolio_value_history` row
+ * every prior transaction, however old). The graph loader below passes a
+ * single-element array covering the exact span of the dates it is about to
+ * derive (`toDerive`'s own min/max), since the series computation uses
+ * exact-date (tolerance-0) price/FX lookups only -- a date outside that
+ * span is NEVER consulted for ANY of `toDerive`'s points, so fetching it
+ * wastes both D1 rows-read and Worker marshalling CPU for data that is
+ * provably unused this call. This matters because the previous
+ * unconditional `[rangeFrom, rangeTo]` window spans a portfolio's ENTIRE
+ * multi-year history: after the daily cron price capture invalidates just
+ * ONE day's stored `portfolio_value_history` row
  * (`invalidateStoredValueHistoryForSecurity`, called from the intraday/
  * Yahoo-compatible capture paths), the very next Overview load had exactly
  * ONE missing date but still paid for `loadFacts`'s full historical
  * `price_observations` read (tens of thousands of rows at the owner's real
  * scale) just to derive that single day -- the dominant cost behind the
- * reported multi-second outlier. `loadHistoricalPortfolioValueAtDates`
- * (Multi-Year) does not pass this -- it keeps its existing (already
- * bounded-by-a-handful-of-FY-end-dates) full-range behaviour unchanged,
- * since that path already widens/narrows its own range independently and
- * is not implicated in this task's reported symptom. */
+ * reported multi-second outlier.
+ *
+ * PRF-005 (owner-reported Error 1102 on `/portfolio/:id/income`, the first
+ * dividend tab): `loadHistoricalPortfolioValueAtDates` (Multi-Year FY-end
+ * lookups, also consumed by the Income landing page's `pastFinancialYears`)
+ * previously called this with NO window at all, defaulting to the FULL
+ * `[rangeFrom, rangeTo]` span on EVERY call regardless of how few dates
+ * (`yearsBack`, capped at 10) were requested -- the exact PRF-003 defect
+ * class, just never fixed for this second caller (PRF-003's own comment
+ * here explicitly deferred it as "not implicated in this task's reported
+ * symptom", which stopped being true once the owner hit 1102 loading
+ * `/income`). Each requested date only ever needs prices/FX within
+ * `MULTI_YEAR_PRICE_TOLERANCE_DAYS` calendar days BEFORE it (never after --
+ * the SAME backward-only window `computeHistoricalPortfolioValueAtDate`
+ * itself consults via `candidatesWithinTolerance`), so `priceWindows` now
+ * accepts MULTIPLE small windows, OR'd together in one query, letting the
+ * FY-end caller pass one narrow window per requested date instead of one
+ * window spanning its entire multi-year date range. An empty array (as
+ * opposed to `undefined`) means "no rows needed" -- the price/FX queries
+ * are skipped entirely (mirrors the existing `securityIds.length === 0`/
+ * `currencyList.length === 0` short-circuits below) -- used when every
+ * requested date falls outside `[rangeFrom, rangeTo]`. */
 async function loadFacts(
   client: SqlClient,
   userId: string,
   portfolioId: string,
   rangeFrom: string,
   rangeTo: string,
-  priceWindow?: { from: string; to: string },
+  priceWindows?: ReadonlyArray<{ from: string; to: string }>,
 ): Promise<{
   baseCurrencyCode: string;
   timezone: string;
@@ -432,8 +450,14 @@ async function loadFacts(
   fxObservations: FxObservation[];
   observedDates: string[];
 } | null> {
-  const priceRangeFrom = priceWindow ? priceWindow.from : rangeFrom;
-  const priceRangeTo = priceWindow ? priceWindow.to : rangeTo;
+  // `undefined` (not passed) means "the whole range" (the graph loader's
+  // pre-PRF-003 behaviour, still the right default absent a narrower ask);
+  // an explicit `[]` means "no rows needed at all" -- see this function's
+  // PRF-005 doc comment above.
+  const windows = priceWindows ?? [{ from: rangeFrom, to: rangeTo }];
+  const priceOrFxWhereClause = (column: "po.market_date" | "fx.market_date") =>
+    windows.map(() => `${column} BETWEEN ? AND ?`).join(" OR ");
+  const windowParams = windows.flatMap((w) => [w.from, w.to]);
   // PRF-003: `portfolio` and `securityRows` are independent reads (neither's
   // SQL references the other) -- fetched concurrently rather than paying
   // two sequential round trips before this function even knows how many
@@ -497,34 +521,27 @@ async function loadFacts(
            ORDER BY t.local_trade_date, t.trade_at, t.id LIMIT ?`,
           [userId, portfolioId, rangeTo, MAX_TRANSACTIONS + 1],
         ),
-    securityIds.length === 0
+    securityIds.length === 0 || windows.length === 0
       ? Promise.resolve([] as Row[])
       : client.all<Row>(
           `SELECT po.* FROM price_observations po
            WHERE po.security_id IN (${securityIds.map(() => "?").join(",")})
-             AND po.market_date BETWEEN ? AND ? AND ${PRICE_SCOPE}
+             AND (${priceOrFxWhereClause("po.market_date")}) AND ${PRICE_SCOPE}
            ORDER BY po.security_id, po.market_date, po.observation_at, po.id
            LIMIT ?`,
-          [
-            ...securityIds,
-            priceRangeFrom,
-            priceRangeTo,
-            userId,
-            MAX_PRICE_OBSERVATIONS + 1,
-          ],
+          [...securityIds, ...windowParams, userId, MAX_PRICE_OBSERVATIONS + 1],
         ),
-    currencyList.length === 0
+    currencyList.length === 0 || windows.length === 0
       ? Promise.resolve([] as Row[])
       : client.all<Row>(
           `SELECT fx.* FROM fx_rate_observations fx
-           WHERE fx.market_date BETWEEN ? AND ?
+           WHERE (${priceOrFxWhereClause("fx.market_date")})
              AND ((fx.base_currency_code = ? AND fx.quote_currency_code IN (${currencyList.map(() => "?").join(",")}))
                OR (fx.quote_currency_code = ? AND fx.base_currency_code IN (${currencyList.map(() => "?").join(",")})))
              AND ${FX_SCOPE}
            ORDER BY fx.market_date, fx.observed_at LIMIT ?`,
           [
-            priceRangeFrom,
-            priceRangeTo,
+            ...windowParams,
             baseCurrencyCode,
             ...currencyList,
             baseCurrencyCode,
@@ -829,7 +846,7 @@ export async function loadHistoricalPortfolioValueSeries(
     portfolioId,
     range.rangeFrom,
     range.rangeTo,
-    { from: toDerive[0]!, to: toDerive[toDerive.length - 1]! },
+    [{ from: toDerive[0]!, to: toDerive[toDerive.length - 1]! }],
   );
   if (!facts) return null;
 
@@ -872,15 +889,25 @@ export async function loadHistoricalPortfolioValueSeries(
   };
 }
 
-/** Values a SMALL, caller-specific set of dates (Multi-Year's FY-end dates)
- * against the SAME bounded fact set/derivation as the graph above -- one
+/** Values a SMALL, caller-specific set of dates (Multi-Year's FY-end dates,
+ * also consumed by the Income landing page's `pastFinancialYears`) against
+ * the SAME bounded fact set/derivation as the graph above -- one
  * derivation, two call shapes. Unlike the graph (exact-date only), these
  * lookups use `MULTI_YEAR_PRICE_TOLERANCE_DAYS` (review B3 ruling: the
  * last observation on-or-before the date within a bounded 7-calendar-day
  * lookback, covering a weekend/holiday landing exactly on an FY end).
  * A requested date outside [rangeFrom, rangeTo] (older than the range this
  * read bothered to fetch prices for) is honestly reported as a gap rather
- * than silently re-querying an unbounded window per date. */
+ * than silently re-querying an unbounded window per date.
+ *
+ * PRF-005 (owner-reported Error 1102 on `/portfolio/:id/income`): `loadFacts`
+ * below now receives one narrow `{from, to}` window PER in-range requested
+ * date (each `MULTI_YEAR_PRICE_TOLERANCE_DAYS` wide, matching the exact
+ * backward-only tolerance `computeHistoricalPortfolioValueAtDate` applies)
+ * instead of the entire `[boundedRangeFrom, range.rangeTo]` span -- see
+ * `loadFacts`'s own PRF-005 doc comment. At `yearsBack` <= 10 this is at
+ * most 10 tiny windows, versus the portfolio's entire multi-year
+ * `price_observations` history every single call. */
 export async function loadHistoricalPortfolioValueAtDates(
   client: SqlClient,
   userId: string,
@@ -925,12 +952,26 @@ export async function loadHistoricalPortfolioValueAtDates(
   // tolerance-7 answer, silently, whenever a candidate date happens to
   // exist exactly on the FY-end date). The read-time tolerance-7
   // derivation below is the SOLE authority for every FY-end value.
+  //
+  // PRF-005: one narrow window per IN-RANGE requested date (see this
+  // function's own PRF-005 doc comment above) -- a date already known to
+  // fall outside `[boundedRangeFrom, range.rangeTo]` gets no window at all
+  // (it is reported as an honest gap in the loop below without ever
+  // touching `facts`), matching that same `date < boundedRangeFrom || date
+  // > range.rangeTo` condition exactly.
+  const priceWindows = validDates
+    .filter((date) => date >= boundedRangeFrom && date <= range.rangeTo)
+    .map((date) => ({
+      from: subtractDaysForWidening(date, MULTI_YEAR_PRICE_TOLERANCE_DAYS),
+      to: date,
+    }));
   const facts = await loadFacts(
     client,
     userId,
     portfolioId,
     boundedRangeFrom,
     range.rangeTo,
+    priceWindows,
   );
   if (!facts) return null;
 

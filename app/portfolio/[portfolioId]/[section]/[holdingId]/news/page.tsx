@@ -1,6 +1,8 @@
 import { notFound } from "next/navigation";
-import { loadAuthenticatedWorkspace } from "../../../../../authenticated-workspace";
-import { getAuthenticatedSqlContext } from "../../../../../portfolio-actions";
+import {
+  loadAuthenticatedWorkspace,
+  type AuthenticatedWorkspaceSqlContext,
+} from "../../../../../authenticated-workspace";
 import { loadOwnedHoldingIdentity } from "../../../../../owned-holding-transactions";
 import {
   HoldingAreaUnavailable,
@@ -37,7 +39,20 @@ export default async function HoldingNewsPage({
     notFound();
   }
 
-  const workspace = await loadAuthenticatedWorkspace(portfolioId);
+  // PRF-005 (Income area census follow-up: the same PRF-002 duplicate-
+  // identity-resolution defect, never fixed on the holding sub-tab pages):
+  // `sqlContextOut` recovers the client/userId `loadAuthenticatedWorkspace`
+  // already resolved instead of paying for a second, duplicate
+  // `getAuthenticatedSqlContext` identity resolution (which doubles
+  // `touchWithAudit`'s write batch on every load of this page).
+  const sqlContextOut: { current: AuthenticatedWorkspaceSqlContext } = {
+    current: { ok: false },
+  };
+  const workspace = await loadAuthenticatedWorkspace(
+    portfolioId,
+    {},
+    sqlContextOut,
+  );
   if (workspace.status === "unavailable") {
     return (
       <HoldingAreaUnavailable
@@ -52,7 +67,7 @@ export default async function HoldingNewsPage({
   }
   if (workspace.activePortfolio === null) notFound();
 
-  const context = await getAuthenticatedSqlContext(portfolioId);
+  const context = sqlContextOut.current;
   if (!context.ok) {
     return (
       <HoldingAreaUnavailable

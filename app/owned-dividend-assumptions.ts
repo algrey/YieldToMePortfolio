@@ -103,13 +103,18 @@ export async function loadOwnedDividendAssumptions(
   portfolioId: string,
   now = new Date(),
 ): Promise<OwnedDividendAssumptions> {
-  const portfolio = await client.get<Row>(
-    `SELECT id FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
-    [portfolioId, userId],
-  );
+  // PRF-005 (Income area census): `portfolio` (ownership gate) and
+  // `settings` (needed only for the FY window below) are mutually
+  // independent reads -- neither's SQL/output feeds the other -- started
+  // concurrently instead of two sequential round trips.
+  const [portfolio, settings] = await Promise.all([
+    client.get<Row>(
+      `SELECT id FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
+      [portfolioId, userId],
+    ),
+    createOwnedUserSettingsRepository(client).get(userId),
+  ]);
   if (!portfolio) throw new Error("not_owned");
-
-  const settings = await createOwnedUserSettingsRepository(client).get(userId);
   if (!settings) throw new Error("missing_user_settings");
   const currentWindow = currentFyWindow(
     now.toISOString(),
@@ -121,10 +126,21 @@ export async function loadOwnedDividendAssumptions(
   const today = currentWindow.window.endDate;
 
   const assumptions = createDividendAssumptionsRepository(client);
-  const portfolioAssumptions = await assumptions.getPortfolioAssumptions(
-    userId,
-    portfolioId,
-  );
+  // PRF-005: `portfolioAssumptions` and `identityRows` are also mutually
+  // independent (both scoped by userId/portfolioId alone) -- one wave
+  // instead of two.
+  const [portfolioAssumptions, identityRows] = await Promise.all([
+    assumptions.getPortfolioAssumptions(userId, portfolioId),
+    client.all<Row>(
+      `SELECT ps.id, ps.security_id, COALESCE(ps.display_symbol, ps.source_symbol) AS symbol,
+              s.primary_currency_code
+       FROM portfolio_securities ps
+       JOIN securities s ON s.id = ps.security_id
+       WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held'
+       ORDER BY ps.id LIMIT ?`,
+      [userId, portfolioId, MAX_SECURITIES + 1],
+    ),
+  ]);
   const portfolioRow: DividendAssumptionsPortfolioRow = {
     valueGrowthPercentDecimal:
       portfolioAssumptions?.valueGrowthPercentDecimal ?? null,
@@ -133,15 +149,6 @@ export async function loadOwnedDividendAssumptions(
     version: portfolioAssumptions?.version ?? null,
   };
 
-  const identityRows = await client.all<Row>(
-    `SELECT ps.id, ps.security_id, COALESCE(ps.display_symbol, ps.source_symbol) AS symbol,
-            s.primary_currency_code
-     FROM portfolio_securities ps
-     JOIN securities s ON s.id = ps.security_id
-     WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held'
-     ORDER BY ps.id LIMIT ?`,
-    [userId, portfolioId, MAX_SECURITIES + 1],
-  );
   if (identityRows.length > MAX_SECURITIES)
     throw new Error("too_many_securities");
   const identities = identityRows.map((row) => ({
@@ -155,67 +162,66 @@ export async function loadOwnedDividendAssumptions(
     return { today, securities: [], portfolio: portfolioRow };
   }
 
-  const securityAssumptionsRecords = await assumptions.listSecurityAssumptions(
-    userId,
-    portfolioId,
-  );
+  const securityIds = [...new Set(identities.map((row) => row.securityId))];
+  // PRF-005: `securityAssumptionsRecords`, `holdings`, `history`, and
+  // `eventRows` are four more mutually independent reads (none consumes
+  // another's output -- `securityIds` above is derived from `identities`,
+  // already resolved) -- collapsed into one wave instead of four
+  // sequential round trips. `holdings`/`history` keep their ORIGINAL
+  // degrade-to-null-on-failure behaviour via `.catch` on each promise
+  // directly (a holdings-pipeline or dividend-history failure must stay
+  // LOCAL and never fail this whole screen, per each read's own comment
+  // below) so neither can reject this `Promise.all`; `securityAssumptionsRecords`/
+  // `eventRows` are NOT caught, matching their original propagate-on-
+  // failure behaviour.
+  const [securityAssumptionsRecords, holdings, history, eventRows] =
+    await Promise.all([
+      assumptions.listSecurityAssumptions(userId, portfolioId),
+      // Provider yield needs a current price -- read-only, so a
+      // holdings-pipeline failure (e.g. no published calculation yet)
+      // degrades every provider column to `price_unavailable` rather than
+      // failing this whole screen.
+      loadOwnedHoldings(client, userId, portfolioId, now).catch(() => null),
+      // DIV-016 part B: `hasFullYearHistoryEvidence` per security is
+      // `computeSecurityDividendForecast`'s OWN already-computed evidence
+      // determination (`loadOwnedDividendHistory`'s per-security
+      // `forecast`) -- reused here for the bridge-status column, never
+      // re-derived. A history-load failure degrades every row WITH an
+      // override to `"active"` (bridging -- evidence reads as absent, so
+      // the override keeps winning; conservative: never silently claims a
+      // live override has gone dormant when evidence genuinely could not
+      // be checked) rather than failing this whole screen, matching the
+      // holdings-pipeline degrade above.
+      loadOwnedDividendHistory(client, userId, portfolioId, now).catch(
+        () => null,
+      ),
+      client.all<Row>(
+        `SELECT security_id, kind, status, ex_date, currency_code, gross_per_share_decimal
+         FROM dividend_events
+         WHERE security_id IN (${inClause(securityIds.length)})
+         LIMIT ?`,
+        [...securityIds, MAX_EVENTS_PER_PORTFOLIO + 1],
+      ),
+    ]);
   const securityAssumptionsById = new Map(
     securityAssumptionsRecords.map((record) => [
       record.portfolioSecurityId,
       record,
     ]),
   );
-
-  // Provider yield needs a current price -- read-only, so a holdings-pipeline
-  // failure (e.g. no published calculation yet) degrades every provider
-  // column to `price_unavailable` rather than failing this whole screen.
-  let holdings: Awaited<ReturnType<typeof loadOwnedHoldings>> | null = null;
-  try {
-    holdings = await loadOwnedHoldings(client, userId, portfolioId, now);
-  } catch {
-    holdings = null;
-  }
   const holdingsByPortfolioSecurityId = new Map(
     (holdings?.rows ?? []).map((row) => [row.id, row]),
   );
-
-  // DIV-016 part B: `hasFullYearHistoryEvidence` per security is
-  // `computeSecurityDividendForecast`'s OWN already-computed evidence
-  // determination (`loadOwnedDividendHistory`'s per-security `forecast`)
-  // -- reused here for the bridge-status column, never re-derived. A
-  // history-load failure degrades every row WITH an override to `"active"`
-  // (bridging -- evidence reads as absent, so the override keeps winning;
-  // conservative: never silently claims a live override has gone
-  // dormant when evidence genuinely could not be checked) rather than
-  // failing this whole screen, matching the holdings-pipeline degrade
-  // above.
-  let evidenceBySecurityId = new Map<string, boolean>();
-  try {
-    const history = await loadOwnedDividendHistory(
-      client,
-      userId,
-      portfolioId,
-      now,
-    );
-    evidenceBySecurityId = new Map(
-      history.securities.map((security) => [
-        security.portfolioSecurityId,
-        security.forecast.hasFullYearHistoryEvidence,
-      ]),
-    );
-  } catch {
-    evidenceBySecurityId = new Map();
-  }
-
-  const securityIds = [...new Set(identities.map((row) => row.securityId))];
-  const eventsBySecurityId = new Map<string, TrailingDividendEventInput[]>();
-  const eventRows = await client.all<Row>(
-    `SELECT security_id, kind, status, ex_date, currency_code, gross_per_share_decimal
-     FROM dividend_events
-     WHERE security_id IN (${inClause(securityIds.length)})
-     LIMIT ?`,
-    [...securityIds, MAX_EVENTS_PER_PORTFOLIO + 1],
+  const evidenceBySecurityId = new Map<string, boolean>(
+    history
+      ? history.securities.map((security) => [
+          security.portfolioSecurityId,
+          security.forecast.hasFullYearHistoryEvidence,
+        ])
+      : [],
   );
+
+  const eventsBySecurityId = new Map<string, TrailingDividendEventInput[]>();
   if (eventRows.length > MAX_EVENTS_PER_PORTFOLIO)
     throw new Error("too_many_dividend_events");
   for (const row of eventRows) {

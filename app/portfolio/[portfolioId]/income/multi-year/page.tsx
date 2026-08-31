@@ -89,6 +89,23 @@ export default async function IncomeMultiYearPage({
     );
   }
 
+  // PRF-005 (owner-reported Error 1102 on the sibling `/income` page):
+  // `loadOwnedIncomeProjection` and `loadOwnedIncomeScenarios` are mutually
+  // independent reads -- scenarios never consume the projection's output --
+  // so both start concurrently instead of two sequential waterfalls.
+  // `scenariosPromise` must be observed on EVERY path, including the
+  // `projection` failure path below which returns early without ever
+  // awaiting it (the PRF-004 orphan-promise class) -- this side observer
+  // prevents an unhandled rejection; the ORIGINAL promise is still awaited
+  // (and its real rejection handled, degrading to `scenariosUnavailable`)
+  // further down, unchanged from the original sequential behaviour.
+  const scenariosPromise = loadOwnedIncomeScenarios(
+    context.client,
+    context.userId,
+    portfolioId,
+  );
+  scenariosPromise.catch(() => {});
+
   let projection: Awaited<ReturnType<typeof loadOwnedIncomeProjection>>;
   try {
     projection = await loadOwnedIncomeProjection(
@@ -117,11 +134,7 @@ export default async function IncomeMultiYearPage({
   let scenarios: IncomeScenarioRecord[] = [];
   let scenariosUnavailable = false;
   try {
-    scenarios = await loadOwnedIncomeScenarios(
-      context.client,
-      context.userId,
-      portfolioId,
-    );
+    scenarios = await scenariosPromise;
   } catch {
     scenariosUnavailable = true;
   }
