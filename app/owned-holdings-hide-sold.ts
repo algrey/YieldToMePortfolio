@@ -7,8 +7,14 @@
 // (two portfolios open in the same session never share or clobber each
 // other's toggle state), try/catch on both read and write (AGENTS.md: a
 // private/incognito tab, a storage quota, or corrupted content must never
-// break rendering), and an honest default (`false` -- "SHOW", the owner's
-// explicit default) on any failure or absent value.
+// break rendering), and an honest default on any failure or absent value.
+//
+// UI-052 (owner directive, verbatim, 2026-08-31): "Quickly change the
+// default to be 'hide sold' in the holdings tab." SUPERSEDES UI-040's
+// default-SHOW ruling above: the default is now `true` ("Hide Sold"
+// active). An explicit stored `"false"` from earlier in the session still
+// means SHOW -- only the ABSENT/unreadable/unrecognised cases take the
+// new default, so a toggle the owner flipped this session is respected.
 import type { StorageLike } from "./income-whatif";
 
 export type { StorageLike };
@@ -20,17 +26,21 @@ export function hideSoldStorageKey(portfolioId: string): string {
 }
 
 /** Reads this session's Hide Sold toggle state back out of `storage`
- * (normally `window.sessionStorage`). Returns the honest default (`false`,
- * "Show Sold" -- the owner's explicit default) on any failure: no stored
- * value, unrecognised content, or a throwing storage implementation. */
+ * (normally `window.sessionStorage`). Returns the default (`true`, "hide
+ * sold" -- the owner's UI-052 directive) on any failure: no stored value,
+ * unrecognised content, or a throwing storage implementation. An explicit
+ * stored `"false"` (the owner toggled to Show this session) is honoured. */
 export function loadHideSoldSession(
   storage: StorageLike,
   key: string,
 ): boolean {
   try {
-    return storage.getItem(key) === "true";
+    const stored = storage.getItem(key);
+    if (stored === "true") return true;
+    if (stored === "false") return false;
+    return true;
   } catch {
-    return false;
+    return true;
   }
 }
 

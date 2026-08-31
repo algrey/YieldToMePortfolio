@@ -835,6 +835,10 @@ function renderOwnedHoldingsWithRealisedGains(): string {
           createElement(PortfolioShell, {
             activeSection: "holdings",
             ownedWorkspace,
+            // UI-052 flipped the production default to HIDE sold; this
+            // suite pins the exited/zero-quantity row's Realised line,
+            // which is only visible in the Show Sold state.
+            initialHideSold: false,
           }),
         ),
       ),

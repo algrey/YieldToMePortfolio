@@ -1327,6 +1327,14 @@ Follow-ups recorded (2026-08-30, non-blocking): (a) `PortfolioBundlePanel` rende
 
 Status: DONE (arrived in owner commit `2f1a2af`, "Couple of things done in agent sub sessions", with no TASKS.md entry). Recorded retroactively by the Orchestrator on 2026-08-30: a USER-scoped USD/AUD rate pill in the top app bar (`app/authenticated-fx-rate.ts`, rendered by `app/components/portfolio-shell.tsx`, styled in `app/globals.css`, workspace-loaded in `app/authenticated-workspace.ts`). Its source comments originally used the ID "UI-049", which later collided with the import-page unblock task above; per AGENTS.md stable-ID rules the pill's four comment references were renamed to UI-050 (comment-only change, no behavior). If the pill needs future work, use this ID.
 
+### UI-052 — Holdings default flips to "hide sold" (owner-directed)
+
+Status: DONE on 2026-08-31 (Orchestrator-implemented per the owner's "quickly" precedent; full suite verification). Owner directive verbatim: "Quickly change the default to be 'hide sold' in the holdings tab." SUPERSEDES UI-040's default-SHOW ruling.
+
+DELIVERED: `loadHideSoldSession` (`app/owned-holdings-hide-sold.ts`) defaults to `true` on absent/unrecognised/throwing storage while an explicit stored `"false"` (the owner toggled to Show this session) is still honoured; `OwnedHoldingsScreen`'s state initialises `true` to match (no hydration flicker). A documented test seam (`initialHideSold`, default `true`, threaded through `PortfolioShell`; production never passes it) lets rendered tests pin the Show Sold state, since server renders never run the hydration effect — `tests/ui-036.test.ts` and `tests/ui-030.test.ts` (which pin sold-row line markup only visible when sold rows render) now pass `initialHideSold: false` explicitly; `tests/ui-040.test.ts`'s default-state pins flipped honestly (empty/unrecognised/throwing storage → `true`; default render: `aria-pressed="true"`, "Show Sold" label, sold row absent, sr-only live region carries the hidden-count sentence; explicit stored-"false" case added).
+
+Verification: `npm run format:check`/`npm run lint` clean (1 pre-existing warning in `tests/mkt-011a.test.ts`); `npx tsc --noEmit` clean; full `npm test` 2678 tests, 2668 pass, 10 env-gated skips, 0 fail.
+
 ### UI-051 — Workspace root lands on Holdings when a portfolio exists (owner-directed)
 
 Status: DONE on 2026-08-31 (worker + reviewer round-1 FAIL with one blocking finding, round-2 correction prescription-exact per precedent; commits `b939d43` + `fc6365e`). Owner directive verbatim: "when the site first loads and has an existing portfolio it should start on the holdings tab."

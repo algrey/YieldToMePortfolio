@@ -176,6 +176,10 @@ function renderOwnedHoldingsScreen(
           createElement(PortfolioShell, {
             activeSection: "holdings",
             ownedWorkspace,
+            // UI-052 flipped the production default to HIDE sold; these
+            // pins cover the sold-row markup only visible in the Show
+            // Sold state, so render it explicitly via the test seam.
+            initialHideSold: false,
           }),
         ),
       ),

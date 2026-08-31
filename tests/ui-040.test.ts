@@ -220,9 +220,9 @@ test("UI-040 hideSoldStorageKey: namespaces by portfolio -- two portfolios in th
   );
 });
 
-test("UI-040 loadHideSoldSession: on empty storage returns the honest default -- false ('Show Sold', the owner's explicit default)", () => {
+test("UI-040/UI-052 loadHideSoldSession: on empty storage returns the default -- true ('hide sold', the owner's UI-052 directive superseding UI-040's default-SHOW)", () => {
   const storage = new FakeStorage();
-  assert.equal(loadHideSoldSession(storage, hideSoldStorageKey("p1")), false);
+  assert.equal(loadHideSoldSession(storage, hideSoldStorageKey("p1")), true);
 });
 
 test("UI-040 session persistence: save then load round-trips true and false exactly, per portfolio", () => {
@@ -235,17 +235,19 @@ test("UI-040 session persistence: save then load round-trips true and false exac
   assert.equal(loadHideSoldSession(storage, keyB), false);
 });
 
-test("UI-040 loadHideSoldSession: degrades any unrecognised stored content to the honest default (false) rather than throwing", () => {
+test("UI-040/UI-052 loadHideSoldSession: degrades any unrecognised stored content to the default (true, hide sold) rather than throwing; an explicit stored 'false' is honoured as SHOW", () => {
   const storage = new FakeStorage();
   const key = hideSoldStorageKey("p1");
   storage.setItem(key, "not-a-boolean");
+  assert.equal(loadHideSoldSession(storage, key), true);
+  storage.setItem(key, "false");
   assert.equal(loadHideSoldSession(storage, key), false);
 });
 
 test("UI-040: a throwing storage (private/incognito tab, quota, blocked) never breaks load or save -- both degrade honestly, never throw into the caller (AGENTS.md/DIV-013 precedent)", () => {
   const storage = new ThrowingStorage();
   const key = hideSoldStorageKey("p1");
-  assert.equal(loadHideSoldSession(storage, key), false);
+  assert.equal(loadHideSoldSession(storage, key), true);
   assert.doesNotThrow(() => saveHideSoldSession(storage, key, true));
 });
 
@@ -367,7 +369,7 @@ test("UI-040 structural pin: dollar-sign alignment mechanism -- both All Time an
 
 // ===========================================================================
 // Part 4: rendered pins (default state -- server render never runs effects,
-// so hideSold is always its default `false` here; mirrors
+// so hideSold is always its default `true` here (UI-052: hide sold); mirrors
 // tests/ui-036.test.ts's/tests/ui-031.test.ts's render-harness pattern).
 // ===========================================================================
 
@@ -505,24 +507,26 @@ function renderOwnedHoldingsScreen(
   );
 }
 
-test("UI-040 render (default 'Show Sold' state): the toggle renders with the owner's exact label, aria-pressed=false, and a fully-sold row is STILL present in the row list (default SHOW)", () => {
+test("UI-040/UI-052 render (default 'hide sold' state): the toggle renders aria-pressed=true with the 'Show Sold' label, a fully-sold row is REMOVED from the row list, and held rows stay (UI-052 default HIDE)", () => {
   const html = renderOwnedHoldingsScreen([
     baseRow({ id: "row-held", symbol: "HELD", quantity: "10" }),
     baseRow({ id: "row-sold", symbol: "SOLD", quantity: "0" }),
   ]);
-  assert.match(html, /class="hide-sold-toggle"[^>]*aria-pressed="false"/);
-  assert.match(html, />Hide Sold</);
-  assert.doesNotMatch(html, />Show Sold</);
-  assert.match(html, /\/portfolio\/portfolio-a\/holdings\/row-sold"/);
+  assert.match(html, /class="hide-sold-toggle"[^>]*aria-pressed="true"/);
+  assert.match(html, />Show Sold</);
+  assert.doesNotMatch(html, />Hide Sold</);
+  assert.doesNotMatch(html, /\/portfolio\/portfolio-a\/holdings\/row-sold"/);
   assert.match(html, /\/portfolio\/portfolio-a\/holdings\/row-held"/);
 });
 
-test("UI-040 render (review fold): the sr-only live region is ALWAYS present in the markup, even in the default (unhidden) state -- but its TEXT is empty, never the hidden-count sentence, since hideSold is false by default", () => {
+test("UI-040/UI-052 render (review fold): the sr-only live region is ALWAYS present, and in the new default (hide sold) state its TEXT is the honest hidden-count sentence", () => {
   const html = renderOwnedHoldingsScreen([
     baseRow({ id: "row-sold", symbol: "SOLD", quantity: "0" }),
   ]);
-  assert.doesNotMatch(html, /sold holding.*hidden/);
-  assert.match(html, /<span class="sr-only" role="status"><\/span>/);
+  assert.match(
+    html,
+    /<span class="sr-only" role="status">1 sold holding hidden<\/span>/,
+  );
 });
 
 test("UI-040 render: no visible helper text anywhere in the toggle region -- the button's own label is the only visible string this feature adds (owner ruling: 'No explanatory text on the screen please')", () => {

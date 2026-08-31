@@ -542,6 +542,7 @@ function OwnedHoldingsScreen({
   portfolioId,
   realisedGains,
   summary,
+  initialHideSold = true,
 }: {
   rows: readonly OwnedHoldingRow[];
   homeCurrencyCode: string;
@@ -563,6 +564,11 @@ function OwnedHoldingsScreen({
    * see `OwnedWorkspace.holdingsSummary`'s own doc comment. `undefined`
    * whenever there are no held securities at all. */
   summary?: HoldingsSummaryFooter;
+  /** UI-052 test seam: initial Hide Sold state before the session-storage
+   * hydration effect runs. Production always uses the default (`true`,
+   * the owner's "hide sold" directive); rendered tests pass `false` to pin
+   * the sold-row markup that is only visible in the Show Sold state. */
+  initialHideSold?: boolean;
 }) {
   const [sortKey, setSortKey] = useState<"ticker" | "value" | "daily" | "gain">(
     "daily",
@@ -601,7 +607,10 @@ function OwnedHoldingsScreen({
   // remount (client-side portfolio switch), so a naive save effect could
   // otherwise clobber the newly-entered portfolio's real stored session
   // with the just-left portfolio's still-in-state value.
-  const [hideSold, setHideSold] = useState(false);
+  // UI-052 (owner directive): default flipped to HIDE sold -- must match
+  // `loadHideSoldSession`'s own default so the post-hydration read of an
+  // empty session storage is a no-op, not a visible flicker.
+  const [hideSold, setHideSold] = useState(initialHideSold);
   const hydratedHideSoldKeyRef = useRef<string | null>(null);
 
   // Declared BEFORE the load effect below -- same ordering rationale as
@@ -3990,6 +3999,7 @@ export function PortfolioShell({
   holdingSymbol = null,
   ownedWorkspace,
   ownedDetails = null,
+  initialHideSold = true,
 }: {
   activeSection: PortfolioSection;
   reviewBadgeLabel?: string;
@@ -3999,6 +4009,9 @@ export function PortfolioShell({
   holdingSymbol?: string | null;
   ownedWorkspace?: OwnedWorkspace;
   ownedDetails?: PortfolioInspection | null;
+  /** UI-052 test seam, threaded to `OwnedHoldingsScreen` -- see its own
+   * doc comment. Production never passes this. */
+  initialHideSold?: boolean;
 }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -5075,6 +5088,7 @@ export function PortfolioShell({
               cash={ownedWorkspace.cash}
               portfolioId={ownedWorkspace.activePortfolio.id}
               realisedGains={ownedWorkspace.realisedGains}
+              initialHideSold={initialHideSold}
               summary={ownedWorkspace.holdingsSummary}
             />
           ) : (
