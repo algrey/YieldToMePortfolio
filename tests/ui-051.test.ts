@@ -288,7 +288,7 @@ test("UI-051: app/authenticated-workspace.ts's landingRedirectOut early-return s
     "const result = await resolveAuthenticatedRequestContext(",
   );
   const earlyReturnIndex = source.indexOf(
-    'if (landingRedirectOut.current !== null) return unavailableWorkspace("");',
+    "if (landingRedirectOut.current !== null) {",
   );
   const promiseAllIndex = source.indexOf(
     "const [portfolioRecords, settings, usdAudRate] = result.ok",
@@ -299,5 +299,50 @@ test("UI-051: app/authenticated-workspace.ts's landingRedirectOut early-return s
   assert.ok(
     resultIndex < earlyReturnIndex && earlyReturnIndex < promiseAllIndex,
     "expected: resolveAuthenticatedRequestContext -> landingRedirectOut early-return -> settings/usdAudRate/portfolio-list Promise.all, in that order",
+  );
+});
+
+test("UI-051 (reviewer follow-up): the landingRedirectOut early-return's throwaway workspace carries a non-empty, honest message -- never a blank string a future forgetful caller could render", async () => {
+  const source = await readFile(
+    new URL("../app/authenticated-workspace.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /return unavailableWorkspace\("Redirecting to your holdings\."\);/,
+  );
+  assert.doesNotMatch(source, /return unavailableWorkspace\(""\);/);
+});
+
+// ---------------------------------------------------------------------------
+// Reviewer B1 (BLOCKING, ruling "keep labels honest"): once `/` redirects to
+// Holdings on initial load, the four owned-mode chrome links in
+// `portfolio-shell.tsx` that used to point at `/` (topbar brand, the
+// portfolio-popover's "All portfolios ->", and the navigation drawer's brand
+// + "Overview" links) would otherwise silently land an "Overview"-labelled
+// click on Holdings instead -- a labelled control not doing what it says.
+// Ruling: with an active portfolio, all four now target
+// `/portfolio/:id/overview` directly (an explicit "go to Overview"
+// navigation, which the owner's initial-load directive does not cover);
+// `/` remains the target only in preview mode / owned-mode-with-no-
+// portfolio. Source-pinned (rather than rendered) because three of these
+// four Links only mount once the portfolio-popover or navigation-drawer is
+// open (component state `tests/ui-024.test.ts`'s static
+// `renderToStaticMarkup` harness does not drive), matching this file's own
+// wiring-guard convention above.
+// ---------------------------------------------------------------------------
+
+test("UI-051 (reviewer B1): all four owned-mode chrome links target the active portfolio's Overview tab, falling back to '/' only with no active portfolio", async () => {
+  const source = await readFile(
+    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    "utf8",
+  );
+  const conditionalOverviewHref =
+    /href=\{\s*\n\s*ownedMode && ownedWorkspace\.activePortfolio\s*\n\s*\? `\/portfolio\/\$\{ownedWorkspace\.activePortfolio\.id\}\/overview`\s*\n\s*: "\/"\s*\n\s*\}/g;
+  const matches = [...source.matchAll(conditionalOverviewHref)];
+  assert.equal(
+    matches.length,
+    4,
+    `expected exactly 4 owned-mode Overview-fallback-to-/ hrefs (topbar brand, popover, drawer brand, drawer Overview), found ${matches.length}`,
   );
 });

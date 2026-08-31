@@ -4500,10 +4500,27 @@ export function PortfolioShell({
             that background fetch; clicking the logo still navigates
             normally (a single on-demand fetch, same as any other
             already-unprefetched tab), it just no longer happens for free
-            on every unrelated page view. */}
+            on every unrelated page view.
+            UI-051 (reviewer B1, owner ruling "keep labels honest"): `/`
+            itself now redirects to the active portfolio's Holdings tab on
+            initial load, so an "overview"-labelled link that still pointed
+            at `/` would silently land the owner on Holdings instead --
+            a labelled control not doing what it says. With an active
+            portfolio, this link now targets `/portfolio/:id/overview`
+            directly (a genuine, explicit "go to Overview" navigation, which
+            the owner's redirect directive does not cover); `/` remains the
+            target only in preview mode and owned-mode-with-no-portfolio.
+            `prefetch={false}` stays regardless of target: the dynamic
+            `/portfolio/:id/overview` route is already auto-skipped by
+            vinext's own DYNAMIC-path rule above, but the `/` fallback
+            (no active portfolio) still needs it. */}
         <Link
           className="topbar-brand"
-          href="/"
+          href={
+            ownedMode && ownedWorkspace.activePortfolio
+              ? `/portfolio/${ownedWorkspace.activePortfolio.id}/overview`
+              : "/"
+          }
           aria-label="YieldToMe overview"
           prefetch={false}
         >
@@ -4607,8 +4624,18 @@ export function PortfolioShell({
                   the same defect class PRF-004 fixed for the always-mounted
                   topbar-brand link (see its comment above). `prefetch=
                   {false}` stops that; the link still navigates normally on
-                  click. */}
-              <Link href="/" onClick={() => setOpenMenu(null)} prefetch={false}>
+                  click.
+                  UI-051 (reviewer B1): same conditional target as the
+                  topbar-brand link above -- see its UI-051 comment. */}
+              <Link
+                href={
+                  ownedMode && ownedWorkspace.activePortfolio
+                    ? `/portfolio/${ownedWorkspace.activePortfolio.id}/overview`
+                    : "/"
+                }
+                onClick={() => setOpenMenu(null)}
+                prefetch={false}
+              >
                 <span>All portfolios</span>
                 <span aria-hidden="true">→</span>
               </Link>
@@ -5227,12 +5254,19 @@ export function PortfolioShell({
                   viewport, every time it opens (`{drawerOpen ? ... :
                   null}`), so vinext's auto-prefetch re-triggers a full
                   root-page RSC fetch on every open for BOTH of this
-                  drawer's `href="/"` links -- the same defect class PRF-004
-                  fixed for the always-mounted topbar-brand link (see its
-                  comment above). `prefetch={false}` stops that; both links
-                  still navigate normally on click. */}
+                  drawer's links -- the same defect class PRF-004 fixed for
+                  the always-mounted topbar-brand link (see its comment
+                  above). `prefetch={false}` stops that; both links still
+                  navigate normally on click.
+                  UI-051 (reviewer B1): both links now target the active
+                  portfolio's Overview tab directly rather than `/` -- see
+                  the topbar-brand link's UI-051 comment above for why. */}
               <Link
-                href="/"
+                href={
+                  ownedMode && ownedWorkspace.activePortfolio
+                    ? `/portfolio/${ownedWorkspace.activePortfolio.id}/overview`
+                    : "/"
+                }
                 onClick={() => setDrawerOpen(false)}
                 prefetch={false}
               >
@@ -5250,7 +5284,11 @@ export function PortfolioShell({
             </div>
             <p className="drawer-label">Workspace</p>
             <Link
-              href="/"
+              href={
+                ownedMode && ownedWorkspace.activePortfolio
+                  ? `/portfolio/${ownedWorkspace.activePortfolio.id}/overview`
+                  : "/"
+              }
               onClick={() => setDrawerOpen(false)}
               prefetch={false}
             >

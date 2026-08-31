@@ -13,12 +13,20 @@ import test from "node:test";
 //     `null`, so `createOverviewData(null)` -- a pure, synchronous function
 //     -- is computed directly instead, removing a permanently-wasted D1
 //     round trip from EVERY root-page load with byte-identical output.
-// (2) The portfolio-popover and navigation-drawer `href="/"` links now carry
+// (2) The portfolio-popover and navigation-drawer links carry
 //     `prefetch={false}`, closing PRF-004's own recorded follow-up (c):
 //     these menus mount fresh, in-viewport, every time they open, so
 //     vinext's auto-prefetch re-triggered a full root-page RSC fetch on
 //     every open -- the same defect class PRF-004 already fixed for the
-//     always-mounted topbar-brand link.
+//     always-mounted topbar-brand link. UI-051 (reviewer B1) changed all
+//     four of these links' `href` from the literal `"/"` this test
+//     originally pinned to a conditional expression (the active
+//     portfolio's Overview tab when one exists, `"/"` only as the
+//     preview/no-portfolio fallback -- see the topbar-brand link's own
+//     UI-051 comment in `portfolio-shell.tsx`) -- the test below now
+//     anchors on `prefetch={false}` instead of the no-longer-literal
+//     `href="/"`, and separately checks each Link's href still falls back
+//     to `"/"`.
 
 function excerptAfter(source: string, marker: string, length = 200): string {
   const index = source.indexOf(marker);
@@ -68,35 +76,42 @@ test("PRF-006: loadAuthenticatedWorkspace computes the Overview publication read
   );
 });
 
-test('PRF-006: the portfolio-popover and navigation-drawer href="/" links opt out of auto-prefetch, mirroring the topbar-brand fix', async () => {
+test("PRF-006: the topbar-brand, portfolio-popover, and navigation-drawer links opt out of auto-prefetch, mirroring the topbar-brand fix", async () => {
   const source = stripComments(
     await readFile(
       new URL("../app/components/portfolio-shell.tsx", import.meta.url),
       "utf8",
     ),
   );
-  // Every `href="/"` Link in the file (topbar-brand, popover, drawer x2)
+  // Every root-workspace Link in the file (topbar-brand, popover, drawer x2)
   // must carry `prefetch={false}` -- each one mounts either unconditionally
   // in the always-visible header or fresh-in-viewport on menu/drawer open,
-  // so vinext's auto-prefetch (skips only dynamic-path routes, never `/`)
-  // would otherwise re-fetch the root page's full RSC render for free.
+  // so vinext's auto-prefetch (skips only dynamic-path routes) would
+  // otherwise re-fetch a full RSC render for free on every mount. UI-051
+  // (reviewer B1) changed these four Links' `href` from the literal `"/"`
+  // this test originally anchored on to a conditional expression, so the
+  // anchor below is `prefetch={false}` itself instead.
   // `[\s\S]*?(?<!=)>` rather than `[^>]*>`: several of these tags carry an
   // `onClick={() => ...}` arrow-function prop, whose own `=>` contains a
   // `>` that is NOT the tag's closing bracket -- the lookbehind excludes
   // only a `>` immediately preceded by `=`, so the real closing `>` (always
   // preceded by a quote, brace, or whitespace) still terminates the match.
-  const hrefRootLinks = [
-    ...source.matchAll(/<Link\b[\s\S]*?href="\/"[\s\S]*?(?<!=)>/g),
+  const prefetchFalseLinks = [
+    ...source.matchAll(/<Link\b[\s\S]*?prefetch=\{false\}[\s\S]*?(?<!=)>/g),
   ];
   assert.ok(
-    hrefRootLinks.length >= 4,
-    `expected at least 4 href="/" Links (topbar-brand, popover, drawer x2), found ${hrefRootLinks.length}`,
+    prefetchFalseLinks.length >= 4,
+    `expected at least 4 prefetch={false} Links (topbar-brand, popover, drawer x2), found ${prefetchFalseLinks.length}`,
   );
-  for (const [tag] of hrefRootLinks) {
+  for (const [tag] of prefetchFalseLinks) {
+    // UI-051: each of these four Links' href still falls back to `"/"` in
+    // preview mode / owned-mode-with-no-portfolio (only the active-portfolio
+    // branch targets `/portfolio/:id/overview` -- see
+    // tests/ui-051.test.ts's dedicated coverage of that conditional).
     assert.match(
       tag,
-      /prefetch=\{false\}/,
-      `href="/" Link missing prefetch={false}: ${tag}`,
+      /: "\/"/,
+      `prefetch={false} root-workspace Link has no "/" fallback target: ${tag}`,
     );
   }
 });

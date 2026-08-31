@@ -141,7 +141,16 @@ export async function loadAuthenticatedWorkspace(
         result.ok && result.context.activePortfolio
           ? result.context.activePortfolio.id
           : null;
-      if (landingRedirectOut.current !== null) return unavailableWorkspace("");
+      // Reviewer follow-up: a non-empty message, not `""`. This placeholder
+      // workspace is only ever meant to be discarded -- the caller must
+      // check `landingRedirectOut.current` and call `redirect()` itself
+      // before rendering anything -- but a `""` message would silently
+      // defeat a `workspace.message ?? fallback` consumer if some future
+      // caller passed this slot and forgot to redirect, rendering a blank
+      // instead of a safe, honest status.
+      if (landingRedirectOut.current !== null) {
+        return unavailableWorkspace("Redirecting to your holdings.");
+      }
     }
     // Resolved once, server-side, per request -- this is the single "now"
     // FY window math anchors on (see domain/calculations/financial-year.ts

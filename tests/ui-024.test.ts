@@ -245,9 +245,22 @@ test("UI-024 (Fold 1): resolveSectionSearchParam falls back to overview for an A
 // function app/page.tsx calls, feeding `redirect()`, to keep owned content
 // off the no-portfolio `/?section=...` fallback route once a real portfolio
 // exists).
+//
+// UI-051 (superseded-at-route-level, reviewer follow-up): `app/page.tsx` now
+// checks `loadAuthenticatedWorkspace`'s `landingRedirectOut` slot and
+// redirects to `/portfolio/:id/holdings` for ANY request to `/` once an
+// active portfolio exists, unconditionally and BEFORE `ownedSectionRedirectPath`
+// is ever called -- so in the real route, that function is now only ever
+// called with a `null` activePortfolioId (the fresh-install/no-portfolio
+// case). The tests below still exercise `ownedSectionRedirectPath` directly
+// with a non-null id and their assertions are still literally true of the
+// PURE function -- it is retained, unchanged, for the null-portfolio path --
+// but their titles' implicit "this is what a real request to `/` does"
+// claim no longer holds: that non-null-id branch is unreachable from
+// `app/page.tsx` now.
 // ---------------------------------------------------------------------------
 
-test("UI-024 (BLOCKING fix): with an active portfolio, a non-overview requested section redirects to the real portfolio-scoped route", () => {
+test("UI-024 (BLOCKING fix; UI-051: this non-null-id branch is now unreachable from app/page.tsx's own landingRedirectOut check -- see this file's UI-051 note above -- the pure function itself is unchanged and still correctly redirects a non-overview section): with an active portfolio, a non-overview requested section redirects to the real portfolio-scoped route", () => {
   assert.equal(
     ownedSectionRedirectPath("portfolio-a", "holdings"),
     "/portfolio/portfolio-a/holdings",
@@ -266,7 +279,7 @@ test("UI-024 (BLOCKING fix): with an active portfolio, a non-overview requested 
   );
 });
 
-test("UI-024 (BLOCKING fix): with an active portfolio, the overview section is exempt -- this route's own includeOverview load already serves it correctly, no redirect", () => {
+test("UI-024 (BLOCKING fix; UI-051: also route-level superseded -- see this file's UI-051 note above, `app/page.tsx` now redirects away from `/` before this branch is ever reached with a non-null id): with an active portfolio, the overview section is exempt -- this route's own includeOverview load already serves it correctly, no redirect", () => {
   assert.equal(ownedSectionRedirectPath("portfolio-a", "overview"), null);
 });
 

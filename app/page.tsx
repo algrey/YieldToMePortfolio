@@ -54,6 +54,15 @@ export default async function Home({ searchParams }: HomePageProps) {
   // fallback) can reach this route again after a portfolio is created, so
   // redirect to the real portfolio-scoped route -- which does its own
   // loading/validation -- instead of rendering owned content here.
+  // UI-051 (superseded-at-route-level, reviewer follow-up): the
+  // `landingRedirect` check above already redirects away from `/` whenever
+  // an active portfolio exists, unconditionally, before this line is
+  // reached -- so `workspace.activePortfolio?.id` is now always `null`
+  // here in practice, and this call's non-null-id branch
+  // (`ownedSectionRedirectPath`'s own doc comment in `portfolio-sections.ts`
+  // has the full explanation) is unreachable. Left in place, unchanged: it
+  // is still the correct, cheap guard for the null-portfolio path, and
+  // removing it would be a speculative refactor outside this task's scope.
   const redirectPath = ownedSectionRedirectPath(
     workspace.activePortfolio?.id ?? null,
     requestedSection,
