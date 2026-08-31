@@ -60,7 +60,8 @@
       },
       "secrets": {
         "required": ["CLOUDFLARE_ACCESS_ISSUER", "CLOUDFLARE_ACCESS_AUDIENCE"]
-      }
+      },
+      "placement": { "mode": "smart" }
     }
   }
 }

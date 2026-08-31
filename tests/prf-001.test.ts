@@ -426,10 +426,17 @@ test("PRF-001: per-request work census -- loadOwnedHoldings at production scale 
 
   const priceStage = stats.byStage.get("price_observations");
   assert.ok(priceStage, "expected a price_observations stage to be recorded");
+  // PRF-004 (owner-reported: tab navigation still 3-10+s on Workers Free):
+  // the separate `count(*)` precheck this used to assert (COUNT + SELECT)
+  // is gone -- the SELECT's own pre-existing `LIMIT MAX_OBSERVATIONS + 1`/
+  // length check already answers "too many?" with no extra round trip. One
+  // query now, not two -- an honest flip, not a loosened guard (the
+  // over-limit throw itself is unchanged; see owned-holdings.ts's own
+  // PRF-004 comment on this query).
   assert.equal(
     stats.priceObservationCalls.length,
-    2,
-    "expected exactly the COUNT + SELECT price_observations queries",
+    1,
+    "expected exactly the SELECT price_observations query (count precheck removed)",
   );
 
   // The REGRESSION GUARD: re-run `EXPLAIN QUERY PLAN` on the EXACT SQL/

@@ -302,7 +302,15 @@ test("UI-003 keeps fixed SQL bind and query budgets observable at runtime", asyn
   );
   assert.ok(queryCount < 40);
   assert.ok(maxParams <= 100);
-  assert.ok(fxQueries.length >= 2 && fxQueries.length <= 4);
+  // PRF-004 (owner-reported: tab navigation still 3-10+s on Workers Free):
+  // the FX chain's own separate `count(*)` precheck is gone -- its SELECT's
+  // pre-existing `LIMIT MAX_OBSERVATIONS + 1`/length check already answers
+  // "too many?" with no extra round trip (see owned-holdings.ts's own
+  // PRF-004 comment on this query) -- so a held portfolio with `fxRows`
+  // already supplied to `loadCash` now issues exactly ONE
+  // `fx_rate_observations` query per read, not two. An honest flip, not a
+  // loosened budget: the over-limit throw itself is unchanged.
+  assert.ok(fxQueries.length >= 1 && fxQueries.length <= 4);
   assert.ok(
     fxQueries.every(
       (sql) =>

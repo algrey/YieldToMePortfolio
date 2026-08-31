@@ -1164,22 +1164,36 @@ test("PRF-002/CALC-005: the root overview census never claims, advances, or othe
 });
 
 // PRF-003 review round 2 (BLOCKING correction): these ceilings are the REAL
-// measured critical-path depths after this task's parallelization fixes --
-// NOT the originally-drafted "<= 6 everywhere" target, which review found
-// was only true of the earlier, unsound merged-connected-component metric.
-// Root and Holdings both still carry an 8-deep critical path (the
-// `loadOwnedHoldings` chain: publication-count/publication-row/identities
-// -> Sharesight-gate/holding-projections -> price-count/price-fetch ->
-// manual_overrides -> cash_accounts/cash_ledger_entries, plus, on `/`
-// specifically, the parallel `resolveRange -> candidates/stored` chain from
-// `loadHistoricalPortfolioValueSeries` landing in the same critical path)
-// -- a real, named, NOT-YET-CLOSED follow-up (see docs/ARCHITECTURE.md's
-// PRF-003 correction entry). These bounds exist so a FUTURE
+// measured critical-path depths after each task's own parallelization fixes
+// -- not an aspirational target. PRF-003 left Root and Holdings at an 8-deep
+// critical path (the `loadOwnedHoldings` chain:
+// publication-count/publication-row/identities -> Sharesight-gate/
+// holding-projections -> price-count/price-fetch -> manual_overrides ->
+// cash_accounts/cash_ledger_entries).
+//
+// PRF-004 (owner-reported, verbatim: "It is still slow, 3 to 10+ seconds per
+// page") dropped both to 6 by batching within `loadOwnedHoldings`: the
+// publication-count precheck was folded into the publication-row fetch
+// itself (`LIMIT 2`, so 0/1/2+ rows answers the same "exactly one?" question
+// the separate `count(*)` used to -- see that query's own PRF-004 comment),
+// the price/FX count-then-fetch prechecks were dropped entirely (each
+// fetch's own pre-existing `LIMIT MAX_OBSERVATIONS + 1`/length check already
+// answered "too many?" -- the count query could never learn anything new),
+// and `cash_accounts`/`cash_ledger_entries` were hoisted into the same big
+// concurrent wave as price/FX/trades/settings (neither depends on that
+// wave's outputs, or on the per-security `rows` built afterward) instead of
+// being fetched afterward, sequentially, inside `loadCash`. The remaining
+// 6-deep chain (identities/publication -> Sharesight-gate/projections ->
+// {price, FX, cash_accounts, cash_ledger_entries, transactions, settings} ->
+// manual_overrides, plus, on `/` specifically, the parallel
+// `resolveRange -> candidates/stored` chain from
+// `loadHistoricalPortfolioValueSeries` landing in the same critical path) is
+// a real, named, NOT-YET-CLOSED follow-up. These bounds exist so a FUTURE
 // re-serialization regression still fires this guard, not to claim the
 // target was met.
 const DEPTH_CEILING: Record<string, number> = {
-  "/ (root overview)": 8,
-  "/portfolio/:id/holdings": 8,
+  "/ (root overview)": 6,
+  "/portfolio/:id/holdings": 6,
   "/portfolio/:id/quotes": 4,
   "/portfolio/:id/details": 3,
   "/portfolio/:id/gains": 4,
@@ -1244,15 +1258,24 @@ test("PRF-003: auth-resolution depth -- touchWithAudit no longer pays a reread r
   );
   assert.equal(result.ok, true);
   const { depth } = waves();
-  // Before this task: findAccessIdentity (wave 1) -> touchWithAudit's batch
+  // Before PRF-003: findAccessIdentity (wave 1) -> touchWithAudit's batch
   // (wave 2) -> the reread findAccessIdentity (wave 3) -> the portfolio
-  // lookup (wave 4) = depth 4. After: the reread is gone entirely (merged
-  // in-memory from already-known fields -- see db/repositories/identity.ts's
-  // PRF-003 comment), so depth 3.
+  // lookup (wave 4) = depth 4. PRF-003 removed the reread (merged in-memory
+  // from already-known fields -- see db/repositories/identity.ts's PRF-003
+  // comment), leaving depth 3: findAccessIdentity -> touchWithAudit's batch
+  // -> portfolio lookup. PRF-004 (owner-reported: tab navigation still
+  // 3-10+s on Workers Free): the portfolio lookup's SQL depends only on the
+  // ALREADY-KNOWN `userId` (available the instant `findAccessIdentity`
+  // resolves to an active record), never on anything `touchWithAudit`'s
+  // audit-write batch produces -- `identity-lifecycle.ts`'s
+  // `onIdentityKnown` hook now fires the portfolio lookup at that point, so
+  // it runs CONCURRENTLY with the audit-write batch instead of strictly
+  // after it. depth 2: findAccessIdentity -> {touchWithAudit batch,
+  // portfolio lookup} as one wave.
   assert.equal(
     depth,
-    3,
-    "expected identity findAccessIdentity + touchWithAudit batch + portfolio lookup, no reread wave",
+    2,
+    "expected identity findAccessIdentity, then touchWithAudit's batch and the portfolio lookup running concurrently in one wave",
   );
 });
 

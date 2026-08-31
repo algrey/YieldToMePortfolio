@@ -42,6 +42,24 @@ export type IdentityLifecycleOptions = {
   defaultTimezone?: string;
   now?: () => string;
   requestId?: string;
+  // PRF-004 (owner-reported: tab navigation still 3-10+s on Workers Free):
+  // `resolve` below already knows the authenticated `userId` as soon as
+  // `findAccessIdentity` returns an ACTIVE, non-revoked record -- BEFORE
+  // `touchWithAudit`'s write batch (a full D1 round trip) even starts. A
+  // caller that needs that same `userId` for its OWN next read (e.g.
+  // `request-context.ts`'s portfolio lookup) previously had to wait for the
+  // ENTIRE `resolve()` call -- including the audit write -- to return,
+  // paying a real, avoidable sequential hop: the portfolio lookup's SQL
+  // depends only on `userId`, never on anything `touchWithAudit` produces.
+  // This optional hook fires SYNCHRONOUSLY at that exact point (never in the
+  // `provisioning` branch below -- a brand-new user's `userId` is not known
+  // until its own INSERT completes, a genuinely rare one-time path this
+  // optimization does not target), letting the caller fire its own
+  // independent read immediately so it runs CONCURRENTLY with the audit
+  // write rather than after it. Never invoked when `resolve` is about to
+  // return `ok: false` (the revoked/not-active checks above already
+  // returned by the time this could fire).
+  onIdentityKnown?: (userId: string) => void;
 };
 
 function normalizeEmail(value: string | null): string | null {
@@ -116,6 +134,7 @@ export function createIdentityLifecycleService(
             : { ok: false, reason: "user-not-active" };
         }
 
+        options.onIdentityKnown?.(existing.userId);
         const authenticatedAt = now();
         const updated = await repository.touchWithAudit(
           existing,

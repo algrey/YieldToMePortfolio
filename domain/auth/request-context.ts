@@ -31,10 +31,28 @@ export async function resolveAuthenticatedRequestContext(
   requestedPortfolioId?: string,
   options?: IdentityLifecycleOptions,
 ): Promise<RequestContextResult> {
-  const identity = await createIdentityLifecycleService(
-    client,
-    options,
-  ).resolve(principal);
+  // PRF-004 (owner-reported: tab navigation still 3-10+s on Workers Free):
+  // the portfolio lookup below depends ONLY on the resolved `userId`, never
+  // on anything `identity.resolve()`'s own `touchWithAudit` write produces
+  // -- but `userId` is known well before that write finishes (see
+  // `identity-lifecycle.ts`'s `onIdentityKnown` doc comment). Firing the
+  // portfolio query as soon as `userId` is known lets it run CONCURRENTLY
+  // with the audit write's D1 round trip instead of strictly after it,
+  // removing one full sequential hop from every authenticated page load.
+  // `portfolios` is created here (no DB call yet) so the callback can use it
+  // the moment `userId` is known.
+  const portfolios = createOwnedPortfolioRepository(client, undefined, {
+    requestId: options?.requestId,
+  });
+  let earlyActivePortfolio: Promise<OwnedPortfolioRecord | null> | null = null;
+  const identity = await createIdentityLifecycleService(client, {
+    ...options,
+    onIdentityKnown: (userId) => {
+      earlyActivePortfolio = requestedPortfolioId
+        ? portfolios.get(userId, requestedPortfolioId)
+        : portfolios.list(userId).then((list) => list[0] ?? null);
+    },
+  }).resolve(principal);
   if (!identity.ok) {
     if (
       identity.reason === "user-not-active" ||
@@ -65,12 +83,19 @@ export async function resolveAuthenticatedRequestContext(
     return { ok: false, reason: "identity" };
   }
 
-  const portfolios = createOwnedPortfolioRepository(client, undefined, {
-    requestId: options?.requestId,
-  });
-  const activePortfolio = requestedPortfolioId
-    ? await portfolios.get(identity.user.id, requestedPortfolioId)
-    : ((await portfolios.list(identity.user.id))[0] ?? null);
+  // PRF-004: `earlyActivePortfolio` is set the moment `userId` was known
+  // (see this function's own PRF-004 comment above) -- by this point it is
+  // either already resolved or resolving concurrently with the audit write
+  // that just finished, so this simply joins it rather than issuing a fresh,
+  // now-redundant query. Only the (structurally rare) `provisioning` branch
+  // of `identity.resolve()` -- a brand-new user, whose `userId` is not known
+  // until its own INSERT completes -- ever leaves this `null`, in which case
+  // this falls back to the original sequential lookup, unchanged.
+  const activePortfolio: OwnedPortfolioRecord | null = earlyActivePortfolio
+    ? await earlyActivePortfolio
+    : requestedPortfolioId
+      ? await portfolios.get(identity.user.id, requestedPortfolioId)
+      : ((await portfolios.list(identity.user.id))[0] ?? null);
 
   if (requestedPortfolioId !== undefined && activePortfolio === null) {
     return { ok: false, reason: "portfolio-not-found" };

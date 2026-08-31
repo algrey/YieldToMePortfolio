@@ -4485,7 +4485,28 @@ export function PortfolioShell({
           </span>
         </button>
 
-        <Link className="topbar-brand" href="/" aria-label="YieldToMe overview">
+        {/* PRF-004 (owner-reported: tab navigation still 3-10+s on Workers
+            Free; production logs showed every navigation ALSO fetching `/`
+            as an `.rsc` prefetch, roughly doubling server work per click):
+            this brand link is rendered unconditionally in the shared shell
+            header on EVERY authenticated page and is essentially always in
+            the viewport, so vinext's shared IntersectionObserver auto-
+            prefetches its target as soon as it mounts (Vinext's own
+            "auto" prefetch mode only skips DYNAMIC-path routes -- e.g.
+            `/portfolio/[id]/...` -- never `/` itself, which has no path
+            params and is therefore eligible). That silently repeated a full
+            root-page RSC render on every single tab navigation, whether or
+            not the owner ever clicked the logo. `prefetch={false}` stops
+            that background fetch; clicking the logo still navigates
+            normally (a single on-demand fetch, same as any other
+            already-unprefetched tab), it just no longer happens for free
+            on every unrelated page view. */}
+        <Link
+          className="topbar-brand"
+          href="/"
+          aria-label="YieldToMe overview"
+          prefetch={false}
+        >
           <BrandMark />
           <span className="wordmark">YieldToMe</span>
         </Link>
