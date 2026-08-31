@@ -755,24 +755,34 @@ export async function loadOwnedHoldings(
     userId,
     portfolioId,
   ];
-  // PRF-003 (owner-reported slow tab navigation): the four read "chains"
-  // below -- price (count-then-fetch), FX (count-then-fetch), cash-account
-  // currencies, and the trade-date window -- plus the user-settings lookup
-  // (moved up from its previous spot just before `rows` is built, unchanged
-  // in every other respect) are all mutually independent: none of their SQL
-  // text or JS logic references another chain's OUTPUT. In particular the
-  // FX predicate below re-derives its own "which currencies matter" answer
-  // via SQL subqueries against `portfolio_securities`/`cash_accounts`
-  // directly -- it never reads the `cashCurrencies` JS array -- so it does
-  // NOT need to wait for the cash-currencies fetch to finish, despite
-  // textually following `relevantCurrencies` (which DOES need
-  // `cashCurrencies`, for the LATER override-target list, not for this
-  // query). Each chain's own internal count-then-fetch order is preserved
-  // exactly (a count query must still resolve before its own row fetch, to
-  // keep the "fail closed on a pathological count before ever marshalling
-  // the full rows" bound each one documents) -- only the FOUR chains
-  // themselves now run as one concurrent wave instead of five-plus
-  // sequential round trips.
+  // PRF-003 (owner-reported slow tab navigation) -- SUPERSEDED by PRF-004
+  // below, kept in place rather than deleted per this codebase's
+  // never-rewrite-history convention: the four read "chains" below -- price
+  // (count-then-fetch), FX (count-then-fetch), cash-account currencies, and
+  // the trade-date window -- plus the user-settings lookup (moved up from
+  // its previous spot just before `rows` is built, unchanged in every other
+  // respect) are all mutually independent: none of their SQL text or JS
+  // logic references another chain's OUTPUT. In particular the FX predicate
+  // below re-derives its own "which currencies matter" answer via SQL
+  // subqueries against `portfolio_securities`/`cash_accounts` directly -- it
+  // never reads the `cashCurrencies` JS array -- so it does NOT need to wait
+  // for the cash-currencies fetch to finish, despite textually following
+  // `relevantCurrencies` (which DOES need `cashCurrencies`, for the LATER
+  // override-target list, not for this query). Each chain's own internal
+  // count-then-fetch order is preserved exactly (a count query must still
+  // resolve before its own row fetch, to keep the "fail closed on a
+  // pathological count before ever marshalling the full rows" bound each one
+  // documents) -- only the FOUR chains themselves now run as one concurrent
+  // wave instead of five-plus sequential round trips. PRF-004 CORRECTION:
+  // the price/FX count-then-fetch pairs described here were NOT actually a
+  // genuine "fail closed before marshalling" dependency -- the fetch's own
+  // pre-existing `LIMIT MAX_OBSERVATIONS + 1`/length check already enforces
+  // the identical bound with no extra round trip, so the count queries this
+  // paragraph describes are REMOVED below, not merely parallelized. This
+  // paragraph is left as a historical record of the (incorrect) reasoning at
+  // the time; see the PRF-004 comment immediately below for what actually
+  // ships now, and `docs/ARCHITECTURE.md`'s dated PRF-004 entry for the full
+  // correction.
   // PRF-004 (owner-reported: tab navigation still 3-10+s on Workers Free):
   // the `price`/`fx` chains below USED to run their own COUNT-then-FETCH
   // round trip pair each -- but the fetch query already carries the

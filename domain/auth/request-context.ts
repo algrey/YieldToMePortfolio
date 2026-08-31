@@ -48,9 +48,23 @@ export async function resolveAuthenticatedRequestContext(
   const identity = await createIdentityLifecycleService(client, {
     ...options,
     onIdentityKnown: (userId) => {
-      earlyActivePortfolio = requestedPortfolioId
+      const pending = requestedPortfolioId
         ? portfolios.get(userId, requestedPortfolioId)
         : portfolios.list(userId).then((list) => list[0] ?? null);
+      // PRF-004 review (B1, BLOCKING): without this, a correlated D1
+      // failure (both `touchWithAudit`'s batch AND this portfolio read
+      // failing -- the EXP-004 D1_ERROR class) left THIS rejection
+      // unobserved whenever `resolve()` itself rejected first: the join at
+      // the `await earlyActivePortfolio` below is unreachable once
+      // `createIdentityLifecycleService(...).resolve(principal)` throws, so
+      // Node flagged a real `unhandledRejection` on every authenticated
+      // request during a D1 incident. This `.catch` is a SIDE observer on
+      // the SAME promise, not a replacement -- `earlyActivePortfolio` is
+      // still assigned `pending` itself (not the `.catch` result), so the
+      // `await` below still rejects normally and surfaces the real error
+      // when `resolve()` succeeds and this promise is actually joined.
+      pending.catch(() => {});
+      earlyActivePortfolio = pending;
     },
   }).resolve(principal);
   if (!identity.ok) {

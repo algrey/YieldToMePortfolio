@@ -1279,6 +1279,97 @@ test("PRF-003: auth-resolution depth -- touchWithAudit no longer pays a reread r
   );
 });
 
+test("PRF-004 review (B1, BLOCKING): a correlated D1 failure -- touchWithAudit's batch AND the eagerly-started portfolio read both failing -- rejects with the audit error and never leaves an unhandledRejection", async () => {
+  // Reviewer's finding: `onIdentityKnown`'s early portfolio read is fired
+  // and forgotten until the `await earlyActivePortfolio` join further down
+  // `resolveAuthenticatedRequestContext` -- but that join is UNREACHABLE
+  // whenever `identity.resolve()` itself rejects first (e.g. `touchWithAudit`'s
+  // `client.batch` failing, the EXP-004 D1_ERROR class). If the early
+  // portfolio promise ALSO rejects in that window, nothing ever observes
+  // it -- a real Node `unhandledRejection` on every authenticated request
+  // during a correlated D1 incident. This reproduces exactly that shape: a
+  // SqlClient whose `batch()` always rejects (simulating the audit-write
+  // failure) AND whose portfolio-lookup `get()` also rejects.
+  const { resolveAuthenticatedRequestContext } =
+    await import("../domain/auth/request-context.ts");
+  const db = await migratedDatabase();
+  const now = "2026-08-01T00:00:00.000Z";
+  db.exec(`
+    INSERT INTO currencies(code,numeric_code,name,minor_unit_digits) VALUES ('AUD',36,'Australian dollar',2);
+    INSERT INTO users(id,status,primary_email,timezone,created_at,updated_at) VALUES ('owner-1','active','owner1@example.test','Australia/Sydney','${now}','${now}');
+    INSERT INTO user_settings(user_id,home_currency_code,timezone,financial_year_start_month,created_at,updated_at,version) VALUES ('owner-1','AUD','Australia/Sydney',7,'${now}','${now}',1);
+    INSERT INTO user_identities(id,user_id,provider,issuer,subject,status,created_at,updated_at) VALUES ('identity-1','owner-1','cloudflare_access','https://issuer.example.test','subject-1','active','${now}','${now}');
+    INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at) VALUES ('portfolio-1','owner-1','P','Portfolio','AUD','Australia/Sydney','fifo','active','${now}','${now}');
+  `);
+  const principal = {
+    tokenType: "app" as const,
+    issuer: "https://issuer.example.test",
+    audience: "aud",
+    subject: "subject-1",
+    email: "owner1@example.test",
+    issuedAt: null,
+    notBefore: 0,
+    expiresAt: 9_999_999_999,
+    keyId: "kid-1",
+  };
+  const base = createSqliteSqlClient(db);
+  const AUDIT_ERROR = new Error(
+    "PRF-004 B1 drill: touchWithAudit batch failure (D1_ERROR)",
+  );
+  const PORTFOLIO_ERROR = new Error(
+    "PRF-004 B1 drill: portfolio read failure (D1_ERROR)",
+  );
+  const client: SqlClient = {
+    all: <T extends Record<string, unknown>>(
+      sql: string,
+      params?: readonly unknown[],
+    ) => base.all<T>(sql, params),
+    get: <T extends Record<string, unknown>>(
+      sql: string,
+      params?: readonly unknown[],
+    ) => {
+      // The early `onIdentityKnown` portfolio lookup
+      // (`owned-portfolios.ts`'s `get`) is the only query joining
+      // `portfolios AS p` on `p.id = ?` -- every OTHER `get`/`all` call this
+      // request makes (identity resolution, `user_settings`) must keep
+      // working normally so `resolve()` actually reaches, and fails inside,
+      // `touchWithAudit`'s `batch()` below.
+      if (sql.includes("FROM portfolios AS p") && sql.includes("p.id = ?")) {
+        return Promise.reject(PORTFOLIO_ERROR) as Promise<T | undefined>;
+      }
+      return base.get<T>(sql, params);
+    },
+    run: (sql: string, params?: readonly unknown[]) => base.run(sql, params),
+    batch: () => Promise.reject(AUDIT_ERROR),
+  };
+
+  const unhandled: unknown[] = [];
+  const onUnhandledRejection = (reason: unknown) => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandledRejection);
+  try {
+    await assert.rejects(
+      () =>
+        resolveAuthenticatedRequestContext(client, principal, "portfolio-1"),
+      (error: unknown) => error === AUDIT_ERROR,
+    );
+    // Give the event loop a full turn (Node fires `unhandledRejection` on a
+    // later microtask/macrotask than the rejection itself) so a genuinely
+    // unobserved rejection -- the exact bug this test guards against -- has
+    // a chance to surface before asserting none did.
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    process.off("unhandledRejection", onUnhandledRejection);
+  }
+  assert.deepEqual(
+    unhandled,
+    [],
+    "expected the early portfolio read's rejection to be observed (via its own .catch), never surfaced as an unhandledRejection",
+  );
+  db.close();
+});
+
 test("PRF-003: the confirmed 20-second-outlier theory -- after a single cron-style invalidation, Overview's slow-path price read is bounded to the invalidated date, not the portfolio's entire multi-year history", async () => {
   const db = await productionScaleFixture();
   // Simulate the owner's report: the :25/:55 cron price capture lands a
