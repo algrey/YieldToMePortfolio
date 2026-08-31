@@ -614,10 +614,17 @@ function localDateAt(timestamp: number, timezone: string): string | null {
   }
 }
 
-// CALC-004: resolves the local calendar-date range a NEW snapshot-pipeline
+// CALC-004: resolved the local calendar-date range a NEW snapshot-pipeline
 // `calculation_runs` row should request when queued by a ledger mutation,
 // import commit, or manual-override invalidation (`db/repositories/
-// ledger.ts`, `import-commit.ts`, `market-data.ts`). Unlike the projection
+// ledger.ts`, `import-commit.ts`, `market-data.ts`). CALC-005 retired the
+// snapshot pipeline (see docs/ARCHITECTURE.md's CALC-005 entry): none of
+// those sites queue a snapshot-pipeline row any more, so this function (and
+// `resolveSnapshotRunRange` below) has no remaining caller. Left in place,
+// unmodified, alongside the rest of this module's rebuild machinery --
+// matching the precedent HIST-001 already set for this same pipeline --
+// rather than deleted, since it is harmless, pure, and self-contained.
+// Unlike the projection
 // pipeline (which always rebuilds the WHOLE ledger regardless of `range_*`
 // -- see `app/calculation-executor-service.ts`'s doc comment), the
 // snapshot/Overview pipeline's completed run publishes exactly the date
@@ -636,12 +643,12 @@ function localDateAt(timestamp: number, timezone: string): string | null {
 // can never request an oversized, unbounded rebuild. Returns `null` only
 // when the portfolio itself cannot be found (defensive; callers already
 // hold a validated portfolio id from the same transaction).
-// Pure date math shared by `resolveSnapshotRunRange` (below) and by
-// `db/repositories/import-commit.ts`'s `finalize`, which folds the same
-// three facts (portfolio timezone/`history_complete_from`/earliest trade
-// date) into a query it ALREADY has to run per affected portfolio, to stay
-// inside `IMPORT_COMMIT_LIMITS.maxQueriesPerInvocation` rather than paying
-// for a second round trip per portfolio.
+// Pure date math previously shared by `resolveSnapshotRunRange` (below) and
+// by `db/repositories/import-commit.ts`'s `finalize` (which folded the same
+// three facts -- portfolio timezone/`history_complete_from`/earliest trade
+// date -- into a query it already had to run per affected portfolio); see
+// this function's own CALC-005 note above for why `finalize` no longer
+// calls it.
 export function computeSnapshotRunRange(
   facts: {
     timezone: string;

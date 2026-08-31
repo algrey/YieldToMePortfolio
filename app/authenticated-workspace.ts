@@ -19,10 +19,6 @@ import { loadOwnedRealisedGainTotals } from "./owned-capital-gains";
 import { buildHoldingsSummaryFooter } from "./owned-holdings-summary";
 import { createHistoricalSnapshotRepository } from "../db/repositories/snapshots.ts";
 import {
-  advanceCalculationRuns,
-  READ_TIME_SNAPSHOT_CALCULATION_BUDGET,
-} from "./calculation-executor-service.ts";
-import {
   createOverviewData,
   createUnavailableOverviewData,
 } from "./overview-read-model";
@@ -353,14 +349,15 @@ export async function loadAuthenticatedWorkspace(
       // SAME securities-only current portfolio value the Holdings tab
       // (`buildHoldingsSummaryFooter`'s `marketValue`) and the HIST-001/
       // BUG-002 value-history graph already show -- never the
-      // CALC-003/CALC-004 persisted-snapshot total below, which stays
+      // CALC-003/CALC-004 persisted-snapshot total below, which stayed
       // cash-inclusive (BUG-002 only touched the HIST-001 series and live
-      // holdings reads, not this dormant snapshot pipeline; the mismatch is
-      // recorded as the existing CALC-005 follow-up in TASKS.md). Loaded
-      // independently, mirroring `portfolioValueHistory` above: a failure
-      // here must never take down the rest of Overview, so the headline
-      // simply reads "unavailable" rather than dragging the whole screen
-      // down with it.
+      // holdings reads, not that dormant snapshot pipeline). CALC-005
+      // retired the snapshot pipeline entirely, so that total can now never
+      // populate at all -- the divergence this comment used to flag as a
+      // follow-up is moot by construction. Loaded independently, mirroring
+      // `portfolioValueHistory` above: a failure here must never take down
+      // the rest of Overview, so the headline simply reads "unavailable"
+      // rather than dragging the whole screen down with it.
       const holdingsSummary = await loadOwnedHoldings(
         client,
         result.context.user.id,
@@ -377,40 +374,29 @@ export async function loadAuthenticatedWorkspace(
         )
         .catch(() => undefined);
       try {
+        // CALC-005: the snapshot pipeline is retired (see
+        // docs/ARCHITECTURE.md's CALC-005 entry) -- this used to self-heal
+        // by claiming/advancing a queued-but-unadvanced snapshot run
+        // (CALC-004 trigger 2) when nothing had published yet, which in
+        // production meant every Overview load re-claimed a permanently
+        // stuck run and spent its full read-time statement budget for
+        // nothing (that run could never complete: it started before a
+        // price-history import and its cursor-based rebuild never revisits
+        // already-processed dates). This now only ever READS
+        // `snapshot_publications` -- never claims/advances -- so a
+        // portfolio with no publication (production's permanent state
+        // today) renders the same honest unavailable overview state it
+        // always has; nothing about this read's OUTPUT changes, only its
+        // cost. The graph/hero above are unaffected either way (HIST-001):
+        // they already source from `price_observations`/ledger facts
+        // directly, never from this publication.
         const snapshotRepo = createHistoricalSnapshotRepository(client);
         const userId = result.context.user.id;
         const portfolioId = configuredWorkspace.activePortfolio.id;
-        let overview = await snapshotRepo.loadPublishedOverview(
+        const overview = await snapshotRepo.loadPublishedOverview(
           userId,
           portfolioId,
         );
-        if (overview === null) {
-          // CALC-004 trigger 2 (read-time self-heal), mirroring
-          // `owned-holdings.ts`'s identical CALC-003 pattern for the
-          // projection pipeline: this is the choke point every Overview
-          // read passes through when the snapshot pipeline's calculation
-          // runs were queued (by a ledger post or import commit) but never
-          // advanced -- e.g. local dev with no cron, or trigger 1's
-          // post-commit snapshot budget exhausting before this portfolio's
-          // (typically much larger) history rebuild finished. Best-effort,
-          // bounded, and re-read exactly once: if nothing is claimable (or
-          // another reader already claimed it -- lease semantics prevent
-          // stampedes) this falls through to the existing honest
-          // unavailable overview state below, never a fabricated chart.
-          await advanceCalculationRuns(
-            { client, now: () => nowInstant },
-            {
-              userId,
-              portfolioId,
-              pipeline: "snapshot",
-              budget: READ_TIME_SNAPSHOT_CALCULATION_BUDGET,
-            },
-          ).catch(() => undefined);
-          overview = await snapshotRepo.loadPublishedOverview(
-            userId,
-            portfolioId,
-          );
-        }
         return {
           ...configuredWorkspace,
           overview: createOverviewData(overview),

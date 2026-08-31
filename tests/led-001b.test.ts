@@ -488,17 +488,19 @@ test("reversal and supersession preserve source facts and rebuild markers", asyn
   );
   assert.equal(supersessionRetry.idempotent, true);
   assert.equal(supersessionRetry.transaction.id, superseded.transaction.id);
-  // CALC-004: every ledger mutation now queues ONE row per pipeline
-  // (projection + snapshot), doubling this count from the pre-CALC-004
-  // value of 4 (one row per mutation: original post, reversal, replacement
-  // post, and the idempotent supersession retry creates no new row).
+  // CALC-004 briefly doubled this count to 8 by queuing ONE row per
+  // pipeline (projection + snapshot) per mutation; CALC-005 retired the
+  // snapshot pipeline entirely (see docs/ARCHITECTURE.md's CALC-005
+  // entry), so this is back to 4 -- one projection-pipeline row per
+  // mutation (original post, reversal, replacement post; the idempotent
+  // supersession retry creates no new row).
   assert.equal(
     present(
       database
         .prepare("SELECT COUNT(*) AS count FROM calculation_runs")
         .get() as { count: number } | undefined,
     ).count,
-    8,
+    4,
   );
 });
 

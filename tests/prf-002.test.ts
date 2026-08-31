@@ -57,9 +57,12 @@
  *     to exist.
  *
  * See TASKS.md's "### PRF-002" entry for the full per-page before/after
- * census table and the CALC-004 snapshot-pipeline finding (measured, but
- * deliberately NOT fixed here -- that pipeline's executor semantics are out
- * of this task's scope; see CALC-005's existing entry).
+ * census table and the CALC-004 snapshot-pipeline finding this task
+ * measured but deliberately did not fix (that pipeline's executor
+ * semantics were out of this task's scope). CALC-005 later retired that
+ * pipeline entirely (docs/ARCHITECTURE.md's CALC-005 entry) -- this file's
+ * root-overview census and its dedicated regression test below now assert
+ * the resulting DROP instead of measuring the finding.
  */
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
@@ -82,10 +85,6 @@ import { loadUsdAudRate } from "../app/authenticated-fx-rate.ts";
 import { loadPortfolioInspectionSafely } from "../db/repositories/portfolio-inspection.ts";
 import { createOwnedUserSettingsRepository } from "../db/repositories/owned-portfolios.ts";
 import { createHistoricalSnapshotRepository } from "../db/repositories/snapshots.ts";
-import {
-  advanceCalculationRuns,
-  READ_TIME_SNAPSHOT_CALCULATION_BUDGET,
-} from "../app/calculation-executor-service.ts";
 import type { SqlClient, SqlStatement } from "../db/repositories/sql-client.ts";
 
 async function migratedDatabase(): Promise<DatabaseSync> {
@@ -129,18 +128,17 @@ const DIVIDEND_MANUAL_RECORD_COUNT = 119;
  *
  * Deliberately NOT seeded: `portfolio_daily_snapshots`/
  * `holding_daily_snapshots` rows for the CALC-004 snapshot pipeline's own
- * partial progress. Production has 69 such rows from a run that keeps
- * getting re-claimed and re-advancing without ever completing (see this
- * file's "CALC-004 snapshot self-heal" test below) -- reproducing that
- * exact stuck-but-progressing internal state (lease/cursor/checkpoint
- * columns) is the snapshot pipeline's own deep internal mechanics, out of
- * this task's scope to touch or fully model (AGENTS.md: do not fix/
- * restructure the calculation pipeline's executor semantics). This fixture
- * instead queues a FRESH snapshot run over the same realistic price/
- * transaction history and measures ONE real, bounded `advanceCalculationRuns`
- * attempt -- an honest lower bound on the read-time cost this pipeline adds
- * to every Overview load while it remains unpublished, without claiming to
- * reproduce the exact eternal-loop mechanics (CALC-005's own territory).
+ * partial progress. Production had 69 such rows from a run that kept
+ * getting re-claimed and re-advancing without ever completing, at the time
+ * this fixture was written for the PRF-002 investigation -- CALC-005 later
+ * retired that pipeline entirely (docs/ARCHITECTURE.md's CALC-005 entry),
+ * so reproducing its exact stuck-but-progressing internal state is no
+ * longer a live production concern. This fixture still seeds ONE legacy
+ * queued snapshot-pipeline row (`snapshot-run-1` below) standing in for
+ * that same stuck-run shape -- not to measure its cost any more (there is
+ * none: nothing ever claims or advances it now), but so the root-overview
+ * census and its dedicated regression test below can prove it stays
+ * completely untouched, never resurrected by a future regression.
  */
 async function productionScaleFixture(): Promise<DatabaseSync> {
   const db = await migratedDatabase();
@@ -356,16 +354,13 @@ async function productionScaleFixture(): Promise<DatabaseSync> {
   }
   db.exec("COMMIT");
 
-  // CALC-004 (measured, deliberately NOT fixed here -- see this function's
-  // own doc comment above): a queued snapshot-pipeline run over the SAME
-  // realistic ledger/price-history range, standing in for the production
-  // account's own never-completing run. `ledger_high_water_start = '0'`
-  // matches this fixture's own projection-run convention above --
-  // `snapshots.rebuild`'s stored-vs-input high-water check is a
-  // self-consistency check against this SAME stored value when non-empty
-  // (see `app/calculation-executor-service.ts`'s `advanceOneRun` call
-  // site), not a live recomputation, so this is a stable, reproducible
-  // "always claimable, always making bounded progress" fixture shape.
+  // CALC-005 (see this function's own doc comment above): a legacy queued
+  // snapshot-pipeline row over the SAME realistic ledger/price-history
+  // range, standing in for the production account's own never-completing
+  // run from before the pipeline was retired. Its exact field values no
+  // longer matter functionally (nothing ever claims/advances/reads it by
+  // pipeline any more) -- it exists purely so tests can assert it is left
+  // completely alone.
   db.exec(`
     INSERT INTO calculation_runs (id,user_id,portfolio_id,range_from,range_to,calculation_version,reason,pipeline,status,attempt,ledger_high_water_start,idempotency_key,created_at,updated_at)
       VALUES ('snapshot-run-1','owner-1','portfolio-1','2018-01-01','2026-08-01',1,'test','snapshot','queued',0,'0','snapshot-run-1','${now}','${now}');
@@ -590,8 +585,16 @@ async function baseWorkspaceLoad(client: SqlClient): Promise<void> {
  * regardless of which section query param is present (see `app/page.tsx`).
  * Mirrors `authenticated-workspace.ts`'s `includeOverview` branch body
  * exactly: the HIST-001 value-history graph, a SEPARATE `loadOwnedHoldings`
- * call for the hero's securities-only summary (UI-047), and the CALC-004
- * snapshot self-heal when nothing has ever published for this account. */
+ * call for the hero's securities-only summary (UI-047), and a single
+ * `loadPublishedOverview` read. CALC-005 retired the snapshot pipeline (see
+ * docs/ARCHITECTURE.md's CALC-005 entry) -- this no longer self-heals by
+ * claiming/advancing a queued-but-unadvanced snapshot run when nothing has
+ * published (that was the CALC-004 shape this census used to measure); a
+ * null publication now falls straight through to the honest unavailable
+ * overview state. `productionScaleFixture` still seeds a legacy queued
+ * snapshot-pipeline row (`snapshot-run-1`, standing in for production's
+ * real stuck run) specifically so this census proves it is truly inert
+ * here -- present but never claimed, advanced, or paid for. */
 async function censusRootOverviewPage(client: SqlClient): Promise<void> {
   await baseWorkspaceLoad(client);
   await loadHistoricalPortfolioValueSeries(client, USER_ID, PORTFOLIO_ID, NOW);
@@ -606,22 +609,7 @@ async function censusRootOverviewPage(client: SqlClient): Promise<void> {
     buildHoldingsSummaryFooter("AUD", holdings.unrealisedSummary, undefined);
   }
   const snapshotRepo = createHistoricalSnapshotRepository(client);
-  let overview = await snapshotRepo.loadPublishedOverview(
-    USER_ID,
-    PORTFOLIO_ID,
-  );
-  if (overview === null) {
-    await advanceCalculationRuns(
-      { client, now: () => NOW.toISOString() },
-      {
-        userId: USER_ID,
-        portfolioId: PORTFOLIO_ID,
-        pipeline: "snapshot",
-        budget: READ_TIME_SNAPSHOT_CALCULATION_BUDGET,
-      },
-    ).catch(() => undefined);
-    overview = await snapshotRepo.loadPublishedOverview(USER_ID, PORTFOLIO_ID);
-  }
+  await snapshotRepo.loadPublishedOverview(USER_ID, PORTFOLIO_ID);
 }
 
 /** `/portfolio/:id/holdings`: `loadAuthenticatedWorkspace(portfolioId,
@@ -725,15 +713,14 @@ test("PRF-002: per-page census -- D1 calls/statements and EXPLAIN QUERY PLAN sca
     // loops over price history any more (PRF-001 fixed Holdings/gains'
     // shared price query; PRF-002's fix means Overview's steady-state read
     // no longer touches `price_observations` row data at all). The root
-    // overview page is the deliberate exception: it alone pays the
-    // CALC-004 snapshot self-heal's `READ_TIME_SNAPSHOT_CALCULATION_BUDGET`
-    // (150 statements) on an account whose snapshot pipeline has never
-    // published -- MEASURED here, honestly, but NOT fixed (that pipeline's
-    // executor semantics are out of this task's scope; see TASKS.md's
-    // PRF-002 entry and the existing CALC-005 entry). Its ceiling is the
-    // budget plus this page's own small baseline, not the same tight bound
-    // as every other page.
-    const ceiling = page.name.startsWith("/ (") ? 250 : 60;
+    // overview page previously paid an EXTRA ~150-statement
+    // `READ_TIME_SNAPSHOT_CALCULATION_BUDGET` self-heal cost here on an
+    // account whose snapshot pipeline had never published (ceiling 250) --
+    // CALC-005 retired that self-heal entirely (docs/ARCHITECTURE.md's
+    // CALC-005 entry), dropping the root page back to the same tight bound
+    // as every other page; this ceiling is the DROP this retirement
+    // produced, not a newly-chosen number.
+    const ceiling = 60;
     assert.ok(
       stats.calls <= ceiling && stats.statements <= ceiling,
       `${page.name} issued ${stats.calls} D1 calls / ${stats.statements} statements (expected <= ${ceiling})`,
@@ -960,37 +947,55 @@ test("PRF-002 (auth-resolution duplication, now fixed): resolving the SAME authe
   db.close();
 });
 
-test("PRF-002: CALC-004 snapshot self-heal cost -- Overview's read-time trigger on an account whose snapshot pipeline has never published", async () => {
-  // `productionScaleFixture` already seeds a queued snapshot-pipeline run
-  // (see its own doc comment) -- reused here directly rather than queueing
-  // a second one, so this test measures the SAME shape the main per-page
-  // census's root-overview row does.
+test("PRF-002/CALC-005: the root overview census never claims, advances, or otherwise touches the legacy queued snapshot-pipeline row", async () => {
+  // `productionScaleFixture` seeds `snapshot-run-1`, a legacy queued
+  // snapshot-pipeline row standing in for production's real stuck run (see
+  // that function's own doc comment). Before CALC-005, the root-overview
+  // page's read-time self-heal would claim and spend a full
+  // `READ_TIME_SNAPSHOT_CALCULATION_BUDGET` (150 statements) trying to
+  // advance exactly this shape on every single load -- this proves that
+  // self-heal is gone: the row is left completely untouched by a real
+  // root-overview page census.
   const db = await productionScaleFixture();
+  const before = db
+    .prepare(
+      `SELECT status, attempt, lease_owner, updated_at FROM calculation_runs WHERE id = 'snapshot-run-1'`,
+    )
+    .get() as {
+    status: string;
+    attempt: number;
+    lease_owner: string | null;
+    updated_at: string;
+  };
+  assert.equal(before.status, "queued");
+
   const { client, stats } = stageCensusClient(createSqliteSqlClient(db));
-  let result: Awaited<ReturnType<typeof advanceCalculationRuns>> | undefined;
-  try {
-    result = await advanceCalculationRuns(
-      { client, now: () => NOW.toISOString() },
-      {
-        userId: USER_ID,
-        portfolioId: PORTFOLIO_ID,
-        pipeline: "snapshot",
-        budget: READ_TIME_SNAPSHOT_CALCULATION_BUDGET,
-      },
-    );
-  } catch (error) {
-    // Reported honestly either way -- see this file's header. The snapshot
-    // pipeline's own internal mechanics are out of this task's scope to
-    // fix; this test's job is only to disclose the read-side cost when it
-    // succeeds, or the fact that it could not be exercised here otherwise.
-    console.log(
-      `\nPRF-002 CALC-004 snapshot self-heal: advanceCalculationRuns threw on this fixture (${(error as Error).message}) -- reported, not fixed (out of scope per AGENTS.md).`,
-    );
-    db.close();
-    return;
-  }
-  console.log(
-    `\nPRF-002 CALC-004 snapshot self-heal (READ_TIME_SNAPSHOT_CALCULATION_BUDGET=${READ_TIME_SNAPSHOT_CALCULATION_BUDGET}): advanced=${result.advanced} completed=${result.completed} remaining=${result.remaining} -- D1 calls=${stats.calls} statements=${stats.statements}`,
+  await censusRootOverviewPage(client);
+
+  const after = db
+    .prepare(
+      `SELECT status, attempt, lease_owner, updated_at FROM calculation_runs WHERE id = 'snapshot-run-1'`,
+    )
+    .get() as {
+    status: string;
+    attempt: number;
+    lease_owner: string | null;
+    updated_at: string;
+  };
+  assert.deepEqual(after, before);
+  // No statement ever mentions the snapshot pipeline at all -- the census
+  // page's own `loadOwnedHoldings`/projection-publication read legitimately
+  // joins `calculation_runs` for the UNRELATED projection pipeline, so the
+  // guard here is specifically that nothing filters or writes by
+  // `pipeline = 'snapshot'` (a claim attempt, a supersede pre-pass, or a
+  // rebuild statement all would).
+  const snapshotPipelineCalls = stats.calls_.filter((call) =>
+    call.sql.includes("'snapshot'"),
+  );
+  assert.equal(
+    snapshotPipelineCalls.length,
+    0,
+    `expected zero snapshot-pipeline statements, saw: ${snapshotPipelineCalls.map((c) => c.sql).join(" | ")}`,
   );
   db.close();
 });

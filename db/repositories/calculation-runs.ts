@@ -623,5 +623,43 @@ export function createCalculationRunRepository(sql: SqlClient) {
         pipeline: String(row.pipeline) as CalculationRunPipeline,
       }));
     },
+
+    // CALC-005: bulk-terminates EVERY queued/running row for one PIPELINE,
+    // across all users/portfolios, regardless of lease state -- the
+    // mechanism the retired snapshot pipeline's cron-sweep cleanup uses
+    // (`app/calculation-executor-service.ts`'s `sweepCalculationRuns`) to
+    // drive production's stuck run and queued residue to a terminal state
+    // without a manual migration touching run rows as data. Unlike
+    // `supersedeStaleQueuedRuns` (which only supersedes a row this SAME
+    // portfolio/pipeline has a genuinely NEWER sibling for), this has no
+    // "newer row" precondition: once a pipeline is retired, EVERY one of
+    // its queued/running rows is stale by definition, not just the ones a
+    // later commit happened to overtake -- including a `running` row whose
+    // lease has not yet expired, since no code path will ever renew or
+    // complete that lease again. Bookkeeping-only (touches only
+    // `calculation_runs`' own status/lease columns, no other owner-scoped
+    // table), matching `listClaimablePortfolios`'s existing precedent for a
+    // global, non-user-scoped maintenance query over this table -- see that
+    // method's doc comment for why this does not widen the ownership
+    // boundary. Uses the pre-existing 'abandoned' status (already a valid
+    // `calculation_runs_status_check` value -- see `db/schema.ts` -- never
+    // previously written by any code path) rather than 'failed', since
+    // nothing about these runs failed: the pipeline itself was retired out
+    // from under them. Returns the number of rows terminated.
+    async terminatePipeline(
+      pipeline: CalculationRunPipeline,
+      now: string,
+    ): Promise<number> {
+      const result = await sql.run(
+        `
+          UPDATE calculation_runs
+          SET status = 'abandoned', failure_category = 'pipeline_retired',
+              lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+          WHERE pipeline = ? AND status IN ('queued', 'running')
+        `,
+        [now, pipeline],
+      );
+      return result.changes;
+    },
   };
 }

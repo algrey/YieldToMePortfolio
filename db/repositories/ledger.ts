@@ -14,7 +14,6 @@ import {
   consumeManualLedgerMutationKeyStatement,
   type LedgerMutationAuthorization,
 } from "./manual-ledger-keys.ts";
-import { resolveSnapshotRunRange } from "./snapshots.ts";
 import { valueHistoryInvalidationFromDateStatement } from "./portfolio-value-history.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 import {
@@ -300,59 +299,6 @@ async function atomic(
   await client.batch(statements);
 }
 
-// CALC-004: alongside the existing `ledger_mutation` `calculation_runs` row
-// (pipeline `projection`, implicit via the column default), every posted/
-// reversed ledger event also queues a SIBLING `snapshot`-pipeline row so the
-// Overview chart pipeline (`db/repositories/snapshots.ts`) advances on the
-// same triggers as holdings/lots, without either row's coalescing ever
-// touching the other (see `calculation-runs.ts`'s `pipeline`-scoped
-// `hasNewerRun`/`supersedeStaleQueuedRuns`). Reuses the SAME
-// `ledgerHighWaterStart` anchor the projection row uses (this transaction's
-// own id) -- it is a pure claim-time self-consistency check inside
-// `snapshots.rebuild`, not a literal "latest ledger row" computation, so
-// anchoring both sibling rows identically is correct and requires no extra
-// high-water lookup. Returns `null` (queueing nothing) only if the
-// portfolio itself cannot be found -- defensive; every caller already holds
-// a validated portfolio id from the same transaction.
-async function snapshotCalculationRunStatement(
-  client: SqlClient,
-  userId: string,
-  portfolioId: string,
-  calculationVersion: number,
-  invalidationSource: string,
-  ledgerHighWaterStart: string,
-  idempotencyKey: string,
-  createdAt: string,
-): Promise<SqlStatement | null> {
-  const range = await resolveSnapshotRunRange(
-    client,
-    userId,
-    portfolioId,
-    createdAt,
-  );
-  if (!range) return null;
-  return {
-    sql: `INSERT INTO calculation_runs (
-      id, user_id, portfolio_id, range_from, range_to, calculation_version,
-      reason, invalidation_source, pipeline, status, attempt,
-      ledger_high_water_start, idempotency_key, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, 'ledger_mutation', ?, 'snapshot', 'queued', 0, ?, ?, ?, ?)`,
-    params: [
-      randomUUID(),
-      userId,
-      portfolioId,
-      range.rangeFrom,
-      range.rangeTo,
-      calculationVersion,
-      invalidationSource,
-      ledgerHighWaterStart,
-      idempotencyKey,
-      createdAt,
-      createdAt,
-    ],
-  };
-}
-
 /** Build one posting's statements so import chunks can share one D1 batch. */
 export async function buildLedgerPostingStatements(
   client: SqlClient,
@@ -469,17 +415,11 @@ export async function buildLedgerPostingStatements(
       createdAt,
     ],
   });
-  const snapshotRunStatement = await snapshotCalculationRunStatement(
-    client,
-    userId,
-    input.portfolioId,
-    prepared.calculationVersion,
-    prepared.transactionId,
-    prepared.transactionId,
-    `ledger-snapshot:${prepared.idempotencyKey}`,
-    createdAt,
-  );
-  if (snapshotRunStatement) statements.push(snapshotRunStatement);
+  // CALC-005: the snapshot pipeline is retired -- this posting no longer
+  // queues a sibling `snapshot`-pipeline `calculation_runs` row (see
+  // docs/ARCHITECTURE.md's CALC-005 entry). The `ledger_mutation` row
+  // queued above (pipeline `projection`, implicit via the column default)
+  // is unchanged.
   // HIST-002 review B2 (BLOCKING): this posting can change shares held from
   // `input.localTradeDate` onward (the ledger-CSV commit path this function
   // serves) -- invalidate every stored value-history row from that date
@@ -784,12 +724,14 @@ export function createOwnedLedgerRepository(
     idempotent: boolean,
   ): Promise<LedgerMutationSuccess> {
     const cashEntry = await getCashEntry(userId, portfolioId, transaction.id);
-    // CALC-004: this transaction now queues a `calculation_runs` row per
-    // pipeline (see `snapshotCalculationRunStatement` above) -- scoped to
-    // `projection` so this lookup keeps returning the SAME run identity
-    // callers already relied on (e.g. `import-reversal.ts`'s
-    // `rebuildJobIds`), never nondeterministically picking either sibling
-    // row.
+    // CALC-004 queued a sibling `snapshot`-pipeline row alongside this
+    // transaction's `projection`-pipeline row; CALC-005 retired that
+    // sibling (see docs/ARCHITECTURE.md), so this predicate is now
+    // defensive rather than disambiguating -- kept explicit anyway so this
+    // lookup can never nondeterministically pick a future non-projection
+    // row for this `invalidation_source`, matching the run identity
+    // callers already rely on (e.g. `import-reversal.ts`'s
+    // `rebuildJobIds`).
     const run = await client.get<{ id: string }>(
       `SELECT id FROM calculation_runs
        WHERE user_id = ? AND portfolio_id = ? AND invalidation_source = ?
@@ -995,17 +937,11 @@ export function createOwnedLedgerRepository(
         createdAt,
       ],
     });
-    const snapshotRunStatement = await snapshotCalculationRunStatement(
-      client,
-      userId,
-      input.portfolioId,
-      prepared.calculationVersion,
-      prepared.transactionId,
-      prepared.transactionId,
-      `ledger-snapshot:${prepared.idempotencyKey}`,
-      createdAt,
-    );
-    if (snapshotRunStatement) statements.push(snapshotRunStatement);
+    // CALC-005: the snapshot pipeline is retired -- this mutation no longer
+    // queues a sibling `snapshot`-pipeline `calculation_runs` row (see
+    // docs/ARCHITECTURE.md's CALC-005 entry). The `ledger_mutation` row
+    // queued above (pipeline `projection`, implicit via the column default)
+    // is unchanged.
     // HIST-002 review B2 (BLOCKING): post/reverse/supersede can all change
     // shares held from `earliestAffectedLocalDate` onward -- invalidate
     // every stored value-history row from that date forward, in the SAME

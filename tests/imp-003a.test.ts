@@ -564,8 +564,11 @@ test("CALC-004 review-round B2: a commit touching exactly 25 distinct portfolios
       `SELECT COUNT(*) AS count FROM calculation_runs WHERE reason = 'import_commit'`,
     )
     .get() as { count: number };
-  // One row per pipeline per affected portfolio.
-  assert.equal(runCount.count, PORTFOLIO_COUNT * 2);
+  // CALC-004 queued one row per pipeline (projection + snapshot) per
+  // affected portfolio here; CALC-005 retired the snapshot pipeline
+  // entirely (see docs/ARCHITECTURE.md's CALC-005 entry), so this is back
+  // to one projection-pipeline row per portfolio.
+  assert.equal(runCount.count, PORTFOLIO_COUNT);
   const pipelines = database
     .prepare(
       `SELECT DISTINCT pipeline FROM calculation_runs WHERE reason = 'import_commit' ORDER BY pipeline`,
@@ -573,7 +576,7 @@ test("CALC-004 review-round B2: a commit touching exactly 25 distinct portfolios
     .all() as Array<{ pipeline: string }>;
   assert.deepEqual(
     pipelines.map((row) => row.pipeline),
-    ["projection", "snapshot"],
+    ["projection"],
   );
 });
 

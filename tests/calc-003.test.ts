@@ -285,31 +285,25 @@ test("CALC-003 end-to-end: a committed batch's queued runs are advanced, publish
       budget: 50,
     },
   );
-  // 2, not the 1 this test asserted pre-CALC-004: `advanceCalculationRunsForCommit`
-  // now advances BOTH pipelines (projection, then snapshot) per distinct
-  // affected portfolio -- see that function's doc comment. Still exactly 1
-  // portfolio here (not the 4 queued runs' worth of results): EVERY
-  // committed row's own ledger posting (`db/repositories/ledger.ts`)
-  // independently queues its own 'ledger_mutation' run (per pipeline) in
-  // addition to `finalize()`'s aggregate 'import_commit' run (per
-  // pipeline, `db/repositories/import-commit.ts`) -- pre-existing,
+  // CALC-004 briefly made this 2 (`advanceCalculationRunsForCommit` advanced
+  // BOTH pipelines, projection then snapshot, per distinct affected
+  // portfolio); CALC-005 retired the snapshot pipeline entirely (see
+  // docs/ARCHITECTURE.md's CALC-005 entry), so this is back to 1 -- exactly
+  // 1 portfolio's projection-pipeline advance (not the 4 queued runs' worth
+  // of results): EVERY committed row's own ledger posting
+  // (`db/repositories/ledger.ts`) independently queues its own
+  // 'ledger_mutation' run in addition to `finalize()`'s aggregate
+  // 'import_commit' run (`db/repositories/import-commit.ts`) -- pre-existing,
   // out-of-scope-for-this-task behaviour this test documents rather than
-  // papers over. `hasNewerRun`'s run-creation-order coalescing (review-round
-  // B1 fix, now pipeline-scoped) means only the run with the LATEST
-  // `created_at` for the portfolio+pipeline ever completes -- here that's
-  // each pipeline's `finalize()` import_commit run, queued after all three
+  // papers over. `hasNewerRun`'s run-creation-order coalescing means only
+  // the run with the LATEST `created_at` for the portfolio ever completes --
+  // here that's `finalize()`'s import_commit run, queued after all three
   // individual row postings -- and every older run (the 3 ledger_mutation
-  // ones, per pipeline) fails fast as `superseded_by_newer_run` without
-  // attempting a rebuild.
-  assert.equal(results.length, 2);
-  assert.equal(results[0]?.completed, 1); // projection pipeline
+  // ones) fails fast as `superseded_by_newer_run` without attempting a
+  // rebuild.
+  assert.equal(results.length, 1);
+  assert.equal(results[0]?.completed, 1);
   assert.equal(results[0]?.remaining, false);
-  // results[1] is the snapshot-pipeline advance -- not asserted further
-  // here (this test's date range runs from the fixture's fixed trade date
-  // to REAL wall-clock "today", since `commit()` does not take a `now`
-  // override, so its completion is environment/date-dependent at this
-  // budget). `tests/calc-004.test.ts` exercises the snapshot pipeline's
-  // completion/publication deterministically with an overridden `now`.
   assert.equal(await publicationCount(client, "user-a", "portfolio-a"), 1);
 
   const holdings = await loadOwnedHoldings(
@@ -1420,16 +1414,12 @@ test("CALC-003 B5 regression: accepting 120 committed rows across 12 securities 
       budget: POST_COMMIT_CALCULATION_BUDGET,
     },
   );
-  // 2, not the 1 this test asserted pre-CALC-004 -- results[0] is the
-  // projection-pipeline advance (asserted below, unchanged); results[1] is
-  // the snapshot-pipeline advance, not asserted further here (its date
-  // range runs to real wall-clock "today", so completion at this budget is
-  // environment/date-dependent -- `tests/calc-004.test.ts` exercises the
-  // snapshot pipeline's completion deterministically with an overridden
-  // `now`). The combined-statement assertion below DOES include both
-  // pipelines' real cost, confirming one synchronous post-commit request
-  // for both pipelines together still stays under D1's ceiling.
-  assert.equal(results.length, 2);
+  // CALC-004 briefly made this 2 (results[0] the projection-pipeline
+  // advance, results[1] a snapshot-pipeline advance whose completion was
+  // environment/date-dependent at this budget); CALC-005 retired the
+  // snapshot pipeline entirely (see docs/ARCHITECTURE.md's CALC-005 entry),
+  // so `advanceCalculationRunsForCommit` only ever advances projection now.
+  assert.equal(results.length, 1);
   assert.equal(results[0]?.completed, 1);
   assert.equal(results[0]?.remaining, false);
   assert.ok(

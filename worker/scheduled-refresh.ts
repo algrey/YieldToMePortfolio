@@ -173,7 +173,13 @@ export async function runScheduledCorporateActionRefresh(
 }
 
 export type ScheduledCalculationSweepResult =
-  | { ok: true; portfolios: number; advanced: number; completed: number }
+  | {
+      ok: true;
+      portfolios: number;
+      advanced: number;
+      completed: number;
+      snapshotRunsTerminated: number;
+    }
   | { ok: false; reason: "database" | "sweep" };
 
 export type ScheduledSharesightPriceRefreshResult =
@@ -327,6 +333,7 @@ export async function runScheduledCalculationSweep(): Promise<ScheduledCalculati
       portfolios: summary.portfoliosSwept,
       advanced: summary.advanced,
       completed: summary.completed,
+      snapshotRunsTerminated: summary.snapshotRunsTerminated,
     };
   } catch {
     return { ok: false, reason: "sweep" };

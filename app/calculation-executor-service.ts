@@ -52,6 +52,28 @@
 // is strictly MORE new state and higher blast radius (both rebuild
 // functions' internals would need phase-awareness) than one discriminator
 // column, for no benefit the separate-rows model doesn't already give.
+//
+// CALC-005 update (2026-08-31, production impact): the `snapshot` pipeline
+// described above is now RETIRED (see docs/ARCHITECTURE.md's CALC-005
+// entry for the full rationale) -- investigation found a price-history-only
+// import never invalidates/requeues a cursor-based snapshot run, so a run
+// started before such an import permanently misses the new prices; in
+// production this left one snapshot run stuck `running` forever (241+
+// resumable claims, zero priced holdings for its entire progress) while
+// HIST-001/HIST-002's read-time derivation already serves the Overview
+// graph/hero from `price_observations`/ledger facts directly, making
+// `snapshot_publications` output nothing actually reads. Nothing queues a
+// `snapshot`-pipeline row any more (`db/repositories/ledger.ts`,
+// `import-commit.ts`); this module never claims/advances one either
+// (`advanceCalculationRunsForCommit` only ever advances `projection` now;
+// `sweepCalculationRuns` bulk-terminates any pre-existing snapshot rows via
+// `terminatePipeline` instead of claiming them). The `projection` pipeline
+// and everything in this file describing it is UNCHANGED. `pipeline`
+// remains a column on `calculation_runs` (dropping it would be a
+// destructive migration for no behavioural gain) and `snapshots.rebuild`/
+// `createHistoricalSnapshotRepository` remain in place, unmodified and
+// unreachable from any production trigger -- matching the precedent
+// HIST-001 already set for this same pipeline.
 import {
   createCalculationRunRepository,
   createHistoricalSnapshotRepository,
@@ -236,46 +258,28 @@ const MAX_STALL_CLAIMS = 5;
 // `app/import-accept-service.ts`): synchronous in the owner's own request,
 // generous enough to finish a typical portfolio outright.
 export const POST_COMMIT_CALCULATION_BUDGET = 450;
-// CALC-004: the snapshot pipeline's post-commit budget, spent in the SAME
-// synchronous request immediately after the projection budget above (see
-// `advanceCalculationRunsForCommit`). Deliberately smaller than the
-// projection budget: `snapshots.rebuild` re-runs `loadFacts` (7 COUNT +
-// 7 SELECT = 14 statements) on EVERY chunk call, even chunks that only
-// continue holdings within the same date, so its fixed per-chunk overhead
-// is far higher than the projection pipeline's; a full multi-year daily
-// history cannot realistically complete synchronously regardless of
-// budget. This budget only needs to make bounded, honest partial progress
-// -- the read-time trigger on the Overview page and the cron sweep make up
-// the rest, exactly like a large projection rebuild already relies on
-// those same two triggers. Combined with the projection budget above
-// (450 + 300 = 750), one commit's total synchronous statement spend stays
-// comfortably under D1's ~1000-statement-per-invocation ceiling even with
-// each call's documented one-call overshoot allowance.
-export const POST_COMMIT_SNAPSHOT_CALCULATION_BUDGET = 300;
 // Trigger 2 (read-time, `app/owned-holdings.ts`): smaller since it runs
 // inline on a page read; a portfolio too large to finish within it still
 // makes real progress, and the next read (or trigger 1/3) continues from
 // the persisted cursor.
 export const READ_TIME_CALCULATION_BUDGET = 150;
-// CALC-004: the Overview page's read-time self-heal budget
-// (`app/authenticated-workspace.ts`, `app/owned-income-projection.ts`) --
-// same rationale as `READ_TIME_CALCULATION_BUDGET`, sized for the snapshot
-// pipeline's higher per-chunk fixed cost (see
-// `POST_COMMIT_SNAPSHOT_CALCULATION_BUDGET`'s comment). Kept equal to the
-// projection read-time budget: both are bounded, best-effort progress on a
-// synchronous page read, not a completion guarantee.
-export const READ_TIME_SNAPSHOT_CALCULATION_BUDGET = 150;
 // Trigger 3 (cron backstop, `worker/scheduled-refresh.ts`): per (user,
-// portfolio, pipeline) work unit, up to `CRON_MAX_PORTFOLIOS_PER_SWEEP`
-// units per sweep -- a background job, not latency-sensitive to a single
-// request, but still bounded so one scheduled invocation cannot run
-// unboundedly long. CALC-004: `listClaimablePortfolios` now yields one row
-// per (user, portfolio, pipeline) with claimable work, so a portfolio
-// needing both pipelines advanced can consume two of the per-sweep units --
-// deliberate, since each pipeline is genuinely independent work reusing the
-// same per-portfolio budget below.
+// portfolio) work unit, up to `CRON_MAX_PORTFOLIOS_PER_SWEEP` units per
+// sweep -- a background job, not latency-sensitive to a single request, but
+// still bounded so one scheduled invocation cannot run unboundedly long.
 export const CRON_CALCULATION_BUDGET_PER_PORTFOLIO = 500;
 export const CRON_MAX_PORTFOLIOS_PER_SWEEP = 10;
+
+// CALC-004 also exported `POST_COMMIT_SNAPSHOT_CALCULATION_BUDGET` (300) and
+// `READ_TIME_SNAPSHOT_CALCULATION_BUDGET` (150) for the snapshot pipeline's
+// post-commit and read-time triggers, and `listClaimablePortfolios` yielded
+// one row per (user, portfolio, pipeline) so the cron sweep spent up to two
+// per-sweep units on a portfolio needing both pipelines advanced. CALC-005
+// retired the snapshot pipeline entirely (see docs/ARCHITECTURE.md's
+// CALC-005 entry): nothing ever queues a snapshot-pipeline run any more, so
+// those two budgets and the multi-pipeline-per-sweep-unit accounting are
+// gone -- `sweepCalculationRuns` below bulk-terminates any pre-existing
+// snapshot-pipeline rows instead of ever claiming/advancing them.
 
 async function hasPendingRun(
   client: SqlClient,
@@ -617,19 +621,17 @@ export async function advanceCalculationRuns(
  * Trigger 1 helper (post-commit/accept): resolves the distinct portfolios
  * touched by a just-finished import commit's `rebuildJobIds`
  * (`ImportCommitSuccess.rebuildJobIds`, `db/repositories/import-commit.ts`)
- * and advances EACH PIPELINE for each within its own budget. Owner-scoped
- * by construction (the lookup is filtered by `userId`, matching every other
- * owned-repository query in this codebase) -- a batch can never cause
- * another user's portfolio to be advanced.
+ * and advances the projection pipeline for each within its own budget.
+ * Owner-scoped by construction (the lookup is filtered by `userId`, matching
+ * every other owned-repository query in this codebase) -- a batch can never
+ * cause another user's portfolio to be advanced.
  *
- * CALC-004: `rebuildJobIds` now contains ids from BOTH pipelines (a commit
- * queues one row per pipeline per affected portfolio -- see
- * `db/repositories/import-commit.ts`'s `finalize`), but this only needs the
- * DISTINCT portfolio ids from it; every distinct portfolio then gets both
- * its projection and snapshot pipelines advanced explicitly, regardless of
- * which pipeline's id happened to appear in `rebuildJobIds` (existing
- * callers -- `app/import-commit-actions.ts`, `app/import-accept-service.ts`
- * -- are unchanged and automatically gain the snapshot-pipeline advance).
+ * CALC-004 also advanced a sibling snapshot-pipeline run here for each
+ * portfolio; CALC-005 retired the snapshot pipeline entirely (see
+ * docs/ARCHITECTURE.md's CALC-005 entry) -- `rebuildJobIds` now only ever
+ * contains projection-pipeline ids (`db/repositories/import-commit.ts`'s
+ * `finalize` no longer queues a snapshot row), so this only needs the
+ * DISTINCT portfolio ids from it to advance projection alone.
  */
 export async function advanceCalculationRunsForCommit(
   context: CalculationExecutorContext,
@@ -637,12 +639,6 @@ export async function advanceCalculationRunsForCommit(
     userId: string;
     calculationRunIds: readonly string[];
     budget: number;
-    /**
-     * Snapshot-pipeline budget for the same request. Defaults to
-     * `POST_COMMIT_SNAPSHOT_CALCULATION_BUDGET` -- override only for tests
-     * that need a specific measured value.
-     */
-    snapshotBudget?: number;
   },
 ): Promise<AdvanceCalculationRunsResult[]> {
   if (input.calculationRunIds.length === 0) return [];
@@ -652,8 +648,6 @@ export async function advanceCalculationRunsForCommit(
      WHERE user_id = ? AND id IN (${placeholders})`,
     [input.userId, ...input.calculationRunIds],
   );
-  const snapshotBudget =
-    input.snapshotBudget ?? POST_COMMIT_SNAPSHOT_CALCULATION_BUDGET;
   const results: AdvanceCalculationRunsResult[] = [];
   for (const row of rows) {
     const portfolioId = String(row.portfolio_id);
@@ -665,27 +659,27 @@ export async function advanceCalculationRunsForCommit(
         budget: input.budget,
       }),
     );
-    results.push(
-      await advanceCalculationRuns(context, {
-        userId: input.userId,
-        portfolioId,
-        pipeline: "snapshot",
-        budget: snapshotBudget,
-      }),
-    );
   }
   return results;
 }
 
 /**
  * Trigger 3 helper (cron backstop): a bounded, oldest-pending-work-first
- * sweep across ALL users' claimable calculation runs, across BOTH
- * pipelines. Discovery (`listClaimablePortfolios`) is a bookkeeping-only
- * query over `calculation_runs` itself (ids and ownership columns, no
- * financial data), now grouped by `(user_id, portfolio_id, pipeline)`;
+ * sweep across ALL users' claimable calculation runs. Discovery
+ * (`listClaimablePortfolios`) is a bookkeeping-only query over
+ * `calculation_runs` itself (ids and ownership columns, no financial data);
  * every actual advance is then delegated to the SAME per-user-scoped
  * `advanceCalculationRuns` the request-path triggers use, so no ownership
  * check is ever widened.
+ *
+ * CALC-005: before anything is claimed, this bulk-terminates every
+ * queued/running `snapshot`-pipeline run (`terminatePipeline`) -- the
+ * retired pipeline (see docs/ARCHITECTURE.md's CALC-005 entry) is never
+ * claimed or advanced here, only driven to its terminal `abandoned` state,
+ * so `listClaimablePortfolios` below naturally yields projection-pipeline
+ * work only. Cheap and idempotent: after the first sweep following
+ * deployment, this UPDATE matches zero rows on every subsequent invocation
+ * (nothing ever queues a new snapshot-pipeline row again).
  */
 export async function sweepCalculationRuns(
   context: CalculationExecutorContext,
@@ -694,9 +688,21 @@ export async function sweepCalculationRuns(
   portfoliosSwept: number;
   advanced: number;
   completed: number;
+  /**
+   * CALC-005: rows moved to the terminal `abandoned` status this
+   * invocation by the snapshot-pipeline cleanup above -- surfaced so
+   * production's cron log (`worker/index.ts`'s `calculation.sweep` event)
+   * can confirm the stuck run and queue residue actually cleared, without
+   * needing a manual D1 inspection. Zero on every sweep after the first.
+   */
+  snapshotRunsTerminated: number;
 }> {
   const now = context.now ?? (() => new Date().toISOString());
   const runs = createCalculationRunRepository(context.client);
+  const snapshotRunsTerminated = await runs.terminatePipeline(
+    "snapshot",
+    now(),
+  );
   const portfolios = await runs.listClaimablePortfolios(
     now(),
     Math.max(0, Math.floor(input.maxPortfolios)),
@@ -713,5 +719,10 @@ export async function sweepCalculationRuns(
     advanced += result.advanced;
     completed += result.completed;
   }
-  return { portfoliosSwept: portfolios.length, advanced, completed };
+  return {
+    portfoliosSwept: portfolios.length,
+    advanced,
+    completed,
+    snapshotRunsTerminated,
+  };
 }

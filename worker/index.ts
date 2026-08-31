@@ -267,6 +267,12 @@ const worker: ExportedHandler<Env> = {
             portfolios: calculationSweepResult.portfolios,
             advanced: calculationSweepResult.advanced,
             completed: calculationSweepResult.completed,
+            // CALC-005: rows the snapshot-pipeline retirement cleanup moved
+            // to `abandoned` this sweep -- see `sweepCalculationRuns`'s doc
+            // comment. Zero on every sweep after the first following
+            // deployment.
+            snapshotRunsTerminated:
+              calculationSweepResult.snapshotRunsTerminated,
           }
         : { reason: calculationSweepResult.reason },
     });
