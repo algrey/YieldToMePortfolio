@@ -6,7 +6,10 @@ import {
 } from "../../../portfolio-sections";
 import { createPreviewPortfolioPrototypes } from "../../../preview-route-data";
 import { loadPreviewValuationFixture } from "../../../preview-valuation";
-import { loadAuthenticatedWorkspace } from "../../../authenticated-workspace";
+import {
+  loadAuthenticatedWorkspace,
+  type AuthenticatedWorkspaceSqlContext,
+} from "../../../authenticated-workspace";
 import { loadAuthenticatedPortfolioInspection } from "../../../portfolio-inspection";
 
 type PortfolioSectionPageProps = {
@@ -25,11 +28,23 @@ export default async function PortfolioSectionPage({
   }
 
   if (portfolioId !== "preview") {
-    const workspace = await loadAuthenticatedWorkspace(portfolioId, {
-      includeQuotes: section === "quotes",
-      includeOverview: section === "overview",
-      includeHoldings: section === "holdings",
-    });
+    // PRF-002: `sqlContextOut` recovers the SAME `client`/`userId`
+    // `loadAuthenticatedWorkspace` already resolved for the "details"
+    // section below, instead of `loadAuthenticatedPortfolioInspection`
+    // paying for a second, duplicate identity resolution. Every other
+    // section ignores it. See TASKS.md's PRF-002 entry.
+    const sqlContextOut: { current: AuthenticatedWorkspaceSqlContext } = {
+      current: { ok: false },
+    };
+    const workspace = await loadAuthenticatedWorkspace(
+      portfolioId,
+      {
+        includeQuotes: section === "quotes",
+        includeOverview: section === "overview",
+        includeHoldings: section === "holdings",
+      },
+      sqlContextOut,
+    );
     if (workspace.status === "unavailable") {
       return (
         <PortfolioShell
@@ -41,7 +56,10 @@ export default async function PortfolioSectionPage({
     if (workspace.activePortfolio === null) notFound();
     const inspection =
       section === "details"
-        ? await loadAuthenticatedPortfolioInspection(portfolioId)
+        ? await loadAuthenticatedPortfolioInspection(
+            portfolioId,
+            sqlContextOut.current,
+          )
         : null;
     return (
       <PortfolioShell

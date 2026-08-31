@@ -28,6 +28,7 @@ import {
 } from "./overview-read-model";
 import { loadHistoricalPortfolioValueSeries } from "./historical-portfolio-value.ts";
 import { loadUsdAudRate } from "./authenticated-fx-rate.ts";
+import type { SqlClient } from "../db/repositories/sql-client.ts";
 
 function isPrincipal(value: unknown): value is VerifiedAccessPrincipal {
   if (typeof value !== "object" || value === null) return false;
@@ -44,6 +45,28 @@ function isPrincipal(value: unknown): value is VerifiedAccessPrincipal {
     typeof candidate.keyId === "string"
   );
 }
+
+// PRF-002 (owner-reported production CPU-limit failure across every
+// authenticated page): six section pages under `/portfolio/:id/*`
+// (gains, income, income/dividends, income/assumptions,
+// income/multi-year, and `details` via `app/portfolio-inspection.ts`)
+// call THIS function purely as an auth/ownership gate (no `includeX`
+// option) and then call `app/portfolio-actions.ts`'s
+// `getAuthenticatedSqlContext(portfolioId)` A SECOND TIME to obtain the
+// `SqlClient`/`userId` their own section-specific loader needs --
+// re-running `resolveAuthenticatedRequestContext` (identity lookup PLUS
+// `touchWithAudit`'s 3-statement UPDATE/UPDATE/INSERT batch) from
+// scratch, doubling that cost on every one of those page loads for no
+// behavioural benefit (both resolutions authenticate the SAME principal
+// against the SAME portfolio id in the SAME request). `sqlContextOut` is
+// an optional output slot: when supplied, this function fills it in with
+// the SAME `client`/`userId` it already resolved for its own use, so
+// those callers can drop their second `getAuthenticatedSqlContext` call
+// entirely (see each affected page's own comment). Never embedded in the
+// `OwnedWorkspace` return value itself -- that DTO crosses into "use
+// client" components, and a raw `SqlClient` must never ride along.
+export type AuthenticatedWorkspaceSqlContext =
+  { ok: true; client: SqlClient; userId: string } | { ok: false };
 
 function unavailableWorkspace(message: string): OwnedWorkspace {
   return {
@@ -63,10 +86,16 @@ export async function loadAuthenticatedWorkspace(
     includeOverview?: boolean;
     includeHoldings?: boolean;
   } = {},
+  // PRF-002: see `AuthenticatedWorkspaceSqlContext`'s doc comment above --
+  // an optional output slot letting the auth-gate-only callers recover the
+  // resolved `client`/`userId` without a second, duplicate
+  // `resolveAuthenticatedRequestContext` call.
+  sqlContextOut?: { current: AuthenticatedWorkspaceSqlContext },
 ): Promise<OwnedWorkspace> {
   const requestHeaders = await headers();
   const principalHeader = requestHeaders.get(VERIFIED_PRINCIPAL_HEADER);
   if (!principalHeader) {
+    if (sqlContextOut) sqlContextOut.current = { ok: false };
     return unavailableWorkspace("Authentication is unavailable.");
   }
 
@@ -76,6 +105,7 @@ export async function loadAuthenticatedWorkspace(
     if (!isPrincipal(decoded)) throw new Error("Invalid verified principal.");
     principal = decoded;
   } catch {
+    if (sqlContextOut) sqlContextOut.current = { ok: false };
     return unavailableWorkspace("Authentication is unavailable.");
   }
 
@@ -96,7 +126,17 @@ export async function loadAuthenticatedWorkspace(
         )
       : [];
     const workspace = createOwnedWorkspace(result, portfolioRecords);
-    if (!result.ok) return workspace;
+    if (!result.ok) {
+      if (sqlContextOut) sqlContextOut.current = { ok: false };
+      return workspace;
+    }
+    if (sqlContextOut) {
+      sqlContextOut.current = {
+        ok: true,
+        client,
+        userId: result.context.user.id,
+      };
+    }
     const settings = await createOwnedUserSettingsRepository(client).get(
       result.context.user.id,
     );
@@ -395,6 +435,7 @@ export async function loadAuthenticatedWorkspace(
     // underlying error silently (a missing local migration column produced
     // an undiagnosable blanket outage here).
     console.error("loadAuthenticatedWorkspace failed", error);
+    if (sqlContextOut) sqlContextOut.current = { ok: false };
     return unavailableWorkspace("Portfolio data is temporarily unavailable.");
   }
 }

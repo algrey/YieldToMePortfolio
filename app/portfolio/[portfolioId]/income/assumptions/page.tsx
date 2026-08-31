@@ -1,6 +1,8 @@
 import { notFound } from "next/navigation";
-import { loadAuthenticatedWorkspace } from "../../../../authenticated-workspace";
-import { getAuthenticatedSqlContext } from "../../../../portfolio-actions";
+import {
+  loadAuthenticatedWorkspace,
+  type AuthenticatedWorkspaceSqlContext,
+} from "../../../../authenticated-workspace";
 import { loadOwnedDividendAssumptions } from "../../../../owned-dividend-assumptions";
 import { createDividendFyOverrideRepository } from "../../../../../db/repositories/dividends.ts";
 import { DividendAssumptionsEditor } from "../../../../components/dividend-assumptions-editor";
@@ -45,7 +47,18 @@ export default async function DividendAssumptionsPage({
       ? overrideYear
       : null;
 
-  const workspace = await loadAuthenticatedWorkspace(portfolioId);
+  // PRF-002: see `../gains/page.tsx`'s identical comment / TASKS.md's
+  // PRF-002 entry -- `sqlContextOut` recovers the client/userId
+  // `loadAuthenticatedWorkspace` already resolved instead of paying for a
+  // second, duplicate `getAuthenticatedSqlContext` identity resolution.
+  const sqlContextOut: { current: AuthenticatedWorkspaceSqlContext } = {
+    current: { ok: false },
+  };
+  const workspace = await loadAuthenticatedWorkspace(
+    portfolioId,
+    {},
+    sqlContextOut,
+  );
   if (workspace.status === "unavailable") {
     return (
       <AssumptionsUnavailable
@@ -57,7 +70,7 @@ export default async function DividendAssumptionsPage({
   }
   if (workspace.activePortfolio === null) notFound();
 
-  const context = await getAuthenticatedSqlContext(portfolioId);
+  const context = sqlContextOut.current;
   if (!context.ok) {
     return (
       <AssumptionsUnavailable message="Portfolio data is temporarily unavailable." />

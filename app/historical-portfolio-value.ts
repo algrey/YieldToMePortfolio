@@ -611,6 +611,76 @@ async function resolveRange(
   return { rangeFrom, rangeTo, rangeClamped };
 }
 
+/** PRF-002 (owner-reported production CPU-limit failure across every
+ * authenticated page): `loadHistoricalPortfolioValueSeries` below used to
+ * call `loadFacts` -- the FULL `transactions` + `price_observations` (every
+ * column, every row, `mapPrice`-validated) + `fx_rate_observations` read --
+ * unconditionally, on EVERY call, purely to compute `observedDates`. In the
+ * overwhelmingly common STEADY-STATE case (the Overview page, since every
+ * candidate date is already stored in `portfolio_value_history` from a
+ * previous read), that entire read was immediately discarded: the
+ * "`missingDates.length === 0`" fast path below never even looks at
+ * `facts.securities`/`facts.fxObservations`. At the owner's real scale this
+ * meant re-fetching and re-validating tens of thousands of
+ * `price_observations` rows on every single Overview page load, for data
+ * that was never used. This lighter query answers "which dates have price
+ * data in range" -- the ONLY thing the fast path needs -- with a single
+ * `DISTINCT market_date` read using the SAME security-id-scoped/`PRICE_SCOPE`
+ * predicate `loadFacts`'s own price query uses (so it matches the identical
+ * row set), without fetching or mapping any other column. The full,
+ * unabridged `loadFacts` read still runs, unchanged, whenever there is
+ * genuine derivation work to do (the slow path below). */
+async function loadCandidateDates(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  rangeFrom: string,
+  rangeTo: string,
+): Promise<{ baseCurrencyCode: string; observedDates: string[] } | null> {
+  const portfolio = await client.get<Row>(
+    `SELECT base_currency_code, timezone FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
+    [portfolioId, userId],
+  );
+  if (!portfolio) return null;
+  const baseCurrencyCode = String(portfolio.base_currency_code ?? "");
+  const timezone = String(portfolio.timezone ?? "");
+  if (!CURRENCY.test(baseCurrencyCode) || !timezone) return null;
+
+  const securityRows = await client.all<Row>(
+    `SELECT ps.security_id FROM portfolio_securities ps
+     WHERE ps.user_id = ? AND ps.portfolio_id = ? ORDER BY ps.id LIMIT ?`,
+    [userId, portfolioId, MAX_SECURITIES + 1],
+  );
+  if (securityRows.length > MAX_SECURITIES)
+    throw new Error("too_many_securities");
+  const securityIds = securityRows
+    .map((row) =>
+      typeof row.security_id === "string" ? row.security_id : null,
+    )
+    .filter((id): id is string => id !== null);
+
+  if (securityIds.length === 0) {
+    return { baseCurrencyCode, observedDates: [] };
+  }
+
+  const dateRows = await client.all<Row>(
+    `SELECT DISTINCT po.market_date FROM price_observations po
+     WHERE po.security_id IN (${securityIds.map(() => "?").join(",")})
+       AND po.market_date BETWEEN ? AND ? AND ${PRICE_SCOPE}
+     ORDER BY po.market_date LIMIT ?`,
+    [...securityIds, rangeFrom, rangeTo, userId, MAX_CANDIDATE_DATES + 1],
+  );
+  const observedDates = dateRows
+    .map((row) =>
+      typeof row.market_date === "string" && DATE.test(row.market_date)
+        ? row.market_date
+        : null,
+    )
+    .filter((date): date is string => date !== null);
+
+  return { baseCurrencyCode, observedDates };
+}
+
 /** Loads the full bounded value series for the graph -- one point per
  * distinct observation date in range, never a synthetic daily grid.
  *
@@ -618,7 +688,10 @@ async function resolveRange(
  * are served from that store directly (no derivation); the newest
  * `MAX_DERIVE_DATES_PER_READ` MISSING dates are derived read-time and
  * opportunistically persisted for next time -- see this module's header
- * comment for the full design record. */
+ * comment for the full design record. PRF-002: which dates are even
+ * "candidates" is now answered by the lightweight `loadCandidateDates`
+ * above rather than the full `loadFacts` read -- see that function's doc
+ * comment. */
 export async function loadHistoricalPortfolioValueSeries(
   client: SqlClient,
   userId: string,
@@ -628,16 +701,16 @@ export async function loadHistoricalPortfolioValueSeries(
   const nowIso = now.toISOString();
   const range = await resolveRange(client, userId, portfolioId, nowIso);
   if (!range) return null;
-  const facts = await loadFacts(
+  const candidates = await loadCandidateDates(
     client,
     userId,
     portfolioId,
     range.rangeFrom,
     range.rangeTo,
   );
-  if (!facts) return null;
+  if (!candidates) return null;
 
-  let dates = facts.observedDates;
+  let dates = candidates.observedDates;
   // Review fold: the RANGE clamp (an earliest-trade date older than the
   // 10-year floor) truncates just as honestly as a candidate-date COUNT
   // overflow does -- both mean real history exists that this read did not
@@ -660,10 +733,11 @@ export async function loadHistoricalPortfolioValueSeries(
 
   if (missingDates.length === 0) {
     // Fully backfilled for this range: the trivial bounded-read fast path
-    // HIST-002 exists for -- no shares/price/FX derivation at all.
+    // HIST-002 exists for -- no shares/price/FX derivation, and (PRF-002)
+    // no full `price_observations` read, at all.
     const points = dates.map((date) => stored.get(date)!);
     return {
-      baseCurrencyCode: facts.baseCurrencyCode,
+      baseCurrencyCode: candidates.baseCurrencyCode,
       rangeFrom: range.rangeFrom,
       rangeTo: range.rangeTo,
       points,
@@ -671,6 +745,18 @@ export async function loadHistoricalPortfolioValueSeries(
       backfillPending: false,
     };
   }
+
+  // PRF-002: only NOW -- once real derivation work is known to exist --
+  // does this pay for the full `transactions`/`price_observations`/
+  // `fx_rate_observations` read.
+  const facts = await loadFacts(
+    client,
+    userId,
+    portfolioId,
+    range.rangeFrom,
+    range.rangeTo,
+  );
+  if (!facts) return null;
 
   // Newest-missing-first (dates/missingDates are ascending, so the tail is
   // the newest) -- matches MAX_CANDIDATE_DATES' own "keep the most recent"

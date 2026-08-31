@@ -656,8 +656,16 @@ test("UI-016: the portfolio-wide dividends list page loads via the owner-scoped 
     "utf8",
   );
   assert.match(page, /export const dynamic = "force-dynamic"/);
-  assert.match(page, /loadAuthenticatedWorkspace\(portfolioId\)/);
-  assert.match(page, /getAuthenticatedSqlContext\(portfolioId\)/);
+  // PRF-002: this page recovers its SqlClient/userId from
+  // `loadAuthenticatedWorkspace`'s own `sqlContextOut` output slot rather
+  // than a second, duplicate `getAuthenticatedSqlContext` identity
+  // resolution -- see TASKS.md's PRF-002 entry.
+  assert.match(
+    page,
+    /loadAuthenticatedWorkspace\(\s*portfolioId,\s*\{\},\s*sqlContextOut,?\s*\)/,
+  );
+  assert.match(page, /sqlContextOut\.current/);
+  assert.doesNotMatch(page, /getAuthenticatedSqlContext\(/);
   assert.match(page, /loadOwnedDividendList\(/);
   assert.match(page, /workspace\.activePortfolio === null\) notFound\(\)/);
 });

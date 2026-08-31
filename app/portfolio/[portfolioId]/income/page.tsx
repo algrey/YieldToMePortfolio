@@ -1,6 +1,8 @@
 import { notFound } from "next/navigation";
-import { loadAuthenticatedWorkspace } from "../../../authenticated-workspace";
-import { getAuthenticatedSqlContext } from "../../../portfolio-actions";
+import {
+  loadAuthenticatedWorkspace,
+  type AuthenticatedWorkspaceSqlContext,
+} from "../../../authenticated-workspace";
 import { loadOwnedIncomeProjection } from "../../../owned-income-projection";
 import { IncomeLanding } from "../../../components/income-landing";
 import { IncomeNav } from "../../../components/income-nav";
@@ -40,7 +42,18 @@ function IncomeUnavailable({
 
 export default async function IncomePage({ params }: IncomePageProps) {
   const { portfolioId } = await params;
-  const workspace = await loadAuthenticatedWorkspace(portfolioId);
+  // PRF-002: see `gains/page.tsx`'s identical comment / TASKS.md's PRF-002
+  // entry -- `sqlContextOut` recovers the client/userId
+  // `loadAuthenticatedWorkspace` already resolved instead of paying for a
+  // second, duplicate `getAuthenticatedSqlContext` identity resolution.
+  const sqlContextOut: { current: AuthenticatedWorkspaceSqlContext } = {
+    current: { ok: false },
+  };
+  const workspace = await loadAuthenticatedWorkspace(
+    portfolioId,
+    {},
+    sqlContextOut,
+  );
 
   if (workspace.status === "unavailable") {
     return (
@@ -54,7 +67,7 @@ export default async function IncomePage({ params }: IncomePageProps) {
   }
   if (workspace.activePortfolio === null) notFound();
 
-  const context = await getAuthenticatedSqlContext(portfolioId);
+  const context = sqlContextOut.current;
   if (!context.ok) {
     return (
       <IncomeUnavailable

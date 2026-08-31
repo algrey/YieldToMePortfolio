@@ -570,8 +570,16 @@ test("CGT-001B: the gains route loads via the owner-scoped context, calls loadOw
     "utf8",
   );
   assert.match(pageSource, /export const dynamic = "force-dynamic";/);
-  assert.match(pageSource, /loadAuthenticatedWorkspace\(portfolioId\)/);
-  assert.match(pageSource, /getAuthenticatedSqlContext\(portfolioId\)/);
+  // PRF-002: this page recovers its SqlClient/userId from
+  // `loadAuthenticatedWorkspace`'s own `sqlContextOut` output slot rather
+  // than a second, duplicate `getAuthenticatedSqlContext` identity
+  // resolution -- see TASKS.md's PRF-002 entry.
+  assert.match(
+    pageSource,
+    /loadAuthenticatedWorkspace\(\s*portfolioId,\s*\{\},\s*sqlContextOut,?\s*\)/,
+  );
+  assert.match(pageSource, /sqlContextOut\.current/);
+  assert.doesNotMatch(pageSource, /getAuthenticatedSqlContext\(/);
   assert.match(
     pageSource,
     /loadOwnedCapitalGains\(\s*context\.client,\s*context\.userId,\s*portfolioId,\s*new Date\(\),\s*\)/,

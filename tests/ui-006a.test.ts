@@ -816,8 +816,16 @@ test("UI-006A: both Income routes load via the owner-scoped context, deny an uno
   ]);
   for (const page of [landingPage, multiYearPage]) {
     assert.match(page, /export const dynamic = "force-dynamic"/);
-    assert.match(page, /loadAuthenticatedWorkspace\(portfolioId\)/);
-    assert.match(page, /getAuthenticatedSqlContext\(portfolioId\)/);
+    // PRF-002: both pages recover their SqlClient/userId from
+    // `loadAuthenticatedWorkspace`'s own `sqlContextOut` output slot rather
+    // than a second, duplicate `getAuthenticatedSqlContext` identity
+    // resolution -- see TASKS.md's PRF-002 entry.
+    assert.match(
+      page,
+      /loadAuthenticatedWorkspace\(\s*portfolioId,\s*\{\},\s*sqlContextOut,?\s*\)/,
+    );
+    assert.match(page, /sqlContextOut\.current/);
+    assert.doesNotMatch(page, /getAuthenticatedSqlContext\(/);
     assert.match(page, /loadOwnedIncomeProjection\(/);
     assert.match(page, /workspace\.activePortfolio === null\) notFound\(\)/);
   }

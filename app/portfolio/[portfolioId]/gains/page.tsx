@@ -1,6 +1,8 @@
 import { notFound } from "next/navigation";
-import { loadAuthenticatedWorkspace } from "../../../authenticated-workspace";
-import { getAuthenticatedSqlContext } from "../../../portfolio-actions";
+import {
+  loadAuthenticatedWorkspace,
+  type AuthenticatedWorkspaceSqlContext,
+} from "../../../authenticated-workspace";
 import { loadOwnedCapitalGains } from "../../../owned-capital-gains";
 import {
   CapitalGainsScreen,
@@ -74,7 +76,23 @@ function reasonForError(
 
 export default async function GainsPage({ params }: GainsPageProps) {
   const { portfolioId } = await params;
-  const workspace = await loadAuthenticatedWorkspace(portfolioId);
+  // PRF-002 (owner-reported production CPU-limit failure across every
+  // authenticated page): this page used to call `loadAuthenticatedWorkspace`
+  // purely as an auth/ownership gate and then call
+  // `getAuthenticatedSqlContext` a SECOND time (same `portfolioId`) to get the
+  // `client`/`userId` for `loadOwnedCapitalGains` below -- re-running the
+  // SAME identity resolution (including its `touchWithAudit` write) twice
+  // per request. `sqlContextOut` recovers the resolution
+  // `loadAuthenticatedWorkspace` already did. See
+  // `AuthenticatedWorkspaceSqlContext`'s doc comment for the full record.
+  const sqlContextOut: { current: AuthenticatedWorkspaceSqlContext } = {
+    current: { ok: false },
+  };
+  const workspace = await loadAuthenticatedWorkspace(
+    portfolioId,
+    {},
+    sqlContextOut,
+  );
 
   if (workspace.status === "unavailable") {
     return (
@@ -88,7 +106,7 @@ export default async function GainsPage({ params }: GainsPageProps) {
   }
   if (workspace.activePortfolio === null) notFound();
 
-  const context = await getAuthenticatedSqlContext(portfolioId);
+  const context = sqlContextOut.current;
   if (!context.ok) {
     return (
       <GainsUnavailable

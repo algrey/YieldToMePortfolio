@@ -1,6 +1,8 @@
 import { notFound } from "next/navigation";
-import { loadAuthenticatedWorkspace } from "../../../../authenticated-workspace";
-import { getAuthenticatedSqlContext } from "../../../../portfolio-actions";
+import {
+  loadAuthenticatedWorkspace,
+  type AuthenticatedWorkspaceSqlContext,
+} from "../../../../authenticated-workspace";
 import { loadOwnedDividendList } from "../../../../owned-dividend-list";
 import {
   parseDividendListFilter,
@@ -56,7 +58,18 @@ export default async function DividendsListPage({
 }: DividendsPageProps) {
   const { portfolioId } = await params;
   const query = await searchParams;
-  const workspace = await loadAuthenticatedWorkspace(portfolioId);
+  // PRF-002: see `gains/page.tsx`'s identical comment / TASKS.md's PRF-002
+  // entry -- `sqlContextOut` recovers the client/userId
+  // `loadAuthenticatedWorkspace` already resolved instead of paying for a
+  // second, duplicate `getAuthenticatedSqlContext` identity resolution.
+  const sqlContextOut: { current: AuthenticatedWorkspaceSqlContext } = {
+    current: { ok: false },
+  };
+  const workspace = await loadAuthenticatedWorkspace(
+    portfolioId,
+    {},
+    sqlContextOut,
+  );
 
   if (workspace.status === "unavailable") {
     return (
@@ -70,7 +83,7 @@ export default async function DividendsListPage({
   }
   if (workspace.activePortfolio === null) notFound();
 
-  const context = await getAuthenticatedSqlContext(portfolioId);
+  const context = sqlContextOut.current;
   if (!context.ok) {
     return (
       <DividendsUnavailable
