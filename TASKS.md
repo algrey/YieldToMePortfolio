@@ -1347,6 +1347,215 @@ Recorded supersession: UI-024's `/?section=X` root deep-link redirect is superse
 
 Verification: `npm run format:check`/`npm run lint`/`npx tsc --noEmit`/`npm run build` clean; full `npm test` 2678 tests, 2668 pass, 10 env-gated skips, 0 fail.
 
+### BUG-011 — A Sharesight sync can double-commit trades already imported by CSV (ledger correctness; owner data may be affected NOW)
+
+Status: READY — highest priority after BUG-010. This is a financial-correctness defect, not a performance one: if it has fired on the owner's account, holdings, cost basis, capital gains, and every total derived from them are overstated.
+
+Found during BUG-010's investigation (reported, deliberately not fixed there). CONFIRMED by code reading; NOT yet confirmed against the owner's real data.
+
+ROOT CAUSE. Trade dedupe is keyed on the `source_reference` STRING only — `db/repositories/import-commit.ts:1406-1422` (`user_id, portfolio_id, source_type='csv_import', source_reference`) plus the `(portfolio_id, source_type, source_reference)` unique index (`db/schema.ts:1031-1035`). But the two import routes mint structurally disjoint keys:
+
+- Sharesight sync → `import-fingerprint:sharesight-trade:<id>` (`domain/sharesight-sync/transform.ts:363`)
+- CSV import → `import-fingerprint:<sha256 of normalized fields>` (`domain/imports/strict-versioned-parser.ts:1586-1591`)
+
+**These key spaces cannot collide**, so the same real-world trade imported by both routes commits twice and satisfies the unique index. Nothing downstream catches it: `DUPLICATE_ROW` compares fingerprints only and its `existingFingerprints` seed has NO production caller; `DUPLICATE_EXACT` is within-file/info-level; `existingDividendSourceReferences` is the only cross-batch prior-import check and is dividends-only and also exact-string. There is no economic-identity (portfolio + security + date + quantity + price) check for trades anywhere. `OVERSELL` cannot backstop it either — `existingQuantities` is likewise never populated by a production caller, so preview holdings start at `"0"` and a full-history Sharesight batch nets out internally.
+
+- Objective: first establish whether the owner's production data is affected; then prevent recurrence.
+- Dependencies: BUG-010 (the site must be reachable to inspect and to run any reversal).
+- Deliver, in order:
+  1. **Diagnose against the real database before any code change.** The candidate query below is a STARTING POINT, not a verdict — `quantity_decimal`/`unit_price_decimal` are decimal STRINGS, so `"100"` vs `"100.00"` will make true duplicates miss the `GROUP BY`. **A null result is not proof of absence**; normalize the decimals before concluding.
+  2. If affected: reverse the duplicate batch through the EXISTING reversal machinery (`db/repositories/import-reversal.ts`) — never a manual DELETE, never a silent history rewrite. Ledger facts are immutable; corrections use reversal/supersession (AGENTS.md).
+  3. Add an economic-identity duplicate check for trades at preview/commit so a cross-route re-import surfaces as a visible "close match, needs a decision" rather than a silent second posting. Reuse the existing reconciliation surface; do not invent a parallel one.
+- Acceptance: a trade imported by CSV and then re-imported via Sharesight sync (and the reverse order) is flagged before commit, not silently double-posted; the flag is a decision surface, never an automatic drop — a genuinely repeated real trade (same security, date, quantity, price) must still be importable when the owner confirms it; existing single-route imports are unaffected; any reversal is auditable and reversible.
+- Tests: cross-route same-trade detection in both orders; decimal-string normalization (`"100"` vs `"100.00"` vs `"100.000"`) in the identity comparison; a genuine same-day repeat trade still importable on confirmation; ownership isolation; the reversal path restores correct totals.
+- Risks: an over-eager identity match silently drops a real trade the owner genuinely made twice — worse than the duplicate it prevents. This must be a decision surface, never an automatic skip. Note also that the dividend path's `existingDividendSourceReferences` check IS exact-string and therefore carries the same cross-route blind spot for payouts; check whether Sharesight payout ids can collide with CSV-imported dividend references, and state the finding either way.
+- Out of scope: changing `source_reference` formats (they are load-bearing for idempotent re-sync), and BUG-010's performance work.
+
+Candidate diagnostic (verify and normalize decimals before trusting):
+
+```sql
+SELECT t.portfolio_id, t.portfolio_security_id, t.type, t.local_trade_date,
+       t.quantity_decimal, t.unit_price_decimal, COUNT(*) AS copies,
+       SUM(CASE WHEN t.source_reference LIKE 'import-fingerprint:sharesight-trade:%' THEN 1 ELSE 0 END) AS sharesight_copies,
+       SUM(CASE WHEN t.source_reference LIKE 'import-fingerprint:%'
+                 AND t.source_reference NOT LIKE 'import-fingerprint:sharesight-%' THEN 1 ELSE 0 END) AS csv_copies
+FROM transactions t
+WHERE t.status = 'posted' AND t.type IN ('buy','sell')
+GROUP BY t.portfolio_id, t.portfolio_security_id, t.type, t.local_trade_date,
+         t.quantity_decimal, t.unit_price_decimal
+HAVING sharesight_copies > 0 AND csv_copies > 0;
+```
+
+### BUG-012 — Persist "attempted, genuinely unresolvable" for a value-history candidate date (BUG-010 follow-up)
+
+Status: READY (after BUG-010 lands and the site is stable).
+
+BUG-010 left a known hazard mitigated rather than solved, and recorded it honestly. A candidate date the derivation genuinely cannot resolve is never stored, so it stays "missing" forever and is re-attempted on every read. A contiguous run of unresolvable dates at least as long as one call's bound can therefore pin that slice permanently and starve every date behind it. BUG-010 lowered the read bound from 400 to 10, which makes a 10-day unresolvable run sufficient where 400 days were needed before — the hazard is materially more reachable than it was. The mitigation is that the cron sweeps oldest-missing while reads sweep newest-missing, so the two work inward from opposite ends; per BUG-010's own report this is mitigation, NOT a proof, since both ends could stall.
+
+- Objective: remove the stall hazard by construction.
+- Deliver: persist "attempted and genuinely unresolvable" as a fact for a (portfolio, date) pair, so it is skipped rather than retried forever, with enough provenance to distinguish "no price data existed" from "not yet attempted". Requires a schema decision and migration → `docs/DATA_MODEL.md` per AGENTS.md.
+- Acceptance: a contiguous unresolvable run no longer blocks progress from either end; an unresolvable date still renders honestly absent, never zero or interpolated; a date that LATER becomes resolvable (a backfilled price import) is re-attempted rather than permanently written off — this is the load-bearing correctness property, and it must be tested directly.
+- Risks: writing off a date permanently when later price data would have resolved it. The record must be invalidated by the same price-import paths that already invalidate value history.
+
+### BUG-010 — Value-history cache wipe puts the site in a permanent Error 1102 loop (owner-reported production OUTAGE)
+
+Status: DONE on 2026-09-01, PENDING DEPLOY (escalation worker single pass, commit `f6d3b6f`; reviewer PASS, explicitly cleared as safe to deploy as is, all findings non-blocking). The fix is committed but the production site stays down until it is deployed.
+
+MEASUREMENT CORRECTION — the task's own root-cause arithmetic understated this by ~5x. `docs/ARCHITECTURE.md` §9.2 sized the 400-date bound from a recorded "~0.05 ms/candidate date". Both the worker and the reviewer independently re-measured the current code on a production-shaped fixture (18 securities, ~2,600 candidate dates), isolating app-side CPU by subtracting SQL-client time from wall time. Reviewer's own curve, median of 5:
+
+```
+bound=1  1.58ms   bound=10   5.29ms   bound=100  27.87ms   bound=400  107.00ms
+bound=5  3.30ms   bound=20   6.87ms   bound=200  54.14ms
+marginal(10->400) = 0.261 ms/date
+```
+
+So the old bound cost ~107 ms against a 10 ms allowance — roughly 10x over, not the ~2x this entry originally computed. Whole root-overview page app CPU on the prf-002 fixture, sequentialized so the measurement is valid: steady state (fully backfilled) **8.42 ms**; wiped with the new bound **13.77 ms**; wiped with the old bound **118.80 ms**.
+
+**Read that middle number honestly: 13.77 ms is still above the nominal 10 ms allowance on this harness, and the harness UNDERSTATES production because it excludes D1 result deserialization.** These absolute figures are machine-dependent — the same harness puts a known-working steady state at 8.42 ms — so the load-bearing result is the ~8.6x reduction and the fact that each read now durably persists its slice. If the Overview still returns 1102 after deploy, **lowering `MAX_DERIVE_DATES_PER_READ` from 10 to 5 is the first lever and needs no change beyond the constant** (5 → ~11.7 ms page level, 1 → ~10.0 ms).
+
+VERIFIED CLOUDFLARE LIMITS — this task's brief asserted a free-plan cron/fetch CPU asymmetry and was WRONG. Workers Free gives **10 ms CPU for BOTH** an HTTP request and a Cron Trigger; the larger scheduled allowance (30 s / 15 min) is Paid-only. Part (b) is therefore sized against the same 10 ms as a page render. `YIELDTOME_WORKERS_PLAN: "free"` is confirmed in all three `wrangler.json` scopes. (The reviewer could not fetch the Cloudflare docs from its sandbox and cleared this on knowledge plus the observation that the conservative direction costs only a slower rebuild.)
+
+DELIVERED: (a) `MAX_DERIVE_DATES_PER_READ` 400 → 10, with the derive-and-persist core extracted into `resolveValueHistorySeries` (one mechanism, parameterised by bound and by which end of the missing set it slices) — reviewer proved the extraction behaviour-preserving by running the pre-commit module beside the new one against identical fixtures, `assert.deepEqual` on both the returned result and every persisted row. (b) New `app/value-history-backfill-service.ts` wired last on the hourly `0 * * * *` tick: `CRON_MAX_BACKFILL_DATES_PER_TICK = 20` as a TOTAL across portfolios (reviewer confirmed `datesRemaining` decrements across iterations), hour-based portfolio rotation, per-portfolio try/catch so a throwing portfolio cannot abort the tick or consume the date budget.
+
+Cron sweeps OLDEST-missing while reads sweep NEWEST-missing — deliberate, and not merely load-sharing: an unresolvable date is never stored, so a contiguous unresolvable run at least as long as one call's bound can pin that slice permanently. Opposite ends mitigate it. Recorded in code and in ARCHITECTURE.md §9.4 as mitigation, NOT proof — both ends could stall. Reviewer judged it acceptable to ship: blast radius is ~5 ms of wasted CPU and a stalled newest end, not a 1102, and the pinned-slice shape needs a fully-liquidated portfolio. Durable fix tracked as BUG-012.
+
+Financial honesty verified by the reviewer against a two-owner fixture: no date fabricated or interpolated, unresolvable dates never stored, later points render `valueDecimal: null` rather than zero, `backfillPending` still reaches the chart's coverage line.
+
+Verification: `npm run format:check` / `npx tsc --noEmit` / `npm run build` clean; lint 0 errors (one pre-existing `tests/mkt-011a.test.ts:168` warning); `npm test` 2695 tests, 2685 pass, 10 env-gated skips, 0 fail.
+
+REVIEW FOLLOW-UPS (none blocking; (c) and (e) are the ones with real cost):
+
+- (a) `worker/scheduled-refresh.ts:313-327` — the new type/function was inserted between an existing CALC-003 doc comment and the function it documents, so that comment now sits on `ScheduledValueHistoryBackfillResult` and `runScheduledCalculationSweep` (`:354`) is undocumented. Move one or the other.
+- (b) `MAX_DERIVE_DATES_PER_READ`'s comment claims the per-read fixed cost "does not shrink with the bound". It does — `loadFacts`' `priceWindow` narrows to the slice's own span (PRF-003), so N=1 is 1.58 ms, not the ~2.7 ms a linear extrapolation implies. The choice of 10 stays defensible (a lower bound pushes recovery onto a cron that may not be deployed), but the recorded reason should be the measured curve, not an overstated fixed cost.
+- (c) NEW PERMANENT D1 `rows_read` COST, unmeasured and undocumented: every tick, for every portfolio examined, the sweep runs the full `loadCandidateDates` `DISTINCT market_date` seek (~47k index entries at 18 securities × ~2,600 dates) — including after convergence, since nothing short-circuits a covered portfolio. Roughly **1.1M rows_read/day against D1's free 5M/day**, the same budget PRF-005 follow-up (b) left open. Wants a cheap "is anything missing" pre-check or a lower cadence.
+- (d) `docs/ARCHITECTURE.md` §9.4's "durable partial progress" credit to `VALUE_HISTORY_CHUNK_SIZE` batching is inert at the configured bounds — that constant is 50 and the bounds are 10 and 20, so there is exactly one batch per slice. Forward progress rests on the slice fitting the budget. The cron's cross-PORTFOLIO durability is real; the sentence should say that instead.
+- (e) A portfolio whose entire missing set is unresolvable AND fits the tick budget reports as converged (`backfillPending` false, `portfoliosPending` 0) while re-deriving those dates every hour forever. `datesDerived > 0` with `rowsPersisted === 0` is the tell and is already logged; the convergence test's fixture has no unresolvable dates, so the branch is uncovered.
+- (f) Nit: `CRON_MAX_BACKFILL_PORTFOLIOS_PER_TICK`'s comment says a fully-covered portfolio "yields its share of the date budget" — true for dates, but it still consumes one of the three portfolio slots.
+- (g) Measurement-method caveats the worker did not state: the wall-minus-SQL method excludes D1 result deserialization (real Worker CPU, so every figure understates production) and is only valid on a sequential chain — it goes negative on the `Promise.all` page loader.
+
+### OPS-004 — Confirm production cron triggers are actually deployed (blocks BUG-010's recovery half)
+
+Status: READY — REQUIRES OWNER ACTION in the Cloudflare account; cannot be resolved from the repository.
+
+`TASKS.md`'s 2026-08-28 deployment record states cron triggers failed with Cloudflare API error **10072** (Workers Free allows 5 cron triggers per account, already consumed account-wide), so "the script/bindings deployed but the scheduled refresh is not yet running — re-attempt via `wrangler triggers deploy` after freeing crons or upgrading."
+
+If that is still true, **every scheduled job this project relies on has never run in production** — the hourly market-data/FX refresh, corporate actions, Sharesight price refresh, the calculation sweep, the intraday capture, and now BUG-010's value-history backfill. BUG-010's recovery would fall entirely to the read path, and the several other "the cron already does this" assumptions recorded across ARCHITECTURE.md and the PRF series would be false.
+
+- Objective: establish whether the production Worker has live cron triggers, and record the answer.
+- Deliver: verify current trigger state (`wrangler deployments`/dashboard); if absent, free an account cron slot or upgrade, re-run `wrangler triggers deploy`, and confirm a tick actually fires by checking for the `market.refresh.scheduled` / `calculation.sweep.scheduled` / value-history-backfill structured logs.
+- Acceptance: the deployment record is updated with the confirmed state either way; if triggers are still absent, every downstream claim that depends on the cron is re-examined and corrected rather than left standing.
+- Risks: silently assuming the cron runs. Several performance decisions in the PRF series were taken on the premise that it does.
+
+Owner report verbatim: "The site appears to be in a permanent state of 1102 after my sharesight sync. Noting I believe I did accept the batch."
+
+ROOT CAUSE (confirmed against this repo's own recorded measurements, not inferred):
+
+1. The accepted Sharesight batch committed TRADES. `finalize` computes `range_from = MIN(local_trade_date)` across every committed trade row. A first full-history Sharesight sync commits the owner's entire trade history, so `range_from` is the earliest trade date (~2020 for this account).
+2. That fires `valueHistoryInvalidationFromDateStatement` — `DELETE FROM portfolio_value_history WHERE user_id = ? AND portfolio_id = ? AND value_date >= ?` (`db/repositories/portfolio-value-history.ts:196`) — wiping essentially the ENTIRE cached series (~1,678 rows for this account).
+3. Every subsequent read now finds ~2,600 missing candidate dates. `app/historical-portfolio-value.ts:830` derives `MAX_DERIVE_DATES_PER_READ = 400` of them per read.
+4. **`docs/ARCHITECTURE.md:605` states the bound's own cost: "derivation CPU, when it runs at all, is bounded to ~20ms/read (400 dates x the Layer-1-optimized ~0.05ms/date)". `docs/ARCHITECTURE.md:571` states the free tier's allowance is "~10ms-per-request". The backfill path at full bound has therefore ALWAYS been ~2x over the free-plan CPU budget** — harmless in steady state (0-3 missing dates/day, per §9.2's own free-tier arithmetic), fatal the moment the cache is wiped.
+5. The request is killed at the CPU limit BEFORE `upsertStoredValueHistory` (`:861`) commits, so the read persists nothing. The next read finds the identical 400 missing dates and repeats. **The loop cannot self-heal, because the work required to escape it exceeds the budget that kills it.**
+6. Nothing else repopulates the cache: `worker/scheduled-refresh.ts` has no `portfolio_value_history` backfill (grep confirms zero references). There is no escape path without a code change.
+
+- Objective: restore the site, and make the backfill path structurally incapable of re-entering this loop.
+- Dependencies: none — this precedes everything else in flight.
+- Deliver, both parts:
+  - (a) **Fit the read path inside the free-plan budget.** `MAX_DERIVE_DATES_PER_READ = 400` must come down to a value whose documented cost fits ~10ms with real headroom alongside the rest of the page's work (~100 dates ≈ 5ms, ~50 ≈ 2.5ms — pick from measurement, not from this arithmetic). Each read then persists its slice and makes forward progress, so a wiped cache rebuilds incrementally across successive loads instead of dying. `backfillPending` already exists and pages already render honestly with missing dates absent (never fabricated), so a smaller slice degrades gracefully by construction.
+  - (b) **Add a bounded `portfolio_value_history` backfill to the hourly cron** (`worker/index.ts`'s `scheduled` handler / `worker/scheduled-refresh.ts`), so recovery does not depend on the owner repeatedly loading pages. Cloudflare's scheduled-handler CPU allowance is materially larger than the fetch path's — VERIFY the current documented figure against <https://developers.cloudflare.com/workers/platform/limits/> before sizing the batch; do not assume. Follow the established bounded-sweep pattern of the existing cron jobs.
+- Acceptance: with `portfolio_value_history` emptied for a production-scale portfolio (18 securities, ~2,600 candidate dates), every authenticated page renders without exceeding the free-plan CPU budget; successive loads strictly increase the number of stored rows until the series is complete; the cron backfill converges the same fixture with no page loads at all; a fully-backfilled portfolio's steady-state read cost is unchanged; no date is ever fabricated or interpolated — a date that cannot be resolved stays absent and honest.
+- Tests: a wiped-cache regression test at production scale proving forward progress per read and bounded per-read derivation; a cron-backfill convergence test; a steady-state no-regression test; an assertion that `backfillPending` and the missing-date rendering stay honest.
+- Risks: lowering the bound too far makes a full rebuild take many reads — acceptable, since partial history renders honestly and the cron carries the bulk. Raising it back is a regression into this outage. Pin the bound with a test that cites the free-tier budget so a future change cannot silently restore a 20ms read.
+- Related, DO NOT fix here, verify and record only: a Sharesight sync's trades key on `sharesight-trade:<id>`, while previously CSV-imported trades carry different `source_reference` values. If this account's history was imported by CSV first, the Sharesight sync's trades may have committed as SECOND copies of the same real trades rather than deduping. Check the account's `transactions` count against expectation before concluding either way; if confirmed, raise it as its own task — it is a ledger-correctness issue, not a performance one, and reversal machinery (`db/repositories/import-reversal.ts`) already exists for it.
+
+### PRF-009 — `import_rows` is scanned twice per commit finalize (review follow-up)
+
+Status: READY. Raised as non-blocking follow-up F2 by PRF-007's reviewer; recorded rather than folded into that task's correction round.
+
+- Objective: stop `finalize`'s affected-portfolio resolution reading `import_rows` twice per commit.
+- Dependencies: PRF-007.
+- Context: PRF-007's fix resolves the affected set as a `UNION ALL` of two branches. Both resolve through `import_rows_user_normalized_fingerprint_idx (user_id=?)` — a per-user range filtered on `batch_id`/`commit_status` in the VM. There is no `(user_id, batch_id, commit_status)` index. Bounded and correct, but it doubles reads in the exact dimension (D1 `rows_read`) the PRF series exists to protect, and PRF-007's Finding D notes `import_rows` grows monotonically with every full Sharesight re-sync.
+- Deliver: either a covering index on `(user_id, batch_id, commit_status)` with its generated migration, or a single-pass formulation of the query. Measure before and after — do not add an index on the assumption it helps.
+- Acceptance: `EXPLAIN QUERY PLAN` shows one `import_rows` pass (or a genuinely narrower seek); commit behaviour, owner scoping, and PRF-007's test suite are unchanged; any migration is reviewed and committed with the code.
+- Risks: an index that is never chosen by the planner is pure write cost on a table every import writes to. Verify the planner actually uses it.
+- Parallel safe: yes, after PRF-007 lands.
+
+### PRF-008 — Scope the Sharesight price-freshness gate to pages that display live prices (owner-ruled)
+
+Status: READY. Split out of PRF-007's Finding C, which measured the problem but was not authorized to fix it.
+
+Owner ruling (2026-09-01), given the measured cost and three alternatives (cron-only everywhere; widen the staleness window; measure end-to-end first): **scope the gate to price pages only.** Keep the 10-minute freshness gate on the pages that actually display live prices (Holdings, Overview, Quotes) and skip it on `/income`, which renders dividend projections rather than live quotes. The hourly cron (`worker/index.ts:236`) remains the refresh path for everyone and is unchanged.
+
+- Objective: remove the cold-cache Sharesight fetch, `price_observations` upserts, and MKT-015 prior-day backfill from the `/income` render path, without weakening any provenance or staleness guarantee on any page.
+- Dependencies: PRF-007 (Finding A landed), BRK-012C, MKT-015.
+- Measured basis (PRF-007 Finding C): the gate costs 10 D1 calls / 62 statements / 21 rows on a cold watermark with 18 Sharesight-matched securities — 54 of those statements in 2 batched writes. `/income` alone is 33/33, so a cold-cache load is an estimated ~43 calls / ~95 statements, over PRF-002's 60-statement per-page ceiling. Confirm this end to end as part of this task: the ~95 figure is additive arithmetic over two separately-measured components, not one cold-cache census.
+- Context: `app/sharesight-price-gate-service.ts` (the four-gate design: credentials → enabled link → cache staleness → single-flight lease), its call site in `app/owned-holdings.ts` (~:655-680, inside the `Promise.all` alongside `projectionRows`), and `app/owned-income-projection.ts`'s call into `loadOwnedHoldings`, which currently has no seam to opt out.
+- Deliver: an explicit, typed seam on `loadOwnedHoldings` controlling whether the freshness gate runs. Default must preserve today's behaviour so every existing caller is unchanged by omission; `/income`'s loader (and `owned-dividend-assumptions.ts`, if it reaches the gate the same way) opts out explicitly. Enumerate every `loadOwnedHoldings` caller and state per caller which side of the seam it lands on and why — do not infer the set from the four pages named in the ruling.
+- Acceptance: `/income` issues zero Sharesight-gate calls and its census drops to the PRF-005 baseline; Holdings, Overview, and Quotes are byte-identical to today, gate included; `/income` still renders honest provenance and staleness for the prices it does show — a price that is stale must read as stale, never as fresh, and a missing quote must still read `unavailable`, never zero; the hourly cron path is untouched.
+- Tests: per-page census proving the gate fires on price pages and not on `/income`; a byte-identical comparison test for the price pages' rendered output; an assertion that opting out never changes the honesty of a rendered price/staleness label; ownership isolation unaffected.
+- Risks: the gate is a correctness feature, not just a cache warmer — silently skipping it somewhere that DOES display live prices would show stale prices as current. The seam must be explicit at every call site, never a default that quietly spreads. Do not weaken the gate itself, its lease semantics, or its staleness threshold.
+- Out of scope: cron-only removal, changing the 10-minute threshold, PRF-005 follow-up (b)'s ~60k `rows_read` question, and PRF-006's blocked `/income` rows_read ruling.
+
+### PRF-007 — Post-Sharesight-sync staleness and free-plan CPU in the import/update pipeline (owner-reported)
+
+Status: DONE on 2026-09-01 (worker round-1 committed `6c1ec49`, reviewer FAIL with three blocking findings plus the F1 ruling, round-2 corrections committed `77b8d40`, reviewer PASS). Finding A fixed. Findings B and C measured only — results folded into their entries below; Finding C's fix is split out as PRF-008 under an owner ruling. Finding D untouched by design.
+
+DELIVERED: `finalize`'s affected-portfolio set resolves as a `UNION ALL` over both commit kinds (trade rows via `transactions`, dividend rows via `dividend_manual_records`), since `import_rows.commit_transaction_id` is a polymorphic, FK-less column with no discriminator. Dividend-only commits now queue their projection run and return it in `rebuildJobIds`. Per the F1 ruling each branch carries a nullable `trade_effective_date` aggregated as `trade_range_from`; the value-history DELETE uses that trade-only date and is skipped entirely when it is NULL, while `calculation_runs.range_from`/`range_to` stay combined. The correlated `ledger_high_water` subquery is wrapped in `COALESCE(..., '')` so a dividend-only commit into a zero-transaction portfolio stores the established `''` sentinel rather than the truthy literal `"null"`.
+
+Reviewer verified independently across both rounds: owner scoping unwidened (cross-user probe); trade-only commits byte-identical against the pre-fix SQL run on the same DB state; `LIMIT` bounds aggregated groups, not per-branch rows; bound parameters 6, well under D1's 100 cap; `EXPLAIN QUERY PLAN` index-seeks both branches with no new scan; 3 of 8 tests confirmed failing against `6c1ec49`. The reviewer additionally probed a case the worker had not — advancing a run for a portfolio that still has zero transactions — and confirmed it completes cleanly with no stall or re-claim loop, so the `''` sentinel introduces no new failure mode.
+
+Review follow-up recorded (non-blocking, cosmetic): the NULL filter is `row.trade_range_from !== null`, correct for both `node:sqlite` and D1; `== null` would additionally guard a hypothetical driver returning `undefined`, which would otherwise reach `String(undefined)` as a date. The second follow-up — `import_rows` now range-scanned twice per commit — is recorded as PRF-009.
+
+Verification: `npm run format:check` / `npm run lint` / `npx tsc --noEmit` / `npm run build` clean (one pre-existing unrelated `tests/mkt-011a.test.ts:168` warning); full `npm test` 2686 tests, 2676 pass, 10 env-gated skips, 0 fail.
+
+Owner report verbatim: "After updating sharesight, I was able to go to the income tab and it still had the old values (not updated). Refreshing it I got an 1102 error." Follow-on to PRF-005 (which censused `/income` at rest) — this task covers the pipeline state a Sharesight sync _commit_ leaves behind, which no prior PRF task exercised.
+
+- Objective: a Sharesight sync whose committed rows are dividend-only must invalidate and requeue the same derived state a trade-bearing commit does, and the first `/income` load after such a commit must stay inside the Cloudflare Workers Free 10ms CPU budget.
+- Dependencies: PRF-005, PRF-006, BRK-005, CALC-005.
+- Requirements: the CALC-003 read-time self-heal contract, HIST-002's value-history invalidation contract.
+
+FINDING A (CONFIRMED by code reading, not yet by execution — reproduce first). `db/repositories/import-commit.ts`'s `finalize` resolves affected portfolios with `JOIN transactions t ON t.id = r.commit_transaction_id` over `commit_status = 'committed'` rows (`:938-941`). The dividend commit path sets `commit_transaction_id` to a `dividend_manual_records.id` (`:1314`), which matches no `transactions.id`. A commit containing only dividend rows — the exact shape of a routine Sharesight payout sync — therefore yields zero `affected` rows, so:
+
+1. no `portfolio_value_history` ranged DELETE is issued (`valueHistoryInvalidationFromDateStatement`, `:967`);
+2. no `projection`-pipeline `calculation_runs` row is queued (`:975-999`);
+3. `rebuildJobIds` is empty, so `app/import-accept-service.ts:362`'s `advanceCalculationRunsForCommit` never runs.
+
+The existing `projection_publications` row keeps pointing at the last completed run and still passes `loadOwnedHoldings`' validity check (`app/owned-holdings.ts:585-643`), so the read-time self-heal never fires either. No test asserted rebuild queueing for a dividend-only commit (`grep rebuildJobIds tests/` covered imp-003a/imp-003b/calc-003/calc-004 only).
+
+**CAUSATION RETRACTED (review B3, 2026-09-01).** This entry originally asserted the queueing gap was the owner's "still had the old values" report. That was inference written as observation, and it is wrong: `/income` reads dividends LIVE (`app/owned-income-projection.ts` → `app/owned-dividend-history.ts:295` → `createDividendManualRecordRepository(client).list(...)`), and neither `db/repositories/projections.ts` nor `domain/snapshots/historical-portfolio-value.ts` / `domain/dividends/shares-held.ts` consume `dividend_manual_records` at all — so a newly queued projection run cannot change any dividend figure `/income` renders. The queueing gap is a real defect and worth fixing on its own merits; it is NOT established as the cause of the reported symptom. The most likely explanation for the owner's observation is simply that the sync had STAGED a batch that was never accepted — staged rows are excluded from totals by design — which is the two-step flow BRK-014 exists to make legible. Confirm with the owner rather than assuming.
+
+- Deliver: dividend-only commits must participate in queueing on the same terms as trade commits. Resolve the affected-portfolio set and its `range_from`/`range_to` from committed rows of BOTH kinds, not from a `transactions`-only join. Do not widen the query's owner scoping and do not change what a trade-bearing commit already does.
+- Acceptance: a commit whose rows are all dividend receipts queues exactly one `projection` run per affected portfolio and returns those ids in `rebuildJobIds`; a mixed trade+dividend commit is unchanged; a fully-skipped (all-duplicate) commit still queues nothing, which is correct — nothing changed.
+- **Value-history invalidation — Orchestrator ruling (2026-09-01, review F1), superseding this task's original Acceptance wording.** The original text prescribed invalidating value history from the earliest committed RECEIPT date. That is wrong and actively harmful: `portfolio_value_history` derives from buy/sell/split quantity facts plus prices and FX (`domain/dividends/shares-held.ts:135-172`, `LedgerQuantityFact`), so a dividend receipt provably cannot make a stored row wrong. Invalidating from a dividend date destroys valid cache rows and forces exactly the HIST-001 re-derivation this task exists to keep off the request path — a Sharesight correction carrying an old receipt would wipe the series from that date forward. RULING: narrow `valueHistoryInvalidationFromDateStatement`'s `fromDate` to the transactions branch's `MIN(local_trade_date)` only; keep the `calculation_runs` row's range combined across both branches (per ARCHITECTURE.md's CALC-004 entry the projection pipeline rebuilds the full ledger regardless of `range_*`, so the widened run range costs nothing). A dividend-only commit therefore issues NO value-history DELETE while still queueing its projection run.
+- Review B1 (blocking, fixed in the correction round): the widened query can return NULL for the correlated `ledger_high_water` subquery when a dividend-only commit lands in a portfolio with zero `posted`/`reversed` transactions, and `String(...)` turned that into the literal `"null"` — truthy, so `resolveEmptyHighWater`'s `if (!highWater)` fallback never fired and a run published `ledger_high_water = "null"`. Resolved with the established `''` sentinel (`db/repositories/market-data.ts:271,348`).
+- Tests: dividend-only commit queues a run and invalidates from the right date; mixed commit byte-identical to today; all-duplicate re-sync commit queues nothing; ownership isolation on the widened query.
+
+FINDING B (SUSPECTED at task authoring; MEASURED 2026-09-01 — hypothesis SOFTENED, no fix proposed). Original suspicion: newly committed dividend rows widen `loadOwnedDividendHistory` and the FY-window work built on it, on a page PRF-005 already left at ~60k rows read per load and depth 11. Census (worker, `productionScaleFixture` + the stage-attributing counting-`SqlClient` method of `tests/prf-002.test.ts`/`tests/prf-005.test.ts`, with 24 newly committed post-sync receipts added on top of the existing 119): `/income` and `/income/multi-year` hold at PRF-005's baseline 33/33 and 34/34 calls/statements — unchanged. Rows returned grow linearly by exactly the new row count (+24, ~1.5%) and stay dominated by unrelated `price_observations` (1170/738 rows) and `transactions` (215 rows) reads. **Dividend-row growth alone is not a material CPU driver at realistic scale.** The census script was a throwaway and was deliberately not committed; re-derive it if this is revisited. PRF-005 follow-up (b) — the ~60k `rows_read` figure against the 5M/day free allowance — is a separate, still-open concern and is NOT closed by this measurement.
+
+FINDING C (SUSPECTED at task authoring; MEASURED 2026-09-01 — now the LEADING candidate for the reported 1102, fix NOT yet attempted). `ensureSharesightPriceFreshness` (BRK-012C) runs on the READ path inside `loadOwnedHoldings`, which `/income` reaches transitively. Measured on a cold watermark with 18 Sharesight-matched securities: **10 D1 calls / 62 statements / 21 rows returned**, of which 2 batched writes carry 54 statements (cache plus `price_observations` upserts). `app/owned-income-projection.ts`'s call into `loadOwnedHoldings` has no options seam to disable it, so it fires unconditionally for a Sharesight-linked account whenever the 10-minute watermark is stale — guaranteed after any idle period, which is exactly the owner's reported scenario. Combined with `/income`'s own 33/33, a cold-cache `/income` load is an estimated **~43 calls / ~95 statements, over PRF-002's own 60-statement per-page ceiling**. Note the estimate is additive arithmetic over two separately-measured components, not a single end-to-end cold-cache census — confirm end to end before or as part of any fix.
+
+- Proposed direction for Finding C (needs an Orchestrator ruling before implementation, NOT authorized by this task as written): move the freshening off the render path, leaning on the hourly cron that already refreshes Sharesight prices (`worker/index.ts:236`). Requirement: do not weaken the gate's honesty guarantees — a page that has not freshened must still show honest staleness/provenance, never a fabricated or silently-stale-as-fresh price. Splitting this into its own task is likely correct, since it changes a read-path guarantee rather than fixing a defect.
+
+FINDING D (CONFIRMED, bounded, cross-referenced — do not fix here). Staging writes one statement per row plus one per row-level issue in a single `client.batch()` with no chunking (`db/repositories/import-staging.ts:455-466`). A Sharesight sync always re-fetches and re-stages the FULL trade/payout history (`app/sharesight-sync-service.ts:518` — watermark narrowing is explicitly deferred), so this grows monotonically toward D1's ~1000-statement ceiling as the owner's history accumulates. It fails closed (`atomic_failure`, nothing persisted), so it is a future wall, not today's defect. Recorded against the existing DEFERRED `IMP-005`; re-evaluate that task's deferral rather than expanding this one.
+
+- Risks: widening `finalize`'s affected-portfolio query is a financial-invalidation path — an over-broad `range_from` triggers a full `portfolio_value_history` rebuild, which is itself the expensive HIST-001 derivation this task exists to keep off the request path. Prefer the narrowest correct date range and pin it with a test.
+- Out of scope: incremental (watermark-narrowed) Sharesight sync; the paid-plan decision; PRF-006's blocked `/income` rows_read question, which still needs its own Orchestrator ruling.
+
+### BRK-014 — Sharesight sync result must say what is new versus already imported (owner-reported)
+
+Status: READY.
+
+Owner report verbatim: "It is unclear for the UI as it appears to download everything." Correct observation about a misleading surface, not about the underlying behaviour: the sync deliberately re-fetches the full trade/payout history every time and dedupes at commit on `source_reference` (`db/repositories/import-commit.ts:1242`, `:1333`, plus the `(portfolio_id, source_reference)` unique indexes), so nothing is duplicated. The panel simply never says so.
+
+- Objective: make the sync result state how many staged rows are genuinely new versus already imported, so an owner can tell a routine no-op sync from one that will actually change their ledger before they accept it.
+- Dependencies: BRK-005, BRK-005B.
+- Context: `app/components/sharesight-sync-panel.tsx:302-320`, `app/sharesight-sync-panel-helpers.ts` (`formatSyncResultMessage`, `SharesightSyncSuccess`), `app/sharesight-sync-service.ts:556-565`.
+- Deliver: `formatSyncResultMessage` reports new versus already-imported counts alongside the existing `rowsStaged`/`skippedPayouts`. The evidence already exists at preview time — `domain/imports/reconciliation.ts` raises `DIVIDEND_ALREADY_IMPORTED_MANUAL_DUPLICATE` (info/warning, never error) against `existingDividendSourceReferences` (`:699-708`, `:792`) — so prefer deriving the counts from the persisted batch's own issues rather than adding a second dedupe query. Keep the pure-helper split: message formatting stays in `sharesight-sync-panel-helpers.ts`, testable without React effects.
+- Acceptance: a re-sync that adds nothing reads unambiguously as "no new rows" rather than as a full re-import; a sync with N new receipts names N; a REUSED batch (`started.reused === true`) reports the STORED counts, never the fresh transform's, preserving the BRK-005 finding-B1 honesty rule; a Sharesight-side value CORRECTION to an existing payout is not counted as "already imported" — it stages as a new batch and must stay visible as a decision.
+- Tests: pure-helper message cases for zero-new, some-new, all-new, reused-batch, and correction-present; a rendered-markup assertion that the counts reach the panel.
+- Risks: reporting a count the batch does not actually hold. The counts must come from persisted batch state on the reused path, matching the existing `rowsStaged`/`skippedPayouts` treatment.
+- Out of scope: changing what the sync fetches, incremental sync, and any change to dedupe semantics.
+- Parallel safe: yes with PRF-007 — different files, though both touch the Sharesight sync path; sequence BRK-014 after PRF-007 if one agent takes both.
+
 ### PRF-006 — Whole-site final optimization pass (owner-directed)
 
 Status: DONE on 2026-08-31 (worker + reviewer round-1 FAIL on doc/comment honesty, round-2 corrections prescription-exact per precedent; commits `f8b4af9` + `ce7083b`). Owner directive verbatim: "Do one last pass and look for any more issues or optimisations across the whole site."
