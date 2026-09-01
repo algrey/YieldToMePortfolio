@@ -13,6 +13,10 @@ import {
 } from "../app/calculation-executor-service.ts";
 import { runSharesightPriceRefresh } from "../app/sharesight-price-refresh-service.ts";
 import {
+  sweepValueHistoryBackfill,
+  type ValueHistoryBackfillSweepSummary,
+} from "../app/value-history-backfill-service.ts";
+import {
   runDailyPriceCapture,
   type RollupFailureKind,
 } from "../app/daily-price-capture-service.ts";
@@ -318,6 +322,35 @@ export async function runScheduledDailyPriceCapture(
  * the other two scheduled refreshes, this does not depend on
  * `MARKET_DATA_PROVIDER`.
  */
+export type ScheduledValueHistoryBackfillResult =
+  | ({ ok: true } & ValueHistoryBackfillSweepSummary)
+  | { ok: false; reason: "database" | "sweep" };
+
+/**
+ * BUG-010 trigger: the hourly cron's bounded `portfolio_value_history`
+ * backfill. Runs alongside the existing hourly sweeps in the same
+ * `scheduled` handler and, deliberately, LAST -- its CPU budget is what is
+ * left of the tick after the other sweeps, and on Workers FREE a Cron
+ * Trigger gets the SAME 10ms allowance an HTTP request does (verified; see
+ * `app/value-history-backfill-service.ts`'s header). Like the calculation
+ * sweep, this needs no provider access and so does not depend on
+ * `MARKET_DATA_PROVIDER`.
+ */
+export async function runScheduledValueHistoryBackfill(): Promise<ScheduledValueHistoryBackfillResult> {
+  let client: Awaited<ReturnType<typeof getSqlClient>>;
+  try {
+    client = await getSqlClient();
+  } catch {
+    return { ok: false, reason: "database" };
+  }
+  try {
+    const summary = await sweepValueHistoryBackfill({ client });
+    return { ok: true, ...summary };
+  } catch {
+    return { ok: false, reason: "sweep" };
+  }
+}
+
 export async function runScheduledCalculationSweep(): Promise<ScheduledCalculationSweepResult> {
   try {
     const client = await getSqlClient();

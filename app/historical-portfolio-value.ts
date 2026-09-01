@@ -45,9 +45,7 @@
  * NOT yet stored: the bounded backfill-on-read logic INLINE in
  * `loadHistoricalPortfolioValueSeries` below derives up to
  * `MAX_DERIVE_DATES_PER_READ` of the newest MISSING candidate dates per
- * read (bounded compute, "tens of ms" per Layer 1's ~0.05ms/candidate-date
- * measurement on the real DB copy -- see TASKS.md's HIST-002 entry for the
- * full before/after numbers) and opportunistically persists exactly those
+ * read and opportunistically persists exactly those
  * freshly-derived points (EFF-001-style identical-value guard: an unchanged
  * re-derivation writes zero rows). Any STILL-missing dates beyond that
  * bound are simply absent from this read's `points` -- never a fabricated
@@ -65,6 +63,20 @@
  * (`valueDecimal: null`) is NEVER stored (the honesty invariant), so it is
  * always "missing" and gets a cheap, bounded, single-date re-derivation
  * attempt on every subsequent read until it genuinely resolves.
+ *
+ * BUG-010 (owner-reported production OUTAGE, 2026-09-01): the paragraph
+ * above describes the mechanism correctly, but its BOUND was ~10x the free
+ * plan's per-invocation CPU allowance, which turned a wiped series into a
+ * permanent Error 1102 loop -- the read could never finish deriving its
+ * slice, so it never persisted one, so the next read repeated identically.
+ * Two changes close that: `MAX_DERIVE_DATES_PER_READ` is now sized from a
+ * re-measurement of the CURRENT code (see its own comment -- the
+ * ~0.05ms/candidate-date figure `docs/ARCHITECTURE.md` §9.2 recorded does
+ * not hold), and `backfillStoredValueHistoryForPortfolio` below lets the
+ * hourly cron (`app/value-history-backfill-service.ts`) rebuild a wiped
+ * series without any page load at all. Neither changes what is stored, what
+ * is rendered, or the honesty invariant -- only how much of the rebuild one
+ * invocation attempts.
  *
  * Invalidation (review B2, BLOCKING -- a stored row is a CACHE, and a cache
  * that never invalidates is a correctness bug, not a performance feature):
@@ -157,16 +169,62 @@ const MAX_FX_OBSERVATIONS = 20_000;
 // the chart/Multi-Year baseline actually need); `datesTruncated` discloses
 // this honestly rather than silently.
 const MAX_CANDIDATE_DATES = 3_660;
-// HIST-002: bounds how many MISSING (not-yet-stored) candidate dates one
-// read will derive read-time before persisting -- the free-tier CPU-safety
-// lever (see this module header's HIST-002 paragraph). Chosen from Layer
-// 1's measured ~0.05ms-per-candidate-date compute cost on the real DB copy
-// (18 securities, ~2,600 candidate dates): 400 * 0.05ms ~= 20ms, a "tens of
-// ms" bound with headroom under this request's other work, while a fully
-// backfilled/steady-state portfolio (the overwhelmingly common case after
-// the first several reads) skips derivation ENTIRELY via the stored-only
-// fast path below.
-const MAX_DERIVE_DATES_PER_READ = 400;
+/**
+ * HIST-002: bounds how many MISSING (not-yet-stored) candidate dates one
+ * READ will derive read-time before persisting -- the free-tier CPU-safety
+ * lever (see this module header's HIST-002 paragraph).
+ *
+ * BUG-010 (owner-reported production OUTAGE, 2026-09-01): this was 400,
+ * sized from `docs/ARCHITECTURE.md` §9.2's recorded ~0.05ms-per-candidate-
+ * date figure (400 x 0.05ms ~= 20ms). BOTH halves of that arithmetic were
+ * wrong for the current code, and the error was load-bearing:
+ *
+ * - RE-MEASURED for BUG-010 on the production-scale fixture this bound is
+ *   sized against (18 securities, ~2,600 candidate dates, one EOD close per
+ *   security per date -- `tests/bug-010.test.ts`'s own fixture), separating
+ *   SQL-client time (D1 network wait in production, NOT Worker CPU) from
+ *   app-side CPU: the derivation alone (`computeHistoricalPortfolioValueSeries`,
+ *   the exact thing §9.2 measured) costs **~0.17ms per candidate date**, and
+ *   the whole read-path slice -- price-row mapping/validation, the per-read
+ *   index build, the upsert statements -- costs **~0.26ms per candidate
+ *   date**, linear from 10 dates to 400. At 400 that is **~104ms of Worker
+ *   CPU**, not 20ms.
+ * - Cloudflare Workers FREE allows **10ms of CPU per invocation** (verified
+ *   2026-09-01 against developers.cloudflare.com/workers/platform/limits/ --
+ *   and the SAME 10ms applies to the Cron Trigger handler, see
+ *   `app/value-history-backfill-service.ts`). The old bound was therefore
+ *   ~10x over budget, not the ~2x §9.2's arithmetic implied.
+ *
+ * In steady state (0-3 missing dates) that never mattered. The moment an
+ * import commit's ranged DELETE wiped the whole series, every read tried to
+ * derive 400 dates, was killed at the CPU limit BEFORE `upsertStoredValueHistory`
+ * committed, persisted nothing, and the next read repeated identically --
+ * a loop that could not self-heal because escaping it cost more than the
+ * budget that killed it.
+ *
+ * 10 dates ~= 2.6ms of MARGINAL app CPU (~4.4ms measured for a whole
+ * derivation read at this scale, once the fixed cost of entering the
+ * derivation path at all -- `loadFacts`' transaction/price marshalling and
+ * the candidate-vs-stored diff -- is included; `tests/bug-010.test.ts` logs
+ * that figure on every run). Roughly a quarter to a half of the free plan's
+ * per-invocation allowance, leaving the rest of the Overview render its own
+ * budget, while still covering the steady-state case (0-3 new trading days
+ * per read, plus the intraday capture's re-derivation of TODAY's row) with
+ * 3x headroom.
+ *
+ * Why 10 rather than 5 or 1: that per-read FIXED cost does not shrink with
+ * the bound, so below roughly this size a smaller slice buys very little CPU
+ * while proportionally slowing every rebuild. 10 sits near that knee.
+ *
+ * A wiped cache now rebuilds incrementally -- every read
+ * derives its slice, PERSISTS it, and makes strictly forward progress --
+ * with the hourly cron (`app/value-history-backfill-service.ts`) carrying
+ * the bulk so recovery does not depend on the owner loading pages.
+ *
+ * Do NOT raise this without re-measuring: raising it back toward 400 is a
+ * regression into the BUG-010 outage. Pinned by `tests/bug-010.test.ts`.
+ */
+export const MAX_DERIVE_DATES_PER_READ = 10;
 // Review B3 ruling: Multi-Year's FY-end lookups may use the last
 // observation on-or-before the FY end within this bounded lookback --
 // covers a weekend/holiday landing exactly on an FY-end date; beyond it,
@@ -767,6 +825,79 @@ export async function loadHistoricalPortfolioValueSeries(
   portfolioId: string,
   now: Date = new Date(),
 ): Promise<HistoricalPortfolioValueResult | null> {
+  const resolved = await resolveValueHistorySeries(
+    client,
+    userId,
+    portfolioId,
+    now,
+    MAX_DERIVE_DATES_PER_READ,
+    "newest",
+  );
+  return resolved ? resolved.result : null;
+}
+
+/** Which end of the still-missing candidate-date set one call's bounded
+ * slice is taken from.
+ *
+ * BUG-010: the READ path takes `"newest"` (unchanged -- the dates an owner
+ * is most likely looking at, and the same "keep the most recent" convention
+ * `MAX_CANDIDATE_DATES` truncation uses). The CRON backfill takes
+ * `"oldest"` deliberately, so the two sweep the missing set from OPPOSITE
+ * ends and meet in the middle.
+ *
+ * That is not just load-sharing. A candidate date the derivation genuinely
+ * cannot resolve is NEVER stored (the honesty invariant -- no fabricated or
+ * placeholder value, ever), so it stays "missing" forever and is re-attempted
+ * on every call. A contiguous run of such dates that is at least as long as
+ * one call's bound therefore pins that call's slice in place permanently and
+ * starves every date behind it. That property is pre-existing (it applied at
+ * the old 400 bound too, just needing a 400-date run to trigger) but a
+ * smaller bound makes a shorter run sufficient, so the two sweeps are pointed
+ * at different ends: an unresolvable run at one end can no longer block the
+ * other end's progress. It is a mitigation, not a proof -- runs at BOTH ends
+ * would still stall, and the durable fix is to persist "attempted, genuinely
+ * unresolvable" as a fact (a schema change, deliberately NOT made here).
+ * Recorded in `docs/ARCHITECTURE.md`'s BUG-010 entry. */
+export type ValueHistoryDeriveEnd = "newest" | "oldest";
+
+/** What one bounded derive-and-persist slice actually did -- the cron's
+ * progress signal (`app/value-history-backfill-service.ts`). `rowsPersisted`
+ * is the EFF-001-guarded write count, so an unchanged re-derivation reports
+ * 0 writes while still reporting the dates it derived. */
+export type ValueHistoryBackfillOutcome = {
+  /** Candidate dates in range this call considered. */
+  candidateDates: number;
+  /** Candidate dates not yet stored when this call started. */
+  missingDates: number;
+  /** Dates this call actually ran the derivation for (<= the bound). */
+  datesDerived: number;
+  /** Rows the derivation resolved a real value for and persisted. Fewer
+   * than `datesDerived` when a date could not be resolved (never stored --
+   * never fabricated) or when the value was unchanged. */
+  rowsPersisted: number;
+  /** At least one candidate date is still missing after this call. */
+  backfillPending: boolean;
+};
+
+/**
+ * BUG-010: the ONE bounded derive-and-persist mechanism, shared verbatim by
+ * the Overview read (`loadHistoricalPortfolioValueSeries` above) and the
+ * hourly cron backfill (`backfillStoredValueHistoryForPortfolio` below) --
+ * deliberately not a second code path, and not a second formula. The two
+ * callers differ ONLY in their bound and in which end of the missing set
+ * they slice from.
+ */
+async function resolveValueHistorySeries(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  now: Date,
+  maxDeriveDates: number,
+  deriveEnd: ValueHistoryDeriveEnd,
+): Promise<{
+  result: HistoricalPortfolioValueResult;
+  outcome: ValueHistoryBackfillOutcome;
+} | null> {
   const nowIso = now.toISOString();
   const range = await resolveRange(client, userId, portfolioId, nowIso);
   if (!range) return null;
@@ -814,21 +945,34 @@ export async function loadHistoricalPortfolioValueSeries(
     // no full `price_observations` read, at all.
     const points = dates.map((date) => stored.get(date)!);
     return {
-      baseCurrencyCode: candidates.baseCurrencyCode,
-      rangeFrom: range.rangeFrom,
-      rangeTo: range.rangeTo,
-      points,
-      datesTruncated,
-      backfillPending: false,
+      result: {
+        baseCurrencyCode: candidates.baseCurrencyCode,
+        rangeFrom: range.rangeFrom,
+        rangeTo: range.rangeTo,
+        points,
+        datesTruncated,
+        backfillPending: false,
+      },
+      outcome: {
+        candidateDates: dates.length,
+        missingDates: 0,
+        datesDerived: 0,
+        rowsPersisted: 0,
+        backfillPending: false,
+      },
     };
   }
 
-  // Newest-missing-first (dates/missingDates are ascending, so the tail is
-  // the newest) -- matches MAX_CANDIDATE_DATES' own "keep the most recent"
-  // convention and prioritises the range an owner is most likely viewing.
+  // `dates`/`missingDates` are ascending, so the TAIL is the newest and the
+  // HEAD is the oldest. The read path slices the newest (the range an owner
+  // is most likely viewing, matching MAX_CANDIDATE_DATES' own "keep the most
+  // recent" convention); BUG-010's cron backfill slices the oldest -- see
+  // `ValueHistoryDeriveEnd`.
   const toDerive =
-    missingDates.length > MAX_DERIVE_DATES_PER_READ
-      ? missingDates.slice(-MAX_DERIVE_DATES_PER_READ)
+    missingDates.length > maxDeriveDates
+      ? deriveEnd === "newest"
+        ? missingDates.slice(-maxDeriveDates)
+        : missingDates.slice(0, maxDeriveDates)
       : missingDates;
   const backfillPending = toDerive.length < missingDates.length;
 
@@ -838,8 +982,9 @@ export async function loadHistoricalPortfolioValueSeries(
   // is further narrowed to `toDerive`'s own span (`priceWindow` below) --
   // see `loadFacts`'s own doc comment for why this is safe (exact-date-only
   // lookups) and why it is the fix for the reported multi-second-outlier
-  // tab-navigation regression. `toDerive` is ascending (a tail slice of the
-  // ascending `missingDates`), so its first/last elements are its min/max.
+  // tab-navigation regression. `toDerive` is ascending (a contiguous slice
+  // of the ascending `missingDates`, from either end), so its first/last
+  // elements are its min/max.
   const facts = await loadFacts(
     client,
     userId,
@@ -858,7 +1003,7 @@ export async function loadHistoricalPortfolioValueSeries(
     securities: facts.securities,
     fxObservations: facts.fxObservations,
   });
-  await upsertStoredValueHistory(client, {
+  const persisted = await upsertStoredValueHistory(client, {
     userId,
     portfolioId,
     points: derived,
@@ -880,13 +1025,60 @@ export async function loadHistoricalPortfolioValueSeries(
   }
 
   return {
-    baseCurrencyCode: facts.baseCurrencyCode,
-    rangeFrom: range.rangeFrom,
-    rangeTo: range.rangeTo,
-    points,
-    datesTruncated,
-    backfillPending,
+    result: {
+      baseCurrencyCode: facts.baseCurrencyCode,
+      rangeFrom: range.rangeFrom,
+      rangeTo: range.rangeTo,
+      points,
+      datesTruncated,
+      backfillPending,
+    },
+    outcome: {
+      candidateDates: dates.length,
+      missingDates: missingDates.length,
+      datesDerived: toDerive.length,
+      // `written` is the honest progress signal: this call only ever derives
+      // dates that were MISSING, so every resolvable one is an INSERT. A
+      // derived date absent from this count is one the derivation could not
+      // resolve -- never stored, never fabricated (the honesty invariant).
+      rowsPersisted: persisted.written,
+      backfillPending,
+    },
   };
+}
+
+/**
+ * BUG-010 part (b): one bounded derive-and-persist slice for ONE portfolio,
+ * driven by the hourly cron rather than by a page load, so a wiped
+ * `portfolio_value_history` recovers without the owner repeatedly loading
+ * the Overview. Thin wrapper over the SAME `resolveValueHistorySeries` the
+ * read path uses -- same candidate-date resolution, same derivation, same
+ * honesty invariant, same owner scoping (`userId` is supplied by the sweep
+ * from `portfolios.user_id`'s own authoritative column, never a
+ * client-supplied id) -- differing only in the bound and in slicing the
+ * OLDEST missing dates instead of the newest (see `ValueHistoryDeriveEnd`).
+ *
+ * Returns `null` for a portfolio this owner does not have (the same
+ * fail-closed shape every read here uses), never a thrown error for a
+ * missing row.
+ */
+export async function backfillStoredValueHistoryForPortfolio(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  maxDeriveDates: number,
+  now: Date = new Date(),
+): Promise<ValueHistoryBackfillOutcome | null> {
+  if (!Number.isInteger(maxDeriveDates) || maxDeriveDates <= 0) return null;
+  const resolved = await resolveValueHistorySeries(
+    client,
+    userId,
+    portfolioId,
+    now,
+    maxDeriveDates,
+    "oldest",
+  );
+  return resolved ? resolved.outcome : null;
 }
 
 /** Values a SMALL, caller-specific set of dates (Multi-Year's FY-end dates,

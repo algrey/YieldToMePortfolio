@@ -22,8 +22,10 @@ import {
   type HistoricalValueSecurityFact,
 } from "../domain/snapshots/historical-portfolio-value.ts";
 import {
+  backfillStoredValueHistoryForPortfolio,
   loadHistoricalPortfolioValueAtDates,
   loadHistoricalPortfolioValueSeries,
+  MAX_DERIVE_DATES_PER_READ,
 } from "../app/historical-portfolio-value.ts";
 import { loadOwnedIncomeProjection } from "../app/owned-income-projection.ts";
 import { projectMultiYearIncome } from "../domain/dividends/projection.ts";
@@ -1510,11 +1512,15 @@ test("HIST-001/HIST-002 review B1 compute-bound pin: 18 securities x ~1,500 shar
   // HIST-002: the first read on a never-backfilled portfolio is bounded to
   // MAX_DERIVE_DATES_PER_READ candidate dates (newest first) -- never the
   // full 1,500 in one request, the free-tier-CPU-safety point of Layer 2.
-  assert.equal(result.points.length, 400);
+  // BUG-010 lowered that bound from 400 to a value that actually fits the
+  // free plan's 10ms-per-invocation CPU allowance; this pin follows the
+  // constant rather than restating a literal, and `tests/bug-010.test.ts`
+  // owns the assertion about the constant's own value and measured cost.
+  assert.equal(result.points.length, MAX_DERIVE_DATES_PER_READ);
   assert.equal(result.backfillPending, true);
   // Sanity: the derivation actually ran real math, not a short-circuit --
   // every point should have all 18 securities priced (same date grid), and
-  // the served points are the NEWEST 400 dates (dates ascending; the fixture
+  // the served points are the NEWEST dates (dates ascending; the fixture
   // built `dates` ascending too).
   assert.equal(result.points[0]!.pricedSecurityCount, 18);
   assert.equal(
@@ -1524,8 +1530,9 @@ test("HIST-001/HIST-002 review B1 compute-bound pin: 18 securities x ~1,500 shar
   // GENEROUS ceiling (review: "count evaluations or wall-clock with
   // generous ceiling") -- the old O(dates x securities x observations)
   // scan was measured at ~35s-CPU-class cost on real data at this scale;
-  // the indexed fix (now bounded to 400 dates/read on top) should complete
-  // in well under a second on any modern machine. 5s leaves enormous
+  // the indexed fix (bounded to MAX_DERIVE_DATES_PER_READ dates/read on
+  // top) should complete in well under a second on any modern machine. 5s
+  // leaves enormous
   // headroom while still catching a regression back to the quadratic-ish
   // shape.
   assert.ok(
@@ -1542,9 +1549,17 @@ test("HIST-001/HIST-002 review B1 compute-bound pin: 18 securities x ~1,500 shar
   // portfolio (bounded backfill persists across reads) eventually cover
   // every candidate date, newest-first, with NO duplicate/lost dates and
   // zero further derivation once caught up (the stored-only fast path).
+  //
+  // BUG-010: successive READS still each add exactly one bound's worth (the
+  // forward-progress property the outage destroyed), pinned over the first
+  // few reads below. Driving all ~1,500 dates through the now-much-smaller
+  // read bound would be ~150 reads of pure repetition, so the drill then
+  // hands the REMAINING backfill to the cron entry point -- the same
+  // mechanism with a larger bound -- and re-asserts the completed series
+  // through the read path, which is what this test is really about.
   let latest = result;
   let reads = 1;
-  while (latest.backfillPending) {
+  for (let extraRead = 0; extraRead < 3; extraRead += 1) {
     reads += 1;
     const next = await loadHistoricalPortfolioValueSeries(
       client,
@@ -1554,12 +1569,35 @@ test("HIST-001/HIST-002 review B1 compute-bound pin: 18 securities x ~1,500 shar
     );
     assert.ok(next);
     if (!next) return;
+    assert.equal(next.points.length, MAX_DERIVE_DATES_PER_READ * reads);
+    assert.equal(next.backfillPending, true);
     latest = next;
   }
+  let cronTicks = 0;
+  for (;;) {
+    cronTicks += 1;
+    assert.ok(cronTicks < 20, "cron backfill failed to converge");
+    const outcome = await backfillStoredValueHistoryForPortfolio(
+      client,
+      "a",
+      "pa",
+      500,
+      new Date("2026-08-25T00:00:00Z"),
+    );
+    assert.ok(outcome);
+    if (!outcome?.backfillPending) break;
+  }
+  const completed = await loadHistoricalPortfolioValueSeries(
+    client,
+    "a",
+    "pa",
+    new Date("2026-08-25T00:00:00Z"),
+  );
+  assert.ok(completed);
+  if (!completed) return;
+  latest = completed;
   assert.equal(latest.points.length, 1500);
   assert.equal(latest.backfillPending, false);
-  // ceil(1500 / 400) = 4 bounded reads to fully backfill.
-  assert.equal(reads, 4);
   for (const point of latest.points) {
     assert.equal(point.pricedSecurityCount, 18);
     assert.equal(point.completeness, "complete");

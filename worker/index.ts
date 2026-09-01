@@ -24,6 +24,7 @@ import {
   runScheduledDailyPriceCapture,
   runScheduledMarketDataRefresh,
   runScheduledSharesightPriceRefresh,
+  runScheduledValueHistoryBackfill,
 } from "./scheduled-refresh";
 
 // MKT-011A: the intraday-capture sweep's own cron pattern (`wrangler.json`'s
@@ -275,6 +276,35 @@ const worker: ExportedHandler<Env> = {
               calculationSweepResult.snapshotRunsTerminated,
           }
         : { reason: calculationSweepResult.reason },
+    });
+
+    // BUG-010: LAST on the hourly tick, deliberately -- on Workers FREE a
+    // Cron Trigger gets the same 10ms CPU allowance an HTTP request does
+    // (verified against Cloudflare's limits table; see
+    // `app/value-history-backfill-service.ts`), so this bounded backfill
+    // spends what is left of the tick rather than competing with the sweeps
+    // above. Its work is persisted per slice, so even a tick cut short at
+    // the CPU limit leaves durable forward progress.
+    const valueHistoryBackfillResult = await runScheduledValueHistoryBackfill();
+    emitStructuredLog({
+      level: valueHistoryBackfillResult.ok ? "info" : "error",
+      event: "value_history.backfill",
+      action: "value_history.backfill.scheduled",
+      result: valueHistoryBackfillResult.ok ? "success" : "failure",
+      requestId: "scheduled",
+      metadata: valueHistoryBackfillResult.ok
+        ? {
+            portfoliosConsidered:
+              valueHistoryBackfillResult.portfoliosConsidered,
+            portfoliosAdvanced: valueHistoryBackfillResult.portfoliosAdvanced,
+            datesDerived: valueHistoryBackfillResult.datesDerived,
+            rowsPersisted: valueHistoryBackfillResult.rowsPersisted,
+            // Nonzero while a wiped series is still catching up -- the
+            // operational signal that a rebuild is in progress.
+            portfoliosPending: valueHistoryBackfillResult.portfoliosPending,
+            portfoliosFailed: valueHistoryBackfillResult.portfoliosFailed,
+          }
+        : { reason: valueHistoryBackfillResult.reason },
     });
   },
 };
