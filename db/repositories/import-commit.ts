@@ -944,23 +944,63 @@ export function createOwnedImportCommitRepository(
     // (portfolio_id, effective date) pairs fixes that without widening
     // ownership scoping (`r.user_id = ?` and the matching table's
     // `t.user_id`/`d.user_id` predicate are unchanged from before).
+    // Review B1 (BLOCKING, 2026-09-01): the correlated `ledger_high_water`
+    // subquery below can genuinely be NULL now -- a dividend-only commit
+    // into a portfolio with zero `posted`/`reversed` transactions has none
+    // to find. Before this fix `String(row.ledger_high_water)` at this
+    // function's tail turned that NULL into the LITERAL STRING `"null"`,
+    // which is truthy: `app/calculation-executor-service.ts`'s `if
+    // (!highWater)` self-heal (the CALC-003 B4 fix that resolves a real
+    // transaction id, or falls back to the established `''` "no ledger
+    // transaction of its own" sentinel -- see `db/repositories/
+    // market-data.ts`'s identical `manual_override` inserts) never fires,
+    // and `"null"` gets published as `projection_publications.ledger_
+    // high_water` -- a fabricated, non-existent transaction id, which
+    // fails OPEN rather than closed and contradicts `docs/DATA_MODEL.md`.
+    // `COALESCE(..., '')` here makes a genuinely-absent high-water the SAME
+    // falsy sentinel every other "queued with no ledger transaction of its
+    // own" caller already uses, so the existing executor self-heal (or its
+    // documented zero-transaction '' short-circuit) applies unchanged.
+    // Orchestrator ruling F1 (2026-09-01): a dividend receipt cannot make a
+    // stored `portfolio_value_history` row wrong -- that series derives
+    // only from buy/sell/split quantity facts plus prices/FX (`domain/
+    // dividends/shares-held.ts`'s `LedgerQuantityFact`), never from
+    // `dividend_manual_records`. Issuing the ranged DELETE from a
+    // dividend-derived date would destroy valid cached rows and force the
+    // exact HIST-001 re-derivation this task exists to keep off the
+    // request path (worse: a Sharesight CORRECTION carrying an old receipt
+    // date would wipe the series from that date forward on every sync).
+    // `trade_effective_date` is tagged per UNION branch so `trade_range_from`
+    // below aggregates ONLY the transactions branch -- NULL when a
+    // portfolio's rows in this commit are dividend-only, in which case no
+    // DELETE is issued for it at all (see the `affected.map` filter below).
+    // `range_from`/`range_to` (used for the queued run) stay combined
+    // across both kinds -- per `docs/ARCHITECTURE.md`'s CALC-004 entry the
+    // projection pipeline rebuilds the full ledger regardless of its
+    // `range_*` columns, so the wider run range costs nothing.
     const affected = await client.all<Record<string, unknown>>(
       `SELECT combined.portfolio_id AS portfolio_id,
               MIN(combined.effective_date) AS range_from,
               MAX(combined.effective_date) AS range_to,
+              MIN(combined.trade_effective_date) AS trade_range_from,
               COUNT(*) AS committed_count,
-              (SELECT latest.id FROM transactions latest
-               WHERE latest.user_id = ? AND latest.portfolio_id = combined.portfolio_id
-                 AND latest.status IN ('posted', 'reversed')
-               ORDER BY latest.trade_at DESC, latest.id DESC LIMIT 1) AS ledger_high_water
+              COALESCE(
+                (SELECT latest.id FROM transactions latest
+                 WHERE latest.user_id = ? AND latest.portfolio_id = combined.portfolio_id
+                   AND latest.status IN ('posted', 'reversed')
+                 ORDER BY latest.trade_at DESC, latest.id DESC LIMIT 1),
+                ''
+              ) AS ledger_high_water
        FROM (
-         SELECT t.portfolio_id AS portfolio_id, t.local_trade_date AS effective_date
+         SELECT t.portfolio_id AS portfolio_id, t.local_trade_date AS effective_date,
+                t.local_trade_date AS trade_effective_date
          FROM import_rows r
          JOIN transactions t ON t.id = r.commit_transaction_id
            AND t.user_id = r.user_id
          WHERE r.user_id = ? AND r.batch_id = ? AND r.commit_status = 'committed'
          UNION ALL
-         SELECT d.portfolio_id AS portfolio_id, d.payment_date AS effective_date
+         SELECT d.portfolio_id AS portfolio_id, d.payment_date AS effective_date,
+                NULL AS trade_effective_date
          FROM import_rows r
          JOIN dividend_manual_records d ON d.id = r.commit_transaction_id
            AND d.user_id = r.user_id
@@ -985,20 +1025,31 @@ export function createOwnedImportCommitRepository(
       (total, row) => total + Number(row.committed_count),
       0,
     );
-    // HIST-002 review B2 (BLOCKING): the whole point of `affected`'s own
-    // `range_from` (MIN(local_trade_date) across every row this commit
-    // touched for the portfolio) is that it is already the earliest date a
-    // stored value-history row could be wrong from -- ONE ranged DELETE per
-    // affected portfolio, in the SAME atomic batch as the queueing below,
-    // covers the whole commit regardless of how many rows it contained. See
-    // `valueHistoryInvalidationFromDateStatement`'s own doc comment.
-    const statements: SqlStatement[] = affected.map((row) =>
-      valueHistoryInvalidationFromDateStatement(
-        userId,
-        String(row.portfolio_id),
-        String(row.range_from),
-      ),
-    );
+    // HIST-002 review B2 (BLOCKING): the whole point of a trade commit's
+    // own `trade_range_from` (MIN(local_trade_date) across every TRADE row
+    // this commit touched for the portfolio) is that it is already the
+    // earliest date a stored value-history row could be wrong from -- ONE
+    // ranged DELETE per affected portfolio, in the SAME atomic batch as the
+    // queueing below, covers the whole commit regardless of how many rows
+    // it contained. See `valueHistoryInvalidationFromDateStatement`'s own
+    // doc comment.
+    //
+    // Orchestrator ruling F1 (2026-09-01): `trade_range_from` is NULL when
+    // this portfolio's committed rows in this commit are dividend-only (no
+    // TRADE row contributed a date) -- filtered out here, so a
+    // dividend-only commit issues NO value-history DELETE at all (correct:
+    // nothing it committed can make a stored value-history row wrong) and
+    // a mixed commit's DELETE date is unaffected by any dividend dates
+    // outside the trade range.
+    const statements: SqlStatement[] = affected
+      .filter((row) => row.trade_range_from !== null)
+      .map((row) =>
+        valueHistoryInvalidationFromDateStatement(
+          userId,
+          String(row.portfolio_id),
+          String(row.trade_range_from),
+        ),
+      );
     statements.push(
       ...affected.map((row) => {
         const portfolioId = String(row.portfolio_id);

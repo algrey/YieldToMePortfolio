@@ -6,17 +6,30 @@
 // r.commit_transaction_id` -- the dividend commit path writes a
 // `dividend_manual_records.id` into `commit_transaction_id`, which matches
 // no `transactions.id`, so a dividend-only commit's `affected` set was
-// always empty: no `portfolio_value_history` invalidation, no queued
-// `projection`-pipeline `calculation_runs` row, and an empty
-// `rebuildJobIds` returned to the caller (`app/import-accept-service.ts`'s
-// `advanceCalculationRunsForCommit` then never runs). This is the owner's
-// "still had the old values" report on `/income` after a Sharesight sync.
+// always empty: no `projection`-pipeline `calculation_runs` row queued, and
+// an empty `rebuildJobIds` returned to the caller
+// (`app/import-accept-service.ts`'s `advanceCalculationRunsForCommit` then
+// never runs). TASKS.md's PRF-007 Finding A names this queueing gap as a
+// HYPOTHESIS for the owner's "still had the old values" report on
+// `/income` after a Sharesight sync -- review round B3 (2026-09-01):
+// that causal link is NOT established by the code. `/income` reads
+// dividends LIVE (`app/owned-income-projection.ts` ->
+// `app/owned-dividend-history.ts` -> `createDividendManualRecordRepository`
+// `.list(...)`), and neither `db/repositories/projections.ts` nor
+// `domain/snapshots/historical-portfolio-value.ts` /
+// `domain/dividends/shares-held.ts` consume `dividend_manual_records` at
+// all, so a newly queued (or previously missing) projection run cannot
+// change any dividend figure `/income` renders. The queueing gap fixed
+// here is real and worth fixing regardless, but it is NOT confirmed to be
+// the cause of the owner's reported symptom -- that remains open (see
+// TASKS.md's Findings B/C for the still-live 1102 hypotheses).
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { markImportReadyWithContext } from "../app/import-ready-service.ts";
 import { buildImportReviewPreview } from "../app/import-preview.ts";
+import { advanceCalculationRuns } from "../app/calculation-executor-service.ts";
 import {
   createDividendManualRecordRepository,
   createOwnedImportCommitRepository,
@@ -307,7 +320,7 @@ test("PRF-007 Finding A: the OLD transactions-only join drops every row of a div
   );
 });
 
-test("PRF-007 Finding A: a dividend-only commit now queues exactly one projection run per affected portfolio and invalidates value history from the earliest committed receipt date", async () => {
+test("PRF-007 Finding A / Orchestrator ruling F1: a dividend-only commit queues exactly one projection run over the combined receipt range, but issues NO value-history invalidation (a dividend receipt cannot make a stored value-history row wrong)", async () => {
   const database = await migratedDatabase();
   stageRow(
     database,
@@ -332,8 +345,9 @@ test("PRF-007 Finding A: a dividend-only commit now queues exactly one projectio
       localTradeDate: "2026-08-05",
     }),
   );
-  // A stored value-history row on/after the earliest committed receipt date
-  // must be invalidated; one strictly BEFORE it must survive untouched.
+  // F1: neither of these stored value-history rows may be touched by a
+  // dividend-only commit -- one sits on/after the earliest receipt date,
+  // one strictly before it, and BOTH must survive untouched.
   seedValueHistory(
     database,
     "user-a",
@@ -361,19 +375,32 @@ test("PRF-007 Finding A: a dividend-only commit now queues exactly one projectio
 
   const jobs = database
     .prepare(
-      `SELECT portfolio_id, range_from, range_to, pipeline, reason
+      `SELECT portfolio_id, range_from, range_to, pipeline, reason, ledger_high_water_start
        FROM calculation_runs WHERE user_id = 'user-a' AND reason = 'import_commit'`,
     )
     .all() as Array<Record<string, unknown>>;
   assert.equal(jobs.length, 1);
   assert.equal(jobs[0]?.portfolio_id, "portfolio-a");
   assert.equal(jobs[0]?.pipeline, "projection");
+  // F1: the queued run's OWN range_from/range_to still combine both commit
+  // kinds -- per docs/ARCHITECTURE.md's CALC-004 entry the projection
+  // pipeline rebuilds the full ledger regardless of range_*, so the wider
+  // run range costs nothing.
   assert.equal(
     jobs[0]?.range_from,
     "2026-08-05",
     "range_from is the earliest committed receipt's payment date",
   );
   assert.equal(jobs[0]?.range_to, "2026-08-10");
+  // Review B1: portfolio-a has ZERO posted/reversed transactions -- the
+  // correlated ledger_high_water subquery genuinely returns NULL, which
+  // must land as the established '' sentinel, never the literal string
+  // "null".
+  assert.equal(
+    jobs[0]?.ledger_high_water_start,
+    "",
+    "a genuinely absent ledger high-water must be the '' sentinel, never the string \"null\"",
+  );
 
   const remainingHistory = database
     .prepare(
@@ -382,9 +409,68 @@ test("PRF-007 Finding A: a dividend-only commit now queues exactly one projectio
     .all() as Array<{ id: string }>;
   assert.deepEqual(
     remainingHistory.map((row) => row.id),
-    ["pvh-before"],
-    "the >= range_from row was invalidated; the row before it was not",
+    ["pvh-before", "pvh-in-range"],
+    "F1: a dividend-only commit must invalidate NOTHING -- both rows survive untouched",
   );
+});
+
+test("PRF-007 review B1: a dividend-only commit's queued run resolves a REAL transaction id via the existing CALC-003 self-heal once the portfolio has one, and publishes it -- never left as '' or the string \"null\"", async () => {
+  const database = await migratedDatabase();
+  stageRow(database, "user-a", "batch-a", "row-1", 2, dividendRow());
+  const client = createSqliteSqlClient(database);
+  const result = await commitBatch(client, "user-a", "batch-a", "prf-007-b1");
+  assert.equal(result.rebuildJobIds.length, 1);
+  const queuedRunId = result.rebuildJobIds[0]!;
+
+  const queued = database
+    .prepare(
+      `SELECT ledger_high_water_start, status FROM calculation_runs WHERE id = ?`,
+    )
+    .get(queuedRunId) as { ledger_high_water_start: string; status: string };
+  assert.equal(queued.ledger_high_water_start, "");
+  assert.equal(queued.status, "queued");
+
+  // A REAL trade transaction lands in the portfolio AFTER the dividend-only
+  // commit queued its run (e.g. a later Sharesight trade sync, or a manual
+  // ledger post) -- the queued run's own ledger_high_water_start is still
+  // '' at this point; it was never retroactively updated.
+  database
+    .prepare(
+      `INSERT INTO transactions (
+         id, user_id, portfolio_id, portfolio_security_id, type, status,
+         trade_at, local_trade_date, quantity_decimal, unit_price_decimal,
+         currency_code, gross_amount_decimal, fee_amount_decimal, tax_amount_decimal,
+         source_type, created_by_user_id, calculation_version, created_at
+       ) VALUES ('later-trade', 'user-a', 'portfolio-a', 'membership-a', 'buy', 'posted',
+         '2026-08-20T00:00:00.000Z', '2026-08-20', '5', '10', 'AUD', '50', '0', '0',
+         'manual', 'user-a', 1, '2026-08-20T00:00:00.000Z')`,
+    )
+    .run();
+
+  const advanced = await advanceCalculationRuns(
+    { client, now: () => "2026-08-20T01:00:00Z" },
+    { userId: "user-a", portfolioId: "portfolio-a", budget: 100_000 },
+  );
+  assert.equal(advanced.completed, 1);
+
+  const completedRun = database
+    .prepare(
+      `SELECT status, ledger_high_water_start FROM calculation_runs WHERE id = ?`,
+    )
+    .get(queuedRunId) as { status: string; ledger_high_water_start: string };
+  assert.equal(completedRun.status, "completed");
+  assert.equal(
+    completedRun.ledger_high_water_start,
+    "later-trade",
+    "the CALC-003 B4 self-heal resolved and persisted the real transaction id, never left as ''",
+  );
+
+  const publication = database
+    .prepare(
+      `SELECT ledger_high_water FROM projection_publications WHERE user_id = 'user-a' AND portfolio_id = 'portfolio-a'`,
+    )
+    .get() as { ledger_high_water: string } | undefined;
+  assert.equal(publication?.ledger_high_water, "later-trade");
 });
 
 test("PRF-007: an all-duplicate re-sync commit (every row skips) still queues nothing -- correct, unchanged", async () => {
@@ -571,6 +657,20 @@ test("PRF-007: a mixed trade+dividend commit (dividend paid inside the trade's o
       localTradeDate: "2026-08-01",
     }),
   );
+  seedValueHistory(
+    database,
+    "user-a",
+    "portfolio-a",
+    "2026-08-01",
+    "pvh-on-trade-date",
+  );
+  seedValueHistory(
+    database,
+    "user-a",
+    "portfolio-a",
+    "2026-07-31",
+    "pvh-before",
+  );
   const client = createSqliteSqlClient(database);
   const result = await commitBatch(
     client,
@@ -592,11 +692,23 @@ test("PRF-007: a mixed trade+dividend commit (dividend paid inside the trade's o
   assert.equal(jobs[0]?.range_from, "2026-08-01");
   assert.equal(jobs[0]?.range_to, "2026-08-01");
 
+  // F1: the trade's own date drives the value-history invalidation exactly
+  // as it always did -- the coincident dividend date changes nothing here.
+  const remainingHistory = database
+    .prepare(
+      `SELECT id FROM portfolio_value_history WHERE portfolio_id = 'portfolio-a' ORDER BY id`,
+    )
+    .all() as Array<{ id: string }>;
+  assert.deepEqual(
+    remainingHistory.map((row) => row.id),
+    ["pvh-before"],
+  );
+
   const manualRepo = createDividendManualRecordRepository(client);
   assert.equal((await manualRepo.list("user-a", "portfolio-a")).length, 1);
 });
 
-test("PRF-007: a mixed trade+dividend commit widens range_from/range_to to include an out-of-range dividend date (correct, not a regression)", async () => {
+test("PRF-007 / Orchestrator ruling F1: a mixed trade+dividend commit widens the queued run's range_from/range_to to include an out-of-range dividend date, but its value-history DELETE stays pinned to the TRADE's own date, unaffected by the earlier dividend date", async () => {
   const database = await migratedDatabase();
   stageRow(
     database,
@@ -623,6 +735,33 @@ test("PRF-007: a mixed trade+dividend commit widens range_from/range_to to inclu
       localTradeDate: "2026-08-01",
     }),
   );
+  // Three probes around the two dates: strictly before the dividend date
+  // (must survive regardless), BETWEEN the dividend date and the trade
+  // date (F1's critical case -- an old-query-naive fix would wrongly
+  // invalidate this since it falls within the COMBINED range_from/range_to,
+  // but nothing this commit did can make it wrong), and on the trade's own
+  // date (must be invalidated, exactly like any trade commit).
+  seedValueHistory(
+    database,
+    "user-a",
+    "portfolio-a",
+    "2026-07-31",
+    "pvh-before-both",
+  );
+  seedValueHistory(
+    database,
+    "user-a",
+    "portfolio-a",
+    "2026-08-05",
+    "pvh-between-dividend-and-trade",
+  );
+  seedValueHistory(
+    database,
+    "user-a",
+    "portfolio-a",
+    "2026-08-10",
+    "pvh-on-trade-date",
+  );
   const client = createSqliteSqlClient(database);
   const result = await commitBatch(client, "user-a", "batch-a", "prf-007-wide");
   assert.equal(result.rebuildJobIds.length, 1);
@@ -634,10 +773,27 @@ test("PRF-007: a mixed trade+dividend commit widens range_from/range_to to inclu
     )
     .all() as Array<Record<string, unknown>>;
   assert.equal(jobs.length, 1);
+  // The queued run's OWN range still combines both kinds (F1: costs
+  // nothing -- the projection pipeline rebuilds the full ledger regardless
+  // of range_from/range_to).
   assert.equal(
     jobs[0]?.range_from,
     "2026-08-01",
     "range_from now reflects the earlier dividend receipt date, not just the trade date",
   );
   assert.equal(jobs[0]?.range_to, "2026-08-10");
+
+  // F1's actual point: the value-history DELETE must be scoped to the
+  // trade's own date (2026-08-10), never the wider combined range_from
+  // (2026-08-01) -- the row strictly between the two dates must survive.
+  const remainingHistory = database
+    .prepare(
+      `SELECT id FROM portfolio_value_history WHERE portfolio_id = 'portfolio-a' ORDER BY id`,
+    )
+    .all() as Array<{ id: string }>;
+  assert.deepEqual(
+    remainingHistory.map((row) => row.id),
+    ["pvh-before-both", "pvh-between-dividend-and-trade"],
+    "only the row ON/AFTER the trade's own date was invalidated; the dividend's earlier date must never widen the DELETE",
+  );
 });
