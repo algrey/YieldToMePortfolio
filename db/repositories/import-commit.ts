@@ -929,22 +929,50 @@ export function createOwnedImportCommitRepository(
     // pipeline is retired (docs/ARCHITECTURE.md's CALC-005 entry) and no
     // longer queued here, so those columns (and the `portfolios` join that
     // existed only to supply them) are gone too.
+    //
+    // PRF-007: a committed row's `commit_transaction_id` points at EITHER a
+    // `transactions.id` (trade rows, `resolveInput`'s "ledger" kind, written
+    // at the trade commit path below) OR a `dividend_manual_records.id`
+    // (dividend rows, the "dividend" kind, written at the dividend commit
+    // path above) -- never both, and never a row that matches the OTHER
+    // table's id (they are independently `randomUUID()`-generated). The
+    // original single `JOIN transactions` here silently dropped every
+    // dividend-only commit's rows from `affected` (zero portfolios matched),
+    // so a Sharesight payout-only sync queued no invalidation/rebuild at
+    // all -- see the PRF-007 TASKS.md entry's Finding A. Resolving the
+    // affected-portfolio set from the UNION of both commit kinds' own
+    // (portfolio_id, effective date) pairs fixes that without widening
+    // ownership scoping (`r.user_id = ?` and the matching table's
+    // `t.user_id`/`d.user_id` predicate are unchanged from before).
     const affected = await client.all<Record<string, unknown>>(
-      `SELECT t.portfolio_id, MIN(t.local_trade_date) AS range_from,
-              MAX(t.local_trade_date) AS range_to, COUNT(*) AS committed_count,
+      `SELECT combined.portfolio_id AS portfolio_id,
+              MIN(combined.effective_date) AS range_from,
+              MAX(combined.effective_date) AS range_to,
+              COUNT(*) AS committed_count,
               (SELECT latest.id FROM transactions latest
-               WHERE latest.user_id = ? AND latest.portfolio_id = t.portfolio_id
+               WHERE latest.user_id = ? AND latest.portfolio_id = combined.portfolio_id
                  AND latest.status IN ('posted', 'reversed')
                ORDER BY latest.trade_at DESC, latest.id DESC LIMIT 1) AS ledger_high_water
-       FROM import_rows r
-       JOIN transactions t ON t.id = r.commit_transaction_id
-         AND t.user_id = r.user_id
-       WHERE r.user_id = ? AND r.batch_id = ? AND r.commit_status = 'committed'
-       GROUP BY t.portfolio_id
-       ORDER BY t.portfolio_id ASC
+       FROM (
+         SELECT t.portfolio_id AS portfolio_id, t.local_trade_date AS effective_date
+         FROM import_rows r
+         JOIN transactions t ON t.id = r.commit_transaction_id
+           AND t.user_id = r.user_id
+         WHERE r.user_id = ? AND r.batch_id = ? AND r.commit_status = 'committed'
+         UNION ALL
+         SELECT d.portfolio_id AS portfolio_id, d.payment_date AS effective_date
+         FROM import_rows r
+         JOIN dividend_manual_records d ON d.id = r.commit_transaction_id
+           AND d.user_id = r.user_id
+         WHERE r.user_id = ? AND r.batch_id = ? AND r.commit_status = 'committed'
+       ) AS combined
+       GROUP BY combined.portfolio_id
+       ORDER BY combined.portfolio_id ASC
        LIMIT ?`,
       [
         userId,
+        userId,
+        batch.id,
         userId,
         batch.id,
         IMPORT_COMMIT_LIMITS.maxAffectedPortfolios + 1,
