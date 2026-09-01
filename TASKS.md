@@ -1399,7 +1399,9 @@ BUG-010 left a known hazard mitigated rather than solved, and recorded it honest
 
 ### BUG-010 — Value-history cache wipe puts the site in a permanent Error 1102 loop (owner-reported production OUTAGE)
 
-Status: DONE on 2026-09-01, PENDING DEPLOY (escalation worker single pass, commit `f6d3b6f`; reviewer PASS, explicitly cleared as safe to deploy as is, all findings non-blocking). The fix is committed but the production site stays down until it is deployed.
+Status: DONE and DEPLOYED on 2026-09-01 (escalation worker single pass, commit `f6d3b6f`; reviewer PASS, explicitly cleared as safe to deploy as is, all findings non-blocking). Production version `e8840dcb-e282-4d9d-9afb-ee142f50d151`, 2026-09-01T12:54:40Z, 100% traffic. No D1 migration required. Cron triggers deployed successfully in the same session for the first time since 2026-08-28 — see OPS-004, which materially changes this task's recovery assumptions: the cron half was previously inert, and it now genuinely runs.
+
+POST-DEPLOY OBSERVATION STILL OWED: confirm from production logs that an Overview load completes without error 1102 and that the backfill makes forward progress (`datesDerived > 0` with `rowsPersisted > 0`). Until that is observed, this task's recovery is expected but not verified. If the Overview still returns 1102, the first lever is `MAX_DERIVE_DATES_PER_READ` 10 → 5 (~11.7 ms page level) or → 1 (~10.0 ms); no change beyond the constant is needed.
 
 MEASUREMENT CORRECTION — the task's own root-cause arithmetic understated this by ~5x. `docs/ARCHITECTURE.md` §9.2 sized the 400-date bound from a recorded "~0.05 ms/candidate date". Both the worker and the reviewer independently re-measured the current code on a production-shaped fixture (18 securities, ~2,600 candidate dates), isolating app-side CPU by subtracting SQL-client time from wall time. Reviewer's own curve, median of 5:
 
@@ -1435,7 +1437,13 @@ REVIEW FOLLOW-UPS (none blocking; (c) and (e) are the ones with real cost):
 
 ### OPS-004 — Confirm production cron triggers are actually deployed (blocks BUG-010's recovery half)
 
-Status: READY — REQUIRES OWNER ACTION in the Cloudflare account; cannot be resolved from the repository.
+Status: DONE on 2026-09-01. Cron triggers are now genuinely deployed. The owner confirmed they were visible in the dashboard, and `npx wrangler triggers deploy --config dist/server/wrangler.json` then registered both schedules cleanly — `schedule: 0 * * * *` and `schedule: 25,55 * * * *` — with no repeat of error 10072. Recorded alongside production deployment version `e8840dcb-e282-4d9d-9afb-ee142f50d151` (2026-09-01T12:54:40Z, 100% traffic), which shipped PRF-007 and BUG-010; no D1 migration was required (58 `drizzle/*.sql`, all applied 2026-08-28, none added since).
+
+CONSEQUENCE WORTH TRACKING: between 2026-08-28 and this deploy, NO scheduled job had ever run in production — not the hourly market-data/FX refresh, corporate actions, Sharesight price refresh, calculation sweep, or intraday capture. Any performance or freshness reasoning recorded in the PRF series or ARCHITECTURE.md that assumed the cron was running described an intended state, not an observed one. Expect first-run catch-up across all five sweeps plus BUG-010's new value-history backfill. Re-examine rather than trust any prior claim that leaned on cron having run.
+
+Original entry follows.
+
+Status (original): READY — REQUIRES OWNER ACTION in the Cloudflare account; cannot be resolved from the repository.
 
 `TASKS.md`'s 2026-08-28 deployment record states cron triggers failed with Cloudflare API error **10072** (Workers Free allows 5 cron triggers per account, already consumed account-wide), so "the script/bindings deployed but the scheduled refresh is not yet running — re-attempt via `wrangler triggers deploy` after freeing crons or upgrading."
 
