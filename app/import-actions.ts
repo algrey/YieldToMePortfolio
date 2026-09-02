@@ -31,6 +31,7 @@ import { classifyImportRows, DEFAULT_IMPORT_LIMITS } from "../domain/imports";
 import type {
   ImportPreviewDividendReconciliationCandidate,
   ImportPreviewExistingDividendEntry,
+  ImportPreviewExistingTradeEntry,
   ImportPreviewPortfolio,
   ImportPreviewSecurityCandidate,
 } from "../domain/imports/reconciliation";
@@ -70,6 +71,7 @@ async function loadReview(
     existingReceiptRows,
     reconciliationCandidateRows,
     existingSourceReferenceRows,
+    existingTradeRows,
   ] = await Promise.all([
     staging.listRows(userId, batchId),
     staging.listIssues(userId, batchId),
@@ -131,6 +133,21 @@ async function loadReview(
        WHERE user_id = ? AND source_reference IS NOT NULL`,
       [userId],
     ),
+    // BUG-011: every existing POSTED buy/sell transaction (any source
+    // route, any prior batch/import), for the preview-time cross-route
+    // duplicate-trade warning -- see
+    // `ImportPreviewExistingTradeEntry`'s doc comment for scope and why a
+    // `status = 'reversed'` transaction is excluded (it no longer
+    // represents a real economic fact currently in force).
+    client.all<Record<string, unknown>>(
+      `SELECT portfolio_security_id, type, local_trade_date,
+              quantity_decimal, unit_price_decimal
+       FROM transactions
+       WHERE user_id = ? AND status = 'posted' AND type IN ('buy', 'sell')
+         AND portfolio_security_id IS NOT NULL
+         AND quantity_decimal IS NOT NULL AND unit_price_decimal IS NOT NULL`,
+      [userId],
+    ),
   ]);
   const previewPortfolios: ImportPreviewPortfolio[] = portfolios.map(
     (item) => ({
@@ -173,6 +190,14 @@ async function loadReview(
           ? null
           : String(row.dividend_per_share_decimal),
     }));
+  const existingTradeEntries: ImportPreviewExistingTradeEntry[] =
+    existingTradeRows.map((row) => ({
+      portfolioSecurityId: String(row.portfolio_security_id),
+      type: String(row.type) as "buy" | "sell",
+      tradeDate: String(row.local_trade_date),
+      quantityDecimal: String(row.quantity_decimal),
+      priceDecimal: String(row.unit_price_decimal),
+    }));
   const existingDividendSourceReferences = new Set(
     existingSourceReferenceRows.map(
       (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
@@ -205,6 +230,7 @@ async function loadReview(
     portfolios: previewPortfolios,
     securityCandidates,
     existingDividendEntries,
+    existingTradeEntries,
     reconciliationCandidates,
     existingDividendSourceReferences,
     attestedSecurityIds,

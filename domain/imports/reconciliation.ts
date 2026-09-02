@@ -32,6 +32,19 @@ function align(left: Decimal, right: Decimal): [bigint, bigint] {
   ];
 }
 
+// BUG-011: decimal-STRING equality for the trade economic-identity check
+// below -- "100", "100.00", and "100.000" must compare equal (AGENTS.md:
+// never use JavaScript binary floating point for quantity/price
+// comparisons). Reuses `decimal`/`align` rather than a naive string or
+// `Number()` comparison.
+function decimalEqual(left: string, right: string): boolean {
+  const [leftCoefficient, rightCoefficient] = align(
+    decimal(left),
+    decimal(right),
+  );
+  return leftCoefficient === rightCoefficient;
+}
+
 function add(left: string, right: string): string {
   const a = decimal(left);
   const b = decimal(right);
@@ -127,6 +140,12 @@ export type ImportReconciliationIssue = Readonly<{
     | "INCOMPLETE_HISTORY"
     | "ROW_UNSUPPORTED"
     | "DIVIDEND_NEAR_EXISTING_ENTRY"
+    // BUG-011: advisory, non-blocking warning that an incoming buy/sell
+    // row's economic identity (security + type + trade date + quantity +
+    // price) exactly matches an EXISTING posted transaction -- see
+    // `ImportPreviewExistingTradeEntry`'s doc comment for the cross-route
+    // duplicate this guards against and why it is never an automatic skip.
+    | "TRADE_NEAR_EXISTING_ENTRY"
     // DIV-016 part C: advisory, preview-only disclosure of the reconciliation
     // this batch's commit would apply (PROPOSED) or could not safely decide
     // (AMBIGUOUS) -- see `ImportPreviewDividendReconciliationCandidate`'s doc
@@ -159,6 +178,30 @@ export type ImportReconciliationIssue = Readonly<{
 export type ImportPreviewExistingDividendEntry = Readonly<{
   portfolioSecurityId: string;
   paymentDate: string;
+}>;
+
+// BUG-011: an existing POSTED buy/sell transaction (any source route,
+// any prior batch), used to warn the reviewer that an incoming trade row
+// looks like the same real-world trade already on the ledger BEFORE they
+// commit it -- never a hard block. Root cause: Sharesight sync mints
+// `import-fingerprint:sharesight-trade:<id>` and CSV import mints
+// `import-fingerprint:<sha256 of normalized fields>` -- structurally
+// disjoint `source_reference` key spaces that can never collide, so the
+// existing exact-string dedupe (`db/repositories/import-commit.ts`) cannot
+// catch the same real trade arriving twice through different routes. This
+// warning is the recurrence-prevention decision surface: it is
+// DELIBERATELY never an automatic skip, because production evidence found
+// two LEGITIMATE same-security/date/quantity/price trades under distinct
+// Sharesight trade ids (one parcel filled in two lots) -- an auto-skip
+// would have silently dropped a real trade. `type`/`tradeDate` are compared
+// exactly; `quantityDecimal`/`priceDecimal` are decimal STRINGS compared via
+// `decimalEqual`, never binary floating point (AGENTS.md).
+export type ImportPreviewExistingTradeEntry = Readonly<{
+  portfolioSecurityId: string;
+  type: "buy" | "sell";
+  tradeDate: string;
+  quantityDecimal: string;
+  priceDecimal: string;
 }>;
 
 // DIV-016 part C: an existing OWNER-TYPED, non-superseded manual dividend
@@ -228,6 +271,11 @@ export type ImportReconciliationInput = Readonly<{
   // near-duplicate dividend row before commit -- see
   // `ImportPreviewExistingDividendEntry`'s doc comment for scope.
   existingDividendEntries?: readonly ImportPreviewExistingDividendEntry[];
+  // BUG-011: existing posted buy/sell transactions (any source route),
+  // loaded by the caller, used to warn on a probable cross-route duplicate
+  // trade before commit -- see `ImportPreviewExistingTradeEntry`'s doc
+  // comment for scope.
+  existingTradeEntries?: readonly ImportPreviewExistingTradeEntry[];
   // DIV-016 part C: existing manual dividend rows eligible for reconciliation
   // -- see `ImportPreviewDividendReconciliationCandidate`'s doc comment.
   reconciliationCandidates?: readonly ImportPreviewDividendReconciliationCandidate[];
@@ -514,6 +562,53 @@ export function createImportReconciliationPreview(
           physicalRowNumber: row.physicalRowNumber,
           sourceKey: membershipId,
           message: `This dividend is within ${PROXIMITY_WINDOW_DAYS} days of an existing entry already recorded for this security -- check it is not a duplicate before committing.`,
+        });
+      }
+    }
+
+    // BUG-011: an incoming buy/sell row whose ECONOMIC IDENTITY (resolved
+    // security + type + trade date + quantity + price) exactly matches an
+    // EXISTING posted transaction is a possible cross-route duplicate -- the
+    // same real trade already imported by CSV (or Sharesight sync) now
+    // arriving again via the other route, each minting a structurally
+    // disjoint `source_reference` so the exact-string dedupe in
+    // `db/repositories/import-commit.ts` can never catch it. DELIBERATELY
+    // non-blocking (`severity: "warning"`, never affects `ready`): production
+    // evidence found two LEGITIMATE trades under this exact identity (same
+    // security/date/quantity/price, distinct Sharesight ids -- one parcel
+    // filled in two lots), so an automatic skip here would silently drop a
+    // real trade. By this point `membershipId` (when non-null) is always a
+    // genuine, already-resolved portfolio-security id, matching the
+    // DIVIDEND_NEAR_EXISTING_ENTRY precedent just above.
+    if (
+      !isDividend &&
+      !isCash &&
+      membershipId !== null &&
+      (row.normalized.type === "buy" || row.normalized.type === "sell") &&
+      row.normalized.localTradeDate !== null &&
+      row.normalized.sharesOwned !== null &&
+      row.normalized.costPerShare !== null
+    ) {
+      const tradeType = row.normalized.type;
+      const tradeDate = row.normalized.localTradeDate;
+      const quantity = row.normalized.sharesOwned;
+      const price = row.normalized.costPerShare;
+      const matchesExisting = (input.existingTradeEntries ?? []).some(
+        (entry) =>
+          entry.portfolioSecurityId === membershipId &&
+          entry.type === tradeType &&
+          entry.tradeDate === tradeDate &&
+          decimalEqual(entry.quantityDecimal, quantity) &&
+          decimalEqual(entry.priceDecimal, price),
+      );
+      if (matchesExisting) {
+        issues.push({
+          code: "TRADE_NEAR_EXISTING_ENTRY",
+          severity: "warning",
+          rowId: row.id,
+          physicalRowNumber: row.physicalRowNumber,
+          sourceKey: membershipId,
+          message: `This ${tradeType} matches an existing posted transaction for the same security, date, quantity, and price -- check this is not the same trade already imported through a different route before committing.`,
         });
       }
     }

@@ -1,6 +1,7 @@
 import type {
   ImportPreviewDividendReconciliationCandidate,
   ImportPreviewExistingDividendEntry,
+  ImportPreviewExistingTradeEntry,
   ImportPreviewPortfolio,
   ImportPreviewSecurityCandidate,
   ImportReconciliationPreview,
@@ -112,6 +113,10 @@ export function buildImportReviewPreview(input: {
   portfolios: ImportPreviewPortfolio[];
   securityCandidates: ImportPreviewSecurityCandidate[];
   existingDividendEntries?: ImportPreviewExistingDividendEntry[];
+  // BUG-011: existing posted buy/sell transactions, for the preview-time
+  // cross-route duplicate-trade warning -- see
+  // `ImportPreviewExistingTradeEntry`'s doc comment.
+  existingTradeEntries?: ImportPreviewExistingTradeEntry[];
   reconciliationCandidates?: ImportPreviewDividendReconciliationCandidate[];
   existingDividendSourceReferences?: ReadonlySet<string>;
   attestedSecurityIds?: readonly string[];
@@ -133,6 +138,7 @@ export function buildImportReviewPreview(input: {
     portfolios: input.portfolios,
     securityCandidates: input.securityCandidates,
     existingDividendEntries: input.existingDividendEntries,
+    existingTradeEntries: input.existingTradeEntries,
     reconciliationCandidates: input.reconciliationCandidates,
     existingDividendSourceReferences: input.existingDividendSourceReferences,
   });

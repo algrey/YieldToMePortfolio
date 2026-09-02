@@ -286,6 +286,8 @@ Immutable/versioned normalized ledger event:
 
 Convention: `fx_rate_to_base × native amount = portfolio-base amount`.
 
+**`source_reference` identity is per-route, not economic (`BUG-011`, 2026-09-02).** Cross-batch trade dedupe (`db/repositories/import-commit.ts`) is an exact-string lookup of `(user_id, portfolio_id, source_type = 'csv_import', source_reference)` against the unique index on `(portfolio_id, source_type, source_reference)` -- it identifies "the same staged row re-committed," never "the same real-world trade." CSV import and Sharesight sync mint structurally disjoint `source_reference` key spaces for the identical real trade (`import-fingerprint:<sha256 of normalized fields>` vs `import-fingerprint:sharesight-trade:<id>`), so importing the same trade through both routes posts it twice while satisfying the unique index -- there is no schema-level economic-identity constraint (portfolio + security + type + date + quantity + price) and none is added by this fix, because a genuine same-day repeat trade (confirmed in production: two real trades under distinct Sharesight ids sharing identical security/date/quantity/price -- one parcel filled in two lots) must remain insertable. The mitigation is a non-blocking preview-time warning (`TRADE_NEAR_EXISTING_ENTRY`, `docs/CSV_IMPORT_SPEC.md`), not a stricter identity or constraint -- the owner decides, per row, whether a match is the same trade or a genuine repeat.
+
 Checks:
 
 - quantities/prices required for buy/sell;

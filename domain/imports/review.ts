@@ -4,6 +4,7 @@ import {
   createImportReconciliationPreview,
   type ImportPreviewDividendReconciliationCandidate,
   type ImportPreviewExistingDividendEntry,
+  type ImportPreviewExistingTradeEntry,
   type ImportPreviewMappingDecision,
   type ImportPreviewPortfolio,
   type ImportPreviewSecurityCandidate,
@@ -69,6 +70,11 @@ export type ImportReviewEvidence = Readonly<{
   // near-duplicate warning. Optional/defaulted to empty so every existing
   // caller/test keeps working unchanged.
   existingDividendEntries?: readonly ImportPreviewExistingDividendEntry[];
+  // BUG-011: existing posted buy/sell transactions, for the preview-time
+  // cross-route duplicate-trade warning -- same optional/absent-tolerant
+  // scoping as `existingDividendEntries` above (see this module's
+  // `hashedPreview` comment for why it is excluded from `previewVersion`).
+  existingTradeEntries?: readonly ImportPreviewExistingTradeEntry[];
   // DIV-016 part C: existing manual dividend rows eligible for
   // reconciliation, for the preview-only `DIVIDEND_RECONCILIATION_PROPOSED`/
   // `_AMBIGUOUS` disclosure -- same optional/absent-tolerant scoping as
@@ -142,6 +148,7 @@ export function buildImportReview(
     securityCandidates: evidence.securityCandidates,
     decisions: evidence.mappings,
     existingDividendEntries: evidence.existingDividendEntries,
+    existingTradeEntries: evidence.existingTradeEntries,
     reconciliationCandidates: evidence.reconciliationCandidates,
     existingDividendSourceReferences: evidence.existingDividendSourceReferences,
   });
@@ -164,6 +171,14 @@ export function buildImportReview(
   // therefore does not invalidate an already-open preview's version --
   // intended, since the warning is advisory, not a fact that changes what
   // would actually commit.
+  //
+  // BUG-011: `TRADE_NEAR_EXISTING_ENTRY` follows the IDENTICAL rule for the
+  // IDENTICAL reason as `DIVIDEND_NEAR_EXISTING_ENTRY` above --
+  // `evidence.existingTradeEntries` is likewise only supplied by the page/
+  // refresh preview path, so this is advisory DISPLAY evidence only; the
+  // ready-service, security-verification-service, and import-commit
+  // revalidation paths call `buildImportReview` without it and must still
+  // compute the identical `previewVersion`.
   //
   // DIV-016 part C: `DIVIDEND_RECONCILIATION_PROPOSED`/`_AMBIGUOUS`/
   // `_ALREADY_IMPORTED_MANUAL_DUPLICATE` and `proposedReconciliations`
@@ -193,6 +208,7 @@ export function buildImportReview(
     issues: preview.issues.filter(
       (issue) =>
         issue.code !== "DIVIDEND_NEAR_EXISTING_ENTRY" &&
+        issue.code !== "TRADE_NEAR_EXISTING_ENTRY" &&
         issue.code !== "DIVIDEND_RECONCILIATION_PROPOSED" &&
         issue.code !== "DIVIDEND_RECONCILIATION_AMBIGUOUS" &&
         issue.code !== "DIVIDEND_ALREADY_IMPORTED_MANUAL_DUPLICATE",
