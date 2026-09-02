@@ -50,6 +50,18 @@ type ImportActionFailure = {
   message: string;
 };
 
+// BUG-011 review round F2: caps how many existing posted trades the
+// cross-route duplicate-trade check compares against. Exceeding this
+// degrades the check to "not computed" (`TRADE_DUPLICATE_CHECK_UNAVAILABLE`)
+// rather than silently truncating the comparison set -- a truncated set
+// could produce a false NEGATIVE (a real duplicate missed because its match
+// fell outside the truncated rows), indistinguishable from a genuine
+// non-match, which is worse than visibly not checking at all. Scoped to ONE
+// portfolio's posted buy/sell trades (see the query below), so this is a
+// generous bound for an individual investor's account, not a whole-account
+// figure.
+const MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK = 5_000;
+
 export type ImportActionSuccess = { ok: true; review: ImportReviewPreview };
 
 async function loadReview(
@@ -133,21 +145,52 @@ async function loadReview(
        WHERE user_id = ? AND source_reference IS NOT NULL`,
       [userId],
     ),
-    // BUG-011: every existing POSTED buy/sell transaction (any source
-    // route, any prior batch/import), for the preview-time cross-route
-    // duplicate-trade warning -- see
-    // `ImportPreviewExistingTradeEntry`'s doc comment for scope and why a
-    // `status = 'reversed'` transaction is excluded (it no longer
-    // represents a real economic fact currently in force).
-    client.all<Record<string, unknown>>(
-      `SELECT portfolio_security_id, type, local_trade_date,
-              quantity_decimal, unit_price_decimal
-       FROM transactions
-       WHERE user_id = ? AND status = 'posted' AND type IN ('buy', 'sell')
-         AND portfolio_security_id IS NOT NULL
-         AND quantity_decimal IS NOT NULL AND unit_price_decimal IS NOT NULL`,
-      [userId],
-    ),
+    // BUG-011: every existing POSTED buy/sell transaction in the batch's
+    // OWN target portfolio (any source route, any prior batch/import), for
+    // the preview-time cross-route duplicate-trade warning -- see
+    // `ImportPreviewExistingTradeEntry`'s doc comment for scope. Scoped to
+    // `batch.targetPortfolioId` (review round F2): a row can only ever
+    // reconcile against securities/trades in ITS target portfolio (see
+    // `portfolioFor`/`securityKey` in `domain/imports/reconciliation.ts`),
+    // so a cross-portfolio comparison set would be both wasted work and a
+    // needlessly larger read; `targetPortfolioId` is `null` only before the
+    // owner has assigned one, at which point no row can resolve a security
+    // at all and the check can never fire either way, so the query is
+    // skipped outright rather than run unscoped.
+    //
+    // Review round F1: `status = 'posted'` alone is NOT enough to exclude a
+    // reversed trade's ledger footprint -- `ledger.reverse()` re-runs
+    // `prepareLedgerPosting` on the ORIGINAL input, so the COMPENSATING
+    // MIRROR row it inserts is itself `status = 'posted'`, with the same
+    // type/quantity/price/date/`portfolio_security_id` as the reversed
+    // trade, and only `reverses_transaction_id` set to distinguish it. The
+    // reversed trade's own ORIGINAL row is excluded by `status = 'posted'`
+    // (it flips to `'reversed'`), but without also excluding
+    // `reverses_transaction_id IS NOT NULL`, the mirror row would still
+    // match and warn on exactly the reverse-then-re-import remediation this
+    // task's own diagnostic step prescribes.
+    //
+    // Review round F2: `LIMIT MAX + 1` caps the comparison set; the
+    // `length > MAX` check below degrades to `existingTradeEntriesUnavailable`
+    // rather than silently comparing against a truncated (and therefore
+    // unreliable) set.
+    batch.targetPortfolioId === null
+      ? Promise.resolve<Record<string, unknown>[]>([])
+      : client.all<Record<string, unknown>>(
+          `SELECT portfolio_security_id, type, local_trade_date,
+                  quantity_decimal, unit_price_decimal
+           FROM transactions
+           WHERE user_id = ? AND portfolio_id = ? AND status = 'posted'
+             AND type IN ('buy', 'sell') AND reverses_transaction_id IS NULL
+             AND portfolio_security_id IS NOT NULL
+             AND quantity_decimal IS NOT NULL AND unit_price_decimal IS NOT NULL
+           LIMIT ?`,
+          [
+            userId,
+            batch.targetPortfolioId,
+            MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1,
+          ],
+        ),
   ]);
   const previewPortfolios: ImportPreviewPortfolio[] = portfolios.map(
     (item) => ({
@@ -190,14 +233,22 @@ async function loadReview(
           ? null
           : String(row.dividend_per_share_decimal),
     }));
+  // BUG-011 review round F2: exceeding the cap degrades to "not computed"
+  // (an empty comparison set PLUS the visible disclosure issue) rather than
+  // silently comparing against the truncated first `MAX` rows, which could
+  // produce a false negative indistinguishable from a genuine non-match.
+  const existingTradeEntriesUnavailable =
+    existingTradeRows.length > MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK;
   const existingTradeEntries: ImportPreviewExistingTradeEntry[] =
-    existingTradeRows.map((row) => ({
-      portfolioSecurityId: String(row.portfolio_security_id),
-      type: String(row.type) as "buy" | "sell",
-      tradeDate: String(row.local_trade_date),
-      quantityDecimal: String(row.quantity_decimal),
-      priceDecimal: String(row.unit_price_decimal),
-    }));
+    existingTradeEntriesUnavailable
+      ? []
+      : existingTradeRows.map((row) => ({
+          portfolioSecurityId: String(row.portfolio_security_id),
+          type: String(row.type) as "buy" | "sell",
+          tradeDate: String(row.local_trade_date),
+          quantityDecimal: String(row.quantity_decimal),
+          priceDecimal: String(row.unit_price_decimal),
+        }));
   const existingDividendSourceReferences = new Set(
     existingSourceReferenceRows.map(
       (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
@@ -231,6 +282,7 @@ async function loadReview(
     securityCandidates,
     existingDividendEntries,
     existingTradeEntries,
+    existingTradeEntriesUnavailable,
     reconciliationCandidates,
     existingDividendSourceReferences,
     attestedSecurityIds,

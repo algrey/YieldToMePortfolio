@@ -75,6 +75,11 @@ export type ImportReviewEvidence = Readonly<{
   // scoping as `existingDividendEntries` above (see this module's
   // `hashedPreview` comment for why it is excluded from `previewVersion`).
   existingTradeEntries?: readonly ImportPreviewExistingTradeEntry[];
+  // BUG-011 review round F2: mirrors `existingTradeEntries` -- true when the
+  // caller's own comparison-set cap was hit, so the check above was not run
+  // this time (see `ImportReconciliationInput.existingTradeEntriesUnavailable`'s
+  // doc comment). Same optional/absent-tolerant scoping and hash exclusion.
+  existingTradeEntriesUnavailable?: boolean;
   // DIV-016 part C: existing manual dividend rows eligible for
   // reconciliation, for the preview-only `DIVIDEND_RECONCILIATION_PROPOSED`/
   // `_AMBIGUOUS` disclosure -- same optional/absent-tolerant scoping as
@@ -149,6 +154,7 @@ export function buildImportReview(
     decisions: evidence.mappings,
     existingDividendEntries: evidence.existingDividendEntries,
     existingTradeEntries: evidence.existingTradeEntries,
+    existingTradeEntriesUnavailable: evidence.existingTradeEntriesUnavailable,
     reconciliationCandidates: evidence.reconciliationCandidates,
     existingDividendSourceReferences: evidence.existingDividendSourceReferences,
   });
@@ -178,7 +184,9 @@ export function buildImportReview(
   // refresh preview path, so this is advisory DISPLAY evidence only; the
   // ready-service, security-verification-service, and import-commit
   // revalidation paths call `buildImportReview` without it and must still
-  // compute the identical `previewVersion`.
+  // compute the identical `previewVersion`. `TRADE_DUPLICATE_CHECK_UNAVAILABLE`
+  // (review round F2) is excluded for the same reason: it too depends on a
+  // page-only-supplied signal (`evidence.existingTradeEntriesUnavailable`).
   //
   // DIV-016 part C: `DIVIDEND_RECONCILIATION_PROPOSED`/`_AMBIGUOUS`/
   // `_ALREADY_IMPORTED_MANUAL_DUPLICATE` and `proposedReconciliations`
@@ -209,6 +217,7 @@ export function buildImportReview(
       (issue) =>
         issue.code !== "DIVIDEND_NEAR_EXISTING_ENTRY" &&
         issue.code !== "TRADE_NEAR_EXISTING_ENTRY" &&
+        issue.code !== "TRADE_DUPLICATE_CHECK_UNAVAILABLE" &&
         issue.code !== "DIVIDEND_RECONCILIATION_PROPOSED" &&
         issue.code !== "DIVIDEND_RECONCILIATION_AMBIGUOUS" &&
         issue.code !== "DIVIDEND_ALREADY_IMPORTED_MANUAL_DUPLICATE",

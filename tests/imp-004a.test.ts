@@ -19,7 +19,10 @@ import {
   type SqlClient,
 } from "../db/repositories/index.ts";
 import { SUPPORTED_IMPORT_PARSER_VERSION } from "../domain/imports/index.ts";
-import type { ImportPreviewExistingDividendEntry } from "../domain/imports/reconciliation.ts";
+import type {
+  ImportPreviewExistingDividendEntry,
+  ImportPreviewExistingTradeEntry,
+} from "../domain/imports/reconciliation.ts";
 
 async function migratedDatabase(): Promise<DatabaseSync> {
   const database = new DatabaseSync(":memory:");
@@ -177,6 +180,12 @@ async function currentPreviewVersion(
 // the hash included the full, unfiltered preview; after the fix, the
 // warning is excluded from the hash by construction, so the two helpers
 // must always agree.
+//
+// BUG-011 review round F3: also mirrors `loadReview`'s existing-trade query
+// (`existingTradeEntries`), byte-for-byte including the F1 fix
+// (`reverses_transaction_id IS NULL`, excluding a reversal's compensating
+// mirror row) and the F2 fix (scoped to `batch.targetPortfolioId`) -- the
+// real query's wiring had zero DB-level test coverage before this round.
 async function pagePreview(
   client: SqlClient,
   userId: string,
@@ -193,6 +202,7 @@ async function pagePreview(
     candidateRows,
     existingManualRows,
     existingReceiptRows,
+    existingTradeRows,
   ] = await Promise.all([
     staging.listRows(userId, batchId),
     staging.listIssues(userId, batchId),
@@ -215,6 +225,18 @@ async function pagePreview(
        WHERE user_id = ?`,
       [userId],
     ),
+    batch.targetPortfolioId === null
+      ? Promise.resolve<Record<string, unknown>[]>([])
+      : client.all<Record<string, unknown>>(
+          `SELECT portfolio_security_id, type, local_trade_date,
+                  quantity_decimal, unit_price_decimal
+           FROM transactions
+           WHERE user_id = ? AND portfolio_id = ? AND status = 'posted'
+             AND type IN ('buy', 'sell') AND reverses_transaction_id IS NULL
+             AND portfolio_security_id IS NOT NULL
+             AND quantity_decimal IS NOT NULL AND unit_price_decimal IS NOT NULL`,
+          [userId, batch.targetPortfolioId],
+        ),
   ]);
   const existingDividendEntries: ImportPreviewExistingDividendEntry[] = [
     ...existingManualRows,
@@ -223,6 +245,14 @@ async function pagePreview(
     portfolioSecurityId: String(row.portfolio_security_id),
     paymentDate: String(row.payment_date),
   }));
+  const existingTradeEntries: ImportPreviewExistingTradeEntry[] =
+    existingTradeRows.map((row) => ({
+      portfolioSecurityId: String(row.portfolio_security_id),
+      type: String(row.type) as "buy" | "sell",
+      tradeDate: String(row.local_trade_date),
+      quantityDecimal: String(row.quantity_decimal),
+      priceDecimal: String(row.unit_price_decimal),
+    }));
   const review = buildImportReviewPreview({
     batch,
     rows,
@@ -246,6 +276,7 @@ async function pagePreview(
       securityId: row.security_id === null ? null : String(row.security_id),
     })),
     existingDividendEntries,
+    existingTradeEntries,
   });
   return review;
 }
@@ -693,4 +724,177 @@ test("DIV-004 B2: a dividend row near an existing owner-typed manual record warn
     2,
     "the pre-existing owner-typed record and the newly imported one both persist -- the warning never blocked or deduplicated anything at commit time",
   );
+});
+
+// ---------------------------------------------------------------------------
+// BUG-011 review round F1/F3: DB-level coverage for `loadReview`'s
+// existing-trade query wiring (`app/import-actions.ts`), which the original
+// task's pure-function tests (`tests/bug-011.test.ts`) never exercised.
+// ---------------------------------------------------------------------------
+
+test("BUG-011 F1 regression: after a trade is committed then reversed, re-staging the IDENTICAL trade does not raise TRADE_NEAR_EXISTING_ENTRY -- the reversal's compensating mirror row (itself status='posted') must be excluded, not just the original now-'reversed' row", async () => {
+  const database = await migratedDatabase();
+  stageRow(database, "batch-a", "row-1", normalizedRow());
+  const client = createSqliteSqlClient(database);
+  const context = { client, userId: "user-a" };
+
+  const previewVersion = await currentPreviewVersion(
+    client,
+    "user-a",
+    "batch-a",
+  );
+  const ready = await markImportReadyWithContext(context, "batch-a", {
+    expectedVersion: 1,
+    expectedPreviewVersion: previewVersion,
+  });
+  assert.equal(ready.ok, true);
+  if (!ready.ok) return;
+  const readyVersion = ready.review.batch.version;
+
+  const commitRepo = createOwnedImportCommitRepository(client);
+  const validated = await commitRepo.validate("user-a", "batch-a");
+  assert.equal(validated.ok, true);
+  if (!validated.ok) return;
+  const commitInput: ImportCommitInput = {
+    expectedVersion: readyVersion,
+    expectedPreviewVersion: validated.previewVersion,
+    idempotencyKey: "bug-011-f1-commit",
+    confirmation: true,
+    requestId: "bug-011-f1-commit-request",
+  };
+  let commitResult = await commitRepo.commit("user-a", "batch-a", commitInput);
+  for (
+    let attempt = 0;
+    attempt < 10 && (!commitResult.ok || commitResult.status !== "committed");
+    attempt += 1
+  ) {
+    assert.equal(commitResult.ok, true);
+    commitResult = await commitRepo.commit("user-a", "batch-a", commitInput);
+  }
+  assert.equal(commitResult.ok, true);
+  if (!commitResult.ok) return;
+
+  const committedBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    "batch-a",
+  );
+  assert.ok(committedBatch);
+  const reversalRepo = createOwnedImportReversalRepository(client);
+  let reversed = await reversalRepo.reverse("user-a", "batch-a", {
+    expectedVersion: committedBatch!.version,
+    idempotencyKey: "bug-011-f1-reverse",
+    confirmation: true,
+    requestId: "bug-011-f1-reverse-request",
+  });
+  for (
+    let attempt = 0;
+    attempt < 10 && (!reversed.ok || reversed.status !== "reversed");
+    attempt += 1
+  ) {
+    assert.equal(reversed.ok, true);
+    reversed = await reversalRepo.reverse("user-a", "batch-a", {
+      expectedVersion: committedBatch!.version,
+      idempotencyKey: "bug-011-f1-reverse",
+      confirmation: true,
+      requestId: "bug-011-f1-reverse-request",
+    });
+  }
+  assert.equal(reversed.ok, true);
+
+  // Sanity check on the fixture itself: the compensating mirror row this
+  // test guards against genuinely exists, is itself `status = 'posted'`,
+  // and carries `reverses_transaction_id` -- exactly the shape F1's finding
+  // described (`ledger.reverse()` re-runs `prepareLedgerPosting` on the
+  // ORIGINAL input).
+  const mirror = database
+    .prepare(
+      `SELECT status, reverses_transaction_id FROM transactions
+       WHERE user_id = 'user-a' AND portfolio_security_id = 'membership-a'
+         AND reverses_transaction_id IS NOT NULL`,
+    )
+    .get() as { status: string; reverses_transaction_id: string } | undefined;
+  assert.ok(mirror, "expected a compensating reversal mirror row");
+  assert.equal(
+    mirror?.status,
+    "posted",
+    "the mirror row is itself posted -- status='posted' alone cannot exclude it",
+  );
+
+  // Re-stage the IDENTICAL trade in a brand-new batch -- exactly BUG-011's
+  // own step-2 remediation path (reverse the duplicate batch, then
+  // re-import).
+  database.exec(`
+    INSERT INTO import_batches (
+      id, user_id, target_portfolio_id, parser_format, parser_version, filename,
+      byte_size, file_sha256, status, created_at, updated_at, version
+    ) VALUES ('batch-reimport', 'user-a', 'portfolio-a', 'strict-versioned-csv',
+      '${SUPPORTED_IMPORT_PARSER_VERSION}', 'sample2.csv', 100, 'file-b', 'parsed',
+      '2026-08-10T00:00:00Z', '2026-08-10T00:00:00Z', 1);
+  `);
+  stageRow(database, "batch-reimport", "row-reimport", normalizedRow());
+  const reimportReview = await pagePreview(client, "user-a", "batch-reimport");
+  const warning = reimportReview.preview.issues.find(
+    (issue) => issue.code === "TRADE_NEAR_EXISTING_ENTRY",
+  );
+  assert.equal(
+    warning,
+    undefined,
+    "F1: a genuinely reverse-then-re-import trade must not be flagged as a duplicate of its own now-reversed self",
+  );
+});
+
+test("BUG-011 F3 ownership isolation: the existing-trade query never returns another owner's posted trades, even when they share an identical economic identity", async () => {
+  const database = await migratedDatabase();
+  // A second owner's membership, sharing the SAME underlying security as
+  // user-a's `membership-a` (id/economic identity is what must stay
+  // isolated -- reusing the same security is deliberate, to make a leak
+  // observable rather than trivially prevented by an unrelated security).
+  database.exec(`
+    INSERT INTO portfolio_securities (id, user_id, portfolio_id, security_id, source_symbol, source_exchange_alias, source_currency_code, status, created_at, updated_at)
+    VALUES ('membership-c', 'user-b', 'portfolio-b', 'security-a', 'ABC', 'ASX', 'AUD', 'held', '2026-08-10', '2026-08-10');
+    INSERT INTO transactions (
+      id, user_id, portfolio_id, portfolio_security_id, type, status, trade_at,
+      local_trade_date, quantity_decimal, unit_price_decimal, currency_code,
+      fee_amount_decimal, tax_amount_decimal, source_type, created_by_user_id,
+      calculation_version, created_at, version
+    ) VALUES
+      ('txn-user-a', 'user-a', 'portfolio-a', 'membership-a', 'buy', 'posted',
+        '2026-08-01T00:00:00Z', '2026-08-01', '5', '10', 'AUD', '0', '0',
+        'manual', 'user-a', 1, '2026-08-01', 1),
+      ('txn-user-b', 'user-b', 'portfolio-b', 'membership-c', 'buy', 'posted',
+        '2026-08-01T00:00:00Z', '2026-08-01', '5', '10', 'AUD', '0', '0',
+        'manual', 'user-b', 1, '2026-08-01', 1);
+  `);
+  const client = createSqliteSqlClient(database);
+
+  const query = `SELECT portfolio_security_id, type, local_trade_date,
+                        quantity_decimal, unit_price_decimal
+                 FROM transactions
+                 WHERE user_id = ? AND portfolio_id = ? AND status = 'posted'
+                   AND type IN ('buy', 'sell') AND reverses_transaction_id IS NULL
+                   AND portfolio_security_id IS NOT NULL
+                   AND quantity_decimal IS NOT NULL AND unit_price_decimal IS NOT NULL`;
+
+  const forUserA = await client.all<Record<string, unknown>>(query, [
+    "user-a",
+    "portfolio-a",
+  ]);
+  assert.equal(forUserA.length, 1);
+  assert.equal(forUserA[0]?.portfolio_security_id, "membership-a");
+
+  const forUserB = await client.all<Record<string, unknown>>(query, [
+    "user-b",
+    "portfolio-b",
+  ]);
+  assert.equal(forUserB.length, 1);
+  assert.equal(forUserB[0]?.portfolio_security_id, "membership-c");
+
+  // Full-pipeline confirmation: staging the SAME economic identity for
+  // user-a warns from user-a's OWN trade, never user-b's.
+  stageRow(database, "batch-a", "row-1", normalizedRow());
+  const review = await pagePreview(client, "user-a", "batch-a");
+  const warning = review.preview.issues.find(
+    (issue) => issue.code === "TRADE_NEAR_EXISTING_ENTRY",
+  );
+  assert.ok(warning, "expected user-a's own posted trade to raise the warning");
 });

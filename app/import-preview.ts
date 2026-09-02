@@ -117,6 +117,10 @@ export function buildImportReviewPreview(input: {
   // cross-route duplicate-trade warning -- see
   // `ImportPreviewExistingTradeEntry`'s doc comment.
   existingTradeEntries?: ImportPreviewExistingTradeEntry[];
+  // BUG-011 review round F2: true when the caller's own comparison-set cap
+  // was hit -- see `ImportReconciliationInput.existingTradeEntriesUnavailable`'s
+  // doc comment.
+  existingTradeEntriesUnavailable?: boolean;
   reconciliationCandidates?: ImportPreviewDividendReconciliationCandidate[];
   existingDividendSourceReferences?: ReadonlySet<string>;
   attestedSecurityIds?: readonly string[];
@@ -139,6 +143,7 @@ export function buildImportReviewPreview(input: {
     securityCandidates: input.securityCandidates,
     existingDividendEntries: input.existingDividendEntries,
     existingTradeEntries: input.existingTradeEntries,
+    existingTradeEntriesUnavailable: input.existingTradeEntriesUnavailable,
     reconciliationCandidates: input.reconciliationCandidates,
     existingDividendSourceReferences: input.existingDividendSourceReferences,
   });

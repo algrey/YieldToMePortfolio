@@ -37,12 +37,27 @@ function align(left: Decimal, right: Decimal): [bigint, bigint] {
 // never use JavaScript binary floating point for quantity/price
 // comparisons). Reuses `decimal`/`align` rather than a naive string or
 // `Number()` comparison.
+//
+// Review round F4: `decimal()` THROWS on a non-canonical string (a leading
+// `-`/`+`, leading zeros, empty, exponent notation, a trailing `.`, or
+// whitespace) with no try/catch anywhere on this preview path -- one such
+// value reaching here would 500 the whole import review page. Every writer
+// today goes through `prepareLedgerPosting`'s `CANONICAL_DECIMAL` (byte-
+// identical to this file's `DECIMAL`), so this is unreachable in practice,
+// but the blast radius (the entire preview, not just this one advisory
+// warning) is large enough to guard defensively: an unparseable value is
+// treated as NOT EQUAL, never thrown -- the warning silently fails to fire
+// for that one comparison rather than breaking the page.
 function decimalEqual(left: string, right: string): boolean {
-  const [leftCoefficient, rightCoefficient] = align(
-    decimal(left),
-    decimal(right),
-  );
-  return leftCoefficient === rightCoefficient;
+  try {
+    const [leftCoefficient, rightCoefficient] = align(
+      decimal(left),
+      decimal(right),
+    );
+    return leftCoefficient === rightCoefficient;
+  } catch {
+    return false;
+  }
 }
 
 function add(left: string, right: string): string {
@@ -146,6 +161,15 @@ export type ImportReconciliationIssue = Readonly<{
     // `ImportPreviewExistingTradeEntry`'s doc comment for the cross-route
     // duplicate this guards against and why it is never an automatic skip.
     | "TRADE_NEAR_EXISTING_ENTRY"
+    // BUG-011 review round F2: the caller (`app/import-actions.ts`) caps how
+    // many existing posted trades it loads for the check above; exceeding
+    // the cap degrades that check to "not computed" rather than silently
+    // truncating the comparison set (which could produce a false negative
+    // -- a real duplicate missed because its match fell outside the
+    // truncated set -- indistinguishable from a genuine non-match). This
+    // batch-level, no-`rowId` info issue makes that degraded state visible
+    // rather than silent.
+    | "TRADE_DUPLICATE_CHECK_UNAVAILABLE"
     // DIV-016 part C: advisory, preview-only disclosure of the reconciliation
     // this batch's commit would apply (PROPOSED) or could not safely decide
     // (AMBIGUOUS) -- see `ImportPreviewDividendReconciliationCandidate`'s doc
@@ -276,6 +300,12 @@ export type ImportReconciliationInput = Readonly<{
   // trade before commit -- see `ImportPreviewExistingTradeEntry`'s doc
   // comment for scope.
   existingTradeEntries?: readonly ImportPreviewExistingTradeEntry[];
+  // BUG-011 review round F2: true when the caller's existing-trade query hit
+  // its cap and therefore did NOT load the full comparison set -- raises
+  // `TRADE_DUPLICATE_CHECK_UNAVAILABLE` instead of running the (now
+  // unreliable) check. Never both this AND a non-empty `existingTradeEntries`
+  // at once; the caller supplies exactly one signal.
+  existingTradeEntriesUnavailable?: boolean;
   // DIV-016 part C: existing manual dividend rows eligible for reconciliation
   // -- see `ImportPreviewDividendReconciliationCandidate`'s doc comment.
   reconciliationCandidates?: readonly ImportPreviewDividendReconciliationCandidate[];
@@ -377,6 +407,19 @@ export function createImportReconciliationPreview(
   let candidateCreates = 0;
   let skips = 0;
   let unresolved = 0;
+
+  // BUG-011 review round F2: a batch-level (no `rowId`), informational
+  // disclosure that the cross-route trade-duplicate check below could not
+  // run this time -- never a silent skip. See `existingTradeEntriesUnavailable`'s
+  // doc comment for why (the caller's own comparison-set cap).
+  if (input.existingTradeEntriesUnavailable) {
+    issues.push({
+      code: "TRADE_DUPLICATE_CHECK_UNAVAILABLE",
+      severity: "info",
+      message:
+        "This portfolio has too many existing trades to check for cross-route duplicates in this preview; the duplicate-trade warning was not computed this time.",
+    });
+  }
 
   for (const row of [...input.rows].sort((left, right) =>
     left.physicalRowNumber === right.physicalRowNumber

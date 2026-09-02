@@ -361,3 +361,106 @@ test("TRADE_NEAR_EXISTING_ENTRY is advisory display evidence excluded from previ
     "a caller that never supplies existingTradeEntries (ready-service, security-verification-service, commit revalidation) must compute the IDENTICAL previewVersion as the page-preview path that does, or every one of those paths would 409 an affected batch's ready/commit with no recovery path",
   );
 });
+
+// ---------------------------------------------------------------------------
+// Review round F2: the "check unavailable" degrade path.
+// ---------------------------------------------------------------------------
+
+test("F2: existingTradeEntriesUnavailable raises a visible, info-severity TRADE_DUPLICATE_CHECK_UNAVAILABLE disclosure -- the degrade is never silent", () => {
+  const preview = createImportReconciliationPreview({
+    rows: [tradeRow({ rowId: "row-10" })],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    existingTradeEntriesUnavailable: true,
+  });
+  const disclosure = preview.issues.find(
+    (issue) => issue.code === "TRADE_DUPLICATE_CHECK_UNAVAILABLE",
+  );
+  assert.ok(disclosure, "expected a visible disclosure of the degraded check");
+  assert.equal(disclosure!.severity, "info");
+  assert.equal(
+    preview.ready,
+    true,
+    "the degraded-check disclosure must never block readiness",
+  );
+});
+
+test("F2: existingTradeEntriesUnavailable is a batch-level disclosure, not tied to any one row (no rowId)", () => {
+  const preview = createImportReconciliationPreview({
+    rows: [tradeRow({ rowId: "row-11" })],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    existingTradeEntriesUnavailable: true,
+  });
+  const disclosure = preview.issues.find(
+    (issue) => issue.code === "TRADE_DUPLICATE_CHECK_UNAVAILABLE",
+  );
+  assert.equal(disclosure!.rowId, undefined);
+});
+
+test("F2: without existingTradeEntriesUnavailable, no disclosure fires (the normal, non-degraded case)", () => {
+  const preview = createImportReconciliationPreview({
+    rows: [tradeRow({ rowId: "row-12" })],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    existingTradeEntries: [EXISTING_TRADE],
+  });
+  assert.equal(
+    preview.issues.find(
+      (issue) => issue.code === "TRADE_DUPLICATE_CHECK_UNAVAILABLE",
+    ),
+    undefined,
+  );
+});
+
+test("TRADE_DUPLICATE_CHECK_UNAVAILABLE is advisory display evidence excluded from previewVersion hashing, for the same reason as TRADE_NEAR_EXISTING_ENTRY", () => {
+  const withoutSignal = buildImportReview({
+    batch: BATCH,
+    rows: [reviewRow()],
+    issues: [],
+    mappings: [],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+  });
+  const withSignal = buildImportReview({
+    batch: BATCH,
+    rows: [reviewRow()],
+    issues: [],
+    mappings: [],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    existingTradeEntriesUnavailable: true,
+  });
+  assert.ok(
+    withSignal.preview.issues.some(
+      (issue) => issue.code === "TRADE_DUPLICATE_CHECK_UNAVAILABLE",
+    ),
+    "sanity check: the disclosure actually fired",
+  );
+  assert.equal(withoutSignal.previewVersion, withSignal.previewVersion);
+});
+
+// ---------------------------------------------------------------------------
+// Review round F4: decimalEqual must never throw on an unparseable value.
+// ---------------------------------------------------------------------------
+
+test("F4: an unparseable existing-entry decimal (e.g. a corrupt/non-canonical DB value) is treated as NOT equal, never throws -- the preview must not 500", () => {
+  const malformedExisting: ImportPreviewExistingTradeEntry[] = [
+    { ...EXISTING_TRADE, quantityDecimal: "-100" }, // decimal() rejects a leading '-'
+  ];
+  assert.doesNotThrow(() => {
+    const preview = createImportReconciliationPreview({
+      rows: [tradeRow({ rowId: "row-13" })],
+      portfolios: PORTFOLIOS,
+      securityCandidates: SECURITY_CANDIDATES,
+      existingTradeEntries: malformedExisting,
+    });
+    assert.equal(
+      preview.issues.find(
+        (issue) => issue.code === "TRADE_NEAR_EXISTING_ENTRY",
+      ),
+      undefined,
+      "an unparseable comparison value must never be treated as a match",
+    );
+  });
+});
