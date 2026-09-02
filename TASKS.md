@@ -1757,7 +1757,41 @@ FINDING D (CONFIRMED, bounded, cross-referenced — do not fix here). Staging wr
 
 ### BRK-014 — Sharesight sync result must say what is new versus already imported (owner-reported)
 
-Status: READY.
+Status: IN PROGRESS — implemented and committed (`4229d07`) but **REVIEW FAILED with one blocking finding; NOT deployed**. Session ended at this boundary by owner instruction. The fix is small, local, and fully prescribed below — a normal Worker round, not an escalation.
+
+**DO NOT DEPLOY `4229d07` AS IT STANDS.** There is no data-integrity or security risk (additive, read-only, owner-scoped, no migration, cannot alter the ledger), but it prints a factually false sentence for precisely the cases this workstream exists to surface. Shipping it half-right is worse than shipping it complete.
+
+BLOCKING FINDING B1 — the classifier compares FEWER fields than the digest that created the batch, so a whole class of Sharesight corrections reports as "No new rows". `isRowAlreadyImported` compares trade quantity+price and payout cash-total — three fields. `canonicalRowDigestFields`, in the same file, hashes **thirteen** value-bearing fields: `type, symbol, exchange, currency, sharesOwned, costPerShare, commission, localTradeDate, tradeAtUtc, frankingPerShare, totalCashDecimal, totalFrankingDecimal, exchangeRateDecimal`. Reviewer reproduced end to end with real writers (sync → commit → corrected re-sync):
+
+- franking-credits-only correction to a committed payout → `newBatch: true, rowsStaged: 1, newRows: 0` → message reads "No new rows — every staged row already matches an existing record."
+- trade-date-only correction to a committed trade → identical false message.
+
+Both violate this task's own acceptance criterion, and both are the exact incident class BRK-005 finding B1 and BRK-010 finding B2 built the value-bearing digest to surface (B2's comment calls `exchangeRateDecimal` "VALUE-BEARING money data"; `total_franking_decimal` is a stored money column and franking adjustments are routine on this owner's AU dividends). The message is self-contradictory: a new batch was created BECAUSE something changed, then the sentence asserts nothing did.
+
+The design is also internally inconsistent whichever semantics you pick: a quantity/price correction reports "new" while commit will skip it; a franking/date correction reports "already imported" while commit will also skip it — same commit outcome, two different reports.
+
+PRESCRIBED FIX (Orchestrator ruling: widen, do not drop the value comparison — "the remote data differs from what we hold" is the semantics this task asks for):
+
+- payouts (`dividend_manual_records`): add `total_franking_decimal` and `payment_date` to the comparison.
+- trades (`transactions`): add `fee_amount_decimal` (map incoming `commission ?? "0"`, matching `import-commit.ts:~900`), `local_trade_date`, and `type`.
+- decimals through `decimalValuesMatch`; dates and type as exact string equality.
+- add the two regression tests above to `tests/brk-005.test.ts`; update `isRowAlreadyImported`'s doc comment and the `docs/ARCHITECTURE.md` BRK-014 paragraph, both of which currently enumerate only quantity/price/cash-total.
+
+**The 13-field digest list is the reference definition of "value-bearing" for this codebase. Any future "is this unchanged?" predicate must be judged against it.**
+
+CONFIRMED CLEAN by the reviewer (do not re-verify): `loadCommittedSharesightRowValues` is owner-scoped from the authenticated context with no client-supplied owner, index-seeking on both tables (`transactions_owner_portfolio_idempotency_unique`, `dividend_manual_records_owner_portfolio_security_idx`), no BUG-011-style index hijack, and correctly UNBOUNDED — truncation would drop map entries and count an already-imported row as NEW, which is the fail-open direction per the BUG-013 precedent, so no cap is required. Decimal comparison goes through `parseDecimal`/`compareDecimal`, never binary float, and every ambiguous case (null mismatch, throw on `""`/`1.`/`01.5`/undefined key) returns false — conservatively "new". Reused-batch honesty verified with a divergence case the shipped test cannot produce (mutating the stored `normalized_fields_json` between syncs): counts follow the STORED rows, not the fresh transform. Message composition with BRK-015's window sentence is correct. The two changed expected strings are honest flips; all four new tests fail against `4229d07^`.
+
+FOLLOW-UPS TO FILE (none block BRK-014):
+
+- **F1 (material, financial honesty — the load-bearing open item).** Commit-time dedupe is identity-only on BOTH tables, so accepting a batch containing a value-corrected row silently skips it. After B1 is fixed the sync will say "1 new row" and accepting it will change nothing. Documented in ARCHITECTURE.md but has no task entry. Decide whether a corrected row should supersede the committed record (reversal/supersession, never an in-place rewrite — ledger facts are immutable) or be surfaced as an explicit blocked/needs-decision row.
+- **F2 (new cross-surface inconsistency, created today).** For a value-corrected row the preview is SILENT by design: BUG-013's identity-only suppression flags kill `DIVIDEND_MATCHES_EXISTING_ENTRY`/`TRADE_NEAR_EXISTING_ENTRY` on exactly the rows whose identity already exists — which now includes the one row the sync result advertises as new. Plumb the same value-aware comparison into `app/import-actions.ts`'s preview load so already-imported no-op rows are labelled per row AND the suppression flags become value-aware so a correction still warns.
+- **F3 (coverage).** Add the reused-path divergence test the reviewer ran (mutate the stored row's `normalized_fields_json` between syncs). Today's reused test passes identically whether counts come from stored rows or the fresh transform, because an identical fetch makes them equal.
+- **F4 (record only, accepted deviations).** The task's `Tests:` line asked for a rendered-markup assertion; a source pin on `runSync` was used instead because `renderComponent` is a static server render and cannot set client state — justified, and the repo's established remedy. The task preferred deriving counts from the batch's own issues rather than a second query; that route is genuinely unavailable (`DIVIDEND_ALREADY_IMPORTED_MANUAL_DUPLICATE` is raised at preview time, not persisted at staging, and is identity-only anyway). Worth one sentence in the ARCHITECTURE.md entry so the suggestion does not read as ignored.
+- (nit) The ARCHITECTURE.md BRK-014 append sits between BRK-015's "Honest UI" paragraph and BRK-015's own later review-round correction, reading slightly out of chronological order.
+
+Original entry follows.
+
+Status (original): READY.
 
 Owner report verbatim: "It is unclear for the UI as it appears to download everything." Correct observation about a misleading surface, not about the underlying behaviour: the sync deliberately re-fetches the full trade/payout history every time and dedupes at commit on `source_reference` (`db/repositories/import-commit.ts:1242`, `:1333`, plus the `(portfolio_id, source_reference)` unique indexes), so nothing is duplicated. The panel simply never says so.
 
