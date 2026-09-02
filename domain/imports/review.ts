@@ -93,8 +93,15 @@ export type ImportReviewEvidence = Readonly<{
   // DIV-016 part C, review round 1 B1 (BLOCKING): `${portfolioId}::
   // ${sourceReference}` keys already committed to `dividend_manual_records`
   // from a prior import -- see `ImportReconciliationInput`'s own doc
-  // comment for what this excludes from the matching pool and why.
+  // comment for what this excludes from the matching pool and why. BUG-013
+  // review round: also now used to suppress a guaranteed-noise dividend
+  // advisory warning -- see that type's own updated doc comment.
   existingDividendSourceReferences?: ReadonlySet<string>;
+  // BUG-013 review round: the trade analog, used to suppress
+  // `TRADE_NEAR_EXISTING_ENTRY` for a row already bound for an identical
+  // commit-time exact-`source_reference` skip -- see
+  // `ImportReconciliationInput.existingTradeSourceReferences`'s doc comment.
+  existingTradeSourceReferences?: ReadonlySet<string>;
 }>;
 
 export type BuiltImportReview = Readonly<{
@@ -163,6 +170,7 @@ export function buildImportReview(
     existingTradeEntriesUnavailable: evidence.existingTradeEntriesUnavailable,
     reconciliationCandidates: evidence.reconciliationCandidates,
     existingDividendSourceReferences: evidence.existingDividendSourceReferences,
+    existingTradeSourceReferences: evidence.existingTradeSourceReferences,
   });
   // DIV-004 (Orchestrator ruling, review round 1 BLOCKING B1 fix):
   // `DIVIDEND_NEAR_EXISTING_ENTRY` is advisory DISPLAY evidence only -- it

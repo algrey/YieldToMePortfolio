@@ -317,6 +317,93 @@ test("a trade row (not a dividend) never raises DIVIDEND_MATCHES_EXISTING_ENTRY 
 });
 
 // ---------------------------------------------------------------------------
+// Review round, RULING 1 (the most material follow-up): a row already bound
+// for a commit-time exact-`source_reference` SKIP needs no advisory warning
+// at all -- it is guaranteed noise, since commit will discard the row
+// regardless of what it economically matches. Measured on an owner-shaped
+// fixture (18 securities x 7 quarterly payouts = 126 already-committed
+// records, re-staged as a full re-sync): 0 warnings before this fix, 252
+// after (DIVIDEND_NEAR_EXISTING_ENTRY + DIVIDEND_MATCHES_EXISTING_ENTRY, one
+// of EACH on every row). Cross-route detection must be UNWEAKENED: a
+// genuinely new row that matches an existing record by economics (a
+// DIFFERENT computed fingerprint/source_reference -- the whole reason this
+// task exists) still warns.
+// ---------------------------------------------------------------------------
+
+test("a row already bound for a commit-time exact source_reference skip raises NEITHER dividend advisory warning, even though it also matches an existing record economically", () => {
+  const row = dividendRow({ rowId: "row-19", shape: "totals" });
+  const preview = createImportReconciliationPreview({
+    rows: [row],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    existingDividendEntries: [EXISTING_PER_SHARE],
+    // This row's own commit-time source_reference (`portfolio-1::import-
+    // fingerprint:${row.fingerprint}`, per `sourceReferenceKey` in
+    // reconciliation.ts) is ALREADY present -- exactly what an already-
+    // fully-committed full re-sync looks like.
+    existingDividendSourceReferences: new Set([
+      `portfolio-1::import-fingerprint:${row.fingerprint}`,
+    ]),
+  });
+  assert.equal(
+    preview.issues.find(
+      (issue) => issue.code === "DIVIDEND_MATCHES_EXISTING_ENTRY",
+    ),
+    undefined,
+    "the economic-identity check must be suppressed for a row commit will skip anyway",
+  );
+  assert.equal(
+    preview.issues.find(
+      (issue) => issue.code === "DIVIDEND_NEAR_EXISTING_ENTRY",
+    ),
+    undefined,
+    "DIV-004's proximity check must ALSO be suppressed for the same row",
+  );
+  assert.equal(preview.ready, true);
+});
+
+test("a row whose fingerprint is NOT in existingDividendSourceReferences still raises both warnings -- suppression is scoped to THIS row's own identity, not a blanket disable", () => {
+  const row = dividendRow({ rowId: "row-20", shape: "totals" });
+  const preview = createImportReconciliationPreview({
+    rows: [row],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    existingDividendEntries: [EXISTING_PER_SHARE],
+    // A DIFFERENT fingerprint entirely -- the genuinely cross-route case
+    // this task exists to detect must stay fully detected.
+    existingDividendSourceReferences: new Set([
+      "portfolio-1::import-fingerprint:some-other-row-fingerprint",
+    ]),
+  });
+  assert.ok(
+    preview.issues.some(
+      (issue) => issue.code === "DIVIDEND_MATCHES_EXISTING_ENTRY",
+    ),
+    "cross-route detection must be unweakened",
+  );
+  assert.ok(
+    preview.issues.some(
+      (issue) => issue.code === "DIVIDEND_NEAR_EXISTING_ENTRY",
+    ),
+  );
+});
+
+test("with no existingDividendSourceReferences supplied at all (the ready-service/commit-revalidation shape), both warnings behave exactly as before this ruling", () => {
+  const row = dividendRow({ rowId: "row-21", shape: "totals" });
+  const preview = createImportReconciliationPreview({
+    rows: [row],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    existingDividendEntries: [EXISTING_PER_SHARE],
+  });
+  assert.ok(
+    preview.issues.some(
+      (issue) => issue.code === "DIVIDEND_MATCHES_EXISTING_ENTRY",
+    ),
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Franking/FX discrepancy: surfaced, never used to decide the match.
 // ---------------------------------------------------------------------------
 
@@ -440,8 +527,19 @@ test("an incoming per-share row missing frankingPerShare entirely (as a 17-colum
 });
 
 test("an unparseable existing-entry cash total (e.g. a corrupt/non-canonical DB value) is treated as NOT matching, never throws", () => {
+  // Review round (ruling 3) CORRECTION: the original fixture here was
+  // "-2.50" with a comment claiming "leading '-' rejected" -- that was
+  // FALSE. `domain/calculations/decimal.ts`'s `DECIMAL_PATTERN` is
+  // `/^-?(0|[1-9]\d*)(?:\.(\d+))?$/` and accepts a leading '-' (only
+  // negative zero is separately rejected); the test passed solely because
+  // -2.50 vs 2.50 falls outside `cashTotalsWithinTolerance`'s 1% band, which
+  // is a TRUE NEGATIVE via the tolerance check, not the `catch` branch --
+  // `safeCashTotalsWithinTolerance`'s guard had zero coverage from this
+  // test, before or after this fix (confirmed: it passes identically
+  // against the pre-fix commit too). "1." genuinely fails the pattern (a
+  // trailing '.' with no fraction digit) and reaches the `catch`.
   const malformedExisting: ImportPreviewExistingDividendEntry[] = [
-    { ...EXISTING_PER_SHARE, cashTotalDecimal: "-2.50" }, // leading '-' rejected
+    { ...EXISTING_PER_SHARE, cashTotalDecimal: "1." },
   ];
   assert.doesNotThrow(() => {
     const preview = createImportReconciliationPreview({
@@ -651,17 +749,26 @@ test("source pin: loadReview's dividend_manual_records query is widened off impo
   );
   // The confirmed root-cause filter fix: the WIDENED query selects the
   // amount/franking/currency columns and is scoped ONLY by
-  // superseded_by_record_id, with no import_batch_id restriction.
+  // superseded_by_record_id, with no import_batch_id restriction. The
+  // LIMIT/bind pair is checked in the SAME regex as its own query's SQL
+  // text (review round, ruling 4) -- the manual and receipt queries bind an
+  // IDENTICAL-looking `[userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK
+  // + 1]` array, so a regex matching that bind alone (anywhere in the file)
+  // would still pass if ONE of the two queries were mutated to a bare `MAX`
+  // (the exact off-by-one BUG-011's F2 exists to prevent) as long as the
+  // OTHER, untouched query's occurrence still satisfied it -- silently
+  // catching nothing. Anchoring the bind to its OWN query's preceding SQL
+  // makes each pin fail independently.
   assert.match(
     source,
-    /SELECT portfolio_security_id, payment_date, shares_decimal,\s*\n\s*dividend_per_share_decimal, franking_credit_per_share_decimal,\s*\n\s*total_cash_decimal, total_franking_decimal, currency_code\s*\n\s*FROM dividend_manual_records\s*\n\s*WHERE user_id = \? AND superseded_by_record_id IS NULL\s*\n\s*LIMIT \?/,
+    /SELECT portfolio_security_id, payment_date, shares_decimal,\s*\n\s*dividend_per_share_decimal, franking_credit_per_share_decimal,\s*\n\s*total_cash_decimal, total_franking_decimal, currency_code\s*\n\s*FROM dividend_manual_records\s*\n\s*WHERE user_id = \? AND superseded_by_record_id IS NULL\s*\n\s*LIMIT \?`,\s*\n\s*\[userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK \+ 1\],/,
   );
-  // The cap: LIMIT MAX + 1, and the cap/degrade DECISION delegated to the
-  // shared, directly tested pure function, using the SAME constant.
   assert.match(
     source,
-    /\[userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK \+ 1\]/,
+    /SELECT portfolio_security_id, payment_date FROM dividend_receipts\s*\n\s*WHERE user_id = \?\s*\n\s*LIMIT \?`,\s*\n\s*\[userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK \+ 1\],/,
   );
+  // The cap/degrade DECISION delegated to the shared, directly tested pure
+  // function, using the SAME constant, for EACH query's own rows array.
   assert.match(
     source,
     /capExistingDividendRows\(\s*existingManualRows,\s*MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,\s*\)/,

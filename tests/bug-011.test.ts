@@ -259,6 +259,75 @@ test("a matching entry of the OPPOSITE type (buy vs sell) does not warn -- type 
   );
 });
 
+// ---------------------------------------------------------------------------
+// BUG-013 review round, RULING 1 (the most material follow-up, applied
+// RETROACTIVELY to this ALREADY-LIVE check): a row already bound for a
+// commit-time exact-`source_reference` SKIP raises no warning at all -- it
+// is guaranteed noise, since commit will discard the row regardless of what
+// it economically matches. The 2026-09-01 production batch staged 226
+// trades and committed 0 (a full re-sync of an already-fully-committed
+// account); every one of those 226 would have warned under the pre-fix
+// behaviour. Cross-route detection must be UNWEAKENED: a genuinely new row
+// that matches an existing record by economics (a DIFFERENT computed
+// fingerprint/source_reference -- the whole reason this check exists) still
+// warns.
+// ---------------------------------------------------------------------------
+
+test("a trade row already bound for a commit-time exact source_reference skip raises no warning, even though it also matches an existing transaction economically", () => {
+  const row = tradeRow({ rowId: "row-30" });
+  const preview = createImportReconciliationPreview({
+    rows: [row],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    existingTradeEntries: [EXISTING_TRADE],
+    // This row's own commit-time source_reference (`portfolio-1::import-
+    // fingerprint:${row.fingerprint}`, per `sourceReferenceKey` in
+    // reconciliation.ts) is ALREADY present -- exactly what an already-
+    // fully-committed full re-sync looks like.
+    existingTradeSourceReferences: new Set([
+      `portfolio-1::import-fingerprint:${row.fingerprint}`,
+    ]),
+  });
+  assert.equal(
+    preview.issues.find((issue) => issue.code === "TRADE_NEAR_EXISTING_ENTRY"),
+    undefined,
+    "the check must be suppressed for a row commit will skip anyway",
+  );
+  assert.equal(preview.ready, true);
+});
+
+test("a trade row whose fingerprint is NOT in existingTradeSourceReferences still raises the warning -- suppression is scoped to THIS row's own identity, not a blanket disable", () => {
+  const row = tradeRow({ rowId: "row-31" });
+  const preview = createImportReconciliationPreview({
+    rows: [row],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    existingTradeEntries: [EXISTING_TRADE],
+    // A DIFFERENT fingerprint entirely -- the genuinely cross-route case
+    // this check exists to detect must stay fully detected.
+    existingTradeSourceReferences: new Set([
+      "portfolio-1::import-fingerprint:some-other-row-fingerprint",
+    ]),
+  });
+  assert.ok(
+    preview.issues.some((issue) => issue.code === "TRADE_NEAR_EXISTING_ENTRY"),
+    "cross-route detection must be unweakened",
+  );
+});
+
+test("with no existingTradeSourceReferences supplied at all (the ready-service/commit-revalidation shape), the warning behaves exactly as before this ruling", () => {
+  const row = tradeRow({ rowId: "row-32" });
+  const preview = createImportReconciliationPreview({
+    rows: [row],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    existingTradeEntries: [EXISTING_TRADE],
+  });
+  assert.ok(
+    preview.issues.some((issue) => issue.code === "TRADE_NEAR_EXISTING_ENTRY"),
+  );
+});
+
 test("a dividend row never raises TRADE_NEAR_EXISTING_ENTRY even against a matching existingTradeEntries entry", () => {
   const preview = createImportReconciliationPreview({
     rows: [

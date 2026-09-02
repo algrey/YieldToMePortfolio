@@ -16,7 +16,10 @@ import {
   capExistingDividendRows,
   MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
 } from "../app/import-dividend-duplicate-check.ts";
-import { computeDividendCashTotal } from "../domain/imports/dividend-reconciliation.ts";
+// BUG-013 review round (ruling 2): the exported, exception-safe wrapper --
+// mirrors `app/import-actions.ts`'s own fix, since this mirror faithfully
+// copied that call site's unguarded form before the fix.
+import { safeComputeDividendCashTotal } from "../domain/imports/reconciliation.ts";
 import {
   createOwnedImportCommitRepository,
   createOwnedImportMappingDecisionRepository,
@@ -231,6 +234,8 @@ async function pagePreview(
     candidateRows,
     existingManualRows,
     existingReceiptRows,
+    existingSourceReferenceRows,
+    existingTradeSourceReferenceRows,
     existingTradeRows,
   ] = await Promise.all([
     staging.listRows(userId, batchId),
@@ -258,6 +263,20 @@ async function pagePreview(
        WHERE user_id = ?
        LIMIT ?`,
       [userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1],
+    ),
+    // BUG-013 review round (ruling 1): mirrors `loadReview`'s
+    // `existingSourceReferenceRows`/`existingTradeSourceReferenceRows`
+    // queries, used to suppress a guaranteed-noise advisory warning for a
+    // row already bound for an identical commit-time exact-match skip.
+    client.all<Record<string, unknown>>(
+      `SELECT portfolio_id, source_reference FROM dividend_manual_records
+       WHERE user_id = ? AND source_reference IS NOT NULL`,
+      [userId],
+    ),
+    client.all<Record<string, unknown>>(
+      `SELECT portfolio_id, source_reference FROM transactions
+       WHERE user_id = ? AND source_type = 'csv_import' AND source_reference IS NOT NULL`,
+      [userId],
     ),
     client.all<Record<string, unknown>>(
       `SELECT portfolio_security_id, type, local_trade_date,
@@ -289,7 +308,7 @@ async function pagePreview(
           ...cappedManualDividendRows.entries.map((row) => ({
             portfolioSecurityId: String(row.portfolio_security_id),
             paymentDate: String(row.payment_date),
-            cashTotalDecimal: computeDividendCashTotal({
+            cashTotalDecimal: safeComputeDividendCashTotal({
               totalCashDecimal:
                 row.total_cash_decimal === null
                   ? null
@@ -301,7 +320,7 @@ async function pagePreview(
                   ? null
                   : String(row.dividend_per_share_decimal),
             }),
-            frankingTotalDecimal: computeDividendCashTotal({
+            frankingTotalDecimal: safeComputeDividendCashTotal({
               totalCashDecimal:
                 row.total_franking_decimal === null
                   ? null
@@ -333,6 +352,16 @@ async function pagePreview(
       quantityDecimal: String(row.quantity_decimal),
       priceDecimal: String(row.unit_price_decimal),
     }));
+  const existingDividendSourceReferences = new Set(
+    existingSourceReferenceRows.map(
+      (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
+    ),
+  );
+  const existingTradeSourceReferences = new Set(
+    existingTradeSourceReferenceRows.map(
+      (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
+    ),
+  );
   const review = buildImportReviewPreview({
     batch,
     rows,
@@ -357,8 +386,10 @@ async function pagePreview(
     })),
     existingDividendEntries,
     existingDividendEntriesUnavailable,
+    existingDividendSourceReferences,
     existingTradeEntries,
     existingTradeEntriesUnavailable: cappedTradeRows.unavailable,
+    existingTradeSourceReferences,
   });
   return review;
 }
@@ -1083,9 +1114,50 @@ test("BUG-013 filter fix: a previously import-sourced dividend record (import_ba
 });
 
 test("BUG-013 ownership isolation: the widened dividend query never returns another owner's dividend records, even when they share an identical economic identity", async () => {
-  const database = await migratedDatabase();
+  // Review round (ruling 5): re-typing the widened SELECT a THIRD time (this
+  // file's `pagePreview` mirror already carries it once, matching
+  // `app/import-actions.ts` once) added a third copy to drift out of sync,
+  // and only ever checked the POSITIVE case (user-a warns) -- which a leaked
+  // cross-user match could equally satisfy, so it never actually proved
+  // isolation. Rewritten to go entirely through `pagePreview` (the SAME
+  // widened-query mirror `tests/bug-013.test.ts`'s source pin verifies
+  // against production) and to assert the NEGATIVE first: with ONLY
+  // user-b's identical-economics record in the database, user-a's own
+  // staged row raises nothing.
+  const negativeDatabase = await migratedDatabase();
   // A second owner's membership, reusing the SAME underlying security as
   // user-a's `membership-a` (economic identity is what must stay isolated).
+  negativeDatabase.exec(`
+    INSERT INTO portfolio_securities (id, user_id, portfolio_id, security_id, source_symbol, source_exchange_alias, source_currency_code, status, created_at, updated_at)
+    VALUES ('membership-c', 'user-b', 'portfolio-b', 'security-a', 'ABC', 'ASX', 'AUD', 'held', '2026-08-10', '2026-08-10');
+    INSERT INTO dividend_manual_records (
+      id, user_id, portfolio_id, portfolio_security_id, payment_date,
+      shares_decimal, dividend_per_share_decimal, franking_credit_per_share_decimal,
+      import_batch_id, source_reference, created_at, updated_at, version
+    ) VALUES ('existing-user-b', 'user-b', 'portfolio-b', 'membership-c', '2026-08-05',
+      '5', '0.50', NULL, 'prior-batch-b', 'import-fingerprint:prior-b', '2026-08-01', '2026-08-01', 1);
+  `);
+  const negativeClient = createSqliteSqlClient(negativeDatabase);
+  stageRow(
+    negativeDatabase,
+    "batch-a",
+    "row-div",
+    dividendNormalizedRow("2026-08-05", "0.50"),
+  );
+  const negativeReview = await pagePreview(negativeClient, "user-a", "batch-a");
+  assert.equal(
+    negativeReview.preview.issues.find(
+      (issue) => issue.code === "DIVIDEND_MATCHES_EXISTING_ENTRY",
+    ),
+    undefined,
+    "user-b's identical-economics existing record alone must never leak a warning to user-a -- this is the actual isolation proof, not merely a sanity check that the positive case still works",
+  );
+
+  // Positive: with user-a's OWN matching record ALSO present (alongside
+  // user-b's), the warning fires -- proves the check still works when the
+  // correct owner's record genuinely exists, so the negative above is not
+  // trivially true because the check is broken outright.
+  const database = await migratedDatabase();
   database.exec(`
     INSERT INTO portfolio_securities (id, user_id, portfolio_id, security_id, source_symbol, source_exchange_alias, source_currency_code, status, created_at, updated_at)
     VALUES ('membership-c', 'user-b', 'portfolio-b', 'security-a', 'ABC', 'ASX', 'AUD', 'held', '2026-08-10', '2026-08-10');
@@ -1100,30 +1172,6 @@ test("BUG-013 ownership isolation: the widened dividend query never returns anot
         '5', '0.50', NULL, 'prior-batch-b', 'import-fingerprint:prior-b', '2026-08-01', '2026-08-01', 1);
   `);
   const client = createSqliteSqlClient(database);
-
-  const query = `SELECT portfolio_security_id, payment_date, shares_decimal,
-                        dividend_per_share_decimal, franking_credit_per_share_decimal,
-                        total_cash_decimal, total_franking_decimal, currency_code
-                 FROM dividend_manual_records
-                 WHERE user_id = ? AND superseded_by_record_id IS NULL
-                 LIMIT ?`;
-
-  const forUserA = await client.all<Record<string, unknown>>(query, [
-    "user-a",
-    MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1,
-  ]);
-  assert.equal(forUserA.length, 1);
-  assert.equal(forUserA[0]?.portfolio_security_id, "membership-a");
-
-  const forUserB = await client.all<Record<string, unknown>>(query, [
-    "user-b",
-    MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1,
-  ]);
-  assert.equal(forUserB.length, 1);
-  assert.equal(forUserB[0]?.portfolio_security_id, "membership-c");
-
-  // Full-pipeline confirmation: staging the SAME economic identity for
-  // user-a warns from user-a's OWN existing record, never user-b's.
   stageRow(
     database,
     "batch-a",
@@ -1137,5 +1185,115 @@ test("BUG-013 ownership isolation: the widened dividend query never returns anot
   assert.ok(
     warning,
     "expected user-a's own existing dividend record to raise the warning",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// BUG-013 review round, RULING 1: DB-level proof that a row already bound
+// for a commit-time exact source_reference SKIP (a full re-sync of an
+// already-fully-committed batch) raises NEITHER dividend advisory warning
+// via the real query wiring, end to end -- not just the pure function.
+// ---------------------------------------------------------------------------
+
+test("BUG-013 review round: a dividend row that will be skipped at commit (its own source_reference already committed) raises no advisory warning through the real query wiring, though a genuinely different fingerprint still warns", async () => {
+  const database = await migratedDatabase();
+  // `stageRow` hardcodes `normalized_fingerprint = 'fingerprint-<rowId>'`
+  // (see this file's own helper), so this row's commit-time source_reference
+  // is EXACTLY `import-fingerprint:fingerprint-row-div` -- an existing
+  // record under that identical source_reference simulates a full re-sync
+  // of an already-committed batch.
+  database.exec(`
+    INSERT INTO dividend_manual_records (
+      id, user_id, portfolio_id, portfolio_security_id, payment_date,
+      shares_decimal, dividend_per_share_decimal, franking_credit_per_share_decimal,
+      import_batch_id, source_reference, created_at, updated_at, version
+    ) VALUES ('existing-same-route', 'user-a', 'portfolio-a', 'membership-a', '2026-08-05',
+      '5', '0.50', NULL, 'prior-batch-a', 'import-fingerprint:fingerprint-row-div', '2026-08-01', '2026-08-01', 1);
+  `);
+  stageRow(
+    database,
+    "batch-a",
+    "row-div",
+    dividendNormalizedRow("2026-08-05", "0.50"),
+  );
+  const client = createSqliteSqlClient(database);
+  const review = await pagePreview(client, "user-a", "batch-a");
+  assert.equal(
+    review.preview.issues.find(
+      (issue) => issue.code === "DIVIDEND_MATCHES_EXISTING_ENTRY",
+    ),
+    undefined,
+    "this row's own source_reference is already committed -- commit will skip it, so the warning is guaranteed noise",
+  );
+  assert.equal(
+    review.preview.issues.find(
+      (issue) => issue.code === "DIVIDEND_NEAR_EXISTING_ENTRY",
+    ),
+    undefined,
+    "DIV-004's proximity check must ALSO be suppressed for the same row",
+  );
+
+  // A SECOND batch staging the SAME economics but resolving to a genuinely
+  // DIFFERENT computed fingerprint (a different source row -- the actual
+  // cross-route scenario) must still warn. Raw-SQL batch insert, matching
+  // this file's own established `batch-reimport` fixture precedent above.
+  database.exec(`
+    INSERT INTO import_batches (
+      id, user_id, target_portfolio_id, parser_format, parser_version, filename,
+      byte_size, file_sha256, status, created_at, updated_at, version
+    ) VALUES ('batch-cross-route', 'user-a', 'portfolio-a', 'strict-versioned-csv',
+      '${SUPPORTED_IMPORT_PARSER_VERSION}', 'cross.csv', 100, 'file-cross', 'parsed',
+      '2026-08-10T00:00:00Z', '2026-08-10T00:00:00Z', 1);
+  `);
+  database
+    .prepare(
+      `INSERT INTO import_rows (
+         id, user_id, batch_id, physical_row_number, row_class,
+         original_fields_json, normalized_fields_json, normalized_fingerprint,
+         validation_status, target_portfolio_id, commit_status, created_at, updated_at, version
+       ) VALUES (?, 'user-a', 'batch-cross-route', 2, 'transaction', '[]', ?, 'a-genuinely-different-fingerprint', 'valid',
+         NULL, 'staged', '2026-08-10', '2026-08-10', 1)`,
+    )
+    .run(
+      "row-div-cross",
+      JSON.stringify(dividendNormalizedRow("2026-08-05", "0.50")),
+    );
+  const crossRouteReview = await pagePreview(
+    client,
+    "user-a",
+    "batch-cross-route",
+  );
+  assert.ok(
+    crossRouteReview.preview.issues.some(
+      (issue) => issue.code === "DIVIDEND_MATCHES_EXISTING_ENTRY",
+    ),
+    "a genuinely different fingerprint is NOT bound for a commit-time skip and must still warn",
+  );
+});
+
+test("BUG-013 review round: a trade row that will be skipped at commit (its own source_reference already committed) raises no TRADE_NEAR_EXISTING_ENTRY through the real query wiring -- the same property BUG-011's already-live check has had since it shipped", async () => {
+  const database = await migratedDatabase();
+  // `stageRow` hardcodes `normalized_fingerprint = 'fingerprint-<rowId>'`,
+  // so this row's commit-time source_reference is EXACTLY
+  // `import-fingerprint:fingerprint-row-1`.
+  database.exec(`
+    INSERT INTO transactions (
+      id, user_id, portfolio_id, portfolio_security_id, type, status, trade_at,
+      local_trade_date, quantity_decimal, unit_price_decimal, currency_code,
+      fee_amount_decimal, tax_amount_decimal, source_type, source_reference,
+      created_by_user_id, calculation_version, created_at, version
+    ) VALUES ('existing-same-route-trade', 'user-a', 'portfolio-a', 'membership-a', 'buy', 'posted',
+      '2026-08-01T00:00:00Z', '2026-08-01', '5', '10', 'AUD', '0', '0',
+      'csv_import', 'import-fingerprint:fingerprint-row-1', 'user-a', 1, '2026-08-01', 1);
+  `);
+  stageRow(database, "batch-a", "row-1", normalizedRow());
+  const client = createSqliteSqlClient(database);
+  const review = await pagePreview(client, "user-a", "batch-a");
+  assert.equal(
+    review.preview.issues.find(
+      (issue) => issue.code === "TRADE_NEAR_EXISTING_ENTRY",
+    ),
+    undefined,
+    "this row's own source_reference is already committed -- commit will skip it, so the warning is guaranteed noise",
   );
 });

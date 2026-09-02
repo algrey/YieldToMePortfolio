@@ -28,17 +28,14 @@ import {
   type ImportRowExclusionActionSuccess,
 } from "./import-row-exclusion-service.ts";
 import { classifyImportRows, DEFAULT_IMPORT_LIMITS } from "../domain/imports";
-import type {
-  ImportPreviewDividendReconciliationCandidate,
-  ImportPreviewExistingDividendEntry,
-  ImportPreviewExistingTradeEntry,
-  ImportPreviewPortfolio,
-  ImportPreviewSecurityCandidate,
+import {
+  safeComputeDividendCashTotal,
+  type ImportPreviewDividendReconciliationCandidate,
+  type ImportPreviewExistingDividendEntry,
+  type ImportPreviewExistingTradeEntry,
+  type ImportPreviewPortfolio,
+  type ImportPreviewSecurityCandidate,
 } from "../domain/imports/reconciliation";
-// BUG-013: the SAME comparable-total helper DIV-016C's reconciliation
-// matching rule uses, reused here so the cross-route dividend near-duplicate
-// check compares like-for-like amounts (see that module's header comment).
-import { computeDividendCashTotal } from "../domain/imports/dividend-reconciliation.ts";
 import {
   fileMetadataFromImportBody,
   MAX_IMPORT_UPLOAD_REQUEST_BYTES,
@@ -83,6 +80,7 @@ async function loadReview(
     existingReceiptRows,
     reconciliationCandidateRows,
     existingSourceReferenceRows,
+    existingTradeSourceReferenceRows,
     existingTradeRows,
   ] = await Promise.all([
     staging.listRows(userId, batchId),
@@ -183,6 +181,22 @@ async function loadReview(
        WHERE user_id = ? AND source_reference IS NOT NULL`,
       [userId],
     ),
+    // BUG-013 review round (ruling 1): the trade analog of the query just
+    // above -- every EXISTING `transactions.source_reference` this owner has
+    // (any portfolio, any status), used to suppress `TRADE_NEAR_EXISTING_ENTRY`
+    // for a row already bound for an identical commit-time exact-match SKIP
+    // (`db/repositories/import-commit.ts`'s own dedupe check at the trade
+    // branch, reproduced here EXACTLY: `source_type = 'csv_import'`, no
+    // `status` filter -- a reversed trade's row still counts as "will be
+    // skipped," matching that check's own behaviour). Deliberately NOT
+    // capped, mirroring the identical, already-shipped, uncapped precedent
+    // of the dividend query above -- this is a cheap Set-membership lookup,
+    // not a per-row comparison loop like `existingTradeRows` below.
+    client.all<Record<string, unknown>>(
+      `SELECT portfolio_id, source_reference FROM transactions
+       WHERE user_id = ? AND source_type = 'csv_import' AND source_reference IS NOT NULL`,
+      [userId],
+    ),
     // BUG-011: every existing POSTED buy/sell transaction across the WHOLE
     // OWNER (any portfolio, any source route, any prior batch/import), for
     // the preview-time cross-route duplicate-trade warning -- see
@@ -281,7 +295,17 @@ async function loadReview(
           ...cappedManualDividendRows.entries.map((row) => ({
             portfolioSecurityId: String(row.portfolio_security_id),
             paymentDate: String(row.payment_date),
-            cashTotalDecimal: computeDividendCashTotal({
+            // Review round (ruling 2): this row's own decimal columns are
+            // now, for the first time, DB-sourced values reaching a
+            // `parseDecimal` call in THIS file -- the pre-widening query
+            // selected no decimal columns at all, so a corrupt/non-canonical
+            // `shares_decimal`/`dividend_per_share_decimal` (or one exceeding
+            // `parseDecimal`'s scale bound, which `dividends.ts`'s own write-
+            // time `isDecimalString` does not check) is new exposure here.
+            // `safeComputeDividendCashTotal` (exported from
+            // `../domain/imports/reconciliation.ts`) never throws -- see its
+            // doc comment.
+            cashTotalDecimal: safeComputeDividendCashTotal({
               totalCashDecimal:
                 row.total_cash_decimal === null
                   ? null
@@ -293,7 +317,7 @@ async function loadReview(
                   ? null
                   : String(row.dividend_per_share_decimal),
             }),
-            frankingTotalDecimal: computeDividendCashTotal({
+            frankingTotalDecimal: safeComputeDividendCashTotal({
               totalCashDecimal:
                 row.total_franking_decimal === null
                   ? null
@@ -349,6 +373,12 @@ async function loadReview(
       (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
     ),
   );
+  // BUG-013 review round (ruling 1): the trade analog, same key shape.
+  const existingTradeSourceReferences = new Set(
+    existingTradeSourceReferenceRows.map(
+      (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
+    ),
+  );
   const linkedSecurityIds = securityCandidates
     .map((candidate) => candidate.securityId)
     .filter((id): id is string => id !== null);
@@ -381,6 +411,7 @@ async function loadReview(
     existingTradeEntriesUnavailable,
     reconciliationCandidates,
     existingDividendSourceReferences,
+    existingTradeSourceReferences,
     attestedSecurityIds,
     securityNames,
     autoCreatedSecurityIds,

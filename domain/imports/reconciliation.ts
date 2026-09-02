@@ -73,7 +73,17 @@ function decimalEqual(left: string, right: string): boolean {
 // for one bad comparison. Failure is treated as "no comparable amount" /
 // "not within tolerance" -- the warning silently fails to fire for that one
 // comparison rather than breaking the page, exactly like `decimalEqual`.
-function safeComputeDividendCashTotal(fields: {
+//
+// `safeComputeDividendCashTotal` is EXPORTED (review round, ruling 2): the
+// caller (`app/import-actions.ts`'s `loadReview`) computes the SAME
+// `cashTotalDecimal`/`frankingTotalDecimal` shape from raw DB columns for
+// EVERY row in the now-widened `existingManualRows` query -- a per-share
+// row's `shares_decimal`/`dividend_per_share_decimal` is exactly as exposed
+// to a corrupt/non-canonical value as any other decimal column this file
+// already guards, and the widened query is NEW exposure (the pre-widening
+// query selected no decimal columns at all). Exporting the ALREADY-TESTED
+// wrapper avoids a second, driftable reimplementation at that call site.
+export function safeComputeDividendCashTotal(fields: {
   totalCashDecimal: string | null;
   sharesDecimal: string | null;
   dividendPerShareDecimal: string | null;
@@ -138,6 +148,18 @@ function daysBetweenDates(a: string, b: string): number {
   return Math.round(
     (Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / msPerDay,
   );
+}
+
+// Review round (post-BUG-013): the EXACT `source_reference` a row would
+// commit under (`db/repositories/import-commit.ts`'s shared
+// `` `import-fingerprint:${row.normalizedFingerprint ?? row.id}` `` for both
+// the trade and dividend branches), scoped by portfolio the same way both
+// `existingDividendSourceReferences` and the new `existingTradeSourceReferences`
+// sets key their entries -- a single shared key builder so the two never
+// drift out of sync with each other or with `import-commit.ts`'s own
+// construction.
+function sourceReferenceKey(portfolioId: string, fingerprint: string): string {
+  return `${portfolioId}::import-fingerprint:${fingerprint}`;
 }
 
 export type ImportReconciliationRow = Readonly<{
@@ -422,7 +444,26 @@ export type ImportReconciliationInput = Readonly<{
   // first), so it is excluded from the reconciliation matching pool
   // entirely -- see `createImportReconciliationPreview`'s own comment at
   // the `freshRows`/`alreadyImportedRows` split for why.
+  //
+  // BUG-013 review round: this SAME set is now ALSO consulted earlier, in
+  // the main per-row loop, to suppress `DIVIDEND_NEAR_EXISTING_ENTRY`/
+  // `DIVIDEND_MATCHES_EXISTING_ENTRY` for a row already bound for this
+  // exact commit-time skip -- warning on a row commit will discard anyway
+  // is guaranteed noise (measured: 0 -> 252 warnings on a 126-row full
+  // re-sync). See `dividendAlreadyBoundForSkip` in
+  // `createImportReconciliationPreview`.
   existingDividendSourceReferences?: ReadonlySet<string>;
+  // BUG-013 review round: the trade analog of `existingDividendSourceReferences`
+  // just above -- `${portfolioId}::${sourceReference}` composite keys of
+  // every EXISTING `transactions` row's `source_reference` (any status,
+  // matching `db/repositories/import-commit.ts`'s own commit-time dedupe
+  // predicate exactly, which likewise applies no `status` filter), used to
+  // suppress `TRADE_NEAR_EXISTING_ENTRY` (BUG-011) for a row already bound
+  // for an identical commit-time skip -- this check has been LIVE in
+  // production with this exact noise property since BUG-011 shipped (the
+  // 2026-09-01 batch staged 226 trades, committed 0; every one would have
+  // warned under the pre-fix behaviour).
+  existingTradeSourceReferences?: ReadonlySet<string>;
 }>;
 
 function decisionFor(
@@ -486,6 +527,19 @@ export function createImportReconciliationPreview(
 ): ImportReconciliationPreview {
   const decisions = input.decisions ?? [];
   const existingFingerprints = input.existingFingerprints ?? new Set<string>();
+  // Review round (post-BUG-013): a row already bound for a commit-time
+  // exact-`source_reference` dedupe SKIP (the SAME real staged content
+  // re-committing -- e.g. a full re-sync of an already-fully-committed
+  // account) needs neither cross-route advisory warning below, since commit
+  // will skip it regardless of what it economically matches. Declared here
+  // (rather than where each was previously read, later in this function) so
+  // the per-row loop can consult them too; `existingDividendSourceReferences`
+  // is the SAME set the DIV-016 part C reconciliation-pool split below
+  // already used -- moved up, not duplicated.
+  const existingDividendSourceReferences =
+    input.existingDividendSourceReferences ?? new Set<string>();
+  const existingTradeSourceReferences =
+    input.existingTradeSourceReferences ?? new Set<string>();
   const issues: ImportReconciliationIssue[] = [];
   const unresolvedCandidates: ImportPreviewSecurityCandidate[] = [];
   const unresolvedCandidateIds = new Set<string>();
@@ -691,6 +745,26 @@ export function createImportReconciliationPreview(
     // conversion. `Purchase Exchange Rate` is unused/ignored on these rows.
     const isDividend = row.normalized.type === "dividend";
 
+    // Review round (post-BUG-013, THE material follow-up): true when THIS
+    // row's own commit-time `source_reference` already exists in
+    // `dividend_manual_records` for this portfolio -- meaning commit will
+    // SKIP it outright (the identical staged content re-committing, e.g. a
+    // full re-sync of an already-fully-committed account), never actually
+    // insert it. Both dividend advisory checks below are guaranteed noise on
+    // such a row: measured on an owner-shaped fixture (18 securities x 7
+    // quarterly payouts = 126 already-committed records, re-staged as a
+    // full re-sync), warnings went from 0 to 252 -- DIVIDEND_NEAR_EXISTING_
+    // ENTRY and DIVIDEND_MATCHES_EXISTING_ENTRY, one of EACH on every single
+    // row -- with commit skipping all 126 regardless. A genuinely CROSS-
+    // ROUTE duplicate has a DIFFERENT computed fingerprint/source_reference
+    // (the whole reason this task exists -- the two routes' key spaces are
+    // structurally disjoint), so it is NEVER present in this set and stays
+    // fully detected; this suppression only silences the case where commit
+    // was always going to skip the row anyway.
+    const dividendAlreadyBoundForSkip = existingDividendSourceReferences.has(
+      sourceReferenceKey(portfolio.id, row.fingerprint),
+    );
+
     // DIV-004: a NON-BLOCKING proximity warning (mirrors FRANKING_ON_NON_
     // DIVIDEND -- readiness/commit are unaffected) when an incoming dividend
     // row falls within DIV-001's matching window of an EXISTING owner-typed
@@ -701,6 +775,7 @@ export function createImportReconciliationPreview(
     // row still awaiting security resolution.
     if (
       isDividend &&
+      !dividendAlreadyBoundForSkip &&
       membershipId !== null &&
       row.normalized.localTradeDate !== null
     ) {
@@ -761,6 +836,7 @@ export function createImportReconciliationPreview(
     // for equality here.
     if (
       isDividend &&
+      !dividendAlreadyBoundForSkip &&
       membershipId !== null &&
       row.normalized.localTradeDate !== null
     ) {
@@ -844,9 +920,24 @@ export function createImportReconciliationPreview(
     // real trade. By this point `membershipId` (when non-null) is always a
     // genuine, already-resolved portfolio-security id, matching the
     // DIVIDEND_NEAR_EXISTING_ENTRY precedent just above.
+    //
+    // Review round (post-BUG-013 follow-up ruling, applies retroactively to
+    // this ALREADY-LIVE check): a row already bound for the identical
+    // commit-time exact-`source_reference` SKIP needs no warning either --
+    // the 2026-09-01 production batch staged 226 trades and committed 0 (a
+    // full re-sync of an already-fully-committed account), so under the
+    // pre-fix behaviour it would have warned on all 226. `tradeAlreadyBoundForSkip`
+    // mirrors `dividendAlreadyBoundForSkip` above exactly: a genuinely
+    // cross-route duplicate's fingerprint/source_reference is structurally
+    // different (the reason this check exists at all) and is never in this
+    // set, so cross-route detection is unweakened.
+    const tradeAlreadyBoundForSkip = existingTradeSourceReferences.has(
+      sourceReferenceKey(portfolio.id, row.fingerprint),
+    );
     if (
       !isDividend &&
       !isCash &&
+      !tradeAlreadyBoundForSkip &&
       membershipId !== null &&
       (row.normalized.type === "buy" || row.normalized.type === "sell") &&
       row.normalized.localTradeDate !== null &&
@@ -1055,8 +1146,6 @@ export function createImportReconciliationPreview(
       (entry): entry is typeof entry & { cashTotalDecimal: string } =>
         entry.cashTotalDecimal !== null,
     );
-  const existingDividendSourceReferences =
-    input.existingDividendSourceReferences ?? new Set<string>();
   const freshRows = dividendReconciliationRowsAll.filter(
     (row) =>
       !existingDividendSourceReferences.has(

@@ -126,6 +126,11 @@ export function buildImportReviewPreview(input: {
   existingTradeEntriesUnavailable?: boolean;
   reconciliationCandidates?: ImportPreviewDividendReconciliationCandidate[];
   existingDividendSourceReferences?: ReadonlySet<string>;
+  // BUG-013 review round: the trade analog, suppressing a guaranteed-noise
+  // `TRADE_NEAR_EXISTING_ENTRY` warning for a row already bound for an
+  // identical commit-time skip -- see
+  // `ImportReconciliationInput.existingTradeSourceReferences`'s doc comment.
+  existingTradeSourceReferences?: ReadonlySet<string>;
   attestedSecurityIds?: readonly string[];
   // BRK-009C: pre-fetched inputs to `deriveSharesightSecuritiesSummary` --
   // this function stays a synchronous, DB-free builder (like every other
@@ -151,6 +156,7 @@ export function buildImportReviewPreview(input: {
     existingTradeEntriesUnavailable: input.existingTradeEntriesUnavailable,
     reconciliationCandidates: input.reconciliationCandidates,
     existingDividendSourceReferences: input.existingDividendSourceReferences,
+    existingTradeSourceReferences: input.existingTradeSourceReferences,
   });
   const excludedRows = input.rows
     .filter((row) => row.excludedByOwnerAt !== null)
