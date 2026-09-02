@@ -496,6 +496,20 @@ export type SharesightPayout = Readonly<{
   exchangeRateDecimal: string | null;
 }>;
 
+/**
+ * BRK-015 (2026-09-02): `from`/`to` here are this codebase's OWN internal
+ * names for the filter window -- `client.ts`'s `toSearchParams` maps them to
+ * Sharesight's actual documented query parameter names, `start_date`/
+ * `end_date` (confirmed live and via `markcatley/sharesight.rs`'s
+ * Swagger-derived docs for both `ListPortfolioTrades` and
+ * `ListPortfolioPayouts`; see `docs/ARCHITECTURE.md` §8.2's BRK-015 entry).
+ * Before this fix the mapping sent the literal strings `from`/`to` as query
+ * keys, which Sharesight's API does not recognise and therefore silently
+ * ignored -- every call, windowed or not, always fell back to the server's
+ * own default (full portfolio-inception-to-today range). Kept as
+ * internal-name `from`/`to` here (rather than renaming this type's fields to
+ * `start_date`/`end_date`) since callers never see the wire format.
+ */
 export type SharesightListParams = Readonly<{
   from?: string;
   to?: string;

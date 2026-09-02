@@ -51,6 +51,15 @@ export function isDisabledIntegrationMessage(message: string): boolean {
   );
 }
 
+/**
+ * BRK-015: mirrors `domain/sharesight-sync/window.ts`'s `SharesightSyncWindow`
+ * (a fresh, structurally-identical type here rather than importing that
+ * domain module, since this file -- unlike its sibling `-service.ts` -- is
+ * consumed by the CLIENT component and must stay import-light).
+ */
+export type SharesightSyncWindowSummary =
+  { kind: "full" } | { kind: "narrowed"; sinceDate: string };
+
 export type SharesightSyncSuccess = {
   ok: true;
   batchId: string;
@@ -58,10 +67,23 @@ export type SharesightSyncSuccess = {
   rowsStaged: number;
   skippedPayouts: number;
   reused: boolean;
+  window: SharesightSyncWindowSummary;
 };
 
 function statusLabel(status: string): string {
   return status.replaceAll("_", " ");
+}
+
+/**
+ * BRK-015: honest window disclosure -- "a routine sync must never read as
+ * fully in sync with Sharesight when it only examined a recent window"
+ * (TASKS.md). Always rendered, never conditionally dropped, so a `narrowed`
+ * result can never be silently read as complete.
+ */
+function windowLabel(window: SharesightSyncWindowSummary): string {
+  return window.kind === "narrowed"
+    ? `Routine sync: checked Sharesight since ${window.sinceDate} (not your full history -- use Full resync to check everything).`
+    : "Checked your entire Sharesight history.";
 }
 
 /** Batch created-vs-reused (with its CURRENT status -- reviewer follow-up
@@ -85,7 +107,11 @@ export function formatSyncResultMessage(result: SharesightSyncSuccess): string {
     result.skippedPayouts > 0
       ? ` ${result.skippedPayouts} future-dated payout${result.skippedPayouts === 1 ? "" : "s"} skipped -- not yet paid; details in the batch preview.`
       : "";
-  return `${batchLine} ${rowsLine}${skippedLine}`;
+  // BRK-015: the window disclosure is its own trailing sentence, always
+  // present -- BRK-014 (new-vs-already-imported counts, a separate READY
+  // task touching this same helper) can append its own line the same way
+  // without needing to touch this composition.
+  return `${batchLine} ${rowsLine}${skippedLine} ${windowLabel(result.window)}`;
 }
 
 /**

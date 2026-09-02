@@ -431,13 +431,25 @@ function requestError(
   return { ok: false, error: { kind, message, retryable } };
 }
 
+/**
+ * BRK-015 fix: Sharesight's documented query parameter names for both
+ * `ListPortfolioTrades` (v2.1.0) and `ListPortfolioPayouts` (v2.0.0) are
+ * `start_date`/`end_date`, NOT `from`/`to` -- confirmed both from
+ * `markcatley/sharesight.rs`'s Swagger-derived API documentation and a live
+ * BRK-015 investigation spike against the owner's real account (a narrowed
+ * `start_date`/`end_date` window returned 2 payouts vs. 119 for the
+ * unwindowed default; the same window under the previous `from`/`to` keys
+ * returned all 119, proving those keys were silently ignored). See
+ * `docs/ARCHITECTURE.md` §8.2's BRK-015 entry and
+ * `SharesightListParams`'s doc comment.
+ */
 function toSearchParams(
   params: SharesightListParams | undefined,
 ): Record<string, string> | undefined {
   if (!params) return undefined;
   const result: Record<string, string> = {};
-  if (params.from) result.from = params.from;
-  if (params.to) result.to = params.to;
+  if (params.from) result.start_date = params.from;
+  if (params.to) result.end_date = params.to;
   return Object.keys(result).length > 0 ? result : undefined;
 }
 

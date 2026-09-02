@@ -9,3 +9,8 @@ export {
   type SharesightTransformInput,
   type SharesightTransformResult,
 } from "./transform.ts";
+export {
+  computeRoutineSyncFromDate,
+  SHARESIGHT_ROUTINE_SYNC_OVERLAP_DAYS,
+  type SharesightSyncWindow,
+} from "./window.ts";

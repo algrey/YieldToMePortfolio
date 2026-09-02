@@ -3567,6 +3567,53 @@ test("BRK-008 onBodyParseDiagnostic: a throwing callback is caught and discarded
   if (!result.ok) assert.equal(result.error.kind, "invalid_response");
 });
 
+// --- BRK-015: listTrades/listPayouts date-range params ---------------------
+
+test("BRK-015: listTrades/listPayouts send Sharesight's real start_date/end_date query keys, not from/to", async () => {
+  const provider = await alwaysValidTokenProvider();
+  let capturedTradesUrl: URL | null = null;
+  let capturedPayoutsUrl: URL | null = null;
+  const client = createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.includes("/trades")) capturedTradesUrl = parsed;
+      if (parsed.pathname.includes("/payouts")) capturedPayoutsUrl = parsed;
+      return jsonResponse(200, { trades: [], payouts: [] });
+    },
+  });
+
+  await client.listTrades("port_1", { from: "2026-08-01", to: "2026-09-01" });
+  assert.ok(capturedTradesUrl, "expected listTrades to reach the fetcher");
+  assert.equal(
+    (capturedTradesUrl as unknown as URL).searchParams.get("start_date"),
+    "2026-08-01",
+  );
+  assert.equal(
+    (capturedTradesUrl as unknown as URL).searchParams.get("end_date"),
+    "2026-09-01",
+  );
+  assert.equal(
+    (capturedTradesUrl as unknown as URL).searchParams.get("from"),
+    null,
+  );
+  assert.equal(
+    (capturedTradesUrl as unknown as URL).searchParams.get("to"),
+    null,
+  );
+
+  await client.listPayouts("port_1", { from: "2026-08-01" });
+  assert.ok(capturedPayoutsUrl, "expected listPayouts to reach the fetcher");
+  assert.equal(
+    (capturedPayoutsUrl as unknown as URL).searchParams.get("start_date"),
+    "2026-08-01",
+  );
+  assert.equal(
+    (capturedPayoutsUrl as unknown as URL).searchParams.get("end_date"),
+    null,
+  );
+});
+
 // --- Nothing reaches client bundles ---------------------------------------
 
 test("BRK-003: domain/sharesight has no client-bundle exposure (no 'use client', no app/ imports)", async () => {

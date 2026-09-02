@@ -13,6 +13,7 @@ import {
   type LinkSharesightPortfolioResult,
   type ListSharesightPortfoliosResult,
   type RunSharesightSyncResult,
+  type SharesightSyncMode,
 } from "./sharesight-sync-service.ts";
 
 export async function listSharesightPortfoliosAction(
@@ -34,8 +35,9 @@ export async function linkSharesightPortfolioAction(
 
 export async function runSharesightSyncAction(
   portfolioId: string,
+  mode: SharesightSyncMode = "routine",
 ): Promise<RunSharesightSyncResult> {
   const context = await getAuthenticatedSqlContext(portfolioId);
   if (!context.ok) return context;
-  return runSharesightSyncWithContext(context, portfolioId);
+  return runSharesightSyncWithContext(context, portfolioId, { mode });
 }

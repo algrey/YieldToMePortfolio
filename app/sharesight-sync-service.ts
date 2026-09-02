@@ -15,6 +15,7 @@ import {
   createOwnedImportStagingRepository,
   createOwnedPortfolioRepository,
   createSharesightSyncStateRepository,
+  loadCommittedSharesightWatermark,
   loadResolvedPortfolioInstrumentCurrencies,
   type SqlClient,
 } from "../db/repositories/index.ts";
@@ -23,9 +24,11 @@ import type {
   ParsedImportRow,
 } from "../domain/imports/index.ts";
 import {
+  computeRoutineSyncFromDate,
   SHARESIGHT_SYNC_PARSER_FORMAT,
   SHARESIGHT_SYNC_PARSER_VERSION,
   transformSharesightSync,
+  type SharesightSyncWindow,
 } from "../domain/sharesight-sync/index.ts";
 import type {
   SharesightClient,
@@ -54,6 +57,13 @@ export type SharesightSyncActionOptions = {
    * `cloudflare:workers` env import a plain node:sqlite test cannot use). */
   integration?: SharesightIntegrationConfig;
   now?: () => string;
+};
+
+export type RunSharesightSyncOptions = SharesightSyncActionOptions & {
+  /** BRK-015: defaults to `"routine"` -- see `SharesightSyncMode`'s doc
+   * comment. Only `runSharesightSyncWithContext` reads this; the link/list
+   * actions above have no notion of a sync window. */
+  mode?: SharesightSyncMode;
 };
 
 async function resolveIntegration(
@@ -225,8 +235,25 @@ export type RunSharesightSyncResult =
       rowsStaged: number;
       skippedPayouts: number;
       reused: boolean;
+      // BRK-015: what this call actually asked Sharesight for -- honest UI
+      // copy must state the window rather than ever implying "fully in
+      // sync" after a narrowed routine sync. See
+      // `domain/sharesight-sync/window.ts`'s `SharesightSyncWindow` doc
+      // comment for the `full` vs `narrowed` distinction.
+      window: SharesightSyncWindow;
     }
   | SharesightSyncActionFailure;
+
+/**
+ * BRK-015: `"routine"` (the default) narrows the fetch to a window derived
+ * from what this portfolio has actually COMMITTED from Sharesight so far,
+ * plus a trailing overlap; `"full"` preserves today's unconditional
+ * inception-to-now fetch, unchanged, for the owner-triggered "Full resync"
+ * action (needed to still catch a Sharesight-side correction to an old
+ * record -- the BRK-005 finding-B1 case -- which a narrowed window would
+ * never see).
+ */
+export type SharesightSyncMode = "routine" | "full";
 
 /**
  * BRK-005 review finding B1 (BLOCKING): the original digest hashed only the
@@ -321,7 +348,7 @@ async function sha256Hex(value: string): Promise<string> {
 export async function runSharesightSyncWithContext(
   context: SharesightSyncActionContext,
   portfolioId: string,
-  options: SharesightSyncActionOptions = {},
+  options: RunSharesightSyncOptions = {},
 ): Promise<RunSharesightSyncResult> {
   const portfolio = await createOwnedPortfolioRepository(context.client).get(
     context.userId,
@@ -372,8 +399,42 @@ export async function runSharesightSyncWithContext(
     };
   }
 
+  // BRK-015: routine (default) narrows the fetch to what this portfolio has
+  // actually COMMITTED from Sharesight so far, minus an overlap -- NEVER to
+  // `sharesight_sync_state.last_synced_at`/`last_trade_watermark` (see
+  // `loadCommittedSharesightWatermark`'s doc comment for why: those are
+  // staging-time signals, and staging-without-accepting is a LIKELY,
+  // expected path on this account -- keying off them would silently drop
+  // whatever an abandoned batch staged). No committed watermark yet (first
+  // sync, or every prior sync was staged and never accepted) falls back to
+  // the same unbounded fetch a Full resync uses -- there is nothing safe to
+  // narrow against. `mode: "full"` always uses the unbounded fetch,
+  // preserving today's behaviour exactly (needed to still catch a
+  // Sharesight-side correction to an old record outside any window -- the
+  // BRK-005 finding-B1 case).
+  const mode: SharesightSyncMode = options.mode ?? "routine";
+  let syncWindow: SharesightSyncWindow = { kind: "full" };
+  if (mode === "routine") {
+    const committedWatermark = await loadCommittedSharesightWatermark(
+      context.client,
+      context.userId,
+      portfolioId,
+    );
+    if (committedWatermark) {
+      syncWindow = {
+        kind: "narrowed",
+        sinceDate: computeRoutineSyncFromDate(committedWatermark),
+      };
+    }
+  }
+  const listParams =
+    syncWindow.kind === "narrowed" ? { from: syncWindow.sinceDate } : undefined;
+
   const client: SharesightClient = integration.client;
-  const tradesResult = await client.listTrades(link.sharesightPortfolioId);
+  const tradesResult = await client.listTrades(
+    link.sharesightPortfolioId,
+    listParams,
+  );
   if (!tradesResult.ok) {
     return {
       ok: false,
@@ -381,7 +442,10 @@ export async function runSharesightSyncWithContext(
       message: "Sharesight did not return a usable trade list.",
     };
   }
-  const payoutsResult = await client.listPayouts(link.sharesightPortfolioId);
+  const payoutsResult = await client.listPayouts(
+    link.sharesightPortfolioId,
+    listParams,
+  );
   if (!payoutsResult.ok) {
     return {
       ok: false,
@@ -513,12 +577,17 @@ export async function runSharesightSyncWithContext(
 
   // Watermark update (BRK-005 ruling 4): `last_synced_at` moves on
   // successful STAGING, never on commit -- commit is a separate, later,
-  // owner-driven step through the unmodified review/ready/commit flow.
-  // `last_trade_watermark` is left untouched: this task always re-fetches
-  // the full trade/payout list (idempotent re-sync dedupes via
-  // `source_reference`, not a fetch-side date filter) -- narrowing the
-  // fetch by watermark is an unplanned incremental-sync design left for a
-  // future task.
+  // owner-driven step through the unmodified review/ready/commit flow. This
+  // remains true unchanged by BRK-015: `last_synced_at` is still purely a
+  // staging-time UI signal, never consulted for fetch narrowing.
+  // `last_trade_watermark` is STILL left untouched, deliberately -- BRK-015
+  // added routine-sync narrowing, but keyed to a value DERIVED from
+  // committed `transactions`/`dividend_manual_records` state
+  // (`loadCommittedSharesightWatermark`), never to a column that could be
+  // advanced by staging alone. See that function's doc comment and this
+  // sync's own window computation above for why: staging a batch and never
+  // accepting it is a LIKELY path on this account, and a staging-advanced
+  // watermark would silently drop whatever an abandoned batch staged.
   await syncStateRepository.upsert(
     context.userId,
     portfolioId,
@@ -562,5 +631,6 @@ export async function runSharesightSyncWithContext(
     rowsStaged,
     skippedPayouts,
     reused: started.reused,
+    window: syncWindow,
   };
 }

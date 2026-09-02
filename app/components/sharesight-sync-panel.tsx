@@ -30,6 +30,7 @@ import {
   isDisabledIntegrationMessage,
   type SharesightLinkStatus,
   type SharesightSyncSuccess,
+  type SharesightSyncWindowSummary,
 } from "../sharesight-sync-panel-helpers.ts";
 
 const DIALOG_FETCH_TIMEOUT_MS = 15_000;
@@ -212,7 +213,13 @@ export function SharesightSyncPanel({
     }
   }
 
-  async function runSync() {
+  // BRK-015: `mode` selects the query param the sync route reads --
+  // `"routine"` (the default button) is the watermark-narrowed sync;
+  // `"full"` is the explicit secondary "Full resync" action that preserves
+  // today's unconditional inception-to-now fetch (needed to still catch a
+  // Sharesight-side correction to an old record a narrowed window would
+  // never see).
+  async function runSync(mode: "routine" | "full") {
     if (!isLinked) return;
     setSyncPending(true);
     setSyncResult(null);
@@ -223,7 +230,7 @@ export function SharesightSyncPanel({
     );
     try {
       const response = await fetch(
-        `/api/portfolios/${portfolioId}/sharesight-sync`,
+        `/api/portfolios/${portfolioId}/sharesight-sync?mode=${mode}`,
         { method: "POST", signal: controller.signal },
       );
       const result = (await response.json()) as
@@ -234,6 +241,7 @@ export function SharesightSyncPanel({
             rowsStaged: number;
             skippedPayouts: number;
             reused: boolean;
+            window: SharesightSyncWindowSummary;
           }
         | { ok: false; message: string };
       if (!result.ok) {
@@ -251,6 +259,7 @@ export function SharesightSyncPanel({
         rowsStaged: result.rowsStaged,
         skippedPayouts: result.skippedPayouts,
         reused: result.reused,
+        window: result.window,
       });
     } catch (error) {
       setSyncResult({
@@ -296,10 +305,20 @@ export function SharesightSyncPanel({
         {isLinked ? (
           <button
             type="button"
-            onClick={() => void runSync()}
+            onClick={() => void runSync("routine")}
             disabled={syncPending}
           >
             {syncPending ? "Syncing…" : "Sync from Sharesight"}
+          </button>
+        ) : null}
+        {isLinked ? (
+          <button
+            type="button"
+            onClick={() => void runSync("full")}
+            disabled={syncPending}
+            title="Checks your ENTIRE Sharesight history, not just recent activity -- slower, but the only way to catch a correction to an old record."
+          >
+            {syncPending ? "Syncing…" : "Full resync"}
           </button>
         ) : null}
       </div>

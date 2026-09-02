@@ -445,3 +445,60 @@ export function createSharesightSyncStateRepository(
 
   return { get, list, upsert, linkExclusive };
 }
+
+/**
+ * BRK-015: the routine sync's narrowing watermark, derived from what has
+ * actually been COMMITTED for this local portfolio -- never from
+ * `sharesight_sync_state.last_synced_at` (which BRK-005 ruling 4 advances on
+ * successful STAGING, before the owner's separate commit step) and never
+ * from `last_trade_watermark` (reserved, deliberately left untouched by this
+ * task). The owner confirmed staging a batch and never accepting it is a
+ * LIKELY path on this account: if narrowing keyed off a staging-advanced
+ * signal, an abandoned batch would push the fetch window past rows that
+ * were never committed, and the next routine sync would never see them
+ * again -- silent, permanent data loss. Deriving the watermark straight
+ * from `transactions`/`dividend_manual_records` instead means a merely
+ * STAGED row (which never touches either table until commit) cannot move
+ * this watermark at all; abandoning a batch leaves the next routine sync's
+ * window exactly where it was, so the abandoned rows are re-fetched.
+ *
+ * Scoped to rows whose `source_reference` carries this sync's own
+ * `import-fingerprint:sharesight-trade:`/`import-fingerprint:sharesight-payout:`
+ * prefix (`domain/sharesight-sync/transform.ts`) -- a CSV-imported row's
+ * unrelated `import-fingerprint:<hash>` reference never contributes here.
+ * `transactions.status = 'posted'` and
+ * `dividend_manual_records.superseded_by_record_id IS NULL` additionally
+ * exclude a row a REVERSAL has since undone (`import-reversal.ts` marks a
+ * reversed transaction `status = 'reversed'`/`'reversing'` and DELETEs a
+ * reversed dividend record outright) -- a reversed sharesight-sourced row
+ * must not anchor the watermark past dates that are no longer, in fact,
+ * reflected in the ledger.
+ *
+ * Returns `null` when this portfolio has no committed Sharesight-sourced
+ * row at all (first-ever sync, or every prior sync was staged and never
+ * accepted) -- the caller treats that exactly like a Full resync bound
+ * (no `from`/`to` sent), which is the correct, safe default when there is
+ * no committed history to narrow against.
+ */
+export async function loadCommittedSharesightWatermark(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+): Promise<string | null> {
+  const row = await client.get<{ max_date: string | null }>(
+    `SELECT MAX(effective_date) AS max_date FROM (
+       SELECT local_trade_date AS effective_date
+         FROM transactions
+        WHERE user_id = ? AND portfolio_id = ? AND status = 'posted'
+          AND source_reference LIKE 'import-fingerprint:sharesight-trade:%'
+       UNION ALL
+       SELECT payment_date AS effective_date
+         FROM dividend_manual_records
+        WHERE user_id = ? AND portfolio_id = ?
+          AND superseded_by_record_id IS NULL
+          AND source_reference LIKE 'import-fingerprint:sharesight-payout:%'
+     )`,
+    [userId, portfolioId, userId, portfolioId],
+  );
+  return row?.max_date ?? null;
+}

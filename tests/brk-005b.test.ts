@@ -118,8 +118,9 @@ test("BRK-005B: formatSyncResultMessage distinguishes a newly created batch from
       rowsStaged: 1,
       skippedPayouts: 0,
       reused: false,
+      window: { kind: "full" },
     }),
-    "Created batch batch-1. 1 row staged.",
+    "Created batch batch-1. 1 row staged. Checked your entire Sharesight history.",
   );
   assert.equal(
     formatSyncResultMessage({
@@ -129,8 +130,9 @@ test("BRK-005B: formatSyncResultMessage distinguishes a newly created batch from
       rowsStaged: 5,
       skippedPayouts: 0,
       reused: true,
+      window: { kind: "full" },
     }),
-    "No changes since last sync -- reused batch batch-1 (status: parsed). 5 rows staged.",
+    "No changes since last sync -- reused batch batch-1 (status: parsed). 5 rows staged. Checked your entire Sharesight history.",
   );
 });
 
@@ -142,6 +144,7 @@ test("BRK-005B: formatSyncResultMessage surfaces a skipped-payout count with a p
     rowsStaged: 3,
     skippedPayouts: 1,
     reused: false,
+    window: { kind: "full" },
   });
   assert.match(one, /1 future-dated payout skipped/);
   assert.match(one, /details in the batch preview/);
@@ -153,6 +156,7 @@ test("BRK-005B: formatSyncResultMessage surfaces a skipped-payout count with a p
     rowsStaged: 3,
     skippedPayouts: 4,
     reused: false,
+    window: { kind: "full" },
   });
   assert.match(many, /4 future-dated payouts skipped/);
 });
@@ -165,6 +169,7 @@ test("BRK-005B: formatSyncResultMessage never mentions skipped payouts when ther
     rowsStaged: 2,
     skippedPayouts: 0,
     reused: false,
+    window: { kind: "full" },
   });
   assert.doesNotMatch(message, /skipped/);
 });
@@ -177,6 +182,7 @@ test("BRK-005B follow-up 2: formatSyncResultMessage surfaces the reused batch's 
     rowsStaged: 4,
     skippedPayouts: 0,
     reused: true,
+    window: { kind: "full" },
   });
   assert.match(committed, /status: committed/);
 
@@ -187,6 +193,7 @@ test("BRK-005B follow-up 2: formatSyncResultMessage surfaces the reused batch's 
     rowsStaged: 4,
     skippedPayouts: 0,
     reused: true,
+    window: { kind: "full" },
   });
   assert.match(needsMapping, /status: needs mapping/);
 
@@ -199,8 +206,43 @@ test("BRK-005B follow-up 2: formatSyncResultMessage surfaces the reused batch's 
     rowsStaged: 4,
     skippedPayouts: 0,
     reused: false,
+    window: { kind: "full" },
   });
   assert.doesNotMatch(created, /status:/);
+});
+
+// ---------------------------------------------------------------------------
+// BRK-015: window disclosure -- a routine (narrowed) sync must never read as
+// though it examined the owner's full Sharesight history.
+// ---------------------------------------------------------------------------
+
+test("BRK-015: formatSyncResultMessage states the narrowed window's since-date, and never claims full-history coverage for it", () => {
+  const narrowed = formatSyncResultMessage({
+    ok: true,
+    batchId: "batch-11",
+    batchStatus: "parsed",
+    rowsStaged: 2,
+    skippedPayouts: 0,
+    reused: false,
+    window: { kind: "narrowed", sinceDate: "2026-07-15" },
+  });
+  assert.match(narrowed, /since 2026-07-15/);
+  assert.match(narrowed, /not your full history/);
+  assert.doesNotMatch(narrowed, /entire Sharesight history/);
+});
+
+test("BRK-015: formatSyncResultMessage reports full-history coverage for a full window (Full resync, or a routine sync's first-ever run)", () => {
+  const full = formatSyncResultMessage({
+    ok: true,
+    batchId: "batch-12",
+    batchStatus: "parsed",
+    rowsStaged: 226,
+    skippedPayouts: 0,
+    reused: false,
+    window: { kind: "full" },
+  });
+  assert.match(full, /entire Sharesight history/);
+  assert.doesNotMatch(full, /not your full history/);
 });
 
 // ---------------------------------------------------------------------------
@@ -691,9 +733,12 @@ test("BRK-005B: the panel's three fetches target exactly BRK-005's three existin
     source,
     /`\/api\/portfolios\/\$\{portfolioId\}\/sharesight-link`/,
   );
+  // BRK-015: the sync route now carries an optional `?mode=` query string
+  // (routine vs. explicit Full resync) -- still the SAME route, never a
+  // fabricated new one, so this match tolerates but does not require it.
   assert.match(
     source,
-    /`\/api\/portfolios\/\$\{portfolioId\}\/sharesight-sync`/,
+    /`\/api\/portfolios\/\$\{portfolioId\}\/sharesight-sync(\?[^`]*)?`/,
   );
 });
 
