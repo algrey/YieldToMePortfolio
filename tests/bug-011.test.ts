@@ -11,6 +11,7 @@
  * trades share this exact identity -- one parcel filled in two lots).
  */
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createImportReconciliationPreview } from "../domain/imports/reconciliation.ts";
 import type {
@@ -25,6 +26,10 @@ import type {
   ImportReviewBatch,
   ImportReviewRow,
 } from "../domain/imports/review.ts";
+import {
+  capExistingTradeRows,
+  MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
+} from "../app/import-trade-duplicate-check.ts";
 
 const PORTFOLIOS: ImportPreviewPortfolio[] = [
   {
@@ -463,4 +468,85 @@ test("F4: an unparseable existing-entry decimal (e.g. a corrupt/non-canonical DB
       "an unparseable comparison value must never be treated as a match",
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// Review round F-a: `capExistingTradeRows` -- the real cap/degrade boundary,
+// unit-tested directly since `app/import-actions.ts` itself (the sole
+// caller, `loadReview`) cannot be imported by this repo's plain Node test
+// runner (it statically imports `getAuthenticatedSqlContext`, which pulls
+// in `next/headers` transitively). Its WIRING into `loadReview` is pinned
+// below via a source-text assertion, matching this repo's established
+// remedy for exactly this constraint (see `tests/imp-003b.test.ts`'s
+// `readFile` + `assert.match` pattern).
+// ---------------------------------------------------------------------------
+
+test("capExistingTradeRows: at or below the cap, every row passes through unmodified and unavailable is false", () => {
+  const rows = [1, 2, 3];
+  assert.deepEqual(capExistingTradeRows(rows, 3), {
+    entries: rows,
+    unavailable: false,
+  });
+  assert.deepEqual(capExistingTradeRows(rows, 5), {
+    entries: rows,
+    unavailable: false,
+  });
+  assert.deepEqual(capExistingTradeRows([], 0), {
+    entries: [],
+    unavailable: false,
+  });
+});
+
+test("capExistingTradeRows: exactly one row OVER the cap degrades to empty entries and unavailable true -- the exact length > max boundary, not off-by-one", () => {
+  const rows = [1, 2, 3, 4];
+  assert.deepEqual(capExistingTradeRows(rows, 3), {
+    entries: [],
+    unavailable: true,
+  });
+});
+
+test("capExistingTradeRows: the real MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK boundary (5,000) behaves the same way -- at the cap is fine, one row over degrades", () => {
+  const atCap = new Array<number>(
+    MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
+  ).fill(0);
+  assert.equal(
+    capExistingTradeRows(atCap, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK)
+      .unavailable,
+    false,
+  );
+  const overCap = new Array<number>(
+    MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1,
+  ).fill(0);
+  assert.equal(
+    capExistingTradeRows(
+      overCap,
+      MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
+    ).unavailable,
+    true,
+  );
+});
+
+test("F-a source pin: loadReview's existing-trade query excludes a reversal's compensating mirror row and applies the MAX + 1 cap via the shared pure capExistingTradeRows -- app/import-actions.ts cannot be imported directly by this test runner (next/headers, transitively), so its WIRING is pinned by source text instead of a live call", async () => {
+  const source = await readFile(
+    new URL("../app/import-actions.ts", import.meta.url),
+    "utf8",
+  );
+  // F1: the compensating reversal mirror row (status='posted', own
+  // reverses_transaction_id set) must be excluded.
+  assert.match(
+    source,
+    /AND type IN \('buy', 'sell'\) AND reverses_transaction_id IS NULL/,
+  );
+  // F2: the query caps at MAX + 1 rows...
+  assert.match(
+    source,
+    /\[userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK \+ 1\]/,
+  );
+  // ...and the cap/degrade DECISION is delegated to the shared, directly
+  // tested pure function above, using the SAME constant the query's LIMIT
+  // uses -- not a re-implemented or drifted threshold.
+  assert.match(
+    source,
+    /capExistingTradeRows\(\s*existingTradeRows,\s*MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,\s*\)/,
+  );
 });

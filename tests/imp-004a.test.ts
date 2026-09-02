@@ -9,6 +9,10 @@ import {
   type ImportReviewPreview,
 } from "../app/import-preview.ts";
 import {
+  capExistingTradeRows,
+  MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
+} from "../app/import-trade-duplicate-check.ts";
+import {
   createOwnedImportCommitRepository,
   createOwnedImportMappingDecisionRepository,
   createOwnedImportReversalRepository,
@@ -181,11 +185,21 @@ async function currentPreviewVersion(
 // warning is excluded from the hash by construction, so the two helpers
 // must always agree.
 //
-// BUG-011 review round F3: also mirrors `loadReview`'s existing-trade query
-// (`existingTradeEntries`), byte-for-byte including the F1 fix
+// BUG-011 review round F3/F-a: also mirrors `loadReview`'s existing-trade
+// query (`existingTradeEntries`), including the F1 fix
 // (`reverses_transaction_id IS NULL`, excluding a reversal's compensating
-// mirror row) and the F2 fix (scoped to `batch.targetPortfolioId`) -- the
-// real query's wiring had zero DB-level test coverage before this round.
+// mirror row) -- the real query's wiring had zero DB-level test coverage
+// before this round. Deliberately USER-WIDE, matching the F2 ruling
+// correction (a batch's target portfolio is not the only portfolio a
+// staged row can resolve into -- see `docs/CSV_IMPORT_SPEC.md`'s "F2
+// RULING CORRECTION" note). The cap/degrade decision itself is genuinely
+// byte-for-byte with production: both this mirror and `loadReview` call
+// the SAME pure `capExistingTradeRows` with the SAME
+// `MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK` constant from
+// `app/import-trade-duplicate-check.ts` (importable directly -- it has no
+// `next/headers` dependency, unlike `app/import-actions.ts` itself). Only
+// the raw SQL text is duplicated, which `tests/bug-011.test.ts`'s
+// source-pin test guards separately.
 async function pagePreview(
   client: SqlClient,
   userId: string,
@@ -225,18 +239,17 @@ async function pagePreview(
        WHERE user_id = ?`,
       [userId],
     ),
-    batch.targetPortfolioId === null
-      ? Promise.resolve<Record<string, unknown>[]>([])
-      : client.all<Record<string, unknown>>(
-          `SELECT portfolio_security_id, type, local_trade_date,
-                  quantity_decimal, unit_price_decimal
-           FROM transactions
-           WHERE user_id = ? AND portfolio_id = ? AND status = 'posted'
-             AND type IN ('buy', 'sell') AND reverses_transaction_id IS NULL
-             AND portfolio_security_id IS NOT NULL
-             AND quantity_decimal IS NOT NULL AND unit_price_decimal IS NOT NULL`,
-          [userId, batch.targetPortfolioId],
-        ),
+    client.all<Record<string, unknown>>(
+      `SELECT portfolio_security_id, type, local_trade_date,
+              quantity_decimal, unit_price_decimal
+       FROM transactions
+       WHERE user_id = ? AND status = 'posted'
+         AND type IN ('buy', 'sell') AND reverses_transaction_id IS NULL
+         AND portfolio_security_id IS NOT NULL
+         AND quantity_decimal IS NOT NULL AND unit_price_decimal IS NOT NULL
+       LIMIT ?`,
+      [userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1],
+    ),
   ]);
   const existingDividendEntries: ImportPreviewExistingDividendEntry[] = [
     ...existingManualRows,
@@ -245,8 +258,12 @@ async function pagePreview(
     portfolioSecurityId: String(row.portfolio_security_id),
     paymentDate: String(row.payment_date),
   }));
+  const cappedTradeRows = capExistingTradeRows(
+    existingTradeRows,
+    MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
+  );
   const existingTradeEntries: ImportPreviewExistingTradeEntry[] =
-    existingTradeRows.map((row) => ({
+    cappedTradeRows.entries.map((row) => ({
       portfolioSecurityId: String(row.portfolio_security_id),
       type: String(row.type) as "buy" | "sell",
       tradeDate: String(row.local_trade_date),
@@ -277,6 +294,7 @@ async function pagePreview(
     })),
     existingDividendEntries,
     existingTradeEntries,
+    existingTradeEntriesUnavailable: cappedTradeRows.unavailable,
   });
   return review;
 }
@@ -897,4 +915,55 @@ test("BUG-011 F3 ownership isolation: the existing-trade query never returns ano
     (issue) => issue.code === "TRADE_NEAR_EXISTING_ENTRY",
   );
   assert.ok(warning, "expected user-a's own posted trade to raise the warning");
+});
+
+test("BUG-011 F2 ruling correction regression: a row that resolves via a MAPPING DECISION into a DIFFERENT portfolio than the batch's own target still raises TRADE_NEAR_EXISTING_ENTRY -- proves the comparison set is genuinely user-wide, not silently scoped to batch.targetPortfolioId", async () => {
+  const database = await migratedDatabase();
+  // A second portfolio owned by the SAME owner (user-a), distinct from
+  // batch-a's own target (portfolio-a) -- exactly the reviewer's repro
+  // shape. `portfolioFor` (domain/imports/reconciliation.ts) can resolve a
+  // row into ANY of the owner's portfolios via a `kind:"portfolio"` mapping
+  // decision, not only the batch's own target.
+  database.exec(`
+    INSERT INTO portfolios (id, user_id, code, name, base_currency_code, timezone, accounting_method, status, created_at, updated_at, version)
+    VALUES ('portfolio-a2', 'user-a', 'A2', 'Secondary', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-10', '2026-08-10', 1);
+    INSERT INTO portfolio_securities (id, user_id, portfolio_id, security_id, source_symbol, source_exchange_alias, source_currency_code, status, created_at, updated_at)
+    VALUES ('membership-a2', 'user-a', 'portfolio-a2', 'security-a', 'ABC', 'ASX', 'AUD', 'held', '2026-08-10', '2026-08-10');
+    INSERT INTO transactions (
+      id, user_id, portfolio_id, portfolio_security_id, type, status, trade_at,
+      local_trade_date, quantity_decimal, unit_price_decimal, currency_code,
+      fee_amount_decimal, tax_amount_decimal, source_type, created_by_user_id,
+      calculation_version, created_at, version
+    ) VALUES ('txn-portfolio-a2', 'user-a', 'portfolio-a2', 'membership-a2', 'buy', 'posted',
+      '2026-08-01T00:00:00Z', '2026-08-01', '5', '10', 'AUD', '0', '0',
+      'manual', 'user-a', 1, '2026-08-01', 1);
+  `);
+  const client = createSqliteSqlClient(database);
+
+  // batch-a's OWN target is portfolio-a (per migratedDatabase's fixture),
+  // but a `kind:"portfolio"` mapping decision redirects the row's source
+  // portfolio name ("Main", from `normalizedRow()`) to portfolio-a2 --
+  // `saveImportMappingAction` accepts any owned `targetId`, so this is a
+  // real, owner-reachable affordance, not a hypothetical.
+  await createOwnedImportMappingDecisionRepository(client).save("user-a", {
+    batchId: "batch-a",
+    kind: "portfolio",
+    sourceKey: "Main",
+    normalizedSourceValue: "Main",
+    targetId: "portfolio-a2",
+    targetValue: null,
+    scope: "batch",
+    confidence: "user",
+    source: "user",
+  });
+  stageRow(database, "batch-a", "row-1", normalizedRow());
+
+  const review = await pagePreview(client, "user-a", "batch-a");
+  const warning = review.preview.issues.find(
+    (issue) => issue.code === "TRADE_NEAR_EXISTING_ENTRY",
+  );
+  assert.ok(
+    warning,
+    "the row resolves into portfolio-a2 (not batch-a's own target, portfolio-a) and must still be compared against portfolio-a2's existing trade -- a query scoped to batch.targetPortfolioId would silently miss this and produce a false negative",
+  );
 });

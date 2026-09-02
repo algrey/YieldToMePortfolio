@@ -43,24 +43,16 @@ import {
   supersedesBatchIdFromImportBody,
   targetPortfolioIdFromImportBody,
 } from "./import-request-body.ts";
+import {
+  capExistingTradeRows,
+  MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
+} from "./import-trade-duplicate-check.ts";
 
 type ImportActionFailure = {
   ok: false;
   status: 400 | 401 | 403 | 404 | 409 | 413 | 503;
   message: string;
 };
-
-// BUG-011 review round F2: caps how many existing posted trades the
-// cross-route duplicate-trade check compares against. Exceeding this
-// degrades the check to "not computed" (`TRADE_DUPLICATE_CHECK_UNAVAILABLE`)
-// rather than silently truncating the comparison set -- a truncated set
-// could produce a false NEGATIVE (a real duplicate missed because its match
-// fell outside the truncated rows), indistinguishable from a genuine
-// non-match, which is worse than visibly not checking at all. Scoped to ONE
-// portfolio's posted buy/sell trades (see the query below), so this is a
-// generous bound for an individual investor's account, not a whole-account
-// figure.
-const MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK = 5_000;
 
 export type ImportActionSuccess = { ok: true; review: ImportReviewPreview };
 
@@ -145,18 +137,33 @@ async function loadReview(
        WHERE user_id = ? AND source_reference IS NOT NULL`,
       [userId],
     ),
-    // BUG-011: every existing POSTED buy/sell transaction in the batch's
-    // OWN target portfolio (any source route, any prior batch/import), for
+    // BUG-011: every existing POSTED buy/sell transaction across the WHOLE
+    // OWNER (any portfolio, any source route, any prior batch/import), for
     // the preview-time cross-route duplicate-trade warning -- see
-    // `ImportPreviewExistingTradeEntry`'s doc comment for scope. Scoped to
-    // `batch.targetPortfolioId` (review round F2): a row can only ever
-    // reconcile against securities/trades in ITS target portfolio (see
-    // `portfolioFor`/`securityKey` in `domain/imports/reconciliation.ts`),
-    // so a cross-portfolio comparison set would be both wasted work and a
-    // needlessly larger read; `targetPortfolioId` is `null` only before the
-    // owner has assigned one, at which point no row can resolve a security
-    // at all and the check can never fire either way, so the query is
-    // skipped outright rather than run unscoped.
+    // `ImportPreviewExistingTradeEntry`'s doc comment for scope.
+    //
+    // Review round F2 RULING CORRECTION (this query was briefly scoped to
+    // `batch.targetPortfolioId` in an earlier round; that was WRONG and is
+    // reverted here). `portfolioFor` (`domain/imports/reconciliation.ts`)
+    // resolves a row's portfolio THREE ways -- a `kind:"portfolio"` mapping
+    // decision's `targetId` (any OWNED portfolio, not just the batch's own
+    // target -- the mapping picker offers every one and
+    // `saveImportMappingAction` accepts any owned `targetId`), the row's own
+    // `targetPortfolioId`, or a unique portfolio NAME match -- so a row can
+    // resolve into a DIFFERENT portfolio than `batch.targetPortfolioId`, and
+    // a batch with no target at all (`null`) still resolves fully by name.
+    // Scoping the comparison set to `batch.targetPortfolioId` therefore
+    // produced silent FALSE NEGATIVES for exactly those rows -- indistin-
+    // guishable from a genuine non-match, i.e. exactly the failure mode this
+    // task's own cap/degrade design (below) is built to avoid. Reverted to
+    // user-wide with no loss of precision: `portfolio_securities.id` is
+    // unique per portfolio and every match below compares against the row's
+    // own already-resolved, portfolio-correct `membershipId`
+    // (`createImportReconciliationPreview`'s `candidate.portfolioId ===
+    // portfolio.id` filter upstream), so a portfolio-A trade can never match
+    // a portfolio-B row's `membershipId` regardless of how wide this read
+    // is -- per-portfolio correctness is enforced by membership identity,
+    // not by this query's `WHERE` clause.
     //
     // Review round F1: `status = 'posted'` alone is NOT enough to exclude a
     // reversed trade's ledger footprint -- `ledger.reverse()` re-runs
@@ -170,27 +177,22 @@ async function loadReview(
     // match and warn on exactly the reverse-then-re-import remediation this
     // task's own diagnostic step prescribes.
     //
-    // Review round F2: `LIMIT MAX + 1` caps the comparison set; the
-    // `length > MAX` check below degrades to `existingTradeEntriesUnavailable`
+    // Review round F2: `LIMIT MAX + 1` caps the comparison set; a
+    // `length > MAX` check (`capExistingTradeRows`, `./import-trade-
+    // duplicate-check.ts`) degrades to `existingTradeEntriesUnavailable`
     // rather than silently comparing against a truncated (and therefore
     // unreliable) set.
-    batch.targetPortfolioId === null
-      ? Promise.resolve<Record<string, unknown>[]>([])
-      : client.all<Record<string, unknown>>(
-          `SELECT portfolio_security_id, type, local_trade_date,
-                  quantity_decimal, unit_price_decimal
-           FROM transactions
-           WHERE user_id = ? AND portfolio_id = ? AND status = 'posted'
-             AND type IN ('buy', 'sell') AND reverses_transaction_id IS NULL
-             AND portfolio_security_id IS NOT NULL
-             AND quantity_decimal IS NOT NULL AND unit_price_decimal IS NOT NULL
-           LIMIT ?`,
-          [
-            userId,
-            batch.targetPortfolioId,
-            MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1,
-          ],
-        ),
+    client.all<Record<string, unknown>>(
+      `SELECT portfolio_security_id, type, local_trade_date,
+              quantity_decimal, unit_price_decimal
+       FROM transactions
+       WHERE user_id = ? AND status = 'posted'
+         AND type IN ('buy', 'sell') AND reverses_transaction_id IS NULL
+         AND portfolio_security_id IS NOT NULL
+         AND quantity_decimal IS NOT NULL AND unit_price_decimal IS NOT NULL
+       LIMIT ?`,
+      [userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1],
+    ),
   ]);
   const previewPortfolios: ImportPreviewPortfolio[] = portfolios.map(
     (item) => ({
@@ -233,22 +235,23 @@ async function loadReview(
           ? null
           : String(row.dividend_per_share_decimal),
     }));
-  // BUG-011 review round F2: exceeding the cap degrades to "not computed"
-  // (an empty comparison set PLUS the visible disclosure issue) rather than
-  // silently comparing against the truncated first `MAX` rows, which could
-  // produce a false negative indistinguishable from a genuine non-match.
-  const existingTradeEntriesUnavailable =
-    existingTradeRows.length > MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK;
+  // BUG-011 review round F2/F-a: the cap/degrade DECISION is a pure
+  // function (`capExistingTradeRows`), unit-tested directly since this file
+  // itself cannot be imported by the test runner -- see that module's doc
+  // comment.
+  const cappedTradeRows = capExistingTradeRows(
+    existingTradeRows,
+    MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
+  );
+  const existingTradeEntriesUnavailable = cappedTradeRows.unavailable;
   const existingTradeEntries: ImportPreviewExistingTradeEntry[] =
-    existingTradeEntriesUnavailable
-      ? []
-      : existingTradeRows.map((row) => ({
-          portfolioSecurityId: String(row.portfolio_security_id),
-          type: String(row.type) as "buy" | "sell",
-          tradeDate: String(row.local_trade_date),
-          quantityDecimal: String(row.quantity_decimal),
-          priceDecimal: String(row.unit_price_decimal),
-        }));
+    cappedTradeRows.entries.map((row) => ({
+      portfolioSecurityId: String(row.portfolio_security_id),
+      type: String(row.type) as "buy" | "sell",
+      tradeDate: String(row.local_trade_date),
+      quantityDecimal: String(row.quantity_decimal),
+      priceDecimal: String(row.unit_price_decimal),
+    }));
   const existingDividendSourceReferences = new Set(
     existingSourceReferenceRows.map(
       (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
