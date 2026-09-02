@@ -1475,6 +1475,38 @@ The two key spaces are structurally incapable of colliding, so the same distribu
 - Risks: the same one BUG-011 proved on real data — an over-eager identity match that auto-skips would silently delete a real distribution. Advisory only. Also note franking/FX fields differ legitimately between routes; do not treat a franking difference as a different distribution, and do not treat it as the same one either without surfacing the discrepancy.
 - Out of scope: changing `source_reference` formats, and BUG-011's trade-side work.
 
+### BUG-014 — Two unguarded `computeDividendCashTotal` calls can 500 the whole import review page (pre-existing)
+
+Status: READY. Pre-existing defect, confirmed independently by BUG-013's reviewer and reproduced directly against current code. Not introduced by BUG-013 — both sites are present unchanged at `b86e643^`.
+
+TWO unguarded sites, not one, both in `domain/imports/reconciliation.ts`:
+
+- `:1048` — `dividendReconciliationRowsAll`, running over every staged dividend row.
+- `:1076` — running over `reconciliationCandidates`, which are **DB-sourced** (`dividend_manual_records` decimal columns), so this one is exposed to a corrupt STORED row as well as a legacy staged blob.
+
+Reproduced by the reviewer against current code: a staged dividend row whose `normalized_fields_json` genuinely lacks `sharesOwned` deserializes to `undefined`, which is `!== null` and so sails past `computeDividendCashTotal`'s `=== null` guards, throwing `Invalid decimal string.` out of `createImportReconciliationPreview`. A non-canonical `costPerShare` such as `"0.50 "` (trailing space) does the same. The throw is uncaught anywhere on the preview path, so the entire `/import` review page 500s — the owner cannot review, correct, or commit anything until the offending row is removed by other means.
+
+Note `db/repositories/dividends.ts`'s `isDecimalString` does not bound scale, but `parseDecimal` does (>24), so a legitimately-stored row can be unparseable at read time. That is the DB-sourced half of the exposure.
+
+- Objective: a single malformed or legacy row must never take down the whole review page.
+- Dependencies: BUG-013 (whose `safeComputeDividendCashTotal`/`safeCashTotalsWithinTolerance` are the established pattern to follow).
+- Deliver: guard both call sites the same way BUG-013 guarded its own — treat an unparseable value as "cannot compare" rather than throwing. The row must still render, and its unusable amount must read as unavailable, never as zero (AGENTS.md: missing dividend data is never zero).
+- Acceptance: a staged row with `undefined` `sharesOwned`, and a stored candidate with a non-canonical or over-scale decimal, both leave the review page rendering; the affected row shows an honest unavailable/needs-attention state rather than a fabricated total; every other row on the page is unaffected; existing DIV-016C reconciliation behaviour is unchanged for well-formed rows.
+- Tests: both throw shapes at both sites (staged-side `undefined` field, DB-side non-canonical and over-scale values); page still renders; no fabricated zero. `tests/bug-013.test.ts:402-440` currently steers around this site and says so in its comment — that disclosure can be replaced with real coverage once this lands.
+- Risks: a guard that silently swallows the value and renders zero would be worse than the crash. Unavailable must be visible.
+
+### BUG-015 — Advisory duplicate warnings fire on every row a re-sync will skip anyway (noise on a financial surface)
+
+Status: BEING FIXED INSIDE BUG-013's correction round (2026-09-02) — recorded here because the defect also affects BUG-011's `TRADE_NEAR_EXISTING_ENTRY`, which is ALREADY DEPLOYED in production version `86aa91cd`. Collapse this entry into BUG-013's completion record once that round lands and is reviewed.
+
+BUG-013's reviewer quantified it on an owner-shaped fixture (18 securities × 7 quarterly payouts = 126 records, all already committed, re-staged as a full re-sync): **0 warnings before → 252 after**, two on every single row (`DIVIDEND_NEAR_EXISTING_ENTRY` 126 + `DIVIDEND_MATCHES_EXISTING_ENTRY` 126), rendered as a flat list by `app/components/import-review.tsx:2376`. Every one is guaranteed noise, because those rows are skipped at commit on an exact `source_reference` match.
+
+The trade-side equivalent is already live and has the same property: the owner's 2026-09-01 batch staged 226 trades and committed 0, so today it would warn on all 226.
+
+Why this matters beyond tidiness: noise on a financial decision surface trains the owner to click through warnings, which defeats the purpose of an advisory check that exists precisely so a real cross-route duplicate gets a human decision. The whole BUG-011/BUG-013 design rests on the owner actually reading these.
+
+Fix (ruled): suppress the advisory check for a row already bound for a dedupe skip — the data is in scope, since `input.existingDividendSourceReferences` is used ~200 lines later to build `alreadyImportedRows`. Cross-route detection must be unweakened: a genuinely new row matching an existing record by economics still warns.
+
 ### BUG-012 — Persist "attempted, genuinely unresolvable" for a value-history candidate date (BUG-010 follow-up)
 
 Status: READY (after BUG-010 lands and the site is stable).
