@@ -1566,7 +1566,38 @@ ROOT CAUSE (confirmed against this repo's own recorded measurements, not inferre
 
 ### PRF-010 — The cron value-history backfill re-scans converged portfolios every tick (BUG-010 follow-up (c))
 
-Status: READY.
+Status: DONE on 2026-09-02 (worker `6282a78` → reviewer FAIL on two blocking findings → corrections `ee4b4ab` → reviewer PASS, explicitly cleared to deploy, migration included). Carries migration `drizzle/0058_prf_010_value_history_backfill_convergence_marker.sql`.
+
+MEASURED, and both figures were corrected mid-task — the ORIGINAL measurement method was wrong in a way that inflated the result. `censusClient` counted one row per `.get()`, but the replacement query is an aggregate that walks every stored row for the portfolio, so "2 rows" was rows RETURNED, not rows READ. Corrected method (folds the `DISTINCT` scan's true examined count, reads the aggregate's own `row_count`): a full-check tick costs **52,040** rows_read, a skipped tick **2,620** (decomposing exactly as 2,600 aggregate + 18 `portfolio_securities` + 1 marker + 1 probe). That is **~95% per skipped tick**, and **~79% daily** at the 6-hour cadence — computed live from the measured numbers (`4 × 52,040 + 20 × 2,620 = 260,560` vs `24 × 52,040 = 1,248,960`), not recycled arithmetic. The residual GROWS with stored history rather than staying constant.
+
+DESIGN: a stored marker on `portfolios` (`value_history_backfill_verified_at`, `value_history_backfill_verified_fingerprint` — two nullable `ADD COLUMN`s, no rebuild, following `historyCompleteFrom`'s precedent) whose fingerprint is DERIVED LIVE rather than independently maintained: stored-side row count, min/max `value_date`, `MAX(computed_at)`, plus a candidate-side `MAX(market_date)` probe. Because every existing invalidation path already mutates `portfolio_value_history`, the stored side self-invalidates with no new call site to remember.
+
+TWO BLOCKING FINDINGS, both on claims this task existed to establish, both of which had already been written into the docs and commit message as observations:
+
+- **B1 — the original fingerprint was blind to the CANDIDATE side, and that was the routine daily case, not a corner.** "Missing" is `candidates(price_observations) − stored(portfolio_value_history)`; the fingerprint only observed the subtrahend. Reviewer's repro with real writers only: converge, land the marker, insert ONE `price_observations` row for a previously-unobserved date with no value-history mutation — fingerprint byte-identical, tick reports `missingDates: 0`, date genuinely unstored. In production this fires daily: `PRICE_SCOPE` does not filter `interval` (`app/historical-portfolio-value.ts:112`), so the day's first `delayed` rollup makes TODAY a candidate, and the accompanying invalidation DELETE removes ZERO rows because nothing is stored for today yet. As shipped, a converged portfolio would have silently stopped receiving its daily cron append — undoing BUG-010 part (b)'s whole purpose, that recovery not depend on the owner loading pages. The count+min+max collision the Orchestrator predicted was ALSO reproduced with real writers.
+- **B2 — the headline measurement**, above.
+
+ORCHESTRATOR RULINGS, all implemented: (1) close the newest-end case structurally with a candidate-side `MAX(market_date)` probe rather than leaving it to the timer; (2) fold `MAX(computed_at)` in to close the delete-then-insert collision; (3) make the skip visible — `ValueHistoryBackfillOutcome.skipped` and `ValueHistoryBackfillSweepSummary.portfoliosConvergedSkipped`, wired through `worker/index.ts`'s structured log, now REQUIRED rather than optional since the entire justification for persisted state is a `rows_read` saving that was otherwise unobservable in production; (4) `CONVERGENCE_RECHECK_INTERVAL_MS` 24h → 6h; (5) correct every place the false claims were recorded, via appended dated paragraphs.
+
+THE SEEK CLAIM WAS VERIFIED, NOT ASSUMED — and it was decisive, since a scanning probe would have cost more than the bug it prevents. `EXPLAIN QUERY PLAN` could not settle it (a seek and a full aggregate walk print identically), so the reviewer used two independent discriminators on the 46,800-row fixture: bytecode (`Once · Last · SeekLE · IdxLT · AggStep · Prev · Prev · AggFinal` — `Next: 0`, `Last: 1`, SQLite's per-`IN`-value MIN/MAX optimization firing) and timing (median of 25: MAX probe **0.0265 ms** vs an identical-predicate `COUNT(*)` full walk at **5.30 ms**). ~200× cheaper, linear in security count.
+
+Reviewer re-ran both original attacks verbatim against the fix: the daily-rollup tail case now invalidates the marker and stores the date; the collision case now differs on `maxComputedAt` and recovers both dates. The ONE remaining gap — an INTERIOR candidate addition — is disclosed plainly, is bounded by the 6-hour interval (confirmed: the past-cadence tick recovers it), and is stated as that backstop's primary job rather than as defense in depth.
+
+Also verified: migration `0058` untouched by the correction round (`git diff 6282a78..ee4b4ab -- drizzle db/schema.ts` empty) and safe on the live database — metadata-only nullable `ADD COLUMN`, `integrity_check ok`, `foreign_key_check` empty, snapshot `prevId` chain intact; ownership scoping on the marker and on `loadCandidateMaxDate`; BUG-010 follow-up (e)'s tell still visible; a future-dated or malformed marker fails open into a full check in both directions; read path untouched.
+
+Verification: `npm run format:check` / `npm run lint` (0 errors, 1 pre-existing unrelated warning) / `npx tsc --noEmit` / `npm run build` clean; `npm test` 2747 tests, 2737 pass, 10 env-gated skips, 0 fail.
+
+REVIEW FOLLOW-UPS (non-blocking):
+
+- (a) `docs/DATA_MODEL.md` presents 52,040/tick and ~1.25M/day as the PRE-fix cost, but that tick includes ~2,601 rows of marker work that did not exist pre-fix (ARCHITECTURE.md discloses the composition inline; DATA_MODEL.md does not). True pre-fix is ~49,440/tick, ~1.19M/day, honest daily reduction ~78%. Errs in the fix's favour by one point — worth a clause next time that file is touched. 52,040 remains correct for a CURRENT full-check tick, which is what the daily estimate uses.
+- (b) `MAX(computed_at)` closes the collision only because wall-clock advances between the convergence snapshot and the offsetting write (`computed_at` is the derivation's `now.toISOString()`). Two derivations inside the same millisecond would still collide — true in production, false in a fixed-`NOW` test. The docs state it absolutely; one qualifying clause would make it exact.
+- (c) The skip path still returns `candidateDates` = stored row count (measured 20 against a real candidate count of 21) and asserts `missingDates: 0`/`backfillPending: false`. Acceptable now that `skipped: true` accompanies them and the JSDoc says the other fields are inferred, but a consumer reading `candidateDates` without checking `skipped` would be misled.
+- (d) `tests/prf-010.test.ts`'s ruling-2 test compares two hand-built fingerprint objects rather than replaying the writer sequence, so it would not catch a future writer that stopped advancing `computed_at`. The reviewer's end-to-end version is cheap to port in.
+- (e) `loadCandidateMaxDate`'s reverse seek must skip rows failing the residual `PRICE_SCOPE` term; in a MULTI-owner deployment a security whose newest rows all belong to another owner would make it walk backwards over them. Not reachable on this single-owner deployment.
+
+Original entry follows.
+
+Status (original): READY.
 
 Raised as non-blocking follow-up (c) by BUG-010's reviewer, and now live in production: BUG-010's cron backfill shipped in version `e8840dcb` and the cron triggers deployed for the first time the same day (OPS-004), so this cost is being paid hourly from now on.
 
