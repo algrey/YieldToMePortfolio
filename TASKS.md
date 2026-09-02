@@ -1433,6 +1433,28 @@ GROUP BY t.portfolio_id, t.portfolio_security_id, t.type, t.local_trade_date,
 HAVING sharesight_copies > 0 AND csv_copies > 0;
 ```
 
+### BUG-013 — The same cross-route double-commit gap is still open for DIVIDENDS (ledger correctness)
+
+Status: READY — high priority. This is BUG-011's defect, unfixed, on the data type the owner actively syncs.
+
+CONFIRMED OPEN, and wider than first thought. Investigated by BUG-011's worker and independently verified by its reviewer in code:
+
+- A dividend row's `source_reference` is `import-fingerprint:${row.normalizedFingerprint}` (`db/repositories/import-commit.ts:519,698`).
+- For a Sharesight payout the fingerprint is `payoutIdentityKey` → `import-fingerprint:sharesight-payout:<sharesightPortfolioId>:<holdingId>:<paidOnDate>` (`domain/sharesight-sync/transform.ts:471`).
+- For a CSV dividend it is a sha256 over `normalizeRowForFingerprint`'s field list (`domain/imports/strict-versioned-parser.ts:957`), sharing NO component with the payout key.
+
+The two key spaces are structurally incapable of colliding, so the same distribution imported once by CSV and once by Sharesight sync commits twice. **BRK-005C's payout-key change does not close this** — it fixed a WITHIN-route idempotency bug (unconfirmed→confirmed churn), not the cross-route gap.
+
+**Neither existing warning covers it (reviewer's addition, worse than the worker reported).** `existingDividendEntries` is loaded with `import_batch_id IS NULL` — owner-typed records only — plus `dividend_receipts`, and DIV-016C's reconciliation candidates use the same filter. **A CSV-imported dividend record is therefore invisible to both.** The cross-route dividend duplicate is fully silent today: no skip, no warning, no reconciliation candidate.
+
+- Objective: give dividends the same visible cross-route near-duplicate surface BUG-011 gave trades.
+- Dependencies: BUG-011 (reuse its pattern and its lessons).
+- Deliver: an economic-identity near-duplicate check for dividend rows — security + payment date + per-share/total amounts, decimal-string normalized — surfaced as an advisory issue in the existing reconciliation surface. Fix the `import_batch_id IS NULL` filter so import-sourced dividend records are visible to the check. Follow BUG-011's shape rather than inventing a second one.
+- Acceptance: a dividend imported by CSV and then re-imported via Sharesight sync (and the reverse order) raises a visible warning before commit; the warning NEVER blocks, skips, or drops a row — a genuinely repeated real distribution stays importable on confirmation (BUG-011's binding constraint applies identically here); `"1.50"` and `"1.5"` compare equal and never through binary floating point; existing dedupe, `source_reference` formats, and DIV-016C reconciliation are unchanged.
+- Tests: cross-route detection in both orders; decimal-string normalization true-positive and true-negative; a genuine same-date repeat distribution still importable; an import-sourced (not owner-typed) existing record is actually seen by the check — the filter bug above; ownership isolation; the query bounded with a `MAX+1` fail-closed cap, per BUG-011 follow-up F2's lesson.
+- Risks: the same one BUG-011 proved on real data — an over-eager identity match that auto-skips would silently delete a real distribution. Advisory only. Also note franking/FX fields differ legitimately between routes; do not treat a franking difference as a different distribution, and do not treat it as the same one either without surfacing the discrepancy.
+- Out of scope: changing `source_reference` formats, and BUG-011's trade-side work.
+
 ### BUG-012 — Persist "attempted, genuinely unresolvable" for a value-history candidate date (BUG-010 follow-up)
 
 Status: READY (after BUG-010 lands and the site is stable).
