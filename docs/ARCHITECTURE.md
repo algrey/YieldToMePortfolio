@@ -690,6 +690,22 @@ The fetch/cron asymmetry is a PAID-plan property. `wrangler.json` deploys produc
 
 **Operational caveat, carried forward from the 2026-08-28 deployment record and NOT resolved by this task:** cron triggers failed to deploy at that time with Cloudflare API error 10072 (Workers Free allows 5 cron triggers per account, already consumed account-wide), so the scheduled handler may not be running in production at all. If that is still true, half (b) of this fix is inert until `wrangler triggers deploy` succeeds, and recovery falls entirely to the read path. Confirm before relying on the cron for this outage's recovery.
 
+### 9.5 PRF-010: the cron backfill re-scanned a converged portfolio's full candidate-date range every tick (2026-09-02, measured in production)
+
+Raised as non-blocking follow-up (c) by BUG-010's reviewer, and confirmed live: BUG-010's cron backfill shipped in `e8840dcb` and OPS-004's cron triggers deployed successfully for the first time the same day (2026-09-01), so this cost was being paid hourly.
+
+**Measured, not estimated.** §9.4's `backfillStoredValueHistoryForPortfolio` called the SAME `loadCandidateDates` `DISTINCT market_date` seek the read path uses, unconditionally, every tick, for every portfolio it examined -- including one that had fully converged (nothing left to derive). At the owner's real scale (18 securities, ~2,600 candidate dates), `tests/prf-010.test.ts` measures this directly: a converged portfolio's tick examines **46,800** `price_observations` rows (re-running the exact captured query as a `COUNT(*)`, the `tests/prf-002.test.ts` PRF-005 measurement convention, since D1's `rows_read` counts index entries visited before `DISTINCT` collapses them, not rows returned). At 24 ticks/day that is **1,123,200 rows/day for one portfolio** -- matching the reviewer's ~1.1M/day estimate, now an observation rather than an estimate. Against a background: this account has previously hit 8.5M row-reads/24h (the CALC-005 record), and PRF-005 follow-up (b)'s ~60k `rows_read`/`/income` load is a separate, still-open cost on the same daily budget.
+
+**Why a cheap query alone cannot answer "is anything missing."** `price_observations_security_date_idx` is `(security_id, adjustment_state, market_date)`, and `loadCandidateDates`'s single-window `BETWEEN` predicate already seeks that index fully bound -- the scan visits exactly the matching rows, not a larger table scan. Proving "zero candidate dates missing" therefore requires visiting every price row in range for every held security; there is no narrower index or aggregate (a `COUNT`/`MAX` skip-scan does not apply once a residual `access_scope` filter sits outside the index) that answers the SAME question for less. A boundary-only check (comparing `MAX`/`MIN` of the stored series to "today") was considered and rejected: a bounded-range interior invalidation (an old price-history correction, `deleteStoredValueHistoryInRangeForOwnedSecurity`) does not move either boundary, so it would go undetected -- the exact class of silent-skip this codebase has hit four times now (BRK-015's two watermarks, BUG-010's unresolvable dates, BUG-011's comparison set).
+
+**What changed.** `portfolios` gains two nullable, cron-only bookkeeping columns (migration `0058_prf_010_value_history_backfill_convergence_marker.sql`, following `historyCompleteFrom`'s own precedent of a per-portfolio marker column rather than a new table): `value_history_backfill_verified_at` and `value_history_backfill_verified_fingerprint`. The fingerprint is `"<row count>:<min value_date>:<max value_date>"` of `portfolio_value_history` for that portfolio, taken the moment a full check proved `missingDates === 0` (`db/repositories/portfolio-value-history.ts`'s `recordPortfolioConvergenceMarker`). `backfillStoredValueHistoryForPortfolio` now checks this marker BEFORE calling `resolveValueHistorySeries`: if the marker is fresh (within `CONVERGENCE_RECHECK_INTERVAL_MS`, 24 hours) and the CURRENT fingerprint (one cheap aggregate query, `loadValueHistoryConvergenceFingerprint`) still matches, the expensive scan is skipped entirely and the tick reports the same shape a genuinely-converged full check would (`missingDates: 0`, `datesDerived: 0`, `rowsPersisted: 0`, `backfillPending: false`). Measured after-cost for the same converged tick: **2 rows** (the marker lookup plus the fingerprint aggregate) -- effectively eliminating the scan.
+
+**Why this needs no invalidation wiring at any other write path.** The fingerprint is not an independently-maintained flag -- it is a live snapshot of `portfolio_value_history` itself, the exact table every existing invalidation path (`valueHistoryInvalidationFromDateStatement`, `deleteStoredValueHistoryInRangeForOwnedSecurity`, `buildValueHistoryInvalidationStatementsForSecurities`) already mutates. Any DELETE those paths issue changes the row count and/or the min/max date this fingerprint captures, so the marker is invalidated for free by construction, with no fourth call site to remember. `tests/prf-010.test.ts`'s invalidation test proves this end to end: converge a portfolio, invalidate one interior date through the real `invalidateStoredValueHistoryForSecurity` path, and confirm the very next tick's fingerprint comparison fails, falls through to the full check, and re-backfills the gap. The 24-hour cadence ceiling is defense in depth on top of that, not the only safeguard, and needs no coupling either: even in the narrow theoretical case where an interior deletion's row-count/date-range change is masked by a coincidentally offsetting write in the same tick (discussed in the marker's own doc comment), the read path (`loadHistoricalPortfolioValueSeries`, entirely untouched by this task) re-verifies via the identical full check on every Overview page load regardless of anything the cron's marker believes.
+
+**The marker never activates for a portfolio with a genuinely unresolvable candidate date.** It is written ONLY when a full check finds `missingDates === 0` from the very first look this tick -- never merely because a tick's derive budget happened to cover every missing date (some of which may be permanently unresolvable). A portfolio with even one such date (BUG-010 follow-up (e)'s territory) can never satisfy `missingDates === 0` -- that date is never `stored`, so it is always counted as missing -- and therefore keeps paying for, and keeps LOGGING, the full check and its `datesDerived > 0`/`rowsPersisted === 0` tell on every tick, unaffected by this task. `tests/prf-010.test.ts` pins this directly.
+
+**Unchanged:** the read path (`loadHistoricalPortfolioValueSeries`, `MAX_DERIVE_DATES_PER_READ`), a genuinely non-converged portfolio's per-tick convergence rate (the marker never applies until the FIRST tick after true convergence), and every BUG-010 honesty guarantee (no date fabricated or interpolated, an unresolvable date stays absent, `backfillPending` stays truthful).
+
 ## 10. Cloudflare binding decisions
 
 ### D1 — use now
@@ -846,6 +862,19 @@ This log records durable architecture decisions previously maintained in `AGENTS
 
 ## Decision log
 
+- `2026-09-02` (`PRF-010`): the cron value-history backfill's per-tick
+  convergence check gains a small persisted per-portfolio marker
+  (`portfolios.value_history_backfill_verified_at`/
+  `...verified_fingerprint`) rather than staying a pure read-time query.
+  Justified by measurement, not assumption: `tests/prf-010.test.ts` shows no
+  cheap query answers "is anything missing" for less than the full
+  `~46,800`-row scan this task exists to avoid, at the owner's real scale.
+  The marker is a live fingerprint of `portfolio_value_history` itself
+  (row count + min/max date), not an independently-maintained flag, so it
+  is invalidated for free by every existing invalidation path rather than
+  needing new coupling at a fourth call site — see §9.5 for the full
+  record, including why a boundary-only (`MAX`/`MIN`-only) marker was
+  rejected as unsafe against a bounded interior invalidation.
 - `2026-09-02` (`BUG-011`): cross-route trade duplicate detection (CSV
   import vs. Sharesight sync, both producing structurally disjoint
   `source_reference` keys for the identical real trade — see the BRK-005

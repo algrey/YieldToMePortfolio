@@ -78,6 +78,15 @@
  * is rendered, or the honesty invariant -- only how much of the rebuild one
  * invocation attempts.
  *
+ * PRF-010 (production, measured, 2026-09-02): once converged, that same
+ * cron kept paying the full candidate-date scan on every tick with nothing
+ * left to derive -- ~1.1M D1 `rows_read`/day. `backfillStoredValueHistoryForPortfolio`
+ * now checks a convergence marker (`db/repositories/portfolio-value-history.ts`)
+ * before that scan; see its own doc comment for the measured before/after
+ * and why the marker needs no invalidation wiring elsewhere. This ONLY
+ * changes the CRON's own per-tick cost -- the read path above (and its
+ * `MAX_DERIVE_DATES_PER_READ` bound) is untouched.
+ *
  * Invalidation (review B2, BLOCKING -- a stored row is a CACHE, and a cache
  * that never invalidates is a correctness bug, not a performance feature):
  * three write paths can make a stored row wrong, all fixed in this task --
@@ -144,8 +153,13 @@ import {
 } from "../domain/snapshots/historical-portfolio-value.ts";
 import type { LedgerQuantityFact } from "../domain/dividends/shares-held.ts";
 import {
+  CONVERGENCE_RECHECK_INTERVAL_MS,
+  convergenceFingerprintMatches,
   deleteStoredValueHistoryInRangeForOwnedSecurity,
+  loadPortfolioConvergenceMarker,
   loadStoredValueHistory,
+  loadValueHistoryConvergenceFingerprint,
+  recordPortfolioConvergenceMarker,
   upsertStoredValueHistory,
 } from "../db/repositories/portfolio-value-history.ts";
 
@@ -1058,6 +1072,30 @@ async function resolveValueHistorySeries(
  * client-supplied id) -- differing only in the bound and in slicing the
  * OLDEST missing dates instead of the newest (see `ValueHistoryDeriveEnd`).
  *
+ * PRF-010 (production, measured): every tick, for every portfolio, this used
+ * to run `loadCandidateDates`'s full `DISTINCT market_date` seek over
+ * `price_observations` (~47k index entries at the owner's real 18-security
+ * scale) even after that portfolio's series had fully converged -- ~1.1M D1
+ * `rows_read`/day (see `tests/prf-010.test.ts`'s measurement). Before paying
+ * for that scan, this now checks `db/repositories/portfolio-value-history.ts`'s
+ * convergence marker -- a fingerprint of `portfolio_value_history` ITSELF
+ * taken the last time a full check proved zero candidate dates were
+ * missing. A match (and a fresh-enough `CONVERGENCE_RECHECK_INTERVAL_MS`)
+ * skips the scan entirely; anything else -- no marker, a stale one, or a
+ * mismatched fingerprint (this portfolio's stored history changed since) --
+ * falls through to the same full check as before. See that module's own doc
+ * comment for why this needs no invalidation wiring at any OTHER write
+ * path: the fingerprint is derived from the exact table every existing
+ * invalidation path already mutates.
+ *
+ * The marker is written ONLY when `missingDates === 0` from the very first
+ * look this tick (never merely because a tick exhausted its derive budget
+ * over dates that turned out unresolvable) -- a portfolio with even one
+ * permanently-unresolvable candidate date (BUG-010 follow-up (e)'s
+ * territory) can never satisfy that, so it keeps paying for, and keeps
+ * LOGGING, the full check and its `datesDerived > 0`/`rowsPersisted === 0`
+ * tell on every tick, exactly as before this task.
+ *
  * Returns `null` for a portfolio this owner does not have (the same
  * fail-closed shape every read here uses), never a thrown error for a
  * missing row.
@@ -1070,6 +1108,33 @@ export async function backfillStoredValueHistoryForPortfolio(
   now: Date = new Date(),
 ): Promise<ValueHistoryBackfillOutcome | null> {
   if (!Number.isInteger(maxDeriveDates) || maxDeriveDates <= 0) return null;
+
+  const marker = await loadPortfolioConvergenceMarker(
+    client,
+    userId,
+    portfolioId,
+  );
+  if (
+    marker &&
+    now.getTime() - Date.parse(marker.verifiedAt) <
+      CONVERGENCE_RECHECK_INTERVAL_MS
+  ) {
+    const fingerprint = await loadValueHistoryConvergenceFingerprint(
+      client,
+      userId,
+      portfolioId,
+    );
+    if (convergenceFingerprintMatches(marker, fingerprint)) {
+      return {
+        candidateDates: fingerprint.rowCount,
+        missingDates: 0,
+        datesDerived: 0,
+        rowsPersisted: 0,
+        backfillPending: false,
+      };
+    }
+  }
+
   const resolved = await resolveValueHistorySeries(
     client,
     userId,
@@ -1078,7 +1143,22 @@ export async function backfillStoredValueHistoryForPortfolio(
     maxDeriveDates,
     "oldest",
   );
-  return resolved ? resolved.outcome : null;
+  if (!resolved) return null;
+  if (resolved.outcome.missingDates === 0) {
+    const fingerprint = await loadValueHistoryConvergenceFingerprint(
+      client,
+      userId,
+      portfolioId,
+    );
+    await recordPortfolioConvergenceMarker(
+      client,
+      userId,
+      portfolioId,
+      fingerprint,
+      now.toISOString(),
+    );
+  }
+  return resolved.outcome;
 }
 
 /** Values a SMALL, caller-specific set of dates (Multi-Year's FY-end dates,

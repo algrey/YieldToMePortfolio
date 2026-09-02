@@ -169,6 +169,24 @@ export const portfolios = sqliteTable(
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     version: integer("version").notNull().default(1),
+    // PRF-010: the hourly cron backfill's own bookkeeping (never read or
+    // written by any user-facing edit path) -- the instant, and a compact
+    // `"<row count>:<min value_date>:<max value_date>"` fingerprint of
+    // `portfolio_value_history`, of the last FULL `loadCandidateDates` check
+    // that PROVED zero candidate dates were missing for this portfolio. See
+    // `app/historical-portfolio-value.ts`'s `backfillStoredValueHistoryForPortfolio`
+    // for how this short-circuits the expensive per-tick DISTINCT scan, and
+    // why re-deriving the fingerprint from `portfolio_value_history` itself
+    // (rather than a flag some other write path must remember to clear)
+    // means it is invalidated for free by every existing invalidation path:
+    // any DELETE those paths issue changes the row count and/or the
+    // min/max date this fingerprint captures. Both columns are NULL until
+    // the first full check confirms convergence, and both are irrelevant to
+    // -- never read by -- the read-time derivation or any user-facing view.
+    valueHistoryBackfillVerifiedAt: text("value_history_backfill_verified_at"),
+    valueHistoryBackfillVerifiedFingerprint: text(
+      "value_history_backfill_verified_fingerprint",
+    ),
   },
   (table) => [
     foreignKey({

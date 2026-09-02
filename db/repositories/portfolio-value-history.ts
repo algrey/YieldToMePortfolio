@@ -171,6 +171,154 @@ export async function upsertStoredValueHistory(
 }
 
 // ---------------------------------------------------------------------------
+// PRF-010: cron-only convergence marker.
+//
+// The hourly cron backfill (`app/value-history-backfill-service.ts`) paid a
+// full `loadCandidateDates` `DISTINCT market_date` seek over
+// `price_observations` (~47k index entries at the owner's real 18-security
+// scale) EVERY tick for EVERY portfolio, including one that had fully
+// converged -- measured at ~1.1M D1 `rows_read`/day against the free plan's
+// 5M/day allowance (see `tests/prf-010.test.ts`'s own before/after
+// measurement). The functions below let the cron short-circuit that scan for
+// a portfolio it has ALREADY proven has zero missing candidate dates,
+// without introducing a flag some OTHER write path must remember to clear.
+//
+// SAFETY: the "fingerprint" below is not an independently-maintained flag --
+// it is a `(row count, min value_date, max value_date)` snapshot of
+// `portfolio_value_history` ITSELF, taken at the exact moment a full check
+// proved nothing was missing. Every existing invalidation path (the ranged
+// DELETE in `valueHistoryInvalidationFromDateStatement`, the owner-scoped
+// `deleteStoredValueHistoryInRangeForOwnedSecurity`, and the cross-owner
+// `buildValueHistoryInvalidationStatementsForSecurities`) mutates exactly
+// this table, so any of them changes this table's row count and/or its
+// min/max date -- there is no separate signal to keep in sync, and no
+// fourth call site to remember (the exact class of bug this task's own
+// history -- BRK-015's two watermarks, BUG-010's unresolvable dates,
+// BUG-011's comparison set -- kept repeating). `tests/prf-010.test.ts`
+// proves this end to end: converge a portfolio, invalidate it through the
+// real `invalidateStoredValueHistoryForSecurity` path, and confirm the very
+// next sweep tick detects the mismatch and resumes backfilling.
+//
+// This marker is ONLY ever written when a full check found ZERO missing
+// candidate dates from the very first look (`ValueHistoryBackfillOutcome`'s
+// `missingDates === 0`) -- never when a tick merely exhausted its derive
+// budget over dates that turned out unresolvable. That keeps a portfolio
+// with even one permanently-unresolvable candidate date (BUG-010 follow-up
+// (e)'s territory) OUT of this shortcut forever: such a portfolio always
+// has `missingDates > 0` (the unresolvable date can never be `stored`), so
+// it keeps paying for -- and keeps LOGGING -- the full check and its
+// `datesDerived > 0`/`rowsPersisted === 0` tell on every tick, completely
+// unaffected by this shortcut.
+//
+// This marker lives on `portfolios` (matching `historyCompleteFrom`'s own
+// precedent of a nullable per-portfolio bookkeeping column), never on
+// `portfolio_value_history` -- the table this fingerprint DESCRIBES must
+// stay the untouched read-time cache the rest of this module documents.
+// ---------------------------------------------------------------------------
+
+/** How long a confirmed-converged marker may be trusted before the cron
+ * re-runs the full check regardless of the fingerprint -- a hard ceiling on
+ * staleness that needs no invalidation coupling to be safe: even in the
+ * narrow theoretical case where an interior invalidation's row-count/date-
+ * range change happens to be masked by an unrelated, coincidentally
+ * offsetting write in the same window (see `tests/prf-010.test.ts`'s own
+ * discussion), this bounds how long the CRON specifically could go without
+ * re-verifying. The independent read path (`loadHistoricalPortfolioValueSeries`,
+ * untouched by this task) re-verifies via the same full check on every page
+ * load regardless, so this is defense in depth, not the only backstop. */
+export const CONVERGENCE_RECHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+export type ValueHistoryConvergenceFingerprint = {
+  rowCount: number;
+  minValueDate: string | null;
+  maxValueDate: string | null;
+};
+
+function encodeConvergenceFingerprint(
+  fingerprint: ValueHistoryConvergenceFingerprint,
+): string {
+  return `${fingerprint.rowCount}:${fingerprint.minValueDate ?? ""}:${fingerprint.maxValueDate ?? ""}`;
+}
+
+/** Cheap owner-scoped snapshot of `portfolio_value_history`'s CURRENT shape
+ * for one portfolio -- one aggregate query, no per-row payload. Far cheaper
+ * than `loadCandidateDates`'s `price_observations` scan (which this
+ * shortcut exists to avoid), but not free: computing `COUNT`/`MIN`/`MAX`
+ * still visits every stored row for this portfolio, so this is sized
+ * against `loadStoredValueHistory`'s existing per-tick cost, not zero. */
+export async function loadValueHistoryConvergenceFingerprint(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+): Promise<ValueHistoryConvergenceFingerprint> {
+  const row = await client.get<Record<string, unknown>>(
+    `SELECT COUNT(*) AS row_count, MIN(value_date) AS lo, MAX(value_date) AS hi
+     FROM portfolio_value_history WHERE user_id = ? AND portfolio_id = ?`,
+    [userId, portfolioId],
+  );
+  return {
+    rowCount: typeof row?.row_count === "number" ? row.row_count : 0,
+    minValueDate: typeof row?.lo === "string" ? row.lo : null,
+    maxValueDate: typeof row?.hi === "string" ? row.hi : null,
+  };
+}
+
+/** Owner-scoped read of the last confirmed-converged marker, or `null` when
+ * the portfolio does not exist for this owner OR has never been confirmed
+ * converged (the fail-open default: "do the full check"). */
+export async function loadPortfolioConvergenceMarker(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+): Promise<{ verifiedAt: string; fingerprint: string } | null> {
+  const row = await client.get<Record<string, unknown>>(
+    `SELECT value_history_backfill_verified_at AS verified_at,
+            value_history_backfill_verified_fingerprint AS fingerprint
+     FROM portfolios WHERE id = ? AND user_id = ?`,
+    [portfolioId, userId],
+  );
+  if (
+    !row ||
+    typeof row.verified_at !== "string" ||
+    typeof row.fingerprint !== "string"
+  ) {
+    return null;
+  }
+  return { verifiedAt: row.verified_at, fingerprint: row.fingerprint };
+}
+
+/** Returns `true` when `loadPortfolioConvergenceMarker`'s own fingerprint
+ * matches `loadValueHistoryConvergenceFingerprint`'s CURRENT one -- pulled
+ * out as its own function so the comparison logic lives next to the
+ * encoding it exercises, rather than being re-derived at the call site. */
+export function convergenceFingerprintMatches(
+  marker: { fingerprint: string },
+  current: ValueHistoryConvergenceFingerprint,
+): boolean {
+  return marker.fingerprint === encodeConvergenceFingerprint(current);
+}
+
+/** Owner-scoped write of the confirmed-converged marker -- called ONLY after
+ * a full check proves `missingDates === 0` (see this section's header for
+ * why that gate matters). Never bumps `portfolios.version`: this is cron
+ * bookkeeping invisible to every user-facing read/edit path, not a change a
+ * concurrent owner edit could conflict with. */
+export async function recordPortfolioConvergenceMarker(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  fingerprint: ValueHistoryConvergenceFingerprint,
+  now: string,
+): Promise<void> {
+  await client.run(
+    `UPDATE portfolios SET value_history_backfill_verified_at = ?,
+       value_history_backfill_verified_fingerprint = ?
+     WHERE id = ? AND user_id = ?`,
+    [now, encodeConvergenceFingerprint(fingerprint), portfolioId, userId],
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Invalidation.
 //
 // Review B2 (BLOCKING): ledger mutations (a back-dated buy, a reversal) and

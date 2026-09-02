@@ -95,20 +95,24 @@ Home currency is the canonical reporting currency. Changing it is an explicit re
 
 ### `portfolios`
 
-| Column                  | Type | Constraints / meaning                                                            |
-| ----------------------- | ---- | -------------------------------------------------------------------------------- |
-| `id`                    | TEXT | PK                                                                               |
-| `user_id`               | TEXT | FK users                                                                         |
-| `code`                  | TEXT | owner-scoped stable short code                                                   |
-| `name`                  | TEXT | display name                                                                     |
-| `base_currency_code`    | TEXT | effective home/reporting currency, initialized from user settings; FK currencies |
-| `timezone`              | TEXT | IANA                                                                             |
-| `accounting_method`     | TEXT | v1 `fifo`                                                                        |
-| `history_complete_from` | TEXT | nullable local date                                                              |
-| `status`                | TEXT | `active`, `archived`                                                             |
-| timestamps/version      |      |                                                                                  |
+| Column                                        | Type | Constraints / meaning                                                            |
+| --------------------------------------------- | ---- | -------------------------------------------------------------------------------- |
+| `id`                                          | TEXT | PK                                                                               |
+| `user_id`                                     | TEXT | FK users                                                                         |
+| `code`                                        | TEXT | owner-scoped stable short code                                                   |
+| `name`                                        | TEXT | display name                                                                     |
+| `base_currency_code`                          | TEXT | effective home/reporting currency, initialized from user settings; FK currencies |
+| `timezone`                                    | TEXT | IANA                                                                             |
+| `accounting_method`                           | TEXT | v1 `fifo`                                                                        |
+| `history_complete_from`                       | TEXT | nullable local date                                                              |
+| `status`                                      | TEXT | `active`, `archived`                                                             |
+| `value_history_backfill_verified_at`          | TEXT | nullable ISO instant; see below                                                  |
+| `value_history_backfill_verified_fingerprint` | TEXT | nullable; see below                                                              |
+| timestamps/version                            |      |                                                                                  |
 
 Unique: `(user_id, id)` for composite FKs; `(user_id, code)`. Index `(user_id, status, updated_at)`.
+
+`value_history_backfill_verified_at`/`value_history_backfill_verified_fingerprint` (nullable, migration `0058_prf_010_value_history_backfill_convergence_marker.sql` — PRF-010): cron-only bookkeeping, never read or written by any user-facing edit path. The hourly value-history backfill (`app/value-history-backfill-service.ts`) was re-running its full `price_observations` `DISTINCT market_date` scan every tick even for a portfolio that had fully converged — measured ~1.1M D1 `rows_read`/day at the owner's real scale (`docs/ARCHITECTURE.md` §9.5). `value_history_backfill_verified_fingerprint` is a `"<row count>:<min value_date>:<max value_date>"` snapshot of `portfolio_value_history` for this portfolio, taken the moment a full check last proved zero candidate dates were missing; `value_history_backfill_verified_at` is that instant. `backfillStoredValueHistoryForPortfolio` (`app/historical-portfolio-value.ts`) skips the expensive scan only when the marker is fresh (within 24 hours) AND the current fingerprint still matches. Deliberately NOT an independently-maintained flag: because the fingerprint is derived live from `portfolio_value_history`'s own current state, every existing invalidation path that deletes rows from that table invalidates this marker for free, with no new call site to keep in sync — see §9.5 for the full record and why a boundary-only (`MAX`/`MIN`) marker was rejected as unsafe.
 
 ### `portfolio_settings`
 
