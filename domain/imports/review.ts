@@ -70,6 +70,10 @@ export type ImportReviewEvidence = Readonly<{
   // near-duplicate warning. Optional/defaulted to empty so every existing
   // caller/test keeps working unchanged.
   existingDividendEntries?: readonly ImportPreviewExistingDividendEntry[];
+  // BUG-013: mirrors `existingTradeEntriesUnavailable` below -- see this
+  // module's `hashedPreview` comment for why it is excluded from
+  // `previewVersion`.
+  existingDividendEntriesUnavailable?: boolean;
   // BUG-011: existing posted buy/sell transactions, for the preview-time
   // cross-route duplicate-trade warning -- same optional/absent-tolerant
   // scoping as `existingDividendEntries` above (see this module's
@@ -153,6 +157,8 @@ export function buildImportReview(
     securityCandidates: evidence.securityCandidates,
     decisions: evidence.mappings,
     existingDividendEntries: evidence.existingDividendEntries,
+    existingDividendEntriesUnavailable:
+      evidence.existingDividendEntriesUnavailable,
     existingTradeEntries: evidence.existingTradeEntries,
     existingTradeEntriesUnavailable: evidence.existingTradeEntriesUnavailable,
     reconciliationCandidates: evidence.reconciliationCandidates,
@@ -188,6 +194,12 @@ export function buildImportReview(
   // (review round F2) is excluded for the same reason: it too depends on a
   // page-only-supplied signal (`evidence.existingTradeEntriesUnavailable`).
   //
+  // BUG-013: `DIVIDEND_MATCHES_EXISTING_ENTRY`/`DIVIDEND_DUPLICATE_CHECK_
+  // UNAVAILABLE` follow the IDENTICAL rule for the IDENTICAL reason as their
+  // trade-side counterparts just above -- both depend on page-only-supplied
+  // signals (`evidence.existingDividendEntries`/
+  // `evidence.existingDividendEntriesUnavailable`).
+  //
   // DIV-016 part C: `DIVIDEND_RECONCILIATION_PROPOSED`/`_AMBIGUOUS`/
   // `_ALREADY_IMPORTED_MANUAL_DUPLICATE` and `proposedReconciliations`
   // follow the IDENTICAL rule for the IDENTICAL reason --
@@ -218,6 +230,8 @@ export function buildImportReview(
         issue.code !== "DIVIDEND_NEAR_EXISTING_ENTRY" &&
         issue.code !== "TRADE_NEAR_EXISTING_ENTRY" &&
         issue.code !== "TRADE_DUPLICATE_CHECK_UNAVAILABLE" &&
+        issue.code !== "DIVIDEND_MATCHES_EXISTING_ENTRY" &&
+        issue.code !== "DIVIDEND_DUPLICATE_CHECK_UNAVAILABLE" &&
         issue.code !== "DIVIDEND_RECONCILIATION_PROPOSED" &&
         issue.code !== "DIVIDEND_RECONCILIATION_AMBIGUOUS" &&
         issue.code !== "DIVIDEND_ALREADY_IMPORTED_MANUAL_DUPLICATE",

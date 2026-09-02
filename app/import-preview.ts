@@ -113,6 +113,9 @@ export function buildImportReviewPreview(input: {
   portfolios: ImportPreviewPortfolio[];
   securityCandidates: ImportPreviewSecurityCandidate[];
   existingDividendEntries?: ImportPreviewExistingDividendEntry[];
+  // BUG-013: mirrors `existingTradeEntriesUnavailable` below -- true when
+  // the caller's own comparison-set cap for the dividend query(ies) was hit.
+  existingDividendEntriesUnavailable?: boolean;
   // BUG-011: existing posted buy/sell transactions, for the preview-time
   // cross-route duplicate-trade warning -- see
   // `ImportPreviewExistingTradeEntry`'s doc comment.
@@ -142,6 +145,8 @@ export function buildImportReviewPreview(input: {
     portfolios: input.portfolios,
     securityCandidates: input.securityCandidates,
     existingDividendEntries: input.existingDividendEntries,
+    existingDividendEntriesUnavailable:
+      input.existingDividendEntriesUnavailable,
     existingTradeEntries: input.existingTradeEntries,
     existingTradeEntriesUnavailable: input.existingTradeEntriesUnavailable,
     reconciliationCandidates: input.reconciliationCandidates,

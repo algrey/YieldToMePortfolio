@@ -562,13 +562,21 @@ test("preview warning: a dividend row within 7 days of an EXISTING owner-typed m
   assert.equal(preview.ready, true, "a warning must never block readiness");
 });
 
-test("preview warning: a dividend row near another IMPORTED record (not owner-typed) does NOT warn -- that is cross-batch dedupe's job", () => {
-  // existingDividendEntries only ever contains owner-typed manual records
-  // (import_batch_id IS NULL) and receipts -- the caller (app/import-
-  // actions.ts) never includes previously-imported rows here, so this test
-  // documents that contract at the reconciliation layer: passing no
-  // existingDividendEntries for an imported-vs-imported scenario produces no
-  // warning.
+test("preview warning: with no existingDividendEntries supplied at all, no proximity warning fires (trivial no-data case)", () => {
+  // BUG-013 CORRECTION: this test previously claimed "existingDividendEntries
+  // only ever contains owner-typed manual records -- the caller never
+  // includes previously-imported rows here" as a deliberate contract. That
+  // claim was the confirmed root cause of a SILENT cross-route dividend
+  // double-commit (see TASKS.md's BUG-013 entry): app/import-actions.ts's
+  // `import_batch_id IS NULL` filter made a CSV-imported dividend invisible
+  // to this same warning when the identical distribution later arrived via
+  // Sharesight sync. That filter is now widened (see
+  // `app/import-actions.ts`'s `loadReview`) to include every non-superseded
+  // dividend_manual_records row regardless of route, and
+  // `tests/bug-013.test.ts` covers the cross-route case directly. This test
+  // now only documents the trivial case at the pure-function layer: an EMPTY
+  // existingDividendEntries array (no data at all, not "imported rows
+  // deliberately excluded") produces no warning.
   const preview = createImportReconciliationPreview({
     rows: [dividendRow({ rowId: "row-1", localTradeDate: "2024-03-05" })],
     portfolios: PORTFOLIOS,

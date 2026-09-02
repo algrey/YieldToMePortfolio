@@ -13,6 +13,11 @@ import {
   MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
 } from "../app/import-trade-duplicate-check.ts";
 import {
+  capExistingDividendRows,
+  MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
+} from "../app/import-dividend-duplicate-check.ts";
+import { computeDividendCashTotal } from "../domain/imports/dividend-reconciliation.ts";
+import {
   createOwnedImportCommitRepository,
   createOwnedImportMappingDecisionRepository,
   createOwnedImportReversalRepository,
@@ -200,6 +205,16 @@ async function currentPreviewVersion(
 // `next/headers` dependency, unlike `app/import-actions.ts` itself). Only
 // the raw SQL text is duplicated, which `tests/bug-011.test.ts`'s
 // source-pin test guards separately.
+//
+// BUG-013: also mirrors `loadReview`'s WIDENED dividend_manual_records query
+// (no longer `import_batch_id IS NULL`-scoped -- that filter was this bug's
+// confirmed root cause) plus the same amount/franking/currency columns and
+// the same cap/degrade decision (`capExistingDividendRows`, an alias of the
+// identical `capExistingTradeRows` function, with its own
+// `MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK` constant). Per this
+// task's own lesson (do not let a test mirror re-implement the production
+// query with no independent check), `tests/bug-013.test.ts` pins the actual
+// `app/import-actions.ts` SQL text separately.
 async function pagePreview(
   client: SqlClient,
   userId: string,
@@ -230,14 +245,19 @@ async function pagePreview(
       [userId],
     ),
     client.all<Record<string, unknown>>(
-      `SELECT portfolio_security_id, payment_date FROM dividend_manual_records
-       WHERE user_id = ? AND import_batch_id IS NULL`,
-      [userId],
+      `SELECT portfolio_security_id, payment_date, shares_decimal,
+              dividend_per_share_decimal, franking_credit_per_share_decimal,
+              total_cash_decimal, total_franking_decimal, currency_code
+       FROM dividend_manual_records
+       WHERE user_id = ? AND superseded_by_record_id IS NULL
+       LIMIT ?`,
+      [userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1],
     ),
     client.all<Record<string, unknown>>(
       `SELECT portfolio_security_id, payment_date FROM dividend_receipts
-       WHERE user_id = ?`,
-      [userId],
+       WHERE user_id = ?
+       LIMIT ?`,
+      [userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1],
     ),
     client.all<Record<string, unknown>>(
       `SELECT portfolio_security_id, type, local_trade_date,
@@ -251,13 +271,56 @@ async function pagePreview(
       [userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1],
     ),
   ]);
-  const existingDividendEntries: ImportPreviewExistingDividendEntry[] = [
-    ...existingManualRows,
-    ...existingReceiptRows,
-  ].map((row) => ({
-    portfolioSecurityId: String(row.portfolio_security_id),
-    paymentDate: String(row.payment_date),
-  }));
+  const cappedManualDividendRows = capExistingDividendRows(
+    existingManualRows,
+    MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
+  );
+  const cappedReceiptDividendRows = capExistingDividendRows(
+    existingReceiptRows,
+    MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
+  );
+  const existingDividendEntriesUnavailable =
+    cappedManualDividendRows.unavailable ||
+    cappedReceiptDividendRows.unavailable;
+  const existingDividendEntries: ImportPreviewExistingDividendEntry[] =
+    existingDividendEntriesUnavailable
+      ? []
+      : [
+          ...cappedManualDividendRows.entries.map((row) => ({
+            portfolioSecurityId: String(row.portfolio_security_id),
+            paymentDate: String(row.payment_date),
+            cashTotalDecimal: computeDividendCashTotal({
+              totalCashDecimal:
+                row.total_cash_decimal === null
+                  ? null
+                  : String(row.total_cash_decimal),
+              sharesDecimal:
+                row.shares_decimal === null ? null : String(row.shares_decimal),
+              dividendPerShareDecimal:
+                row.dividend_per_share_decimal === null
+                  ? null
+                  : String(row.dividend_per_share_decimal),
+            }),
+            frankingTotalDecimal: computeDividendCashTotal({
+              totalCashDecimal:
+                row.total_franking_decimal === null
+                  ? null
+                  : String(row.total_franking_decimal),
+              sharesDecimal:
+                row.shares_decimal === null ? null : String(row.shares_decimal),
+              dividendPerShareDecimal:
+                row.franking_credit_per_share_decimal === null
+                  ? null
+                  : String(row.franking_credit_per_share_decimal),
+            }),
+            currencyCode:
+              row.currency_code === null ? null : String(row.currency_code),
+          })),
+          ...cappedReceiptDividendRows.entries.map((row) => ({
+            portfolioSecurityId: String(row.portfolio_security_id),
+            paymentDate: String(row.payment_date),
+          })),
+        ];
   const cappedTradeRows = capExistingTradeRows(
     existingTradeRows,
     MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
@@ -293,6 +356,7 @@ async function pagePreview(
       securityId: row.security_id === null ? null : String(row.security_id),
     })),
     existingDividendEntries,
+    existingDividendEntriesUnavailable,
     existingTradeEntries,
     existingTradeEntriesUnavailable: cappedTradeRows.unavailable,
   });
@@ -965,5 +1029,113 @@ test("BUG-011 F2 ruling correction regression: a row that resolves via a MAPPING
   assert.ok(
     warning,
     "the row resolves into portfolio-a2 (not batch-a's own target, portfolio-a) and must still be compared against portfolio-a2's existing trade -- a query scoped to batch.targetPortfolioId would silently miss this and produce a false negative",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// BUG-013: the same cross-route double-commit gap, on dividends.
+// ---------------------------------------------------------------------------
+
+test("BUG-013 filter fix: a previously import-sourced dividend record (import_batch_id NOT NULL, simulating a prior CSV import) is now visible to the cross-route check -- the confirmed root-cause filter bug", async () => {
+  const database = await migratedDatabase();
+  // Simulates a distribution already committed via a PRIOR CSV import (any
+  // batch other than the one about to be previewed) -- import_batch_id is
+  // NOT NULL, exactly the row shape the old `import_batch_id IS NULL` filter
+  // made invisible to both DIVIDEND_NEAR_EXISTING_ENTRY and this check.
+  database.exec(`
+    INSERT INTO dividend_manual_records (
+      id, user_id, portfolio_id, portfolio_security_id, payment_date,
+      shares_decimal, dividend_per_share_decimal, franking_credit_per_share_decimal,
+      import_batch_id, source_reference, created_at, updated_at, version
+    ) VALUES ('existing-imported-1', 'user-a', 'portfolio-a', 'membership-a', '2026-08-05',
+      '5', '0.50', NULL, 'prior-batch-csv', 'import-fingerprint:prior-csv-row', '2026-08-01', '2026-08-01', 1);
+  `);
+  // Incoming row: same security, same payment date, same cash total
+  // (5 x 0.50 = 2.50) -- arriving via a SECOND route/batch (Sharesight sync,
+  // in the real defect) for the SAME real distribution.
+  stageRow(
+    database,
+    "batch-a",
+    "row-div",
+    dividendNormalizedRow("2026-08-05", "0.50"),
+  );
+  const client = createSqliteSqlClient(database);
+
+  const review = await pagePreview(client, "user-a", "batch-a");
+  const warning = review.preview.issues.find(
+    (issue) => issue.code === "DIVIDEND_MATCHES_EXISTING_ENTRY",
+  );
+  assert.ok(
+    warning,
+    "an import-sourced (not owner-typed) existing dividend record must now be visible to the cross-route check -- before the fix, import_batch_id IS NULL made it invisible and this warning never fired",
+  );
+  assert.equal(review.preview.ready, true, "advisory only -- never blocks");
+
+  // The pre-existing proximity check must ALSO now see this same
+  // previously-invisible record (same widened query feeds both).
+  const proximityWarning = review.preview.issues.find(
+    (issue) => issue.code === "DIVIDEND_NEAR_EXISTING_ENTRY",
+  );
+  assert.ok(
+    proximityWarning,
+    "DIV-004's proximity check reuses the same widened existingDividendEntries and must also now see this import-sourced record",
+  );
+});
+
+test("BUG-013 ownership isolation: the widened dividend query never returns another owner's dividend records, even when they share an identical economic identity", async () => {
+  const database = await migratedDatabase();
+  // A second owner's membership, reusing the SAME underlying security as
+  // user-a's `membership-a` (economic identity is what must stay isolated).
+  database.exec(`
+    INSERT INTO portfolio_securities (id, user_id, portfolio_id, security_id, source_symbol, source_exchange_alias, source_currency_code, status, created_at, updated_at)
+    VALUES ('membership-c', 'user-b', 'portfolio-b', 'security-a', 'ABC', 'ASX', 'AUD', 'held', '2026-08-10', '2026-08-10');
+    INSERT INTO dividend_manual_records (
+      id, user_id, portfolio_id, portfolio_security_id, payment_date,
+      shares_decimal, dividend_per_share_decimal, franking_credit_per_share_decimal,
+      import_batch_id, source_reference, created_at, updated_at, version
+    ) VALUES
+      ('existing-user-a', 'user-a', 'portfolio-a', 'membership-a', '2026-08-05',
+        '5', '0.50', NULL, 'prior-batch-a', 'import-fingerprint:prior-a', '2026-08-01', '2026-08-01', 1),
+      ('existing-user-b', 'user-b', 'portfolio-b', 'membership-c', '2026-08-05',
+        '5', '0.50', NULL, 'prior-batch-b', 'import-fingerprint:prior-b', '2026-08-01', '2026-08-01', 1);
+  `);
+  const client = createSqliteSqlClient(database);
+
+  const query = `SELECT portfolio_security_id, payment_date, shares_decimal,
+                        dividend_per_share_decimal, franking_credit_per_share_decimal,
+                        total_cash_decimal, total_franking_decimal, currency_code
+                 FROM dividend_manual_records
+                 WHERE user_id = ? AND superseded_by_record_id IS NULL
+                 LIMIT ?`;
+
+  const forUserA = await client.all<Record<string, unknown>>(query, [
+    "user-a",
+    MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1,
+  ]);
+  assert.equal(forUserA.length, 1);
+  assert.equal(forUserA[0]?.portfolio_security_id, "membership-a");
+
+  const forUserB = await client.all<Record<string, unknown>>(query, [
+    "user-b",
+    MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1,
+  ]);
+  assert.equal(forUserB.length, 1);
+  assert.equal(forUserB[0]?.portfolio_security_id, "membership-c");
+
+  // Full-pipeline confirmation: staging the SAME economic identity for
+  // user-a warns from user-a's OWN existing record, never user-b's.
+  stageRow(
+    database,
+    "batch-a",
+    "row-div",
+    dividendNormalizedRow("2026-08-05", "0.50"),
+  );
+  const review = await pagePreview(client, "user-a", "batch-a");
+  const warning = review.preview.issues.find(
+    (issue) => issue.code === "DIVIDEND_MATCHES_EXISTING_ENTRY",
+  );
+  assert.ok(
+    warning,
+    "expected user-a's own existing dividend record to raise the warning",
   );
 });

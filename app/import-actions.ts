@@ -35,6 +35,10 @@ import type {
   ImportPreviewPortfolio,
   ImportPreviewSecurityCandidate,
 } from "../domain/imports/reconciliation";
+// BUG-013: the SAME comparable-total helper DIV-016C's reconciliation
+// matching rule uses, reused here so the cross-route dividend near-duplicate
+// check compares like-for-like amounts (see that module's header comment).
+import { computeDividendCashTotal } from "../domain/imports/dividend-reconciliation.ts";
 import {
   fileMetadataFromImportBody,
   MAX_IMPORT_UPLOAD_REQUEST_BYTES,
@@ -47,6 +51,10 @@ import {
   capExistingTradeRows,
   MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
 } from "./import-trade-duplicate-check.ts";
+import {
+  capExistingDividendRows,
+  MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
+} from "./import-dividend-duplicate-check.ts";
 
 type ImportActionFailure = {
   ok: false;
@@ -90,23 +98,61 @@ async function loadReview(
        ORDER BY ps.source_symbol ASC, ps.id ASC`,
       [userId],
     ),
-    // DIV-004: existing OWNER-typed manual records only (import_batch_id
-    // IS NULL) -- an imported-vs-imported near match is cross-batch
-    // dedupe's job (source_reference idempotency), not this warning's.
+    // BUG-013: WIDENED from "owner-typed only" (`import_batch_id IS NULL`)
+    // -- that filter was the confirmed root cause of a SILENT cross-route
+    // dividend double-commit: both `existingDividendEntries` (this warning)
+    // and DIV-016C's reconciliation candidates excluded EVERY import-
+    // sourced dividend record, so a CSV-imported distribution was invisible
+    // to the near-duplicate check when the SAME distribution later arrived
+    // via Sharesight sync (or the reverse order) -- no skip, no warning, no
+    // reconciliation candidate. Now includes every non-superseded
+    // `dividend_manual_records` row regardless of route/batch, carrying the
+    // amount/franking/currency columns `DIVIDEND_MATCHES_EXISTING_ENTRY`
+    // (`domain/imports/reconciliation.ts`) needs. DIV-016C's OWN
+    // reconciliation-candidates query below is DELIBERATELY left scoped to
+    // `import_batch_id IS NULL` -- that is a distinct, correct business rule
+    // (only a manually entered fact can be SUPERSEDED, per the DIV-016
+    // owner ruling), not the same bug, and widening it would let an already-
+    // imported row wrongly "supersede" another import.
     // DIV-016 part A: excludes a superseded (historical) row -- only the
     // CURRENT head of each lineage is "the" dividend on record; comparing
     // against a superseded ancestor's payment date would raise a spurious
     // near-duplicate warning against a fact the owner already corrected.
+    // BUG-013: unlike a reversed TRADE (`ledger.reverse()` inserts a
+    // compensating mirror row, still `status = 'posted'`, that BUG-011 had
+    // to explicitly exclude), a reversed IMPORT BATCH's dividend rows are
+    // hard-DELETEd by `db/repositories/import-reversal.ts`'s `finalize()`
+    // (`dividend_manual_records` has no "reversed" status/mirror-row
+    // concept -- DIV-001 treats it as an owner-mutable/deletable fact, not
+    // an immutable ledger entry). A reversed dividend import therefore
+    // leaves NO row here to warn against -- `superseded_by_record_id IS
+    // NULL` above is the only exclusion this table needs.
+    // BUG-013: `LIMIT MAX + 1` caps the comparison set, mirroring BUG-011's
+    // F2 lesson -- `capExistingDividendRows` (`./import-dividend-duplicate-
+    // check.ts`) degrades to `existingDividendEntriesUnavailable` rather
+    // than silently comparing against a truncated (and therefore
+    // unreliable) set. This query was previously UNBOUNDED.
     client.all<Record<string, unknown>>(
-      `SELECT portfolio_security_id, payment_date FROM dividend_manual_records
-       WHERE user_id = ? AND import_batch_id IS NULL
-         AND superseded_by_record_id IS NULL`,
-      [userId],
+      `SELECT portfolio_security_id, payment_date, shares_decimal,
+              dividend_per_share_decimal, franking_credit_per_share_decimal,
+              total_cash_decimal, total_franking_decimal, currency_code
+       FROM dividend_manual_records
+       WHERE user_id = ? AND superseded_by_record_id IS NULL
+       LIMIT ?`,
+      [userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1],
     ),
+    // BUG-013: `dividend_receipts` is a provider-observed fact outside the
+    // CSV/Sharesight IMPORT routes this task's cross-route gap is about (it
+    // has no `import_batch_id`/route concept at all), so it stays out of
+    // scope for `DIVIDEND_MATCHES_EXISTING_ENTRY`'s amount check -- only
+    // DIV-004's payment-date-proximity check uses it, unchanged. Now capped
+    // like the query above (was previously unbounded) since both feed the
+    // same combined, capped `existingDividendEntries` array.
     client.all<Record<string, unknown>>(
       `SELECT portfolio_security_id, payment_date FROM dividend_receipts
-       WHERE user_id = ?`,
-      [userId],
+       WHERE user_id = ?
+       LIMIT ?`,
+      [userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1],
     ),
     // DIV-016 part C: existing owner-typed, non-superseded manual dividend
     // records eligible to be matched and superseded by an incoming
@@ -214,13 +260,59 @@ async function loadReview(
       sourceCurrencyCode: String(row.source_currency_code),
       securityId: row.security_id === null ? null : String(row.security_id),
     }));
-  const existingDividendEntries: ImportPreviewExistingDividendEntry[] = [
-    ...existingManualRows,
-    ...existingReceiptRows,
-  ].map((row) => ({
-    portfolioSecurityId: String(row.portfolio_security_id),
-    paymentDate: String(row.payment_date),
-  }));
+  // BUG-013: the cap/degrade DECISION is the same pure, directly-tested
+  // function BUG-011 introduced, aliased for dividends -- see
+  // `./import-dividend-duplicate-check.ts`'s doc comment.
+  const cappedManualDividendRows = capExistingDividendRows(
+    existingManualRows,
+    MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
+  );
+  const cappedReceiptDividendRows = capExistingDividendRows(
+    existingReceiptRows,
+    MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
+  );
+  const existingDividendEntriesUnavailable =
+    cappedManualDividendRows.unavailable ||
+    cappedReceiptDividendRows.unavailable;
+  const existingDividendEntries: ImportPreviewExistingDividendEntry[] =
+    existingDividendEntriesUnavailable
+      ? []
+      : [
+          ...cappedManualDividendRows.entries.map((row) => ({
+            portfolioSecurityId: String(row.portfolio_security_id),
+            paymentDate: String(row.payment_date),
+            cashTotalDecimal: computeDividendCashTotal({
+              totalCashDecimal:
+                row.total_cash_decimal === null
+                  ? null
+                  : String(row.total_cash_decimal),
+              sharesDecimal:
+                row.shares_decimal === null ? null : String(row.shares_decimal),
+              dividendPerShareDecimal:
+                row.dividend_per_share_decimal === null
+                  ? null
+                  : String(row.dividend_per_share_decimal),
+            }),
+            frankingTotalDecimal: computeDividendCashTotal({
+              totalCashDecimal:
+                row.total_franking_decimal === null
+                  ? null
+                  : String(row.total_franking_decimal),
+              sharesDecimal:
+                row.shares_decimal === null ? null : String(row.shares_decimal),
+              dividendPerShareDecimal:
+                row.franking_credit_per_share_decimal === null
+                  ? null
+                  : String(row.franking_credit_per_share_decimal),
+            }),
+            currencyCode:
+              row.currency_code === null ? null : String(row.currency_code),
+          })),
+          ...cappedReceiptDividendRows.entries.map((row) => ({
+            portfolioSecurityId: String(row.portfolio_security_id),
+            paymentDate: String(row.payment_date),
+          })),
+        ];
   const reconciliationCandidates: ImportPreviewDividendReconciliationCandidate[] =
     reconciliationCandidateRows.map((row) => ({
       id: String(row.id),
@@ -284,6 +376,7 @@ async function loadReview(
     portfolios: previewPortfolios,
     securityCandidates,
     existingDividendEntries,
+    existingDividendEntriesUnavailable,
     existingTradeEntries,
     existingTradeEntriesUnavailable,
     reconciliationCandidates,

@@ -60,6 +60,39 @@ function decimalEqual(left: string, right: string): boolean {
   }
 }
 
+// BUG-013: safe wrappers around `computeDividendCashTotal`/
+// `cashTotalsWithinTolerance` for the dividend economic-identity check
+// below, mirroring `decimalEqual`'s F4 lesson above -- an incoming row's
+// `normalized` fields are typed `string | null` but a row STAGED BEFORE a
+// field existed (e.g. `frankingPerShare`/`totalCashDecimal`/
+// `totalFrankingDecimal` predate IMP-006/BRK-005) deserializes its stored
+// `normalized_fields_json` with that key genuinely ABSENT (`undefined`, not
+// `null`), and an existing DB entry's decimal columns could in principle be
+// a corrupt/non-canonical value. Either would otherwise throw out of
+// `parseDecimal`/`parseDecimalResult` and 500 the whole import review page
+// for one bad comparison. Failure is treated as "no comparable amount" /
+// "not within tolerance" -- the warning silently fails to fire for that one
+// comparison rather than breaking the page, exactly like `decimalEqual`.
+function safeComputeDividendCashTotal(fields: {
+  totalCashDecimal: string | null;
+  sharesDecimal: string | null;
+  dividendPerShareDecimal: string | null;
+}): string | null {
+  try {
+    return computeDividendCashTotal(fields);
+  } catch {
+    return null;
+  }
+}
+
+function safeCashTotalsWithinTolerance(left: string, right: string): boolean {
+  try {
+    return cashTotalsWithinTolerance(left, right);
+  } catch {
+    return false;
+  }
+}
+
 function add(left: string, right: string): string {
   const a = decimal(left);
   const b = decimal(right);
@@ -170,6 +203,23 @@ export type ImportReconciliationIssue = Readonly<{
     // batch-level, no-`rowId` info issue makes that degraded state visible
     // rather than silent.
     | "TRADE_DUPLICATE_CHECK_UNAVAILABLE"
+    // BUG-013: the dividend equivalent of TRADE_NEAR_EXISTING_ENTRY --
+    // advisory, non-blocking warning that an incoming dividend row's
+    // ECONOMIC IDENTITY (security + exact payment date + cash-total amount,
+    // within DIV-016C's own tolerance) matches an EXISTING dividend_manual_
+    // records row from ANY route/batch (not just owner-typed ones -- see
+    // `ImportPreviewExistingDividendEntry`'s doc comment for why the caller
+    // widened its filter). Distinct from `DIVIDEND_NEAR_EXISTING_ENTRY`
+    // (DIV-004), which is a looser payment-date-PROXIMITY-only heuristic
+    // with no amount check and (before this task) never saw an
+    // import-sourced existing row at all.
+    | "DIVIDEND_MATCHES_EXISTING_ENTRY"
+    // BUG-013: mirrors TRADE_DUPLICATE_CHECK_UNAVAILABLE -- the caller's own
+    // comparison-set cap for the query(ies) backing `existingDividendEntries`
+    // was exceeded, so BOTH the check above and DIV-004's proximity check
+    // were not computed this time (the same widened, now-larger query feeds
+    // both). Batch-level, no `rowId`, `info` severity, never blocking.
+    | "DIVIDEND_DUPLICATE_CHECK_UNAVAILABLE"
     // DIV-016 part C: advisory, preview-only disclosure of the reconciliation
     // this batch's commit would apply (PROPOSED) or could not safely decide
     // (AMBIGUOUS) -- see `ImportPreviewDividendReconciliationCandidate`'s doc
@@ -191,17 +241,64 @@ export type ImportReconciliationIssue = Readonly<{
   message: string;
 }>;
 
-// DIV-004: an existing (already-persisted, pre-this-batch) owner-entered
-// dividend fact used to warn the reviewer that an incoming CSV dividend row
-// looks like a probable duplicate BEFORE they commit it -- never a hard
-// block, since it is only a proximity heuristic, not a certain duplicate
-// (matching the FRANKING_ON_NON_DIVIDEND precedent for a non-blocking
-// dividend-row warning). Deliberately excludes previously IMPORTED rows: an
-// imported-vs-imported near-match is cross-batch dedupe's job (the
-// `source_reference` idempotency key at commit time), not this warning's.
+// DIV-004: an existing (already-persisted, pre-this-batch) dividend fact
+// used to warn the reviewer that an incoming CSV dividend row looks like a
+// probable duplicate BEFORE they commit it -- never a hard block, since it
+// is only a proximity heuristic, not a certain duplicate (matching the
+// FRANKING_ON_NON_DIVIDEND precedent for a non-blocking dividend-row
+// warning).
+//
+// BUG-013 CORRECTION: this type previously carried a doc comment claiming it
+// "deliberately excludes previously IMPORTED rows: an imported-vs-imported
+// near-match is cross-batch dedupe's job" -- that claim was the confirmed
+// root cause of a SILENT cross-route dividend double-commit (see TASKS.md's
+// BUG-013 entry). A dividend's `source_reference` is a route-specific
+// fingerprint (a Sharesight payout identity key for one route, a sha256 over
+// CSV fields for the other) that can never collide across routes, so
+// "cross-batch dedupe" never actually caught an imported-vs-imported
+// cross-route match at all -- the exclusion above just made that gap
+// invisible too. The caller (`app/import-actions.ts`) now includes every
+// non-superseded `dividend_manual_records` row regardless of route/batch,
+// and this type carries the additional amount/franking/currency fields the
+// economic-identity check (`DIVIDEND_MATCHES_EXISTING_ENTRY`) needs.
 export type ImportPreviewExistingDividendEntry = Readonly<{
   portfolioSecurityId: string;
   paymentDate: string;
+  // BUG-013: comparable cash total (see `computeDividendCashTotal`) for the
+  // economic-identity check (`DIVIDEND_MATCHES_EXISTING_ENTRY`) below.
+  // Optional/nullable: a `dividend_receipts` entry never carries this (that
+  // table is a provider-observed fact outside the CSV/Sharesight IMPORT
+  // routes this task's cross-route gap is about -- out of scope, see
+  // `ImportPreviewDividendReconciliationCandidate`'s established precedent
+  // for the same narrower dividend_manual_records-only scoping), and a
+  // dividend_manual_records row missing enough fields to compute one is
+  // likewise `null`, never fabricated. Absent entirely for every caller
+  // that predates this task (keeps DIV-004-only fixtures compiling
+  // unchanged).
+  cashTotalDecimal?: string | null;
+  // BUG-013: comparable TOTAL franking credits, same derivation as
+  // `cashTotalDecimal` but over the franking fields (`computeDividendCashTotal`
+  // is a generic "total = given, or shares x per-unit" helper -- reused here
+  // for franking, not just cash). `null`/absent when unknown. Used only to
+  // SURFACE a franking discrepancy alongside a cash-total match, never to
+  // decide the match itself -- franking legitimately differs between routes
+  // (e.g. a 17-column CSV header reports no franking at all) without the
+  // two rows being a different real distribution.
+  frankingTotalDecimal?: string | null;
+  // BUG-013: non-null only when this dividend_manual_records row recorded a
+  // currency DIFFERENT FROM ITS OWN SECURITY's currency (Sharesight totals-
+  // mode FX case B/C -- see `db/repositories/import-commit.ts`'s dividend
+  // branch). Deliberately NOT compared against the incoming row's own
+  // `normalized.currency` for an equality decision: that field is always
+  // set on the incoming row's raw evidence regardless of whether it is
+  // foreign to the SECURITY (a fact only resolvable via a DB lookup this
+  // pure function does not have), so a direct equality check would be
+  // comparing "declared row currency" against "confirmed-foreign-to-
+  // security flag" and would misfire constantly (every native CSV row would
+  // spuriously "differ" from a `null` here). Used only to surface, in the
+  // warning message, that FX was involved on the EXISTING side when
+  // present -- never to compute a currency match/mismatch verdict.
+  currencyCode?: string | null;
 }>;
 
 // BUG-011: an existing POSTED buy/sell transaction (any source route,
@@ -295,6 +392,12 @@ export type ImportReconciliationInput = Readonly<{
   // near-duplicate dividend row before commit -- see
   // `ImportPreviewExistingDividendEntry`'s doc comment for scope.
   existingDividendEntries?: readonly ImportPreviewExistingDividendEntry[];
+  // BUG-013: mirrors `existingTradeEntriesUnavailable` -- true when the
+  // caller's own comparison-set cap for the query(ies) backing
+  // `existingDividendEntries` was exceeded, so neither the economic-identity
+  // check nor DIV-004's proximity check ran this time. Never both this AND
+  // a non-empty `existingDividendEntries` at once.
+  existingDividendEntriesUnavailable?: boolean;
   // BUG-011: existing posted buy/sell transactions (any source route),
   // loaded by the caller, used to warn on a probable cross-route duplicate
   // trade before commit -- see `ImportPreviewExistingTradeEntry`'s doc
@@ -418,6 +521,17 @@ export function createImportReconciliationPreview(
       severity: "info",
       message:
         "This portfolio has too many existing trades to check for cross-route duplicates in this preview; the duplicate-trade warning was not computed this time.",
+    });
+  }
+
+  // BUG-013: mirrors the trade disclosure above, for the dividend
+  // comparison set.
+  if (input.existingDividendEntriesUnavailable) {
+    issues.push({
+      code: "DIVIDEND_DUPLICATE_CHECK_UNAVAILABLE",
+      severity: "info",
+      message:
+        "This account has too many existing dividend records to check for near-duplicates in this preview; the dividend duplicate warnings were not computed this time.",
     });
   }
 
@@ -606,6 +720,113 @@ export function createImportReconciliationPreview(
           sourceKey: membershipId,
           message: `This dividend is within ${PROXIMITY_WINDOW_DAYS} days of an existing entry already recorded for this security -- check it is not a duplicate before committing.`,
         });
+      }
+    }
+
+    // BUG-013: the dividend equivalent of BUG-011's TRADE_NEAR_EXISTING_ENTRY
+    // -- an incoming dividend row whose ECONOMIC IDENTITY (resolved security
+    // + EXACT payment date + cash-total amount, within DIV-016C's own
+    // `cashTotalsWithinTolerance` tolerance) matches an EXISTING
+    // dividend_manual_records row is a possible cross-route duplicate: the
+    // same real distribution already imported by CSV (or Sharesight sync)
+    // arriving again via the other route. Root cause: a dividend's
+    // `source_reference` is `import-fingerprint:<fingerprint>`, and the
+    // fingerprint itself is a Sharesight payout identity key
+    // (`sharesight-payout:<portfolioId>:<holdingId>:<paidOnDate>`) for one
+    // route and a sha256 over the CSV row's normalized fields for the
+    // other -- structurally disjoint key spaces sharing no component, so
+    // the exact-string dedupe in `db/repositories/import-commit.ts` can
+    // never catch this cross-route case (see this codebase's TASKS.md
+    // BUG-013 entry for the full investigation). DELIBERATELY non-blocking
+    // for the identical reason BUG-011 is: a genuinely repeated real
+    // distribution (e.g. two separate real payments happening to share a
+    // date and amount) must stay importable on confirmation, never
+    // auto-skipped or dropped.
+    //
+    // Uses `cashTotalsWithinTolerance` (DIV-016C's own established 1%
+    // tolerance), not a stricter exact-decimal match: unlike a trade's
+    // price/quantity (expected byte-identical for the same real fill), a
+    // dividend's cash total can genuinely differ by rounding noise across
+    // routes (a CSV per-share recombination vs. Sharesight's own totals-mode
+    // figure) without being a different distribution -- see
+    // `domain/imports/dividend-reconciliation.ts`'s header comment for the
+    // full rationale this reuses rather than re-deriving.
+    //
+    // Franking/FX are NEVER part of the match decision (they legitimately
+    // differ between routes -- e.g. a 17-column CSV header reports no
+    // franking at all), but a detected franking difference is surfaced in
+    // the message rather than silently ignored -- see
+    // `ImportPreviewExistingDividendEntry`'s doc comment for why currency/FX
+    // is disclosed (when recorded on the existing side) but never compared
+    // for equality here.
+    if (
+      isDividend &&
+      membershipId !== null &&
+      row.normalized.localTradeDate !== null
+    ) {
+      const paymentDate = row.normalized.localTradeDate;
+      const incomingCashTotal = safeComputeDividendCashTotal({
+        totalCashDecimal: row.normalized.totalCashDecimal ?? null,
+        sharesDecimal: row.normalized.sharesOwned,
+        dividendPerShareDecimal: row.normalized.costPerShare,
+      });
+      if (incomingCashTotal !== null) {
+        const incomingFrankingTotal = safeComputeDividendCashTotal({
+          totalCashDecimal: row.normalized.totalFrankingDecimal ?? null,
+          sharesDecimal: row.normalized.sharesOwned,
+          dividendPerShareDecimal: row.normalized.frankingPerShare,
+        });
+        const matchingEntry = (input.existingDividendEntries ?? []).find(
+          (entry) =>
+            entry.portfolioSecurityId === membershipId &&
+            entry.paymentDate === paymentDate &&
+            (entry.cashTotalDecimal ?? null) !== null &&
+            safeCashTotalsWithinTolerance(
+              entry.cashTotalDecimal as string,
+              incomingCashTotal,
+            ),
+        );
+        if (matchingEntry) {
+          const existingFrankingTotal =
+            matchingEntry.frankingTotalDecimal ?? null;
+          const notes: string[] = [];
+          if (
+            existingFrankingTotal !== null &&
+            incomingFrankingTotal !== null
+          ) {
+            if (
+              !safeCashTotalsWithinTolerance(
+                existingFrankingTotal,
+                incomingFrankingTotal,
+              )
+            ) {
+              notes.push(
+                "the recorded franking credits differ between the two records",
+              );
+            }
+          } else if (existingFrankingTotal !== incomingFrankingTotal) {
+            notes.push(
+              "franking credits are recorded on only one of the two records",
+            );
+          }
+          if ((matchingEntry.currencyCode ?? null) !== null) {
+            notes.push(
+              `the existing record was booked with a foreign-currency conversion (${matchingEntry.currencyCode})`,
+            );
+          }
+          const noteSuffix =
+            notes.length > 0
+              ? ` Note: ${notes.join("; ")} -- this does not by itself mean these are different distributions, but check it before committing.`
+              : "";
+          issues.push({
+            code: "DIVIDEND_MATCHES_EXISTING_ENTRY",
+            severity: "warning",
+            rowId: row.id,
+            physicalRowNumber: row.physicalRowNumber,
+            sourceKey: membershipId,
+            message: `This dividend matches an existing record for the same security, payment date, and amount -- check this is not the same distribution already imported through a different route before committing.${noteSuffix}`,
+          });
+        }
       }
     }
 
