@@ -15,12 +15,19 @@ import {
   createOwnedImportStagingRepository,
   createOwnedPortfolioRepository,
   createSharesightSyncStateRepository,
+  loadCommittedSharesightRowValues,
   loadCommittedSharesightWatermarks,
   loadResolvedPortfolioInstrumentCurrencies,
+  type SharesightCommittedRowValues,
   type SqlClient,
 } from "../db/repositories/index.ts";
+import {
+  compareDecimal,
+  parseDecimal,
+} from "../domain/calculations/decimal.ts";
 import type {
   ImportParseSuccess,
+  NormalizedImportRow,
   ParsedImportRow,
 } from "../domain/imports/index.ts";
 import {
@@ -238,6 +245,16 @@ export type RunSharesightSyncResult =
       rowsStaged: number;
       skippedPayouts: number;
       reused: boolean;
+      // BRK-014 (owner-reported): of the `rowsStaged` rows, how many are
+      // genuinely NEW versus already match a currently-committed
+      // transaction/dividend record for this portfolio -- see
+      // `isRowAlreadyImported`'s doc comment for the exact "unchanged
+      // identity + unchanged value" definition and why a Sharesight-side
+      // value CORRECTION deliberately counts as `newRows`, never
+      // `alreadyImportedRows`. Always `newRows + alreadyImportedRows ===
+      // rowsStaged`.
+      newRows: number;
+      alreadyImportedRows: number;
       // BRK-015: what this call actually asked Sharesight for -- honest UI
       // copy must state the window rather than ever implying "fully in
       // sync" after a narrowed routine sync. See
@@ -311,6 +328,103 @@ function canonicalRowDigestFields(row: ParsedImportRow): string {
     // this function exists to prevent.
     normalized.exchangeRateDecimal ?? "",
   ].join("|");
+}
+
+/**
+ * BRK-014: exact-decimal equality, tolerant of a formatting difference
+ * ("100" vs "100.00") the way every other decimal comparison in this
+ * codebase is (AGENTS.md) -- never a literal string/`Number()` compare.
+ * `null` matches `null` (both sides genuinely have no value); any other
+ * mismatch, including one side `null` and the other not, or a parse
+ * failure on a malformed stored value, returns `false`. This is
+ * deliberately the CONSERVATIVE direction: an uncertain comparison must
+ * never be mistaken for "confirmed unchanged" (see `isRowAlreadyImported`).
+ */
+function decimalValuesMatch(
+  incoming: string | null,
+  existing: string | null,
+): boolean {
+  if (incoming === null && existing === null) return true;
+  if (incoming === null || existing === null) return false;
+  try {
+    return compareDecimal(parseDecimal(incoming), parseDecimal(existing)) === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * BRK-014 (owner-reported: a re-sync that staged 14 rows, all of them
+ * already-imported duplicates, read exactly like a fresh 14-row import).
+ * True only when this row's own commit-time identity (`source_reference`)
+ * already exists among this portfolio's currently-committed
+ * trades/dividends AND its economic value is unchanged from what is
+ * already stored there -- i.e. accepting this row would be a true no-op.
+ *
+ * A Sharesight-side value CORRECTION to an existing payout/trade shares the
+ * SAME identity (a payout/trade's `fingerprint` is identity-only --
+ * `payoutIdentityKey`/`sharesight-trade:<id>`, never value-bearing) but a
+ * DIFFERENT value, so this deliberately returns `false` for it -- it must
+ * read as `newRows` (a decision the owner still needs to see), never
+ * `alreadyImportedRows`. See `canonicalRowDigestFields`'s BRK-005
+ * finding-B1 doc comment for the incident this distinction guards against
+ * (a corrected trade silently resolving to the OLD batch with no visible
+ * signal at all).
+ *
+ * Note: this is honest about what the SYNC RESULT reports, not a claim
+ * about commit behaviour -- `db/repositories/import-commit.ts`'s own
+ * exact-`source_reference` skip check is identity-only and will, today,
+ * still skip a value-corrected row at commit time exactly as it would a
+ * true duplicate (out of scope for this task: changing commit-time dedupe
+ * semantics). Reporting the correction as `newRows` here is what keeps it
+ * visible to the owner as a decision, even though this task does not
+ * change what accepting it actually does.
+ */
+function isRowAlreadyImported(
+  row: {
+    fingerprint: string;
+    normalized: Pick<
+      NormalizedImportRow,
+      "type" | "sharesOwned" | "costPerShare" | "totalCashDecimal"
+    >;
+  },
+  existing: SharesightCommittedRowValues,
+): boolean {
+  const sourceReference = `import-fingerprint:${row.fingerprint}`;
+  if (row.normalized.type === "dividend") {
+    const existingPayout = existing.payouts.get(sourceReference);
+    if (!existingPayout) return false;
+    return decimalValuesMatch(
+      row.normalized.totalCashDecimal ?? null,
+      existingPayout.cashTotalDecimal,
+    );
+  }
+  const existingTrade = existing.trades.get(sourceReference);
+  if (!existingTrade) return false;
+  return (
+    decimalValuesMatch(
+      row.normalized.sharesOwned,
+      existingTrade.quantityDecimal,
+    ) &&
+    decimalValuesMatch(row.normalized.costPerShare, existingTrade.priceDecimal)
+  );
+}
+
+function countAlreadyImported(
+  rows: readonly {
+    fingerprint: string;
+    normalized: Pick<
+      NormalizedImportRow,
+      "type" | "sharesOwned" | "costPerShare" | "totalCashDecimal"
+    >;
+  }[],
+  existing: SharesightCommittedRowValues,
+): number {
+  let count = 0;
+  for (const row of rows) {
+    if (isRowAlreadyImported(row, existing)) count += 1;
+  }
+  return count;
 }
 
 // BRK-005B review finding B2 (BLOCKING): the digest omitted the LOCAL
@@ -511,12 +625,28 @@ export async function runSharesightSyncWithContext(
   // was necessary: "no same-fetch trade evidence" is the realistic steady
   // state for a recurring payout (trades are historical), not a rare edge
   // case, so guessing there was never safe.
-  const resolvedInstrumentCurrencies =
-    await loadResolvedPortfolioInstrumentCurrencies(
-      context.client,
-      context.userId,
-      portfolioId,
-    );
+  // BRK-014: loaded alongside `resolvedInstrumentCurrencies` (independent
+  // reads, same round trip depth) -- the currently-committed identity/value
+  // state this sync's own fetch will be compared against below to report
+  // new-versus-already-imported counts. Needed on BOTH the fresh and
+  // REUSED paths (unlike `transformed.rows`/`transformed.issues`, which the
+  // reused path deliberately does NOT trust -- see the honesty rule at
+  // `rowsStaged`'s assignment below), since "already committed" reflects
+  // the account's CURRENT state, not a snapshot from whenever the batch was
+  // first staged.
+  const [resolvedInstrumentCurrencies, existingSharesightRowValues] =
+    await Promise.all([
+      loadResolvedPortfolioInstrumentCurrencies(
+        context.client,
+        context.userId,
+        portfolioId,
+      ),
+      loadCommittedSharesightRowValues(
+        context.client,
+        context.userId,
+        portfolioId,
+      ),
+    ]);
   const transformed = transformSharesightSync({
     portfolioName: portfolio.name,
     trades: tradesResult.value,
@@ -653,6 +783,14 @@ export async function runSharesightSyncWithContext(
   let skippedPayouts = transformed.issues.filter(
     (issue) => issue.code === "SHARESIGHT_PAYOUT_UNCONFIRMED",
   ).length;
+  // BRK-014: same honesty discipline as `rowsStaged`/`skippedPayouts` above
+  // -- on the fresh path, count directly from `transformed.rows` (what was
+  // just staged); on the REUSED path, re-derive from the STORED staged rows
+  // (`staging.listRows`), never from the fresh transform.
+  let alreadyImportedRows = countAlreadyImported(
+    transformed.rows,
+    existingSharesightRowValues,
+  );
   if (started.reused) {
     rowsStaged = started.batch.totalRows;
     const storedIssues = await staging.listIssues(
@@ -662,7 +800,25 @@ export async function runSharesightSyncWithContext(
     skippedPayouts = storedIssues.filter(
       (issue) => issue.code === "SHARESIGHT_PAYOUT_UNCONFIRMED",
     ).length;
+    const storedRows = await staging.listRows(context.userId, started.batch.id);
+    const economicRows = storedRows.flatMap((row) =>
+      row.rowClass === "transaction" &&
+      row.normalizedFingerprint !== null &&
+      row.normalizedFields !== null
+        ? [
+            {
+              fingerprint: row.normalizedFingerprint,
+              normalized: row.normalizedFields,
+            },
+          ]
+        : [],
+    );
+    alreadyImportedRows = countAlreadyImported(
+      economicRows,
+      existingSharesightRowValues,
+    );
   }
+  const newRows = rowsStaged - alreadyImportedRows;
 
   return {
     ok: true,
@@ -670,6 +826,8 @@ export async function runSharesightSyncWithContext(
     batchStatus,
     rowsStaged,
     skippedPayouts,
+    newRows,
+    alreadyImportedRows,
     reused: started.reused,
     window: { trades: tradeWindow, payouts: payoutWindow },
   };

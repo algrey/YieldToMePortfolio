@@ -119,10 +119,12 @@ test("BRK-005B: formatSyncResultMessage distinguishes a newly created batch from
       batchStatus: "parsed",
       rowsStaged: 1,
       skippedPayouts: 0,
+      newRows: 1,
+      alreadyImportedRows: 0,
       reused: false,
       window: { trades: { kind: "full" }, payouts: { kind: "full" } },
     }),
-    "Created batch batch-1. 1 row staged. Checked your entire Sharesight history (trades and dividends).",
+    "Created batch batch-1. 1 row staged. 1 new row. Checked your entire Sharesight history (trades and dividends).",
   );
   assert.equal(
     formatSyncResultMessage({
@@ -131,10 +133,12 @@ test("BRK-005B: formatSyncResultMessage distinguishes a newly created batch from
       batchStatus: "parsed",
       rowsStaged: 5,
       skippedPayouts: 0,
+      newRows: 5,
+      alreadyImportedRows: 0,
       reused: true,
       window: { trades: { kind: "full" }, payouts: { kind: "full" } },
     }),
-    "No changes since last sync -- reused batch batch-1 (status: parsed). 5 rows staged. Checked your entire Sharesight history (trades and dividends).",
+    "No changes since last sync -- reused batch batch-1 (status: parsed). 5 rows staged. 5 new rows. Checked your entire Sharesight history (trades and dividends).",
   );
 });
 
@@ -145,6 +149,8 @@ test("BRK-005B: formatSyncResultMessage surfaces a skipped-payout count with a p
     batchStatus: "parsed",
     rowsStaged: 3,
     skippedPayouts: 1,
+    newRows: 3,
+    alreadyImportedRows: 0,
     reused: false,
     window: { trades: { kind: "full" }, payouts: { kind: "full" } },
   });
@@ -157,6 +163,8 @@ test("BRK-005B: formatSyncResultMessage surfaces a skipped-payout count with a p
     batchStatus: "parsed",
     rowsStaged: 3,
     skippedPayouts: 4,
+    newRows: 3,
+    alreadyImportedRows: 0,
     reused: false,
     window: { trades: { kind: "full" }, payouts: { kind: "full" } },
   });
@@ -170,6 +178,8 @@ test("BRK-005B: formatSyncResultMessage never mentions skipped payouts when ther
     batchStatus: "parsed",
     rowsStaged: 2,
     skippedPayouts: 0,
+    newRows: 2,
+    alreadyImportedRows: 0,
     reused: false,
     window: { trades: { kind: "full" }, payouts: { kind: "full" } },
   });
@@ -183,6 +193,8 @@ test("BRK-005B follow-up 2: formatSyncResultMessage surfaces the reused batch's 
     batchStatus: "committed",
     rowsStaged: 4,
     skippedPayouts: 0,
+    newRows: 4,
+    alreadyImportedRows: 0,
     reused: true,
     window: { trades: { kind: "full" }, payouts: { kind: "full" } },
   });
@@ -194,6 +206,8 @@ test("BRK-005B follow-up 2: formatSyncResultMessage surfaces the reused batch's 
     batchStatus: "needs_mapping",
     rowsStaged: 4,
     skippedPayouts: 0,
+    newRows: 4,
+    alreadyImportedRows: 0,
     reused: true,
     window: { trades: { kind: "full" }, payouts: { kind: "full" } },
   });
@@ -207,6 +221,8 @@ test("BRK-005B follow-up 2: formatSyncResultMessage surfaces the reused batch's 
     batchStatus: "committed",
     rowsStaged: 4,
     skippedPayouts: 0,
+    newRows: 4,
+    alreadyImportedRows: 0,
     reused: false,
     window: { trades: { kind: "full" }, payouts: { kind: "full" } },
   });
@@ -225,6 +241,8 @@ test("BRK-015: formatSyncResultMessage states the narrowed window's since-date, 
     batchStatus: "parsed",
     rowsStaged: 2,
     skippedPayouts: 0,
+    newRows: 2,
+    alreadyImportedRows: 0,
     reused: false,
     window: {
       trades: { kind: "narrowed", sinceDate: "2026-07-15" },
@@ -244,6 +262,8 @@ test("BRK-015: formatSyncResultMessage reports full-history coverage for a full 
     batchStatus: "parsed",
     rowsStaged: 226,
     skippedPayouts: 0,
+    newRows: 226,
+    alreadyImportedRows: 0,
     reused: false,
     window: { trades: { kind: "full" }, payouts: { kind: "full" } },
   });
@@ -261,6 +281,8 @@ test("BRK-015 review round B1 fix: formatSyncResultMessage states trades and pay
     batchStatus: "parsed",
     rowsStaged: 3,
     skippedPayouts: 0,
+    newRows: 3,
+    alreadyImportedRows: 0,
     reused: false,
     window: {
       trades: { kind: "narrowed", sinceDate: "2026-07-02" },
@@ -283,6 +305,8 @@ test("BRK-015 review round B1 fix: formatSyncResultMessage states trades and pay
     batchStatus: "parsed",
     rowsStaged: 1,
     skippedPayouts: 0,
+    newRows: 1,
+    alreadyImportedRows: 0,
     reused: false,
     window: {
       trades: { kind: "narrowed", sinceDate: "2026-08-01" },
@@ -292,6 +316,133 @@ test("BRK-015 review round B1 fix: formatSyncResultMessage states trades and pay
   assert.match(halfFull, /trades since 2026-08-01/);
   assert.match(halfFull, /all dividends/);
   assert.doesNotMatch(halfFull, /entire Sharesight history/);
+});
+
+// ---------------------------------------------------------------------------
+// BRK-014 (owner-reported): the sync result must say how many staged rows
+// are genuinely NEW versus already imported -- a 2026-09-02 production
+// re-sync staged 14 rows, all 14 already-imported duplicates, and read
+// exactly like a fresh 14-row import because nothing distinguished them.
+// ---------------------------------------------------------------------------
+
+test("BRK-014: formatSyncResultMessage reads unambiguously as 'no new rows' when every staged row already matches an existing record -- never as a full re-import", () => {
+  const message = formatSyncResultMessage({
+    ok: true,
+    batchId: "batch-20",
+    batchStatus: "parsed",
+    rowsStaged: 14,
+    skippedPayouts: 0,
+    newRows: 0,
+    alreadyImportedRows: 14,
+    reused: false,
+    window: { trades: { kind: "full" }, payouts: { kind: "full" } },
+  });
+  assert.match(message, /No new rows/);
+  assert.doesNotMatch(message, /14 new row/);
+});
+
+test("BRK-014: formatSyncResultMessage names N when every staged row is genuinely new, without a redundant '0 already imported' clause", () => {
+  const message = formatSyncResultMessage({
+    ok: true,
+    batchId: "batch-21",
+    batchStatus: "parsed",
+    rowsStaged: 3,
+    skippedPayouts: 0,
+    newRows: 3,
+    alreadyImportedRows: 0,
+    reused: false,
+    window: { trades: { kind: "full" }, payouts: { kind: "full" } },
+  });
+  assert.match(message, /3 new rows\./);
+  assert.doesNotMatch(message, /already imported/);
+});
+
+test("BRK-014: formatSyncResultMessage names both counts for a mixed batch (some new, some already imported)", () => {
+  const message = formatSyncResultMessage({
+    ok: true,
+    batchId: "batch-22",
+    batchStatus: "parsed",
+    rowsStaged: 5,
+    skippedPayouts: 0,
+    newRows: 2,
+    alreadyImportedRows: 3,
+    reused: false,
+    window: { trades: { kind: "full" }, payouts: { kind: "full" } },
+  });
+  assert.match(message, /2 new rows; 3 already imported\./);
+});
+
+test("BRK-014: singular 'row'/'new row' wording for a batch of exactly one", () => {
+  const message = formatSyncResultMessage({
+    ok: true,
+    batchId: "batch-23",
+    batchStatus: "parsed",
+    rowsStaged: 1,
+    skippedPayouts: 0,
+    newRows: 1,
+    alreadyImportedRows: 0,
+    reused: false,
+    window: { trades: { kind: "full" }, payouts: { kind: "full" } },
+  });
+  assert.match(message, /1 new row\./);
+  assert.doesNotMatch(message, /1 new rows/);
+});
+
+test("BRK-014: a REUSED batch's message uses the SUPPLIED (caller-derived, stored-not-fresh) new/already-imported counts exactly the same way as a freshly created batch's", () => {
+  // This test only pins the pure formatter's composition -- the honesty
+  // rule that a reused batch's caller must derive these counts from STORED
+  // state, not the fresh transform, is enforced and tested at the service
+  // layer (`app/sharesight-sync-service.ts`, `tests/brk-005.test.ts`).
+  const message = formatSyncResultMessage({
+    ok: true,
+    batchId: "batch-24",
+    batchStatus: "committed",
+    rowsStaged: 14,
+    skippedPayouts: 0,
+    newRows: 0,
+    alreadyImportedRows: 14,
+    reused: true,
+    window: { trades: { kind: "full" }, payouts: { kind: "full" } },
+  });
+  assert.match(message, /No changes since last sync/);
+  assert.match(message, /No new rows/);
+});
+
+test("BRK-014: a batch that staged nothing at all shows no new/already-imported clause (rowsLine alone is already unambiguous)", () => {
+  const message = formatSyncResultMessage({
+    ok: true,
+    batchId: "batch-25",
+    batchStatus: "parsed",
+    rowsStaged: 0,
+    skippedPayouts: 0,
+    newRows: 0,
+    alreadyImportedRows: 0,
+    reused: false,
+    window: { trades: { kind: "full" }, payouts: { kind: "full" } },
+  });
+  assert.doesNotMatch(message, /new row/);
+  assert.doesNotMatch(message, /already imported/);
+});
+
+test("BRK-014: a Sharesight-side value correction is represented as a NEW row in the counts the formatter receives -- the formatter never re-derives 'already imported' from batchId/reused itself", () => {
+  // The correction case is a SERVICE-layer classification decision (see
+  // `isRowAlreadyImported` in `app/sharesight-sync-service.ts` and its
+  // dedicated service-level test); this pins that the pure formatter
+  // faithfully reports whatever `newRows`/`alreadyImportedRows` it is
+  // given, so a correction that the service correctly counts as `newRows`
+  // reads as new here too, never silently reclassified as already imported.
+  const message = formatSyncResultMessage({
+    ok: true,
+    batchId: "batch-26",
+    batchStatus: "parsed",
+    rowsStaged: 1,
+    skippedPayouts: 0,
+    newRows: 1,
+    alreadyImportedRows: 0,
+    reused: false,
+    window: { trades: { kind: "full" }, payouts: { kind: "full" } },
+  });
+  assert.match(message, /1 new row\./);
 });
 
 // ---------------------------------------------------------------------------
@@ -788,6 +939,28 @@ test("BRK-005B: the panel's three fetches target exactly BRK-005's three existin
   // template literal here -- this just confirms the panel actually calls
   // it, not a second, drifted copy of the URL logic.
   assert.match(source, /buildSharesightSyncUrl\(portfolioId, mode\)/);
+});
+
+// ---------------------------------------------------------------------------
+// BRK-014: the new-vs-already-imported counts must actually reach the panel
+// (and therefore `formatSyncResultMessage`'s rendering) -- source-scanned
+// like this file's other client-state-transition assertions, since there is
+// no jsdom harness in this suite to mock the fetch response and exercise
+// `setSyncResult` at runtime (see this file's header comment).
+// ---------------------------------------------------------------------------
+
+test("BRK-014: runSync reads newRows/alreadyImportedRows off the fetch response and forwards them into syncResult, so formatSyncResultMessage actually renders the real counts", async () => {
+  const source = await readFile(new URL(PANEL_PATH, import.meta.url), "utf8");
+  const runSyncIndex = source.indexOf("async function runSync(");
+  assert.ok(runSyncIndex >= 0, "expected a runSync function");
+  const runSyncBlock = source.slice(runSyncIndex, source.indexOf("return (\n"));
+  assert.match(runSyncBlock, /newRows: number;/);
+  assert.match(runSyncBlock, /alreadyImportedRows: number;/);
+  assert.match(runSyncBlock, /newRows: result\.newRows,/);
+  assert.match(
+    runSyncBlock,
+    /alreadyImportedRows: result\.alreadyImportedRows,/,
+  );
 });
 
 // ---------------------------------------------------------------------------

@@ -260,7 +260,9 @@ export {
 } from "./dividends.ts";
 export {
   createSharesightSyncStateRepository,
+  loadCommittedSharesightRowValues,
   loadCommittedSharesightWatermarks,
+  type SharesightCommittedRowValues,
   type SharesightCommittedWatermarks,
   type SharesightSyncStateMutationFailure,
   type SharesightSyncStateRecord,

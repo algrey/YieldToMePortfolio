@@ -1600,6 +1600,18 @@ test("BRK-005: reviewer B1 repro -- a Sharesight-side correction to an already-s
     false,
     "a genuinely different fetch must never report reused",
   );
+  // BRK-014: the corrected row shares the SAME identity as the already-
+  // committed trade (`fingerprint`/`source_reference` are identity-only,
+  // unaffected by a value correction), but its VALUE differs -- it must
+  // count as `newRows` (a decision the owner still needs to see), never
+  // `alreadyImportedRows`, or the correction would silently read as a
+  // routine no-op re-sync.
+  assert.equal(
+    second.newRows,
+    1,
+    "a value-corrected row must count as new, never already imported",
+  );
+  assert.equal(second.alreadyImportedRows, 0);
 
   const secondRows = await createOwnedImportStagingRepository(client).listRows(
     "user-a",
@@ -1634,6 +1646,181 @@ test("BRK-005: reviewer B1 repro -- a Sharesight-side correction to an already-s
     { quantity_decimal: string; unit_price_decimal: string } | undefined;
   assert.equal(committedTradeAfter?.quantity_decimal, "5");
   assert.equal(committedTradeAfter?.unit_price_decimal, "10");
+});
+
+// ---------------------------------------------------------------------------
+// BRK-014 (owner-reported): the sync result must say how many staged rows
+// are genuinely NEW versus already imported -- a 2026-09-02 production
+// re-sync staged 14 rows, all 14 already-imported duplicates, and read
+// exactly like a fresh 14-row import because nothing distinguished them.
+// ---------------------------------------------------------------------------
+
+test("BRK-014: a fresh sync against an account with nothing previously committed reports every staged row as new", async () => {
+  const database = await migratedDatabase();
+  const { client, sharesightClient } = await linkedFixture(database, {
+    portfolios: [fakePortfolio()],
+    trades: [fakeTrade({ id: "trade-fresh" })],
+    payouts: [fakePayout({ id: "payout-fresh" })],
+  });
+  const result = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: { enabled: true, client: sharesightClient } },
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.rowsStaged, 2);
+  assert.equal(result.newRows, 2);
+  assert.equal(result.alreadyImportedRows, 0);
+});
+
+test("BRK-014: a REUSED batch's already-imported count reflects the account's CURRENT committed state, re-derived from the batch's STORED rows -- never the fresh transform", async () => {
+  const database = await migratedDatabase();
+  const fixtures = {
+    portfolios: [fakePortfolio()],
+    trades: [fakeTrade({ id: "trade-reused" })],
+    payouts: [] as SharesightPayout[],
+  };
+  const { client, sharesightClient } = await linkedFixture(database, fixtures);
+  const integration = { enabled: true as const, client: sharesightClient };
+
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  assert.equal(first.newRows, 1);
+  assert.equal(first.alreadyImportedRows, 0);
+
+  const firstBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    first.batchId,
+  );
+  assert.ok(firstBatch);
+  await commitBatch(
+    client,
+    first.batchId,
+    "brk-014-reused-commit",
+    firstBatch!.version,
+  );
+
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    { integration },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  assert.equal(
+    second.batchId,
+    first.batchId,
+    "identical fetch must still reuse the batch",
+  );
+  assert.equal(second.reused, true);
+  assert.equal(second.rowsStaged, 1);
+  assert.equal(
+    second.newRows,
+    0,
+    "the trade is now committed -- the reused batch's re-derived count must reflect that",
+  );
+  assert.equal(second.alreadyImportedRows, 1);
+});
+
+test("BRK-014: a Full resync combining rows already committed via separate earlier routine syncs reports them as already imported, even though the combined fetch stages a genuinely NEW (non-reused) batch -- the owner's exact 2026-09-02 production shape", async () => {
+  const database = await migratedDatabase();
+  const { client } = await linkedFixture(database, {
+    portfolios: [fakePortfolio()],
+  });
+
+  // Two payouts, each synced and committed SEPARATELY (mirrors two ordinary
+  // routine syncs over time).
+  const payoutA = fakePayout({
+    id: "payout-a",
+    paidOnDate: "2026-01-05",
+    amountDecimal: "2.50",
+  });
+  const syncA = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-a" },
+    "portfolio-a",
+    {
+      integration: {
+        enabled: true,
+        client: fakeSharesightClient({ trades: [], payouts: [payoutA] }),
+      },
+    },
+  );
+  assert.equal(syncA.ok, true);
+  if (!syncA.ok) return;
+  const batchA = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    syncA.batchId,
+  );
+  assert.ok(batchA);
+  await commitBatch(client, syncA.batchId, "brk-014-full-a", batchA!.version);
+
+  const payoutB = fakePayout({
+    id: "payout-b",
+    paidOnDate: "2026-04-05",
+    amountDecimal: "3.00",
+  });
+  const syncB = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-b" },
+    "portfolio-a",
+    {
+      integration: {
+        enabled: true,
+        client: fakeSharesightClient({ trades: [], payouts: [payoutB] }),
+      },
+    },
+  );
+  assert.equal(syncB.ok, true);
+  if (!syncB.ok) return;
+  const batchB = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    syncB.batchId,
+  );
+  assert.ok(batchB);
+  await commitBatch(client, syncB.batchId, "brk-014-full-b", batchB!.version);
+
+  // A Full resync now returns BOTH already-committed payouts PLUS one
+  // genuinely new one -- a combined fetch that was never staged as a single
+  // batch before, so it is a genuinely fresh (non-reused) batch, even
+  // though most of its rows already exist.
+  const payoutC = fakePayout({
+    id: "payout-c",
+    paidOnDate: "2026-07-05",
+    amountDecimal: "4.00",
+  });
+  const full = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-full" },
+    "portfolio-a",
+    {
+      mode: "full",
+      integration: {
+        enabled: true,
+        client: fakeSharesightClient({
+          trades: [],
+          payouts: [payoutA, payoutB, payoutC],
+        }),
+      },
+    },
+  );
+  assert.equal(full.ok, true);
+  if (!full.ok) return;
+  assert.equal(
+    full.reused,
+    false,
+    "a combined fetch never staged as one batch before must be genuinely new",
+  );
+  assert.equal(full.rowsStaged, 3);
+  assert.equal(full.newRows, 1, "only payout C is genuinely new");
+  assert.equal(
+    full.alreadyImportedRows,
+    2,
+    "A and B already match committed records",
+  );
 });
 
 test("BRK-005: reviewer PROBE 3 -- the reused-batch path reports the STORED rowsStaged/skippedPayouts against a KNOWN-correct absolute count (1 skipped payout), not merely self-consistent with a possibly-buggy DB read, and the omission's detail (symbol/paid_on) is visible in the stored issue", async () => {

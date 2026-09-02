@@ -78,6 +78,15 @@ export type SharesightSyncSuccess = {
   batchStatus: string;
   rowsStaged: number;
   skippedPayouts: number;
+  // BRK-014 (owner-reported): of `rowsStaged`, how many are genuinely NEW
+  // versus already match a currently-committed record for this portfolio.
+  // Always `newRows + alreadyImportedRows === rowsStaged`. See
+  // `app/sharesight-sync-service.ts`'s `isRowAlreadyImported` doc comment
+  // for the exact "unchanged identity + unchanged value" definition and why
+  // a Sharesight-side value correction counts as `newRows`, never
+  // `alreadyImportedRows`.
+  newRows: number;
+  alreadyImportedRows: number;
   reused: boolean;
   window: SharesightSyncWindowSummary;
 };
@@ -164,20 +173,40 @@ function windowLabel(window: SharesightSyncWindowSummary): string {
  * correction), so the copy below says "future-dated" rather than the prior
  * "unconfirmed" wording, which would otherwise wrongly imply every
  * unconfirmed payout was skipped. */
+/**
+ * BRK-014 (owner-reported): the core fix for "It is unclear... it appears
+ * to download everything" -- this line must let the owner tell a routine
+ * no-op sync from one that will actually change their ledger BEFORE they
+ * open the preview. Only rendered when rows were actually staged (a
+ * zero-staged sync already reads unambiguously from `rowsLine` alone).
+ * Three shapes, deliberately distinct wording rather than one templated
+ * sentence: the all-already-imported case states "No new rows" literally
+ * (unambiguous, never read as a full re-import); the all-new case omits the
+ * redundant "0 already imported" clause; the mixed case names both counts.
+ */
+function newVsAlreadyImportedLine(result: SharesightSyncSuccess): string {
+  if (result.rowsStaged === 0) return "";
+  if (result.newRows === 0) {
+    return " No new rows -- every staged row already matches an existing record.";
+  }
+  const newLabel = `${result.newRows} new row${result.newRows === 1 ? "" : "s"}`;
+  if (result.alreadyImportedRows === 0) return ` ${newLabel}.`;
+  return ` ${newLabel}; ${result.alreadyImportedRows} already imported.`;
+}
+
 export function formatSyncResultMessage(result: SharesightSyncSuccess): string {
   const batchLine = result.reused
     ? `No changes since last sync -- reused batch ${result.batchId} (status: ${statusLabel(result.batchStatus)}).`
     : `Created batch ${result.batchId}.`;
   const rowsLine = `${result.rowsStaged} row${result.rowsStaged === 1 ? "" : "s"} staged.`;
+  const newVsExistingLine = newVsAlreadyImportedLine(result);
   const skippedLine =
     result.skippedPayouts > 0
       ? ` ${result.skippedPayouts} future-dated payout${result.skippedPayouts === 1 ? "" : "s"} skipped -- not yet paid; details in the batch preview.`
       : "";
   // BRK-015: the window disclosure is its own trailing sentence, always
-  // present -- BRK-014 (new-vs-already-imported counts, a separate READY
-  // task touching this same helper) can append its own line the same way
-  // without needing to touch this composition.
-  return `${batchLine} ${rowsLine}${skippedLine} ${windowLabel(result.window)}`;
+  // present.
+  return `${batchLine} ${rowsLine}${newVsExistingLine}${skippedLine} ${windowLabel(result.window)}`;
 }
 
 /**

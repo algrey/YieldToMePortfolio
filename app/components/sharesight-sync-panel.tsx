@@ -251,6 +251,8 @@ export function SharesightSyncPanel({
             batchStatus: string;
             rowsStaged: number;
             skippedPayouts: number;
+            newRows: number;
+            alreadyImportedRows: number;
             reused: boolean;
             window: SharesightSyncWindowSummary;
           }
@@ -269,6 +271,8 @@ export function SharesightSyncPanel({
         batchStatus: result.batchStatus,
         rowsStaged: result.rowsStaged,
         skippedPayouts: result.skippedPayouts,
+        newRows: result.newRows,
+        alreadyImportedRows: result.alreadyImportedRows,
         reused: result.reused,
         window: result.window,
       });

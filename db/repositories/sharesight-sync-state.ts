@@ -537,3 +537,78 @@ export async function loadCommittedSharesightWatermarks(
     payoutWatermark: row?.payout_watermark ?? null,
   };
 }
+
+export type SharesightCommittedRowValues = Readonly<{
+  trades: ReadonlyMap<
+    string,
+    { quantityDecimal: string | null; priceDecimal: string | null }
+  >;
+  payouts: ReadonlyMap<string, { cashTotalDecimal: string | null }>;
+}>;
+
+/**
+ * BRK-014 (owner-reported: a re-sync that adds nothing read as a full
+ * re-import because the sync result never said how many staged rows were
+ * genuinely new versus already imported). The VALUE-BEARING counterpart to
+ * `loadCommittedSharesightWatermarks` above: returns, keyed by each row's
+ * own `source_reference`, the economic fields a Sharesight-side CORRECTION
+ * would change (trade quantity/price; payout cash total). This is what lets
+ * the caller tell a genuinely unchanged re-fetched row (same identity, same
+ * value -- truly "already imported") apart from a Sharesight-side value
+ * correction to the SAME identity (same `source_reference`, changed value
+ * -- must never read as "already imported"; see
+ * `app/sharesight-sync-service.ts`'s `canonicalRowDigestFields` doc comment
+ * for the BRK-005 finding-B1 incident this distinction guards against).
+ *
+ * Deliberately mirrors `db/repositories/import-commit.ts`'s own exact-match
+ * commit-time identity predicates (no `status`/`superseded_by_record_id`
+ * filter on either table) -- this must answer the SAME "will commit treat
+ * this identity as already present" question commit itself asks when it
+ * looks up `source_reference`, not a narrower one that could miss a row
+ * commit would actually skip (e.g. a reversed trade's `source_reference`
+ * still blocks a re-import at commit, per BUG-011's ruling).
+ */
+export async function loadCommittedSharesightRowValues(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+): Promise<SharesightCommittedRowValues> {
+  const tradeRows = await client.all<{
+    source_reference: string;
+    quantity_decimal: string | null;
+    unit_price_decimal: string | null;
+  }>(
+    `SELECT source_reference, quantity_decimal, unit_price_decimal
+       FROM transactions
+      WHERE user_id = ? AND portfolio_id = ? AND source_type = 'csv_import'
+        AND source_reference LIKE 'import-fingerprint:sharesight-trade:%'`,
+    [userId, portfolioId],
+  );
+  const payoutRows = await client.all<{
+    source_reference: string;
+    total_cash_decimal: string | null;
+  }>(
+    `SELECT source_reference, total_cash_decimal
+       FROM dividend_manual_records
+      WHERE user_id = ? AND portfolio_id = ?
+        AND source_reference LIKE 'import-fingerprint:sharesight-payout:%'`,
+    [userId, portfolioId],
+  );
+  return {
+    trades: new Map(
+      tradeRows.map((row) => [
+        row.source_reference,
+        {
+          quantityDecimal: row.quantity_decimal,
+          priceDecimal: row.unit_price_decimal,
+        },
+      ]),
+    ),
+    payouts: new Map(
+      payoutRows.map((row) => [
+        row.source_reference,
+        { cashTotalDecimal: row.total_cash_decimal },
+      ]),
+    ),
+  };
+}
