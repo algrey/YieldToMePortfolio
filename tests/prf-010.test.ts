@@ -10,12 +10,24 @@
  * series had fully converged (nothing left to derive). Reviewer estimate:
  * ~1.1M D1 `rows_read`/day. This file MEASURES that cost first (per this
  * task's own instruction: the 1.1M figure is an estimate, not an
- * observation), then proves the fix -- a convergence marker on `portfolios`
+ * observation) -- the BEFORE test below measures 52,040 `rows_read` per
+ * such tick, ~1.25M/day at 24 unconditional ticks, confirming the
+ * reviewer's estimate as the right order of magnitude. It then proves the
+ * fix -- a convergence marker on `portfolios`
  * (`db/repositories/portfolio-value-history.ts`) that short-circuits the
- * scan once a full check has already proven zero candidate dates are
- * missing -- reduces it, without weakening any BUG-010 honesty guarantee or
- * hiding BUG-010 follow-up (e)'s `datesDerived > 0`/`rowsPersisted === 0`
- * tell.
+ * expensive candidate-date scan once a full check has already proven zero
+ * candidate dates are missing. Review correction (2026-09-02): a first
+ * version of this fix and its measurement both had to be corrected --
+ * (1) the marker was blind to a brand-new candidate date with no prior
+ * stored history (the routine daily case, not a corner one), now closed by
+ * `loadCandidateMaxDate`'s candidate-side probe; (2) the "after" figure
+ * originally counted rows RETURNED, not rows READ -- the AFTER test below
+ * measures the honest ~2,600-row cost of the fingerprint check itself
+ * (~95% per-tick reduction, ~79% once the recheck cadence's periodic full
+ * checks are folded into a daily estimate). Every test in this file
+ * verifies the fix reduces this cost without weakening any BUG-010 honesty
+ * guarantee or hiding BUG-010 follow-up (e)'s `datesDerived > 0`/
+ * `rowsPersisted === 0` tell.
  */
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
@@ -25,6 +37,7 @@ import { createSqliteSqlClient } from "../db/repositories/index.ts";
 import type { SqlClient } from "../db/repositories/sql-client.ts";
 import {
   invalidateStoredValueHistoryForSecurity,
+  loadCandidateMaxDate as loadCandidateMaxDateForTests,
   loadHistoricalPortfolioValueSeries,
   backfillStoredValueHistoryForPortfolio,
 } from "../app/historical-portfolio-value.ts";
@@ -33,6 +46,7 @@ import {
   convergenceFingerprintMatches,
   loadPortfolioConvergenceMarker,
   loadValueHistoryConvergenceFingerprint,
+  recordPortfolioConvergenceMarker,
 } from "../db/repositories/portfolio-value-history.ts";
 import { sweepValueHistoryBackfill } from "../app/value-history-backfill-service.ts";
 
@@ -131,21 +145,62 @@ async function productionScaleFixture(): Promise<DatabaseSync> {
   return db;
 }
 
-/** Wraps a real SqlClient to count rows RETURNED by `.all()` (the
- * `tests/hist-001.test.ts` convention) and to capture every call's SQL/
- * params so a test can re-run `EXPLAIN QUERY PLAN`/a raw `COUNT(*)` on
- * exactly what the real code path just executed (the `tests/prf-002.test.ts`
- * `stageCensusClient` convention). Distinct from both precedents only in
- * that it ALSO exposes a per-table-substring row-scan estimate: for the
- * `DISTINCT market_date` seek specifically, rows RETURNED (post-dedup)
- * massively understates D1's actual `rows_read` metering (which counts
- * index entries visited, pre-dedup) -- see `tests/prf-002.test.ts`'s own
- * PRF-005 test for the identical observation. */
+/**
+ * Wraps a real SqlClient to measure D1's actual `rows_read` metering (rows
+ * VISITED, not rows returned), and to capture every call's SQL/params so a
+ * test can re-run `EXPLAIN QUERY PLAN`/a raw `COUNT(*)` on exactly what the
+ * real code path just executed (the `tests/prf-002.test.ts` `stageCensusClient`
+ * convention).
+ *
+ * Review correction (B2, 2026-09-02): a naive "count rows RETURNED by
+ * `.all()`/`.get()`" proxy (the `tests/hist-001.test.ts` convention) is
+ * WRONG for two shapes here, both of which return far fewer rows than they
+ * visit: (1) `loadCandidateDates`'s `SELECT DISTINCT market_date` collapses
+ * ~46,800 visited index entries down to ~2,600 returned dates; (2)
+ * `loadValueHistoryConvergenceFingerprint`'s `COUNT(*)/MIN/MAX` aggregate
+ * always returns exactly one row while visiting every matching row under
+ * the hood. `rowsRead()` below corrects BOTH: a captured `DISTINCT
+ * market_date` call is re-run as `COUNT(*)` against the identical predicate
+ * (what SQLite/D1 must actually visit before collapsing to distinct dates
+ * -- the `tests/prf-002.test.ts` PRF-005 measurement convention); a captured
+ * `portfolio_value_history` `COUNT(*)` aggregate call reads its OWN
+ * `row_count` field (the aggregate reports exactly how many rows it
+ * visited) instead of counting the single row returned. Every other call
+ * (plain lookups, `MAX(market_date)` over `price_observations` -- see this
+ * file's own doc comment on why THAT one genuinely is a cheap index seek,
+ * not a scan) is counted as its actual returned row count, which for those
+ * shapes is an honest proxy. */
 function censusClient(db: DatabaseSync, inner: SqlClient) {
   let allCalls = 0;
-  let rowsReturned = 0;
+  let rowsRead = 0;
   const calls: Array<{ sql: string; params: readonly unknown[] | undefined }> =
     [];
+  const isPortfolioValueHistoryCountAggregate = (sql: string): boolean =>
+    sql.includes("FROM portfolio_value_history") && sql.includes("COUNT(*)");
+  const isCandidateDistinctScan = (sql: string): boolean =>
+    sql.includes("price_observations") &&
+    sql.includes("DISTINCT po.market_date");
+  /** Re-runs a captured `SELECT DISTINCT po.market_date ...` call as
+   * `COUNT(*)` against the identical predicate (minus the trailing
+   * `ORDER BY ... LIMIT ?`, whose bound param is dropped to match). */
+  function candidateScanTrueRowsExamined(
+    sql: string,
+    params: readonly unknown[] | undefined,
+  ): number {
+    const countSql = sql
+      .replace(
+        "SELECT DISTINCT po.market_date FROM price_observations po",
+        "SELECT COUNT(*) AS c FROM price_observations po",
+      )
+      .replace(/ORDER BY po\.market_date LIMIT \?/, "");
+    const paramsWithoutLimit = (params ?? []).slice(0, -1);
+    const row = db
+      .prepare(countSql)
+      .get(...(paramsWithoutLimit as never[])) as {
+      c: number;
+    };
+    return row.c;
+  }
   const wrapped: SqlClient = {
     async all<T extends Record<string, unknown>>(
       sql: string,
@@ -154,7 +209,9 @@ function censusClient(db: DatabaseSync, inner: SqlClient) {
       allCalls += 1;
       calls.push({ sql, params });
       const rows = await inner.all<T>(sql, params);
-      rowsReturned += rows.length;
+      rowsRead += isCandidateDistinctScan(sql)
+        ? candidateScanTrueRowsExamined(sql, params)
+        : rows.length;
       return rows;
     },
     async get<T extends Record<string, unknown>>(
@@ -164,7 +221,15 @@ function censusClient(db: DatabaseSync, inner: SqlClient) {
       allCalls += 1;
       calls.push({ sql, params });
       const row = await inner.get<T>(sql, params);
-      if (row) rowsReturned += 1;
+      if (row && isPortfolioValueHistoryCountAggregate(sql)) {
+        // The aggregate's OWN count is D1's real rows_read for this call --
+        // it must visit every one of those rows to compute COUNT/MIN/MAX,
+        // regardless of returning a single result row.
+        const rowCount = (row as Record<string, unknown>).row_count;
+        rowsRead += typeof rowCount === "number" ? rowCount : 1;
+      } else if (row) {
+        rowsRead += 1;
+      }
       return row;
     },
     run: inner.run.bind(inner),
@@ -174,32 +239,21 @@ function censusClient(db: DatabaseSync, inner: SqlClient) {
     client: wrapped,
     reset: () => {
       allCalls = 0;
-      rowsReturned = 0;
+      rowsRead = 0;
       calls.length = 0;
     },
-    stats: () => ({ allCalls, rowsReturned, calls: [...calls] }),
-    /** The true D1 `rows_read` proxy for the candidate-date scan: re-runs
-     * the EXACT captured `DISTINCT market_date` query as a `COUNT(*)`
-     * against the same predicate, which is what SQLite/D1 must actually
-     * visit before collapsing to distinct dates. */
+    stats: () => ({ allCalls, rowsRead, calls: [...calls] }),
+    /** The true D1 `rows_read` proxy for the candidate-date scan, exposed
+     * standalone for tests that want to assert on it directly (as opposed
+     * to the aggregate `rowsRead` total above, which already folds this
+     * in). `null` when no such call was captured. */
     candidateScanRowsExamined: (): number | null => {
-      const candidateCall = calls.find(
-        (call) =>
-          call.sql.includes("price_observations") &&
-          call.sql.includes("DISTINCT po.market_date"),
+      const candidateCall = calls.find((call) =>
+        isCandidateDistinctScan(call.sql),
       );
-      if (!candidateCall) return null;
-      const countSql = candidateCall.sql
-        .replace(
-          "SELECT DISTINCT po.market_date FROM price_observations po",
-          "SELECT COUNT(*) AS c FROM price_observations po",
-        )
-        .replace(/ORDER BY po\.market_date LIMIT \?/, "");
-      const paramsWithoutLimit = (candidateCall.params ?? []).slice(0, -1);
-      const row = db
-        .prepare(countSql)
-        .get(...(paramsWithoutLimit as never[])) as { c: number };
-      return row.c;
+      return candidateCall
+        ? candidateScanTrueRowsExamined(candidateCall.sql, candidateCall.params)
+        : null;
     },
   };
 }
@@ -262,6 +316,10 @@ test("PRF-010 measurement: a converged portfolio's cron tick BEFORE the fix -- o
   if (!outcome) return;
   assert.equal(outcome.missingDates, 0);
   assert.equal(outcome.backfillPending, false);
+  assert.ok(
+    !outcome.skipped,
+    "a freshly-run full check must never report skipped",
+  );
 
   const examined = candidateScanRowsExamined();
   assert.ok(
@@ -273,8 +331,9 @@ test("PRF-010 measurement: a converged portfolio's cron tick BEFORE the fix -- o
     examined! > 40_000,
     `expected the pre-fix scan to examine tens of thousands of rows, got ${examined}`,
   );
+  const { rowsRead, allCalls } = stats();
   console.log(
-    `PRF-010 BEFORE: one converged-portfolio cron tick with no marker examines ${examined} price_observations rows (${stats().rowsReturned} rows returned across ${stats().allCalls} .all() calls) -- x24 ticks/day = ${((examined ?? 0) * 24).toLocaleString()} rows/day for this ONE portfolio.`,
+    `PRF-010 BEFORE (pre-fix baseline, every tick paying this): one converged-portfolio cron tick reads ${rowsRead} rows total across ${allCalls} calls (candidate scan alone: ${examined}) -- x24 ticks/day = ${(rowsRead * 24).toLocaleString()} rows/day for this ONE portfolio if every tick ran this unconditionally (the pre-fix production shape). See the AFTER test for the real post-fix daily estimate once the marker is in play.`,
   );
 
   // This same tick, having proven zero missing, must now have recorded the
@@ -287,7 +346,7 @@ test("PRF-010 measurement: a converged portfolio's cron tick BEFORE the fix -- o
   assert.ok(recordedMarker);
 });
 
-test("PRF-010 measurement: a converged portfolio's cron tick AFTER the fix -- the marker short-circuits the scan entirely, ~2,600 rows or fewer", async () => {
+test("PRF-010 measurement: a converged portfolio's cron tick AFTER the fix -- the marker short-circuits the DISTINCT scan, but the fingerprint check itself still costs ~2,600 rows_read, an honest ~95% reduction (not the ~100% a rows-RETURNED count would wrongly suggest)", async () => {
   const { db, client } = await productionScale();
   await convergePortfolio(client);
   // Prime the marker (mirrors the previous test's own last step, done here
@@ -314,23 +373,62 @@ test("PRF-010 measurement: a converged portfolio's cron tick AFTER the fix -- th
   assert.equal(outcome.datesDerived, 0);
   assert.equal(outcome.rowsPersisted, 0);
   assert.equal(outcome.backfillPending, false);
+  assert.equal(outcome.skipped, true);
 
   assert.equal(
     candidateScanRowsExamined(),
     null,
     "the fix must skip the DISTINCT market_date scan entirely once converged",
   );
-  const { allCalls, rowsReturned } = stats();
+  const { allCalls, rowsRead } = stats();
+  // ~52,040 (this file's own BEFORE test, printed above on every run) --
+  // 46,800 candidate scan + ~2,600 loadStoredValueHistory + ~2,600 for the
+  // SAME fingerprint aggregate this AFTER tick also pays (the BEFORE tick
+  // is the one that just converged and writes the marker) + a handful of
+  // small fixed lookups.
+  const beforeRowsRead = 52_040;
   console.log(
-    `PRF-010 AFTER: the same converged-portfolio cron tick, marker warm, makes ${allCalls} .all() calls returning ${rowsReturned} rows total (vs tens of thousands pre-fix) -- x24 ticks/day = ${(rowsReturned * 24).toLocaleString()} rows/day for this ONE portfolio, a ${Math.round((1 - (rowsReturned * 24) / (46_800 * 24)) * 100)}%+ reduction.`,
+    `PRF-010 AFTER: the same converged-portfolio cron tick, marker warm, reads ${rowsRead} rows total across ${allCalls} calls (vs ~${beforeRowsRead.toLocaleString()} pre-fix) -- a ${Math.round((1 - rowsRead / beforeRowsRead) * 100)}% reduction on a tick that would otherwise have re-verified convergence from scratch. At CONVERGENCE_RECHECK_INTERVAL_MS's 6-hour cadence, roughly 4 of 24 daily ticks pay the ~${beforeRowsRead.toLocaleString()}-row full check and the other ~20 pay this ~${rowsRead.toLocaleString()}-row shortcut: ~${(4 * beforeRowsRead + 20 * rowsRead).toLocaleString()} rows/day for this ONE portfolio, versus ~${(24 * beforeRowsRead).toLocaleString()}/day if every tick ran the full check.`,
   );
-  // The remaining cost is bounded by the cheap fingerprint check
-  // (`loadValueHistoryConvergenceFingerprint`'s single aggregate query),
-  // nowhere near the ~46,800-row pre-fix scan.
+  // Dominated by `loadValueHistoryConvergenceFingerprint`'s COUNT/MIN/MAX
+  // aggregate, which genuinely visits every stored row for this portfolio
+  // (~2,600 at this fixture's scale) -- NOT free, and nowhere near the
+  // ~46,800-row pre-fix scan. A tight ceiling here is deliberate: it fails
+  // if a future change makes this measurement silently fall back to
+  // counting rows returned instead of rows read.
   assert.ok(
-    rowsReturned < 5_000,
-    `expected the warm-marker tick to read well under 5,000 rows, got ${rowsReturned}`,
+    rowsRead > 2_000,
+    `expected the warm-marker tick's honest rows_read to be dominated by the ~2,600-row fingerprint aggregate, got ${rowsRead} (suspiciously low -- check the measurement is counting rows READ, not rows returned)`,
   );
+  assert.ok(
+    rowsRead < 3_500,
+    `expected the warm-marker tick to read well under the pre-fix scan, got ${rowsRead}`,
+  );
+});
+
+test("PRF-010 ruling 3: sweepValueHistoryBackfill's summary counts a skipped portfolio in portfoliosConvergedSkipped -- required visibility, not optional", async () => {
+  const { client } = await productionScale();
+  await convergePortfolio(client);
+  await backfillStoredValueHistoryForPortfolio(client, "owner", "pf", 20, NOW);
+  assert.ok(await loadPortfolioConvergenceMarker(client, "owner", "pf"));
+
+  const summary = await sweepValueHistoryBackfill(
+    { client },
+    { now: new Date(NOW.getTime() + 3_600_000) },
+  );
+  assert.equal(summary.portfoliosConsidered, 1);
+  assert.equal(summary.portfoliosConvergedSkipped, 1);
+  assert.equal(summary.portfoliosPending, 0);
+  assert.equal(summary.datesDerived, 0);
+  assert.equal(summary.rowsPersisted, 0);
+
+  // Past the cadence window, the SAME portfolio's tick is no longer counted
+  // as skipped -- the full check ran instead.
+  const laterSummary = await sweepValueHistoryBackfill(
+    { client },
+    { now: new Date(NOW.getTime() + CONVERGENCE_RECHECK_INTERVAL_MS + 1) },
+  );
+  assert.equal(laterSummary.portfoliosConvergedSkipped, 0);
 });
 
 test("PRF-010: a NON-converged portfolio still runs the full check and converges at the same rate -- the marker never applies until genuinely zero dates are missing", async () => {
@@ -487,14 +585,18 @@ test("PRF-010 invalidation: a real invalidation call clears the fingerprint matc
     "the invalidation must have actually deleted the stored row",
   );
 
-  // The stale marker (row count/max/min from BEFORE the delete) must no
-  // longer match -- prove it via the SAME comparison the real code path
-  // uses, not by re-deriving the logic.
-  const currentFingerprint = await loadValueHistoryConvergenceFingerprint(
-    client,
-    "owner",
-    "pf",
-  );
+  // The stale marker (row count/max/min/computed_at from BEFORE the delete)
+  // must no longer match -- prove it via the SAME comparison the real code
+  // path uses, not by re-deriving the logic. Deleting the ONE stored row
+  // strictly REDUCES the stored-side row count (2,600 -> 2,599), so this
+  // particular case is caught by the STORED side alone (ruling 1's
+  // candidate-side probe is what closes the newest-end case a stored-side
+  // delete like this one does not exercise).
+  const [storedFingerprint, candidateMaxDate] = await Promise.all([
+    loadValueHistoryConvergenceFingerprint(client, "owner", "pf"),
+    loadCandidateMaxDateForTests(client, "owner", "pf"),
+  ]);
+  const currentFingerprint = { ...storedFingerprint, candidateMaxDate };
   assert.equal(
     convergenceFingerprintMatches(markerBefore, currentFingerprint),
     false,
@@ -531,6 +633,123 @@ test("PRF-010 invalidation: a real invalidation call clears the fingerprint matc
   );
 });
 
+test("PRF-010 ruling 1 (B1, the blocking daily case): a brand-new candidate date -- the day's first price landing for a date with NO prior price data at all, e.g. the daily delayed rollup -- is detected even though portfolio_value_history is completely untouched by it", async () => {
+  const { db, client } = await productionScale();
+  await convergePortfolio(client);
+  await backfillStoredValueHistoryForPortfolio(client, "owner", "pf", 20, NOW);
+  const markerBefore = await loadPortfolioConvergenceMarker(
+    client,
+    "owner",
+    "pf",
+  );
+  assert.ok(markerBefore);
+  const storedCountBefore = (
+    db.prepare(`SELECT COUNT(*) AS c FROM portfolio_value_history`).get() as {
+      c: number;
+    }
+  ).c;
+
+  // Simulate the real production trigger named in the review: a rollup
+  // lands the FIRST price ever observed for a date that had no candidate
+  // at all before -- no correction, no delete, nothing for
+  // buildValueHistoryInvalidationStatementsForSecurities to invalidate
+  // (there is no stored row for this date to remove). Only ONE security
+  // gets it (a single delayed rollup, not a full re-sync), matching the
+  // real writer's per-security shape.
+  const lastDate = PRODUCTION_SCALE_DATES[PRODUCTION_SCALE_DATES.length - 1]!;
+  const nextDate = weekdays(
+    new Date(Date.parse(`${lastDate}T00:00:00Z`) + 86_400_000)
+      .toISOString()
+      .slice(0, 10),
+    1,
+  )[0]!;
+  db.exec(
+    `INSERT INTO price_observations (id,provider_id,access_scope,scope_user_id,scope_key,mapping_id,security_id,interval,observation_at,market_date,market_timezone,currency_code,close_decimal,adjustment_state,quality,ingested_at) VALUES
+     ('price-new-candidate','owner-import','user','owner','owner','map-sec-0','sec-0','delayed','${nextDate}T04:00:00.000Z','${nextDate}','Australia/Sydney','AUD','10.50','raw','indicative','2026-08-24T00:00:00.000Z')`,
+  );
+  // Confirms the premise: nothing was invalidated/deleted by this insert --
+  // portfolio_value_history is byte-identical to before it landed.
+  assert.equal(
+    (
+      db.prepare(`SELECT COUNT(*) AS c FROM portfolio_value_history`).get() as {
+        c: number;
+      }
+    ).c,
+    storedCountBefore,
+  );
+
+  const outcome = await backfillStoredValueHistoryForPortfolio(
+    client,
+    "owner",
+    "pf",
+    20,
+    new Date(Date.parse(`${nextDate}T00:00:00Z`) + 3_600_000),
+  );
+  assert.ok(outcome);
+  if (!outcome) return;
+  // THE FIX: this must NOT report skipped/converged -- the candidate-side
+  // MAX(market_date) probe now sees nextDate and the fingerprint no longer
+  // matches the stale marker, so the full check runs and picks it up the
+  // same tick BUG-010 part (b) was built for (no page load required).
+  assert.ok(
+    !outcome.skipped,
+    "a brand-new candidate date must not be silently absorbed by the marker shortcut",
+  );
+  assert.equal(outcome.missingDates, 1);
+  assert.equal(outcome.rowsPersisted, 1);
+  assert.equal(outcome.backfillPending, false);
+  const storedRow = db
+    .prepare(
+      `SELECT completeness, priced_security_count FROM portfolio_value_history WHERE value_date = ?`,
+    )
+    .get(nextDate) as { completeness: string; priced_security_count: number };
+  assert.ok(storedRow, "the new candidate date must have been backfilled");
+  // Only 1 of 18 held securities is priced for this date -- partial, never
+  // fabricated as complete.
+  assert.equal(storedRow.completeness, "partial");
+  assert.equal(storedRow.priced_security_count, 1);
+});
+
+test("PRF-010 ruling 2: MAX(computed_at) closes the delete-then-reinsert-elsewhere collision -- two fingerprints identical in row count and min/max value_date, differing ONLY in computed_at, must NOT be treated as the same state", async () => {
+  const { client } = await productionScale();
+  await convergePortfolio(client);
+  const baseline = {
+    rowCount: 2600,
+    minValueDate: PRODUCTION_SCALE_DATES[0]!,
+    maxValueDate: PRODUCTION_SCALE_DATES[PRODUCTION_SCALE_DATES.length - 1]!,
+    maxComputedAt: "2026-08-24T00:00:00.000Z",
+    candidateMaxDate:
+      PRODUCTION_SCALE_DATES[PRODUCTION_SCALE_DATES.length - 1]!,
+  };
+  await recordPortfolioConvergenceMarker(
+    client,
+    "owner",
+    "pf",
+    baseline,
+    NOW.toISOString(),
+  );
+  const marker = await loadPortfolioConvergenceMarker(client, "owner", "pf");
+  assert.ok(marker);
+  if (!marker) return;
+
+  // The reviewer's reproduced collision: an interior delete (row count -1)
+  // coincidentally offset by an unrelated insert elsewhere in the SAME
+  // window, landing row count and min/max value_date back on their PRIOR
+  // values while the actual date SET differs. Row count/min/max/
+  // candidateMaxDate are unchanged from `baseline`; only `maxComputedAt`
+  // reflects the real insert that just happened.
+  const collided = { ...baseline, maxComputedAt: "2026-08-24T00:00:01.000Z" };
+  assert.equal(
+    convergenceFingerprintMatches(marker, collided),
+    false,
+    "a fingerprint differing only in maxComputedAt must not match -- this is exactly the collision ruling 2 exists to close",
+  );
+
+  // Sanity: a GENUINELY unchanged fingerprint (including computed_at) does
+  // still match -- ruling 2 must not make every comparison fail.
+  assert.equal(convergenceFingerprintMatches(marker, baseline), true);
+});
+
 test("PRF-010: the marker respects a hard recheck cadence even when the fingerprint still matches", async () => {
   const { db, client } = await productionScale();
   await convergePortfolio(client);
@@ -560,7 +779,12 @@ test("PRF-010: the marker respects a hard recheck cadence even when the fingerpr
 });
 
 test("PRF-010 regression: loadHistoricalPortfolioValueSeries (the READ path) is completely unaffected -- it never consults or writes the convergence marker", async () => {
-  const { db, client } = await productionScale();
+  // Deliberately does NOT close the shared fixture db (`productionScale()`
+  // reuses a module-level `sharedDb` across every test in this file, and
+  // this is not guaranteed to be the last one registered) -- the process
+  // exit reclaims it, matching every other `productionScale()`-based test
+  // in this file.
+  const { client } = await productionScale();
   await convergePortfolio(client);
   assert.equal(
     await loadPortfolioConvergenceMarker(client, "owner", "pf"),
@@ -581,5 +805,4 @@ test("PRF-010 regression: loadHistoricalPortfolioValueSeries (the READ path) is 
     await loadPortfolioConvergenceMarker(client, "owner", "pf"),
     null,
   );
-  db.close();
 });

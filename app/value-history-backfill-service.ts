@@ -104,6 +104,13 @@ export type ValueHistoryBackfillSweepSummary = {
    * `RAISE(ABORT)` purge-lock trigger is the known, legitimate case). The
    * sweep continues with the next portfolio rather than failing the tick. */
   portfoliosFailed: number;
+  /** PRF-010 ruling 3: portfolios this tick reported converged via the
+   * cron's convergence-marker shortcut (`outcome.skipped`) rather than a
+   * freshly-run `loadCandidateDates` check. Required visibility, not
+   * optional: this is the entire justification for the persisted marker's
+   * `rows_read` saving, and without it the sweep log looks identical
+   * whether a tick verified convergence or merely assumed it. */
+  portfoliosConvergedSkipped: number;
 };
 
 export type ValueHistoryBackfillSweepOptions = {
@@ -138,6 +145,7 @@ export async function sweepValueHistoryBackfill(
     rowsPersisted: 0,
     portfoliosPending: 0,
     portfoliosFailed: 0,
+    portfoliosConvergedSkipped: 0,
   };
   if (maxDates <= 0 || maxPortfolios <= 0) return summary;
 
@@ -198,6 +206,7 @@ export async function sweepValueHistoryBackfill(
     summary.rowsPersisted += outcome.rowsPersisted;
     if (outcome.rowsPersisted > 0) summary.portfoliosAdvanced += 1;
     if (outcome.backfillPending) summary.portfoliosPending += 1;
+    if (outcome.skipped) summary.portfoliosConvergedSkipped += 1;
     datesRemaining -= outcome.datesDerived;
   }
 

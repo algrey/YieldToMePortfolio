@@ -78,13 +78,23 @@
  * is rendered, or the honesty invariant -- only how much of the rebuild one
  * invocation attempts.
  *
- * PRF-010 (production, measured, 2026-09-02): once converged, that same
- * cron kept paying the full candidate-date scan on every tick with nothing
- * left to derive -- ~1.1M D1 `rows_read`/day. `backfillStoredValueHistoryForPortfolio`
- * now checks a convergence marker (`db/repositories/portfolio-value-history.ts`)
- * before that scan; see its own doc comment for the measured before/after
- * and why the marker needs no invalidation wiring elsewhere. This ONLY
- * changes the CRON's own per-tick cost -- the read path above (and its
+ * PRF-010 (production, measured, 2026-09-02; corrected 2026-09-02 after
+ * review found the first version both under-detected staleness and
+ * overstated the saving): once converged, that same cron kept paying the
+ * full candidate-date scan on every tick with nothing left to derive --
+ * 52,040 `rows_read`/tick, ~1.25M/day at 24 unconditional ticks.
+ * `backfillStoredValueHistoryForPortfolio` now checks a convergence marker
+ * (`db/repositories/portfolio-value-history.ts`) before that scan; see its
+ * own doc comment for the measured before/after (a skipped tick still
+ * costs ~2,600 `rows_read`, not free -- ~79% daily reduction once
+ * `CONVERGENCE_RECHECK_INTERVAL_MS`'s periodic full checks are folded in)
+ * and for exactly what the marker does and does NOT prove (it combines a
+ * STORED-side snapshot with a CANDIDATE-side `MAX(market_date)` probe --
+ * neither alone is sufficient, and even combined an interior candidate
+ * addition is a known, accepted residual gap for which the recheck
+ * interval is the PRIMARY cron-side backstop, not eliminated). This ONLY
+ * changes the
+ * CRON's own per-tick cost -- the read path above (and its
  * `MAX_DERIVE_DATES_PER_READ` bound) is untouched.
  *
  * Invalidation (review B2, BLOCKING -- a stored row is a CACHE, and a cache
@@ -822,6 +832,57 @@ async function loadCandidateDates(
   return { baseCurrencyCode, observedDates };
 }
 
+/**
+ * PRF-010 ruling 1: the CANDIDATE-side half of the convergence fingerprint
+ * (`db/repositories/portfolio-value-history.ts`'s own header comment has
+ * the full record of why the stored-side snapshot alone is not enough).
+ * `MAX(market_date)` over this portfolio's held securities'
+ * `price_observations`, under the SAME `PRICE_SCOPE` predicate
+ * `loadCandidateDates` uses -- deliberately NOT bounded by `rangeTo`, since
+ * this is a fingerprint comparison, not a derivation input, and a bound
+ * would only add a query parameter for no cost benefit.
+ *
+ * This is a genuine index seek, not `loadCandidateDates`'s full scan:
+ * `price_observations_security_date_idx` is `(security_id, adjustment_state,
+ * market_date)`, and SQLite applies its MIN/MAX optimization once per value
+ * of the `security_id IN (...)` list (confirmed empirically -- this costs a
+ * small constant multiple of the security count, not the ~46,800-row full
+ * range scan `loadCandidateDates` pays for the SAME predicate once a
+ * `market_date BETWEEN` bound is added). `null` only when the portfolio
+ * holds no securities at all.
+ *
+ * Exported for `tests/prf-010.test.ts` only (to construct the same merged
+ * fingerprint `backfillStoredValueHistoryForPortfolio` does) -- every real
+ * caller reaches this through that function.
+ */
+export async function loadCandidateMaxDate(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+): Promise<string | null> {
+  const securityRows = await client.all<Row>(
+    `SELECT ps.security_id FROM portfolio_securities ps
+     WHERE ps.user_id = ? AND ps.portfolio_id = ? ORDER BY ps.id LIMIT ?`,
+    [userId, portfolioId, MAX_SECURITIES + 1],
+  );
+  if (securityRows.length > MAX_SECURITIES)
+    throw new Error("too_many_securities");
+  const securityIds = securityRows
+    .map((row) =>
+      typeof row.security_id === "string" ? row.security_id : null,
+    )
+    .filter((id): id is string => id !== null);
+  if (securityIds.length === 0) return null;
+
+  const row = await client.get<Row>(
+    `SELECT MAX(po.market_date) AS hi FROM price_observations po
+     WHERE po.security_id IN (${securityIds.map(() => "?").join(",")})
+       AND ${PRICE_SCOPE}`,
+    [...securityIds, userId],
+  );
+  return typeof row?.hi === "string" && DATE.test(row.hi) ? row.hi : null;
+}
+
 /** Loads the full bounded value series for the graph -- one point per
  * distinct observation date in range, never a synthetic daily grid.
  *
@@ -891,6 +952,14 @@ export type ValueHistoryBackfillOutcome = {
   rowsPersisted: number;
   /** At least one candidate date is still missing after this call. */
   backfillPending: boolean;
+  /** PRF-010 ruling 3: `true` only on the cron's convergence-marker
+   * shortcut (`backfillStoredValueHistoryForPortfolio`) -- this tick did
+   * NOT run `loadCandidateDates` and every other field here is INFERRED
+   * from the last full check's proof plus a fingerprint match, not
+   * independently measured this tick. Omitted (never `false`) for every
+   * outcome that ran the real check, so a log/consumer can tell "verified"
+   * from "assumed still converged" apart at a glance. */
+  skipped?: boolean;
 };
 
 /**
@@ -1075,18 +1144,23 @@ async function resolveValueHistorySeries(
  * PRF-010 (production, measured): every tick, for every portfolio, this used
  * to run `loadCandidateDates`'s full `DISTINCT market_date` seek over
  * `price_observations` (~47k index entries at the owner's real 18-security
- * scale) even after that portfolio's series had fully converged -- ~1.1M D1
- * `rows_read`/day (see `tests/prf-010.test.ts`'s measurement). Before paying
- * for that scan, this now checks `db/repositories/portfolio-value-history.ts`'s
- * convergence marker -- a fingerprint of `portfolio_value_history` ITSELF
- * taken the last time a full check proved zero candidate dates were
- * missing. A match (and a fresh-enough `CONVERGENCE_RECHECK_INTERVAL_MS`)
- * skips the scan entirely; anything else -- no marker, a stale one, or a
- * mismatched fingerprint (this portfolio's stored history changed since) --
- * falls through to the same full check as before. See that module's own doc
- * comment for why this needs no invalidation wiring at any OTHER write
- * path: the fingerprint is derived from the exact table every existing
- * invalidation path already mutates.
+ * scale) even after that portfolio's series had fully converged --
+ * 52,040 `rows_read`/tick, ~1.25M/day if every tick paid it (see
+ * `tests/prf-010.test.ts`'s measurement; the fingerprint check that now
+ * short-circuits this is itself ~2,600 `rows_read`, not free). Before
+ * paying for that scan, this now checks
+ * `db/repositories/portfolio-value-history.ts`'s convergence marker -- a
+ * fingerprint combining a snapshot of `portfolio_value_history` (the STORED
+ * side) with `loadCandidateMaxDate` below (the CANDIDATE side), taken the
+ * last time a full check proved zero candidate dates were missing. A match
+ * (and a fresh-enough `CONVERGENCE_RECHECK_INTERVAL_MS`) skips the scan
+ * entirely; anything else -- no marker, a stale one, or a mismatched
+ * fingerprint -- falls through to the same full check as before. See that
+ * module's own doc comment for exactly what this fingerprint does and does
+ * NOT prove -- in particular, an interior candidate addition (a backdated
+ * price-history import introducing dates that were never priced before) is
+ * NOT detected by the fingerprint at all; `CONVERGENCE_RECHECK_INTERVAL_MS`
+ * is that residue's primary backstop on the cron side.
  *
  * The marker is written ONLY when `missingDates === 0` from the very first
  * look this tick (never merely because a tick exhausted its derive budget
@@ -1114,16 +1188,24 @@ export async function backfillStoredValueHistoryForPortfolio(
     userId,
     portfolioId,
   );
+  // Guard against a negative age: a future-dated `verifiedAt` (clock skew,
+  // or a hand-edited row) must fall through to the full check rather than
+  // being treated as "just verified" by an unguarded `<` comparison. A
+  // malformed `verified_at` already fails open via `Date.parse`'s `NaN`
+  // (any comparison against `NaN` is `false`) -- that stays unchanged.
+  const markerAgeMs = marker
+    ? now.getTime() - Date.parse(marker.verifiedAt)
+    : NaN;
   if (
     marker &&
-    now.getTime() - Date.parse(marker.verifiedAt) <
-      CONVERGENCE_RECHECK_INTERVAL_MS
+    markerAgeMs >= 0 &&
+    markerAgeMs < CONVERGENCE_RECHECK_INTERVAL_MS
   ) {
-    const fingerprint = await loadValueHistoryConvergenceFingerprint(
-      client,
-      userId,
-      portfolioId,
-    );
+    const [storedFingerprint, candidateMaxDate] = await Promise.all([
+      loadValueHistoryConvergenceFingerprint(client, userId, portfolioId),
+      loadCandidateMaxDate(client, userId, portfolioId),
+    ]);
+    const fingerprint = { ...storedFingerprint, candidateMaxDate };
     if (convergenceFingerprintMatches(marker, fingerprint)) {
       return {
         candidateDates: fingerprint.rowCount,
@@ -1131,6 +1213,7 @@ export async function backfillStoredValueHistoryForPortfolio(
         datesDerived: 0,
         rowsPersisted: 0,
         backfillPending: false,
+        skipped: true,
       };
     }
   }
@@ -1145,16 +1228,15 @@ export async function backfillStoredValueHistoryForPortfolio(
   );
   if (!resolved) return null;
   if (resolved.outcome.missingDates === 0) {
-    const fingerprint = await loadValueHistoryConvergenceFingerprint(
-      client,
-      userId,
-      portfolioId,
-    );
+    const [storedFingerprint, candidateMaxDate] = await Promise.all([
+      loadValueHistoryConvergenceFingerprint(client, userId, portfolioId),
+      loadCandidateMaxDate(client, userId, portfolioId),
+    ]);
     await recordPortfolioConvergenceMarker(
       client,
       userId,
       portfolioId,
-      fingerprint,
+      { ...storedFingerprint, candidateMaxDate },
       now.toISOString(),
     );
   }

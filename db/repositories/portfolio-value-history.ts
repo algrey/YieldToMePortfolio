@@ -177,27 +177,71 @@ export async function upsertStoredValueHistory(
 // full `loadCandidateDates` `DISTINCT market_date` seek over
 // `price_observations` (~47k index entries at the owner's real 18-security
 // scale) EVERY tick for EVERY portfolio, including one that had fully
-// converged -- measured at ~1.1M D1 `rows_read`/day against the free plan's
-// 5M/day allowance (see `tests/prf-010.test.ts`'s own before/after
-// measurement). The functions below let the cron short-circuit that scan for
-// a portfolio it has ALREADY proven has zero missing candidate dates,
-// without introducing a flag some OTHER write path must remember to clear.
+// converged -- measured at 52,040 `rows_read` per such tick (46,800
+// candidate scan + ~2,600 `loadStoredValueHistory` + ~2,600 for the
+// fingerprint that same tick writes + small fixed lookups), ~1.25M/day at 24
+// ticks if every tick paid it unconditionally (see `tests/prf-010.test.ts`'s
+// own before/after measurement). The functions below let the cron
+// short-circuit the CANDIDATE-DATE SCAN specifically for a portfolio it has
+// ALREADY proven has zero missing candidate dates -- not the whole tick for
+// free: the fingerprint check itself measures ~2,600 `rows_read`, dominated
+// by the stored-side aggregate below visiting every stored row for the
+// portfolio. Folding in `CONVERGENCE_RECHECK_INTERVAL_MS`'s periodic full
+// re-checks, the real daily estimate for one portfolio is ~260,560 rows/day
+// -- a real ~79% reduction, not the ~100% an earlier, uncorrected version of
+// this comment claimed. This never introduces a flag some OTHER write path
+// must remember to clear.
 //
-// SAFETY: the "fingerprint" below is not an independently-maintained flag --
-// it is a `(row count, min value_date, max value_date)` snapshot of
-// `portfolio_value_history` ITSELF, taken at the exact moment a full check
-// proved nothing was missing. Every existing invalidation path (the ranged
-// DELETE in `valueHistoryInvalidationFromDateStatement`, the owner-scoped
-// `deleteStoredValueHistoryInRangeForOwnedSecurity`, and the cross-owner
-// `buildValueHistoryInvalidationStatementsForSecurities`) mutates exactly
-// this table, so any of them changes this table's row count and/or its
-// min/max date -- there is no separate signal to keep in sync, and no
-// fourth call site to remember (the exact class of bug this task's own
-// history -- BRK-015's two watermarks, BUG-010's unresolvable dates,
-// BUG-011's comparison set -- kept repeating). `tests/prf-010.test.ts`
-// proves this end to end: converge a portfolio, invalidate it through the
-// real `invalidateStoredValueHistoryForSecurity` path, and confirm the very
-// next sweep tick detects the mismatch and resumes backfilling.
+// WHAT THIS FINGERPRINT ACTUALLY PROVES (corrected 2026-09-02 after review
+// found the original text overclaimed -- read this before trusting or
+// extending it). "Missing" is `candidates(price_observations) minus
+// stored(portfolio_value_history)` -- a set difference over TWO tables. The
+// fingerprint below combines a snapshot of BOTH sides:
+//
+// - the STORED side (`loadValueHistoryConvergenceFingerprint` here): row
+//   count, min/max `value_date`, and max `computed_at` of
+//   `portfolio_value_history` for this portfolio. Every existing
+//   invalidation path (`valueHistoryInvalidationFromDateStatement`,
+//   `deleteStoredValueHistoryInRangeForOwnedSecurity`,
+//   `buildValueHistoryInvalidationStatementsForSecurities`) mutates exactly
+//   this table, so a DELETE that actually removes a row changes this
+//   snapshot -- no fourth call site to remember. `MAX(computed_at)` closes
+//   a real collision a prior version of this comment dismissed as "narrow
+//   theoretical": a delete of N rows followed by an upsert of a DIFFERENT N
+//   rows (e.g. an interior correction landing the same tick as ordinary
+//   tail growth) can leave row count AND min/max value_date unchanged while
+//   the actual date SET differs -- reviewer-reproduced with real writers,
+//   not a corner case. Any insert or value-changing update advances
+//   `computed_at`, so that specific collision can no longer produce a
+//   matching fingerprint.
+// - the CANDIDATE side (`app/historical-portfolio-value.ts`'s
+//   `loadCandidateMaxDate`, merged into this type's `candidateMaxDate`
+//   field by the caller): `MAX(market_date)` over this portfolio's held
+//   securities' `price_observations`, under the SAME `PRICE_SCOPE`
+//   predicate `loadCandidateDates` uses -- a genuine index seek (SQLite
+//   applies its MIN/MAX optimization per value of the `security_id IN
+//   (...)` list), not the full scan this shortcut exists to avoid. This
+//   closes the STORED side's fundamental blind spot: a brand-new candidate
+//   date (the day's first price landing for a date that had NO price data
+//   at all before, e.g. `app/historical-portfolio-value.ts`'s own header
+//   note that `PRICE_SCOPE` does not filter `interval`, so a `delayed`
+//   rollup makes TODAY a candidate) leaves `portfolio_value_history`
+//   completely untouched -- nothing to delete, so the stored-side
+//   fingerprint alone is byte-identical before and after. Without this,
+//   BUG-010 part (b)'s whole point (recovery without a page load) silently
+//   stopped applying to a converged portfolio's daily cron append.
+//
+// WHAT REMAINS UNCOVERED, HONESTLY: an INTERIOR candidate addition -- a
+// brand-new price row for a date OLDER than the current candidate max (a
+// backdated historical price-history import introducing dates that were
+// never priced before) -- moves neither the stored-side snapshot (nothing
+// was stored there to begin with) nor `candidateMaxDate` (the new date is
+// not the max). This is real residual risk, not defense-in-depth trivia:
+// `CONVERGENCE_RECHECK_INTERVAL_MS` is this residue's PRIMARY backstop on
+// the cron side, not a secondary one, bounding how long such a gap can
+// persist before the next full check re-derives it; the untouched read
+// path (`loadHistoricalPortfolioValueSeries`) also independently re-checks
+// on every page load regardless of what the cron believes.
 //
 // This marker is ONLY ever written when a full check found ZERO missing
 // candidate dates from the very first look (`ValueHistoryBackfillOutcome`'s
@@ -217,42 +261,61 @@ export async function upsertStoredValueHistory(
 // ---------------------------------------------------------------------------
 
 /** How long a confirmed-converged marker may be trusted before the cron
- * re-runs the full check regardless of the fingerprint -- a hard ceiling on
- * staleness that needs no invalidation coupling to be safe: even in the
- * narrow theoretical case where an interior invalidation's row-count/date-
- * range change happens to be masked by an unrelated, coincidentally
- * offsetting write in the same window (see `tests/prf-010.test.ts`'s own
- * discussion), this bounds how long the CRON specifically could go without
- * re-verifying. The independent read path (`loadHistoricalPortfolioValueSeries`,
- * untouched by this task) re-verifies via the same full check on every page
- * load regardless, so this is defense in depth, not the only backstop. */
-export const CONVERGENCE_RECHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+ * re-runs the full check regardless of the fingerprint. This is the
+ * PRIMARY backstop for the interior-candidate-addition gap this section's
+ * header documents (not merely defense in depth on top of an otherwise
+ * airtight signal). Measured at this fixture's production scale
+ * (`tests/prf-010.test.ts`): a skipped tick reads ~2,600 rows against a
+ * ~52,040-row full check, so even at ~4 full-check ticks/day (this
+ * interval) plus ~20 skip ticks, the estimated daily cost for one
+ * portfolio is ~260,560 rows -- a ~79% reduction from the ~1.25M/day a
+ * 24-tick/day unconditional full check would cost, while quartering the
+ * worst-case staleness window a 24-hour interval would allow. The
+ * independent read path (`loadHistoricalPortfolioValueSeries`, untouched
+ * by this task) re-verifies via the same full check on every page load
+ * regardless. */
+export const CONVERGENCE_RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export type ValueHistoryConvergenceFingerprint = {
   rowCount: number;
   minValueDate: string | null;
   maxValueDate: string | null;
+  /** PRF-010 ruling 2: closes the delete-then-reinsert collision -- any
+   * insert or value-changing update to `portfolio_value_history` advances
+   * this, even when row count and min/max `value_date` happen to land back
+   * on their prior values. */
+  maxComputedAt: string | null;
+  /** PRF-010 ruling 1: `MAX(market_date)` over the candidate side
+   * (`price_observations`, same `PRICE_SCOPE`), populated by the CALLER
+   * (`app/historical-portfolio-value.ts` owns `PRICE_SCOPE`/security-id
+   * resolution) -- this module only encodes/compares it. `null` only when
+   * the portfolio holds no securities at all. */
+  candidateMaxDate: string | null;
 };
 
 function encodeConvergenceFingerprint(
   fingerprint: ValueHistoryConvergenceFingerprint,
 ): string {
-  return `${fingerprint.rowCount}:${fingerprint.minValueDate ?? ""}:${fingerprint.maxValueDate ?? ""}`;
+  return `${fingerprint.rowCount}:${fingerprint.minValueDate ?? ""}:${fingerprint.maxValueDate ?? ""}:${fingerprint.maxComputedAt ?? ""}:${fingerprint.candidateMaxDate ?? ""}`;
 }
 
 /** Cheap owner-scoped snapshot of `portfolio_value_history`'s CURRENT shape
  * for one portfolio -- one aggregate query, no per-row payload. Far cheaper
  * than `loadCandidateDates`'s `price_observations` scan (which this
  * shortcut exists to avoid), but not free: computing `COUNT`/`MIN`/`MAX`
- * still visits every stored row for this portfolio, so this is sized
- * against `loadStoredValueHistory`'s existing per-tick cost, not zero. */
+ * still visits every stored row for this portfolio (~2,600 at the owner's
+ * real scale), so this is sized against `loadStoredValueHistory`'s existing
+ * per-tick cost, not zero -- see `tests/prf-010.test.ts`'s measured figures.
+ * Returns the STORED-side fields only; `candidateMaxDate` is populated by
+ * the caller (see this section's header comment). */
 export async function loadValueHistoryConvergenceFingerprint(
   client: SqlClient,
   userId: string,
   portfolioId: string,
-): Promise<ValueHistoryConvergenceFingerprint> {
+): Promise<Omit<ValueHistoryConvergenceFingerprint, "candidateMaxDate">> {
   const row = await client.get<Record<string, unknown>>(
-    `SELECT COUNT(*) AS row_count, MIN(value_date) AS lo, MAX(value_date) AS hi
+    `SELECT COUNT(*) AS row_count, MIN(value_date) AS lo, MAX(value_date) AS hi,
+            MAX(computed_at) AS last_computed
      FROM portfolio_value_history WHERE user_id = ? AND portfolio_id = ?`,
     [userId, portfolioId],
   );
@@ -260,6 +323,8 @@ export async function loadValueHistoryConvergenceFingerprint(
     rowCount: typeof row?.row_count === "number" ? row.row_count : 0,
     minValueDate: typeof row?.lo === "string" ? row.lo : null,
     maxValueDate: typeof row?.hi === "string" ? row.hi : null,
+    maxComputedAt:
+      typeof row?.last_computed === "string" ? row.last_computed : null,
   };
 }
 

@@ -706,6 +706,13 @@ Raised as non-blocking follow-up (c) by BUG-010's reviewer, and confirmed live: 
 
 **Unchanged:** the read path (`loadHistoricalPortfolioValueSeries`, `MAX_DERIVE_DATES_PER_READ`), a genuinely non-converged portfolio's per-tick convergence rate (the marker never applies until the FIRST tick after true convergence), and every BUG-010 honesty guarantee (no date fabricated or interpolated, an unresolvable date stays absent, `backfillPending` stays truthful).
 
+**CORRECTION (review, 2026-09-02) -- the two paragraphs above overclaimed; this replaces neither, it corrects them.** Review found, with real-writer reproductions rather than hypotheticals, that the original fingerprint (row count + min/max `value_date` of `portfolio_value_history` alone) and the original "2 rows" after-cost were both wrong:
+
+- **B1 (blocking): the fingerprint was blind to the CANDIDATE side, and this is the routine daily case, not a corner.** "Missing" is `candidates(price_observations) minus stored(portfolio_value_history)` -- a set difference over TWO tables -- but the original fingerprint only observed the subtrahend. A brand-new candidate date (the day's first price landing for a date that had NO price data at all before -- `app/historical-portfolio-value.ts`'s own header notes `PRICE_SCOPE` does not filter `interval`, so a `delayed` rollup makes TODAY a candidate) leaves `portfolio_value_history` completely untouched: nothing is stored there to delete, so `buildValueHistoryInvalidationStatementsForSecurities`' accompanying DELETE removes zero rows and the stored-side fingerprint is byte-identical before and after. This fires every day at the owner's real scale, silently reintroducing the page-load dependency BUG-010 part (b) exists to remove. Fixed by folding a CANDIDATE-side probe into the fingerprint -- `app/historical-portfolio-value.ts`'s `loadCandidateMaxDate`, `MAX(market_date)` over the held securities' `price_observations` under the same `PRICE_SCOPE` predicate `loadCandidateDates` uses. Confirmed empirically to be a genuine index seek (SQLite applies its MIN/MAX optimization per value of the `security_id IN (...)` list), not the ~46,800-row scan this task exists to avoid.
+- Reviewer also reproduced the count+min+max collision this entry's first version called "narrow theoretical" using only real writers (an interior delete offset by an unrelated insert elsewhere in the same tick, landing row count and min/max `value_date` back on their prior values while the actual date set differs) -- it needs only a coincidence, not an adversary. Closed by adding `MAX(computed_at)` to the fingerprint: any insert or value-changing update to `portfolio_value_history` advances it, so a collision that leaves row count and min/max `value_date` unchanged can no longer also leave `computed_at` unchanged.
+- **The honest remaining gap, stated plainly rather than downplayed:** an INTERIOR candidate addition -- a brand-new price row for a date OLDER than the current candidate max (a backdated historical price-history import introducing dates that were never priced before) -- moves neither the stored-side snapshot nor `candidateMaxDate`. `CONVERGENCE_RECHECK_INTERVAL_MS` is this residue's PRIMARY cron-side backstop, not defense in depth on top of an otherwise-complete signal -- lowered to **6 hours** (from the original 24) once measurement showed this still delivers most of the per-tick saving while quartering the worst-case staleness window. The untouched read path independently re-verifies on every page load regardless of what the cron believes, which is the other half of why this residue is bounded rather than a silent-stall risk.
+- **B2 (blocking): the original "2 rows"/"100%+ reduction" after-figure counted rows RETURNED by `.get()`, not rows READ.** `loadValueHistoryConvergenceFingerprint`'s `COUNT(*)/MIN/MAX/MAX(computed_at)` aggregate returns exactly one row while visiting every stored row for the portfolio under the hood (`EXPLAIN` confirms `SEARCH portfolio_value_history USING COVERING INDEX ... (user_id=? AND portfolio_id=?)`, a full walk of that portfolio's stored rows) -- the module's own doc comment already said as much ("not free: computing `COUNT`/`MIN`/`MAX` still visits every stored row"), so the printed measurement contradicted the code it was describing. Corrected, measured figures (`tests/prf-010.test.ts`, same production-scale fixture): a converged tick's full check (BEFORE, unconditional every tick) reads **52,040** rows (46,800 candidate scan + ~2,600 `loadStoredValueHistory` + ~2,600 for the fingerprint this SAME tick writes + small fixed lookups) -- **1,248,960/day** at 24 ticks if every tick paid it, matching the reviewer's ~1.1M/day estimate. AFTER the fix, a skipped tick reads **2,620** rows (dominated by the fingerprint aggregate's own ~2,600-row visit) -- a 95% reduction on that ONE tick. Folding in the 6-hour cadence's periodic full re-checks (roughly 4 full-check ticks and 20 skip ticks per day), the real daily estimate for one portfolio is **~260,560 rows/day**, versus ~1,248,960/day pre-fix -- a ~79% DAILY reduction, real and worth the two columns, but not the ~100% figure originally recorded. The residual cost grows with stored history size rather than staying constant, since it is dominated by `portfolio_value_history`'s own row count for that portfolio.
+
 ## 10. Cloudflare binding decisions
 
 ### D1 — use now
@@ -862,6 +869,19 @@ This log records durable architecture decisions previously maintained in `AGENTS
 
 ## Decision log
 
+- `2026-09-02` (`PRF-010` correction, review): the entry immediately below
+  overclaimed on two points, both corrected in §9.5's own appended
+  correction paragraph rather than by editing that entry or the paragraph
+  below: (1) the marker's fingerprint additionally needs a CANDIDATE-side
+  `MAX(market_date)` probe (`loadCandidateMaxDate`) -- the original
+  stored-side-only fingerprint could not see a brand-new candidate date
+  with no prior stored history, the routine daily case, not a corner one;
+  (2) the "2 rows"/effectively-free after-cost was rows RETURNED, not rows
+  READ -- the real measured after-cost is ~2,600 rows per skipped tick
+  (dominated by the fingerprint's own `COUNT`/`MIN`/`MAX` aggregate visiting
+  every stored row), a real ~79% daily reduction once the now-6-hour
+  (not 24-hour) recheck cadence's periodic full checks are folded in, not
+  a ~100% one.
 - `2026-09-02` (`PRF-010`): the cron value-history backfill's per-tick
   convergence check gains a small persisted per-portfolio marker
   (`portfolios.value_history_backfill_verified_at`/

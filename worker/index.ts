@@ -303,6 +303,12 @@ const worker: ExportedHandler<Env> = {
             // operational signal that a rebuild is in progress.
             portfoliosPending: valueHistoryBackfillResult.portfoliosPending,
             portfoliosFailed: valueHistoryBackfillResult.portfoliosFailed,
+            // PRF-010: how many of the above were reported converged via
+            // the convergence-marker shortcut rather than a freshly-run
+            // candidate-date scan this tick -- the visible proxy for the
+            // rows_read saving this task exists to deliver.
+            portfoliosConvergedSkipped:
+              valueHistoryBackfillResult.portfoliosConvergedSkipped,
           }
         : { reason: valueHistoryBackfillResult.reason },
     });
