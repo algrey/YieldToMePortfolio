@@ -446,59 +446,94 @@ export function createSharesightSyncStateRepository(
   return { get, list, upsert, linkExclusive };
 }
 
+export type SharesightCommittedWatermarks = Readonly<{
+  tradeWatermark: string | null;
+  payoutWatermark: string | null;
+}>;
+
 /**
- * BRK-015: the routine sync's narrowing watermark, derived from what has
- * actually been COMMITTED for this local portfolio -- never from
- * `sharesight_sync_state.last_synced_at` (which BRK-005 ruling 4 advances on
- * successful STAGING, before the owner's separate commit step) and never
- * from `last_trade_watermark` (reserved, deliberately left untouched by this
- * task). The owner confirmed staging a batch and never accepting it is a
- * LIKELY path on this account: if narrowing keyed off a staging-advanced
- * signal, an abandoned batch would push the fetch window past rows that
- * were never committed, and the next routine sync would never see them
- * again -- silent, permanent data loss. Deriving the watermark straight
- * from `transactions`/`dividend_manual_records` instead means a merely
- * STAGED row (which never touches either table until commit) cannot move
- * this watermark at all; abandoning a batch leaves the next routine sync's
- * window exactly where it was, so the abandoned rows are re-fetched.
+ * BRK-015 (review round B1 fix): the routine sync's narrowing watermarks,
+ * derived from what has actually been COMMITTED for this local portfolio --
+ * never from `sharesight_sync_state.last_synced_at` (which BRK-005 ruling 4
+ * advances on successful STAGING, before the owner's separate commit step)
+ * and never from `last_trade_watermark` (reserved, deliberately left
+ * untouched by this task). The owner confirmed staging a batch and never
+ * accepting it is a LIKELY path on this account: if narrowing keyed off a
+ * staging-advanced signal, an abandoned batch would push the fetch window
+ * past rows that were never committed, and the next routine sync would
+ * never see them again -- silent, permanent data loss. Deriving the
+ * watermark straight from `transactions`/`dividend_manual_records` instead
+ * means a merely STAGED row (which never touches either table until
+ * commit) cannot move either watermark at all; abandoning a batch leaves
+ * the next routine sync's window exactly where it was, so the abandoned
+ * rows are re-fetched.
  *
- * Scoped to rows whose `source_reference` carries this sync's own
- * `import-fingerprint:sharesight-trade:`/`import-fingerprint:sharesight-payout:`
- * prefix (`domain/sharesight-sync/transform.ts`) -- a CSV-imported row's
- * unrelated `import-fingerprint:<hash>` reference never contributes here.
+ * **TWO SEPARATE watermarks, never one shared MAX.** The original version
+ * of this function computed a single `MAX` over a `transactions UNION ALL
+ * dividend_manual_records` subquery and the caller passed that ONE value to
+ * BOTH `listTrades` and `listPayouts`. Review round B1 (BLOCKING) found
+ * that the two streams advance at different rates on a real account (the
+ * owner has ~107 trades vs. ~119 payouts across the account's whole
+ * history, committed on unrelated schedules), so the LEADING stream's
+ * watermark silently set the LAGGING stream's fetch window too -- exactly
+ * the "silent, permanent skip" hazard this task's own load-bearing
+ * correctness property exists to prevent, reached cross-stream instead of
+ * cross-sync, and landing on the owner's dividends specifically (a
+ * Sharesight-side late-entered payout dated only just past the PAYOUT
+ * watermark, but before the TRADE-watermark-derived cutoff the shared
+ * value produced, would never be fetched again). Each stream now gets its
+ * own independently-computed `MAX`, in one query (two scalar subqueries,
+ * not a UNION), so neither stream's watermark can ever be governed by the
+ * other's activity.
+ *
+ * Each subquery is scoped to rows whose `source_reference` carries this
+ * sync's own `import-fingerprint:sharesight-trade:`/
+ * `import-fingerprint:sharesight-payout:` prefix
+ * (`domain/sharesight-sync/transform.ts`) -- a CSV-imported row's unrelated
+ * `import-fingerprint:<hash>` reference never contributes to either.
  * `transactions.status = 'posted'` and
  * `dividend_manual_records.superseded_by_record_id IS NULL` additionally
  * exclude a row a REVERSAL has since undone (`import-reversal.ts` marks a
  * reversed transaction `status = 'reversed'`/`'reversing'` and DELETEs a
  * reversed dividend record outright) -- a reversed sharesight-sourced row
- * must not anchor the watermark past dates that are no longer, in fact,
+ * must not anchor either watermark past dates that are no longer, in fact,
  * reflected in the ledger.
  *
- * Returns `null` when this portfolio has no committed Sharesight-sourced
- * row at all (first-ever sync, or every prior sync was staged and never
- * accepted) -- the caller treats that exactly like a Full resync bound
- * (no `from`/`to` sent), which is the correct, safe default when there is
- * no committed history to narrow against.
+ * Each field is `null` when this portfolio has no committed Sharesight-
+ * sourced row of that KIND at all (first-ever sync of that stream, every
+ * prior sync of that stream was staged and never accepted, or -- per the
+ * review's own note -- a route that commits Sharesight-sourced dividends
+ * without minting the `sharesight-payout:` prefix) -- the caller treats a
+ * `null` watermark exactly like a Full resync bound for THAT stream alone
+ * (no `from`/`to` sent for it), which is the correct, safe default when
+ * there is no committed history to narrow that stream against; the OTHER
+ * stream's window is unaffected.
  */
-export async function loadCommittedSharesightWatermark(
+export async function loadCommittedSharesightWatermarks(
   client: SqlClient,
   userId: string,
   portfolioId: string,
-): Promise<string | null> {
-  const row = await client.get<{ max_date: string | null }>(
-    `SELECT MAX(effective_date) AS max_date FROM (
-       SELECT local_trade_date AS effective_date
-         FROM transactions
-        WHERE user_id = ? AND portfolio_id = ? AND status = 'posted'
-          AND source_reference LIKE 'import-fingerprint:sharesight-trade:%'
-       UNION ALL
-       SELECT payment_date AS effective_date
-         FROM dividend_manual_records
-        WHERE user_id = ? AND portfolio_id = ?
-          AND superseded_by_record_id IS NULL
-          AND source_reference LIKE 'import-fingerprint:sharesight-payout:%'
-     )`,
+): Promise<SharesightCommittedWatermarks> {
+  const row = await client.get<{
+    trade_watermark: string | null;
+    payout_watermark: string | null;
+  }>(
+    `SELECT
+       (SELECT MAX(local_trade_date)
+          FROM transactions
+         WHERE user_id = ? AND portfolio_id = ? AND status = 'posted'
+           AND source_reference LIKE 'import-fingerprint:sharesight-trade:%'
+       ) AS trade_watermark,
+       (SELECT MAX(payment_date)
+          FROM dividend_manual_records
+         WHERE user_id = ? AND portfolio_id = ?
+           AND superseded_by_record_id IS NULL
+           AND source_reference LIKE 'import-fingerprint:sharesight-payout:%'
+       ) AS payout_watermark`,
     [userId, portfolioId, userId, portfolioId],
   );
-  return row?.max_date ?? null;
+  return {
+    tradeWatermark: row?.trade_watermark ?? null,
+    payoutWatermark: row?.payout_watermark ?? null,
+  };
 }

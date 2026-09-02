@@ -15,7 +15,7 @@ import {
   createOwnedImportStagingRepository,
   createOwnedPortfolioRepository,
   createSharesightSyncStateRepository,
-  loadCommittedSharesightWatermark,
+  loadCommittedSharesightWatermarks,
   loadResolvedPortfolioInstrumentCurrencies,
   type SqlClient,
 } from "../db/repositories/index.ts";
@@ -25,9 +25,12 @@ import type {
 } from "../domain/imports/index.ts";
 import {
   computeRoutineSyncFromDate,
+  SHARESIGHT_PAYOUT_SYNC_OVERLAP_DAYS,
   SHARESIGHT_SYNC_PARSER_FORMAT,
   SHARESIGHT_SYNC_PARSER_VERSION,
+  SHARESIGHT_TRADE_SYNC_OVERLAP_DAYS,
   transformSharesightSync,
+  type SharesightStreamWindow,
   type SharesightSyncWindow,
 } from "../domain/sharesight-sync/index.ts";
 import type {
@@ -399,41 +402,78 @@ export async function runSharesightSyncWithContext(
     };
   }
 
-  // BRK-015: routine (default) narrows the fetch to what this portfolio has
-  // actually COMMITTED from Sharesight so far, minus an overlap -- NEVER to
+  // BRK-015: routine (default) narrows EACH stream's fetch independently to
+  // what this portfolio has actually COMMITTED of THAT stream from
+  // Sharesight so far, minus that stream's own overlap -- NEVER to
   // `sharesight_sync_state.last_synced_at`/`last_trade_watermark` (see
-  // `loadCommittedSharesightWatermark`'s doc comment for why: those are
+  // `loadCommittedSharesightWatermarks`'s doc comment for why: those are
   // staging-time signals, and staging-without-accepting is a LIKELY,
   // expected path on this account -- keying off them would silently drop
-  // whatever an abandoned batch staged). No committed watermark yet (first
-  // sync, or every prior sync was staged and never accepted) falls back to
-  // the same unbounded fetch a Full resync uses -- there is nothing safe to
-  // narrow against. `mode: "full"` always uses the unbounded fetch,
+  // whatever an abandoned batch staged).
+  //
+  // Review round B1 fix (BLOCKING): trades and payouts get SEPARATE
+  // watermarks and SEPARATE overlap constants, computed and applied
+  // independently -- a single shared value previously let the LEADING
+  // stream's watermark silently govern the LAGGING stream's window (a
+  // trade committed well after the last committed payout pushed the
+  // payout fetch's `from` bound forward too, past a late-entered dividend
+  // that was still well inside ITS OWN stream's intended overlap). See
+  // `loadCommittedSharesightWatermarks`'s doc comment for the full
+  // incident and `window.ts`'s two distinct overlap constants
+  // (`SHARESIGHT_TRADE_SYNC_OVERLAP_DAYS` / `SHARESIGHT_PAYOUT_SYNC_OVERLAP_DAYS`,
+  // deliberately different sizes -- payouts need a much larger one; see
+  // that constant's own doc comment for the live ex-date-vs-paid-date
+  // finding driving its size).
+  //
+  // No committed watermark yet for a given stream (first sync of that
+  // stream, or every prior sync of it was staged and never accepted) falls
+  // back to an unbounded fetch for THAT STREAM ALONE -- there is nothing
+  // safe to narrow it against; the other stream's window is unaffected.
+  // `mode: "full"` always uses an unbounded fetch for BOTH streams,
   // preserving today's behaviour exactly (needed to still catch a
   // Sharesight-side correction to an old record outside any window -- the
   // BRK-005 finding-B1 case).
   const mode: SharesightSyncMode = options.mode ?? "routine";
-  let syncWindow: SharesightSyncWindow = { kind: "full" };
+  let tradeWindow: SharesightStreamWindow = { kind: "full" };
+  let payoutWindow: SharesightStreamWindow = { kind: "full" };
   if (mode === "routine") {
-    const committedWatermark = await loadCommittedSharesightWatermark(
+    const watermarks = await loadCommittedSharesightWatermarks(
       context.client,
       context.userId,
       portfolioId,
     );
-    if (committedWatermark) {
-      syncWindow = {
+    if (watermarks.tradeWatermark) {
+      tradeWindow = {
         kind: "narrowed",
-        sinceDate: computeRoutineSyncFromDate(committedWatermark),
+        sinceDate: computeRoutineSyncFromDate(
+          watermarks.tradeWatermark,
+          SHARESIGHT_TRADE_SYNC_OVERLAP_DAYS,
+        ),
+      };
+    }
+    if (watermarks.payoutWatermark) {
+      payoutWindow = {
+        kind: "narrowed",
+        sinceDate: computeRoutineSyncFromDate(
+          watermarks.payoutWatermark,
+          SHARESIGHT_PAYOUT_SYNC_OVERLAP_DAYS,
+        ),
       };
     }
   }
-  const listParams =
-    syncWindow.kind === "narrowed" ? { from: syncWindow.sinceDate } : undefined;
+  const tradeListParams =
+    tradeWindow.kind === "narrowed"
+      ? { from: tradeWindow.sinceDate }
+      : undefined;
+  const payoutListParams =
+    payoutWindow.kind === "narrowed"
+      ? { from: payoutWindow.sinceDate }
+      : undefined;
 
   const client: SharesightClient = integration.client;
   const tradesResult = await client.listTrades(
     link.sharesightPortfolioId,
-    listParams,
+    tradeListParams,
   );
   if (!tradesResult.ok) {
     return {
@@ -444,7 +484,7 @@ export async function runSharesightSyncWithContext(
   }
   const payoutsResult = await client.listPayouts(
     link.sharesightPortfolioId,
-    listParams,
+    payoutListParams,
   );
   if (!payoutsResult.ok) {
     return {
@@ -581,9 +621,9 @@ export async function runSharesightSyncWithContext(
   // remains true unchanged by BRK-015: `last_synced_at` is still purely a
   // staging-time UI signal, never consulted for fetch narrowing.
   // `last_trade_watermark` is STILL left untouched, deliberately -- BRK-015
-  // added routine-sync narrowing, but keyed to a value DERIVED from
-  // committed `transactions`/`dividend_manual_records` state
-  // (`loadCommittedSharesightWatermark`), never to a column that could be
+  // added routine-sync narrowing, but keyed to TWO values (one per stream)
+  // DERIVED from committed `transactions`/`dividend_manual_records` state
+  // (`loadCommittedSharesightWatermarks`), never to a column that could be
   // advanced by staging alone. See that function's doc comment and this
   // sync's own window computation above for why: staging a batch and never
   // accepting it is a LIKELY path on this account, and a staging-advanced
@@ -631,6 +671,6 @@ export async function runSharesightSyncWithContext(
     rowsStaged,
     skippedPayouts,
     reused: started.reused,
-    window: syncWindow,
+    window: { trades: tradeWindow, payouts: payoutWindow },
   };
 }

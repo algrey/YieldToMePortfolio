@@ -52,13 +52,25 @@ export function isDisabledIntegrationMessage(message: string): boolean {
 }
 
 /**
- * BRK-015: mirrors `domain/sharesight-sync/window.ts`'s `SharesightSyncWindow`
- * (a fresh, structurally-identical type here rather than importing that
- * domain module, since this file -- unlike its sibling `-service.ts` -- is
- * consumed by the CLIENT component and must stay import-light).
+ * BRK-015: mirrors `domain/sharesight-sync/window.ts`'s
+ * `SharesightStreamWindow`/`SharesightSyncWindow` (fresh, structurally-
+ * identical types here rather than importing that domain module, since this
+ * file -- unlike its sibling `-service.ts` -- is consumed by the CLIENT
+ * component and must stay import-light).
+ *
+ * Review round B1 fix: trades and payouts are reported as TWO SEPARATE
+ * stream windows, never folded into one -- the two streams narrow
+ * independently (their own watermark, their own overlap constant), so a
+ * shared summary could silently overstate coverage for whichever stream
+ * happened to have the wider window.
  */
-export type SharesightSyncWindowSummary =
+export type SharesightSyncStreamWindowSummary =
   { kind: "full" } | { kind: "narrowed"; sinceDate: string };
+
+export type SharesightSyncWindowSummary = Readonly<{
+  trades: SharesightSyncStreamWindowSummary;
+  payouts: SharesightSyncStreamWindowSummary;
+}>;
 
 export type SharesightSyncSuccess = {
   ok: true;
@@ -70,6 +82,47 @@ export type SharesightSyncSuccess = {
   window: SharesightSyncWindowSummary;
 };
 
+/** BRK-015: the two sync modes the owner can trigger -- `"routine"` (the
+ * default, watermark-narrowed) and `"full"` (the explicit secondary action,
+ * unconditional fetch). Shared by the panel's fetch-URL builder and the
+ * route's query-param parser so both sides of the wire agree on the exact
+ * same two literal strings. */
+export type SharesightSyncModeParam = "routine" | "full";
+
+/**
+ * Review round follow-up 3 fix: the panel's fetch URL and the route's query
+ * parsing were each an untested inline literal (`?mode=${mode}` / a raw
+ * `searchParams.get("mode") === "full"` check), and the one regression test
+ * that used to pin this exact string was RELAXED (to tolerate any query
+ * string at all) rather than fixed when the panel grew the query param --
+ * "the tested layer is not the layer the browser hits." `buildSharesightSyncUrl`
+ * is now the SINGLE place that literal query string is constructed;
+ * `resolveSharesightSyncMode` (below) is the SINGLE place it is parsed back
+ * out server-side -- both directly unit-tested against the exact wire
+ * string, not just source-scanned.
+ */
+export function buildSharesightSyncUrl(
+  portfolioId: string,
+  mode: SharesightSyncModeParam,
+): string {
+  return `/api/portfolios/${portfolioId}/sharesight-sync?mode=${mode}`;
+}
+
+/**
+ * Parses the sync route's `?mode=` query param from a request URL. Anything
+ * other than the exact literal `"full"` -- including it being entirely
+ * absent -- resolves to `"routine"`: this query param is same-origin UI
+ * wiring, not owner-facing input that needs its own validation error, so an
+ * unrecognised value fails safe to the narrower, cheaper default rather
+ * than rejecting the request.
+ */
+export function resolveSharesightSyncMode(
+  url: string | URL,
+): SharesightSyncModeParam {
+  const parsed = typeof url === "string" ? new URL(url) : url;
+  return parsed.searchParams.get("mode") === "full" ? "full" : "routine";
+}
+
 function statusLabel(status: string): string {
   return status.replaceAll("_", " ");
 }
@@ -78,12 +131,25 @@ function statusLabel(status: string): string {
  * BRK-015: honest window disclosure -- "a routine sync must never read as
  * fully in sync with Sharesight when it only examined a recent window"
  * (TASKS.md). Always rendered, never conditionally dropped, so a `narrowed`
- * result can never be silently read as complete.
+ * result can never be silently read as complete. Review round B1 fix:
+ * states trades and payouts SEPARATELY (never a single combined date) --
+ * the two streams narrow independently, so collapsing them into one
+ * sentence could silently overstate coverage for whichever stream actually
+ * had the narrower window.
  */
 function windowLabel(window: SharesightSyncWindowSummary): string {
-  return window.kind === "narrowed"
-    ? `Routine sync: checked Sharesight since ${window.sinceDate} (not your full history -- use Full resync to check everything).`
-    : "Checked your entire Sharesight history.";
+  if (window.trades.kind === "full" && window.payouts.kind === "full") {
+    return "Checked your entire Sharesight history (trades and dividends).";
+  }
+  const tradesText =
+    window.trades.kind === "narrowed"
+      ? `trades since ${window.trades.sinceDate}`
+      : "all trades";
+  const payoutsText =
+    window.payouts.kind === "narrowed"
+      ? `dividends since ${window.payouts.sinceDate}`
+      : "all dividends";
+  return `Routine sync: checked ${tradesText} and ${payoutsText} (not your full history -- use Full resync to check everything).`;
 }
 
 /** Batch created-vs-reused (with its CURRENT status -- reviewer follow-up

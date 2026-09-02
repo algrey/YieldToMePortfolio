@@ -3,14 +3,21 @@
  * plus an explicit full resync (owner-ruled).
  *
  * THE LOAD-BEARING CORRECTNESS PROPERTY under test throughout this file:
- * the routine sync's narrowing watermark is derived from what has actually
- * been COMMITTED (`transactions`/`dividend_manual_records`), never from
- * `sharesight_sync_state.last_synced_at`/`last_trade_watermark` (both
+ * the routine sync's narrowing watermarks are derived from what has
+ * actually been COMMITTED (`transactions`/`dividend_manual_records`), never
+ * from `sharesight_sync_state.last_synced_at`/`last_trade_watermark` (both
  * staging-time signals -- BRK-005 ruling 4 advances `last_synced_at` on
  * successful STAGING, before the owner's separate commit step). The owner
  * confirmed staging a batch and never accepting it is a LIKELY path on this
  * account, not a remote edge case -- see "abandoned batch" below, which
  * pins exactly this hazard.
+ *
+ * REVIEW ROUND B1 (BLOCKING) FIX, ALSO PINNED HERE: trades and payouts get
+ * TWO SEPARATE watermarks and TWO SEPARATE overlap constants, never one
+ * shared value -- a shared watermark let the LEADING stream silently
+ * govern the LAGGING stream's fetch window, which landed on the owner's
+ * dividends specifically. See "cross-stream" test below for the reviewer's
+ * exact repro.
  *
  * Fixtures largely mirror `tests/brk-005.test.ts`'s established pattern
  * (`migratedDatabase`, `fakeTrade`/`fakePayout`/`fakePortfolio`,
@@ -33,16 +40,18 @@ import {
 import {
   createOwnedImportCommitRepository,
   createOwnedImportMappingDecisionRepository,
+  createOwnedImportReversalRepository,
   createOwnedImportStagingRepository,
   createOwnedPortfolioRepository,
   createSqliteSqlClient,
-  loadCommittedSharesightWatermark,
+  loadCommittedSharesightWatermarks,
   type ImportCommitInput,
   type SqlClient,
 } from "../db/repositories/index.ts";
 import {
   computeRoutineSyncFromDate,
-  SHARESIGHT_ROUTINE_SYNC_OVERLAP_DAYS,
+  SHARESIGHT_PAYOUT_SYNC_OVERLAP_DAYS,
+  SHARESIGHT_TRADE_SYNC_OVERLAP_DAYS,
 } from "../domain/sharesight-sync/index.ts";
 import type {
   SharesightClient,
@@ -71,9 +80,11 @@ async function migratedDatabase(): Promise<DatabaseSync> {
     INSERT INTO currencies (code, numeric_code, name, minor_unit_digits, is_active)
     VALUES ('AUD', 36, 'Australian dollar', 2, 1);
     INSERT INTO users (id, status, primary_email, timezone, created_at, updated_at, version)
-    VALUES ('user-a', 'active', 'a@example.com', 'Australia/Sydney', '2026-08-13', '2026-08-13', 1);
+    VALUES ('user-a', 'active', 'a@example.com', 'Australia/Sydney', '2026-08-13', '2026-08-13', 1),
+           ('user-b', 'active', 'b@example.com', 'Australia/Sydney', '2026-08-13', '2026-08-13', 1);
     INSERT INTO user_settings (user_id, home_currency_code, timezone, created_at, updated_at, version)
-    VALUES ('user-a', 'AUD', 'Australia/Sydney', '2026-08-13', '2026-08-13', 1);
+    VALUES ('user-a', 'AUD', 'Australia/Sydney', '2026-08-13', '2026-08-13', 1),
+           ('user-b', 'AUD', 'Australia/Sydney', '2026-08-13', '2026-08-13', 1);
     INSERT INTO portfolios (id, user_id, code, name, base_currency_code, timezone, accounting_method, status, created_at, updated_at, version)
     VALUES ('portfolio-a', 'user-a', 'A', 'Main', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-13', '2026-08-13', 1);
     INSERT INTO securities (id, canonical_name, asset_type, primary_currency_code, status, created_at, updated_at)
@@ -357,30 +368,31 @@ const integrationOf = (sharesightClient: SharesightClient) => ({
 test("BRK-015: computeRoutineSyncFromDate subtracts the overlap in whole calendar days, UTC, across a month/year boundary", () => {
   assert.equal(computeRoutineSyncFromDate("2026-08-20", 30), "2026-07-21");
   assert.equal(computeRoutineSyncFromDate("2026-01-05", 10), "2025-12-26");
-  assert.equal(
-    computeRoutineSyncFromDate("2026-08-20"),
-    computeRoutineSyncFromDate(
-      "2026-08-20",
-      SHARESIGHT_ROUTINE_SYNC_OVERLAP_DAYS,
-    ),
-    "default overlap must be SHARESIGHT_ROUTINE_SYNC_OVERLAP_DAYS",
-  );
 });
 
 test("BRK-015: computeRoutineSyncFromDate rejects a non-YYYY-MM-DD input rather than silently misparsing it", () => {
-  assert.throws(() => computeRoutineSyncFromDate("not-a-date"));
+  assert.throws(() => computeRoutineSyncFromDate("not-a-date", 30));
+});
+
+test("BRK-015 review round B1 fix: SHARESIGHT_TRADE_SYNC_OVERLAP_DAYS and SHARESIGHT_PAYOUT_SYNC_OVERLAP_DAYS are distinct, non-interchangeable constants -- there is no shared default any more", () => {
+  assert.equal(SHARESIGHT_TRADE_SYNC_OVERLAP_DAYS, 30);
+  assert.equal(SHARESIGHT_PAYOUT_SYNC_OVERLAP_DAYS, 180);
+  assert.notEqual(
+    SHARESIGHT_TRADE_SYNC_OVERLAP_DAYS,
+    SHARESIGHT_PAYOUT_SYNC_OVERLAP_DAYS,
+  );
 });
 
 // ---------------------------------------------------------------------------
-// Watermark advances only on commit, and only from committed state
+// Watermarks advance only on commit, and only from committed state
 // ---------------------------------------------------------------------------
 
-test("BRK-015 (the load-bearing hazard): the committed watermark stays null after STAGING alone, and only moves once the batch is COMMITTED", async () => {
+test("BRK-015 (the load-bearing hazard): the committed watermarks stay null after STAGING alone, and only move once the batch is COMMITTED", async () => {
   const database = await migratedDatabase();
   const { client, sharesightClient } = await linkedFixture(database, {
     portfolios: [fakePortfolio()],
     trades: [fakeTrade({ id: "trade-1", transactionDate: "2026-07-01" })],
-    payouts: [],
+    payouts: [fakePayout({ id: "payout-1", paidOnDate: "2026-07-05" })],
   });
 
   const synced = await runSharesightSyncWithContext(
@@ -391,29 +403,265 @@ test("BRK-015 (the load-bearing hazard): the committed watermark stays null afte
   assert.equal(synced.ok, true);
   if (!synced.ok) return;
 
-  // Staged, not yet committed -- the derived watermark must still be null.
-  const beforeCommit = await loadCommittedSharesightWatermark(
+  // Staged, not yet committed -- both derived watermarks must still be null.
+  const beforeCommit = await loadCommittedSharesightWatermarks(
     client,
     "user-a",
     "portfolio-a",
   );
-  assert.equal(beforeCommit, null);
+  assert.equal(beforeCommit.tradeWatermark, null);
+  assert.equal(beforeCommit.payoutWatermark, null);
 
   await commitBatch(client, synced.batchId, "brk-015-commit-1");
 
-  const afterCommit = await loadCommittedSharesightWatermark(
+  const afterCommit = await loadCommittedSharesightWatermarks(
     client,
     "user-a",
     "portfolio-a",
   );
-  assert.equal(afterCommit, "2026-07-01");
+  assert.equal(afterCommit.tradeWatermark, "2026-07-01");
+  assert.equal(afterCommit.payoutWatermark, "2026-07-05");
+});
+
+test("BRK-015: loadCommittedSharesightWatermarks is owner-scoped -- a DIFFERENT user's query against the SAME portfolio id sees no watermark at all (review round follow-up 4)", async () => {
+  const database = await migratedDatabase();
+  const { client, sharesightClient } = await linkedFixture(database, {
+    portfolios: [fakePortfolio()],
+    trades: [fakeTrade({ id: "trade-1", transactionDate: "2026-07-01" })],
+    payouts: [fakePayout({ id: "payout-1", paidOnDate: "2026-07-05" })],
+  });
+  const synced = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: integrationOf(sharesightClient) },
+  );
+  assert.equal(synced.ok, true);
+  if (!synced.ok) return;
+  await commitBatch(client, synced.batchId, "brk-015-iso-commit");
+
+  const owner = await loadCommittedSharesightWatermarks(
+    client,
+    "user-a",
+    "portfolio-a",
+  );
+  assert.equal(owner.tradeWatermark, "2026-07-01");
+  assert.equal(owner.payoutWatermark, "2026-07-05");
+
+  const otherUser = await loadCommittedSharesightWatermarks(
+    client,
+    "user-b",
+    "portfolio-a",
+  );
+  assert.equal(
+    otherUser.tradeWatermark,
+    null,
+    "a different user must never see this portfolio's committed trade watermark",
+  );
+  assert.equal(
+    otherUser.payoutWatermark,
+    null,
+    "a different user must never see this portfolio's committed payout watermark",
+  );
+});
+
+test("BRK-015: loadCommittedSharesightWatermarks excludes a REVERSED trade and its SUPERSEDED/deleted payout (review round follow-up 4)", async () => {
+  const database = await migratedDatabase();
+  const { client, sharesightClient } = await linkedFixture(database, {
+    portfolios: [fakePortfolio()],
+    trades: [fakeTrade({ id: "trade-1", transactionDate: "2026-07-01" })],
+    payouts: [fakePayout({ id: "payout-1", paidOnDate: "2026-07-05" })],
+  });
+  const synced = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: integrationOf(sharesightClient) },
+  );
+  assert.equal(synced.ok, true);
+  if (!synced.ok) return;
+  await commitBatch(client, synced.batchId, "brk-015-rev-commit");
+
+  const before = await loadCommittedSharesightWatermarks(
+    client,
+    "user-a",
+    "portfolio-a",
+  );
+  assert.equal(before.tradeWatermark, "2026-07-01");
+  assert.equal(before.payoutWatermark, "2026-07-05");
+
+  // Reverse the WHOLE batch -- the reversal machinery's real unit (mirrors
+  // tests/brk-005.test.ts's own reversal round trip). This flips the
+  // trade's status away from 'posted' AND deletes the dividend record
+  // outright (`db/repositories/import-reversal.ts`).
+  const committedBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    synced.batchId,
+  );
+  const reversalRepo = createOwnedImportReversalRepository(client);
+  let reversed = await reversalRepo.reverse("user-a", synced.batchId, {
+    expectedVersion: committedBatch!.version,
+    idempotencyKey: "brk-015-reverse",
+    confirmation: true,
+    requestId: "brk-015-reverse-request",
+  });
+  for (
+    let attempt = 0;
+    attempt < 10 && (!reversed.ok || reversed.status !== "reversed");
+    attempt += 1
+  ) {
+    assert.equal(reversed.ok, true);
+    reversed = await reversalRepo.reverse("user-a", synced.batchId, {
+      expectedVersion: committedBatch!.version,
+      idempotencyKey: "brk-015-reverse",
+      confirmation: true,
+      requestId: "brk-015-reverse-request",
+    });
+  }
+  assert.equal(reversed.ok, true);
+  if (reversed.ok) assert.equal(reversed.status, "reversed");
+
+  const after = await loadCommittedSharesightWatermarks(
+    client,
+    "user-a",
+    "portfolio-a",
+  );
+  assert.equal(
+    after.tradeWatermark,
+    null,
+    "a reversed trade must not anchor the trade watermark",
+  );
+  assert.equal(
+    after.payoutWatermark,
+    null,
+    "a reversed/deleted payout must not anchor the payout watermark",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// REVIEW ROUND B1 (BLOCKING): the payout stream must never be narrowed by
+// the trade stream's watermark, or vice versa.
+// ---------------------------------------------------------------------------
+
+test("BRK-015 REVIEW ROUND B1 (the reviewer's exact repro): a late-entered payout is not silently skipped just because the TRADE stream has advanced further -- each stream's window must come from its OWN watermark", async () => {
+  const database = await migratedDatabase();
+  const baselineTrade = fakeTrade({
+    id: "trade-baseline",
+    transactionDate: "2026-06-01",
+  });
+  const baselinePayout = fakePayout({
+    id: "payout-baseline",
+    paidOnDate: "2026-06-01",
+  });
+  const { client, sharesightClient } = await linkedFixture(database, {
+    portfolios: [fakePortfolio()],
+    trades: [baselineTrade],
+    payouts: [baselinePayout],
+  });
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: integrationOf(sharesightClient) },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  await commitBatch(client, first.batchId, "brk-015-b1-baseline");
+
+  // Only the TRADE stream advances -- a later trade commits; no new payout.
+  const laterTrade = fakeTrade({
+    id: "trade-later",
+    transactionDate: "2026-08-01",
+  });
+  const { client: sharesightClientB } = filteringSharesightClient({
+    portfolios: [fakePortfolio()],
+    trades: [baselineTrade, laterTrade],
+    payouts: [baselinePayout],
+  });
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    { integration: integrationOf(sharesightClientB) },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  await commitBatch(client, second.batchId, "brk-015-b1-later-trade");
+
+  const watermarks = await loadCommittedSharesightWatermarks(
+    client,
+    "user-a",
+    "portfolio-a",
+  );
+  assert.equal(watermarks.tradeWatermark, "2026-08-01");
+  assert.equal(
+    watermarks.payoutWatermark,
+    "2026-06-01",
+    "the payout watermark must be UNCHANGED by trade-only activity -- the lagging stream",
+  );
+
+  // Sharesight late-enters a payout only 19 days past the PAYOUT
+  // watermark -- well inside the payout stream's own (180-day) overlap,
+  // but WOULD have been excluded by a trade-watermark-derived shared
+  // window (2026-08-01 - 30 = 2026-07-02 > 2026-06-20).
+  const latePayout = fakePayout({
+    id: "payout-late",
+    paidOnDate: "2026-06-20",
+  });
+  const { client: sharesightClientC, calls } = filteringSharesightClient({
+    portfolios: [fakePortfolio()],
+    trades: [baselineTrade, laterTrade],
+    payouts: [baselinePayout, latePayout],
+  });
+  const third = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-3" },
+    "portfolio-a",
+    { integration: integrationOf(sharesightClientC) },
+  );
+  assert.equal(third.ok, true);
+  if (!third.ok) return;
+
+  const expectedTradeFrom = computeRoutineSyncFromDate(
+    "2026-08-01",
+    SHARESIGHT_TRADE_SYNC_OVERLAP_DAYS,
+  );
+  const expectedPayoutFrom = computeRoutineSyncFromDate(
+    "2026-06-01",
+    SHARESIGHT_PAYOUT_SYNC_OVERLAP_DAYS,
+  );
+  assert.notEqual(
+    expectedTradeFrom,
+    expectedPayoutFrom,
+    "sanity: the two windows must genuinely differ for this repro to mean anything",
+  );
+  assert.equal(calls.trades[0]?.params?.from, expectedTradeFrom);
+  assert.equal(
+    calls.payouts[0]?.params?.from,
+    expectedPayoutFrom,
+    "the payout fetch must be governed by the PAYOUT watermark, never the trade watermark",
+  );
+  assert.deepEqual(third.window.trades, {
+    kind: "narrowed",
+    sinceDate: expectedTradeFrom,
+  });
+  assert.deepEqual(third.window.payouts, {
+    kind: "narrowed",
+    sinceDate: expectedPayoutFrom,
+  });
+
+  // The late payout must actually have been fetched/staged: 1 trade
+  // (laterTrade -- baselineTrade is outside the trade window) + 2 payouts
+  // (baselinePayout + latePayout, both inside the payout window) = 3.
+  // Under the pre-fix shared-watermark bug this would have been 2 (the
+  // late payout silently dropped).
+  assert.equal(
+    third.rowsStaged,
+    3,
+    "the late-entered payout must be present -- 2 here would mean it was silently dropped (the pre-fix bug)",
+  );
 });
 
 // ---------------------------------------------------------------------------
 // Routine sync narrows the fetch; unchanged account stages far fewer rows
 // ---------------------------------------------------------------------------
 
-test("BRK-015: a routine sync narrows listTrades/listPayouts to (committed watermark - overlap), unset upper bound", async () => {
+test("BRK-015: a routine sync narrows listTrades to (committed trade watermark - trade overlap), unset upper bound", async () => {
   const database = await migratedDatabase();
   const oldTrade = fakeTrade({
     id: "trade-old",
@@ -426,7 +674,8 @@ test("BRK-015: a routine sync narrows listTrades/listPayouts to (committed water
   });
 
   // First-ever sync: no committed watermark yet -- must be an UNBOUNDED
-  // fetch (mirrors today's behaviour), reported as window.kind === "full".
+  // fetch for BOTH streams (mirrors today's behaviour), reported as
+  // window.trades.kind === window.payouts.kind === "full".
   const first = await runSharesightSyncWithContext(
     { client, userId: "user-a", requestId: "sync-1" },
     "portfolio-a",
@@ -435,18 +684,19 @@ test("BRK-015: a routine sync narrows listTrades/listPayouts to (committed water
   assert.equal(first.ok, true);
   if (!first.ok) return;
   assert.deepEqual(calls.trades[0]?.params, undefined);
-  assert.equal(first.window.kind, "full");
+  assert.equal(first.window.trades.kind, "full");
+  assert.equal(first.window.payouts.kind, "full");
   await commitBatch(client, first.batchId, "brk-015-commit-old");
 
-  const watermark = await loadCommittedSharesightWatermark(
+  const watermarks = await loadCommittedSharesightWatermarks(
     client,
     "user-a",
     "portfolio-a",
   );
-  assert.equal(watermark, "2020-01-01");
+  assert.equal(watermarks.tradeWatermark, "2020-01-01");
 
   // Second sync (routine, default mode): must narrow to
-  // (watermark - overlap), no upper bound.
+  // (trade watermark - trade overlap), no upper bound.
   const second = await runSharesightSyncWithContext(
     { client, userId: "user-a", requestId: "sync-2" },
     "portfolio-a",
@@ -454,13 +704,18 @@ test("BRK-015: a routine sync narrows listTrades/listPayouts to (committed water
   );
   assert.equal(second.ok, true);
   if (!second.ok) return;
-  const expectedFrom = computeRoutineSyncFromDate("2020-01-01");
+  const expectedFrom = computeRoutineSyncFromDate(
+    "2020-01-01",
+    SHARESIGHT_TRADE_SYNC_OVERLAP_DAYS,
+  );
   assert.deepEqual(calls.trades[1]?.params, { from: expectedFrom });
-  assert.deepEqual(calls.payouts[1]?.params, { from: expectedFrom });
-  assert.deepEqual(second.window, {
+  assert.deepEqual(second.window.trades, {
     kind: "narrowed",
     sinceDate: expectedFrom,
   });
+  // No payout ever committed -- that stream stays unbounded independently.
+  assert.deepEqual(calls.payouts[1]?.params, undefined);
+  assert.equal(second.window.payouts.kind, "full");
 });
 
 test("BRK-015 acceptance: an unchanged account's routine sync stages far fewer rows than a full history would (226-row production symptom)", async () => {
@@ -515,7 +770,7 @@ test("BRK-015 acceptance: an unchanged account's routine sync stages far fewer r
 // A genuinely new payout since the last sync is still picked up
 // ---------------------------------------------------------------------------
 
-test("BRK-015 acceptance: a new payout dated after the committed watermark is still picked up by the next routine sync", async () => {
+test("BRK-015 acceptance: a new payout dated after the committed payout watermark is still picked up by the next routine sync", async () => {
   const database = await migratedDatabase();
   const { client, sharesightClient } = await linkedFixture(database, {
     portfolios: [fakePortfolio()],
@@ -596,12 +851,12 @@ test("BRK-015 THE HAZARD: a batch staged and then abandoned (never accepted) is 
   if (!first.ok) return;
   await commitBatch(client, first.batchId, "brk-015-commit-baseline");
 
-  const watermarkAfterBaseline = await loadCommittedSharesightWatermark(
+  const watermarkAfterBaseline = await loadCommittedSharesightWatermarks(
     client,
     "user-a",
     "portfolio-a",
   );
-  assert.equal(watermarkAfterBaseline, "2026-06-01");
+  assert.equal(watermarkAfterBaseline.tradeWatermark, "2026-06-01");
 
   // A NEW trade arrives, recent enough to fall inside the routine window --
   // this sync STAGES it but the batch is deliberately NEVER accepted
@@ -632,12 +887,12 @@ test("BRK-015 THE HAZARD: a batch staged and then abandoned (never accepted) is 
   // The committed watermark must be UNCHANGED by the abandoned staging --
   // this is the hazard's exact failure mode if narrowing had keyed off a
   // staging-advanced signal instead.
-  const watermarkAfterAbandon = await loadCommittedSharesightWatermark(
+  const watermarkAfterAbandon = await loadCommittedSharesightWatermarks(
     client,
     "user-a",
     "portfolio-a",
   );
-  assert.equal(watermarkAfterAbandon, "2026-06-01");
+  assert.equal(watermarkAfterAbandon.tradeWatermark, "2026-06-01");
 
   // A THIRD sync (routine) must still ask Sharesight for the abandoned
   // trade's date -- i.e. the fetch window must NOT have advanced past
@@ -667,10 +922,10 @@ test("BRK-015 THE HAZARD: a batch staged and then abandoned (never accepted) is 
 });
 
 // ---------------------------------------------------------------------------
-// Overlap boundary: settled just inside vs. just outside the 30-day window
+// Overlap boundary: settled just inside vs. just outside the trade overlap
 // ---------------------------------------------------------------------------
 
-test("BRK-015: overlap boundary -- a trade dated exactly at (watermark - overlap) is included, one day earlier is excluded", async () => {
+test("BRK-015: overlap boundary -- a trade dated exactly at (watermark - trade overlap) is included, one day earlier is excluded", async () => {
   const database = await migratedDatabase();
   const anchorTrade = fakeTrade({
     id: "trade-anchor",
@@ -690,7 +945,10 @@ test("BRK-015: overlap boundary -- a trade dated exactly at (watermark - overlap
   if (!first.ok) return;
   await commitBatch(client, first.batchId, "brk-015-commit-anchor");
 
-  const cutoff = computeRoutineSyncFromDate("2026-08-20"); // 2026-07-21
+  const cutoff = computeRoutineSyncFromDate(
+    "2026-08-20",
+    SHARESIGHT_TRADE_SYNC_OVERLAP_DAYS,
+  ); // 2026-07-21
   const insideTrade = fakeTrade({
     id: "trade-inside",
     transactionDate: cutoff,
@@ -805,7 +1063,8 @@ test("BRK-015 acceptance: a routine sync cannot see a correction to an old (out-
   if (!full.ok) return;
   assert.deepEqual(calls.trades[0]?.params, undefined);
   assert.deepEqual(calls.payouts[0]?.params, undefined);
-  assert.equal(full.window.kind, "full");
+  assert.equal(full.window.trades.kind, "full");
+  assert.equal(full.window.payouts.kind, "full");
   assert.equal(full.reused, false, "the correction must produce a NEW batch");
   assert.equal(full.rowsStaged, 2);
 });

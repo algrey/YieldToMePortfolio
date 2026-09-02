@@ -1,5 +1,6 @@
 import { runSharesightSyncAction } from "../../../../sharesight-sync-actions.ts";
 import { rejectCrossSiteMutation } from "../../../../mutation-request.ts";
+import { resolveSharesightSyncMode } from "../../../../sharesight-sync-panel-helpers.ts";
 
 // BRK-005: owner-initiated Sharesight read-sync into a STAGED import batch
 // (CSRF-first, owner-scoped POST -- Orchestrator ruling 1). Fetches
@@ -12,9 +13,11 @@ import { rejectCrossSiteMutation } from "../../../../mutation-request.ts";
 // BRK-015: `?mode=full` selects the explicit "Full resync" action
 // (unconditional inception-to-now fetch, unchanged from pre-BRK-015
 // behaviour); any other value, or its absence, is the default `"routine"`
-// watermark-narrowed sync. An unrecognised value falls back to `"routine"`
-// rather than failing the request -- this query param is same-origin UI
-// wiring, not owner-facing input that needs its own validation error.
+// watermark-narrowed sync. Parsing lives in the shared, directly-tested
+// `resolveSharesightSyncMode` (`sharesight-sync-panel-helpers.ts`) -- the
+// SAME function `tests/brk-005b.test.ts` pins against the exact wire
+// string, rather than an inline literal duplicated (and driftable) between
+// this route and the panel's fetch call.
 export async function POST(
   request: Request,
   context: { params: Promise<{ portfolioId: string }> },
@@ -22,10 +25,7 @@ export async function POST(
   const rejected = rejectCrossSiteMutation(request);
   if (rejected) return rejected;
   const { portfolioId } = await context.params;
-  const mode =
-    new URL(request.url).searchParams.get("mode") === "full"
-      ? "full"
-      : "routine";
+  const mode = resolveSharesightSyncMode(request.url);
   const result = await runSharesightSyncAction(portfolioId, mode);
   return Response.json(result, {
     status: result.ok ? 200 : result.status,

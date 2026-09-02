@@ -12,9 +12,11 @@ import {
 import { listSharesightPortfoliosWithContext } from "../app/sharesight-sync-service.ts";
 import { loadOwnedSharesightLinks } from "../app/owned-sharesight-links.ts";
 import {
+  buildSharesightSyncUrl,
   formatSyncResultMessage,
   isDisabledIntegrationMessage,
   mergeSharesightLinks,
+  resolveSharesightSyncMode,
   type SharesightLinkStatus,
 } from "../app/sharesight-sync-panel-helpers.ts";
 
@@ -118,9 +120,9 @@ test("BRK-005B: formatSyncResultMessage distinguishes a newly created batch from
       rowsStaged: 1,
       skippedPayouts: 0,
       reused: false,
-      window: { kind: "full" },
+      window: { trades: { kind: "full" }, payouts: { kind: "full" } },
     }),
-    "Created batch batch-1. 1 row staged. Checked your entire Sharesight history.",
+    "Created batch batch-1. 1 row staged. Checked your entire Sharesight history (trades and dividends).",
   );
   assert.equal(
     formatSyncResultMessage({
@@ -130,9 +132,9 @@ test("BRK-005B: formatSyncResultMessage distinguishes a newly created batch from
       rowsStaged: 5,
       skippedPayouts: 0,
       reused: true,
-      window: { kind: "full" },
+      window: { trades: { kind: "full" }, payouts: { kind: "full" } },
     }),
-    "No changes since last sync -- reused batch batch-1 (status: parsed). 5 rows staged. Checked your entire Sharesight history.",
+    "No changes since last sync -- reused batch batch-1 (status: parsed). 5 rows staged. Checked your entire Sharesight history (trades and dividends).",
   );
 });
 
@@ -144,7 +146,7 @@ test("BRK-005B: formatSyncResultMessage surfaces a skipped-payout count with a p
     rowsStaged: 3,
     skippedPayouts: 1,
     reused: false,
-    window: { kind: "full" },
+    window: { trades: { kind: "full" }, payouts: { kind: "full" } },
   });
   assert.match(one, /1 future-dated payout skipped/);
   assert.match(one, /details in the batch preview/);
@@ -156,7 +158,7 @@ test("BRK-005B: formatSyncResultMessage surfaces a skipped-payout count with a p
     rowsStaged: 3,
     skippedPayouts: 4,
     reused: false,
-    window: { kind: "full" },
+    window: { trades: { kind: "full" }, payouts: { kind: "full" } },
   });
   assert.match(many, /4 future-dated payouts skipped/);
 });
@@ -169,7 +171,7 @@ test("BRK-005B: formatSyncResultMessage never mentions skipped payouts when ther
     rowsStaged: 2,
     skippedPayouts: 0,
     reused: false,
-    window: { kind: "full" },
+    window: { trades: { kind: "full" }, payouts: { kind: "full" } },
   });
   assert.doesNotMatch(message, /skipped/);
 });
@@ -182,7 +184,7 @@ test("BRK-005B follow-up 2: formatSyncResultMessage surfaces the reused batch's 
     rowsStaged: 4,
     skippedPayouts: 0,
     reused: true,
-    window: { kind: "full" },
+    window: { trades: { kind: "full" }, payouts: { kind: "full" } },
   });
   assert.match(committed, /status: committed/);
 
@@ -193,7 +195,7 @@ test("BRK-005B follow-up 2: formatSyncResultMessage surfaces the reused batch's 
     rowsStaged: 4,
     skippedPayouts: 0,
     reused: true,
-    window: { kind: "full" },
+    window: { trades: { kind: "full" }, payouts: { kind: "full" } },
   });
   assert.match(needsMapping, /status: needs mapping/);
 
@@ -206,7 +208,7 @@ test("BRK-005B follow-up 2: formatSyncResultMessage surfaces the reused batch's 
     rowsStaged: 4,
     skippedPayouts: 0,
     reused: false,
-    window: { kind: "full" },
+    window: { trades: { kind: "full" }, payouts: { kind: "full" } },
   });
   assert.doesNotMatch(created, /status:/);
 });
@@ -224,9 +226,13 @@ test("BRK-015: formatSyncResultMessage states the narrowed window's since-date, 
     rowsStaged: 2,
     skippedPayouts: 0,
     reused: false,
-    window: { kind: "narrowed", sinceDate: "2026-07-15" },
+    window: {
+      trades: { kind: "narrowed", sinceDate: "2026-07-15" },
+      payouts: { kind: "narrowed", sinceDate: "2026-07-15" },
+    },
   });
-  assert.match(narrowed, /since 2026-07-15/);
+  assert.match(narrowed, /trades since 2026-07-15/);
+  assert.match(narrowed, /dividends since 2026-07-15/);
   assert.match(narrowed, /not your full history/);
   assert.doesNotMatch(narrowed, /entire Sharesight history/);
 });
@@ -239,10 +245,53 @@ test("BRK-015: formatSyncResultMessage reports full-history coverage for a full 
     rowsStaged: 226,
     skippedPayouts: 0,
     reused: false,
-    window: { kind: "full" },
+    window: { trades: { kind: "full" }, payouts: { kind: "full" } },
   });
   assert.match(full, /entire Sharesight history/);
   assert.doesNotMatch(full, /not your full history/);
+});
+
+test("BRK-015 review round B1 fix: formatSyncResultMessage states trades and payouts SEPARATELY when their windows differ, never collapsing them into one shared (and therefore potentially wrong) date", () => {
+  // The exact reviewer repro shape: trades narrowed to a recent date,
+  // payouts still needing their own, much earlier, wider window because
+  // the payout stream's own watermark lags the trade stream's.
+  const mixed = formatSyncResultMessage({
+    ok: true,
+    batchId: "batch-13",
+    batchStatus: "parsed",
+    rowsStaged: 3,
+    skippedPayouts: 0,
+    reused: false,
+    window: {
+      trades: { kind: "narrowed", sinceDate: "2026-07-02" },
+      payouts: { kind: "narrowed", sinceDate: "2026-01-02" },
+    },
+  });
+  assert.match(mixed, /trades since 2026-07-02/);
+  assert.match(mixed, /dividends since 2026-01-02/);
+  // Never silently reports the LATER (narrower) trades date as if it also
+  // covered payouts, which would UNDERSTATE the payout window that was
+  // actually used and could read as "dividends before 2026-07-02 were not
+  // checked" when in fact they were, back to 2026-01-02.
+  assert.doesNotMatch(mixed, /dividends since 2026-07-02/);
+
+  // One stream full, the other narrowed -- must not collapse to the
+  // all-full or all-narrowed sentence.
+  const halfFull = formatSyncResultMessage({
+    ok: true,
+    batchId: "batch-14",
+    batchStatus: "parsed",
+    rowsStaged: 1,
+    skippedPayouts: 0,
+    reused: false,
+    window: {
+      trades: { kind: "narrowed", sinceDate: "2026-08-01" },
+      payouts: { kind: "full" },
+    },
+  });
+  assert.match(halfFull, /trades since 2026-08-01/);
+  assert.match(halfFull, /all dividends/);
+  assert.doesNotMatch(halfFull, /entire Sharesight history/);
 });
 
 // ---------------------------------------------------------------------------
@@ -733,13 +782,64 @@ test("BRK-005B: the panel's three fetches target exactly BRK-005's three existin
     source,
     /`\/api\/portfolios\/\$\{portfolioId\}\/sharesight-link`/,
   );
-  // BRK-015: the sync route now carries an optional `?mode=` query string
-  // (routine vs. explicit Full resync) -- still the SAME route, never a
-  // fabricated new one, so this match tolerates but does not require it.
-  assert.match(
-    source,
-    /`\/api\/portfolios\/\$\{portfolioId\}\/sharesight-sync(\?[^`]*)?`/,
+  // BRK-015: the sync fetch's URL (including its `?mode=` query string) is
+  // now built by the shared, directly-tested `buildSharesightSyncUrl`
+  // (`tests` below pin its exact wire output) rather than an inline
+  // template literal here -- this just confirms the panel actually calls
+  // it, not a second, drifted copy of the URL logic.
+  assert.match(source, /buildSharesightSyncUrl\(portfolioId, mode\)/);
+});
+
+// ---------------------------------------------------------------------------
+// Review round follow-up 3 fix: the `?mode=` wire itself, pinned directly
+// (not just source-scanned) on both the panel-emitting side and the
+// route-parsing side.
+// ---------------------------------------------------------------------------
+
+test("BRK-015: buildSharesightSyncUrl emits the exact ?mode=full / ?mode=routine wire string the route expects", () => {
+  assert.equal(
+    buildSharesightSyncUrl("portfolio-a", "full"),
+    "/api/portfolios/portfolio-a/sharesight-sync?mode=full",
   );
+  assert.equal(
+    buildSharesightSyncUrl("portfolio-a", "routine"),
+    "/api/portfolios/portfolio-a/sharesight-sync?mode=routine",
+  );
+});
+
+test('BRK-015: resolveSharesightSyncMode maps ?mode=full to "full", and anything else (including absence) to "routine"', () => {
+  assert.equal(
+    resolveSharesightSyncMode(
+      "https://example.test/api/portfolios/portfolio-a/sharesight-sync?mode=full",
+    ),
+    "full",
+  );
+  assert.equal(
+    resolveSharesightSyncMode(
+      "https://example.test/api/portfolios/portfolio-a/sharesight-sync",
+    ),
+    "routine",
+    "mode absent -> routine",
+  );
+  assert.equal(
+    resolveSharesightSyncMode(
+      "https://example.test/api/portfolios/portfolio-a/sharesight-sync?mode=bogus",
+    ),
+    "routine",
+    "unrecognised mode value fails safe to routine, never rejected or crashed on",
+  );
+  assert.equal(
+    resolveSharesightSyncMode(
+      "https://example.test/api/portfolios/portfolio-a/sharesight-sync?mode=routine",
+    ),
+    "routine",
+  );
+});
+
+test('BRK-015: the panel wires the Sync-from-Sharesight and Full-resync buttons to runSync("routine") / runSync("full") respectively', async () => {
+  const source = await readFile(new URL(PANEL_PATH, import.meta.url), "utf8");
+  assert.match(source, /onClick=\{\(\) => void runSync\("routine"\)\}/);
+  assert.match(source, /onClick=\{\(\) => void runSync\("full"\)\}/);
 });
 
 test("BRK-005B: the link dialog states the single-active-link replacement semantics in its own copy", async () => {

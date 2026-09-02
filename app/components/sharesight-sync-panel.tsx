@@ -26,9 +26,11 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import {
+  buildSharesightSyncUrl,
   formatSyncResultMessage,
   isDisabledIntegrationMessage,
   type SharesightLinkStatus,
+  type SharesightSyncModeParam,
   type SharesightSyncSuccess,
   type SharesightSyncWindowSummary,
 } from "../sharesight-sync-panel-helpers.ts";
@@ -92,7 +94,16 @@ export function SharesightSyncPanel({
   const [linkPending, setLinkPending] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
 
-  const [syncPending, setSyncPending] = useState(false);
+  // Review round follow-up 5 (accessibility, AGENTS.md's labelled-controls
+  // rule): a single shared `syncPending` flag made BOTH buttons render
+  // "Syncing…" whenever either sync ran, so the owner had no way to tell
+  // WHICH action was actually in flight. `pendingMode` instead names the
+  // specific mode currently running (or `null`) -- each button's own label
+  // only flips to "Syncing…" when IT is the one running; both stay
+  // disabled while either is in flight (never two concurrent syncs), but
+  // that is an ordinary enabled/disabled affordance, not an ambiguous label.
+  const [pendingMode, setPendingMode] =
+    useState<SharesightSyncModeParam | null>(null);
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
 
   useEffect(() => {
@@ -219,9 +230,9 @@ export function SharesightSyncPanel({
   // today's unconditional inception-to-now fetch (needed to still catch a
   // Sharesight-side correction to an old record a narrowed window would
   // never see).
-  async function runSync(mode: "routine" | "full") {
+  async function runSync(mode: SharesightSyncModeParam) {
     if (!isLinked) return;
-    setSyncPending(true);
+    setPendingMode(mode);
     setSyncResult(null);
     const controller = new AbortController();
     const timeout = setTimeout(
@@ -229,10 +240,10 @@ export function SharesightSyncPanel({
       DIALOG_FETCH_TIMEOUT_MS,
     );
     try {
-      const response = await fetch(
-        `/api/portfolios/${portfolioId}/sharesight-sync?mode=${mode}`,
-        { method: "POST", signal: controller.signal },
-      );
+      const response = await fetch(buildSharesightSyncUrl(portfolioId, mode), {
+        method: "POST",
+        signal: controller.signal,
+      });
       const result = (await response.json()) as
         | {
             ok: true;
@@ -271,7 +282,7 @@ export function SharesightSyncPanel({
       });
     } finally {
       clearTimeout(timeout);
-      setSyncPending(false);
+      setPendingMode(null);
     }
   }
 
@@ -306,22 +317,39 @@ export function SharesightSyncPanel({
           <button
             type="button"
             onClick={() => void runSync("routine")}
-            disabled={syncPending}
+            disabled={pendingMode !== null}
+            aria-busy={pendingMode === "routine" || undefined}
           >
-            {syncPending ? "Syncing…" : "Sync from Sharesight"}
+            {pendingMode === "routine" ? "Syncing…" : "Sync from Sharesight"}
           </button>
         ) : null}
         {isLinked ? (
           <button
             type="button"
             onClick={() => void runSync("full")}
-            disabled={syncPending}
-            title="Checks your ENTIRE Sharesight history, not just recent activity -- slower, but the only way to catch a correction to an old record."
+            disabled={pendingMode !== null}
+            aria-busy={pendingMode === "full" || undefined}
+            aria-describedby="sharesight-full-resync-hint"
           >
-            {syncPending ? "Syncing…" : "Full resync"}
+            {pendingMode === "full" ? "Syncing…" : "Full resync"}
           </button>
         ) : null}
       </div>
+      {isLinked ? (
+        // Review round follow-up 5: this explanation previously lived ONLY
+        // in a `title` attribute -- invisible without a mouse hover, so
+        // never reachable by keyboard or announced by a screen reader
+        // (AGENTS.md's labelled-controls rule). Now visible text, wired to
+        // the button via `aria-describedby` above.
+        <p
+          id="sharesight-full-resync-hint"
+          className="sharesight-full-resync-hint"
+        >
+          Full resync checks your ENTIRE Sharesight history, not just recent
+          activity -- slower, but the only way to catch a correction to an old
+          record.
+        </p>
+      ) : null}
 
       {syncResult ? (
         syncResult.ok ? (

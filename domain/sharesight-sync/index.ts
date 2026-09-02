@@ -11,6 +11,8 @@ export {
 } from "./transform.ts";
 export {
   computeRoutineSyncFromDate,
-  SHARESIGHT_ROUTINE_SYNC_OVERLAP_DAYS,
+  SHARESIGHT_PAYOUT_SYNC_OVERLAP_DAYS,
+  SHARESIGHT_TRADE_SYNC_OVERLAP_DAYS,
+  type SharesightStreamWindow,
   type SharesightSyncWindow,
 } from "./window.ts";
