@@ -1522,6 +1522,24 @@ ROOT CAUSE (confirmed against this repo's own recorded measurements, not inferre
 - Risks: lowering the bound too far makes a full rebuild take many reads — acceptable, since partial history renders honestly and the cron carries the bulk. Raising it back is a regression into this outage. Pin the bound with a test that cites the free-tier budget so a future change cannot silently restore a 20ms read.
 - Related, DO NOT fix here, verify and record only: a Sharesight sync's trades key on `sharesight-trade:<id>`, while previously CSV-imported trades carry different `source_reference` values. If this account's history was imported by CSV first, the Sharesight sync's trades may have committed as SECOND copies of the same real trades rather than deduping. Check the account's `transactions` count against expectation before concluding either way; if confirmed, raise it as its own task — it is a ledger-correctness issue, not a performance one, and reversal machinery (`db/repositories/import-reversal.ts`) already exists for it.
 
+### PRF-010 — The cron value-history backfill re-scans converged portfolios every tick (BUG-010 follow-up (c))
+
+Status: READY.
+
+Raised as non-blocking follow-up (c) by BUG-010's reviewer, and now live in production: BUG-010's cron backfill shipped in version `e8840dcb` and the cron triggers deployed for the first time the same day (OPS-004), so this cost is being paid hourly from now on.
+
+Every tick, for every portfolio it examines, `app/value-history-backfill-service.ts` runs the full `loadCandidateDates` `DISTINCT market_date` seek (~47k index entries at 18 securities × ~2,600 dates) — **including after that portfolio's series has fully converged**, because nothing short-circuits a covered portfolio. Reviewer's estimate: roughly **1.1M D1 `rows_read`/day** against the free plan's 5M/day allowance. Unmeasured and undocumented at the time of shipping.
+
+Context that makes this worth doing rather than deferring: this account has previously hit 8.5M row-reads/24h (the CALC-005 record), and PRF-005 follow-up (b)'s ~60k `rows_read` per `/income` load is still open. Those two plus this one share a single daily budget.
+
+- Objective: stop paying a full candidate-date scan for a portfolio that has nothing left to backfill.
+- Dependencies: BUG-010 (deployed).
+- Deliver: a cheap "is anything missing" pre-check before the full `DISTINCT market_date` seek, or a lower sweep cadence, or a stored per-portfolio convergence marker — whichever measurement supports. **Measure the current cost first;** the 1.1M/day figure is a reviewer estimate, not an observation.
+- Acceptance: a fully-converged portfolio costs materially less per tick than today, with the saving measured rather than asserted; a portfolio with genuine missing dates still converges at the same rate; the honesty properties BUG-010 established are untouched (no date fabricated or interpolated, unresolvable dates stay absent, `backfillPending` stays truthful).
+- Tests: converged-portfolio tick cost versus today; unconverged portfolio still converges; the BUG-010 suite unregressed.
+- Risks: a convergence marker that goes stale would stop a portfolio backfilling entirely — the silent-skip class this codebase has now hit three times (BRK-015's cross-stream watermark, BRK-015's staging watermark, BUG-010's unresolvable dates). Any marker must be invalidated by the same paths that invalidate value history. Prefer a cheap query over stored state unless measurement clearly justifies the state.
+- Related, do not fix here: BUG-010 follow-up (e) — a portfolio whose entire missing set is unresolvable AND fits the tick budget reports as converged (`backfillPending` false) while re-deriving those dates every hour forever. `datesDerived > 0` with `rowsPersisted === 0` is the tell and is already logged. That branch is uncovered by tests and is BUG-012's territory, but this task's convergence pre-check must not make it harder to see.
+
 ### PRF-009 — `import_rows` is scanned twice per commit finalize (review follow-up)
 
 Status: READY. Raised as non-blocking follow-up F2 by PRF-007's reviewer; recorded rather than folded into that task's correction round.
