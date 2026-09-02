@@ -1347,11 +1347,38 @@ Recorded supersession: UI-024's `/?section=X` root deep-link redirect is superse
 
 Verification: `npm run format:check`/`npm run lint`/`npx tsc --noEmit`/`npm run build` clean; full `npm test` 2678 tests, 2668 pass, 10 env-gated skips, 0 fail.
 
+### BRK-015 — Incremental Sharesight sync: watermark-narrowed routine sync plus an explicit full resync (owner-ruled)
+
+Status: READY.
+
+Owner report verbatim: "Each time I sync sharesight it syncs back to 2019. This takes considerable time and can risk passing the free plan." Owner ruling (2026-09-02), chosen over a fixed 12-month window, a trades/dividends split alone, and a windowed-and-split combination: **watermark window plus full resync.** The routine action fetches from the last successful sync minus a ~30-day overlap; a separate explicit "Full resync" keeps the inception-to-now path.
+
+Both halves of the plumbing already exist and are simply unused:
+
+- `SharesightListParams { from?: string; to?: string }` (`domain/sharesight/contracts.ts:499`) is already accepted by `listTrades` and `listPayouts`. `app/sharesight-sync-service.ts:383-384` calls both with NO params.
+- `sharesight_sync_state.last_trade_watermark` already exists, is persisted, and is deliberately unused — `app/sharesight-sync-service.ts:514-521` records that "narrowing the fetch by watermark is an unplanned incremental-sync design left for a future task."
+
+**CRITICAL DESIGN HAZARD — do not narrow by the existing watermark as it is currently maintained.** BRK-005 ruling 4 advances `last_synced_at` on successful STAGING, never on commit, precisely because commit is a separate owner-driven step. If a narrowed fetch keys off a staging-advanced watermark, then a batch that is staged and never accepted moves the watermark past rows that were never committed, and the next narrowed sync will never fetch them again — **silent, permanent data loss**. The narrowing watermark must therefore derive from what has actually been COMMITTED (or be tracked as a separate field advanced only on commit). This is the load-bearing correctness property of the whole task; pin it with a test that stages, abandons, re-syncs, and asserts the abandoned rows are still fetched.
+
+- Objective: make the routine sync proportional to what actually changed, without losing the ability to see Sharesight-side corrections to older records.
+- Dependencies: BRK-005, BRK-005B.
+- Deliver:
+  - Routine sync passes `from = <last COMMITTED sync point> - 30 days` (overlap for late-settled items), `to` unset. Dedupe at commit is unchanged and still catches anything the overlap re-fetches.
+  - An explicit secondary "Full resync" action that passes no window, preserving today's behaviour.
+  - Honest UI: a routine sync must never read as "you are fully in sync with Sharesight" when it only examined a recent window. State the window. This pairs with BRK-014's new-versus-already-imported counts; do the two together if one agent takes both.
+- Acceptance: a routine sync on an unchanged account stages few or zero rows instead of 226; a new payout since the last sync is still picked up; a batch staged and then abandoned is re-fetched by the next routine sync (the hazard above); a full resync still detects a Sharesight-side value correction to a 2020 trade — the BRK-005 finding-B1 case — and surfaces it as a decision; ownership isolation unchanged; dedupe semantics and `source_reference` formats unchanged.
+- Tests: unchanged-account routine sync stages ~0 rows; new-payout pickup; abandoned-batch re-fetch; full resync catches an old-record correction; overlap boundary (an item settled just inside/outside the 30 days); watermark advancement only on commit.
+- Risks: narrowing trades away correction detection for anything outside the window — mitigated, not eliminated, by the full-resync action. Say so in the UI rather than implying completeness. A too-small overlap silently misses late-settled items; 30 days is a starting point, not a measured value.
+- Side benefits worth noting in the completion record: this directly relieves PRF-007's Finding D (staging writes one statement per row in a single `client.batch()` with no chunking, growing toward D1's ~1000-statement ceiling — `db/repositories/import-staging.ts:455-466`) and cuts the accept path's commit-chunk count, since both scale with STAGED rows.
+- **Investigate first, and report before implementing:** the 2026-09-01 sync fetched 226 payouts/trades and returned nothing newer than the account's latest held dividend (`payment_date` 2026-08-20) even though the owner had received new dividends. `listPayouts` currently passes no date range, so Sharesight's own server-side default window is unknown and undocumented here. It is possible that passing an EXPLICIT `from`/`to` changes what the endpoint returns — which would make this task the fix for the missing dividends, not merely a performance change. Establish what the endpoint does with and without an explicit range before designing the window.
+
 ### BUG-011 — A Sharesight sync can double-commit trades already imported by CSV (ledger correctness; owner data may be affected NOW)
 
 Status: READY — highest priority after BUG-010. This is a financial-correctness defect, not a performance one: if it has fired on the owner's account, holdings, cost basis, capital gains, and every total derived from them are overstated.
 
-Found during BUG-010's investigation (reported, deliberately not fixed there). CONFIRMED by code reading; NOT yet confirmed against the owner's real data.
+Found during BUG-010's investigation (reported, deliberately not fixed there). CONFIRMED by code reading. **CHECKED against production 2026-09-02: it has NOT fired on this account.** 107 posted transactions, unchanged from the pre-sync census; the 2026-09-01 Sharesight batch committed 0 rows and skipped all 226, so it added no trades at all. The account's earlier import was a `portfolio-bundle-json` restore, which preserves the original `source_reference` verbatim (`app/portfolio-bundle-service.ts:758`), so the Sharesight keys matched and dedupe worked. The cross-route gap is real but was not exercised here — the exposure is a CSV-then-Sharesight sequence, which this account never performed.
+
+**Evidence that directly constrains the fix.** The duplicate scan found two economic-identity collisions, and BOTH are legitimate: same security, date, quantity and price, but distinct Sharesight trade ids (`347283`/`347285` on 2020-02-27, `104900`/`104908` on 2025-06-26) — one parcel filled in two lots. An economic-identity check that auto-skipped would have silently dropped a real trade on this very account. This is concrete evidence for the Risks field below: the check MUST be a decision surface, never an automatic skip.
 
 ROOT CAUSE. Trade dedupe is keyed on the `source_reference` STRING only — `db/repositories/import-commit.ts:1406-1422` (`user_id, portfolio_id, source_type='csv_import', source_reference`) plus the `(portfolio_id, source_type, source_reference)` unique index (`db/schema.ts:1031-1035`). But the two import routes mint structurally disjoint keys:
 
