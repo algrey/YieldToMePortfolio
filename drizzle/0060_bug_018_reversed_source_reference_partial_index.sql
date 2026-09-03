@@ -1,0 +1,2 @@
+DROP INDEX `transactions_portfolio_source_reference_unique`;--> statement-breakpoint
+CREATE UNIQUE INDEX `transactions_portfolio_source_reference_unique` ON `transactions` (`portfolio_id`,`source_type`,`source_reference`) WHERE "transactions"."status" <> 'reversed';

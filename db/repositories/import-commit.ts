@@ -1489,13 +1489,34 @@ export function createOwnedImportCommitRepository(
             committedRowCount += 1;
             continue;
           }
+          // BUG-018: a REVERSED row must never block a genuine re-import --
+          // `ledger.reverse()` never clears `source_reference`, and the
+          // ledger fact it belongs to is immutable, so the only way to
+          // "free" the key for a new posted transaction is to stop counting
+          // a reversed row as occupying it. `status <> 'reversed'` mirrors
+          // the new partial unique index (`db/schema.ts`'s
+          // `transactions_portfolio_source_reference_unique`) exactly, and
+          // matches `app/import-actions.ts`'s `existingTradeSourceReferences`
+          // suppression query so the advisory-suppression set and this skip
+          // set stay identical (BUG-013's proven invariant). Transactions
+          // never carry an intermediate "reversing" status themselves --
+          // `ledger.reverse()` flips `status` `'posted'` -> `'reversed'`
+          // atomically inside one `client.batch()` alongside the
+          // compensating mirror and inventory update (see `ledger.ts`'s
+          // `reverse()`) -- so a transaction that is part of a
+          // still-`'reversing'` `import_batches` row (BUG-016's chunked
+          // finalize) is either still `'posted'` (not yet reached by that
+          // chunk, correctly still blocking) or already fully `'reversed'`
+          // (that transaction's own reversal is atomically complete,
+          // correctly no longer blocking) -- never a partial state that
+          // needs its own predicate branch.
           const existing = await client.get<{
             id: string;
             idempotency_key: string | null;
           }>(
             `SELECT id, idempotency_key FROM transactions
              WHERE user_id = ? AND portfolio_id = ? AND source_type = 'csv_import'
-               AND source_reference = ? LIMIT 1`,
+               AND source_reference = ? AND status <> 'reversed' LIMIT 1`,
             [userId, resolved.input.portfolioId, resolved.sourceReference],
           );
           if (existing) {

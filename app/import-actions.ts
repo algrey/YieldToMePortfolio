@@ -220,13 +220,20 @@ async function loadReview(
     ),
     // BUG-013 review round (ruling 1): the trade analog of the dividend
     // query above -- every EXISTING `transactions.source_reference` this
-    // owner has (any portfolio, any status), used to suppress
+    // owner has (any portfolio, any non-reversed status), used to suppress
     // `TRADE_NEAR_EXISTING_ENTRY` for a row already bound for an identical
     // commit-time exact-match SKIP (`db/repositories/import-commit.ts`'s own
     // dedupe check at the trade branch, reproduced here EXACTLY:
-    // `source_type = 'csv_import'`, no `status` filter -- a reversed trade's
-    // row still counts as "will be skipped," matching that check's own
-    // behaviour).
+    // `source_type = 'csv_import'`).
+    //
+    // BUG-018 fix: `status <> 'reversed'` added to match the commit-time
+    // lookup's own new predicate. A reversed row no longer occupies the
+    // `source_reference` key (the partial unique index in `db/schema.ts` was
+    // narrowed the same way) and commit no longer skips a re-import against
+    // it, so this suppression set must stop treating a reversed row as
+    // "will be skipped" too -- BUG-013's proven invariant (suppression set
+    // == commit skip set) requires the two predicates stay identical, not
+    // just the two `source_type`/`source_reference` columns.
     //
     // BUG-013 review follow-up ("fail-open cap"): this query was previously
     // left deliberately UNBOUNDED, reasoning it was "a cheap Set-membership
@@ -255,6 +262,7 @@ async function loadReview(
     client.all<Record<string, unknown>>(
       `SELECT portfolio_id, source_reference FROM transactions
        WHERE user_id = ? AND source_type = 'csv_import' AND source_reference IS NOT NULL
+         AND status <> 'reversed'
        LIMIT ?`,
       [userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1],
     ),

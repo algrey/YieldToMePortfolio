@@ -928,7 +928,7 @@ test("source pin: loadReview's trade suppression-set query is bounded with LIMIT
   );
   assert.match(
     source,
-    /SELECT portfolio_id, source_reference FROM transactions\s*\n\s*WHERE user_id = \? AND source_type = 'csv_import' AND source_reference IS NOT NULL\s*\n\s*LIMIT \?`,\s*\n\s*\[userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK \+ 1\],/,
+    /SELECT portfolio_id, source_reference FROM transactions\s*\n\s*WHERE user_id = \? AND source_type = 'csv_import' AND source_reference IS NOT NULL\s*\n\s*AND status <> 'reversed'\s*\n\s*LIMIT \?`,\s*\n\s*\[userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK \+ 1\],/,
   );
   // The cap/degrade DECISION is delegated to the shared pure function for
   // the trade route only.

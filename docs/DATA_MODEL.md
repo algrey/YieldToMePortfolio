@@ -294,6 +294,8 @@ Convention: `fx_rate_to_base × native amount = portfolio-base amount`.
 
 **`source_reference` identity is per-route, not economic (`BUG-011`, 2026-09-02).** Cross-batch trade dedupe (`db/repositories/import-commit.ts`) is an exact-string lookup of `(user_id, portfolio_id, source_type = 'csv_import', source_reference)` against the unique index on `(portfolio_id, source_type, source_reference)` -- it identifies "the same staged row re-committed," never "the same real-world trade." CSV import and Sharesight sync mint structurally disjoint `source_reference` key spaces for the identical real trade (`import-fingerprint:<sha256 of normalized fields>` vs `import-fingerprint:sharesight-trade:<id>`), so importing the same trade through both routes posts it twice while satisfying the unique index -- there is no schema-level economic-identity constraint (portfolio + security + type + date + quantity + price) and none is added by this fix, because a genuine same-day repeat trade (confirmed in production: two real trades under distinct Sharesight ids sharing identical security/date/quantity/price -- one parcel filled in two lots) must remain insertable. The mitigation is a non-blocking preview-time warning (`TRADE_NEAR_EXISTING_ENTRY`, `docs/CSV_IMPORT_SPEC.md`), not a stricter identity or constraint -- the owner decides, per row, whether a match is the same trade or a genuine repeat.
 
+**`transactions_portfolio_source_reference_unique` is a PARTIAL unique index, `WHERE status <> 'reversed'` (`BUG-018`, 2026-09-03; migration `0060_bug_018_reversed_source_reference_partial_index.sql`).** It was a full unique index on `(portfolio_id, source_type, source_reference)` until this fix. `ledger.reverse()` never clears the reversed transaction's `source_reference` (ledger facts are immutable -- correction is reversal, never a rewrite), so under the old full index that key stayed permanently occupied and a reverse-then-re-import of the SAME trade could never land: the commit-time lookup found the reversed row, skipped the re-import, and created no new ledger fact. For a Sharesight sync batch this was unconditional, not merely likely -- a sync row's key (`sharesight-trade:<id>`) is identity-only and never changes, so reversing a synced batch made every one of its trades permanently unsyncable for the life of the account. The partial index now excludes reversed rows from the uniqueness constraint entirely, so a re-import after a reversal is a genuinely NEW posted transaction reusing the freed `source_reference`; the reversed original and its reversal mirror are untouched (immutable). A transaction mid-way through a CHUNKED reversal (`import_batches.status = 'reversing'`, BUG-016) carries no analogous intermediate status of its own -- `ledger.reverse()` flips a transaction's `status` from `'posted'` to `'reversed'` atomically, in the same `client.batch()` as its compensating mirror and inventory update, so within a still-`'reversing'` batch each of its transactions is either fully `'posted'` (not yet reached, still correctly blocking) or fully `'reversed'` (that row's own reversal is complete, correctly no longer blocking) -- never a partial state. The matching `status <> 'reversed'` predicate was added everywhere else the same "does this identity already occupy the key" question is asked: `import-commit.ts`'s commit-time trade lookup, `app/import-actions.ts`'s `existingTradeSourceReferences` advisory-suppression query (keeping BUG-013's proven suppression-set-equals-commit-skip-set invariant), and `db/repositories/sharesight-sync-state.ts`'s `loadCommittedSharesightRowValues` (BRK-014's value-comparison map, which mirrors the commit predicate by design -- a reversed Sharesight trade now reads as NEW on the next sync). Dividends need no analogous change: `dividend_manual_records` has no reversed-row concept at all -- a reversal hard-DELETEs the record, freeing its `source_reference` immediately.
+
 Checks:
 
 - quantities/prices required for buy/sell;
@@ -1542,9 +1544,14 @@ CREATE TABLE transactions (
   UNIQUE (id, user_id),
   UNIQUE (id, user_id, portfolio_id),
   UNIQUE (id, user_id, portfolio_id, portfolio_security_id),
-  UNIQUE (user_id, portfolio_id, idempotency_key),
-  UNIQUE (portfolio_id, source_type, source_reference)
+  UNIQUE (user_id, portfolio_id, idempotency_key)
+  -- BUG-018: (portfolio_id, source_type, source_reference) is a PARTIAL
+  -- unique index, not a plain UNIQUE column list -- see
+  -- `transactions_portfolio_source_reference_unique` below.
 );
+CREATE UNIQUE INDEX transactions_portfolio_source_reference_unique
+  ON transactions(portfolio_id, source_type, source_reference)
+  WHERE status <> 'reversed';
 CREATE INDEX idx_transactions_ledger
   ON transactions(user_id, portfolio_id, local_trade_date, id);
 CREATE INDEX idx_transactions_security

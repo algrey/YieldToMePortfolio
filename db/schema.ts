@@ -1046,11 +1046,32 @@ export const transactions = sqliteTable(
       table.portfolioId,
       table.portfolioSecurityId,
     ),
-    uniqueIndex("transactions_portfolio_source_reference_unique").on(
-      table.portfolioId,
-      table.sourceType,
-      table.sourceReference,
-    ),
+    // BUG-018: this index used to be a FULL unique index, so
+    // `ledger.reverse()` flipping a transaction to `status = 'reversed'`
+    // (its `source_reference` is never cleared -- see `ledger.ts`'s
+    // `reverse()`) permanently occupied the key: a reverse-then-re-import of
+    // the SAME trade found the reversed row already sitting on the identity
+    // and skipped forever, with no new ledger fact. Ledger facts are
+    // immutable (AGENTS.md) -- the reversed row must never be rewritten or
+    // deleted to free the slot -- so the constraint itself is narrowed to a
+    // PARTIAL unique index that only governs NON-reversed rows, mirroring
+    // `security_identifiers_sharesight_instrument_unique`'s and
+    // `import_batches_commit_idempotency_unique`'s partial-index precedent.
+    // A genuine re-import after a reversal is therefore a normal INSERT of a
+    // brand-new posted row REUSING the same `source_reference` -- the
+    // reversed original and its reversal mirror are untouched. No `ON
+    // CONFLICT` clause in this codebase targets
+    // `(portfolio_id, source_type, source_reference)` (grepped before this
+    // change), so the narrowing needs no matching `ON CONFLICT ... WHERE`
+    // update. `db/repositories/import-commit.ts`'s cross-batch trade lookup
+    // and `app/import-actions.ts`'s `existingTradeSourceReferences`
+    // suppression query gained the matching `status <> 'reversed'` predicate
+    // in the same change so the commit skip set, the index, and the
+    // advisory suppression set all agree on what counts as "occupying" the
+    // key.
+    uniqueIndex("transactions_portfolio_source_reference_unique")
+      .on(table.portfolioId, table.sourceType, table.sourceReference)
+      .where(sql`${table.status} <> 'reversed'`),
     uniqueIndex("transactions_owner_portfolio_idempotency_unique").on(
       table.userId,
       table.portfolioId,

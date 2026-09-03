@@ -639,13 +639,25 @@ export type SharesightCommittedRowValues = Readonly<{
  * comment above). See `isRowAlreadyImported`'s doc comment for the exact
  * field-by-field list this now supports and the residual list that remains.
  *
- * Deliberately mirrors `db/repositories/import-commit.ts`'s own exact-match
- * commit-time identity predicates (no `status`/`superseded_by_record_id`
- * filter on either table) -- this must answer the SAME "will commit treat
- * this identity as already present" question commit itself asks when it
- * looks up `source_reference`, not a narrower one that could miss a row
- * commit would actually skip (e.g. a reversed trade's `source_reference`
- * still blocks a re-import at commit, per BUG-011's ruling).
+ * Deliberately mirrors `db/repositories/import-commit.ts`'s own commit-time
+ * identity predicates -- this must answer the SAME "will commit treat this
+ * identity as already present" question commit itself asks when it looks up
+ * `source_reference`, never a narrower or wider one.
+ *
+ * BUG-018: commit's trade lookup gained a `status <> 'reversed'` predicate
+ * (a reversed transaction's `source_reference` no longer blocks a re-import,
+ * since `ledger.reverse()` never clears it and the row must stay immutable)
+ * -- this trade query mirrors that predicate by design, so a reversed
+ * Sharesight-sourced trade drops out of the map and reads as NEW on the next
+ * sync (BRK-014's count says "N new rows"), matching what commit will
+ * actually do with it. `dividend_manual_records` carries no analogous
+ * change: a reversed dividend row is hard-DELETEd by `import-reversal.ts`
+ * (see `docs/DATA_MODEL.md`), which already frees its `source_reference` and
+ * removes it from this query's result with no predicate needed -- unlike
+ * `transactions.status`, `superseded_by_record_id IS NULL` is intentionally
+ * still absent here: a superseded (not reversed) dividend row is a distinct,
+ * still-true commit-time identity `import-commit.ts` itself does not filter
+ * on either.
  */
 export async function loadCommittedSharesightRowValues(
   client: SqlClient,
@@ -665,7 +677,8 @@ export async function loadCommittedSharesightRowValues(
             fee_amount_decimal, local_trade_date, type, currency_code
        FROM transactions
       WHERE user_id = ? AND portfolio_id = ? AND source_type = 'csv_import'
-        AND source_reference LIKE 'import-fingerprint:sharesight-trade:%'`,
+        AND source_reference LIKE 'import-fingerprint:sharesight-trade:%'
+        AND status <> 'reversed'`,
     [userId, portfolioId],
   );
   const payoutRows = await client.all<{

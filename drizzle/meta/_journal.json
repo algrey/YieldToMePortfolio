@@ -421,6 +421,13 @@
       "when": 1788418742649,
       "tag": "0059_bug_012_value_history_unresolvable",
       "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "6",
+      "when": 1788423587237,
+      "tag": "0060_bug_018_reversed_source_reference_partial_index",
+      "breakpoints": true
     }
   ]
 }
