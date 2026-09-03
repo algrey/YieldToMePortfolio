@@ -3109,7 +3109,7 @@ test("BRK-016: invalidate() forces the next getAccessToken() call to re-exchange
 test("BRK-016: invalidate() racing an in-flight refresh never drops that refresh's result", async () => {
   let clock = 0;
   let tokenCalls = 0;
-  let resolveSecondExchange: ((response: Response) => void) | null = null;
+  let resolveSecondExchange: ((response: Response) => void) | undefined;
   const fetcher: SharesightFetcher = async () => {
     tokenCalls += 1;
     if (tokenCalls === 1) {
@@ -3140,7 +3140,7 @@ test("BRK-016: invalidate() racing an in-flight refresh never drops that refresh
   provider.invalidate?.();
 
   assert.ok(resolveSecondExchange);
-  resolveSecondExchange!(tokenFixtureResponse("brk-016-race-token-2"));
+  resolveSecondExchange(tokenFixtureResponse("brk-016-race-token-2"));
   const second = await secondPending;
   assert.equal(second.ok, true);
   if (second.ok) assert.equal(second.value, "brk-016-race-token-2");

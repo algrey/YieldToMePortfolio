@@ -752,11 +752,19 @@ export async function runSharesightSyncWithContext(
   // BRK-016: the trade and payout streams are independent fetches -- issue
   // both before waiting on either, rather than paying their two timeouts
   // back-to-back. Failure handling is UNCHANGED from the prior sequential
-  // code: the trades check runs first, so if both streams fail the trades
-  // message is what's reported (matches what a sequential await would have
-  // surfaced first, since `listTrades` used to run to completion before
-  // `listPayouts` was even attempted); either stream failing alone still
-  // reports that stream's own message.
+  // code for every TYPED result: the trades check runs first, so if both
+  // streams fail the trades message is what's reported (matches what a
+  // sequential await would have surfaced first, since `listTrades` used to
+  // run to completion before `listPayouts` was even attempted); either
+  // stream failing alone still reports that stream's own message. This is
+  // NOT true for a rejection: if `listTrades` resolves `ok: false` while
+  // `listPayouts` REJECTS, the prior sequential code returned the trades 502
+  // without ever calling `listPayouts`, but `Promise.all` here lets that
+  // rejection propagate and throw instead of returning the typed 502. This
+  // is unreachable through the real `SharesightClient` -- every real path
+  // resolves a typed `{ ok: true | false }` result, never rejects -- so it
+  // is deliberately not handled with `Promise.allSettled`; only a
+  // hypothetical non-conforming client could hit it.
   const [tradesResult, payoutsResult] = await Promise.all([
     client.listTrades(link.sharesightPortfolioId, tradeListParams),
     client.listPayouts(link.sharesightPortfolioId, payoutListParams),

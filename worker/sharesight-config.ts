@@ -81,11 +81,17 @@ function normalizeSecret(value: unknown): string | null {
 // point, `worker/scheduled-refresh.ts`'s two crons,
 // `app/sharesight-price-gate-service.ts`'s per-page gate, and
 // `app/sharesight-sync-service.ts`'s three actions -- calls
-// `createSharesightIntegrationConfig(env)` with a single argument). Tests
-// inject `dependencies` (a fake `fetcher`/`now`) and must always get a fresh
-// provider, since sharing one across fixtures would leak state between
-// cases -- see the `dependencies` branch below, which never reads or writes
-// this slot.
+// `createSharesightIntegrationConfig(env)` with a single argument). A caller
+// that injects `dependencies` (a fake `fetcher`/`now`) always bypasses this
+// slot entirely -- see the `dependencies` branch below, which never reads or
+// writes it -- so that shape is always safe regardless of memo state.
+// A NO-`dependencies` test call is NOT automatically safe: it is eligible
+// for the memo exactly like production code, and is only correct when the
+// test stubs `globalThis.fetch` BEFORE constructing the config (the real
+// provider binds `fetch.bind(globalThis)` at construction time) and resets
+// this slot via `__resetSharesightIntegrationCacheForTests` in a `finally`.
+// Skip either step and the test either reuses a provider bound to a dead
+// stub from an earlier case, or its real `fetch` call reaches the network.
 //
 // Holds AT MOST ONE provider, matched by strict-equality comparison against
 // the (clientId, clientSecret) pair that built it -- never a hash/digest of

@@ -164,7 +164,11 @@ test("BRK-016: two consecutive createSharesightIntegrationConfig(env) calls with
   }
 });
 
-test("BRK-016: a different credential pair builds a brand-new, unshared provider", async () => {
+// Guard test: pre-fix code built a fresh, unmemoized provider on every
+// call, so a changed credential pair already never shared a provider --
+// this assertion passed before BRK-016's memo existed too. Kept to lock the
+// per-pair isolation in place now that a shared slot exists to get wrong.
+test("BRK-016 (guard): a different credential pair builds a brand-new, unshared provider", async () => {
   __resetSharesightIntegrationCacheForTests();
   const originalFetch = globalThis.fetch;
   let tokenCalls = 0;
@@ -206,7 +210,11 @@ test("BRK-016: a different credential pair builds a brand-new, unshared provider
   }
 });
 
-test("BRK-016: an injected `dependencies` argument always bypasses the memo, even across two configs built with the identical credential pair", async () => {
+// Guard test: pre-fix code had no memo at all, so an injected
+// `dependencies` argument already got its own unshared provider every time
+// -- this assertion passed before BRK-016 too. Kept to lock in that the
+// `dependencies` branch stays untouched by the new memo slot.
+test("BRK-016 (guard): an injected `dependencies` argument always bypasses the memo, even across two configs built with the identical credential pair", async () => {
   __resetSharesightIntegrationCacheForTests();
   let firstExchanges = 0;
   const firstFetcher: SharesightFetcher = async (url) => {
