@@ -550,19 +550,20 @@ export type SharesightCommittedRowValues = Readonly<{
       currencyCode: string | null;
     }
   >;
-  // BRK-014 round 3: `dividend_manual_records.currency_code` is deliberately
-  // NOT carried here. Unlike `transactions.currency_code` (`NOT NULL`,
-  // stored verbatim from `normalized.currency` on every trade --
-  // `import-commit.ts:909`), the dividend column is only populated when
-  // `import-commit.ts`'s dividend branch finds the payout's currency FOREIGN
-  // to its own security's currency (`isForeignToSecurity`); a payout NATIVE
-  // to its security -- the common case for this owner's AU holdings --
-  // commits with this column NULL even though `normalized.currency` held a
-  // real value at commit time. It is therefore not a faithful counterpart of
-  // `normalized.currency` the way `transactions.currency_code` is, and
-  // comparing it would report every native payout's routine re-sync as
-  // "changed" the moment `normalized.currency` is populated. See
-  // `isRowAlreadyImported`'s doc comment for the full residual-fields list.
+  // BRK-014 round 4: `dividend_manual_records.currency_code` IS now carried
+  // here (round 3 deliberately excluded it -- see the round-3 history in
+  // `app/sharesight-sync-service.ts`'s `isRowAlreadyImported` doc comment).
+  // Unlike `transactions.currency_code` (`NOT NULL`, stored verbatim from
+  // `normalized.currency` on every trade -- `import-commit.ts:909`), this
+  // column is only populated when `import-commit.ts`'s dividend branch finds
+  // the payout's currency FOREIGN to its own security's currency
+  // (`isForeignToSecurity`); a payout NATIVE to its security -- the common
+  // case for this owner's AU holdings -- commits with this column NULL even
+  // though `normalized.currency` held a real value at commit time. A stored
+  // NULL therefore means "not independently recorded", not "changed" --
+  // `isRowAlreadyImported`'s `currencyNotComparableOrMatches` helper treats
+  // it as a pass rather than a mismatch, mirroring the FX rate's own NULL
+  // handling below.
   payouts: ReadonlyMap<
     string,
     {
@@ -575,6 +576,13 @@ export type SharesightCommittedRowValues = Readonly<{
       // rate (case C-no-rate). See `isRowAlreadyImported`'s doc comment for
       // the not-comparable handling this NULL requires.
       fxRateToPortfolioDecimal: string | null;
+      // BRK-014 round 4: populated whenever `import-commit.ts` finds the
+      // payout foreign to its security (case B OR case C-no-rate -- unlike
+      // the FX rate above, this is NOT limited to the rate-present branch),
+      // NULL for a native payout (case A). See the round-4 addition to
+      // `isRowAlreadyImported`'s doc comment for the resulting per-row mix
+      // on a foreign-no-rate payout (currency comparable, FX rate not).
+      currencyCode: string | null;
     }
   >;
 }>;
@@ -623,11 +631,13 @@ export type SharesightCommittedRowValues = Readonly<{
  * `isRowAlreadyImported` still treats it as a pass). `symbol`/`exchange`
  * remain genuinely residual (no committed column at all -- a mapping
  * decision can point the same Sharesight identity at a different resolved
- * security without changing any digest-adjacent stored column here), and so
- * does payout `currency_code` (populated only for a payout foreign to its
- * security -- see its own field comment above). See `isRowAlreadyImported`'s
- * doc comment for the exact field-by-field list this now supports and the
- * residual list that remains.
+ * security without changing any digest-adjacent stored column here).
+ *
+ * Round 4 (small, Orchestrator-approved widening) additionally carries
+ * payout `currency_code` -- a faithful counterpart ONLY when non-null, same
+ * not-comparable-on-NULL handling as the FX rate (see that field's own
+ * comment above). See `isRowAlreadyImported`'s doc comment for the exact
+ * field-by-field list this now supports and the residual list that remains.
  *
  * Deliberately mirrors `db/repositories/import-commit.ts`'s own exact-match
  * commit-time identity predicates (no `status`/`superseded_by_record_id`
@@ -664,9 +674,10 @@ export async function loadCommittedSharesightRowValues(
     total_franking_decimal: string | null;
     payment_date: string | null;
     fx_rate_to_portfolio_decimal: string | null;
+    currency_code: string | null;
   }>(
     `SELECT source_reference, total_cash_decimal, total_franking_decimal,
-            payment_date, fx_rate_to_portfolio_decimal
+            payment_date, fx_rate_to_portfolio_decimal, currency_code
        FROM dividend_manual_records
       WHERE user_id = ? AND portfolio_id = ?
         AND source_reference LIKE 'import-fingerprint:sharesight-payout:%'`,
@@ -694,6 +705,7 @@ export async function loadCommittedSharesightRowValues(
           totalFrankingDecimal: row.total_franking_decimal,
           paymentDate: row.payment_date,
           fxRateToPortfolioDecimal: row.fx_rate_to_portfolio_decimal,
+          currencyCode: row.currency_code,
         },
       ]),
     ),

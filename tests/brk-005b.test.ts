@@ -326,13 +326,19 @@ test("BRK-015 review round B1 fix: formatSyncResultMessage states trades and pay
 // ---------------------------------------------------------------------------
 
 // Review round 3 (BLOCKING, correction to this test's own original fixture):
-// this test originally passed `reused: false` here, pinning the EXACT
-// self-contradictory message the reviewer flagged -- a NEW batch (one that
-// could only exist because `canonicalRowDigestFields`'s digest changed)
-// printing "every staged row already matches an existing record." "No new
-// rows" is only honest on the REUSED path, where the fetch was byte-
-// identical to the prior sync (see `newVsAlreadyImportedLine`'s doc comment
-// in `app/sharesight-sync-panel-helpers.ts`). The `reused: false` + zero-new
+// this test originally passed `reused: false` here, pinning a message that
+// used the REUSED-path "every staged row already matches an existing
+// record" copy for a NEW batch. Round 4 (correction to this comment's own
+// round-3 wording): a `reused: false` + all-already-imported batch is not
+// itself self-contradictory -- it is a legitimate shape (e.g. a Full resync
+// of an unchanged ledger, where the digest changes because the fetched row
+// SET differs, not because any row's value did). What is self-contradictory
+// is printing the REUSED-only "every staged row already matches" copy for
+// it, since that copy asserts the fetch was byte-identical to the prior
+// sync, which is not true on this path. "No new rows -- every staged row
+// already matches" is only honest on the REUSED path, where the fetch WAS
+// byte-identical (see `newVsAlreadyImportedLine`'s doc comment in
+// `app/sharesight-sync-panel-helpers.ts`). The `reused: false` + zero-new
 // case now gets its own dedicated test below.
 test("BRK-014: formatSyncResultMessage reads unambiguously as 'no new rows' when a REUSED batch's every staged row already matches an existing record -- never as a full re-import", () => {
   const message = formatSyncResultMessage({
@@ -352,13 +358,16 @@ test("BRK-014: formatSyncResultMessage reads unambiguously as 'no new rows' when
 
 // BRK-014 review round 3 (BLOCKING): a NEW batch (`reused: false`) can still
 // report zero `newRows` if every field `isRowAlreadyImported` actually
-// compares happens to match -- which only happens when the digest changed
-// because of a RESIDUAL field (symbol, exchange, or a native payout's FX
-// rate/currency -- see `app/sharesight-sync-service.ts`'s
-// `isRowAlreadyImported` doc comment). Saying "every staged row already
-// matches an existing record" here would be self-contradictory (the batch
-// exists only because something changed), so this case must read
-// differently from the genuinely-reused zero-new case above.
+// compares happens to match. Round 4 (correction to this comment's own
+// round-3 wording): that does not mean the digest necessarily changed
+// because of a residual field (symbol/exchange) -- it can equally mean
+// Sharesight returned a different combination of rows than the last sync
+// (a full resync or a changed window) with no row's own value changing at
+// all. Either way, saying "every staged row already matches an existing
+// record" (the REUSED-path copy, which asserts a byte-identical fetch) here
+// would be dishonest, so this case must read differently from the
+// genuinely-reused zero-new case above -- naming what WAS checked and both
+// possibilities, never asserting either one occurred.
 test("BRK-014 review round 3: formatSyncResultMessage never claims 'every staged row already matches' for a NEW (non-reused) zero-new batch -- it names the residual, uncompared fields instead", () => {
   const message = formatSyncResultMessage({
     ok: true,

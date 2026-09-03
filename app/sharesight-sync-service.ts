@@ -429,18 +429,26 @@ function decimalValuesMatch(
  *   pass, not a `decimalValuesMatch` call, and why getting this wrong would
  *   report every native-currency payout as "new" on every routine re-sync.
  *
- * `symbol`/`exchange`/`fingerprint` remain genuinely RESIDUAL for both
- * trades and payouts: no committed column records them independently of
- * security resolution, and a mapping decision can point the same Sharesight
- * identity at a different resolved security without changing any other
- * digest-adjacent stored value here. Payout `currency` is ALSO residual --
- * `dividend_manual_records.currency_code` is populated only when the payout
- * is foreign to its security (same condition as the FX rate above), so
- * unlike the trade's `currency_code` it is not a faithful counterpart for
- * every payout and comparing it would misreport every native payout the
- * same way an unguarded FX comparison would. Every comparison stays
- * conservative: an unrecognised/malformed value or a missing committed row
- * returns `false` ("new"), never a false "already imported".
+ * Round 4 (small, Orchestrator-approved widening, same pattern as the FX
+ * rate above, reviewer-confirmed no false-positive risk): payout `currency`
+ * is now ALSO compared, three-way exactly like `exchangeRateDecimal` --
+ * `dividend_manual_records.currency_code` vs `normalized.currency`, exact
+ * string match, but ONLY when the STORED value is non-null (see
+ * `currencyNotComparableOrMatches` below). `import-commit.ts` stores this
+ * column under the SAME `isForeignToSecurity` condition as the FX rate, but
+ * only the rate-present branch (case B) ALSO stores a rate -- a foreign
+ * payout committed with NO rate (case C-no-rate) is therefore a per-row MIX:
+ * its `currency` is now comparable while its `exchangeRateDecimal` on that
+ * SAME row stays not-comparable (still NULL), named explicitly here since
+ * it is not an all-or-nothing distinction.
+ *
+ * `symbol`/`exchange`/`fingerprint` remain the only fields genuinely
+ * RESIDUAL for both trades and payouts: no committed column records them
+ * independently of security resolution, and a mapping decision can point
+ * the same Sharesight identity at a different resolved security without
+ * changing any other digest-adjacent stored value here. Every comparison
+ * stays conservative: an unrecognised/malformed value or a missing
+ * committed row returns `false` ("new"), never a false "already imported".
  *
  * Note: this is honest about what the SYNC RESULT reports, not a claim
  * about commit behaviour -- `db/repositories/import-commit.ts`'s own
@@ -475,6 +483,24 @@ function fxRateNotComparableOrMatches(
 ): boolean {
   if (storedFxRateToPortfolioDecimal === null) return true;
   return decimalValuesMatch(incoming, storedFxRateToPortfolioDecimal);
+}
+
+/**
+ * BRK-014 round 4: the currency counterpart of `fxRateNotComparableOrMatches`
+ * above -- `dividend_manual_records.currency_code` is written under the same
+ * `isForeignToSecurity` condition as the FX rate (`import-commit.ts`), so a
+ * stored `null` means "this payout was native to its security, nothing
+ * independently recorded", never "changed" and never "confirmed equal to the
+ * incoming value". Exact string equality once a stored value exists --
+ * unlike `decimalValuesMatch`, this is not a decimal, so no formatting
+ * tolerance is needed.
+ */
+function currencyNotComparableOrMatches(
+  incoming: string | null,
+  storedCurrencyCode: string | null,
+): boolean {
+  if (storedCurrencyCode === null) return true;
+  return incoming === storedCurrencyCode;
 }
 
 function isRowAlreadyImported(
@@ -512,6 +538,10 @@ function isRowAlreadyImported(
       fxRateNotComparableOrMatches(
         row.normalized.exchangeRateDecimal ?? null,
         existingPayout.fxRateToPortfolioDecimal,
+      ) &&
+      currencyNotComparableOrMatches(
+        row.normalized.currency ?? null,
+        existingPayout.currencyCode,
       )
     );
   }
