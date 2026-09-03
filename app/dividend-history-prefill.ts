@@ -122,6 +122,14 @@ export function frankingCell(
  *   at all) -- `docs/CALCULATIONS.md`'s BRK-010 paragraph documents this
  *   reading "Unknown", so the two paths must never silently diverge on
  *   wording for one concept.
+ * - **BUG-021 correction round**: a TOTAL that reads `null` because the
+ *   underlying stored value (or an owner franking-currency override) could
+ *   not be parsed (`row.frankingUnreadable`) is labelled distinctly from
+ *   both "Unknown" (genuinely absent) and DIV-007's "none reported"
+ *   inference (genuinely absent, but inferred as a real $0) -- this is a
+ *   value that DOES exist somewhere but this app cannot currently read,
+ *   the same "needs correction" framing `row.amountUnreadable` already uses
+ *   for a cash figure.
  */
 export function frankingDisplay(
   row: DerivedDividendRow,
@@ -133,6 +141,7 @@ export function frankingDisplay(
   ) {
     return frankingCell(row.franking, row.currencyCode, baseCurrencyCode);
   }
+  if (row.frankingUnreadable) return "Franking unavailable — needs correction";
   if (row.frankingTotalDecimal === null) return "Unknown";
   const amount = `${formatIncomeMoney(row.currencyCode, baseCurrencyCode, row.frankingTotalDecimal)} total`;
   if (row.frankingDerivedZero) return `${amount} (none reported)`;

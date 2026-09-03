@@ -266,6 +266,37 @@ test("BRK-011 repository: save() rejects a negative franking amount", async () =
   if (!result.ok) assert.equal(result.reason, "invalid_input");
 });
 
+test("BUG-021 correction round: save() rejects a franking override over DECIMAL_LIMITS (25 fractional digits, or 65 total digits) rather than writing a value /income cannot later read", async () => {
+  const db = await ownedFixture();
+  const repo = createDividendImportFrankingOverrideRepository(
+    createSqliteSqlClient(db),
+    () => "2026-08-01T00:00:00Z",
+  );
+  const overScale = await repo.save("a", "pa", "psa", "imported-a", {
+    frankingTotalDecimal: `1.${"1".repeat(25)}`,
+    expectedVersion: null,
+    requestId: "r1",
+  });
+  assert.equal(overScale.ok, false);
+  if (!overScale.ok) assert.equal(overScale.reason, "invalid_input");
+
+  const overDigits = await repo.save("a", "pa", "psa", "imported-a", {
+    frankingTotalDecimal: "1".repeat(65),
+    expectedVersion: null,
+    requestId: "r2",
+  });
+  assert.equal(overDigits.ok, false);
+  if (!overDigits.ok) assert.equal(overDigits.reason, "invalid_input");
+
+  // Exactly at the boundary still succeeds.
+  const atBoundary = await repo.save("a", "pa", "psa", "imported-a", {
+    frankingTotalDecimal: `1.${"1".repeat(24)}`,
+    expectedVersion: null,
+    requestId: "r3",
+  });
+  assert.equal(atBoundary.ok, true);
+});
+
 test("BRK-011 repository: a duplicate create is a version_conflict; a version-guarded update succeeds and a stale version is rejected", async () => {
   const db = await ownedFixture();
   const repo = createDividendImportFrankingOverrideRepository(
@@ -358,6 +389,41 @@ test("BRK-011 action: saveDividendFrankingOverrideWithContext denies a cross-own
     expectedVersion: null,
   });
   assert.equal(ok.ok, true);
+});
+
+test("BUG-021 correction round: saveDividendFrankingOverrideWithContext rejects an over-bound franking amount with a field message before it ever reaches the repository", async () => {
+  const db = await ownedFixture();
+  const client = createSqliteSqlClient(db);
+  const context = { client, userId: "a", requestId: "r1" };
+
+  const overScale = await saveDividendFrankingOverrideWithContext(
+    context,
+    "pa",
+    {
+      portfolioSecurityId: "psa",
+      dividendManualRecordId: "imported-a",
+      frankingTotalDecimal: `1.${"1".repeat(25)}`,
+      expectedVersion: null,
+    },
+  );
+  assert.equal(overScale.ok, false);
+  if (!overScale.ok) {
+    assert.equal(overScale.status, 400);
+    assert.match(overScale.message, /24 decimal places/);
+  }
+
+  const overDigits = await saveDividendFrankingOverrideWithContext(
+    context,
+    "pa",
+    {
+      portfolioSecurityId: "psa",
+      dividendManualRecordId: "imported-a",
+      frankingTotalDecimal: "1".repeat(65),
+      expectedVersion: null,
+    },
+  );
+  assert.equal(overDigits.ok, false);
+  if (!overDigits.ok) assert.equal(overDigits.status, 400);
 });
 
 // ---------------------------------------------------------------------------

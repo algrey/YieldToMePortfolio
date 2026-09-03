@@ -3607,6 +3607,19 @@ export function createDividendImportFrankingOverrideRepository(
     if (!isNonNegativeDecimalString(input.frankingTotalDecimal)) {
       return { ok: false, reason: "invalid_input" };
     }
+    // BUG-021 correction round (reviewer follow-up 1): this writer bounded
+    // only SHAPE (`isNonNegativeDecimalString`), not size -- an unbounded
+    // franking-currency override (e.g. 25 fractional digits or 65 total
+    // digits) would write successfully here and then throw the whole
+    // security's dividend history out of `deriveDividendHistoryForSecurity`
+    // the next time `/income` re-parsed it, exactly the BUG-014/BUG-022
+    // read-path hazard those tasks closed for every other
+    // `dividend_manual_records` amount column. Bounded at the same
+    // `isWithinReadPathDecimalBounds` limit every other amount writer in
+    // this file uses.
+    if (!isWithinReadPathDecimalBounds(input.frankingTotalDecimal)) {
+      return { ok: false, reason: "invalid_input" };
+    }
     if (
       !(await ownedImportedManualRecord(
         client,

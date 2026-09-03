@@ -14,9 +14,30 @@
  * consumer can render "amount unavailable — needs correction" instead of
  * the generic missing-data label, and the rest of the security's rows are
  * completely unaffected.
+ *
+ * CORRECTION ROUND (F1, BLOCKING): round 1 above nulled an unreadable field
+ * but did not record WHICH field was unreadable anywhere a later pre-pass
+ * could see -- `deriveAbsentImportedFranking`'s DIV-007 inference read the
+ * now-nulled `totalFrankingDecimal` on an imported totals-mode record and
+ * could not tell "Sharesight genuinely sent nothing" from "this app could
+ * not read what was stored", so it derived a KNOWN "$0.00 (none reported)"
+ * for an unreadable franking figure -- exactly the fabricated zero round 1's
+ * own text claimed never to happen. The same nulling also let
+ * `resolveImportedRecordCurrency`'s B2 unverified-nonzero-foreign guard fall
+ * through to its normal success path for an unreadable `totalCashDecimal`,
+ * setting `convertedToSecurityCurrency: true` even though nothing was
+ * converted. Fixed with a per-field `unreadableFields` marker set on the
+ * fact, read by both functions to keep "unreadable" and "genuinely absent"
+ * distinct even after both become `null`; a new `frankingUnreadable` row
+ * flag renders "Franking unavailable — needs correction". Folded in: an
+ * unreadable `frankingOverrideTotalDecimal` (BRK-011) is sanitized the same
+ * way (never a throw, never a derived zero); its two writers now also
+ * enforce `isWithinReadPathDecimalBounds` (see tests/brk-011.test.ts).
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { mock } from "node:test";
 import test from "node:test";
 import {
@@ -320,6 +341,196 @@ test("BUG-021: FX isolation (BRK-010 F3) is unaffected -- an unreadable amount a
 });
 
 // ---------------------------------------------------------------------------
+// Correction round (F1, BLOCKING): the imported-tier pre-passes that run
+// AFTER sanitizeManualRecordAmounts must not treat an unreadable nulled
+// value as if it were genuinely absent.
+// ---------------------------------------------------------------------------
+
+test("BUG-021 correction round (F1): an unreadable stored totalFrankingDecimal on an imported totals-mode record is disclosed as frankingUnreadable, never derived to a fabricated '$0.00 (none reported)' -- reproduced with an importBatchId record and a totalCashDecimal, the tier round 1's own franking test never touched", () => {
+  const record: DividendManualRecordFact = {
+    id: "franking-total-bad",
+    paymentDate: "2026-08-05",
+    sharesDecimal: null,
+    dividendPerShareDecimal: null,
+    frankingCreditPerShareDecimal: null,
+    totalCashDecimal: "100",
+    // Non-canonical (trailing space) -- unreadable, not absent.
+    totalFrankingDecimal: "97." + "1".repeat(97),
+    importBatchId: "batch-a",
+  };
+
+  const warnMock = mock.method(console, "warn", () => {});
+  let rows;
+  try {
+    rows = deriveDividendHistoryForSecurity({
+      portfolioSecurityId: "ps-e",
+      securityCurrencyCode: "AUD",
+      portfolioBaseCurrencyCode: "AUD",
+      events: [],
+      overrides: [],
+      receipts: [],
+      manualRecords: [record],
+      transactions: [],
+      defaultFrankingPercentDecimal: null,
+      today: "2026-09-19",
+    });
+  } finally {
+    warnMock.mock.restore();
+  }
+
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  assert.equal(row.cashDecimal, "100", "the readable cash total is intact");
+  assert.equal(row.amountUnknown, false);
+  assert.equal(row.amountUnreadable ?? false, false);
+  assert.equal(
+    row.frankingTotalDecimal,
+    null,
+    "never a fabricated derived total",
+  );
+  assert.equal(
+    row.frankingDerivedZero,
+    false,
+    "must not be mistaken for DIV-007's absent-field inference",
+  );
+  assert.equal(row.frankingUnreadable, true);
+
+  const totals = computeLifetimeDividendTotals(rows, "AUD");
+  assert.equal(totals.status, "ok");
+  if (totals.status !== "ok") return;
+  assert.equal(totals.receivedCashDecimal, "100");
+  assert.equal(
+    totals.receivedFrankingUnknownCount,
+    1,
+    "excluded from franking sums, disclosed, never silently zeroed",
+  );
+});
+
+test("BUG-021 correction round (F1/B2): an unreadable totalCashDecimal on a FOREIGN, otherwise-achievable-conversion imported record keeps the pre-round-1 conservative outcome -- never marked as converted", () => {
+  const record: DividendManualRecordFact = {
+    id: "cash-bad-foreign",
+    paymentDate: "2026-08-05",
+    sharesDecimal: null,
+    dividendPerShareDecimal: null,
+    frankingCreditPerShareDecimal: null,
+    // 97 fractional digits -- unreadable.
+    totalCashDecimal: `250.${"1".repeat(97)}`,
+    totalFrankingDecimal: null,
+    importBatchId: "batch-a",
+    currencyCode: "USD",
+    fxRateToPortfolioDecimal: "1.5",
+    fxRateSource: "sharesight",
+  };
+
+  const warnMock = mock.method(console, "warn", () => {});
+  let rows;
+  try {
+    rows = deriveDividendHistoryForSecurity({
+      portfolioSecurityId: "ps-f",
+      securityCurrencyCode: "AUD",
+      portfolioBaseCurrencyCode: "AUD",
+      events: [],
+      overrides: [],
+      receipts: [],
+      manualRecords: [record],
+      transactions: [],
+      defaultFrankingPercentDecimal: null,
+      today: "2026-09-19",
+    });
+  } finally {
+    warnMock.mock.restore();
+  }
+
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  assert.equal(row.cashDecimal, null);
+  assert.equal(row.amountUnreadable, true);
+  // The B2 guard's conservative pre-fix outcome: nothing was converted, so
+  // no conversion provenance is claimed -- the row's own (foreign) currency
+  // displays honestly instead of a misleading "converted from USD" note
+  // beside an unavailable amount.
+  assert.equal(
+    row.originalCurrencyCode,
+    null,
+    "must not claim a conversion that never happened",
+  );
+  assert.equal(row.currencyCode, "USD", "the record's true currency shows");
+  assert.equal(row.fxRateToPortfolioDecimal, null);
+});
+
+test("BUG-021 correction round (fold-in 1): an unreadable owner franking-currency override (BRK-011) is treated as no override -- absent with disclosure, never a throw and never a fabricated zero", () => {
+  const overrideBadAbsentStored: DividendManualRecordFact = {
+    id: "override-bad-absent",
+    paymentDate: "2026-08-05",
+    sharesDecimal: null,
+    dividendPerShareDecimal: null,
+    frankingCreditPerShareDecimal: null,
+    totalCashDecimal: "100",
+    totalFrankingDecimal: null,
+    importBatchId: "batch-a",
+    frankingOverrideTotalDecimal: `1.${"1".repeat(97)}`,
+  };
+  const overrideBadGoodStored: DividendManualRecordFact = {
+    id: "override-bad-good-stored",
+    paymentDate: "2026-08-06",
+    sharesDecimal: null,
+    dividendPerShareDecimal: null,
+    frankingCreditPerShareDecimal: null,
+    totalCashDecimal: "100",
+    // A genuine, readable Sharesight-reported figure...
+    totalFrankingDecimal: "5",
+    importBatchId: "batch-a",
+    // ...but the owner's override on top of it is unreadable.
+    frankingOverrideTotalDecimal: "1".repeat(65),
+  };
+
+  const warnMock = mock.method(console, "warn", () => {});
+  let rows;
+  try {
+    rows = deriveDividendHistoryForSecurity({
+      portfolioSecurityId: "ps-g",
+      securityCurrencyCode: "AUD",
+      portfolioBaseCurrencyCode: "AUD",
+      events: [],
+      overrides: [],
+      receipts: [],
+      manualRecords: [overrideBadAbsentStored, overrideBadGoodStored],
+      transactions: [],
+      defaultFrankingPercentDecimal: null,
+      today: "2026-09-19",
+    });
+  } finally {
+    warnMock.mock.restore();
+  }
+
+  assert.equal(rows.length, 2, "no throw -- both records still produce a row");
+  const absentRow = rows.find(
+    (row) => row.id === "imported:override-bad-absent",
+  );
+  const goodStoredRow = rows.find(
+    (row) => row.id === "imported:override-bad-good-stored",
+  );
+
+  // The override could not be read AND nothing else was stored: absent,
+  // disclosed, never a fabricated zero.
+  assert.equal(absentRow?.cashDecimal, "100");
+  assert.equal(absentRow?.frankingTotalDecimal, null);
+  assert.equal(absentRow?.frankingDerivedZero, false);
+  assert.equal(absentRow?.frankingUnreadable, true);
+
+  // The override could not be read, but the record's OWN stored figure was
+  // fine -- the real reported value must still surface, not "unreadable".
+  assert.equal(goodStoredRow?.cashDecimal, "100");
+  assert.equal(goodStoredRow?.frankingTotalDecimal, "5");
+  assert.equal(goodStoredRow?.frankingDerivedZero, false);
+  assert.equal(
+    goodStoredRow?.frankingUnreadable ?? false,
+    false,
+    "a bad override must not shadow a perfectly good stored figure",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Part 3: rendered markup on the security Dividends tab and the /income
 // dividends list -- the affected row still appears, with its date, and a
 // non-color status text distinct from the generic "Unavailable"/"not paid".
@@ -527,4 +738,182 @@ test("BUG-021: the /income dividends list renders the same unreadable-amount row
   assert.match(html, />needs correction</);
   assert.doesNotMatch(html, /\$0\.00/);
   assert.match(html, /\$100\.00/);
+});
+
+// ---------------------------------------------------------------------------
+// Correction round (c): a row whose franking (not cash) is unreadable
+// renders "Franking unavailable — needs correction" on both surfaces, and
+// the cash figure itself renders normally (unaffected).
+// ---------------------------------------------------------------------------
+
+const frankingUnreadableSecurityRow = {
+  ...okSecurityRow,
+  id: "imported:franking-bad-1",
+  paymentDate: "2026-09-05",
+  frankingUnreadable: true,
+};
+
+test("BUG-021 correction round: the security Dividends tab renders a franking-only-unreadable row's franking cell as 'Franking unavailable — needs correction', while its cash figure renders normally", () => {
+  const html = renderComponent(
+    "SecurityDividendsTab",
+    "../app/components/security-dividends-tab.tsx",
+    {
+      portfolioId: "pa",
+      portfolioSecurityId: "psa1",
+      symbol: "ALPHA",
+      currencyCode: "AUD",
+      baseCurrencyCode: "AUD",
+      today: "2026-09-19",
+      rows: [frankingUnreadableSecurityRow],
+      filteredArtifactCount: 0,
+      lifetimeTotals: {
+        currencyCode: "AUD",
+        status: "ok",
+        rowCount: 1,
+        excludedCount: 0,
+        unknownAmountCount: 0,
+        receivedCashDecimal: "100",
+        receivedFrankingKnownDecimal: null,
+        receivedFrankingUnknownCount: 1,
+        receivedGrossDecimal: "100",
+        pendingCashDecimal: null,
+        pendingFrankingKnownDecimal: null,
+        pendingFrankingUnknownCount: 0,
+        pendingGrossDecimal: null,
+        pendingCount: 0,
+      },
+      overridesByEventId: {},
+      manualRecordsById: {},
+      frankingOverridesByManualRecordId: {},
+      assumptions: {
+        dividendYieldPercentDecimal: null,
+        frankingPercentDecimal: null,
+        dividendGrowthPercentDecimal: null,
+        version: null,
+      },
+      portfolioAssumptions: {
+        valueGrowthPercentDecimal: null,
+        portfolioDividendGrowthPercentDecimal: null,
+        version: null,
+      },
+      subtitle: "Alpha Fixture · XASX · AUD",
+    },
+  );
+  assert.match(html, /Franking unavailable — needs correction/);
+  // The cash figure itself is fine and must not read as unavailable.
+  assert.match(html, /\$100\.00/);
+  assert.doesNotMatch(html, /Amount unavailable — needs correction/);
+});
+
+test("BUG-021 correction round: the /income dividends list renders a franking-only-unreadable row's franking cell as 'Franking unavailable — needs correction', while its cash figure renders normally", () => {
+  const html = renderComponent(
+    "OwnedDividendList",
+    "../app/components/owned-dividend-list.tsx",
+    {
+      portfolioId: "pa",
+      baseCurrencyCode: "AUD",
+      today: "2026-09-19",
+      rows: [
+        {
+          id: "psa1:imported:franking-bad-1",
+          portfolioSecurityId: "psa1",
+          symbol: "ALPHA",
+          currencyCode: "AUD",
+          paymentDate: "2026-09-05",
+          exDate: null,
+          notPaid: false,
+          cashDecimal: "100",
+          amountUnreadable: false,
+          frankingTotalDecimal: null,
+          frankingDerivedZero: false,
+          frankingUnreadable: true,
+          grossDecimal: "100",
+          source: "imported",
+          excluded: false,
+          originalCurrencyCode: null,
+          fxRateToPortfolioDecimal: null,
+          fxRateSource: null,
+        },
+      ],
+      truncated: false,
+      totalCount: 1,
+    },
+  );
+  assert.match(html, /Franking unavailable — needs correction/);
+  assert.match(html, /\$100\.00/);
+  assert.doesNotMatch(html, /Amount unavailable — needs correction/);
+});
+
+// ---------------------------------------------------------------------------
+// Correction round (F2): `docs/CALCULATIONS.md`'s ops-note diagnostic query
+// undercounted -- `LENGTH(col) - INSTR(col, '.')` is NOT 0 for a dot-less
+// value (INSTR returns 0, so the expression is the value's FULL length),
+// so a canonical 25-64-digit dot-less integer was wrongly counted as
+// unreadable. Pinned directly against the doc's own SQL (source-pin
+// convention, mirroring tests/imp-003b.test.ts) so a future edit that
+// reintroduces the bug fails this test.
+// ---------------------------------------------------------------------------
+
+test("BUG-021 correction round (F2): the CALCULATIONS.md ops-note query counts a canonical dot-less 30-digit integer as READABLE, not a false positive", async () => {
+  const doc = await readFile(
+    new URL("../docs/CALCULATIONS.md", import.meta.url),
+    "utf8",
+  );
+  const marker = "Ops note (read-only";
+  const markerIndex = doc.indexOf(marker);
+  assert.ok(markerIndex >= 0, "the ops-note section must still exist");
+  const fenceStart = doc.indexOf("```sql", markerIndex);
+  assert.ok(fenceStart >= 0);
+  const fenceBodyStart = doc.indexOf("\n", fenceStart) + 1;
+  const fenceEnd = doc.indexOf("```", fenceBodyStart);
+  const sql = doc.slice(fenceBodyStart, fenceEnd);
+
+  const db = new DatabaseSync(":memory:");
+  db.exec(`
+    CREATE TABLE dividend_manual_records (
+      user_id TEXT,
+      shares_decimal TEXT,
+      dividend_per_share_decimal TEXT,
+      franking_credit_per_share_decimal TEXT,
+      total_cash_decimal TEXT,
+      total_franking_decimal TEXT
+    );
+  `);
+  const insert = db.prepare(
+    `INSERT INTO dividend_manual_records (user_id, shares_decimal, dividend_per_share_decimal, franking_credit_per_share_decimal, total_cash_decimal, total_franking_decimal) VALUES (?, NULL, NULL, NULL, NULL, NULL)`,
+  );
+  // Canonical dot-less 30-digit integer -- the false-positive shape.
+  insert.run("dotless-30");
+  db.exec(
+    `UPDATE dividend_manual_records SET shares_decimal = '${"1".repeat(30)}' WHERE user_id = 'dotless-30'`,
+  );
+  // Ordinary canonical value.
+  db.exec(
+    `INSERT INTO dividend_manual_records (user_id, shares_decimal) VALUES ('canonical', '150.25')`,
+  );
+  // 97 fractional digits -- must still be counted.
+  db.exec(
+    `INSERT INTO dividend_manual_records (user_id, shares_decimal) VALUES ('over-scale', '1.${"1".repeat(97)}')`,
+  );
+  // 65 total digits -- must still be counted.
+  db.exec(
+    `INSERT INTO dividend_manual_records (user_id, shares_decimal) VALUES ('over-digits', '${"1".repeat(65)}')`,
+  );
+
+  const rows = db.prepare(sql).all() as {
+    user_id: string;
+    unreadable_amount_count: number;
+  }[];
+  const byUser = new Map(
+    rows.map((row) => [row.user_id, row.unreadable_amount_count]),
+  );
+
+  assert.equal(
+    byUser.get("dotless-30"),
+    undefined,
+    "a canonical dot-less 30-digit integer must not be counted as unreadable",
+  );
+  assert.equal(byUser.get("canonical"), undefined);
+  assert.equal(byUser.get("over-scale"), 1);
+  assert.equal(byUser.get("over-digits"), 1);
 });

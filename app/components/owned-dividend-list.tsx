@@ -266,6 +266,16 @@ export function OwnedDividendList({
                         row.currencyCode,
                         baseCurrencyCode,
                         row.frankingTotalDecimal,
+                        // BUG-021 correction round: a stored franking figure
+                        // (or owner override) this app could not read gets
+                        // its own actionable copy, distinct from "Unknown"
+                        // and from DIV-007's "none reported" inference.
+                        row.frankingUnreadable
+                          ? {
+                              unavailableLabel:
+                                "Franking unavailable — needs correction",
+                            }
+                          : undefined,
                       )}
                       {row.frankingDerivedZero ? (
                         <>

@@ -236,6 +236,7 @@ function row(overrides: Partial<OwnedDividendListRow>): OwnedDividendListRow {
     amountUnreadable: false,
     frankingTotalDecimal: null,
     frankingDerivedZero: false,
+    frankingUnreadable: false,
     grossDecimal: null,
     source: "auto",
     excluded: false,
@@ -353,6 +354,7 @@ function toListRow(dRow: {
   amountUnreadable?: boolean;
   frankingTotalDecimal: string | null;
   frankingDerivedZero: boolean;
+  frankingUnreadable?: boolean;
   grossDecimal: string | null;
   source: string;
   excluded: boolean;
@@ -372,6 +374,7 @@ function toListRow(dRow: {
     amountUnreadable: dRow.amountUnreadable === true,
     frankingTotalDecimal: dRow.frankingTotalDecimal,
     frankingDerivedZero: dRow.frankingDerivedZero,
+    frankingUnreadable: dRow.frankingUnreadable === true,
     grossDecimal: dRow.grossDecimal,
     source: dRow.source as OwnedDividendListRow["source"],
     excluded: dRow.excluded,

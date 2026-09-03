@@ -991,6 +991,18 @@ export async function saveDividendFrankingOverrideWithContext(
       message: "Franking credits must be a non-negative amount.",
     };
   }
+  // BUG-021 correction round (reviewer follow-up 1): form-shape validation
+  // above never bounded SIZE -- see the repository's identical bound
+  // (`db/repositories/dividends.ts`'s `save`) for the read-path hazard this
+  // closes.
+  if (!isWithinReadPathDecimalBounds(frankingTotalDecimal)) {
+    return {
+      ok: false,
+      status: 400,
+      message:
+        "Franking credits must have at most 24 decimal places and 64 digits in total.",
+    };
+  }
   const expectedVersion = expectedVersionOf(input.expectedVersion);
   if (expectedVersion === undefined) {
     return { ok: false, status: 400, message: "A valid version is required." };

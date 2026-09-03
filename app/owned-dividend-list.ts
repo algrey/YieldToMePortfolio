@@ -71,6 +71,13 @@ export type OwnedDividendListRow = {
    * "none reported" note so the owner can distinguish it from a real
    * confirmed-unfranked payout. */
   frankingDerivedZero: boolean;
+  /** BUG-021 correction round: `true` when `frankingTotalDecimal` above is
+   * `null` because the underlying stored value (or an owner franking
+   * override) could not be read, not because it was genuinely absent --
+   * see `DerivedDividendRow.frankingUnreadable`'s doc comment. Lets the
+   * list render the distinct "needs correction" copy rather than "Unknown"
+   * or the DIV-007 "none reported" inference. */
+  frankingUnreadable: boolean;
   grossDecimal: string | null;
   source: DerivedDividendRowSource;
   /** Review finding B2: an owner-excluded row (event-override `exclude: true`) must not render identically to a counted one -- carried through and rendered as the security tab's own "· excluded" marker so the list never silently disagrees with the totals. */
@@ -154,6 +161,7 @@ export async function loadOwnedDividendList(
     amountUnreadable: row.amountUnreadable === true,
     frankingTotalDecimal: row.frankingTotalDecimal,
     frankingDerivedZero: row.frankingDerivedZero,
+    frankingUnreadable: row.frankingUnreadable === true,
     grossDecimal: row.grossDecimal,
     source: row.source,
     excluded: row.excluded,
