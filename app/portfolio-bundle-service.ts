@@ -72,6 +72,7 @@ import { chainOrder } from "../domain/exports/chain-order.ts";
 import { readPortfolioBundle } from "../db/repositories/portfolio-bundle.ts";
 import type { SqlClient } from "../db/repositories/sql-client.ts";
 import {
+  buildPortfolioCreationStatements,
   createOwnedPortfolioRepository,
   createOwnedUserSettingsRepository,
 } from "../db/repositories/owned-portfolios.ts";
@@ -1454,9 +1455,6 @@ export async function commitValidatedPortfolioBundleScaffold(
     }
   }
 
-  const portfolios = createOwnedPortfolioRepository(ctx.client, undefined, {
-    requestId: ctx.requestId,
-  });
   let portfolioName: string;
   let code: string;
   if (portfolioId) {
@@ -1478,34 +1476,61 @@ export async function commitValidatedPortfolioBundleScaffold(
     code = row.code;
   } else {
     code = bundle.portfolio.code;
-    let portfolio = null;
-    for (let attempt = 0; attempt < 5 && !portfolio; attempt += 1) {
-      try {
-        portfolio = await portfolios.create(ctx.userId, {
+    let created: string | null = null;
+    for (let attempt = 0; attempt < 5 && !created; attempt += 1) {
+      const creation = buildPortfolioCreationStatements(
+        ctx.userId,
+        {
           code,
           name: bundle.portfolio.name,
           timezone: bundle.portfolio.timezone,
           accountingMethod:
             bundle.portfolio.accountingMethod === "fifo" ? "fifo" : undefined,
           historyCompleteFrom: bundle.portfolio.historyCompleteFrom,
-        });
+        },
+        ctx.requestId,
+        now,
+      );
+      try {
+        // BUG-019: the portfolio row, its creation-audit row, and the
+        // `import_batches.target_portfolio_id` link that attributes the
+        // new portfolio to THIS batch all land in ONE atomic
+        // `client.batch()` call. Previously the portfolio was created
+        // (via `portfolios.create()`, its own separate batch) and the
+        // link was a further standalone `client.run()` -- a crash between
+        // the two left a portfolio row that existed but was attributable
+        // to no batch. A retry then found `target_portfolio_id` still
+        // NULL, took this same branch, and created a SECOND portfolio
+        // under `<code>-restored`, permanently orphaning the first (it
+        // has no batch pointing at it, so nothing archives or resumes
+        // it, and `countUnrelatedPortfolios` counts it against every
+        // later system-restore's fresh-account precondition). Folding all
+        // three writes into one D1 batch means a failure anywhere in it
+        // rolls back the entire thing, so a retry always starts from
+        // "nothing created yet" -- never "half created".
+        const rows = await ctx.client.batch([
+          ...creation.statements,
+          {
+            sql: "UPDATE import_batches SET target_portfolio_id = ? WHERE id = ? AND user_id = ?",
+            params: [creation.portfolioId, batchId, ctx.userId],
+          },
+        ]);
+        if (rows[0]?.results[0]) {
+          created = creation.portfolioId;
+        }
       } catch {
         code = `${bundle.portfolio.code}-restored${attempt > 0 ? `-${attempt + 1}` : ""}`;
       }
     }
-    if (!portfolio) {
+    if (!created) {
       return commitFailure(
         ctx,
         batchId,
         "A destination portfolio could not be created for this bundle.",
       );
     }
-    portfolioId = portfolio.id;
-    portfolioName = portfolio.name;
-    await ctx.client.run(
-      "UPDATE import_batches SET target_portfolio_id = ? WHERE id = ? AND user_id = ?",
-      [portfolioId, batchId, ctx.userId],
-    );
+    portfolioId = created;
+    portfolioName = bundle.portfolio.name;
 
     if (bundle.portfolioSettings.quoteStalenessPolicy !== null) {
       await ctx.client.run(

@@ -264,6 +264,68 @@ function auditMutationStatement(input: {
   };
 }
 
+/**
+ * BUG-019: statement-builder seam so a caller that must create a portfolio
+ * as part of a LARGER atomic `client.batch()` (e.g. `app/portfolio-bundle-
+ * service.ts`'s restore scaffold, which also needs to link the new
+ * portfolio into its `import_batches` row in the SAME batch -- a crash
+ * between two separate calls left a portfolio attributable to no batch)
+ * can get the exact same INSERT + creation-audit statements `create()`
+ * below executes, without duplicating them. `create()` itself now calls
+ * this builder (single source of truth -- see `buildLedgerPostingStatements`
+ * in `db/repositories/ledger.ts` for the precedent this follows).
+ */
+export function buildPortfolioCreationStatements(
+  userId: string,
+  input: CreatePortfolioInput,
+  requestId: string,
+  createdAt: string,
+): { portfolioId: string; statements: SqlStatement[] } {
+  const portfolioId = input.id ?? randomUUID();
+  const statements: SqlStatement[] = [
+    {
+      sql: `
+        INSERT INTO portfolios (
+          id, user_id, code, name, base_currency_code, timezone,
+          accounting_method, history_complete_from, status,
+          created_at, updated_at, version
+        )
+        SELECT
+          ?, us.user_id, ?, ?, us.home_currency_code, ?, ?, ?, 'active',
+          ?, ?, 1
+        FROM user_settings AS us
+        WHERE us.user_id = ?
+        RETURNING id, user_id, code, name, base_currency_code, timezone,
+          accounting_method, history_complete_from, status, created_at,
+          updated_at, version, base_currency_code AS home_currency_code
+      `,
+      params: [
+        portfolioId,
+        input.code,
+        input.name,
+        input.timezone,
+        input.accountingMethod ?? "fifo",
+        input.historyCompleteFrom ?? null,
+        createdAt,
+        createdAt,
+        userId,
+      ],
+    },
+    auditMutationStatement({
+      actorUserId: userId,
+      action: "portfolio.create",
+      targetType: "portfolio",
+      targetId: portfolioId,
+      requestId,
+      occurredAt: createdAt,
+      condition:
+        "EXISTS (SELECT 1 FROM portfolios WHERE id = ? AND user_id = ?)",
+      conditionParams: [portfolioId, userId],
+    }),
+  ];
+  return { portfolioId, statements };
+}
+
 export function createOwnedPortfolioRepository(
   client: SqlClient,
   now?: () => string,
@@ -317,48 +379,13 @@ export function createOwnedPortfolioRepository(
       input: CreatePortfolioInput,
     ): Promise<OwnedPortfolioRecord | null> {
       const createdAt = nowIso(now);
-      const portfolioId = input.id ?? randomUUID();
-      const rows = await client.batch([
-        {
-          sql: `
-            INSERT INTO portfolios (
-              id, user_id, code, name, base_currency_code, timezone,
-              accounting_method, history_complete_from, status,
-              created_at, updated_at, version
-            )
-            SELECT
-              ?, us.user_id, ?, ?, us.home_currency_code, ?, ?, ?, 'active',
-              ?, ?, 1
-            FROM user_settings AS us
-            WHERE us.user_id = ?
-            RETURNING id, user_id, code, name, base_currency_code, timezone,
-              accounting_method, history_complete_from, status, created_at,
-              updated_at, version, base_currency_code AS home_currency_code
-          `,
-          params: [
-            portfolioId,
-            input.code,
-            input.name,
-            input.timezone,
-            input.accountingMethod ?? "fifo",
-            input.historyCompleteFrom ?? null,
-            createdAt,
-            createdAt,
-            userId,
-          ],
-        },
-        auditMutationStatement({
-          actorUserId: userId,
-          action: "portfolio.create",
-          targetType: "portfolio",
-          targetId: portfolioId,
-          requestId,
-          occurredAt: createdAt,
-          condition:
-            "EXISTS (SELECT 1 FROM portfolios WHERE id = ? AND user_id = ?)",
-          conditionParams: [portfolioId, userId],
-        }),
-      ]);
+      const { statements } = buildPortfolioCreationStatements(
+        userId,
+        input,
+        requestId,
+        createdAt,
+      );
+      const rows = await client.batch(statements);
       const row = rows[0]?.results[0];
       return row ? createPortfolioRecord(row) : null;
     },

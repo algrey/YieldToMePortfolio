@@ -46,6 +46,7 @@ import {
   type PortfolioBundleV1,
 } from "../domain/exports/portfolio-bundle.ts";
 import type { SqlClient } from "../db/repositories/sql-client.ts";
+import { countUnrelatedPortfolios } from "../db/repositories/system-backup.ts";
 
 /** The part sizes `app/components/system-backup-panel.tsx` drives the
  * chunked core restore at -- declared once here so the per-request work
@@ -292,6 +293,42 @@ async function buildBundle(): Promise<PortfolioBundleV1> {
   return exported.bundle;
 }
 
+/** BUG-019 regression harness: wraps `client` so EVERY `run()`/`batch()`
+ * call carrying a statement matching `matchSql` throws instead of
+ * executing -- standing in for a destination that is permanently
+ * unreachable for the ONE request/client instance that is about to attempt
+ * it (a crashed Worker invocation never gets to retry in-process; the
+ * NEXT request is a fresh call with a fresh, healthy client). Matches both
+ * `run()` (the pre-fix separate `UPDATE ... target_portfolio_id` call) and
+ * `batch()` (the post-fix atomic call the link statement now travels in),
+ * so the SAME wrapper reproduces the failure against either shape:
+ * pre-fix it throws on the FIRST (and only) attempt, uncaught, after the
+ * portfolio row has already been durably created by a separate, earlier,
+ * unintercepted `create()` batch -- exactly the partial state this task
+ * exists to make impossible; post-fix, every one of the (up to five)
+ * atomic create+link attempts this client makes rolls back in full, so it
+ * either exhausts its retries with NOTHING written, or (this wrapper
+ * always throws on match, so it always exhausts) returns a graceful
+ * `ok:false` -- never a half-created portfolio. */
+function withFailureOn(
+  client: SqlClient,
+  matchSql: (sql: string) => boolean,
+): SqlClient {
+  return {
+    ...client,
+    async run(sql, params) {
+      if (matchSql(sql)) throw new Error("BUG-019 simulated failure");
+      return client.run(sql, params);
+    },
+    async batch(statements) {
+      if (statements.some((statement) => matchSql(statement.sql))) {
+        throw new Error("BUG-019 simulated failure");
+      }
+      return client.batch(statements);
+    },
+  };
+}
+
 test("scaffold: creates an owner-scoped destination portfolio, its securities, and reports zero committed rows for a brand-new restore", async () => {
   const bundle = await buildBundle();
   const db = await migratedDatabase();
@@ -316,6 +353,99 @@ test("scaffold: creates an owner-scoped destination portfolio, its securities, a
     [result.result.portfolioId],
   );
   assert.equal(owned?.user_id, "target");
+});
+
+/** Drives one BUG-019 failed-request-then-retry cycle: a scaffold call
+ * whose destination client always throws on the target-link statement
+ * (standing in for a crashed request -- see `withFailureOn`'s own comment),
+ * followed by a genuine retry through the SAME `commitPortfolioBundleScaffold`
+ * entry point using the real, healthy client. The first call's outcome
+ * (pre-fix: an uncaught throw with a real orphan already durably written;
+ * post-fix: a graceful `ok:false` with nothing written) is deliberately
+ * NOT asserted on here -- only the state the SECOND call leaves behind is,
+ * which is what a real owner retrying a failed restore actually observes. */
+async function scaffoldOnceFailingThenRetry(
+  db: DatabaseSync,
+  bundle: PortfolioBundleV1,
+  userId: string,
+) {
+  const realClient = createSqliteSqlClient(db);
+  const failingClient = withFailureOn(realClient, (sql) =>
+    sql.includes("target_portfolio_id"),
+  );
+  try {
+    await commitPortfolioBundleScaffold(
+      ctxFor(failingClient, userId),
+      bundle,
+      "backup.json",
+      JSON.stringify(bundle).length,
+    );
+  } catch {
+    // Pre-fix: the standalone link UPDATE throws uncaught. Expected --
+    // the retry below is the actual assertion subject.
+  }
+  const retried = await commitPortfolioBundleScaffold(
+    ctxFor(realClient, userId),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  return { realClient, retried };
+}
+
+test("BUG-019: a crash between creating the destination portfolio and linking it to its batch never orphans a portfolio -- a retry creates exactly one", async () => {
+  const bundle = await buildBundle();
+  const db = await migratedDatabase();
+  seedFreshAccount(db, "target");
+
+  const { realClient, retried } = await scaffoldOnceFailingThenRetry(
+    db,
+    bundle,
+    "target",
+  );
+  assert.equal(retried.ok, true);
+  if (!retried.ok) return;
+  assert.equal(retried.result.idempotent, false);
+  // The code must be the ORIGINAL requested code -- not a `-restored`
+  // fallback, which would only fire if the first (real) code were already
+  // taken by an undetected orphan from the failed attempt.
+  assert.equal(retried.result.code, bundle.portfolio.code);
+
+  const totalPortfolioCount = await realClient.get<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM portfolios WHERE user_id = 'target'",
+  );
+  assert.equal(totalPortfolioCount?.n, 1);
+
+  const linkedBatch = await realClient.get<{
+    target_portfolio_id: string | null;
+    status: string;
+  }>(
+    "SELECT target_portfolio_id, status FROM import_batches WHERE user_id = 'target' LIMIT 1",
+  );
+  assert.equal(linkedBatch?.target_portfolio_id, retried.result.portfolioId);
+});
+
+test("BUG-019: a failed-then-retried scaffold never leaves an orphan that trips the fresh-account precondition for a later system restore", async () => {
+  const bundle = await buildBundle();
+  const db = await migratedDatabase();
+  seedFreshAccount(db, "target");
+
+  const { realClient, retried } = await scaffoldOnceFailingThenRetry(
+    db,
+    bundle,
+    "target",
+  );
+  assert.equal(retried.ok, true);
+  if (!retried.ok) return;
+
+  const fingerprint = await fingerprintBundle(bundle);
+  const unrelated = await countUnrelatedPortfolios(realClient, "target", [
+    fingerprint,
+  ]);
+  // Zero: the completed restore's ONE portfolio is fully accounted for by
+  // its batch's `target_portfolio_id` -- no invisible orphan is left over
+  // to fail a later system restore's fresh-account precondition.
+  assert.equal(unrelated, 0);
 });
 
 test("transactions part: writes rows in the given order, resending the SAME part is a no-op (idempotent, no duplicates)", async () => {
