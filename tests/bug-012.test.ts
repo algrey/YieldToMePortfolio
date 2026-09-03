@@ -1088,6 +1088,11 @@ async function sharesightInvalidationFixture(input: {
   owners: readonly OwnerSeed[];
   securityIds: readonly string[];
   dates: readonly string[];
+  /** BUG-012 round-4 B1: per-portfolio holdings, for the shapes where the
+   * whole point is that portfolios hold DIFFERENT subsets of the chunk's
+   * securities. Omitted (or a portfolio absent from it) means "holds every
+   * `securityId`", the shape every round-3 test above relies on. */
+  holdingsByPortfolioId?: Readonly<Record<string, readonly string[]>>;
 }): Promise<DatabaseSync> {
   const db = await migratedDatabase();
   db.exec(`
@@ -1110,7 +1115,8 @@ async function sharesightInvalidationFixture(input: {
         `INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at)
          VALUES('${portfolioId}','${owner.userId}','${portfolioId}','${portfolioId}','AUD','Australia/Sydney','fifo','active','2026-08-01','2026-08-01');`,
       );
-      for (const securityId of input.securityIds) {
+      for (const securityId of input.holdingsByPortfolioId?.[portfolioId] ??
+        input.securityIds) {
         db.exec(
           `INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_exchange_alias,source_currency_code,status,created_at,updated_at)
            VALUES('ps-${portfolioId}-${securityId}','${owner.userId}','${portfolioId}','${securityId}','ONE','ASX','AUD','held','2026-08-01','2026-08-01');`,
@@ -1156,10 +1162,14 @@ function recordingClient(db: DatabaseSync): {
   client: SqlClient;
   statements: Array<{ sql: string; params: readonly unknown[] }>;
   batchCalls: number;
+  batchSizes: number[];
 } {
   const inner = createSqliteSqlClient(db);
   const recorded: Array<{ sql: string; params: readonly unknown[] }> = [];
-  const state = { batchCalls: 0 };
+  // BUG-012 round-4 fold-in: the load-bearing bound is PER `batch()` call,
+  // not the run's total -- a total-only assertion passes for a single
+  // oversized batch, which is exactly the failure D1 would reject.
+  const batchSizes: number[] = [];
   const client: SqlClient = {
     all: (sql, params) => inner.all(sql, params),
     get: (sql, params) => inner.get(sql, params),
@@ -1168,7 +1178,7 @@ function recordingClient(db: DatabaseSync): {
       return inner.run(sql, params);
     },
     batch: (statements) => {
-      state.batchCalls += 1;
+      batchSizes.push(statements.length);
       for (const statement of statements) {
         recorded.push({ sql: statement.sql, params: statement.params ?? [] });
       }
@@ -1178,8 +1188,9 @@ function recordingClient(db: DatabaseSync): {
   return {
     client,
     statements: recorded,
+    batchSizes,
     get batchCalls() {
-      return state.batchCalls;
+      return batchSizes.length;
     },
   };
 }
@@ -1235,7 +1246,8 @@ test("BUG-012 round-3 B1: one security held across 22 of the owner's OWN portfol
   // portfolios were never invalidated -- again deterministically, every
   // run. Post-fix this is 22 groups x 2 statements = 44, which still fits
   // beside a 1-security chunk's 2 write statements in ONE atomic batch
-  // (46 <= 100), so no follow-on batch is needed here.
+  // (46 <= the 90-statement working ceiling), so no follow-on batch is
+  // needed here.
   const portfolioIds = Array.from({ length: 22 }, (_, i) => `pf-${i}`);
   const db = await sharesightInvalidationFixture({
     owners: [{ userId: "owner", portfolioIds }],
@@ -1326,18 +1338,27 @@ test("BUG-012 round-3 B1/FU3: a remainder past the write batch's room is ISSUED 
   // and D1's 100-statement `batch()` ceiling in one place, so the two can
   // never drift apart the way BUG-012 F3's hand-maintained
   // `MARKET_DATA_REFRESH_REPOSITORY_LIMITS.maxStatementsPerChunk` did.
+  //
+  // BUG-012 round-4: the budgets derive from `maxStatementsPerBatch`
+  // (100 - a deliberate 10-statement margin), NOT from D1's raw ceiling.
+  // Round 3's derivation put the worst-case atomic batch at exactly 100;
+  // this suite runs on node:sqlite, whose `batch()` has no ceiling at all,
+  // so green tests are not evidence that production D1 accepts a batch of
+  // exactly 100.
   assert.deepEqual(SHARESIGHT_PRICE_REFRESH_LIMITS, {
     maxSecuritiesPerChunk: 25,
     d1MaxStatementsPerBatch: 100,
+    d1BatchStatementMargin: 10,
+    maxStatementsPerBatch: 90, // 100 - 10
     statementsPerSecurity: 2,
     statementsPerInvalidatedPortfolio: 2,
-    maxInvalidationPortfoliosPerWriteBatch: 25, // (100 - 25*2) / 2
-    maxInvalidationPortfoliosPerFollowOnBatch: 50, // 100 / 2
+    maxInvalidationPortfoliosPerWriteBatch: 20, // (90 - 25*2) / 2
+    maxInvalidationPortfoliosPerFollowOnBatch: 45, // 90 / 2
     maxUsersPerRun: 50,
   });
 
   // 25 securities (a FULL chunk: 50 write statements, leaving room for
-  // exactly 25 groups) x 30 of the owner's own portfolios -> 5 groups must
+  // exactly 20 groups) x 30 of the owner's own portfolios -> 10 groups must
   // spill into a follow-on batch. Every one of the 30 portfolios must still
   // end up fully invalidated.
   const securityIds = Array.from({ length: 25 }, (_, i) => `sec-${i}`);
@@ -1368,14 +1389,144 @@ test("BUG-012 round-3 B1/FU3: a remainder past the write batch's room is ISSUED 
   assert.equal(
     recorder.batchCalls,
     2,
-    "one atomic write batch plus exactly one follow-on batch for the 5-group remainder",
+    "one atomic write batch plus exactly one follow-on batch for the 10-group remainder",
   );
-  // No batch may exceed D1's ceiling -- the bound the whole derivation exists
-  // to respect.
-  assert.ok(
-    recorder.statements.length <=
-      SHARESIGHT_PRICE_REFRESH_LIMITS.d1MaxStatementsPerBatch * 2,
+  // BUG-012 round-4 fold-in: the bound is PER `batch()` call. The previous
+  // form asserted only the RUN TOTAL against 2 x the ceiling, which a
+  // single 200-statement batch would have satisfied -- precisely the shape
+  // D1 rejects.
+  assert.deepEqual(
+    recorder.batchSizes,
+    [90, 20],
+    "write batch = 50 writes + 20 inline groups x 2 = 90 (the margin honoured); follow-on = the 10 remaining groups x 2",
   );
+  for (const size of recorder.batchSizes) {
+    assert.ok(
+      size <= SHARESIGHT_PRICE_REFRESH_LIMITS.d1MaxStatementsPerBatch,
+      `a single batch of ${size} statements exceeds D1's ceiling`,
+    );
+    assert.ok(
+      size <= SHARESIGHT_PRICE_REFRESH_LIMITS.maxStatementsPerBatch,
+      `a single batch of ${size} statements spends the deliberate margin`,
+    );
+  }
+  db.close();
+});
+
+// ---------------------------------------------------------------------------
+// Round-4 B1: the grouped invalidation must cover the EXACT set of dates the
+// chunk wrote for the securities each portfolio holds -- not the calendar
+// span between them. `marketDate` is each instrument's own Sharesight
+// `current_price_updated_at`, so one halted/unlisted holding drags the span
+// arbitrarily wide.
+// ---------------------------------------------------------------------------
+
+/** Every `value_date` still MARKED unresolvable for a portfolio, ascending
+ * -- the mark-side twin of `storedDates` above. */
+function markedDates(db: DatabaseSync, portfolioId: string): string[] {
+  return (
+    db
+      .prepare(
+        `SELECT value_date FROM portfolio_value_history_unresolvable WHERE portfolio_id = ? ORDER BY value_date`,
+      )
+      .all(portfolioId) as Array<{ value_date: string }>
+  ).map((row) => row.value_date);
+}
+
+test("BUG-012 round-4 B1: a stale-priced holding beside a live one invalidates EXACTLY the two written dates -- never the 70-date span between them", async () => {
+  // The defect this round fixes. Round 3 folded the portfolio's targets
+  // into `[MIN, MAX]` and deleted the whole span: 70 stored rows and 70
+  // marks per hourly tick. With the read bound at 10 dates per call and the
+  // cron at 20 per tick, a span that wide can never be rebuilt -- BUG-010's
+  // outage shape, re-created every hour -- and PRF-010 convergence can
+  // never be satisfied. It also cleared marks for dates this write CANNOT
+  // have made resolvable (`priceToleranceDays` is 0: a price on D affects
+  // only D), contradicting DATA_MODEL's and CALCULATIONS' "cleared by a
+  // write that can make the date newly resolvable" rule.
+  const dates = weekdays("2026-06-01", 70);
+  const staleDate = dates[0]!;
+  const liveDate = dates[69]!;
+  const db = await sharesightInvalidationFixture({
+    owners: [{ userId: "owner", portfolioIds: ["pf"] }],
+    securityIds: ["sec-stale", "sec-live"],
+    dates,
+  });
+  assert.equal(storedCount(db, "pf"), 70);
+  assert.equal(markCount(db, "pf"), 70);
+  const client = createSqliteSqlClient(db);
+
+  await upsertSharesightPriceObservations(client, {
+    userId: "owner",
+    candidates: [
+      sharesightCandidateFor("sec-stale", staleDate, "1.00", "STALE"),
+      sharesightCandidateFor("sec-live", liveDate, "2.00", "LIVE"),
+    ],
+    now: "2026-09-03T00:00:00.000Z",
+  });
+
+  assert.equal(
+    storedCount(db, "pf"),
+    68,
+    "exactly the two repriced dates' stored rows may be invalidated",
+  );
+  assert.equal(
+    markCount(db, "pf"),
+    68,
+    "exactly the two repriced dates' marks may be cleared",
+  );
+  // The 68 survivors are the 68 dates the write never mentioned, exactly --
+  // both written dates gone, nothing between them touched.
+  assert.deepEqual(
+    storedDates(db, "pf"),
+    dates.slice(1, 69),
+    "every date between the two written ones must survive untouched",
+  );
+  assert.deepEqual(markedDates(db, "pf"), dates.slice(1, 69));
+  db.close();
+});
+
+test("BUG-012 round-4 B1: each portfolio gets exactly the dates of the securities IT holds -- never another portfolio's dates, never the gap between them", async () => {
+  // Two securities priced on 06-01 and 06-04. `pf-both` holds both, so it
+  // must lose exactly those two dates and keep 06-02/06-03. `pf-late` holds
+  // only the 06-04 security, so 06-01 is not a date any price it can read
+  // changed: it must lose 06-04 alone. Round 3's `[MIN, MAX]` fold deleted
+  // 06-01..06-04 wholesale for `pf-both`.
+  const db = await sharesightInvalidationFixture({
+    owners: [{ userId: "owner", portfolioIds: ["pf-both", "pf-late"] }],
+    securityIds: ["sec-early", "sec-late"],
+    dates: ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04"],
+    holdingsByPortfolioId: {
+      "pf-both": ["sec-early", "sec-late"],
+      "pf-late": ["sec-late"],
+    },
+  });
+  const client = createSqliteSqlClient(db);
+
+  await upsertSharesightPriceObservations(client, {
+    userId: "owner",
+    candidates: [
+      sharesightCandidateFor("sec-early", "2026-06-01", "1.00", "EARLY"),
+      sharesightCandidateFor("sec-late", "2026-06-04", "2.00", "LATE"),
+    ],
+    now: "2026-09-03T00:00:00.000Z",
+  });
+
+  assert.deepEqual(
+    storedDates(db, "pf-both"),
+    ["2026-06-02", "2026-06-03"],
+    "pf-both holds both securities: exactly 06-01 and 06-04 are invalidated",
+  );
+  assert.deepEqual(markedDates(db, "pf-both"), ["2026-06-02", "2026-06-03"]);
+  assert.deepEqual(
+    storedDates(db, "pf-late"),
+    ["2026-06-01", "2026-06-02", "2026-06-03"],
+    "pf-late holds only the 06-04 security: 06-01 is not a date its own reads changed",
+  );
+  assert.deepEqual(markedDates(db, "pf-late"), [
+    "2026-06-01",
+    "2026-06-02",
+    "2026-06-03",
+  ]);
   db.close();
 });
 

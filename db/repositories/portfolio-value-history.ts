@@ -725,6 +725,27 @@ export async function buildValueHistoryInvalidationStatementsForSecurities(
  * deployment's data shape produces. */
 export const MAX_OWNER_INVALIDATION_PORTFOLIOS = 200;
 
+/** D1's documented per-statement BOUND-PARAMETER ceiling. Each statement
+ * `buildOwnerValueHistoryInvalidationStatementGroups` emits binds
+ * `user_id`, `portfolio_id`, and one parameter per targeted date, so a
+ * portfolio's date set is bounded at `100 - 2 = 98`. The real caller's
+ * worst case is far under it (a 25-security Sharesight chunk carries at
+ * most 25 distinct market dates -> 27 parameters), but the bound is
+ * ASSERTED rather than assumed: node:sqlite (this suite's backend) has a
+ * far higher variable limit than D1 enforces, so a green suite could not
+ * prove this on its own. */
+export const MAX_OWNER_INVALIDATION_BOUND_PARAMETERS = 100;
+
+/** BUG-012 round-4 B1: a single (security, date) the write actually
+ * touched. NOT a range: `priceToleranceDays` is 0 on the value-history
+ * read path, so a price written for date D can only ever change D's own
+ * resolvability -- see `buildOwnerValueHistoryInvalidationStatementGroups`
+ * for why a range was wrong here. */
+export type OwnerValueHistoryInvalidationTarget = Readonly<{
+  securityId: string;
+  marketDate: string;
+}>;
+
 /**
  * BUG-012 round-3 B1 -- the OWNER-SCOPED, COMPLETE sibling of
  * `buildValueHistoryInvalidationStatementsForSecurities` above, for a write
@@ -745,17 +766,34 @@ export const MAX_OWNER_INVALIDATION_PORTFOLIOS = 200;
  *    client-supplied id.
  * 2. Targets are GROUPED per portfolio rather than per (portfolio,
  *    security): one `portfolio_value_history` DELETE plus one
- *    `portfolio_value_history_unresolvable` clear per portfolio, spanning
- *    `[MIN(fromDate), MAX(toDate)]` across the chunk securities THAT
- *    portfolio actually holds. A value-history row is a whole-portfolio
- *    aggregate, so one ranged DELETE per portfolio invalidates everything N
- *    per-security DELETEs would have (a superset only in also covering any
- *    calendar date BETWEEN two targeted dates -- deleting a cached row is
- *    always safe, the read path re-derives it honestly, and a cleared mark
- *    is simply re-attempted). The statement count is therefore
- *    2 x (the owner's portfolios holding any chunk security), INDEPENDENT
- *    of how many securities the chunk carries -- the property that makes a
- *    per-chunk budget expressible at all.
+ *    `portfolio_value_history_unresolvable` clear per portfolio, over the
+ *    EXACT SET of dates the chunk wrote for the securities THAT portfolio
+ *    actually holds (`value_date IN (?, ...)`). A value-history row is a
+ *    whole-portfolio aggregate, so one grouped DELETE per portfolio
+ *    invalidates exactly what N per-security single-date DELETEs would
+ *    have -- the same set, neither more nor less. The statement count is
+ *    therefore 2 x (the owner's portfolios holding any chunk security),
+ *    INDEPENDENT of how many securities the chunk carries -- the property
+ *    that makes a per-chunk budget expressible at all.
+ *
+ * **BUG-012 round-4 B1 -- why this is a SET and not a `BETWEEN` range.**
+ * Round 3 folded each portfolio's targets into `[MIN(fromDate),
+ * MAX(toDate)]` and deleted the whole span, arguing a superset was
+ * harmless. It is not. `marketDate` comes verbatim from each instrument's
+ * Sharesight `current_price_updated_at` (`domain/sharesight/
+ * price-accretion.ts`), so ONE halted/suspended/unlisted holding whose
+ * last price is months old drags `MIN` months behind `MAX`, and the span
+ * deletes every stored row and every mark in between -- re-done on every
+ * hourly tick. With the read bound at 10 dates per call and the cron at 20
+ * per tick, a span wider than ~20 dates can never be rebuilt: it is
+ * BUG-010's own outage shape, and PRF-010 convergence can never be
+ * satisfied for that portfolio. Measured on a two-security fixture (one
+ * priced today, one 70 weekdays stale): 70 stored rows and 70 marks
+ * deleted, where the exact set deletes 2. It also cleared marks for dates
+ * the write CANNOT have made resolvable -- the read path's
+ * `priceToleranceDays` is 0, so a price on D affects only D -- contra
+ * `docs/DATA_MODEL.md`/`docs/CALCULATIONS.md`'s rule that a mark is
+ * cleared by a write that can make that date newly resolvable.
  *
  * Returns one 2-statement GROUP per affected portfolio (never a flat list)
  * so the caller can append as many groups as its own atomic batch has room
@@ -766,29 +804,21 @@ export const MAX_OWNER_INVALIDATION_PORTFOLIOS = 200;
 export async function buildOwnerValueHistoryInvalidationStatementGroups(
   client: SqlClient,
   userId: string,
-  targets: readonly ValueHistoryInvalidationTarget[],
+  targets: readonly OwnerValueHistoryInvalidationTarget[],
   maxPortfolios: number = MAX_OWNER_INVALIDATION_PORTFOLIOS,
 ): Promise<SqlStatement[][]> {
-  // Folded per security (MIN from / MAX to), never a last-write-wins Map:
-  // one chunk can legitimately carry two dates for the SAME security (the
+  // Accumulated as a SET per security, never a last-write-wins Map: one
+  // chunk can legitimately carry two dates for the SAME security (the
   // hourly refresh's own day plus an MKT-015 prior-day backfill), and
   // keeping only the last one would silently leave the other date's stale
   // row/mark in place.
-  const bySecurityId = new Map<string, { fromDate: string; toDate: string }>();
+  const datesBySecurityId = new Map<string, Set<string>>();
   for (const target of targets) {
-    const existing = bySecurityId.get(target.securityId);
-    if (!existing) {
-      bySecurityId.set(target.securityId, {
-        fromDate: target.fromDate,
-        toDate: target.toDate,
-      });
-      continue;
-    }
-    if (target.fromDate < existing.fromDate)
-      existing.fromDate = target.fromDate;
-    if (target.toDate > existing.toDate) existing.toDate = target.toDate;
+    const existing = datesBySecurityId.get(target.securityId);
+    if (existing) existing.add(target.marketDate);
+    else datesBySecurityId.set(target.securityId, new Set([target.marketDate]));
   }
-  const securityIds = [...bySecurityId.keys()];
+  const securityIds = [...datesBySecurityId.keys()];
   if (securityIds.length === 0) return [];
   // A ROW bound, not a portfolio bound: this result set is at most (the
   // owner's portfolios holding one of these securities) x (chunk
@@ -801,7 +831,10 @@ export async function buildOwnerValueHistoryInvalidationStatementGroups(
      ORDER BY portfolio_id ASC, security_id ASC LIMIT ?`,
     [userId, ...securityIds, maxPortfolios * securityIds.length + 1],
   );
-  const byPortfolioId = new Map<string, { fromDate: string; toDate: string }>();
+  // The UNION of the held securities' own dates -- so a portfolio holding
+  // only the stale security gets only the stale date, and one holding both
+  // gets both, never the calendar span between them.
+  const datesByPortfolioId = new Map<string, Set<string>>();
   for (const row of rows) {
     if (
       typeof row.portfolio_id !== "string" ||
@@ -809,38 +842,44 @@ export async function buildOwnerValueHistoryInvalidationStatementGroups(
     ) {
       continue;
     }
-    const target = bySecurityId.get(row.security_id);
-    if (!target) continue;
-    const existing = byPortfolioId.get(row.portfolio_id);
-    if (!existing) {
-      byPortfolioId.set(row.portfolio_id, {
-        fromDate: target.fromDate,
-        toDate: target.toDate,
-      });
-      continue;
-    }
-    // ISO `YYYY-MM-DD` text compares in true date order.
-    if (target.fromDate < existing.fromDate)
-      existing.fromDate = target.fromDate;
-    if (target.toDate > existing.toDate) existing.toDate = target.toDate;
+    const dates = datesBySecurityId.get(row.security_id);
+    if (!dates) continue;
+    const existing = datesByPortfolioId.get(row.portfolio_id);
+    if (existing) for (const date of dates) existing.add(date);
+    else datesByPortfolioId.set(row.portfolio_id, new Set(dates));
   }
-  if (byPortfolioId.size > maxPortfolios) {
+  if (datesByPortfolioId.size > maxPortfolios) {
     throw new Error("owner_value_history_invalidation_overflow");
   }
-  return [...byPortfolioId.entries()].map(([portfolioId, range]) => [
-    {
-      sql: `DELETE FROM portfolio_value_history
-            WHERE user_id = ? AND portfolio_id = ? AND value_date BETWEEN ? AND ?`,
-      params: [userId, portfolioId, range.fromDate, range.toDate],
-    },
-    {
-      // BUG-012: the paired mark clear -- a fresher/backfilled price for a
-      // security this portfolio holds can turn a `'no_priceable_security'`
-      // mark into a resolvable date, so it is cleared in the SAME unit as
-      // the value-history DELETE, never as a skippable follow-up.
-      sql: `DELETE FROM portfolio_value_history_unresolvable
-            WHERE user_id = ? AND portfolio_id = ? AND value_date BETWEEN ? AND ?`,
-      params: [userId, portfolioId, range.fromDate, range.toDate],
-    },
-  ]);
+  return [...datesByPortfolioId.entries()].map(([portfolioId, dateSet]) => {
+    // Sorted only for a deterministic, diffable parameter order; the SET is
+    // what carries the meaning, not the order.
+    const dates = [...dateSet].sort();
+    // Fail closed rather than emit a statement D1 would reject at runtime
+    // (the local node:sqlite backend would happily accept it, so the suite
+    // alone could never catch this).
+    if (dates.length + 2 > MAX_OWNER_INVALIDATION_BOUND_PARAMETERS) {
+      throw new Error("owner_value_history_invalidation_parameter_overflow");
+    }
+    const placeholders = dates.map(() => "?").join(",");
+    return [
+      {
+        sql: `DELETE FROM portfolio_value_history
+            WHERE user_id = ? AND portfolio_id = ? AND value_date IN (${placeholders})`,
+        params: [userId, portfolioId, ...dates],
+      },
+      {
+        // BUG-012: the paired mark clear -- a fresher/backfilled price for a
+        // security this portfolio holds can turn a `'no_priceable_security'`
+        // mark into a resolvable date, so it is cleared in the SAME unit as
+        // the value-history DELETE, never as a skippable follow-up. Scoped
+        // to the SAME exact dates: a mark for any other date is not
+        // something this write could have made resolvable, so clearing it
+        // would only force a pointless re-derivation.
+        sql: `DELETE FROM portfolio_value_history_unresolvable
+            WHERE user_id = ? AND portfolio_id = ? AND value_date IN (${placeholders})`,
+        params: [userId, portfolioId, ...dates],
+      },
+    ];
+  });
 }

@@ -28,6 +28,30 @@ export const SHARESIGHT_PRICE_PROVIDER_ID = "sharesight";
  * `MARKET_DATA_REFRESH_REPOSITORY_LIMITS.maxStatementsPerChunk` did. */
 const D1_MAX_STATEMENTS_PER_BATCH = 100;
 
+/** BUG-012 round-4: a DELIBERATE margin held back from
+ * `D1_MAX_STATEMENTS_PER_BATCH`, restoring the 10-statement headroom the
+ * round-2 implementation documented (90 of 100) and round 3 spent -- its
+ * derivation put the worst-case atomic batch at EXACTLY 100.
+ *
+ * Rationale, stated as a limitation rather than a measurement: this suite
+ * runs against node:sqlite, whose `batch()` is a local loop with no
+ * statement ceiling at all, so a green suite is not evidence that a batch
+ * of exactly 100 is accepted by production D1 -- and D1 has repeatedly
+ * proven stricter than the local driver on limits of this kind. Sitting
+ * exactly ON a documented ceiling also leaves no room for any future
+ * per-chunk statement (a watermark, a progress row) without silently
+ * re-breaching it. 10 is not derived from a measurement; it is the same
+ * headroom this module carried before round 3 removed it, and it costs
+ * only 5 inline portfolio groups (25 -> 20), with the remainder issued in
+ * follow-on batches rather than dropped. */
+const D1_BATCH_STATEMENT_MARGIN = 10;
+
+/** The statements one `batch()` call may actually contain here: D1's
+ * ceiling less the margin above. Every budget below derives from this, and
+ * the call site measures its remaining room against it too. */
+const MAX_STATEMENTS_PER_BATCH =
+  D1_MAX_STATEMENTS_PER_BATCH - D1_BATCH_STATEMENT_MARGIN;
+
 /** BRK-012B: each candidate security costs at most 2 statements in the
  * write half of this module's batch (1 guarded `security_provider_mappings`
  * ensure -- a no-op SELECT after that security's first successful run --
@@ -57,18 +81,31 @@ const MAX_SECURITIES_PER_CHUNK = 25;
  * The invalidation cost is therefore 2 statements per affected portfolio of
  * the writer's, independent of the chunk's security count:
  *
- * - `maxInvalidationPortfoliosPerWriteBatch` = (100 - 25*2) / 2 = 25
+ * BUG-012 round-4: every budget below is derived from
+ * `MAX_STATEMENTS_PER_BATCH` (= 100 - the deliberate
+ * `D1_BATCH_STATEMENT_MARGIN` of 10), not from D1's raw ceiling -- round 3
+ * derived them from the raw 100 and so put the worst-case atomic batch at
+ * EXACTLY 100, spending headroom this module had documented since round 2.
+ *
+ * - `maxInvalidationPortfoliosPerWriteBatch` = (90 - 25*2) / 2 = 20
  *   portfolio groups fit ALONGSIDE a full 25-security chunk's writes, in
- *   the same atomic batch. Computed from `D1_MAX_STATEMENTS_PER_BATCH` and
- *   `maxSecuritiesPerChunk`, never a hand-maintained literal; the call site
+ *   the same atomic batch (worst case 50 + 40 = 90 of D1's 100). Computed
+ *   from the constants, never a hand-maintained literal; the call site
  *   recomputes the remaining room from the batch it ACTUALLY built (a
  *   short chunk leaves room for more groups than this worst case).
- * - `maxInvalidationPortfoliosPerFollowOnBatch` = 100 / 2 = 50 groups per
+ * - `maxInvalidationPortfoliosPerFollowOnBatch` = 90 / 2 = 45 groups per
  *   follow-on `batch()` for any REMAINDER past that -- the remainder is
  *   ISSUED, never dropped. Pre-BUG-012-round-3 the excess was silently
  *   truncated by a `LIMIT`, which deterministically left marks and stale
  *   rows in place on every hourly run (reviewer-reproduced at 25 securities
  *   in one portfolio and at 22 portfolios on one security).
+ *
+ * The per-STATEMENT bound parameter count is bounded separately, by
+ * `buildOwnerValueHistoryInvalidationStatementGroups` itself: a group's
+ * two DELETEs bind `user_id` + `portfolio_id` + one parameter per targeted
+ * date, and a chunk carries at most `maxSecuritiesPerChunk` distinct
+ * market dates, so 27 of D1's 100-parameter ceiling in the worst case --
+ * asserted there, not assumed here.
  *
  * Multiple chunks run as separate atomic `batch()` calls (not one giant
  * transaction) -- safe because accretion is idempotent, so a chunk that
@@ -81,15 +118,17 @@ const MAX_SECURITIES_PER_CHUNK = 25;
 export const SHARESIGHT_PRICE_REFRESH_LIMITS = Object.freeze({
   maxSecuritiesPerChunk: MAX_SECURITIES_PER_CHUNK,
   d1MaxStatementsPerBatch: D1_MAX_STATEMENTS_PER_BATCH,
+  d1BatchStatementMargin: D1_BATCH_STATEMENT_MARGIN,
+  maxStatementsPerBatch: MAX_STATEMENTS_PER_BATCH,
   statementsPerSecurity: STATEMENTS_PER_SECURITY,
   statementsPerInvalidatedPortfolio: STATEMENTS_PER_INVALIDATED_PORTFOLIO,
   maxInvalidationPortfoliosPerWriteBatch: Math.floor(
-    (D1_MAX_STATEMENTS_PER_BATCH -
+    (MAX_STATEMENTS_PER_BATCH -
       MAX_SECURITIES_PER_CHUNK * STATEMENTS_PER_SECURITY) /
       STATEMENTS_PER_INVALIDATED_PORTFOLIO,
   ),
   maxInvalidationPortfoliosPerFollowOnBatch: Math.floor(
-    D1_MAX_STATEMENTS_PER_BATCH / STATEMENTS_PER_INVALIDATED_PORTFOLIO,
+    MAX_STATEMENTS_PER_BATCH / STATEMENTS_PER_INVALIDATED_PORTFOLIO,
   ),
   maxUsersPerRun: 50,
 });
@@ -348,10 +387,15 @@ export async function upsertSharesightPriceObservations(
     // makes the cost 2 statements per affected portfolio instead of 2 per
     // (portfolio, security) row, so a 25-security chunk in ONE portfolio
     // costs 2 statements, not 50.
+    //
+    // BUG-012 round-4 B1: one target per (security, marketDate) -- the
+    // EXACT dates this chunk wrote, never a folded range. A halted or
+    // unlisted instrument's `current_price_updated_at` can be months
+    // behind a live one's, and the round-3 `[MIN, MAX]` span deleted every
+    // stored row and mark in between on every hourly tick.
     const invalidationTargets = batchCandidates.map((candidate) => ({
       securityId: candidate.securityId,
-      fromDate: candidate.marketDate,
-      toDate: candidate.marketDate,
+      marketDate: candidate.marketDate,
     }));
     const invalidationGroups =
       await buildOwnerValueHistoryInvalidationStatementGroups(
@@ -365,7 +409,7 @@ export async function upsertSharesightPriceObservations(
     const inlineGroupCapacity = Math.max(
       0,
       Math.floor(
-        (SHARESIGHT_PRICE_REFRESH_LIMITS.d1MaxStatementsPerBatch -
+        (SHARESIGHT_PRICE_REFRESH_LIMITS.maxStatementsPerBatch -
           statements.length) /
           SHARESIGHT_PRICE_REFRESH_LIMITS.statementsPerInvalidatedPortfolio,
       ),
@@ -403,7 +447,7 @@ export async function upsertSharesightPriceObservations(
     // another write touches the date -- the identical residual the intraday
     // rollup's own separate-batch invalidation already accepts. This tail
     // only exists at all for an owner holding one chunk's securities across
-    // more than ~25 of their OWN portfolios.
+    // more than ~20 of their OWN portfolios.
     for (const followOnGroups of chunk(
       tailGroups,
       SHARESIGHT_PRICE_REFRESH_LIMITS.maxInvalidationPortfoliosPerFollowOnBatch,
