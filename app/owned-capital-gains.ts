@@ -47,6 +47,7 @@ import {
   advanceCalculationRuns,
   READ_TIME_CALCULATION_BUDGET,
 } from "./calculation-executor-service.ts";
+import { emitStructuredLog } from "../domain/observability/index.ts";
 
 const MAX_ALLOCATIONS = 10_000;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -167,17 +168,74 @@ function basisStatusValue(row: Row): CapitalGainAllocationFact["basisStatus"] {
 // imported: this module and `owned-holdings.ts` are designed as
 // independent, parallel composition layers (see this file's header
 // comment) and neither imports the other's server-only code.
+//
+// BUG-017 round 2 (review B1, corrected after review 2026-09-03): mirrors
+// `app/owned-holdings.ts`'s identical correction verbatim -- the
+// candidate set is scoped to runs NEWER than the published run (`r`,
+// joined below in `PUBLICATION_SQL`) via the same BUG-020 `(created_at,
+// rowid)` total order, not merely "any non-superseded queued/running/
+// failed run" -- see that module's comment for the full reproduction
+// (a terminally failed OLD run kept flagging "failed" forever after a
+// later run completed and published).
 const PENDING_RUN_STATUS_SUBQUERY = `(SELECT cr.status FROM calculation_runs cr
    WHERE cr.user_id = pp.user_id AND cr.portfolio_id = pp.portfolio_id
      AND cr.pipeline = 'projection'
      AND cr.status IN ('queued', 'running', 'failed')
      AND (cr.status <> 'failed' OR cr.failure_category IS NULL OR cr.failure_category <> 'superseded_by_newer_run')
+     AND (cr.created_at > r.created_at OR (cr.created_at = r.created_at AND cr.rowid > r.rowid))
    ORDER BY cr.created_at DESC, cr.rowid DESC LIMIT 1)`;
+// BUG-017 F1 (follow-up, recorded not fixed): identical cost profile to
+// `app/owned-holdings.ts`'s own F1 note -- this subquery reads every
+// queued/running/failed row (superseded included) for the portfolio and
+// falls back to `USE TEMP B-TREE FOR ORDER BY`; measured linear (0.07 ms
+// at 500 rows, 0.79 ms at 5,000; ~211 superseded rows already on the real
+// account). Needs a `(user_id, portfolio_id, status, created_at)` index or
+// superseded-row pruning; tracked as a PRF follow-up, not fixed here.
 function pendingStateFromRow(row: Row): ProjectionPendingState {
   const reason = optionalText(row, "pending_run_status");
   if (reason === "queued" || reason === "running" || reason === "failed")
     return { pending: true, reason };
   return { pending: false };
+}
+// BUG-017 F2: identical purpose and shape to `app/owned-holdings.ts`'s own
+// `logStuckProjectionPending` -- see that module's doc comment for the
+// full rationale. Deliberately duplicated rather than imported, matching
+// this file's own established parallel-module convention above.
+async function logStuckProjectionPending(
+  client: SqlClient,
+  input: {
+    userId: string;
+    portfolioId: string;
+    publishedRunId: string;
+    reason: "queued" | "running" | "failed";
+  },
+): Promise<void> {
+  const pendingRun = await client.get<Row>(
+    `SELECT cr.id, cr.status, cr.failure_category FROM calculation_runs cr
+     JOIN calculation_runs r ON r.id = ? AND r.user_id = cr.user_id AND r.portfolio_id = cr.portfolio_id
+     WHERE cr.user_id = ? AND cr.portfolio_id = ? AND cr.pipeline = 'projection'
+       AND cr.status IN ('queued', 'running', 'failed')
+       AND (cr.status <> 'failed' OR cr.failure_category IS NULL OR cr.failure_category <> 'superseded_by_newer_run')
+       AND (cr.created_at > r.created_at OR (cr.created_at = r.created_at AND cr.rowid > r.rowid))
+     ORDER BY cr.created_at DESC, cr.rowid DESC LIMIT 1`,
+    [input.publishedRunId, input.userId, input.portfolioId],
+  );
+  emitStructuredLog({
+    level: "warn",
+    event: "projection.pending",
+    action: "owned_capital_gains.stuck",
+    result: "failure",
+    requestId: "read-time-self-heal",
+    metadata: {
+      portfolioId: input.portfolioId,
+      reason: input.reason,
+      pendingRunId: pendingRun ? requiredText(pendingRun, "id") : null,
+      pendingRunStatus: pendingRun ? requiredText(pendingRun, "status") : null,
+      pendingRunFailureCategory: pendingRun
+        ? optionalText(pendingRun, "failure_category")
+        : null,
+    },
+  });
 }
 
 // UI-030: shared shape returned by the internal loader below -- both
@@ -314,6 +372,14 @@ async function loadCapitalGainDisposalRows(
       publication = reReadPublication;
       projectionPending = pendingStateFromRow(publication);
     }
+  }
+  if (projectionPending.pending) {
+    await logStuckProjectionPending(client, {
+      userId,
+      portfolioId,
+      publishedRunId: requiredText(publication, "calculation_run_id"),
+      reason: projectionPending.reason,
+    }).catch(() => undefined);
   }
   const runId = requiredText(publication, "calculation_run_id");
   const version = integer(publication, "calculation_version");

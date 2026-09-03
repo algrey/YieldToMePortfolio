@@ -291,6 +291,22 @@ export async function loadAuthenticatedWorkspace(
         // a `loadOwnedRealisedGainTotals` failure still never surfaces here
         // -- only a `loadOwnedHoldings` failure still falls through to this
         // block's `catch` below, exactly as before.
+        //
+        // BUG-017 F4 (accepted, documented not fixed): `loadOwnedHoldings`
+        // and `loadOwnedRealisedGainTotals` both read `calculation_runs`/
+        // `projection_publications` for the SAME portfolio and, when a
+        // newer run is pending, each independently attempts the SAME
+        // bounded read-time self-heal (`advanceCalculationRuns`). Running
+        // them concurrently (this `Promise.all`) means only ONE of the two
+        // wins the claim lease; the loser's own self-heal call makes zero
+        // progress (~4 extra, otherwise-wasted statements) and simply
+        // falls through to its existing "still pending" handling -- never
+        // a throw, never a wrong result, just a few statements spent on a
+        // lease it was never going to win. Accepted because both loaders
+        // need the SAME published run to be current, the lease semantics
+        // already bound the wasted cost, and serialising the two reads
+        // purely to avoid this would reintroduce the extra sequential
+        // round trip PRF-003 removed above.
         const [holdings, realised] = await Promise.all([
           loadOwnedHoldings(
             client,

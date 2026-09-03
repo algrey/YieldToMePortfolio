@@ -55,6 +55,7 @@ import {
   advanceCalculationRuns,
   READ_TIME_CALCULATION_BUDGET,
 } from "./calculation-executor-service.ts";
+import { emitStructuredLog } from "../domain/observability/index.ts";
 
 const MAX_HELD = 500;
 const MAX_PROJECTIONS = 500;
@@ -154,17 +155,105 @@ function optionalText(row: Row, key: string, pattern?: RegExp): string | null {
 // publication query's own index usage (`projection_publications_owner_
 // portfolio_unique`, `calculation_runs_id_user_portfolio_unique`,
 // `portfolios_id_user_id_unique`) untouched.
+//
+// BUG-017 round 2 (review B1, 2026-09-03 -- corrected after review: the
+// candidate set below is "newer than the PUBLISHED run", not merely "any
+// non-superseded queued/running/failed run"): the round-1 candidate set
+// omitted `completed` entirely, so a terminally FAILED run older than the
+// run that eventually succeeded and published kept matching forever --
+// reproduced as run-1 completed -> run-2 failed (`oversell`) -> run-3
+// queued, advanced, completed and published, with this subquery still
+// returning run-2's `failed` status (the newest row still IN the
+// `queued`/`running`/`failed` set) even though the served publication was
+// fully current. Rather than adding `completed` to the candidate set
+// (which would require also re-deriving "is this completed row actually
+// the published one" -- more complex and duplicating the outer query's
+// own join), the fix instead scopes every candidate to runs NEWER than
+// the run this SAME row's publication actually references (`r`, joined
+// below in `PUBLICATION_SQL`) using the identical `(created_at, rowid)`
+// total order BUG-020 established -- a candidate older than or equal to
+// the published run can never be "news" regardless of its own status.
 const PENDING_RUN_STATUS_SUBQUERY = `(SELECT cr.status FROM calculation_runs cr
    WHERE cr.user_id = pp.user_id AND cr.portfolio_id = pp.portfolio_id
      AND cr.pipeline = 'projection'
      AND cr.status IN ('queued', 'running', 'failed')
      AND (cr.status <> 'failed' OR cr.failure_category IS NULL OR cr.failure_category <> 'superseded_by_newer_run')
+     AND (cr.created_at > r.created_at OR (cr.created_at = r.created_at AND cr.rowid > r.rowid))
    ORDER BY cr.created_at DESC, cr.rowid DESC LIMIT 1)`;
+// BUG-017 F1 (follow-up, recorded not fixed): this subquery's own WHERE
+// clause reads every queued/running/failed row -- including every
+// `superseded_by_newer_run` row, since the `failure_category` exclusion is
+// a filter, not an index predicate -- for this user/portfolio, and D1's
+// planner falls back to `USE TEMP B-TREE FOR ORDER BY` once it has that
+// candidate set (confirmed via EXPLAIN QUERY PLAN). Superseded rows
+// accumulate one per committed import row/ledger mutation batch and are
+// never pruned (~211 already on the real production account). Measured
+// against a synthetic fixture: 0.07 ms at 500 such rows, 0.79 ms at 5,000,
+// scaling linearly -- bounded today, but not indefinitely. Needs either a
+// dedicated `(user_id, portfolio_id, status, created_at)` index or a
+// pruning job for `superseded_by_newer_run` rows; tracked as a PRF
+// follow-up, not fixed here (out of this task's scope).
 function pendingStateFromRow(row: Row): ProjectionPendingState {
   const reason = optionalText(row, "pending_run_status");
   if (reason === "queued" || reason === "running" || reason === "failed")
     return { pending: true, reason };
   return { pending: false };
+}
+// BUG-017 F2 (TASKS.md Risks line: "a run permanently stuck ... log it"):
+// fires exactly once per read that ends up SERVING a possibly-stale
+// publication -- a terminal `failed` newer run (nothing will ever retry
+// it) or a `queued`/`running` run the read-time self-heal above just
+// failed to advance (lease contention, budget exhaustion). One extra,
+// best-effort D1 statement (only paid on this rare path -- the common
+// "nothing pending" path never calls this) re-resolves the SAME candidate
+// this request's own `PENDING_RUN_STATUS_SUBQUERY` matched, this time
+// selecting its id/failure_category too, purely for diagnostics. Never
+// throws into the caller: a logging failure must not break an otherwise
+// honest read, exactly like `advanceCalculationRuns(...).catch(() =>
+// undefined)` above. Metadata is userId-free -- `portfolioId` itself is
+// redacted by `domain/observability/redaction.ts`'s `SENSITIVE_KEY`
+// pattern before it ever reaches a sink, matching every other structured
+// log in this codebase; `pendingRunId`/`pendingRunStatus`/
+// `pendingRunFailureCategory` are internal calculation-run identifiers,
+// not user data, so they are logged in full to make the stuck run
+// findable. Guarded against noise only by LEVEL (`warn`), never by
+// suppressing repeats -- a stuck run flagged on every load is precisely
+// the signal this exists to surface.
+async function logStuckProjectionPending(
+  client: SqlClient,
+  input: {
+    userId: string;
+    portfolioId: string;
+    publishedRunId: string;
+    reason: "queued" | "running" | "failed";
+  },
+): Promise<void> {
+  const pendingRun = await client.get<Row>(
+    `SELECT cr.id, cr.status, cr.failure_category FROM calculation_runs cr
+     JOIN calculation_runs r ON r.id = ? AND r.user_id = cr.user_id AND r.portfolio_id = cr.portfolio_id
+     WHERE cr.user_id = ? AND cr.portfolio_id = ? AND cr.pipeline = 'projection'
+       AND cr.status IN ('queued', 'running', 'failed')
+       AND (cr.status <> 'failed' OR cr.failure_category IS NULL OR cr.failure_category <> 'superseded_by_newer_run')
+       AND (cr.created_at > r.created_at OR (cr.created_at = r.created_at AND cr.rowid > r.rowid))
+     ORDER BY cr.created_at DESC, cr.rowid DESC LIMIT 1`,
+    [input.publishedRunId, input.userId, input.portfolioId],
+  );
+  emitStructuredLog({
+    level: "warn",
+    event: "projection.pending",
+    action: "owned_holdings.stuck",
+    result: "failure",
+    requestId: "read-time-self-heal",
+    metadata: {
+      portfolioId: input.portfolioId,
+      reason: input.reason,
+      pendingRunId: pendingRun ? requiredText(pendingRun, "id") : null,
+      pendingRunStatus: pendingRun ? requiredText(pendingRun, "status") : null,
+      pendingRunFailureCategory: pendingRun
+        ? optionalText(pendingRun, "failure_category")
+        : null,
+    },
+  });
 }
 function integer(row: Row, key: string): number {
   const value = field(row, key);
@@ -699,6 +788,14 @@ export async function loadOwnedHoldings(
       publication = reReadPublication;
       projectionPending = pendingStateFromRow(publication);
     }
+  }
+  if (projectionPending.pending) {
+    await logStuckProjectionPending(client, {
+      userId,
+      portfolioId,
+      publishedRunId: requiredText(publication, "calculation_run_id"),
+      reason: projectionPending.reason,
+    }).catch(() => undefined);
   }
   const runId = requiredText(publication, "calculation_run_id");
   const version = integer(publication, "calculation_version");

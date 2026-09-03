@@ -401,6 +401,117 @@ test("BUG-017: a run superseded by a newer, now-published run is excluded -- it 
 });
 
 // ---------------------------------------------------------------------------
+// Round 2 (review B1, BLOCKING): the round-1 candidate set never compared
+// a candidate run against the PUBLISHED run -- only against its own
+// status -- so a terminally failed OLD run kept masking a fully current
+// portfolio as "recalculation failed" forever, even after a LATER run
+// completed and published. Reviewer-reproduced sequence, pinned here:
+// run-1 completed -> run-2 failed (`oversell`) -> run-3 queued, advanced,
+// completed and published. Covers BOTH directions the fix must get right:
+// while run-2's failure is still the newest terminal state, the flag must
+// correctly report pending/failed (the fix must not swallow a genuine
+// newer failure); once run-3 completes and publishes, the flag must clear
+// (the fix must stop a stale older failure from masking a newer success).
+// ---------------------------------------------------------------------------
+
+test("BUG-017 B1 regression: a terminally-failed run is excluded once a LATER run completes and publishes, but still reports pending/failed beforehand", async () => {
+  const database = await migratedDatabase();
+  insertTransaction(database, {
+    id: "buy-1",
+    type: "buy",
+    tradeAt: "2026-01-01T00:00:00Z",
+    quantityDecimal: "3",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "30",
+  });
+  const client = createSqliteSqlClient(database);
+  await queueLedgerMutationRun(client, {
+    id: "run-1",
+    ledgerHighWater: "buy-1",
+    localDate: "2026-01-01",
+    now: "2026-08-18T00:00:00Z",
+  });
+  await advanceCalculationRuns(
+    { client },
+    { userId: "user-a", portfolioId: "portfolio-a", budget: 200 },
+  );
+  assert.equal(await publicationCount(client, "user-a", "portfolio-a"), 1);
+
+  // A genuinely poisoned run, newer than the published run-1.
+  insertTransaction(database, {
+    id: "buy-2",
+    type: "buy",
+    tradeAt: "2026-01-02T00:00:00Z",
+    quantityDecimal: "4",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "40",
+  });
+  await queueLedgerMutationRun(client, {
+    id: "run-2",
+    ledgerHighWater: "buy-2",
+    localDate: "2026-01-02",
+    now: "2026-08-19T00:00:00Z",
+  });
+  database.exec(`
+    UPDATE calculation_runs SET status = 'failed', failure_category = 'oversell', attempt = 3
+    WHERE id = 'run-2'
+  `);
+
+  // (inverse direction) While run-2's failure is the newest terminal
+  // state and nothing newer has published, the flag must still say so --
+  // the fix must not over-correct into silently ignoring a genuine
+  // pending failure.
+  const stillFailed = await loadOwnedHoldings(
+    client,
+    "user-a",
+    "portfolio-a",
+    new Date("2026-08-19T02:00:00Z"),
+  );
+  assert.deepEqual(stillFailed.projectionPending, {
+    pending: true,
+    reason: "failed",
+  });
+
+  // A THIRD, later ledger mutation queues a fresh run; it is claimable
+  // and unrelated to run-2's poisoned state, so a self-heal (or an
+  // explicit advance, as here, mirroring "cron eventually runs") carries
+  // it to completion and publication.
+  insertTransaction(database, {
+    id: "buy-3",
+    type: "buy",
+    tradeAt: "2026-01-03T00:00:00Z",
+    quantityDecimal: "5",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "50",
+  });
+  await queueLedgerMutationRun(client, {
+    id: "run-3",
+    ledgerHighWater: "buy-3",
+    localDate: "2026-01-03",
+    now: "2026-08-20T00:00:00Z",
+  });
+  const third = await advanceCalculationRuns(
+    { client },
+    { userId: "user-a", portfolioId: "portfolio-a", budget: 200 },
+  );
+  assert.equal(third.completed, 1);
+  assert.equal(await publicationCount(client, "user-a", "portfolio-a"), 1);
+
+  // (main B1 fix) run-3 is now the published run; run-2's stale terminal
+  // failure -- OLDER than the now-published run -- must no longer surface
+  // at all. Before the fix this stayed `{ pending: true, reason: "failed"
+  // }` forever, on a fully current portfolio.
+  const holdings = await loadOwnedHoldings(
+    client,
+    "user-a",
+    "portfolio-a",
+    new Date("2026-08-20T02:00:00Z"),
+  );
+  assert.deepEqual(holdings.projectionPending, { pending: false });
+  assert.equal(holdings.rows[0]?.quantity, "12");
+});
+
+// ---------------------------------------------------------------------------
 // (f) ownership: another owner's queued run never flags this owner's
 //     portfolio.
 // ---------------------------------------------------------------------------
@@ -445,6 +556,91 @@ test("BUG-017 (f): another user's queued run never flags this user's own up-to-d
     new Date("2026-08-20T02:00:00Z"),
   );
   assert.deepEqual(holdings.projectionPending, { pending: false });
+});
+
+// ---------------------------------------------------------------------------
+// F2 (TASKS.md Risks line: "a run permanently stuck ... log it"): a
+// warn-level structured log fires exactly once, carrying the pending run's
+// own identity for diagnosis, whenever a read ends up serving a
+// possibly-stale publication. Uses the SAME console.log capture pattern
+// `tests/imp-003b.test.ts` established for `emitStructuredLog`'s default
+// sink (monkey-patch, collect, restore in `finally`).
+// ---------------------------------------------------------------------------
+
+test("BUG-017 F2: a terminally-failed pending state emits one warn-level structured log naming the stuck run", async () => {
+  const database = await migratedDatabase();
+  insertTransaction(database, {
+    id: "buy-1",
+    type: "buy",
+    tradeAt: "2026-01-01T00:00:00Z",
+    quantityDecimal: "3",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "30",
+  });
+  const client = createSqliteSqlClient(database);
+  await queueLedgerMutationRun(client, {
+    id: "run-1",
+    ledgerHighWater: "buy-1",
+    localDate: "2026-01-01",
+    now: "2026-08-18T00:00:00Z",
+  });
+  await advanceCalculationRuns(
+    { client },
+    { userId: "user-a", portfolioId: "portfolio-a", budget: 200 },
+  );
+  insertTransaction(database, {
+    id: "buy-2",
+    type: "buy",
+    tradeAt: "2026-01-02T00:00:00Z",
+    quantityDecimal: "4",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "40",
+  });
+  await queueLedgerMutationRun(client, {
+    id: "run-2",
+    ledgerHighWater: "buy-2",
+    localDate: "2026-01-02",
+    now: "2026-08-19T00:00:00Z",
+  });
+  database.exec(`
+    UPDATE calculation_runs SET status = 'failed', failure_category = 'oversell', attempt = 3
+    WHERE id = 'run-2'
+  `);
+
+  const logLines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: unknown) => {
+    logLines.push(String(line));
+  };
+  try {
+    await loadOwnedHoldings(
+      client,
+      "user-a",
+      "portfolio-a",
+      new Date("2026-08-19T02:00:00Z"),
+    );
+  } finally {
+    console.log = originalLog;
+  }
+
+  const stuckLines = logLines
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((event) => event.action === "owned_holdings.stuck");
+  assert.equal(stuckLines.length, 1);
+  const event = stuckLines[0]!;
+  assert.equal(event.level, "warn");
+  assert.equal(event.event, "projection.pending");
+  assert.equal(event.result, "failure");
+  const metadata = event.metadata as Record<string, unknown>;
+  // `portfolioId` is redacted by `domain/observability/redaction.ts`'s
+  // `SENSITIVE_KEY` pattern before it reaches the sink -- this is the same
+  // app-wide behaviour every other structured log already gets, not a gap
+  // in this log call.
+  assert.equal(metadata.portfolioId, "[REDACTED]");
+  assert.equal(metadata.reason, "failed");
+  assert.equal(metadata.pendingRunId, "run-2");
+  assert.equal(metadata.pendingRunStatus, "failed");
+  assert.equal(metadata.pendingRunFailureCategory, "oversell");
 });
 
 // ---------------------------------------------------------------------------
@@ -585,6 +781,176 @@ test("BUG-017 parity (owned-capital-gains): a terminally-failed newer run is a d
     `SELECT attempt FROM calculation_runs WHERE id = 'run-2'`,
   );
   assert.equal(run?.attempt, 2);
+});
+
+test("BUG-017 B1 regression parity (owned-capital-gains): a terminally-failed run is excluded once a LATER run completes and publishes, but still reports pending/failed beforehand", async () => {
+  const database = await migratedDatabase();
+  insertTransaction(database, {
+    id: "buy-1",
+    type: "buy",
+    tradeAt: "2024-01-01T00:00:00Z",
+    quantityDecimal: "10",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "100",
+  });
+  insertTransaction(database, {
+    id: "sell-1",
+    type: "sell",
+    tradeAt: "2026-01-15T00:00:00Z",
+    quantityDecimal: "5",
+    unitPriceDecimal: "20",
+    grossAmountDecimal: "100",
+  });
+  const client = createSqliteSqlClient(database);
+  await queueLedgerMutationRun(client, {
+    id: "run-1",
+    ledgerHighWater: "sell-1",
+    localDate: "2026-01-15",
+    now: "2026-08-18T00:00:00Z",
+  });
+  await advanceCalculationRuns(
+    { client },
+    { userId: "user-a", portfolioId: "portfolio-a", budget: 200 },
+  );
+
+  insertTransaction(database, {
+    id: "sell-2",
+    type: "sell",
+    tradeAt: "2026-02-01T00:00:00Z",
+    quantityDecimal: "3",
+    unitPriceDecimal: "25",
+    grossAmountDecimal: "75",
+  });
+  await queueLedgerMutationRun(client, {
+    id: "run-2",
+    ledgerHighWater: "sell-2",
+    localDate: "2026-02-01",
+    now: "2026-08-19T00:00:00Z",
+  });
+  database.exec(`
+    UPDATE calculation_runs SET status = 'failed', failure_category = 'oversell', attempt = 2
+    WHERE id = 'run-2'
+  `);
+
+  // (inverse direction) still the newest terminal state -- must still
+  // report pending/failed.
+  const stillFailed = await loadOwnedCapitalGains(
+    client,
+    "user-a",
+    "portfolio-a",
+    new Date("2026-08-19T02:00:00Z"),
+  );
+  assert.deepEqual(stillFailed.projectionPending, {
+    pending: true,
+    reason: "failed",
+  });
+
+  // A later, unrelated disposal queues a fresh run that completes and
+  // publishes.
+  insertTransaction(database, {
+    id: "sell-3",
+    type: "sell",
+    tradeAt: "2026-03-01T00:00:00Z",
+    quantityDecimal: "2",
+    unitPriceDecimal: "30",
+    grossAmountDecimal: "60",
+  });
+  await queueLedgerMutationRun(client, {
+    id: "run-3",
+    ledgerHighWater: "sell-3",
+    localDate: "2026-03-01",
+    now: "2026-08-20T00:00:00Z",
+  });
+  const third = await advanceCalculationRuns(
+    { client },
+    { userId: "user-a", portfolioId: "portfolio-a", budget: 200 },
+  );
+  assert.equal(third.completed, 1);
+
+  // (main B1 fix) run-3 is now published; run-2's stale terminal failure
+  // -- older than the now-published run -- must no longer surface.
+  const history = await loadOwnedCapitalGains(
+    client,
+    "user-a",
+    "portfolio-a",
+    new Date("2026-08-20T02:00:00Z"),
+  );
+  assert.deepEqual(history.projectionPending, { pending: false });
+  assert.equal(history.disposalCount, 3);
+});
+
+test("BUG-017 F2 parity (owned-capital-gains): a terminally-failed pending state emits one warn-level structured log naming the stuck run", async () => {
+  const database = await migratedDatabase();
+  insertTransaction(database, {
+    id: "buy-1",
+    type: "buy",
+    tradeAt: "2024-01-01T00:00:00Z",
+    quantityDecimal: "10",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "100",
+  });
+  insertTransaction(database, {
+    id: "sell-1",
+    type: "sell",
+    tradeAt: "2026-01-15T00:00:00Z",
+    quantityDecimal: "5",
+    unitPriceDecimal: "20",
+    grossAmountDecimal: "100",
+  });
+  const client = createSqliteSqlClient(database);
+  await queueLedgerMutationRun(client, {
+    id: "run-1",
+    ledgerHighWater: "sell-1",
+    localDate: "2026-01-15",
+    now: "2026-08-18T00:00:00Z",
+  });
+  await advanceCalculationRuns(
+    { client },
+    { userId: "user-a", portfolioId: "portfolio-a", budget: 200 },
+  );
+  insertTransaction(database, {
+    id: "sell-2",
+    type: "sell",
+    tradeAt: "2026-02-01T00:00:00Z",
+    quantityDecimal: "3",
+    unitPriceDecimal: "25",
+    grossAmountDecimal: "75",
+  });
+  await queueLedgerMutationRun(client, {
+    id: "run-2",
+    ledgerHighWater: "sell-2",
+    localDate: "2026-02-01",
+    now: "2026-08-19T00:00:00Z",
+  });
+  database.exec(`
+    UPDATE calculation_runs SET status = 'failed', failure_category = 'oversell', attempt = 2
+    WHERE id = 'run-2'
+  `);
+
+  const logLines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: unknown) => {
+    logLines.push(String(line));
+  };
+  try {
+    await loadOwnedCapitalGains(
+      client,
+      "user-a",
+      "portfolio-a",
+      new Date("2026-08-19T02:00:00Z"),
+    );
+  } finally {
+    console.log = originalLog;
+  }
+
+  const stuckLines = logLines
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((event) => event.action === "owned_capital_gains.stuck");
+  assert.equal(stuckLines.length, 1);
+  const metadata = stuckLines[0]!.metadata as Record<string, unknown>;
+  assert.equal(metadata.reason, "failed");
+  assert.equal(metadata.pendingRunId, "run-2");
+  assert.equal(metadata.pendingRunFailureCategory, "oversell");
 });
 
 // ---------------------------------------------------------------------------
@@ -739,6 +1105,13 @@ test("BUG-017 (e) render: the Holdings screen shows the recalculating notice whe
     html,
     /Recalculating after your latest ledger change — figures may not yet reflect it\./,
   );
+  // F3: the notice must be an announced live region, not merely visible
+  // text -- matches the established `.unavailable`/`role="status"`
+  // advisory convention this file's other notices already use.
+  assert.match(
+    html,
+    /<p class="unavailable" role="status">Recalculating after your latest ledger change/,
+  );
 });
 
 test("BUG-017 (e) render: the Holdings screen shows the distinct failed-recalculation notice for reason 'failed'", () => {
@@ -748,6 +1121,10 @@ test("BUG-017 (e) render: the Holdings screen shows the distinct failed-recalcul
   assert.match(
     html,
     /The last recalculation failed — figures reflect the previous successful calculation\./,
+  );
+  assert.match(
+    html,
+    /<p class="unavailable" role="status">The last recalculation failed/,
   );
   assert.doesNotMatch(html, /Recalculating after your latest ledger change/);
 });
@@ -852,6 +1229,11 @@ test("BUG-017 (e) render: the Overview screen shows the recalculating notice whe
     html,
     /Recalculating after your latest ledger change — figures may not yet reflect it\./,
   );
+  // F3: same announced-live-region requirement as the Holdings screen.
+  assert.match(
+    html,
+    /<p class="unavailable" role="status">Recalculating after your latest ledger change/,
+  );
 });
 
 test("BUG-017 (e) render: the Overview screen shows no notice when holdingsProjectionPending is absent", () => {
@@ -905,10 +1287,101 @@ test("BUG-017 (e) render: the Capital gains screen shows the recalculating notic
     html,
     /Recalculating after your latest ledger change — figures may not yet reflect it\./,
   );
+  // F3: same announced-live-region requirement as the other two surfaces.
+  assert.match(
+    html,
+    /<p class="unavailable" role="status">Recalculating after your latest ledger change/,
+  );
 });
 
 test("BUG-017 (e) render: the Capital gains screen shows no notice when projectionPending is false", () => {
   const html = renderGainsScreen(JSON.stringify({ pending: false }));
   assert.doesNotMatch(html, /Recalculating after your latest ledger change/);
   assert.doesNotMatch(html, /The last recalculation failed/);
+});
+
+// F3: `capital-gains-screen.tsx:~548`'s POPULATED branch
+// (`disposalCount > 0`) was uncovered -- every existing gains render test
+// above exercises only the `disposalCount === 0` empty-state branch's OWN
+// `ProjectionPendingNotice` call at `:507`. This drives the real,
+// populated FY-table path with one disposal so the `:548` call site (and
+// the FY table it sits above) is actually rendered.
+function renderGainsScreenPopulated(projectionPendingJson: string): string {
+  const componentUrl = new URL(
+    "../app/components/capital-gains-screen.tsx",
+    import.meta.url,
+  ).href;
+  const fyTotal = {
+    endingYear: 2026,
+    label: "FY26",
+    window: { startDate: "2025-07-01", endDate: "2026-06-30" },
+    rows: [],
+    disposalCount: 1,
+    excludedIncompleteCount: 0,
+    excludedIncompleteSecurityNames: [],
+    partialCoverage: false,
+    totalDiscountableGainsGrossDecimal: "1000.00",
+    totalNonDiscountableGainsGrossDecimal: "0",
+    totalLossesDecimal: "0",
+    lossAppliedToNonDiscountableDecimal: "0",
+    lossAppliedToDiscountableDecimal: "0",
+    remainingNonDiscountableAfterLossDecimal: "0",
+    remainingDiscountableAfterLossDecimal: "1000.00",
+    discountRateDecimal: "0.50",
+    discountAppliedDecimal: "500.00",
+    netCapitalGainEstimateDecimal: "500.00",
+    unabsorbedLossDecimal: "0",
+  };
+  const history = {
+    today: "2026-08-14",
+    financialYearStartMonth: 7,
+    baseCurrencyCode: "AUD",
+    disposalCount: 1,
+    fyTotals: [fyTotal],
+    historyCompleteFrom: "2025-07-01",
+    earliestTradeDate: "2025-08-01",
+    projectionPending: JSON.parse(projectionPendingJson),
+  };
+  const script = `
+    import { createElement } from "react";
+    import { renderToStaticMarkup } from "react-dom/server";
+    import { CapitalGainsScreen } from ${JSON.stringify(componentUrl)};
+    const props = ${JSON.stringify({
+      portfolioId: "portfolio-a",
+      holdingsHref: "/portfolio/portfolio-a/holdings",
+      result: { status: "ok", history },
+    })};
+    process.stdout.write(
+      renderToStaticMarkup(createElement(CapitalGainsScreen, props)),
+    );
+  `;
+  return execFileSync(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "--eval", script],
+    { encoding: "utf8" },
+  );
+}
+
+test("BUG-017 (e) render: the Capital gains screen shows the recalculating notice on the POPULATED (disposalCount > 0) branch", () => {
+  const html = renderGainsScreenPopulated(
+    JSON.stringify({ pending: true, reason: "queued" }),
+  );
+  assert.match(
+    html,
+    /Recalculating after your latest ledger change — figures may not yet reflect it\./,
+  );
+  assert.match(
+    html,
+    /<p class="unavailable" role="status">Recalculating after your latest ledger change/,
+  );
+  // Proves this is genuinely the populated branch, not a fallback to the
+  // empty-state short-circuit.
+  assert.doesNotMatch(html, /No disposals yet/);
+});
+
+test("BUG-017 (e) render: the Capital gains screen shows no notice on the POPULATED branch when projectionPending is false", () => {
+  const html = renderGainsScreenPopulated(JSON.stringify({ pending: false }));
+  assert.doesNotMatch(html, /Recalculating after your latest ledger change/);
+  assert.doesNotMatch(html, /The last recalculation failed/);
+  assert.doesNotMatch(html, /No disposals yet/);
 });
