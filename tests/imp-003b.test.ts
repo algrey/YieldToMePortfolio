@@ -647,6 +647,298 @@ test("BUG-016 review B1: a finalizing reversal across 6 dividend-bearing portfol
   );
 });
 
+/**
+ * Instrumented `SqlClient` wrapper: counts D1 queries/statements, records
+ * every atomic unit's size, and tracks the largest parameter list, exactly
+ * as the trade-only budget test above does inline.
+ */
+function countingClient(base: SqlClient): {
+  client: SqlClient;
+  counts: {
+    queries: number;
+    statements: number;
+    largestParameterCount: number;
+    batchSizes: number[];
+  };
+} {
+  const counts = {
+    queries: 0,
+    statements: 0,
+    largestParameterCount: 0,
+    batchSizes: [] as number[],
+  };
+  const client: SqlClient = {
+    async all(sql, params) {
+      counts.queries += 1;
+      counts.largestParameterCount = Math.max(
+        counts.largestParameterCount,
+        params?.length ?? 0,
+      );
+      return base.all(sql, params);
+    },
+    async get(sql, params) {
+      counts.queries += 1;
+      counts.largestParameterCount = Math.max(
+        counts.largestParameterCount,
+        params?.length ?? 0,
+      );
+      return base.get(sql, params);
+    },
+    async run(sql, params) {
+      counts.queries += 1;
+      counts.statements += 1;
+      counts.largestParameterCount = Math.max(
+        counts.largestParameterCount,
+        params?.length ?? 0,
+      );
+      return base.run(sql, params);
+    },
+    async batch(statements) {
+      counts.queries += statements.length;
+      counts.statements += statements.length;
+      counts.batchSizes.push(statements.length);
+      counts.largestParameterCount = Math.max(
+        counts.largestParameterCount,
+        ...statements.map((statement) => statement.params?.length ?? 0),
+      );
+      return base.batch!(statements);
+    },
+  };
+  return { client, counts };
+}
+
+// BUG-016 review round-3 B1 regression pin (precedent: tests/imp-003a.test.ts's
+// "commit touching exactly 25 distinct portfolios" test): the phase-2
+// dividend-rebuild INSERTs are N extra statements on the SAME invocation, so
+// the per-invocation budget has to be sized at the `maxAffectedPortfolios`
+// ceiling, not at the trade-only path. The previous 56 bound was already
+// exceeded at N=6 (56), N=7 (57), N=10 (60); N=25 -- the documented ceiling
+// itself -- measures 75 queries / 50 statements. This pins BOTH bounds at
+// exactly that ceiling, plus the atomic-unit bound the round-2 fix bought.
+test("BUG-016 review B1: a finalizing reversal at exactly the 25-portfolio ceiling stays inside the per-invocation D1 budgets", async () => {
+  const database = await migratedDatabase();
+  const portfolioCount = IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios;
+  assert.equal(portfolioCount, 25);
+  for (let index = 1; index <= portfolioCount; index += 1) {
+    seedDividendBearingPortfolio(database, index);
+  }
+  // Two trades as well: `maxChunkSize` is 2, so this single finalizing
+  // invocation carries the maximum trade work AND the maximum dividend work.
+  const { version } = await commitBatch(database, 2);
+  const { client, counts } = countingClient(createSqliteSqlClient(database));
+  const result = await createOwnedImportReversalRepository(client, {
+    chunkSize: IMPORT_REVERSAL_LIMITS.maxChunkSize,
+  }).reverse("user-a", "batch-a", reversalInput(version, "ceiling-reversal"));
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.status, "reversed");
+  // 2 per-transaction `ledger_mutation` ids + one `import_reverse` id per
+  // dividend-bearing portfolio.
+  assert.equal(result.rebuildJobIds.length, 2 + portfolioCount);
+  assert.ok(
+    counts.queries <= IMPORT_REVERSAL_LIMITS.maxQueriesPerInvocation,
+    `${counts.queries} D1 queries at the ${portfolioCount}-portfolio ceiling exceeds the ${IMPORT_REVERSAL_LIMITS.maxQueriesPerInvocation} budget`,
+  );
+  assert.ok(
+    counts.statements <= IMPORT_REVERSAL_LIMITS.maxStatementsPerInvocation,
+    `${counts.statements} D1 statements at the ${portfolioCount}-portfolio ceiling exceeds the ${IMPORT_REVERSAL_LIMITS.maxStatementsPerInvocation} budget`,
+  );
+  assert.ok(
+    counts.batchSizes.every(
+      (size) => size <= IMPORT_REVERSAL_LIMITS.maxStatementsPerAtomicUnit,
+    ),
+    `every atomic unit must stay within the ${IMPORT_REVERSAL_LIMITS.maxStatementsPerAtomicUnit}-statement budget, saw ${JSON.stringify(counts.batchSizes)}`,
+  );
+  assert.ok(
+    counts.largestParameterCount <=
+      IMPORT_REVERSAL_LIMITS.maxParametersPerStatement,
+  );
+  assert.equal(
+    (
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM calculation_runs WHERE reason = 'import_reverse' AND user_id = 'user-a'",
+        )
+        .get() as { count: number }
+    ).count,
+    portfolioCount,
+  );
+});
+
+// BUG-016 review round-3 fold-in: the overflow branch (more dividend-bearing
+// portfolios than `maxAffectedPortfolios`) had no test at all. Unlike the
+// commit side, a reversal must NEVER fail closed here -- the ledger is
+// already reversed by the time this runs -- so overflow queues the first N
+// portfolios by id, logs the rest as a structured warning naming the batch,
+// and still reports the batch `reversed`.
+test("BUG-016: a reversal over more dividend-bearing portfolios than the ceiling queues the first 25 by id, warns once, and still completes", async () => {
+  const database = await migratedDatabase();
+  const portfolioCount = IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios + 1;
+  for (let index = 1; index <= portfolioCount; index += 1) {
+    seedDividendBearingPortfolio(database, index);
+  }
+  const { version } = await commitBatch(database, 0);
+  const { client, counts } = countingClient(createSqliteSqlClient(database));
+  const logLines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: unknown) => {
+    logLines.push(String(line));
+  };
+  let result;
+  try {
+    result = await createOwnedImportReversalRepository(client).reverse(
+      "user-a",
+      "batch-a",
+      reversalInput(version, "overflow-reversal"),
+    );
+  } finally {
+    console.log = originalLog;
+  }
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.status, "reversed");
+
+  // Exactly the first 25 portfolios, in `portfolio_id` order -- the SELECT
+  // driving the queueing is `ORDER BY dmr.portfolio_id ASC LIMIT 26`, and the
+  // slice keeps the leading 25. Ids sort lexically, so `portfolio-div-1`,
+  // `portfolio-div-10`..`portfolio-div-19`, `portfolio-div-2`, ... and
+  // `portfolio-div-9` is the one left out at N=26.
+  const expectedPortfolioIds = Array.from(
+    { length: portfolioCount },
+    (_unused, index) => `portfolio-div-${index + 1}`,
+  )
+    .sort()
+    .slice(0, IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios);
+  assert.deepEqual(
+    result.rebuildJobIds,
+    expectedPortfolioIds.map(
+      (portfolioId) => `import-reversal-rebuild:batch-a:${portfolioId}`,
+    ),
+  );
+  assert.deepEqual(
+    database
+      .prepare(
+        `SELECT portfolio_id FROM calculation_runs
+         WHERE user_id = 'user-a' AND reason = 'import_reverse'
+         ORDER BY portfolio_id ASC`,
+      )
+      .all()
+      .map((row) => String(row.portfolio_id)),
+    expectedPortfolioIds,
+  );
+
+  // `finalize`'s own fixed 6-statement unit, then the 25 queued INSERTs
+  // chunked at `maxStatementsPerAtomicUnit` (10 + 10 + 5).
+  assert.deepEqual(counts.batchSizes, [
+    6,
+    IMPORT_REVERSAL_LIMITS.maxStatementsPerAtomicUnit,
+    IMPORT_REVERSAL_LIMITS.maxStatementsPerAtomicUnit,
+    IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios -
+      2 * IMPORT_REVERSAL_LIMITS.maxStatementsPerAtomicUnit,
+  ]);
+
+  const overflowWarnings = logLines
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter(
+      (entry) => entry.action === "import.reverse.dividend_rebuild_overflow",
+    );
+  assert.equal(overflowWarnings.length, 1);
+  assert.equal(overflowWarnings[0]!.level, "warn");
+  assert.deepEqual(overflowWarnings[0]!.metadata, {
+    batchId: "batch-a",
+    affectedPortfolios: portfolioCount,
+    queuedPortfolios: IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios,
+  });
+});
+
+// BUG-016 review round-3 B2 regression pin: `reverseImportWithContext` used
+// to advance whatever `rebuildJobIds` came back from ANY invocation, so a
+// chunked reversal (`maxChunkSize` is 2 -- the owner's 226-row batch is 113
+// invocations) ran a full FIFO rebuild plus publish on EVERY chunk, against a
+// ledger still mid-reversal. Measured across this 3-invocation fixture:
+// 75/72/65 D1 queries ungated versus 46/45/65 gated, for an identical end
+// state. The commit route it mirrors gates on the terminal status
+// (`result.status === "committed"`); this pins the reversal's equivalent.
+test("BUG-016 review B2: a chunked reversal advances calculation runs once, on the finalizing invocation only", async () => {
+  const { database, version } = await commitBatch(await migratedDatabase(), 6);
+  // Same clock-gap rationale as the single-invocation fold-in test above:
+  // keeps the commit's own now-stale runs from tying with the reversal's on
+  // `created_at`.
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const context = {
+    client: createSqliteSqlClient(database),
+    userId: "user-a",
+    requestId: "chunked-fold-in-request",
+  };
+  const completedCount = () =>
+    (
+      database
+        .prepare(
+          `SELECT count(*) AS count FROM calculation_runs
+           WHERE user_id = 'user-a' AND status = 'completed'`,
+        )
+        .get() as { count: number }
+    ).count;
+
+  const statuses: string[] = [];
+  for (let invocation = 1; invocation <= 3; invocation += 1) {
+    const result = await reverseImportWithContext(
+      context,
+      "batch-a",
+      reversalInput(version, "chunked-fold-in"),
+    );
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    statuses.push(result.reversal.status);
+    if (invocation < 3) {
+      assert.equal(
+        completedCount(),
+        0,
+        `invocation ${invocation} is a non-final chunk and must not advance any calculation run`,
+      );
+    }
+  }
+  assert.deepEqual(statuses, ["reversing", "reversing", "reversed"]);
+
+  // Exactly one advancement across the whole reversal.
+  assert.equal(completedCount(), 1);
+  const completedRunId = String(
+    (
+      database
+        .prepare(
+          `SELECT id FROM calculation_runs
+           WHERE user_id = 'user-a' AND status = 'completed'`,
+        )
+        .get() as { id: string }
+    ).id,
+  );
+  // Everything the earlier chunks queued is resolved, not stranded: the
+  // finalizing call advances the whole projection pipeline for the portfolio,
+  // superseding the older queued rows.
+  assert.equal(
+    (
+      database
+        .prepare(
+          `SELECT count(*) AS count FROM calculation_runs
+           WHERE user_id = 'user-a' AND status IN ('queued', 'running')`,
+        )
+        .get() as { count: number }
+    ).count,
+    0,
+  );
+  const publication = database
+    .prepare(
+      `SELECT calculation_run_id FROM projection_publications
+       WHERE user_id = 'user-a' AND portfolio_id = 'portfolio-a'`,
+    )
+    .get() as { calculation_run_id: string } | undefined;
+  assert.equal(
+    publication?.calculation_run_id,
+    completedRunId,
+    "the publication must be current at the end of a chunked reversal, pointing at its single completed run",
+  );
+});
+
 test("reversal resumes after a bounded failure and corrected upload supersedes only reversed batches", async () => {
   const { database, version } = await commitBatch(await migratedDatabase(), 3);
   const client = createSqliteSqlClient(database);

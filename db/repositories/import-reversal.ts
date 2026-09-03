@@ -14,9 +14,32 @@ export const IMPORT_REVERSAL_LIMITS = {
   // transaction's own atomic batch (see `persist`'s own doc comment) --
   // a small 2-transaction fixture measured 51 total queries/statements
   // against the previous 50 ceiling (1 over). Raised with headroom.
-  maxQueriesPerInvocation: 56,
+  // (That raise took both bounds 50 -> 56; superseded by the measurement
+  // below, which is the same trade-only path plus the dividend phase.)
+  //
+  // BUG-016 review B1 fix (2026-09-03): the phase-2 dividend-rebuild
+  // INSERTs (issued after `finalize`'s atomic unit commits, chunked at
+  // `maxStatementsPerAtomicUnit` each) are N additional statements on the
+  // SAME invocation, one per dividend-bearing portfolio, so the previous
+  // 56 ceiling -- sized for the trade-only path -- was already exceeded at
+  // N=6. Re-measured against the real repository (2 trades reversed at
+  // `maxChunkSize`, plus N dividend-bearing portfolios, the finalizing
+  // invocation, `tests/imp-003b.test.ts`):
+  //
+  //   N portfolios |  0 |  1 |  2 |  6 |  7 | 10 | 25 | 26
+  //   queries      | 49 | 51 | 52 | 56 | 57 | 60 | 75 | 75
+  //   statements   | 25 | 26 | 27 | 31 | 32 | 35 | 50 | 50
+  //
+  // N=25 is the true worst case: `maxAffectedPortfolios` caps the queued
+  // set, so N=26 (and any larger batch) clamps to the same 75/50 (the
+  // overflow branch queues 25 and logs the rest). Raised to 90/60 -- the
+  // measured worst case plus the same ~20% headroom precedent CALC-004
+  // review B2 used when it raised `IMPORT_COMMIT_LIMITS.maxStatementsPerChunk`
+  // 50 -> 60 for the analogous per-portfolio growth on the commit side.
+  // Both bounds are pinned at exactly N=25 by `tests/imp-003b.test.ts`.
+  maxQueriesPerInvocation: 90,
   maxStatementsPerAtomicUnit: 10,
-  maxStatementsPerInvocation: 56,
+  maxStatementsPerInvocation: 60,
   maxParametersPerStatement: 100,
   // BUG-016 review B1 fix (2026-09-03): mirrors `import-commit.ts`'s
   // `IMPORT_COMMIT_LIMITS.maxAffectedPortfolios` -- the same ceiling on how
@@ -106,6 +129,16 @@ function batchFromRow(row: Record<string, unknown>): BatchState {
 
 function isValidKey(value: string): boolean {
   return value.length > 0 && value.length <= 120 && !/[\u0000\r\n]/.test(value);
+}
+
+/** Returns `source` without `key`, leaving `source` untouched. */
+function withoutKey(
+  source: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> {
+  const copy = { ...source };
+  delete copy[key];
+  return copy;
 }
 
 /** Executes `statements` as one D1-compatible atomic unit via `batch()`. */
@@ -551,11 +584,20 @@ export function createOwnedImportReversalRepository(
           targetId: batchId,
           requestId,
           result: "success",
+          // BUG-016 review fold-in (2026-09-03): this audit row is written
+          // INSIDE the atomic unit, i.e. BEFORE the phase-2 dividend-rebuild
+          // INSERTs below are issued -- a failed chunk means some of
+          // `dividendRebuildJobIds` never land. Naming the merged field
+          // `intendedRebuildJobIds` keeps the audit row from claiming rows
+          // that may not exist. Trade-only invocations keep the original
+          // `rebuildJobIds` name: those ids were already committed by
+          // `ledger.reverse()`'s own atomic units before this call, so that
+          // field remains a statement of fact.
           metadata:
             dividendRebuildJobIds.length > 0
               ? {
-                  ...metadata,
-                  rebuildJobIds: [
+                  ...withoutKey(metadata, "rebuildJobIds"),
+                  intendedRebuildJobIds: [
                     ...((metadata.rebuildJobIds as string[] | undefined) ?? []),
                     ...dividendRebuildJobIds,
                   ],

@@ -1043,6 +1043,12 @@ test("a dividend-only reversal (no trade rows at all) still audits its deleted i
 // Also proves the queued run is a genuinely USABLE `calculation_runs` row:
 // `advanceCalculationRuns` claims and completes it, and
 // `projection_publications` ends up valid and current.
+//
+// Round-3 note: this is COVERAGE of the dividend-only shape, not a
+// regression pin -- it passes against the pre-fix (round-1) code too, since
+// a batch with no trades has only one invocation and so cannot express the
+// chunk-gating defect at all. The regression pin for the gating itself is
+// the multi-chunk test further down this file.
 test("BUG-016 review B2: a dividend-only reversal finalizes on the first invocation, queues exactly one usable import_reverse run, and a repeated final call queues no second row", async () => {
   const database = await migratedDatabase();
   stageRow(database, "batch-a", "row-1", 2, dividendRow());
@@ -1435,12 +1441,19 @@ test("BUG-016: a chunked reversal (chunkSize 1) leaves dividend records and the 
   const finalMetadata = JSON.parse(finalAudit.metadata_json) as {
     reversedDividendRecordCount: number;
     restoredManualRecordCount: number;
-    rebuildJobIds: string[];
+    rebuildJobIds?: string[];
+    intendedRebuildJobIds: string[];
   };
   assert.equal(finalMetadata.reversedDividendRecordCount, 2);
   assert.equal(finalMetadata.restoredManualRecordCount, 1);
+  // BUG-016 review round-3 fold-in: the audit row is written INSIDE the
+  // atomic unit, before the phase-2 dividend-rebuild INSERTs are issued, so
+  // on a dividend-bearing finalize the field is named for what it is -- the
+  // INTENDED set -- and the `rebuildJobIds` name (a statement of fact,
+  // reserved for ids already committed by `ledger.reverse()`) is absent.
+  assert.equal(finalMetadata.rebuildJobIds, undefined);
   assert.ok(
-    finalMetadata.rebuildJobIds.some((id) =>
+    finalMetadata.intendedRebuildJobIds.some((id) =>
       id.startsWith("import-reversal-rebuild:batch-a:portfolio-a"),
     ),
   );

@@ -87,12 +87,28 @@ export async function reverseImportWithContext(
     // a reversal that just finished queues `calculation_runs` rows (the
     // per-transaction `ledger_mutation` rows `ledger.reverse()` queues for
     // every reversed trade, plus, on the finalizing invocation, the
-    // dividend-parity `import_reverse` row) that nothing else would advance
+    // dividend-parity `import_reverse` rows) that nothing else would advance
     // in-request, leaving them `queued` until the cron sweep. Best-effort
     // and bounded -- a failure here must never turn an already-successful
     // reversal into an error response; the read-time and cron triggers
     // still cover anything left queued or interrupted.
-    if (result.rebuildJobIds.length > 0) {
+    //
+    // Review B2 fix (2026-09-03): gated on the TERMINAL status, exactly as
+    // the commit route it mirrors gates on `result.status === "committed"`.
+    // A reversal chunks at `IMPORT_REVERSAL_LIMITS.maxChunkSize` (2), so a
+    // large batch spans many `reversing` invocations, each returning its own
+    // freshly queued `rebuildJobIds`; advancing on every one of them ran a
+    // full FIFO rebuild plus publish per chunk against a ledger still being
+    // reversed -- measured 75/72/65 D1 statements across a 3-chunk reversal
+    // versus 46/45/65 with this gate, for an identical end state, since the
+    // intermediate rebuilds are superseded by the next chunk's run anyway.
+    // Runs queued by a non-final chunk are not lost: the finalizing call
+    // resolves its own ids to their DISTINCT portfolios and then advances
+    // each portfolio's whole projection pipeline (see
+    // `advanceCalculationRunsForCommit`), so earlier chunks' queued rows for
+    // those portfolios are completed or superseded there. The read-time and
+    // cron triggers remain the backstop if the finalizing call never comes.
+    if (result.status === "reversed" && result.rebuildJobIds.length > 0) {
       await advanceCalculationRunsForCommit(
         { client: context.client },
         {

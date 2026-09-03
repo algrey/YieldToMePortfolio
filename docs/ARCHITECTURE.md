@@ -885,6 +885,28 @@ This log records durable architecture decisions previously maintained in `AGENTS
 
 ## Decision log
 
+- `2026-09-03` (`BUG-016` correction, review round 3): the `CALC-003`
+  execution-model entry below enumerates trigger 1's call sites as "both the
+  manual commit route (`app/import-commit-actions.ts`) and the atomic accept
+  service (`app/import-accept-service.ts`)". That enumeration is no longer
+  complete: `app/import-reversal-service.ts` is a THIRD trigger-1 call site.
+  A reversal queues `calculation_runs` rows of its own -- one
+  `ledger_mutation` row per reversed trade (queued by `ledger.reverse()`)
+  plus, on a dividend-bearing batch, one `import_reverse` row per affected
+  portfolio -- and before this change nothing advanced them in-request, so a
+  reversed batch left Holdings/Overview stale until the cron sweep: the same
+  symptom `CALC-003` was filed for, on the reversal path. Like the two commit
+  call sites it is best-effort (`.catch(() => undefined)`) and budgeted at
+  `POST_COMMIT_CALCULATION_BUDGET`, and it is gated on the TERMINAL status
+  (`result.status === "reversed"`) exactly as the commit route gates on
+  `"committed"`: reversals chunk at `IMPORT_REVERSAL_LIMITS.maxChunkSize`
+  (2), so an ungated call ran a full FIFO rebuild plus publish on every chunk
+  against a ledger still mid-reversal (measured across a 3-invocation
+  fixture: 75/72/65 D1 queries ungated versus 46/45/65 gated, identical end
+  state -- the intermediate rebuilds are superseded by the next chunk's run
+  anyway). Triggers (2) read-time and (3) cron remain the backstop and are
+  unchanged. No prior text edited; this entry is the correction.
+
 - `2026-09-02` (`PRF-010` correction, review): the entry immediately below
   overclaimed on two points, both corrected in §9.5's own appended
   correction paragraph rather than by editing that entry or the paragraph
