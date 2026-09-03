@@ -50,6 +50,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { OwnedCapitalGainsHistory } from "../owned-capital-gains.ts";
+import type { ProjectionPendingState } from "../owned-holdings-contract.ts";
 import { buildCapitalGainsDisplayRows } from "../capital-gains-display-format.ts";
 import {
   CGT_CARRY_FORWARD_NOTE,
@@ -63,6 +64,26 @@ import {
 } from "../../domain/gains/index.ts";
 import { formatIncomeMoney, formatQuantity } from "../income-format.ts";
 import { IncomeNav } from "./income-nav.tsx";
+
+// BUG-017: honest, visible (non-color, non-badge -- matches the
+// established `.unavailable` `role="status"` advisory convention already
+// used above for carried/coverage disclosures) disclosure that the
+// figures below may not reflect the ledger's latest state. `null` when
+// there is nothing to disclose.
+function ProjectionPendingNotice({
+  pending,
+}: {
+  pending: ProjectionPendingState | undefined;
+}) {
+  if (!pending?.pending) return null;
+  return (
+    <p className="unavailable" role="status">
+      {pending.reason === "failed"
+        ? "The last recalculation failed — figures reflect the previous successful calculation."
+        : "Recalculating after your latest ledger change — figures may not yet reflect it."}
+    </p>
+  );
+}
 
 /** Human-readable label for each `CapitalGainEligibilityLabel` -- never the raw enum value, and "unknown" is spelled out rather than implying a fabricated zero. */
 const ELIGIBILITY_LABELS: Record<CapitalGainEligibilityLabel, string> = {
@@ -483,6 +504,7 @@ export function CapitalGainsScreen({
           </p>
           <Link href={holdingsHref}>Go to holdings</Link>
         </section>
+        <ProjectionPendingNotice pending={history.projectionPending} />
         <GainsDisclaimer />
       </main>
     );
@@ -523,6 +545,7 @@ export function CapitalGainsScreen({
   return (
     <main className="income-screen">
       <IncomeNav portfolioId={portfolioId} active="gains" />
+      <ProjectionPendingNotice pending={history.projectionPending} />
 
       <div className="income-fy-table-wrap">
         <table className="income-fy-table">

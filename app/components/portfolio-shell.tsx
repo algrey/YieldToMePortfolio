@@ -39,6 +39,7 @@ import {
   sortOwnedHoldings,
   type OwnedCashSummary,
   type OwnedHoldingRow,
+  type ProjectionPendingState,
 } from "../owned-holdings-contract";
 import {
   ownedHoldingAmount,
@@ -242,6 +243,16 @@ export type OwnedWorkspace = {
   // -- `undefined` only when there are no held securities at all (nothing
   // to summarise, mirroring the holdings screen's own empty state).
   holdingsSummary?: HoldingsSummaryFooter;
+  // BUG-017: read-time signal that `holdings`/`holdingsSummary`/
+  // `cash`/`realisedGains` above (and, on the Overview tab,
+  // `holdingsSummary`'s headline figures) may not yet reflect the
+  // ledger's latest state -- see `ProjectionPendingState`'s own doc
+  // comment (`app/owned-holdings-contract.ts`). `undefined` only when
+  // neither `includeHoldings` nor `includeOverview` was requested (the
+  // section that would need it was never loaded) or the read failed
+  // outright; both cases render no disclosure, matching every other
+  // best-effort field on this type.
+  holdingsProjectionPending?: ProjectionPendingState;
 };
 export type OwnedOverviewData = {
   status:
@@ -542,6 +553,7 @@ function OwnedHoldingsScreen({
   portfolioId,
   realisedGains,
   summary,
+  projectionPending,
   initialHideSold = true,
 }: {
   rows: readonly OwnedHoldingRow[];
@@ -549,6 +561,8 @@ function OwnedHoldingsScreen({
   view: "native" | "home";
   state: "complete" | "partial" | "empty" | "unavailable";
   cash?: OwnedCashSummary;
+  /** BUG-017: see `OwnedWorkspace.holdingsProjectionPending`'s doc comment. */
+  projectionPending?: ProjectionPendingState;
   /** UI-023: builds each row's link to the standalone per-holding detail
    * route (`/portfolio/:id/holdings/:portfolioSecurityId`) -- the owned
    * in-place detail `<dialog>` sheet is gone (owner decision, competitor
@@ -689,6 +703,17 @@ function OwnedHoldingsScreen({
         {sortedRows.length === 0 ? (
           <p className="empty-inline">
             No security holdings. Cash is shown separately.
+          </p>
+        ) : null}
+        {/* BUG-017: honest, visible (non-color) disclosure that these
+            figures may not reflect the ledger's latest change -- matches
+            the `.unavailable`/`role="status"` advisory convention used
+            elsewhere for holdings-row action-required states. */}
+        {projectionPending?.pending ? (
+          <p className="unavailable" role="status">
+            {projectionPending.reason === "failed"
+              ? "The last recalculation failed — figures reflect the previous successful calculation."
+              : "Recalculating after your latest ledger change — figures may not yet reflect it."}
           </p>
         ) : null}
         <div className="holdings-grid table-heading sticky-heading">
@@ -2031,6 +2056,7 @@ function OwnedOverviewScreen({
   nowInstant,
   portfolioValueHistory,
   holdingsSummary,
+  holdingsProjectionPending,
 }: {
   data: OwnedOverviewData;
   portfolioId: string;
@@ -2060,6 +2086,8 @@ function OwnedOverviewScreen({
   // failed or there are no held securities -- the headline then reads
   // "unavailable" rather than falling back to the wrong number.
   holdingsSummary?: HoldingsSummaryFooter;
+  /** BUG-017: see `OwnedWorkspace.holdingsProjectionPending`'s doc comment -- the SAME best-effort holdings read `holdingsSummary` above already came from. */
+  holdingsProjectionPending?: ProjectionPendingState;
 }) {
   const [range, setRange] = useState<
     "1M" | "3M" | "12M" | "FY" | "Last FY" | "All"
@@ -2253,6 +2281,17 @@ function OwnedOverviewScreen({
                 : "Known value"}
           </strong>
           <span> -- {stateCopy}</span>
+        </p>
+      ) : null}
+      {/* BUG-017: honest, VISIBLE (non-color) disclosure -- unlike the
+          sr-only box above, this headline figure genuinely can be stale
+          relative to the ledger (see `holdingsProjectionPending`'s doc
+          comment), so it must be visible, not screen-reader-only. */}
+      {holdingsProjectionPending?.pending ? (
+        <p className="unavailable" role="status">
+          {holdingsProjectionPending.reason === "failed"
+            ? "The last recalculation failed — figures reflect the previous successful calculation."
+            : "Recalculating after your latest ledger change — figures may not yet reflect it."}
         </p>
       ) : null}
       <section className="overview-hero" aria-labelledby="owned-overview-title">
@@ -5075,6 +5114,9 @@ export function PortfolioShell({
                 }
               }
               holdingsSummary={ownedWorkspace.holdingsSummary}
+              holdingsProjectionPending={
+                ownedWorkspace.holdingsProjectionPending
+              }
             />
           ) : activeSection === "holdings" && ownedWorkspace.activePortfolio ? (
             <OwnedHoldingsScreen
@@ -5090,6 +5132,7 @@ export function PortfolioShell({
               realisedGains={ownedWorkspace.realisedGains}
               initialHideSold={initialHideSold}
               summary={ownedWorkspace.holdingsSummary}
+              projectionPending={ownedWorkspace.holdingsProjectionPending}
             />
           ) : (
             <OwnedWorkspaceScreen

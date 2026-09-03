@@ -101,6 +101,34 @@ export type OwnedHoldingCoverage = {
 export type OwnedHoldingSort = "ticker" | "value" | "daily" | "gain";
 export type OwnedHoldingDirection = "ascending" | "descending";
 
+// BUG-017: read-time signal that the projection publication currently
+// being served may not reflect the ledger's latest state -- the
+// publication itself can be internally self-consistent (a real completed
+// run, version-matched, high-water-matched) while a NEWER calculation run
+// for the same portfolio is queued/running/terminally-failed and nothing
+// has advanced it into a fresh publication yet (post-commit budget
+// exhausted, a `failed` run, cron down). `pending: false` means the
+// current publication is confirmed up to date (no such newer run found,
+// or a same-request self-heal attempt caught it up). `reason: "queued" |
+// "running"` means a newer run IS in flight -- the caller already ran one
+// bounded read-time self-heal attempt (`advanceCalculationRuns`) this
+// request and it either made no progress or is still working; the
+// EXISTING publication is still served, just flagged. `reason: "failed"`
+// is a DISTINCT, more serious honesty state: the newest run for this
+// portfolio/pipeline failed with a failure_category other than
+// `superseded_by_newer_run` (a genuinely poisoned computation) -- per
+// `app/calculation-executor-service.ts`'s `advanceOneRun`, nothing
+// retries a terminally `failed` run automatically; only a fresh ledger
+// mutation queues a new one. Self-heal is never attempted for this
+// reason (there is nothing claimable to advance). See
+// `app/owned-holdings.ts`'s `PUBLICATION_SQL` and
+// `app/owned-capital-gains.ts`'s equivalent query for the read, and
+// `docs/ARCHITECTURE.md`'s CALC-003 entry (BUG-017 addendum) for the
+// full design.
+export type ProjectionPendingState =
+  | { pending: false }
+  | { pending: true; reason: "queued" | "running" | "failed" };
+
 export function sortOwnedHoldings(
   rows: readonly OwnedHoldingRow[],
   key: OwnedHoldingSort,

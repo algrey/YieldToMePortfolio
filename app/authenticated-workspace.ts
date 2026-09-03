@@ -19,6 +19,7 @@ import type { OwnedWorkspace } from "./components/portfolio-shell";
 import { loadOwnedWatchlist } from "./owned-watchlist";
 import { loadOwnedHoldings } from "./owned-holdings";
 import { loadOwnedRealisedGainTotals } from "./owned-capital-gains";
+import type { ProjectionPendingState } from "./owned-holdings-contract.ts";
 import { buildHoldingsSummaryFooter } from "./owned-holdings-summary";
 import { createOverviewData } from "./overview-read-model";
 import { loadHistoricalPortfolioValueSeries } from "./historical-portfolio-value.ts";
@@ -344,6 +345,10 @@ export async function loadAuthenticatedWorkspace(
           cash: holdings.cash,
           realisedGains,
           holdingsSummary,
+          // BUG-017: see `OwnedWorkspace.holdingsProjectionPending`'s doc
+          // comment -- the SAME `loadOwnedHoldings` read this whole branch
+          // already made, no second read.
+          holdingsProjectionPending: holdings.projectionPending,
         };
       } catch {
         return {
@@ -431,6 +436,16 @@ export async function loadAuthenticatedWorkspace(
       // `createHistoricalSnapshotRepository`/`createUnavailableOverviewData`
       // are unused here now.
       const overview = createOverviewData(null);
+      // BUG-017: an output-slot capture (mirrors `sqlContextOut`/
+      // `landingRedirectOut` above) rather than widening the tuple below or
+      // merging `holdingsSummary` into a second object -- keeps the
+      // existing `[portfolioValueHistory, holdingsSummary]` wave shape
+      // untouched (see `tests/ui-047.test.ts`'s source pin) while still
+      // reading `holdings.projectionPending` from the SAME single
+      // `loadOwnedHoldings` call `holdingsSummary` already comes from.
+      const holdingsProjectionPendingOut: {
+        current: ProjectionPendingState | undefined;
+      } = { current: undefined };
       const [portfolioValueHistory, holdingsSummary] = await Promise.all([
         // HIST-001 (HISTORY -- see the PRF-006 comment above; the "read
         // below" this originally pointed at is gone, only `holdingsSummary`
@@ -497,15 +512,19 @@ export async function loadAuthenticatedWorkspace(
           result.context.user.id,
           configuredWorkspace.activePortfolio.id,
         )
-          .then((holdings) =>
-            holdings.unrealisedSummary
+          .then((holdings) => {
+            // BUG-017: side-channel capture -- see the output-slot comment
+            // above. Set before this `.then` resolves, so it is always
+            // populated by the time the outer `Promise.all` settles.
+            holdingsProjectionPendingOut.current = holdings.projectionPending;
+            return holdings.unrealisedSummary
               ? buildHoldingsSummaryFooter(
                   configuredWorkspace.activePortfolio!.baseCurrencyCode,
                   holdings.unrealisedSummary,
                   undefined,
                 )
-              : undefined,
-          )
+              : undefined;
+          })
           .catch(() => undefined),
       ]);
       return {
@@ -513,6 +532,7 @@ export async function loadAuthenticatedWorkspace(
         overview,
         portfolioValueHistory,
         holdingsSummary,
+        holdingsProjectionPending: holdingsProjectionPendingOut.current,
       };
     }
     return configuredWorkspace;

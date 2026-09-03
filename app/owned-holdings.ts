@@ -48,6 +48,7 @@ import type {
   OwnedHoldingRow,
   OwnedHoldingsUnrealisedSummary,
   OwnedHoldingValue,
+  ProjectionPendingState,
 } from "./owned-holdings-contract.ts";
 import type { Tone } from "./prototype-data.ts";
 import {
@@ -135,6 +136,35 @@ function optionalText(row: Row, key: string, pattern?: RegExp): string | null {
   if (typeof value !== "string" || (pattern && !pattern.test(value)))
     throw new Error(`invalid_${key}`);
   return value;
+}
+// BUG-017: a correlated scalar subquery, folded into the SAME publication
+// read (zero extra D1 statements) -- returns the status of the newest
+// `calculation_runs` row for this user/portfolio/`projection` pipeline
+// that is either still in flight (`queued`/`running`) or terminally
+// `failed` for a reason OTHER than `superseded_by_newer_run` (a run
+// superseded by a still-newer run is not itself news -- the newer run,
+// if still queued/running/failed, is what this subquery actually
+// surfaces, since it is more recent). `NULL` means no such run exists --
+// the served publication is confirmed current. Ordered `created_at DESC,
+// rowid DESC` mirroring `db/repositories/calculation-runs.ts`'s own
+// `(created_at, rowid)` tie-break convention (see `nextClaimable`/
+// `supersedeStaleQueuedRuns`), just descending instead of ascending.
+// Verified via EXPLAIN QUERY PLAN (BUG-017 worker report) to seek
+// `calculation_runs_portfolio_status_idx` and to leave the outer
+// publication query's own index usage (`projection_publications_owner_
+// portfolio_unique`, `calculation_runs_id_user_portfolio_unique`,
+// `portfolios_id_user_id_unique`) untouched.
+const PENDING_RUN_STATUS_SUBQUERY = `(SELECT cr.status FROM calculation_runs cr
+   WHERE cr.user_id = pp.user_id AND cr.portfolio_id = pp.portfolio_id
+     AND cr.pipeline = 'projection'
+     AND cr.status IN ('queued', 'running', 'failed')
+     AND (cr.status <> 'failed' OR cr.failure_category IS NULL OR cr.failure_category <> 'superseded_by_newer_run')
+   ORDER BY cr.created_at DESC, cr.rowid DESC LIMIT 1)`;
+function pendingStateFromRow(row: Row): ProjectionPendingState {
+  const reason = optionalText(row, "pending_run_status");
+  if (reason === "queued" || reason === "running" || reason === "failed")
+    return { pending: true, reason };
+  return { pending: false };
 }
 function integer(row: Row, key: string): number {
   const value = field(row, key);
@@ -507,6 +537,11 @@ export async function loadOwnedHoldings(
   // immediately below) -- present whenever `rows.length > 0`, even if every
   // row is a zero-quantity (sold-to-zero) one.
   unrealisedSummary?: OwnedHoldingsUnrealisedSummary;
+  // BUG-017: see `ProjectionPendingState`'s own doc comment. Always
+  // populated (never `undefined`) so every consumer must handle it
+  // explicitly; the zero-held-securities early return below has nothing
+  // to stale-check and always reports `{ pending: false }`.
+  projectionPending: ProjectionPendingState;
 }> {
   const nowIso = now.toISOString();
   // PRF-003 (owner-reported slow tab navigation): `portfolio` and
@@ -570,6 +605,10 @@ export async function loadOwnedHoldings(
         converted: 0,
         basis: 0,
       },
+      // BUG-017: no held securities means no projection to be stale --
+      // this path never reads `calculation_runs`/`projection_publications`
+      // at all (see the BUG-002 comment above).
+      projectionPending: { pending: false },
     };
   }
   // PRF-004: the old `PUBLICATION_COUNT_SQL` (`SELECT count(*) ...`) is gone
@@ -582,7 +621,7 @@ export async function loadOwnedHoldings(
   // 1) -- so `rows.length !== 1` below is byte-identical in every branch to
   // the old `integer(publicationCountRow, "count") !== 1` check, at one
   // query instead of two.
-  const PUBLICATION_SQL = `SELECT pp.calculation_run_id, pp.calculation_version, pp.ledger_high_water, r.status AS run_status, r.calculation_version AS run_version, r.ledger_high_water_end, p.base_currency_code FROM projection_publications pp JOIN portfolios p ON p.id = pp.portfolio_id AND p.user_id = pp.user_id JOIN calculation_runs r ON r.id = pp.calculation_run_id AND r.user_id = pp.user_id AND r.portfolio_id = pp.portfolio_id WHERE pp.user_id = ? AND pp.portfolio_id = ? LIMIT 2`;
+  const PUBLICATION_SQL = `SELECT pp.calculation_run_id, pp.calculation_version, pp.ledger_high_water, r.status AS run_status, r.calculation_version AS run_version, r.ledger_high_water_end, p.base_currency_code, ${PENDING_RUN_STATUS_SUBQUERY} AS pending_run_status FROM projection_publications pp JOIN portfolios p ON p.id = pp.portfolio_id AND p.user_id = pp.user_id JOIN calculation_runs r ON r.id = pp.calculation_run_id AND r.user_id = pp.user_id AND r.portfolio_id = pp.portfolio_id WHERE pp.user_id = ? AND pp.portfolio_id = ? LIMIT 2`;
   const IDENTITIES_SQL = `SELECT ps.id, ps.security_id, COALESCE(ps.display_symbol, ps.source_symbol) AS symbol, COALESCE(ps.display_name, s.canonical_name, ps.source_name, ps.source_symbol) AS name, COALESCE(e.mic, e.name, ps.source_exchange_alias, 'N/A') AS exchange, s.primary_currency_code FROM portfolio_securities ps JOIN securities s ON s.id = ps.security_id LEFT JOIN exchanges e ON e.id = s.exchange_id WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held' ORDER BY ps.id LIMIT ?`;
   // PRF-003: `publicationRows` (the data, doubling as its own multiplicity
   // gate -- see this block's own PRF-004 comment above) and `identities` are
@@ -626,8 +665,41 @@ export async function loadOwnedHoldings(
   }
   if (publicationRows.length !== 1)
     throw new Error("invalid_projection_publication_count");
-  const publication = publicationRows[0];
+  let publication = publicationRows[0];
   if (!publication) throw new Error("missing_projection_publication");
+  let projectionPending = pendingStateFromRow(publication);
+  // BUG-017: the publication above can be internally self-consistent (the
+  // checks below all pass) while a NEWER run for this same portfolio is
+  // already queued/running and simply hasn't been advanced into a fresh
+  // publication yet. Self-heal is only worth attempting for "queued"/
+  // "running" -- a "failed" reason means the newest run already ran to a
+  // terminal, non-superseded failure, and nothing (short of a fresh
+  // ledger mutation queuing an entirely new run) will ever advance it;
+  // see `ProjectionPendingState`'s doc comment.
+  if (projectionPending.pending && projectionPending.reason !== "failed") {
+    await advanceCalculationRuns(
+      { client, now: () => nowIso },
+      {
+        userId,
+        portfolioId,
+        pipeline: "projection",
+        budget: READ_TIME_CALCULATION_BUDGET,
+      },
+    ).catch(() => undefined);
+    const reReadRows = await client.all<Row>(PUBLICATION_SQL, [
+      userId,
+      portfolioId,
+    ]);
+    // A weird multiplicity change mid-self-heal is not this branch's
+    // concern to diagnose -- keep serving the publication already
+    // validated below and simply report the pending state unresolved,
+    // per this task's "do not throw" directive.
+    const reReadPublication = reReadRows[0];
+    if (reReadRows.length === 1 && reReadPublication) {
+      publication = reReadPublication;
+      projectionPending = pendingStateFromRow(publication);
+    }
+  }
   const runId = requiredText(publication, "calculation_run_id");
   const version = integer(publication, "calculation_version");
   if (
@@ -1521,6 +1593,7 @@ export async function loadOwnedHoldings(
       value: unrealisedSummaryValue,
       daily: unrealisedSummaryDaily,
     },
+    projectionPending,
   };
 }
 

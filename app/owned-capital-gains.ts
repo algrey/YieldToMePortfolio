@@ -42,6 +42,11 @@ import {
   type FyCapitalGainsTotal,
   type SecurityRealisedGainTotal,
 } from "../domain/gains/index.ts";
+import type { ProjectionPendingState } from "./owned-holdings-contract.ts";
+import {
+  advanceCalculationRuns,
+  READ_TIME_CALCULATION_BUDGET,
+} from "./calculation-executor-service.ts";
 
 const MAX_ALLOCATIONS = 10_000;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -86,6 +91,14 @@ export type OwnedCapitalGainsHistory = {
    * known zero -- never a fabricated one.
    */
   earliestTradeDate: string | null;
+  // BUG-017: see `ProjectionPendingState`'s own doc comment
+  // (`app/owned-holdings-contract.ts`) for the full design -- the same
+  // read-time staleness signal `loadOwnedHoldings` returns, applied to
+  // the lot-allocation projection this screen reads instead of
+  // `holding_projections`. Always populated; `{ pending: false }` for a
+  // portfolio with no disposals yet (no publication is even read on that
+  // path -- see the empty-state short-circuit below).
+  projectionPending: ProjectionPendingState;
 };
 
 function field(row: Row, key: string): unknown {
@@ -146,6 +159,27 @@ function basisStatusValue(row: Row): CapitalGainAllocationFact["basisStatus"] {
   return value;
 }
 
+// BUG-017: identical subquery to `app/owned-holdings.ts`'s own
+// `PENDING_RUN_STATUS_SUBQUERY` -- see that module's doc comment for the
+// full rationale (why `failed`/`superseded_by_newer_run` are handled the
+// way they are, why the ordering matches `db/repositories/calculation-
+// runs.ts`'s tie-break convention). Deliberately duplicated rather than
+// imported: this module and `owned-holdings.ts` are designed as
+// independent, parallel composition layers (see this file's header
+// comment) and neither imports the other's server-only code.
+const PENDING_RUN_STATUS_SUBQUERY = `(SELECT cr.status FROM calculation_runs cr
+   WHERE cr.user_id = pp.user_id AND cr.portfolio_id = pp.portfolio_id
+     AND cr.pipeline = 'projection'
+     AND cr.status IN ('queued', 'running', 'failed')
+     AND (cr.status <> 'failed' OR cr.failure_category IS NULL OR cr.failure_category <> 'superseded_by_newer_run')
+   ORDER BY cr.created_at DESC, cr.rowid DESC LIMIT 1)`;
+function pendingStateFromRow(row: Row): ProjectionPendingState {
+  const reason = optionalText(row, "pending_run_status");
+  if (reason === "queued" || reason === "running" || reason === "failed")
+    return { pending: true, reason };
+  return { pending: false };
+}
+
 // UI-030: shared shape returned by the internal loader below -- both
 // `loadOwnedCapitalGains` (FY-bucketed, for the Gains tab) and
 // `loadOwnedRealisedGainTotals` (security-bucketed, for the holdings row's
@@ -159,6 +193,10 @@ type CapitalGainDisposalRowsResult = {
   historyCompleteFrom: string | null;
   earliestTradeDate: string | null;
   rows: CapitalGainDisposalRow[];
+  // BUG-017: see `OwnedCapitalGainsHistory.projectionPending`'s doc
+  // comment. Threaded through from the SAME publication read/self-heal
+  // both `loadOwnedCapitalGains` and `loadOwnedRealisedGainTotals` share.
+  projectionPending: ProjectionPendingState;
 };
 
 async function loadCapitalGainDisposalRows(
@@ -228,6 +266,11 @@ async function loadCapitalGainDisposalRows(
       historyCompleteFrom,
       earliestTradeDate,
       rows: [],
+      // BUG-017: no active sell means no `lot_allocations` are even
+      // possible yet -- this path never reads `projection_publications`/
+      // `calculation_runs` at all, mirroring `loadOwnedHoldings`'s
+      // zero-held-securities short-circuit.
+      projectionPending: { pending: false },
     };
   }
 
@@ -237,17 +280,41 @@ async function loadCapitalGainDisposalRows(
   );
   if (integer(publicationCountRow ?? {}, "count") !== 1)
     throw new Error("invalid_projection_publication_count");
-  const publication = await client.get<Row>(
-    `SELECT pp.calculation_run_id, pp.calculation_version, pp.ledger_high_water,
+  const PUBLICATION_SQL = `SELECT pp.calculation_run_id, pp.calculation_version, pp.ledger_high_water,
             r.status AS run_status, r.calculation_version AS run_version,
-            r.ledger_high_water_end
+            r.ledger_high_water_end, ${PENDING_RUN_STATUS_SUBQUERY} AS pending_run_status
      FROM projection_publications pp
      JOIN calculation_runs r
        ON r.id = pp.calculation_run_id AND r.user_id = pp.user_id AND r.portfolio_id = pp.portfolio_id
-     WHERE pp.user_id = ? AND pp.portfolio_id = ? LIMIT 1`,
-    [userId, portfolioId],
-  );
+     WHERE pp.user_id = ? AND pp.portfolio_id = ? LIMIT 1`;
+  let publication = await client.get<Row>(PUBLICATION_SQL, [
+    userId,
+    portfolioId,
+  ]);
   if (!publication) throw new Error("missing_projection_publication");
+  let projectionPending = pendingStateFromRow(publication);
+  // BUG-017: mirrors `app/owned-holdings.ts`'s own self-heal-then-re-read-
+  // once branch -- see that module's doc comment for why "failed" is
+  // excluded (nothing claimable to advance).
+  if (projectionPending.pending && projectionPending.reason !== "failed") {
+    await advanceCalculationRuns(
+      { client, now: () => now.toISOString() },
+      {
+        userId,
+        portfolioId,
+        pipeline: "projection",
+        budget: READ_TIME_CALCULATION_BUDGET,
+      },
+    ).catch(() => undefined);
+    const reReadPublication = await client.get<Row>(PUBLICATION_SQL, [
+      userId,
+      portfolioId,
+    ]);
+    if (reReadPublication) {
+      publication = reReadPublication;
+      projectionPending = pendingStateFromRow(publication);
+    }
+  }
   const runId = requiredText(publication, "calculation_run_id");
   const version = integer(publication, "calculation_version");
   if (
@@ -349,6 +416,7 @@ async function loadCapitalGainDisposalRows(
     historyCompleteFrom,
     earliestTradeDate,
     rows,
+    projectionPending,
   };
 }
 
@@ -380,6 +448,7 @@ export async function loadOwnedCapitalGains(
     fyTotals: fyResult.totals,
     historyCompleteFrom: base.historyCompleteFrom,
     earliestTradeDate: base.earliestTradeDate,
+    projectionPending: base.projectionPending,
   };
 }
 
