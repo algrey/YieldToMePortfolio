@@ -294,8 +294,19 @@ export function createOwnedImportReversalRepository(
     idempotencyKey: string,
     requestId: string,
     reversed: boolean,
+    // BUG-016: how many of THIS batch's own `dividend_manual_records` rows
+    // are still present as of the read taken just before this call (`reverse()`'s
+    // `pendingDividendRecordCount`) -- lets a trade-only invocation (the
+    // overwhelmingly common case) skip the extra grouped SELECT below
+    // entirely, keeping `IMPORT_REVERSAL_LIMITS.maxQueriesPerInvocation`
+    // unchanged for that path. A resumed/repeated FINAL invocation also
+    // naturally reads 0 here (the rows are already gone from the first
+    // successful run), so it skips the SELECT and queues no duplicate run --
+    // the ON CONFLICT DO NOTHING on the INSERT below is a second, belt-and-
+    // braces guard, not the only one.
+    dividendRecordCount: number,
     metadata: Record<string, unknown>,
-  ): Promise<boolean> {
+  ): Promise<{ ok: true; dividendRebuildJobIds: string[] } | { ok: false }> {
     const at = now();
     const statusFields = reversed
       ? "status = 'reversed', reversed_at = ?"
@@ -321,56 +332,139 @@ export function createOwnedImportReversalRepository(
         `,
         params: [at, userId, batchId],
       },
-      // IMP-006: dividend rows never post through the ledger (see
-      // `db/repositories/dividends.ts`), so they have no compensating
-      // "reversal" transaction for the predicate above to match. DIV-001
-      // treats `dividend_manual_records` as an owner-mutable/deletable fact
-      // rather than an immutable ledger entry (its own repository already
-      // exposes a hard `remove()`), so reversal here deletes exactly the
-      // rows this batch created (via `import_batch_id`) instead of writing
-      // a "reversed" marker row -- there is no such status on this table.
-      // Both statements below are self-guarded and safe to include on every
-      // `finalize()` invocation (including resumed/repeated ones): the
-      // `UPDATE` only matches rows still `committed`, and the `DELETE` only
-      // matches rows that still exist, so a repeat run of either is a no-op.
-      {
-        sql: `
-          UPDATE import_rows
-          SET commit_status = 'reversed', updated_at = ?, version = version + 1
-          WHERE user_id = ? AND batch_id = ? AND commit_status = 'committed'
-            AND row_class = 'transaction'
-            AND json_extract(normalized_fields_json, '$.type') = 'dividend'
-        `,
-        params: [at, userId, batchId],
-      },
-      // DIV-016 part C: restore (un-supersede) any manual row this batch
-      // reconciled away BEFORE the DELETE below removes its superseding
-      // (imported) successor -- ordering matters, the subquery must still
-      // find the about-to-be-deleted rows. Owner ruling: "sharesight should
-      // take precedence from there forward" implies the reverse too --
-      // reversing that same sync must hand precedence back to the manual
-      // row, never silently lose it. Self-guarded like the statements
-      // around it: only rows still pointing at THIS batch's imported rows
-      // match, so a repeat/resumed reversal invocation is a safe no-op.
-      {
-        sql: `
-          UPDATE dividend_manual_records
-          SET superseded_by_record_id = NULL, updated_at = ?, version = version + 1
-          WHERE user_id = ?
-            AND superseded_by_record_id IN (
-              SELECT id FROM dividend_manual_records
-              WHERE user_id = ? AND import_batch_id = ?
-            )
-        `,
-        params: [at, userId, userId, batchId],
-      },
-      {
+    ];
+    let dividendRebuildJobIds: string[] = [];
+    // BUG-016: the dividend side of a reversal (the flip below, the DIV-016C
+    // restore, and the hard DELETE) must never run on a non-final CHUNK --
+    // only the finalizing invocation (`reversed === true`) may touch income
+    // facts. Before this fix all three ran on EVERY invocation, so a batch
+    // with more trades than `chunkSize` lost every dividend record after the
+    // very first chunk; if a later chunk then failed permanently
+    // (`dependent_facts`/`conflict`) the batch was stuck `reversing` with its
+    // income facts already gone. Each statement stays self-guarded/idempotent
+    // exactly as before, so a resumed/repeated FINAL invocation is still a
+    // safe no-op.
+    if (reversed) {
+      statements.push(
+        // IMP-006: dividend rows never post through the ledger (see
+        // `db/repositories/dividends.ts`), so they have no compensating
+        // "reversal" transaction for the predicate above to match. DIV-001
+        // treats `dividend_manual_records` as an owner-mutable/deletable fact
+        // rather than an immutable ledger entry (its own repository already
+        // exposes a hard `remove()`), so reversal here deletes exactly the
+        // rows this batch created (via `import_batch_id`) instead of writing
+        // a "reversed" marker row -- there is no such status on this table.
+        // Both statements below are self-guarded and safe to include on
+        // every finalizing invocation (including resumed/repeated ones): the
+        // `UPDATE` only matches rows still `committed`, and the `DELETE`
+        // only matches rows that still exist, so a repeat run of either is a
+        // no-op.
+        {
+          sql: `
+            UPDATE import_rows
+            SET commit_status = 'reversed', updated_at = ?, version = version + 1
+            WHERE user_id = ? AND batch_id = ? AND commit_status = 'committed'
+              AND row_class = 'transaction'
+              AND json_extract(normalized_fields_json, '$.type') = 'dividend'
+          `,
+          params: [at, userId, batchId],
+        },
+        // DIV-016 part C: restore (un-supersede) any manual row this batch
+        // reconciled away BEFORE the DELETE below removes its superseding
+        // (imported) successor -- ordering matters, the subquery must still
+        // find the about-to-be-deleted rows. Owner ruling: "sharesight
+        // should take precedence from there forward" implies the reverse
+        // too -- reversing that same sync must hand precedence back to the
+        // manual row, never silently lose it. Self-guarded like the
+        // statements around it: only rows still pointing at THIS batch's
+        // imported rows match, so a repeat/resumed reversal invocation is a
+        // safe no-op.
+        {
+          sql: `
+            UPDATE dividend_manual_records
+            SET superseded_by_record_id = NULL, updated_at = ?, version = version + 1
+            WHERE user_id = ?
+              AND superseded_by_record_id IN (
+                SELECT id FROM dividend_manual_records
+                WHERE user_id = ? AND import_batch_id = ?
+              )
+          `,
+          params: [at, userId, userId, batchId],
+        },
+      );
+
+      // BUG-016: close the asymmetry PRF-007 left on the commit side --
+      // PRF-007's `import-commit.ts` `finalize` queues a `projection`
+      // `calculation_runs` row for every portfolio a dividend-only COMMIT
+      // touched, on the same terms as a trade-bearing commit. Note PRF-007's
+      // own review B3 retraction: nothing derived actually reads
+      // `dividend_manual_records` content today (`/income` reads dividends
+      // LIVE; neither `db/repositories/projections.ts` nor
+      // `domain/snapshots/historical-portfolio-value.ts` /
+      // `domain/dividends/shares-held.ts` consume the table at all), so this
+      // queued run cannot change any figure `/income` or `/holdings`
+      // renders. PRF-007 queued it anyway, on its own merits, for parity
+      // between the two commit kinds -- this mirrors that same parity
+      // decision onto the reversal path rather than inventing a rebuild
+      // this data actually needs. Guarded by `dividendRecordCount` (read
+      // just before `finalize` was called): a trade-only reversal skips the
+      // extra SELECT and queues nothing.
+      if (dividendRecordCount > 0) {
+        const dividendPortfolios = await client.all<Record<string, unknown>>(
+          `
+            SELECT dmr.portfolio_id AS portfolio_id,
+                   MIN(dmr.payment_date) AS range_from,
+                   MAX(dmr.payment_date) AS range_to,
+                   COALESCE(
+                     (SELECT latest.id FROM transactions latest
+                      WHERE latest.user_id = ? AND latest.portfolio_id = dmr.portfolio_id
+                        AND latest.status IN ('posted', 'reversed')
+                      ORDER BY latest.trade_at DESC, latest.id DESC LIMIT 1),
+                     ''
+                   ) AS ledger_high_water
+            FROM dividend_manual_records dmr
+            WHERE dmr.user_id = ? AND dmr.import_batch_id = ?
+            GROUP BY dmr.portfolio_id
+            ORDER BY dmr.portfolio_id ASC
+          `,
+          [userId, userId, batchId],
+        );
+        dividendRebuildJobIds = dividendPortfolios.map((row) => {
+          const portfolioId = String(row.portfolio_id);
+          const rebuildJobId = `import-reversal-rebuild:${batchId}:${portfolioId}`;
+          statements.push({
+            sql: `INSERT INTO calculation_runs (
+              id, user_id, portfolio_id, range_from, range_to, calculation_version,
+              reason, invalidation_source, status, attempt, ledger_high_water_start,
+              idempotency_key, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 1, 'import_reverse', ?, 'queued', 0, ?, ?, ?, ?)
+            ON CONFLICT (user_id, portfolio_id, calculation_version, idempotency_key) DO NOTHING`,
+            params: [
+              rebuildJobId,
+              userId,
+              portfolioId,
+              String(row.range_from),
+              String(row.range_to),
+              batchId,
+              String(row.ledger_high_water),
+              rebuildJobId,
+              at,
+              at,
+            ],
+          });
+          return rebuildJobId;
+        });
+      }
+
+      statements.push({
         sql: `
           DELETE FROM dividend_manual_records
           WHERE user_id = ? AND import_batch_id = ?
         `,
         params: [userId, batchId],
-      },
+      });
+    }
+    statements.push(
       createAuditInsertStatement(
         {
           actorUserId: userId,
@@ -380,7 +474,16 @@ export function createOwnedImportReversalRepository(
           targetId: batchId,
           requestId,
           result: "success",
-          metadata,
+          metadata:
+            dividendRebuildJobIds.length > 0
+              ? {
+                  ...metadata,
+                  rebuildJobIds: [
+                    ...((metadata.rebuildJobIds as string[] | undefined) ?? []),
+                    ...dividendRebuildJobIds,
+                  ],
+                }
+              : metadata,
           occurredAt: at,
         },
         () => at,
@@ -394,12 +497,12 @@ export function createOwnedImportReversalRepository(
         `,
         params: [...statusParams, at, batchId, userId, idempotencyKey],
       },
-    ];
+    );
     try {
       await atomic(client, statements);
-      return true;
+      return { ok: true, dividendRebuildJobIds };
     } catch {
-      return false;
+      return { ok: false };
     }
   }
 
@@ -504,7 +607,8 @@ export function createOwnedImportReversalRepository(
       }
 
       const remaining = await remainingCount(userId, batchId);
-      const reversedDividendRecordCount = await pendingDividendRecordCount(
+      const finalizing = remaining === 0;
+      const dividendRecordCount = await pendingDividendRecordCount(
         userId,
         batchId,
       );
@@ -512,33 +616,47 @@ export function createOwnedImportReversalRepository(
         userId,
         batchId,
       );
+      // BUG-016: these counts are read from `dividend_manual_records` as it
+      // stands BEFORE this call's own writes -- on a non-final CHUNK the
+      // dividend statements below do not run at all (see `finalize`), so the
+      // rows are still merely PENDING, not reversed/restored yet. Naming the
+      // audit field honestly by invocation kind stops a chunk's metadata
+      // from reading "reversed" for income facts `finalize` did not touch.
       const finalized = await finalize(
         userId,
         batchId,
         input.idempotencyKey,
         input.requestId,
-        remaining === 0,
+        finalizing,
+        dividendRecordCount,
         {
           reversedTransactionCount: reversedTransactions,
           remainingTransactionCount: remaining,
-          reversedDividendRecordCount,
-          restoredManualRecordCount,
+          ...(finalizing
+            ? {
+                reversedDividendRecordCount: dividendRecordCount,
+                restoredManualRecordCount,
+              }
+            : {
+                pendingDividendRecordCount: dividendRecordCount,
+                pendingRestoredManualRecordCount: restoredManualRecordCount,
+              }),
           rebuildJobIds,
         },
       );
-      if (!finalized) {
+      if (!finalized.ok) {
         return { ok: false, reason: "atomic_failure", resumable: true };
       }
 
       return {
         ok: true,
         batchId,
-        status: remaining === 0 ? "reversed" : "reversing",
+        status: finalizing ? "reversed" : "reversing",
         resumed,
         idempotent: resumed && reversedTransactions === 0,
         reversedTransactions,
         remainingTransactions: remaining,
-        rebuildJobIds,
+        rebuildJobIds: [...rebuildJobIds, ...finalized.dividendRebuildJobIds],
       };
     },
   };

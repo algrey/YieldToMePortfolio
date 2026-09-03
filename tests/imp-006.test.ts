@@ -11,6 +11,7 @@ import {
   createOwnedImportMappingDecisionRepository,
   createOwnedPortfolioRepository,
   createDividendManualRecordRepository,
+  createOwnedLedgerRepository,
   createSqliteSqlClient,
   type ImportCommitInput,
   type SqlClient,
@@ -69,7 +70,13 @@ async function migratedDatabase(): Promise<DatabaseSync> {
 }
 
 function buyRow(
-  overrides: Partial<{ id: string }> = {},
+  overrides: Partial<{
+    id: string;
+    transactionDate: string;
+    transactionTime: string;
+    tradeAtUtc: string;
+    localTradeDate: string;
+  }> = {},
 ): Record<string, unknown> {
   return {
     id: overrides.id ?? "trade-1",
@@ -82,15 +89,15 @@ function buyRow(
     sharesOwned: "5",
     costPerShare: "10",
     commission: "0",
-    transactionDate: "2026-08-01 GMT+1000",
-    transactionTime: "10:00:00",
+    transactionDate: overrides.transactionDate ?? "2026-08-01 GMT+1000",
+    transactionTime: overrides.transactionTime ?? "10:00:00",
     purchaseExchangeRate: null,
     type: "buy",
     accounting: "fifo",
     accountingExecutionIds: null,
     notes: null,
-    tradeAtUtc: "2026-08-01T00:00:00.000Z",
-    localTradeDate: "2026-08-01",
+    tradeAtUtc: overrides.tradeAtUtc ?? "2026-08-01T00:00:00.000Z",
+    localTradeDate: overrides.localTradeDate ?? "2026-08-01",
     cashEvent: null,
     frankingPerShare: null,
   };
@@ -164,6 +171,39 @@ function stageRow(
       physicalRowNumber,
       JSON.stringify(normalized),
       fingerprint ?? `fingerprint-${batchId}-${rowId}`,
+    );
+}
+
+// BUG-016: a pre-existing OWNER-typed manual record (no `import_batch_id`,
+// no `superseded_by_record_id`) -- the DIV-016C reconciliation candidate
+// shape (mirrors `tests/div-016c.test.ts`'s identical helper). Used to prove
+// that a chunked reversal's un-supersede restore only ever fires on the
+// FINAL invocation, and fires exactly once even if the final invocation is
+// itself repeated.
+function seedManualRecord(
+  database: DatabaseSync,
+  overrides: {
+    id: string;
+    portfolioSecurityId: string;
+    paymentDate: string;
+    sharesDecimal: string;
+    dividendPerShareDecimal: string;
+  },
+): void {
+  database
+    .prepare(
+      `INSERT INTO dividend_manual_records (
+         id, user_id, portfolio_id, portfolio_security_id, payment_date,
+         shares_decimal, dividend_per_share_decimal, franking_credit_per_share_decimal,
+         import_batch_id, source_reference, created_at, updated_at, version
+       ) VALUES (?, 'user-a', 'portfolio-a', ?, ?, ?, ?, NULL, NULL, NULL, '2026-08-01', '2026-08-01', 1)`,
+    )
+    .run(
+      overrides.id,
+      overrides.portfolioSecurityId,
+      overrides.paymentDate,
+      overrides.sharesDecimal,
+      overrides.dividendPerShareDecimal,
     );
 }
 
@@ -1033,4 +1073,406 @@ test("cross-user access is denied at the repository boundary for a dividend-cont
     1,
     "another owner's failed reversal attempt must not affect the real owner's record",
   );
+});
+
+// ---------------------------------------------------------------------------
+// BUG-016: chunked reversal must not touch dividend facts before the trade
+// side is complete
+// ---------------------------------------------------------------------------
+
+test("BUG-016: a chunked reversal (chunkSize 1) leaves dividend records and the DIV-016C restore untouched until the FINAL invocation, then deletes/restores them, queues a rebuild, and a repeated final call is a no-op", async () => {
+  const database = await migratedDatabase();
+
+  // A pre-existing owner-typed manual record that the imported "div-1" row
+  // below will safely reconcile against (same security, payment date and
+  // cash total: 5 x 0.5 = 2.5) -- the DIV-016C candidate shape.
+  seedManualRecord(database, {
+    id: "manual-pre",
+    portfolioSecurityId: "membership-a",
+    paymentDate: "2026-08-10",
+    sharesDecimal: "5",
+    dividendPerShareDecimal: "0.5",
+  });
+
+  stageRow(
+    database,
+    "batch-a",
+    "trade-1",
+    2,
+    buyRow({
+      id: "trade-1",
+      transactionDate: "2026-08-01 GMT+1000",
+      tradeAtUtc: "2026-08-01T00:00:00.000Z",
+      localTradeDate: "2026-08-01",
+    }),
+  );
+  stageRow(
+    database,
+    "batch-a",
+    "trade-2",
+    3,
+    buyRow({
+      id: "trade-2",
+      transactionDate: "2026-08-02 GMT+1000",
+      tradeAtUtc: "2026-08-02T00:00:00.000Z",
+      localTradeDate: "2026-08-02",
+    }),
+  );
+  stageRow(
+    database,
+    "batch-a",
+    "trade-3",
+    4,
+    buyRow({
+      id: "trade-3",
+      transactionDate: "2026-08-03 GMT+1000",
+      tradeAtUtc: "2026-08-03T00:00:00.000Z",
+      localTradeDate: "2026-08-03",
+    }),
+  );
+  stageRow(
+    database,
+    "batch-a",
+    "row-div-1",
+    5,
+    dividendRow({
+      id: "div-1",
+      paymentDate: "2026-08-10 GMT+1000",
+      localTradeDate: "2026-08-10",
+    }),
+  );
+  stageRow(
+    database,
+    "batch-a",
+    "row-div-2",
+    6,
+    dividendRow({
+      id: "div-2",
+      paymentDate: "2026-08-11 GMT+1000",
+      localTradeDate: "2026-08-11",
+      costPerShare: "0.3",
+    }),
+  );
+  const client = createSqliteSqlClient(database);
+  await commitBatch(client, "batch-a", "bug-016-commit");
+
+  const manualRepo = createDividendManualRecordRepository(client);
+  const supersededPre = await manualRepo.get(
+    "user-a",
+    "portfolio-a",
+    "manual-pre",
+  );
+  assert.ok(
+    supersededPre?.supersededByRecordId,
+    "expected the imported div-1 row to reconcile against the pre-existing manual record",
+  );
+  const preVersionAfterSupersede = supersededPre!.version;
+
+  function batchDividendRecordCount(): number {
+    return (
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM dividend_manual_records WHERE import_batch_id = 'batch-a'",
+        )
+        .get() as { count: number }
+    ).count;
+  }
+  function dividendImportRowStatuses(): string[] {
+    return (
+      database
+        .prepare(
+          "SELECT commit_status FROM import_rows WHERE id IN ('row-div-1', 'row-div-2') ORDER BY id",
+        )
+        .all() as { commit_status: string }[]
+    ).map((row) => row.commit_status);
+  }
+  function rebuildRunCount(): number {
+    return (
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM calculation_runs WHERE reason = 'import_reverse' AND user_id = 'user-a' AND portfolio_id = 'portfolio-a'",
+        )
+        .get() as { count: number }
+    ).count;
+  }
+  function reverseAuditCount(): number {
+    return (
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM audit_events WHERE action = 'import.reverse' AND target_id = 'batch-a'",
+        )
+        .get() as { count: number }
+    ).count;
+  }
+
+  assert.equal(batchDividendRecordCount(), 2);
+
+  const committedBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    "batch-a",
+  );
+  assert.ok(committedBatch);
+  const reversalRepo = createOwnedImportReversalRepository(client, {
+    chunkSize: 1,
+  });
+  const reversalInput = {
+    expectedVersion: committedBatch!.version,
+    idempotencyKey: "bug-016-reverse",
+    confirmation: true,
+    requestId: "bug-016-reverse-request",
+  };
+
+  // Invocation 1 of 3: reverses trade-1 only. Two trades remain, so this is
+  // NOT the finalizing invocation -- dividend facts must be untouched.
+  const first = await reversalRepo.reverse("user-a", "batch-a", reversalInput);
+  assert.equal(first.ok, true);
+  if (first.ok) {
+    assert.equal(first.status, "reversing");
+    assert.equal(first.reversedTransactions, 1);
+    assert.equal(first.remainingTransactions, 2);
+  }
+  assert.equal(
+    batchDividendRecordCount(),
+    2,
+    "the first (non-final) chunk must not delete any dividend record",
+  );
+  assert.deepEqual(dividendImportRowStatuses(), ["committed", "committed"]);
+  assert.equal(
+    (await manualRepo.get("user-a", "portfolio-a", "manual-pre"))
+      ?.supersededByRecordId,
+    supersededPre!.supersededByRecordId,
+    "the DIV-016C restore must not fire on a non-final chunk",
+  );
+  assert.equal(rebuildRunCount(), 0);
+
+  // Invocation 2 of 3: reverses trade-2. One trade remains -- still not
+  // finalizing.
+  const second = await reversalRepo.reverse("user-a", "batch-a", reversalInput);
+  assert.equal(second.ok, true);
+  if (second.ok) {
+    assert.equal(second.status, "reversing");
+    assert.equal(second.remainingTransactions, 1);
+  }
+  assert.equal(batchDividendRecordCount(), 2);
+  assert.deepEqual(dividendImportRowStatuses(), ["committed", "committed"]);
+  assert.equal(rebuildRunCount(), 0);
+
+  // Invocation 3 of 3: reverses trade-3, the last trade -- THIS is the
+  // finalizing invocation. Now the dividend flip/restore/delete and the
+  // PRF-007-mirrored rebuild queueing must all fire, atomically.
+  const third = await reversalRepo.reverse("user-a", "batch-a", reversalInput);
+  assert.equal(third.ok, true);
+  if (third.ok) {
+    assert.equal(third.status, "reversed");
+    assert.equal(third.remainingTransactions, 0);
+    assert.ok(
+      third.rebuildJobIds.some((id) =>
+        id.startsWith("import-reversal-rebuild:batch-a:portfolio-a"),
+      ),
+      "expected the dividend-driven rebuild id in the finalizing call's rebuildJobIds",
+    );
+  }
+  assert.equal(
+    batchDividendRecordCount(),
+    0,
+    "the finalizing invocation must delete every one of this batch's dividend records",
+  );
+  assert.deepEqual(dividendImportRowStatuses(), ["reversed", "reversed"]);
+  const restoredPre = await manualRepo.get(
+    "user-a",
+    "portfolio-a",
+    "manual-pre",
+  );
+  assert.equal(
+    restoredPre?.supersededByRecordId,
+    null,
+    "the DIV-016C restore must fire on the finalizing invocation",
+  );
+  const restoredVersion = restoredPre!.version;
+  assert.ok(
+    restoredVersion > preVersionAfterSupersede,
+    "the restore must have actually written the row (version advanced)",
+  );
+  assert.equal(
+    rebuildRunCount(),
+    1,
+    "exactly one import_reverse rebuild run queued for the affected portfolio",
+  );
+  const rebuildRun = database
+    .prepare(
+      "SELECT range_from, range_to, invalidation_source FROM calculation_runs WHERE reason = 'import_reverse' AND user_id = 'user-a' AND portfolio_id = 'portfolio-a'",
+    )
+    .get() as {
+    range_from: string;
+    range_to: string;
+    invalidation_source: string;
+  };
+  assert.equal(rebuildRun.range_from, "2026-08-10");
+  assert.equal(rebuildRun.range_to, "2026-08-11");
+  assert.equal(rebuildRun.invalidation_source, "batch-a");
+  assert.equal(reverseAuditCount(), 1);
+  const finalAudit = database
+    .prepare(
+      `SELECT metadata_json FROM audit_events
+       WHERE action = 'import.reverse' AND target_id = 'batch-a'
+       ORDER BY occurred_at DESC LIMIT 1`,
+    )
+    .get() as { metadata_json: string };
+  const finalMetadata = JSON.parse(finalAudit.metadata_json) as {
+    reversedDividendRecordCount: number;
+    restoredManualRecordCount: number;
+    rebuildJobIds: string[];
+  };
+  assert.equal(finalMetadata.reversedDividendRecordCount, 2);
+  assert.equal(finalMetadata.restoredManualRecordCount, 1);
+  assert.ok(
+    finalMetadata.rebuildJobIds.some((id) =>
+      id.startsWith("import-reversal-rebuild:batch-a:portfolio-a"),
+    ),
+  );
+
+  // Invocation 4: the batch is already `reversed` -- a repeated FINAL call
+  // (same idempotency key) must be a no-op, not a second delete/restore/
+  // queue.
+  const repeated = await reversalRepo.reverse(
+    "user-a",
+    "batch-a",
+    reversalInput,
+  );
+  assert.equal(repeated.ok, true);
+  if (repeated.ok) {
+    assert.equal(repeated.resumed, true);
+    assert.equal(repeated.idempotent, true);
+  }
+  assert.equal(batchDividendRecordCount(), 0);
+  assert.equal(rebuildRunCount(), 1, "no duplicate rebuild run queued");
+  assert.equal(reverseAuditCount(), 1, "no duplicate terminal audit event");
+  const restoredAgain = await manualRepo.get(
+    "user-a",
+    "portfolio-a",
+    "manual-pre",
+  );
+  assert.equal(
+    restoredAgain?.version,
+    restoredVersion,
+    "the DIV-016C restore must fire exactly once, not again on a repeated final call",
+  );
+});
+
+test("BUG-016: a mid-reversal dependent_facts failure (a sell posted against a lot between chunk invocations) leaves the batch's dividend records intact", async () => {
+  const database = await migratedDatabase();
+  stageRow(
+    database,
+    "batch-a",
+    "trade-1",
+    2,
+    buyRow({
+      id: "trade-1",
+      transactionDate: "2026-08-01 GMT+1000",
+      tradeAtUtc: "2026-08-01T00:00:00.000Z",
+      localTradeDate: "2026-08-01",
+    }),
+  );
+  stageRow(
+    database,
+    "batch-a",
+    "trade-2",
+    3,
+    buyRow({
+      id: "trade-2",
+      transactionDate: "2026-08-02 GMT+1000",
+      tradeAtUtc: "2026-08-02T00:00:00.000Z",
+      localTradeDate: "2026-08-02",
+    }),
+  );
+  stageRow(
+    database,
+    "batch-a",
+    "row-div-1",
+    4,
+    dividendRow({
+      id: "div-1",
+      paymentDate: "2026-08-10 GMT+1000",
+      localTradeDate: "2026-08-10",
+    }),
+  );
+  const client = createSqliteSqlClient(database);
+  await commitBatch(client, "batch-a", "bug-016-df-commit");
+
+  function batchDividendRecordCount(): number {
+    return (
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM dividend_manual_records WHERE import_batch_id = 'batch-a'",
+        )
+        .get() as { count: number }
+    ).count;
+  }
+
+  assert.equal(batchDividendRecordCount(), 1);
+
+  const committedBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    "batch-a",
+  );
+  assert.ok(committedBatch);
+  const reversalRepo = createOwnedImportReversalRepository(client, {
+    chunkSize: 1,
+  });
+  const reversalInput = {
+    expectedVersion: committedBatch!.version,
+    idempotencyKey: "bug-016-df-reverse",
+    confirmation: true,
+    requestId: "bug-016-df-reverse-request",
+  };
+
+  const first = await reversalRepo.reverse("user-a", "batch-a", reversalInput);
+  assert.equal(first.ok, true);
+  if (first.ok) {
+    assert.equal(first.status, "reversing");
+    assert.equal(first.remainingTransactions, 1);
+  }
+  assert.equal(batchDividendRecordCount(), 1);
+
+  // A sell against the remaining lot, posted OUTSIDE this batch, dated after
+  // the still-unreversed trade-2 -- makes the rest of this batch's reversal
+  // permanently blocked (`dependent_facts`).
+  const sale = await createOwnedLedgerRepository(client).post("user-a", {
+    portfolioId: "portfolio-a",
+    type: "sell",
+    portfolioSecurityId: "membership-a",
+    quantityDecimal: "2",
+    unitPriceDecimal: "12",
+    grossAmountDecimal: "24",
+    feeAmountDecimal: "0",
+    taxAmountDecimal: "0",
+    fxRateToBaseDecimal: null,
+    sourceType: "manual",
+    sourceReference: "manual-sale-1",
+    idempotencyKey: "manual-sale-1",
+    tradeAt: "2026-08-04T00:00:00.000Z",
+    localTradeDate: "2026-08-04",
+    settlementDate: null,
+    currencyCode: "AUD",
+    fxRateSource: null,
+    fxObservedAt: null,
+    requestId: "request-sale",
+  });
+  assert.equal(sale.ok, true);
+
+  const second = await reversalRepo.reverse("user-a", "batch-a", reversalInput);
+  assert.equal(second.ok, false);
+  if (!second.ok) {
+    assert.equal(second.reason, "dependent_facts");
+    assert.ok(second.impacts && second.impacts.length > 0);
+  }
+  assert.equal(
+    batchDividendRecordCount(),
+    1,
+    "a mid-reversal dependent_facts failure must leave this batch's dividend records intact",
+  );
+  const batchAfter = database
+    .prepare("SELECT status FROM import_batches WHERE id = 'batch-a'")
+    .get() as { status: string };
+  assert.equal(batchAfter.status, "reversing");
 });
