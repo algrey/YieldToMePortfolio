@@ -191,41 +191,63 @@ async function loadReview(
     // `ImportReconciliationInput.existingDividendSourceReferences`'s doc
     // comment).
     //
-    // BUG-013 review follow-up ("fail-open cap"): bounded with `LIMIT MAX +
-    // 1` -- see the fail-open/fail-closed asymmetry comment on the capped
-    // result below.
+    // PRF-009 correction round B1 (BLOCKING): PRF-009 round 1 wrongly
+    // classified this set as a pure SUPPRESSION set and capped it fail-open
+    // (`LIMIT MAX + 1`, dropping to empty on overflow) alongside the trade
+    // set below. It is NOT pure suppression: `createImportReconciliationPreview`
+    // (`domain/imports/reconciliation.ts`) ALSO uses it to split
+    // `dividendReconciliationRowsAll` into `freshRows`/`alreadyImportedRows`
+    // -- membership here removes a row from the matching pool entirely. A
+    // fail-open overflow (set collapses to empty) put a genuinely
+    // dedupe-bound row BACK into `freshRows`, where it could earn a false
+    // `DIVIDEND_RECONCILIATION_PROPOSED` ("committing will supersede the
+    // manual record" -- exactly the false promise B1 originally existed to
+    // remove) and consume/poison a manual candidate a sibling fresh row
+    // could otherwise have cleanly matched. This is a COMPARISON set
+    // (DIV-016C), not a suppression set, so it is deliberately left
+    // UNBOUNDED, matching `capExistingTradeRows`/`capExistingDividendRows`'s
+    // fail-closed comparison-set treatment in spirit (there is no size
+    // threshold past which the correct answer becomes "not computed" here --
+    // membership must be exact or the split above silently mis-derives).
+    // Only `existingTradeSourceReferences` below is a genuine pure
+    // suppression set (its sole consumer, `tradeAlreadyBoundForSkip` in
+    // `domain/imports/reconciliation.ts`, only silences an advisory
+    // warning) and stays capped fail-open.
     client.all<Record<string, unknown>>(
       `SELECT portfolio_id, source_reference FROM dividend_manual_records
-       WHERE user_id = ? AND source_reference IS NOT NULL
-       LIMIT ?`,
-      [userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1],
+       WHERE user_id = ? AND source_reference IS NOT NULL`,
+      [userId],
     ),
-    // BUG-013 review round (ruling 1): the trade analog of the query just
-    // above -- every EXISTING `transactions.source_reference` this owner has
-    // (any portfolio, any status), used to suppress `TRADE_NEAR_EXISTING_ENTRY`
-    // for a row already bound for an identical commit-time exact-match SKIP
-    // (`db/repositories/import-commit.ts`'s own dedupe check at the trade
-    // branch, reproduced here EXACTLY: `source_type = 'csv_import'`, no
-    // `status` filter -- a reversed trade's row still counts as "will be
-    // skipped," matching that check's own behaviour).
+    // BUG-013 review round (ruling 1): the trade analog of the dividend
+    // query above -- every EXISTING `transactions.source_reference` this
+    // owner has (any portfolio, any status), used to suppress
+    // `TRADE_NEAR_EXISTING_ENTRY` for a row already bound for an identical
+    // commit-time exact-match SKIP (`db/repositories/import-commit.ts`'s own
+    // dedupe check at the trade branch, reproduced here EXACTLY:
+    // `source_type = 'csv_import'`, no `status` filter -- a reversed trade's
+    // row still counts as "will be skipped," matching that check's own
+    // behaviour).
     //
-    // BUG-013 review follow-up ("fail-open cap"): this query -- and its
-    // dividend twin above -- was previously left deliberately UNBOUNDED,
-    // reasoning it was "a cheap Set-membership lookup, not a per-row
-    // comparison loop like `existingTradeRows` below." The Orchestrator's
-    // own F2 precedent (a truncated read must fail CLOSED, per BUG-011)
-    // does not apply here and the reviewer correctly departed from it: F2
-    // caps a COMPARISON set, where truncation produces a silent FALSE
-    // NEGATIVE indistinguishable from a genuine non-match. This is a
-    // SUPPRESSION set instead -- `existingTradeSourceReferences`/
-    // `existingDividendSourceReferences` only ever SILENCE an advisory
+    // BUG-013 review follow-up ("fail-open cap"): this query was previously
+    // left deliberately UNBOUNDED, reasoning it was "a cheap Set-membership
+    // lookup, not a per-row comparison loop like `existingTradeRows` below."
+    // The Orchestrator's own F2 precedent (a truncated read must fail
+    // CLOSED, per BUG-011) does not apply here and the reviewer correctly
+    // departed from it: F2 caps a COMPARISON set, where truncation produces
+    // a silent FALSE NEGATIVE indistinguishable from a genuine non-match.
+    // `existingTradeSourceReferences` IS a pure SUPPRESSION set -- its sole
+    // consumer, `tradeAlreadyBoundForSkip` in
+    // `domain/imports/reconciliation.ts`, only ever SILENCES an advisory
     // warning for a row already bound for an identical commit-time skip
-    // (see `sourceReferenceKey` in `domain/imports/reconciliation.ts`).
-    // Truncating it can only ADD noise (a row that would have been
-    // suppressed just shows its warning again), never hide a duplicate --
-    // the truncated-comparison-set failure mode this file's OTHER caps
-    // (`existingTradeRows`, `existingManualRows`, `existingReceiptRows`)
-    // exist to prevent cannot happen here. `LIMIT MAX + 1` therefore fails
+    // (see `sourceReferenceKey` there); it never feeds a matching-pool split
+    // the way `existingDividendSourceReferences` does (see that query's own
+    // comment above -- PRF-009's correction round removed its cap after
+    // finding it was NOT a pure suppression set). Truncating THIS set can
+    // only ADD noise (a row that would have been suppressed just shows its
+    // warning again), never hide a duplicate -- the truncated-comparison-set
+    // failure mode this file's OTHER caps (`existingTradeRows`,
+    // `existingManualRows`, `existingReceiptRows`) exist to prevent cannot
+    // happen here. `LIMIT MAX + 1` therefore fails
     // OPEN: on overflow the whole set for that route is dropped to empty
     // (below), which simply reverts to the noisier pre-BUG-013 behaviour a
     // sync already regularly produced before this fix, not a fail-CLOSED
@@ -424,35 +446,18 @@ async function loadReview(
       quantityDecimal: String(row.quantity_decimal),
       priceDecimal: String(row.unit_price_decimal),
     }));
-  // BUG-013 review follow-up ("fail-open cap"): the cap/degrade DECISION is
-  // the shared pure function above -- see its doc comment for why this
-  // degrades the OPPOSITE way from this file's comparison-set caps
-  // (`capExistingTradeRows`/`capExistingDividendRows`, which fail closed).
-  const cappedDividendSourceReferenceRows = capSuppressionReferenceRows(
-    existingSourceReferenceRows,
-    MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
-  );
-  if (cappedDividendSourceReferenceRows.overflowed) {
-    emitStructuredLog({
-      level: "warn",
-      event: "import.preview",
-      action: "import.preview.dividend_suppression_overflow",
-      result: "failure",
-      requestId: "import-preview-suppression-overflow",
-      metadata: {
-        batchId,
-        rows: existingSourceReferenceRows.length,
-        max: MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
-      },
-    });
-  }
+  // PRF-009 correction round B1 (BLOCKING): NOT capped -- see the doc
+  // comment on `existingSourceReferenceRows`'s own query above for why this
+  // set is a COMPARISON set (DIV-016C), not a pure suppression set, and
+  // therefore cannot fail open to empty on overflow.
   const existingDividendSourceReferences = new Set(
-    cappedDividendSourceReferenceRows.rows.map(
+    existingSourceReferenceRows.map(
       (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
     ),
   );
-  // BUG-013 review round (ruling 1): the trade analog, same key shape and
-  // same fail-open cap as the dividend set above.
+  // BUG-013 review round (ruling 1): the trade analog, same key shape --
+  // but unlike the dividend set above, this one IS a pure suppression set
+  // (see its query's own doc comment) and keeps the fail-open cap.
   const cappedTradeSourceReferenceRows = capSuppressionReferenceRows(
     existingTradeSourceReferenceRows,
     MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
