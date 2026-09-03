@@ -365,6 +365,9 @@ export type SystemBackupScaffoldPortfolio = {
   committedDividendCount: number;
   transactionsCount: number;
   dividendRecordsCount: number;
+  /** OPS-005: see `BundleScaffoldResult.missingTransactionRefs`'s own
+   * comment -- the resume mechanism itself, not merely diagnostic. */
+  missingTransactionRefs: readonly string[];
 };
 
 export type SystemBackupScaffoldResult = {
@@ -454,6 +457,7 @@ export async function commitSystemBackupCoreScaffold(
       committedDividendCount: result.result.committedDividendCount,
       transactionsCount: bundle.transactions.length,
       dividendRecordsCount: bundle.dividendManualRecords.length,
+      missingTransactionRefs: result.result.missingTransactionRefs,
     });
   }
 
@@ -641,6 +645,7 @@ export async function commitSystemBackupImport(
         portfolioStatus: bundle.portfolio.status,
         transactionsCount: bundle.transactions.length,
         dividendRecordsCount: bundle.dividendManualRecords.length,
+        transactionRefs: bundle.transactions.map((tx) => tx.ref),
       });
       if (!finalizeResult.ok) {
         return {

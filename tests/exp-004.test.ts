@@ -43,6 +43,7 @@ import {
 import {
   canonicalBundleJson,
   sha256Hex,
+  type BundleTransaction,
   type PortfolioBundleV1,
 } from "../domain/exports/portfolio-bundle.ts";
 import type { SqlClient } from "../db/repositories/sql-client.ts";
@@ -291,6 +292,183 @@ async function buildBundle(): Promise<PortfolioBundleV1> {
   assert.equal(exported.ok, true);
   if (!exported.ok) throw new Error("export failed");
   return exported.bundle;
+}
+
+// ---------------------------------------------------------------------------
+// OPS-005 fixtures/helpers: a real "reversed original + re-imported twin"
+// shape (BUG-018's own legal post-fix shape) PLUS an unrelated fourth root,
+// timed with a deterministic clock so the pre-BUG-018-round-2 breadth-first
+// order and the current depth-first order provably disagree about what sits
+// at a chunk boundary -- see `oldBreadthFirstChainOrder`'s own comment.
+// ---------------------------------------------------------------------------
+
+/** OPS-005 regression fixture. One portfolio, FOUR transactions:
+ *   originalA (root, t0, source_reference "shared-ref") --reversed by-->
+ *     mirrorA (child of originalA, t2)
+ *   rootExtra (unrelated root, t1, no source_reference)
+ *   twinA (root, t3, RE-USES originalA's freed "shared-ref")
+ *
+ * A deterministic clock (never the real one) drives `created_at` so the
+ * ordering relationship below is exact, never flaky:
+ *   OLD (breadth-first) order: [originalA, rootExtra, twinA, mirrorA]
+ *   NEW (depth-first)   order: [originalA, mirrorA, rootExtra, twinA]
+ * A part boundary that commits the OLD order's first TWO items
+ * (`{originalA, rootExtra}`) therefore sits at NEW-order position 2 too --
+ * but position 2 of the NEW order is `rootExtra`, not `mirrorA`. A stale
+ * positional resume (`newOrder.slice(committedCount)`) starts at position 2
+ * and so skips `mirrorA` (position 1) entirely -- see the regression test
+ * using this fixture for the full walk-through and the pre-fix proof.
+ */
+async function reversedPlusUnrelatedRootFixture(): Promise<{
+  client: SqlClient;
+}> {
+  const db = await migratedDatabase();
+  db.exec(`
+    INSERT INTO currencies(code,numeric_code,name,minor_unit_digits) VALUES
+      ('AUD',36,'Australian dollar',2);
+    INSERT INTO users(id,status,primary_email,timezone,created_at,updated_at) VALUES
+      ('a','active','a@example.test','Australia/Sydney','2026-08-01','2026-08-01');
+    INSERT INTO user_settings(user_id,home_currency_code,timezone,financial_year_start_month,created_at,updated_at,version) VALUES
+      ('a','AUD','Australia/Sydney',7,'2026-08-01','2026-08-01',1);
+    INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at) VALUES
+      ('pa','a','A','Portfolio A','AUD','Australia/Sydney','fifo','active','2026-08-01','2026-08-01');
+    INSERT INTO securities(id,asset_type,primary_currency_code,canonical_name,created_at,updated_at) VALUES
+      ('s1','equity','AUD','Alpha Co','2026-08-01','2026-08-01');
+    INSERT INTO security_identifiers(id,security_id,scheme,value,valid_from,source) VALUES
+      ('si1','s1','ticker','ALPHA','2026-08-01','owner_attested');
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at) VALUES
+      ('psa1','a','pa','s1','ALPHA','AUD','held','2026-08-01','2026-08-01');
+  `);
+  const client = createSqliteSqlClient(db);
+  let clockMs = new Date("2026-01-01T00:00:00.000Z").getTime();
+  const nextTimestamp = (): string => {
+    const iso = new Date(clockMs).toISOString();
+    clockMs += 1000;
+    return iso;
+  };
+  const ledger = createOwnedLedgerRepository(client, nextTimestamp);
+
+  const originalA = await ledger.post("a", {
+    portfolioId: "pa",
+    type: "buy",
+    portfolioSecurityId: "psa1",
+    quantityDecimal: "100",
+    unitPriceDecimal: "5",
+    grossAmountDecimal: "500",
+    feeAmountDecimal: "0",
+    taxAmountDecimal: "0",
+    fxRateToBaseDecimal: null,
+    sourceType: "csv_import",
+    sourceReference: "shared-ref",
+    idempotencyKey: randomUUID(),
+    tradeAt: "2026-01-01T00:00:00.000Z",
+    localTradeDate: "2026-01-01",
+    settlementDate: null,
+    currencyCode: "AUD",
+    fxRateSource: null,
+    fxObservedAt: null,
+    requestId: randomUUID(),
+  });
+  assert.equal(originalA.ok, true);
+  if (!originalA.ok) throw new Error("fixture originalA failed");
+
+  const rootExtra = await ledger.post("a", {
+    portfolioId: "pa",
+    type: "buy",
+    portfolioSecurityId: "psa1",
+    quantityDecimal: "10",
+    unitPriceDecimal: "5",
+    grossAmountDecimal: "50",
+    feeAmountDecimal: "0",
+    taxAmountDecimal: "0",
+    fxRateToBaseDecimal: null,
+    sourceType: "manual",
+    idempotencyKey: randomUUID(),
+    tradeAt: "2026-01-02T00:00:00.000Z",
+    localTradeDate: "2026-01-02",
+    settlementDate: null,
+    currencyCode: "AUD",
+    fxRateSource: null,
+    fxObservedAt: null,
+    requestId: randomUUID(),
+  });
+  assert.equal(rootExtra.ok, true);
+
+  const mirrorA = await ledger.reverse(
+    "a",
+    "pa",
+    originalA.transaction.id,
+    randomUUID(),
+    randomUUID(),
+  );
+  assert.equal(mirrorA.ok, true);
+
+  const twinA = await ledger.post("a", {
+    portfolioId: "pa",
+    type: "buy",
+    portfolioSecurityId: "psa1",
+    quantityDecimal: "100",
+    unitPriceDecimal: "5",
+    grossAmountDecimal: "500",
+    feeAmountDecimal: "0",
+    taxAmountDecimal: "0",
+    fxRateToBaseDecimal: null,
+    sourceType: "csv_import",
+    sourceReference: "shared-ref",
+    idempotencyKey: randomUUID(),
+    tradeAt: "2026-01-04T00:00:00.000Z",
+    localTradeDate: "2026-01-04",
+    settlementDate: null,
+    currencyCode: "AUD",
+    fxRateSource: null,
+    fxObservedAt: null,
+    requestId: randomUUID(),
+  });
+  assert.equal(twinA.ok, true);
+
+  return { client };
+}
+
+/** The pre-BUG-018-round-2 breadth-first `chainOrder`, copied verbatim
+ * (only re-typed against this file's own `ChainItem` import) from git
+ * history (`d4f9159`, the commit immediately before BUG-018 round 2
+ * replaced it with the depth-first version `chain-order.ts` now exports).
+ * Used ONLY by the regression test below, to construct a real "part 1
+ * committed under the OLD order" scenario without needing a scratch git
+ * worktree -- this function is never imported by, and never influences,
+ * any production code path. */
+function oldBreadthFirstChainOrder<T extends ChainItem>(
+  items: readonly T[],
+  dependencyOf: (item: T) => string | null,
+): T[] {
+  const byRef = new Map(items.map((item) => [item.ref, item]));
+  const stableCompare = (a: T, b: T): number =>
+    a.createdAt === b.createdAt
+      ? a.ref.localeCompare(b.ref)
+      : a.createdAt.localeCompare(b.createdAt);
+  const children = new Map<string, T[]>();
+  const queue: T[] = [];
+  for (const item of items) {
+    const dep = dependencyOf(item);
+    if (dep === null || !byRef.has(dep)) {
+      queue.push(item);
+      continue;
+    }
+    const siblings = children.get(dep);
+    if (siblings) siblings.push(item);
+    else children.set(dep, [item]);
+  }
+  queue.sort(stableCompare);
+  const ordered: T[] = [];
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const item = queue[cursor]!;
+    ordered.push(item);
+    const kids = children.get(item.ref);
+    if (!kids) continue;
+    kids.sort(stableCompare);
+    queue.push(...kids);
+  }
+  return ordered;
 }
 
 /** BUG-019 regression harness: wraps `client` so EVERY `run()`/`batch()`
@@ -713,6 +891,7 @@ test("dividends part + finalize: a supersession chain is written across parts an
     portfolioStatus: bundle.portfolio.status,
     transactionsCount: bundle.transactions.length,
     dividendRecordsCount: bundle.dividendManualRecords.length,
+    transactionRefs: bundle.transactions.map((tx) => tx.ref),
   };
   const finalize1 = await commitPortfolioBundleFinalize(
     ctxFor(client, "target"),
@@ -1245,8 +1424,19 @@ test("production leftover state: an OLD-code `committing` batch with partially r
   assert.equal(resumed.result.fingerprint, first.result.fingerprint);
   assert.equal(resumed.result.committedTransactionCount, 1);
   assert.equal(resumed.result.committedDividendCount, 0);
+  // OPS-005: the ACTUAL resume mechanism -- the ref-probe, not the count --
+  // names exactly what remains, already in the server's current chain
+  // order (mirroring what `system-backup-panel.tsx` now does).
+  assert.deepEqual(
+    resumed.result.missingTransactionRefs,
+    orderedTransactions.slice(1).map((tx) => tx.ref),
+  );
 
-  // ...and the remaining parts complete the restore.
+  // ...and the remaining parts complete the restore, driven by the ref
+  // list the browser now actually sends (never a count-derived slice).
+  const transactionsByRef = new Map(
+    bundle.transactions.map((tx) => [tx.ref, tx]),
+  );
   const rest = await commitPortfolioBundleTransactionsPart(
     ctxFor(client, "own"),
     {
@@ -1254,8 +1444,8 @@ test("production leftover state: an OLD-code `committing` batch with partially r
       batchId: resumed.result.batchId,
       fingerprint: resumed.result.fingerprint,
       securities: resumed.result.securities,
-      transactions: orderedTransactions.slice(
-        resumed.result.committedTransactionCount,
+      transactions: resumed.result.missingTransactionRefs.map((ref) =>
+        transactionsByRef.get(ref)!,
       ),
     },
   );
@@ -1289,6 +1479,7 @@ test("production leftover state: an OLD-code `committing` batch with partially r
     portfolioStatus: bundle.portfolio.status,
     transactionsCount: bundle.transactions.length,
     dividendRecordsCount: bundle.dividendManualRecords.length,
+    transactionRefs: bundle.transactions.map((tx) => tx.ref),
   });
   assert.equal(finalized.ok, true);
 
@@ -1313,6 +1504,267 @@ test("production leftover state: an OLD-code `committing` batch with partially r
   );
   assert.equal(batches.length, 1);
   assert.equal(batches[0]?.status, "committed");
+});
+
+// ---------------------------------------------------------------------------
+// OPS-005: resume by ref-probe, immune to a chain-order change straddling a
+// deploy (BUG-018 round 3's documented, previously-open hazard), plus
+// finalize's own defence-in-depth transaction-ref verification.
+// ---------------------------------------------------------------------------
+
+test("OPS-005 regression (guard): resume via the ref-probe survives a chain-order change between the part that wrote committed rows and the part that resumes -- the pre-fix count/slice strategy would have silently dropped the reversal mirror here", async () => {
+  const { client: sourceClient } = await reversedPlusUnrelatedRootFixture();
+  const exported = await exportPortfolioBundle(ctxFor(sourceClient, "a"), "pa");
+  assert.equal(exported.ok, true);
+  if (!exported.ok) return;
+  const bundle = exported.bundle;
+  assert.equal(bundle.transactions.length, 4);
+
+  const original = bundle.transactions.find((tx) => tx.status === "reversed");
+  assert.ok(original, "the fixture must leave one reversed original");
+  const mirror = bundle.transactions.find((tx) => tx.reversesRef !== null);
+  assert.ok(mirror, "the fixture must leave one reversal mirror");
+  assert.equal(mirror.reversesRef, original.ref);
+  const twin = bundle.transactions.find(
+    (tx) =>
+      tx.reversesRef === null &&
+      tx.status === "posted" &&
+      tx.sourceReference === "shared-ref",
+  );
+  assert.ok(twin, "the fixture must leave one re-imported twin");
+  const rootExtra = bundle.transactions.find(
+    (tx) => tx.reversesRef === null && tx.sourceReference === null,
+  );
+  assert.ok(rootExtra, "the fixture must leave one unrelated root");
+
+  const dependencyOf = (tx: BundleTransaction): string | null =>
+    tx.reversesRef ?? tx.supersedesRef;
+  const oldOrder = oldBreadthFirstChainOrder(bundle.transactions, dependencyOf);
+  const newOrder = chainOrder(bundle.transactions, dependencyOf);
+  // Sanity-check the fixture's own timing actually produces the disagreement
+  // this test exists to exploit -- if either assertion below fails, the
+  // fixture's clock/dependency wiring is wrong, not the production code.
+  assert.deepEqual(
+    oldOrder.map((tx) => tx.ref),
+    [original.ref, rootExtra.ref, twin.ref, mirror.ref],
+  );
+  assert.deepEqual(
+    newOrder.map((tx) => tx.ref),
+    [original.ref, mirror.ref, rootExtra.ref, twin.ref],
+  );
+
+  const targetDb = await migratedDatabase();
+  seedFreshAccount(targetDb, "target");
+  const targetClient = createSqliteSqlClient(targetDb);
+
+  const scaffold1 = await commitPortfolioBundleScaffold(
+    ctxFor(targetClient, "target"),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(scaffold1.ok, true);
+  if (!scaffold1.ok) return;
+
+  // Part 1 committed under the OLD (pre-BUG-018-round-2) order -- exactly
+  // what a restore begun before that deploy would have durably written by
+  // the time a chunk boundary at position 2 landed.
+  const part1 = await commitPortfolioBundleTransactionsPart(
+    ctxFor(targetClient, "target"),
+    {
+      portfolioId: scaffold1.result.portfolioId,
+      batchId: scaffold1.result.batchId,
+      fingerprint: scaffold1.result.fingerprint,
+      securities: scaffold1.result.securities,
+      transactions: oldOrder.slice(0, 2),
+    },
+  );
+  assert.equal(part1.ok, true, part1.ok ? "" : part1.message);
+
+  // The deploy now ships the depth-first chainOrder. The owner reloads and
+  // confirms again: scaffold must report exactly what remains from the
+  // ACTUAL database state -- never from an assumption about which order
+  // wrote part 1.
+  const resumed = await commitPortfolioBundleScaffold(
+    ctxFor(targetClient, "target"),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(resumed.ok, true);
+  if (!resumed.ok) return;
+  assert.equal(resumed.result.committedTransactionCount, 2);
+
+  // GUARD: proves this was a genuine, reproducible defect -- the OLD design
+  // resumed by slicing the CURRENT (new) order at the live count. That
+  // positional slice silently drops the mirror here, because position 2 of
+  // the new order is `rootExtra` (already written), not the mirror (still
+  // missing). This computation touches no service code; it only shows what
+  // the retired strategy would have sent.
+  const oldStyleSlice = newOrder.slice(
+    resumed.result.committedTransactionCount,
+  );
+  assert.ok(
+    !oldStyleSlice.some((tx) => tx.ref === mirror.ref),
+    "pre-fix guard: the count/slice resume drops the reversal mirror when the write order and the resume order disagree",
+  );
+
+  // THE FIX: the ref-probe names exactly the unwritten rows, independent of
+  // either order, in the server's own current chain order.
+  assert.deepEqual(resumed.result.missingTransactionRefs, [
+    mirror.ref,
+    twin.ref,
+  ]);
+
+  // The browser (post-fix) sends exactly this list, in this order -- and
+  // every row lands, none twice.
+  const transactionsByRef = new Map(
+    bundle.transactions.map((tx) => [tx.ref, tx]),
+  );
+  const part2 = await commitPortfolioBundleTransactionsPart(
+    ctxFor(targetClient, "target"),
+    {
+      portfolioId: resumed.result.portfolioId,
+      batchId: resumed.result.batchId,
+      fingerprint: resumed.result.fingerprint,
+      securities: resumed.result.securities,
+      transactions: resumed.result.missingTransactionRefs.map((ref) =>
+        transactionsByRef.get(ref)!,
+      ),
+    },
+  );
+  assert.equal(part2.ok, true, part2.ok ? "" : part2.message);
+
+  const rows = await targetClient.all<{ id: string }>(
+    "SELECT id FROM transactions WHERE user_id = 'target' AND portfolio_id = ?",
+    [resumed.result.portfolioId],
+  );
+  assert.equal(
+    rows.length,
+    4,
+    "every row restored exactly once -- none dropped, none duplicated",
+  );
+
+  const finalized = await commitPortfolioBundleFinalize(
+    ctxFor(targetClient, "target"),
+    {
+      portfolioId: resumed.result.portfolioId,
+      batchId: resumed.result.batchId,
+      fingerprint: resumed.result.fingerprint,
+      securities: resumed.result.securities,
+      dividendLinkage: [],
+      dividendSecurityAssumptions: [],
+      dividendPortfolioAssumption: null,
+      dividendFyOverrides: [],
+      dividendEventOverrides: [],
+      dividendImportFrankingOverrides: [],
+      whatifScenarios: [],
+      portfolioStatus: "active",
+      transactionsCount: bundle.transactions.length,
+      dividendRecordsCount: 0,
+      transactionRefs: bundle.transactions.map((tx) => tx.ref),
+    },
+  );
+  assert.equal(finalized.ok, true, finalized.ok ? "" : finalized.message);
+});
+
+test("OPS-005: finalize's transaction-ref verification fails closed, and the batch is never marked committed, when a previously-committed transaction is missing at finalize time", async () => {
+  const bundle = await buildBundle();
+  const db = await migratedDatabase();
+  seedFreshAccount(db, "target");
+  const client = createSqliteSqlClient(db);
+
+  const scaffold = await commitPortfolioBundleScaffold(
+    ctxFor(client, "target"),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(scaffold.ok, true);
+  if (!scaffold.ok) return;
+
+  const orderedTransactions = chainOrder(
+    bundle.transactions,
+    (tx) => tx.reversesRef ?? tx.supersedesRef,
+  );
+  const txResult = await commitPortfolioBundleTransactionsPart(
+    ctxFor(client, "target"),
+    {
+      portfolioId: scaffold.result.portfolioId,
+      batchId: scaffold.result.batchId,
+      fingerprint: scaffold.result.fingerprint,
+      securities: scaffold.result.securities,
+      transactions: orderedTransactions,
+    },
+  );
+  assert.equal(txResult.ok, true);
+  const divResult = await commitPortfolioBundleDividendsPart(
+    ctxFor(client, "target"),
+    {
+      portfolioId: scaffold.result.portfolioId,
+      batchId: scaffold.result.batchId,
+      fingerprint: scaffold.result.fingerprint,
+      securities: scaffold.result.securities,
+      records: chainOrder(
+        bundle.dividendManualRecords,
+        (record) => record.supersedesRef,
+      ),
+    },
+  );
+  assert.equal(divResult.ok, true);
+
+  // Simulate a row vanishing between the transactions part and finalize
+  // (a deleted row, a bug elsewhere, or a finalize replayed against the
+  // wrong batch) -- one committed transaction is removed directly.
+  const victim = await client.get<{ id: string }>(
+    "SELECT id FROM transactions WHERE user_id = 'target' AND portfolio_id = ? LIMIT 1",
+    [scaffold.result.portfolioId],
+  );
+  assert.ok(victim);
+  // A real transaction has FK-restricted dependents (its own cash-ledger
+  // entry, at least) -- fine for this fixture's own two-transaction chain,
+  // which has neither a reversal/supersession target nor a lot-linked
+  // sell, but toggling enforcement off for the one delete keeps this test
+  // robust to that shape either way.
+  db.exec("PRAGMA foreign_keys = OFF;");
+  await client.run("DELETE FROM transactions WHERE id = ?", [victim.id]);
+  db.exec("PRAGMA foreign_keys = ON;");
+
+  const finalized = await commitPortfolioBundleFinalize(
+    ctxFor(client, "target"),
+    {
+      portfolioId: scaffold.result.portfolioId,
+      batchId: scaffold.result.batchId,
+      fingerprint: scaffold.result.fingerprint,
+      securities: scaffold.result.securities,
+      dividendLinkage: dividendLinkageFor(bundle),
+      dividendSecurityAssumptions: bundle.dividendSecurityAssumptions,
+      dividendPortfolioAssumption: bundle.dividendPortfolioAssumption,
+      dividendFyOverrides: bundle.dividendFyOverrides,
+      dividendEventOverrides: bundle.dividendEventOverrides,
+      dividendImportFrankingOverrides: bundle.dividendImportFrankingOverrides,
+      whatifScenarios: bundle.whatifScenarios,
+      portfolioStatus: bundle.portfolio.status,
+      transactionsCount: bundle.transactions.length,
+      dividendRecordsCount: bundle.dividendManualRecords.length,
+      transactionRefs: bundle.transactions.map((tx) => tx.ref),
+    },
+  );
+  assert.equal(finalized.ok, false);
+  if (finalized.ok) return;
+  assert.equal(finalized.status, 409);
+  assert.match(finalized.message, /1 transaction\(s\) were not found/);
+
+  const batchRow = await client.get<{ status: string }>(
+    "SELECT status FROM import_batches WHERE id = ?",
+    [scaffold.result.batchId],
+  );
+  assert.notEqual(
+    batchRow?.status,
+    "committed",
+    "a batch that failed finalize's transaction-ref check must never be marked committed",
+  );
+  assert.equal(batchRow?.status, "failed");
 });
 
 // ---------------------------------------------------------------------------

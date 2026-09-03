@@ -262,6 +262,14 @@ type ScaffoldPortfolio = {
   securities: ScaffoldSecurity[];
   committedTransactionCount: number;
   committedDividendCount: number;
+  // OPS-005: the resume mechanism itself -- every transaction ref still
+  // needing a write, in the server's own current chain order. Replaces
+  // deriving a slice index from `committedTransactionCount` against this
+  // browser's own (possibly stale-cached-bundle) chain-order computation,
+  // which a chain-order change straddling a deploy could desynchronise
+  // silently (BUG-018 round 3's documented, now-closed hazard). See
+  // `docs/BACKUP_FORMAT.md`'s "Resume evidence" section.
+  missingTransactionRefs: string[];
 };
 type ScaffoldResult = {
   watchlist: {
@@ -539,13 +547,22 @@ export function SystemBackupPanel() {
     ] of scaffoldOutcome.value.result.portfolios.entries()) {
       const bundle = prepared.value.coreBackup.portfolios[index]!;
       if (!portfolioScaffold.idempotent) {
-        const orderedTransactions = chainOrder(
-          bundle.transactions,
-          (tx) => tx.reversesRef ?? tx.supersedesRef,
+        // OPS-005: the scaffold response's `missingTransactionRefs` IS the
+        // resume mechanism -- a server-derived, always-live list of exactly
+        // the refs not yet written, already in the server's own current
+        // chain order. This browser never re-derives "how much is left"
+        // from a count/slice; it only maps each ref back to the full
+        // transaction object this bundle already carries and preserves the
+        // order the server gave.
+        const transactionsByRef = new Map(
+          bundle.transactions.map((tx) => [tx.ref, tx]),
         );
-        const remainingTransactions = orderedTransactions.slice(
-          portfolioScaffold.committedTransactionCount,
-        );
+        const remainingTransactions = portfolioScaffold.missingTransactionRefs
+          .map((ref) => transactionsByRef.get(ref))
+          .filter(
+            (tx): tx is (typeof bundle.transactions)[number] =>
+              tx !== undefined,
+          );
         const transactionParts = chunkRows(
           remainingTransactions,
           TRANSACTIONS_RESTORE_CHUNK_ROWS,
@@ -648,6 +665,10 @@ export function SystemBackupPanel() {
             portfolioStatus: bundle.portfolio.status,
             transactionsCount: bundle.transactions.length,
             dividendRecordsCount: bundle.dividendManualRecords.length,
+            // OPS-005 (defence in depth): every transaction ref, so
+            // finalize can verify each one was actually written before
+            // marking this portfolio committed.
+            transactionRefs: bundle.transactions.map((tx) => tx.ref),
           },
           (status) =>
             `Cloudflare ended the request (HTTP ${status}) while finishing "${portfolioScaffold.portfolioName}". Its transactions and dividend records are already safely restored; re-select this same backup and confirm again to finish.`,

@@ -181,6 +181,7 @@ export type SystemBackupCorePartRequest =
       portfolioStatus: unknown;
       transactionsCount: unknown;
       dividendRecordsCount: unknown;
+      transactionRefs: unknown;
     };
 
 export function systemBackupCorePartFromBody(
@@ -263,6 +264,7 @@ export function systemBackupCorePartFromBody(
         portfolioStatus: body.portfolioStatus,
         transactionsCount: body.transactionsCount,
         dividendRecordsCount: body.dividendRecordsCount,
+        transactionRefs: body.transactionRefs,
       },
     };
   }

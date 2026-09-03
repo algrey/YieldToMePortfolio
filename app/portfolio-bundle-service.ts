@@ -69,6 +69,7 @@ import {
   type PortfolioBundleV1,
 } from "../domain/exports/portfolio-bundle.ts";
 import { chainOrder } from "../domain/exports/chain-order.ts";
+import { chunkRows } from "../domain/exports/chunk-rows.ts";
 import { readPortfolioBundle } from "../db/repositories/portfolio-bundle.ts";
 import type { SqlClient } from "../db/repositories/sql-client.ts";
 import {
@@ -1156,9 +1157,22 @@ export type BundleScaffoldResult = {
   securitiesMatched: number;
   /** Live, server-derived resume evidence -- see this section's header
    * comment. When `idempotent` is true these equal the bundle's own full
-   * counts. */
+   * counts. Kept as an informational/diagnostic figure; OPS-005 moved the
+   * ACTUAL resume mechanism to `missingTransactionRefs` below, which is
+   * immune to a chain-order change across a deploy (see that field's own
+   * comment). */
   committedTransactionCount: number;
   committedDividendCount: number;
+  /**
+   * OPS-005: every transaction ref this bundle still needs written, in the
+   * CURRENT (server-computed, always-live) chain order -- never a count to
+   * be sliced against a client-side re-derivation of that order. Empty when
+   * `idempotent` is true or when nothing remains. The caller (browser) maps
+   * each ref back to its own copy of the bundle's transaction object and
+   * sends exactly this list, in this order, to the transactions part(s) --
+   * see `docs/BACKUP_FORMAT.md`'s "Resume evidence" section.
+   */
+  missingTransactionRefs: readonly string[];
 };
 
 /**
@@ -1218,6 +1232,51 @@ async function countByIdempotencyPrefix(
     [userId, portfolioId, range.start, range.endExclusive],
   );
   return Number(row?.count ?? 0);
+}
+
+/**
+ * OPS-005: the resume mechanism's core primitive -- a bounded, chunked,
+ * owner-scoped existence probe over a bundle's own transaction refs.
+ * Replaces the old "slice the chain-ordered array at a server-reported
+ * COUNT" resume strategy, which silently dropped rows whenever the chain
+ * order used to WRITE part 1 differed from the chain order used to compute
+ * the resume slice (an ordering change straddling a deploy -- exactly what
+ * BUG-018 round 2 did, and what round 3's doc correction flagged as an
+ * unresolved hazard). A count is meaningful only against the specific order
+ * that produced it; ref membership is not -- it depends only on what is
+ * actually, durably written in the database right now.
+ *
+ * Returns the SUBSET of `refs` whose derived idempotency key
+ * (`bundle:<fingerprint>:<ref>`) has NOT yet been written for this owner's
+ * portfolio under this bundle's fingerprint namespace. Chunks the existence
+ * lookup at <=50 keys per query -- an `IN (...)` list of 50 placeholders
+ * plus the two scoping params is comfortably under SQLite/D1's default
+ * bound-variable ceiling, and mirrors the 50-row dividend part size already
+ * used elsewhere in this module.
+ */
+async function listMissingTransactionRefs(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  fingerprint: string,
+  refs: readonly string[],
+): Promise<Set<string>> {
+  const missing = new Set<string>(refs);
+  const prefix = `bundle:${fingerprint}:`;
+  for (const chunk of chunkRows(refs, 50)) {
+    if (chunk.length === 0) continue;
+    const keys = chunk.map((ref) => `${prefix}${ref}`);
+    const placeholders = keys.map(() => "?").join(", ");
+    const rows = await client.all<{ idempotency_key: string }>(
+      `SELECT idempotency_key FROM transactions
+       WHERE user_id = ? AND portfolio_id = ? AND idempotency_key IN (${placeholders})`,
+      [userId, portfolioId, ...keys],
+    );
+    for (const row of rows) {
+      missing.delete(row.idempotency_key.slice(prefix.length));
+    }
+  }
+  return missing;
 }
 
 async function findTransactionIdByRef(
@@ -1408,6 +1467,7 @@ export async function commitValidatedPortfolioBundleScaffold(
         securitiesMatched: 0,
         committedTransactionCount: bundle.transactions.length,
         committedDividendCount: bundle.dividendManualRecords.length,
+        missingTransactionRefs: [],
       },
     };
   }
@@ -1615,13 +1675,33 @@ export async function commitValidatedPortfolioBundleScaffold(
     );
   }
 
-  const committedTransactionCount = await countByIdempotencyPrefix(
+  // OPS-005: the resume-evidence probe. Chain order is recomputed HERE,
+  // fresh, from the server's own current `chainOrder` module on every
+  // scaffold call -- never carried over from a prior request or trusted
+  // from the wire -- so a chain-order change deployed between two parts of
+  // the SAME resume can never desynchronise the count against the order the
+  // way the old `slice(committedTransactionCount)` strategy could (see
+  // `missingTransactionRefs`'s own doc comment and
+  // `docs/BACKUP_FORMAT.md`'s "Resume evidence" section).
+  const orderedTransactionRefs = chainOrder(
+    bundle.transactions,
+    (tx) => tx.reversesRef ?? tx.supersedesRef,
+  ).map((tx) => tx.ref);
+  const missingRefsSet = await listMissingTransactionRefs(
     ctx.client,
-    "transactions",
     ctx.userId,
     portfolioId,
     fingerprint,
+    orderedTransactionRefs,
   );
+  const missingTransactionRefs = orderedTransactionRefs.filter((ref) =>
+    missingRefsSet.has(ref),
+  );
+  // `committedTransactionCount` is now purely informational/diagnostic --
+  // derived from the SAME probe rather than a second `COUNT(*)` query, so
+  // it can never disagree with `missingTransactionRefs`.
+  const committedTransactionCount =
+    orderedTransactionRefs.length - missingTransactionRefs.length;
   const committedDividendCount = await countByIdempotencyPrefix(
     ctx.client,
     "dividend_manual_records",
@@ -1644,6 +1724,7 @@ export async function commitValidatedPortfolioBundleScaffold(
       securitiesMatched,
       committedTransactionCount,
       committedDividendCount,
+      missingTransactionRefs,
     },
   };
 }
@@ -2061,6 +2142,17 @@ export type BundleFinalizeInput = {
   portfolioStatus: "active" | "archived";
   transactionsCount: number;
   dividendRecordsCount: number;
+  /**
+   * OPS-005 (defence in depth): every transaction ref the bundle carries --
+   * mirrors `dividendLinkage`'s role for dividends. Finalize re-derives each
+   * ref's idempotency key and verifies it was actually written before doing
+   * anything else, exactly as the dividend-linkage pass below already
+   * re-looks-up every dividend ref and fails closed. Without this, a
+   * transactions part silently skipped (a browser bug, a manual/curl replay
+   * of the finalize request alone, or a row deleted between parts) could
+   * reach `committed` status having never posted every transaction.
+   */
+  transactionRefs: readonly string[];
 };
 
 /** EXP-004: the RAW wire shape a finalize HTTP request carries -- every
@@ -2082,6 +2174,7 @@ export type BundleFinalizeWireInput = {
   portfolioStatus: unknown;
   transactionsCount: unknown;
   dividendRecordsCount: unknown;
+  transactionRefs: unknown;
 };
 
 /** Structurally validates a finalize request's wire fields into a typed
@@ -2210,6 +2303,16 @@ export function parseBundleFinalizeWireInput(
     return { ok: false, message: "The restore counts are malformed." };
   }
 
+  if (
+    !Array.isArray(raw.transactionRefs) ||
+    raw.transactionRefs.some(
+      (ref) => typeof ref !== "string" || ref.length === 0,
+    )
+  ) {
+    return { ok: false, message: "The transaction ref list is malformed." };
+  }
+  const transactionRefs = raw.transactionRefs as string[];
+
   return {
     ok: true,
     value: {
@@ -2227,6 +2330,7 @@ export function parseBundleFinalizeWireInput(
       portfolioStatus: raw.portfolioStatus,
       transactionsCount: raw.transactionsCount as number,
       dividendRecordsCount: raw.dividendRecordsCount as number,
+      transactionRefs,
     },
   };
 }
@@ -2277,6 +2381,26 @@ export async function commitPortfolioBundleFinalize(
   const securityRefToId = new Map(
     input.securities.map((s) => [s.ref, s.portfolioSecurityId]),
   );
+
+  // OPS-005 (defence in depth): re-verify every transaction ref was
+  // actually written before doing anything else, mirroring the dividend-
+  // linkage re-lookup immediately below. Fails closed and visibly -- a
+  // transactions part silently skipped, replayed out of order, or a row
+  // removed between parts must never let this portfolio reach `committed`.
+  const missingTransactionRefs = await listMissingTransactionRefs(
+    ctx.client,
+    ctx.userId,
+    input.portfolioId,
+    input.fingerprint,
+    input.transactionRefs,
+  );
+  if (missingTransactionRefs.size > 0) {
+    return commitFailure(
+      ctx,
+      input.batchId,
+      `${missingTransactionRefs.size} transaction(s) were not found during finalize -- restore every transactions part before finalizing.`,
+    );
+  }
 
   const manualRecords = createDividendManualRecordRepository(ctx.client);
   const divRefToId = new Map<string, string>();

@@ -722,6 +722,42 @@ restore interrupted before this task's round-2 depth-first `chainOrder` fix
 is deployed must be started over from scratch, not resumed, once the new
 build is live.
 
+**Superseding correction (2026-09-04, OPS-005):** the same-build condition
+above is now REMOVED, not merely documented as a hazard -- resume no longer
+depends on any chain order agreeing across two requests at all.
+`commitPortfolioBundleScaffold` recomputes the bundle's chain order fresh on
+every call (never carried over from an earlier request) and, for each ref in
+that order, runs a bounded, chunked, owner-scoped existence probe against
+`transactions.idempotency_key` (`bundle:<fingerprint>:<ref>`, chunked at <=50
+refs per `IN (...)` lookup -- e.g. a 200-transaction portfolio costs 4 SELECT
+statements). The scaffold response's new `missingTransactionRefs` field is
+the actual resume mechanism: every ref not yet written, already in the
+server's own current chain order. `system-backup-panel.tsx` sends exactly
+that list back on the following transactions part(s) -- it no longer derives
+"what remains" from `committedTransactionCount` sliced against its own
+locally recomputed chain order at all. `committedTransactionCount` is kept
+only as an informational/diagnostic figure (now derived from the same probe,
+so it can never disagree with `missingTransactionRefs`).
+
+Because resume is now a ref-membership question ("is this specific row
+durably written?") rather than a position question ("how many rows are
+before the cut?"), it is correct regardless of which chain order -- old
+breadth-first, new depth-first, or any future change -- wrote the rows
+already on disk. The operational rule above (start over rather than resume
+across this specific deploy) no longer applies to any FUTURE chain-order
+change; it is retained only as a historical record of the hazard this fix
+closes.
+
+Defence in depth: `commitPortfolioBundleFinalize` now runs the identical
+existence probe over every transaction ref the bundle carries (a new
+`transactionRefs` field, mirroring `dividendLinkage`'s pre-existing role for
+dividends) before doing anything else, and fails closed -- a typed 409
+naming how many refs are missing, marking the batch `failed`, never
+`committed` -- if any are absent. This catches a transactions part silently
+skipped, replayed out of order, or a row removed between parts by some other
+means, exactly as the pre-existing dividend-linkage re-lookup already
+protects the dividend side.
+
 ### Partial-failure messaging (per-phase, honest)
 
 Each phase reports failure with wording specific to what actually happened
