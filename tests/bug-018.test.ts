@@ -20,7 +20,16 @@ import { readFile, readdir } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import type { SQLInputValue } from "node:sqlite";
 import test from "node:test";
+import { randomUUID } from "node:crypto";
 import { buildImportReviewPreview } from "../app/import-preview.ts";
+import {
+  commitPortfolioBundleImport,
+  commitPortfolioBundleScaffold,
+  commitPortfolioBundleTransactionsPart,
+  exportPortfolioBundle,
+} from "../app/portfolio-bundle-service.ts";
+import { chainOrder } from "../domain/exports/chain-order.ts";
+import type { PortfolioBundleV1 } from "../domain/exports/portfolio-bundle.ts";
 import { markImportReadyWithContext } from "../app/import-ready-service.ts";
 import {
   linkSharesightPortfolioWithContext,
@@ -1084,4 +1093,386 @@ test("BUG-018 (BRK-014 integration): a reversed Sharesight-sourced trade drops o
     .prepare("SELECT status FROM transactions WHERE id = ?")
     .get(committed.id) as { status: string };
   assert.equal(originalStillReversed.status, "reversed");
+});
+
+// ---------------------------------------------------------------------------
+// B1 (round 2, reviewer BLOCKING): the shape BUG-018 made legal -- a REVERSED
+// original and a re-imported TWIN sharing one `source_reference`, plus the
+// reversal's compensating mirror -- must survive an export/restore round
+// trip. It did not. Two independent causes:
+//
+//  (a) `chainOrder` emitted every ROOT before any child (breadth-first), so
+//      the replay order was [reversed original, twin, mirror]: the twin was
+//      posted while the original was still `posted`, and the partial unique
+//      index rightly rejected it;
+//  (b) `ledger.getBySourceReference` carried no `status <> 'reversed'`
+//      predicate, so `persist()` refused the write with `reason: "conflict"`
+//      before it ever reached the database.
+// ---------------------------------------------------------------------------
+
+/** Builds the A1 shape (CSV commit -> reverse -> re-import of the identical
+ * trade) and returns the three transactions it leaves behind. */
+async function reversedPlusReimportFixture(): Promise<{
+  database: DatabaseSync;
+  client: SqlClient;
+  originalId: string;
+  mirrorId: string;
+  twinId: string;
+}> {
+  const database = await migratedDatabase();
+  const client = createSqliteSqlClient(database);
+  insertBatch(database, { id: "batch-a", fileSha256: "file-a" });
+  stageTradeRow(database, {
+    id: "row-1",
+    batchId: "batch-a",
+    physicalRowNumber: 2,
+    fingerprint: "shared-fingerprint",
+  });
+  await commitBatchToCompletion(client, "user-a", "batch-a", "commit-a");
+  const originalId = (
+    database
+      .prepare(
+        `SELECT id FROM transactions
+         WHERE user_id = 'user-a' AND source_reference = 'import-fingerprint:shared-fingerprint'`,
+      )
+      .get() as { id: string }
+  ).id;
+  const reversed = await createOwnedImportReversalRepository(client).reverse(
+    "user-a",
+    "batch-a",
+    reversalInput(batchVersion(database, "batch-a")),
+  );
+  assert.equal(reversed.ok, true);
+  const mirrorId = (
+    database
+      .prepare("SELECT id FROM transactions WHERE reverses_transaction_id = ?")
+      .get(originalId) as { id: string }
+  ).id;
+  insertBatch(database, { id: "batch-b", fileSha256: "file-b" });
+  stageTradeRow(database, {
+    id: "row-2",
+    batchId: "batch-b",
+    physicalRowNumber: 2,
+    fingerprint: "shared-fingerprint",
+  });
+  await commitBatchToCompletion(client, "user-a", "batch-b", "commit-b");
+  const twinId = (
+    database
+      .prepare(
+        "SELECT commit_transaction_id AS id FROM import_rows WHERE id = 'row-2'",
+      )
+      .get() as { id: string }
+  ).id;
+  assert.notEqual(twinId, originalId);
+  return { database, client, originalId, mirrorId, twinId };
+}
+
+/** The three refs an exported bundle of that shape carries, identified by
+ * ROLE rather than by position -- export order is not part of the contract,
+ * `chainOrder` is. */
+function bundleRoles(bundle: PortfolioBundleV1): {
+  originalRef: string;
+  mirrorRef: string;
+  twinRef: string;
+} {
+  assert.equal(bundle.transactions.length, 3);
+  const mirror = bundle.transactions.find((tx) => tx.reversesRef !== null);
+  assert.ok(mirror, "the exported bundle must carry the reversal mirror");
+  const originalRef = mirror.reversesRef;
+  assert.ok(originalRef);
+  const twin = bundle.transactions.find(
+    (tx) => tx.reversesRef === null && tx.ref !== originalRef,
+  );
+  assert.ok(twin, "the exported bundle must carry the re-imported twin");
+  return { originalRef, mirrorRef: mirror.ref, twinRef: twin.ref };
+}
+
+test("BUG-018 (round 2) ordering rule: chainOrder emits a reversal IMMEDIATELY after the transaction it targets, before any unrelated root -- fails pre-fix, where the breadth-first sweep emitted [original, twin, mirror] and the twin was replayed while the original was still posted", () => {
+  // The twin is given an EARLIER `createdAt` than the mirror so the
+  // tie-break cannot accidentally produce the right answer: dependency
+  // placement, not time, must decide.
+  const original = { ref: "tx-original", createdAt: "2026-08-01T00:00:00Z" };
+  const twin = { ref: "tx-twin", createdAt: "2026-08-02T00:00:00Z" };
+  const mirror = { ref: "tx-mirror", createdAt: "2026-08-03T00:00:00Z" };
+  const ordered = chainOrder([original, twin, mirror], (item) =>
+    item.ref === "tx-mirror" ? "tx-original" : null,
+  );
+  assert.deepEqual(
+    ordered.map((item) => item.ref),
+    ["tx-original", "tx-mirror", "tx-twin"],
+    "the reversal that FREES the shared source_reference must land before the twin that reuses it",
+  );
+});
+
+test("BUG-018 (round 2): a parent's whole subtree is emitted before the next unrelated root (fails pre-fix), while unrelated roots and sibling children keep their existing deterministic createdAt-then-ref order (unchanged)", () => {
+  const items = [
+    { ref: "b", createdAt: "2026-08-02T00:00:00Z" },
+    { ref: "a", createdAt: "2026-08-01T00:00:00Z" },
+    { ref: "c", createdAt: "2026-08-03T00:00:00Z" },
+  ];
+  assert.deepEqual(
+    chainOrder(items, () => null).map((item) => item.ref),
+    ["a", "b", "c"],
+  );
+  // Two children of the SAME parent (same-millisecond, broken by ref) still
+  // precede a later, unrelated root.
+  const chained = [
+    { ref: "root-late", createdAt: "2026-08-09T00:00:00Z" },
+    { ref: "child-z", createdAt: "2026-08-02T00:00:00.000Z" },
+    { ref: "child-a", createdAt: "2026-08-02T00:00:00.000Z" },
+    { ref: "root-early", createdAt: "2026-08-01T00:00:00Z" },
+  ];
+  assert.deepEqual(
+    chainOrder(chained, (item) =>
+      item.ref.startsWith("child-") ? "root-early" : null,
+    ).map((item) => item.ref),
+    ["root-early", "child-a", "child-z", "root-late"],
+  );
+});
+
+test('BUG-018 (round 2, B1): a portfolio holding a REVERSED original, its mirror, and a re-imported twin sharing one source_reference exports and RESTORES through commitPortfolioBundleImport -- fails pre-fix with 409 "A transaction could not be replayed (conflict)"', async () => {
+  const source = await reversedPlusReimportFixture();
+  const exported = await exportPortfolioBundle(
+    { client: source.client, userId: "user-a", requestId: randomUUID() },
+    "portfolio-a",
+  );
+  assert.equal(exported.ok, true);
+  if (!exported.ok) return;
+  const bundle = exported.bundle;
+  assert.equal(bundle.transactions.length, 3);
+
+  // Restore into the OTHER owner's account -- a real cross-account restore:
+  // ownership is re-derived, never carried in the file.
+  const restored = await commitPortfolioBundleImport(
+    { client: source.client, userId: "user-b", requestId: randomUUID() },
+    bundle,
+    "portfolio.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(
+    restored.ok,
+    true,
+    restored.ok ? "" : `restore failed: ${restored.message}`,
+  );
+  if (!restored.ok) return;
+
+  const rows = source.database
+    .prepare(
+      `SELECT status, source_reference, reverses_transaction_id
+       FROM transactions WHERE user_id = 'user-b' AND portfolio_id = ?`,
+    )
+    .all(restored.result.portfolioId) as {
+    status: string;
+    source_reference: string | null;
+    reverses_transaction_id: string | null;
+  }[];
+  assert.equal(rows.length, 3, "all three transactions must be replayed");
+  const reversedRows = rows.filter((row) => row.status === "reversed");
+  assert.equal(reversedRows.length, 1);
+  assert.equal(
+    reversedRows[0]!.source_reference,
+    "import-fingerprint:shared-fingerprint",
+    "the restored original keeps the reversed fact's own source_reference",
+  );
+  const mirrors = rows.filter((row) => row.reverses_transaction_id !== null);
+  assert.equal(mirrors.length, 1);
+  assert.equal(mirrors[0]!.status, "posted");
+  const twins = rows.filter(
+    (row) => row.status === "posted" && row.reverses_transaction_id === null,
+  );
+  assert.equal(twins.length, 1, "the re-imported twin must be restored too");
+  assert.equal(
+    twins[0]!.source_reference,
+    "import-fingerprint:shared-fingerprint",
+    "the twin legitimately reuses the freed key -- the partial index permits exactly one non-reversed holder",
+  );
+});
+
+test("BUG-018 (round 2, B1): the same shape restores through the CHUNKED system-backup twin, including when the part boundary falls between the original and its reversal (the reversal resolves its target from the database, not from in-process state)", async () => {
+  const source = await reversedPlusReimportFixture();
+  const exported = await exportPortfolioBundle(
+    { client: source.client, userId: "user-a", requestId: randomUUID() },
+    "portfolio-a",
+  );
+  assert.equal(exported.ok, true);
+  if (!exported.ok) return;
+  const bundle = exported.bundle;
+  const roles = bundleRoles(bundle);
+
+  const ordered = chainOrder(
+    bundle.transactions,
+    (tx) => tx.reversesRef ?? tx.supersedesRef,
+  );
+  assert.deepEqual(
+    ordered.map((tx) => tx.ref),
+    [roles.originalRef, roles.mirrorRef, roles.twinRef],
+    "the browser slicer and the server compute this identical order from the shared module",
+  );
+
+  const ctx = {
+    client: source.client,
+    userId: "user-b",
+    requestId: randomUUID(),
+  };
+  const scaffold = await commitPortfolioBundleScaffold(
+    ctx,
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(scaffold.ok, true);
+  if (!scaffold.ok) return;
+  assert.equal(scaffold.result.committedTransactionCount, 0);
+
+  // Boundary AFTER the original only: the reversal that frees the key lands
+  // in a LATER request than the transaction it targets, and the twin that
+  // reuses the key rides in that same later part.
+  const partArgs = {
+    portfolioId: scaffold.result.portfolioId,
+    batchId: scaffold.result.batchId,
+    fingerprint: scaffold.result.fingerprint,
+    securities: scaffold.result.securities,
+  };
+  const first = await commitPortfolioBundleTransactionsPart(ctx, {
+    ...partArgs,
+    transactions: ordered.slice(0, 1),
+  });
+  assert.equal(first.ok, true, first.ok ? "" : `part 1: ${first.message}`);
+
+  // Resume evidence between the two parts is the live server-side count,
+  // and it must agree with where the boundary actually fell.
+  const resumed = await commitPortfolioBundleScaffold(
+    ctx,
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(resumed.ok, true);
+  if (!resumed.ok) return;
+  assert.equal(resumed.result.committedTransactionCount, 1);
+
+  const second = await commitPortfolioBundleTransactionsPart(ctx, {
+    ...partArgs,
+    transactions: ordered.slice(1),
+  });
+  assert.equal(second.ok, true, second.ok ? "" : `part 2: ${second.message}`);
+  if (!second.ok) return;
+  assert.equal(second.result.committedCount, 2);
+
+  const rows = source.database
+    .prepare(
+      `SELECT status, source_reference, reverses_transaction_id
+       FROM transactions WHERE user_id = 'user-b' AND portfolio_id = ?`,
+    )
+    .all(scaffold.result.portfolioId) as {
+    status: string;
+    source_reference: string | null;
+    reverses_transaction_id: string | null;
+  }[];
+  assert.equal(rows.length, 3);
+  assert.equal(rows.filter((row) => row.status === "reversed").length, 1);
+  assert.equal(
+    rows.filter(
+      (row) =>
+        row.status === "posted" &&
+        row.reverses_transaction_id === null &&
+        row.source_reference === "import-fingerprint:shared-fingerprint",
+    ).length,
+    1,
+  );
+
+  // Re-sending the SAME rows is still a no-op -- chunk retries must stay
+  // idempotent now that a second row may legally share the key.
+  const replay = await commitPortfolioBundleTransactionsPart(ctx, {
+    ...partArgs,
+    transactions: ordered,
+  });
+  assert.equal(replay.ok, true, replay.ok ? "" : `replay: ${replay.message}`);
+  const afterReplay = source.database
+    .prepare(
+      "SELECT COUNT(*) AS count FROM transactions WHERE user_id = 'user-b' AND portfolio_id = ?",
+    )
+    .get(scaffold.result.portfolioId) as { count: number };
+  assert.equal(afterReplay.count, 3, "a resent part must never duplicate");
+});
+
+// ---------------------------------------------------------------------------
+// Reviewer F1 (round 2): the ledger's own manual path must agree with the
+// import path and the partial index -- `getBySourceReference` is a pre-check
+// FOR that constraint, so it must not be stricter than it.
+// ---------------------------------------------------------------------------
+
+test("BUG-018 (round 2, F1): ledger.post -> reverse -> post with the SAME owner-typed sourceReference succeeds (the reversed row no longer occupies the key), while post -> post with the same reference is still rejected as a conflict", async () => {
+  const database = await migratedDatabase();
+  const client = createSqliteSqlClient(database);
+  const ledger = createOwnedLedgerRepository(client);
+  const postInput = (idempotencyKey: string) => ({
+    portfolioId: "portfolio-a",
+    type: "buy" as const,
+    portfolioSecurityId: "membership-a",
+    quantityDecimal: "2",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "20",
+    feeAmountDecimal: "0",
+    taxAmountDecimal: "0",
+    fxRateToBaseDecimal: null,
+    sourceType: "manual" as const,
+    sourceReference: "manual-ref-1",
+    idempotencyKey,
+    tradeAt: "2026-08-01T00:00:00.000Z",
+    localTradeDate: "2026-08-01",
+    settlementDate: null,
+    currencyCode: "AUD",
+    fxRateSource: null,
+    fxObservedAt: null,
+    requestId: randomUUID(),
+  });
+
+  const first = await ledger.post("user-a", postInput("manual-key-1"));
+  assert.equal(first.ok, true, first.ok ? "" : `first post: ${first.reason}`);
+  if (!first.ok) return;
+
+  // A DIFFERENT posting reusing the same reference while the first is still
+  // posted is still a conflict -- the key is genuinely occupied.
+  const duplicate = await ledger.post("user-a", postInput("manual-key-2"));
+  assert.equal(duplicate.ok, false);
+  if (duplicate.ok) return;
+  assert.equal(duplicate.reason, "conflict");
+
+  const reversal = await ledger.reverse(
+    "user-a",
+    "portfolio-a",
+    first.transaction.id,
+    "manual-reverse-key",
+    randomUUID(),
+  );
+  assert.equal(reversal.ok, true);
+  assert.equal(
+    (
+      database
+        .prepare("SELECT status FROM transactions WHERE id = ?")
+        .get(first.transaction.id) as { status: string }
+    ).status,
+    "reversed",
+  );
+
+  // Now the key is free: the same manual reference may be posted again.
+  const rePost = await ledger.post("user-a", postInput("manual-key-3"));
+  assert.equal(
+    rePost.ok,
+    true,
+    rePost.ok ? "" : `re-post after reversal was rejected: ${rePost.reason}`,
+  );
+  if (!rePost.ok) return;
+  assert.notEqual(rePost.transaction.id, first.transaction.id);
+  assert.equal(rePost.transaction.status, "posted");
+
+  // ...and exactly once: a further duplicate is a conflict again.
+  const secondDuplicate = await ledger.post(
+    "user-a",
+    postInput("manual-key-4"),
+  );
+  assert.equal(secondDuplicate.ok, false);
+  if (secondDuplicate.ok) return;
+  assert.equal(secondDuplicate.reason, "conflict");
 });

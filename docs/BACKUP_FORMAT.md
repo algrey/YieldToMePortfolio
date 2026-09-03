@@ -433,6 +433,43 @@ one:
    portfolio's `import_batches` row `committed`. Small-cardinality data,
    bounded by override/scenario counts, not transaction count.
 
+### Chain ordering (`domain/exports/chain-order.ts`)
+
+Both the whole-bundle path and the chunked path replay a portfolio's
+transactions (and its dividend records) in the order `chainOrder` computes
+from the bundle's own explicit `ref` graph — never a `createdAt` sort, whose
+millisecond ties are routine and whose UUID tiebreak has no relation to
+dependency order. The browser slicer (`system-backup-panel.tsx`) IMPORTS
+that same module rather than reimplementing it, so both sides of a chunked
+restore compute a byte-identical order.
+
+The ordering rule, since `BUG-018` review round 2: **a reversal or
+supersession is emitted immediately after the transaction it targets**, and
+transitively its own dependents, before any other unrelated root. Unrelated
+roots — and sibling children of one parent — keep the same deterministic
+`createdAt`-then-`ref` order they always had.
+
+The immediacy is load-bearing, not cosmetic. `BUG-018` narrowed
+`transactions_portfolio_source_reference_unique` to
+`WHERE status <> 'reversed'`, so a portfolio may legitimately hold a
+REVERSED original and a re-imported TWIN sharing one `source_reference`.
+The earlier breadth-first traversal emitted every root before any child —
+[reversed original, twin, mirror] — which posted the twin while the
+original was still `posted`, and the partial index rightly rejected it: a
+perfectly valid exported portfolio failed to restore with
+"A transaction could not be replayed (conflict)". Depth-first emits
+[original, mirror, twin]: the reversal that FREES the key is replayed before
+the row that reuses it.
+
+A chunk boundary falling between an original and its reversal is safe. The
+chunked path never resolves a dependency from in-process state: it looks its
+target up in the database by the derived idempotency key
+(`bundle:<fingerprint>:<ref>`, `findTransactionIdByRef`), so a dependency
+written by an EARLIER part — or by an earlier, interrupted attempt at the
+same part — resolves normally. What the ordering must guarantee is only that
+a dependency is never in a LATER part than its dependent, which the slicing
+of this single ordered array gives directly.
+
 ### The actual production root cause: D1's LIKE pattern limit
 
 Confirmed from `wrangler tail` on 2026-08-31, after the part-size work below

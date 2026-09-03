@@ -502,6 +502,33 @@ export function createOwnedLedgerRepository(
     return row ? mapTransaction(row) : null;
   }
 
+  /**
+   * The ledger's own pre-check/classification counterpart of
+   * `transactions_portfolio_source_reference_unique`: "is this owner-typed
+   * `source_reference` already taken in this portfolio?"
+   *
+   * BUG-018 (round 2): `AND status <> 'reversed'` mirrors the partial unique
+   * index (`db/schema.ts`, migration 0060) EXACTLY, and matches the same
+   * predicate already carried by `import-commit.ts`'s commit-time trade
+   * lookup, `app/import-actions.ts`'s `existingTradeSourceReferences`
+   * suppression query and `sharesight-sync-state.ts`'s
+   * `loadCommittedSharesightRowValues`. Without it this pre-check was
+   * STRICTER than the constraint it exists to anticipate, so it rejected
+   * writes the database would have accepted:
+   *
+   *  - `persist()` (below) refused every `ledger.post`/`supersede` whose
+   *    `source_reference` matched a REVERSED row with `reason: "conflict"`,
+   *    which broke bundle restore of the now-legal "reversed original +
+   *    re-imported twin sharing a `source_reference`" shape, and refused a
+   *    manual re-post after a reversal that the import path already allows;
+   *  - the post-`atomic()` error classifier (also below) mis-labelled a
+   *    genuine unrelated write failure as `conflict` whenever a reversed row
+   *    happened to share the reference, hiding the real reason.
+   *
+   * A reversed row's own idempotent replay is unaffected: it is matched by
+   * `getByIdempotency`, which is checked first in the classifier and keyed on
+   * the (unnarrowed) idempotency-key index.
+   */
   async function getBySourceReference(
     userId: string,
     input: InternalLedgerInput,
@@ -512,7 +539,7 @@ export function createOwnedLedgerRepository(
     const row = await client.get<Record<string, unknown>>(
       `SELECT ${TRANSACTION_COLUMNS} FROM transactions
        WHERE user_id = ? AND portfolio_id = ? AND source_type = ?
-         AND source_reference = ? LIMIT 1`,
+         AND source_reference = ? AND status <> 'reversed' LIMIT 1`,
       [userId, input.portfolioId, input.sourceType, input.sourceReference],
     );
     return row ? mapTransaction(row) : null;
