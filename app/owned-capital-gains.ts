@@ -271,15 +271,23 @@ async function loadCapitalGainDisposalRows(
   // ASC tie-break, deliberately including reversed transactions (a
   // transaction that existed and was later reversed is still evidence the
   // ledger was actively tracking this portfolio on that date).
-  const portfolio = await client.get<Row>(
-    `SELECT p.base_currency_code, p.history_complete_from,
-            (SELECT t.local_trade_date FROM transactions t
-             WHERE t.user_id = p.user_id AND t.portfolio_id = p.id
-               AND t.status IN ('posted', 'reversed')
-             ORDER BY t.local_trade_date ASC, t.id ASC LIMIT 1) AS earliest_trade_date
-     FROM portfolios p WHERE p.id = ? AND p.user_id = ? LIMIT 1`,
-    [portfolioId, userId],
-  );
+  // PRF-011: the portfolio row and the user settings row are mutually
+  // independent reads (different tables, neither depends on the other's
+  // result), so both run in one wave instead of two sequential round
+  // trips -- mirroring `app/owned-holdings.ts`'s PRF-003 `Promise.all`
+  // discipline.
+  const [portfolio, settings] = await Promise.all([
+    client.get<Row>(
+      `SELECT p.base_currency_code, p.history_complete_from,
+              (SELECT t.local_trade_date FROM transactions t
+               WHERE t.user_id = p.user_id AND t.portfolio_id = p.id
+                 AND t.status IN ('posted', 'reversed')
+               ORDER BY t.local_trade_date ASC, t.id ASC LIMIT 1) AS earliest_trade_date
+       FROM portfolios p WHERE p.id = ? AND p.user_id = ? LIMIT 1`,
+      [portfolioId, userId],
+    ),
+    createOwnedUserSettingsRepository(client).get(userId),
+  ]);
   if (!portfolio) throw new Error("not_owned");
   const baseCurrencyCode = requiredText(portfolio, "base_currency_code");
   const historyCompleteFrom = optionalText(
@@ -293,7 +301,6 @@ async function loadCapitalGainDisposalRows(
     DATE,
   );
 
-  const settings = await createOwnedUserSettingsRepository(client).get(userId);
   if (!settings) throw new Error("missing_user_settings");
   const currentWindow = currentFyWindow(
     now.toISOString(),
@@ -332,23 +339,30 @@ async function loadCapitalGainDisposalRows(
     };
   }
 
-  const publicationCountRow = await client.get<Row>(
-    `SELECT count(*) AS count FROM projection_publications pp WHERE pp.user_id = ? AND pp.portfolio_id = ?`,
-    [userId, portfolioId],
-  );
-  if (integer(publicationCountRow ?? {}, "count") !== 1)
-    throw new Error("invalid_projection_publication_count");
+  // PRF-011: the old separate `SELECT count(*) ...` precheck is gone --
+  // this function only ever needed to know whether EXACTLY one publication
+  // row exists, never the real count when it is 0 or >= 2. That is
+  // answerable from the SAME `LIMIT` the data query already needed, just
+  // raised from 1 to 2: 0 rows back means "none", exactly 1 means "trust
+  // it", and 2 rows back means "more than one" -- so `publicationRows.length
+  // !== 1` below is byte-identical in every branch to the old
+  // `integer(publicationCountRow, "count") !== 1` check, at one query
+  // instead of two. Mirrors `app/owned-holdings.ts`'s own PRF-004 fix
+  // verbatim.
   const PUBLICATION_SQL = `SELECT pp.calculation_run_id, pp.calculation_version, pp.ledger_high_water,
             r.status AS run_status, r.calculation_version AS run_version,
             r.ledger_high_water_end, ${PENDING_RUN_STATUS_SUBQUERY} AS pending_run_status
      FROM projection_publications pp
      JOIN calculation_runs r
        ON r.id = pp.calculation_run_id AND r.user_id = pp.user_id AND r.portfolio_id = pp.portfolio_id
-     WHERE pp.user_id = ? AND pp.portfolio_id = ? LIMIT 1`;
-  let publication = await client.get<Row>(PUBLICATION_SQL, [
+     WHERE pp.user_id = ? AND pp.portfolio_id = ? LIMIT 2`;
+  const publicationRows = await client.all<Row>(PUBLICATION_SQL, [
     userId,
     portfolioId,
   ]);
+  if (publicationRows.length !== 1)
+    throw new Error("invalid_projection_publication_count");
+  let publication = publicationRows[0];
   if (!publication) throw new Error("missing_projection_publication");
   let projectionPending = pendingStateFromRow(publication);
   // BUG-017: mirrors `app/owned-holdings.ts`'s own self-heal-then-re-read-
@@ -364,10 +378,12 @@ async function loadCapitalGainDisposalRows(
         budget: READ_TIME_CALCULATION_BUDGET,
       },
     ).catch(() => undefined);
-    const reReadPublication = await client.get<Row>(PUBLICATION_SQL, [
+    const reReadRows = await client.all<Row>(PUBLICATION_SQL, [
       userId,
       portfolioId,
     ]);
+    const reReadPublication =
+      reReadRows.length === 1 ? reReadRows[0] : undefined;
     if (reReadPublication) {
       publication = reReadPublication;
       projectionPending = pendingStateFromRow(publication);
@@ -391,15 +407,23 @@ async function loadCapitalGainDisposalRows(
   )
     throw new Error("invalid_projection_publication");
 
-  const allocationCountRow = await client.get<Row>(
-    `SELECT count(*) AS count FROM lot_allocations
-     WHERE user_id = ? AND portfolio_id = ? AND calculation_run_id = ?`,
-    [userId, portfolioId, runId],
-  );
-  const allocationCount = integer(allocationCountRow ?? {}, "count");
-  if (allocationCount > MAX_ALLOCATIONS)
-    throw new Error("too_many_allocations");
-
+  // PRF-011: the old separate `SELECT count(*) FROM lot_allocations ...`
+  // precheck is gone. Its overflow purpose (`allocationCount >
+  // MAX_ALLOCATIONS`) is already answered by the `LIMIT MAX_ALLOCATIONS + 1`
+  // data read below (`allocationRows.length > MAX_ALLOCATIONS`) -- exactly
+  // the anti-pattern PRF-004 removed from `owned-holdings.ts`. Its OTHER
+  // purpose -- detecting a `lot_allocations` row an INNER JOIN silently
+  // dropped because its tax lot/opening/sell/security chain could not be
+  // resolved -- must not simply disappear (AGENTS.md: never silently
+  // under-report disposals). `la` (lot_allocations) is now the driving
+  // table with LEFT JOINs for tl/opening/sell/ps, so every matching
+  // allocation row is guaranteed to appear in `allocationRows` regardless
+  // of whether the chain resolved; a broken chain now surfaces as NULL
+  // joined columns, which the existing `requiredText` calls below already
+  // reject with a specific `invalid_<field>` error (acquired_date,
+  // disposed_date, symbol, name) instead of the old aggregate
+  // `missing_allocation_dates`. Same closed-failure guarantee, one query
+  // instead of two.
   const allocationRows = await client.all<Row>(
     `SELECT la.id AS allocation_id, la.portfolio_security_id,
             la.matched_quantity_decimal, la.allocated_base_basis_decimal,
@@ -410,17 +434,17 @@ async function loadCapitalGainDisposalRows(
             COALESCE(ps.display_symbol, ps.source_symbol) AS symbol,
             COALESCE(ps.display_name, s.canonical_name, ps.source_name, ps.source_symbol) AS name
      FROM lot_allocations la
-     JOIN tax_lots tl
+     LEFT JOIN tax_lots tl
        ON tl.id = la.tax_lot_id AND tl.user_id = la.user_id
       AND tl.portfolio_id = la.portfolio_id AND tl.portfolio_security_id = la.portfolio_security_id
       AND tl.calculation_run_id = la.calculation_run_id
-     JOIN transactions opening
+     LEFT JOIN transactions opening
        ON opening.id = tl.opening_transaction_id AND opening.user_id = la.user_id
       AND opening.portfolio_id = la.portfolio_id
-     JOIN transactions sell
+     LEFT JOIN transactions sell
        ON sell.id = la.sell_transaction_id AND sell.user_id = la.user_id
       AND sell.portfolio_id = la.portfolio_id
-     JOIN portfolio_securities ps
+     LEFT JOIN portfolio_securities ps
        ON ps.id = la.portfolio_security_id AND ps.user_id = la.user_id AND ps.portfolio_id = la.portfolio_id
      LEFT JOIN securities s ON s.id = ps.security_id
      WHERE la.user_id = ? AND la.portfolio_id = ? AND la.calculation_run_id = ?
@@ -430,15 +454,6 @@ async function loadCapitalGainDisposalRows(
   );
   if (allocationRows.length > MAX_ALLOCATIONS)
     throw new Error("too_many_allocations");
-  // Every JOIN above is a hard requirement (a lot allocation's acquisition
-  // and disposal dates must always be resolvable via its tax lot's opening
-  // transaction and its own sell transaction) -- if the joined row count
-  // does not match the allocation count for this run, some allocation's
-  // dates are unavailable. That "shouldn't happen" per CGT-001A's ruling,
-  // so this fails typed/closed rather than silently under-reporting
-  // disposals.
-  if (allocationRows.length !== allocationCount)
-    throw new Error("missing_allocation_dates");
 
   const facts: CapitalGainAllocationFact[] = allocationRows.map((row) => ({
     allocationId: requiredText(row, "allocation_id"),

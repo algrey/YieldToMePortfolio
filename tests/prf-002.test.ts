@@ -284,6 +284,21 @@ async function productionScaleFixture(): Promise<DatabaseSync> {
     );
   }
 
+  // PRF-011: one active disposal against `holding-0` (its opening lot is
+  // `tx-0`, the loop's first buy above -- 2018-01-01, quantity 10) so
+  // `/gains` is actually measured by the census below instead of hitting
+  // `loadOwnedCapitalGains`'s zero-active-sell short-circuit (see that
+  // function's own empty-state comment). Published under the SAME `run-1`
+  // publication every other census page already reads.
+  db.exec(`
+    INSERT INTO transactions(id,user_id,portfolio_id,portfolio_security_id,type,status,trade_at,local_trade_date,quantity_decimal,unit_price_decimal,currency_code,gross_amount_decimal,fee_amount_decimal,tax_amount_decimal,source_type,created_by_user_id,calculation_version,created_at)
+      VALUES ('tx-cgt-sell','owner-1','portfolio-1','holding-0','sell','posted','2026-07-15T00:00:00.000Z','2026-07-15','5','20','AUD','100','0','0','manual','owner-1',1,'2026-07-15');
+    INSERT INTO tax_lots (id,user_id,portfolio_id,portfolio_security_id,opening_transaction_id,acquired_at,original_quantity_decimal,open_quantity_decimal,native_basis_decimal,base_basis_decimal,basis_status,status,calculation_run_id,calculation_version,rebuilt_at)
+      VALUES ('tax-lot-cgt','owner-1','portfolio-1','holding-0','tx-0','2018-01-01T00:00:00.000Z','10','5','50','50','complete','open','run-1',1,'${now}');
+    INSERT INTO lot_allocations (id,user_id,portfolio_id,portfolio_security_id,sell_transaction_id,tax_lot_id,allocation_sequence,matched_quantity_decimal,allocated_base_basis_decimal,base_net_proceeds_decimal,fee_base_decimal,tax_base_decimal,base_realised_gain_decimal,basis_status,calculation_run_id,calculation_version)
+      VALUES ('lot-alloc-cgt','owner-1','portfolio-1','holding-0','tx-cgt-sell','tax-lot-cgt',1,'5','25','100','0','0','75','complete','run-1',1);
+  `);
+
   // 119 dividend_manual_records spread across the 18 securities.
   const insertDividend = db.prepare(
     `INSERT INTO dividend_manual_records(id,user_id,portfolio_id,portfolio_security_id,payment_date,shares_decimal,dividend_per_share_decimal,franking_credit_per_share_decimal,created_at,updated_at,version) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
@@ -1073,6 +1088,64 @@ const PAGES: Array<{
   },
 ];
 
+test("PRF-011: Holdings census with Sharesight CONFIGURED and ENABLED (fresh watermark, cache_fresh branch -- zero Sharesight fetches) issues exactly ONE sharesight_sync_state statement instead of two", async () => {
+  // Every other census in this file runs with `NOT_CONFIGURED_SHARESIGHT`
+  // (gate 1's own zero-fetch short-circuit), which never exercises gates
+  // 2+3's `sharesight_sync_state` read at all -- this task's (c) fix only
+  // has a statement to save on a load where Sharesight IS configured and
+  // linked. Seeds a fresh (5-minutes-old) watermark so the gate takes the
+  // `cache_fresh` branch deterministically -- no network fetch, no
+  // additional writes, isolating exactly the gates-2+3 read count this
+  // task changed.
+  const db = await productionScaleFixture();
+  db.exec(`
+    INSERT INTO sharesight_sync_state (id, user_id, portfolio_id, sharesight_portfolio_id, enabled, created_at, updated_at, version, last_price_refresh_at, last_price_refresh_status)
+      VALUES ('sync-1', 'owner-1', 'portfolio-1', 'sp-1', 1, '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z', 1, '2026-08-01T11:55:00.000Z', 'ok');
+  `);
+  const CONFIGURED_SHARESIGHT_FRESH = {
+    integration: {
+      enabled: true as const,
+      client: {
+        listPortfolios: async () => {
+          throw new Error("PRF-011 test: unexpected Sharesight call");
+        },
+        getPortfolioHoldings: async () => {
+          throw new Error("PRF-011 test: unexpected Sharesight call");
+        },
+        listTrades: async () => {
+          throw new Error("PRF-011 test: unexpected Sharesight call");
+        },
+        listPayouts: async () => {
+          throw new Error("PRF-011 test: unexpected Sharesight call");
+        },
+        listUserInstruments: async () => {
+          throw new Error(
+            "PRF-011 test: no Sharesight fetch expected on the cache_fresh path",
+          );
+        },
+      },
+    },
+    now: () => NOW.toISOString(),
+  };
+  const { client, stats } = stageCensusClient(createSqliteSqlClient(db));
+  const result = await loadOwnedHoldings(
+    client,
+    USER_ID,
+    PORTFOLIO_ID,
+    NOW,
+    CONFIGURED_SHARESIGHT_FRESH,
+  );
+  assert.equal(result.status, "complete");
+  const syncStateCalls = stats.calls_.filter((call) =>
+    call.sql.includes("sharesight_sync_state"),
+  );
+  assert.equal(
+    syncStateCalls.length,
+    1,
+    "expected gates 2+3 to cost exactly one sharesight_sync_state read when configured and enabled",
+  );
+});
+
 test("PRF-002: per-page census -- D1 calls/statements and EXPLAIN QUERY PLAN scan check at production scale (18 securities, 107 transactions, ~60k price_observations, 119 dividends, fully-backfilled portfolio_value_history)", async () => {
   const rows: string[] = [];
   for (const page of PAGES) {
@@ -1336,6 +1409,46 @@ test("PRF-002 (auth-resolution duplication, now fixed): resolving the SAME authe
   db.close();
 });
 
+test("PRF-011: /import and /ledger/new now cost exactly ONE identity resolution (oneResolutionStatements) instead of two -- source-verified, since neither page.tsx can be driven directly under plain node --test (next/headers)", async () => {
+  // Mirrors the test immediately above: `oneResolutionStatements` is what
+  // ONE `resolveAuthenticatedRequestContext` call costs (identity lookup
+  // plus `touchWithAudit`'s 2 UPDATEs + 1 conditional audit INSERT). Before
+  // this task, `app/import/page.tsx` and `app/portfolio/[portfolioId]/
+  // ledger/new/page.tsx` each called `loadAuthenticatedWorkspace()` (one
+  // resolution) and THEN `getAuthenticatedSqlContext()` a second time (a
+  // second, full resolution) purely to recover the SqlClient/userId their
+  // own section-specific loader needed -- costing `oneResolutionStatements
+  // * 2`, including a SECOND, duplicate audit-log row per page view. Both
+  // pages now thread `loadAuthenticatedWorkspace`'s `sqlContextOut` output
+  // slot instead (see `app/authenticated-workspace.ts`'s
+  // `AuthenticatedWorkspaceSqlContext` doc comment), matching the SAME
+  // `sqlContextOut` pattern the six PRF-002 pages already use
+  // (`[section]/page.tsx`, `gains/page.tsx`). Neither page can be imported
+  // and driven directly here (`next/headers` -- see this file's header), so
+  // this is a source-level proof that the SECOND resolution call is gone --
+  // the runtime cost of avoiding it is exactly `oneResolutionStatements`
+  // above, proven generically by the "twice" test immediately above.
+  const [importPage, ledgerNewPage] = await Promise.all([
+    readFile(new URL("../app/import/page.tsx", import.meta.url), "utf8"),
+    readFile(
+      new URL(
+        "../app/portfolio/[portfolioId]/ledger/new/page.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ]);
+  for (const page of [importPage, ledgerNewPage]) {
+    assert.match(page, /loadAuthenticatedWorkspace\(/);
+    assert.match(page, /sqlContextOut/);
+    assert.doesNotMatch(
+      page,
+      /getAuthenticatedSqlContext\(/,
+      "expected the second, duplicate identity resolution to be gone",
+    );
+  }
+});
+
 test("PRF-002/CALC-005: the root overview census never claims, advances, or otherwise touches the legacy queued snapshot-pipeline row", async () => {
   // `productionScaleFixture` seeds `snapshot-run-1`, a legacy queued
   // snapshot-pipeline row standing in for production's real stuck run (see
@@ -1422,7 +1535,18 @@ const DEPTH_CEILING: Record<string, number> = {
   "/portfolio/:id/holdings": 6,
   "/portfolio/:id/quotes": 4,
   "/portfolio/:id/details": 3,
-  "/portfolio/:id/gains": 4,
+  // PRF-011: raised from 4 to 5 once the fixture above gained a genuine
+  // active disposal (previously `/gains` never exercised anything past
+  // `loadOwnedCapitalGains`'s zero-active-sell short-circuit -- 4 was
+  // calibrated to that shallow shape, not a measured disposal chain). The
+  // real post-fix chain is baseWorkspaceLoad's own wave (settings/FX,
+  // depth 1) then `loadOwnedCapitalGains`'s now-4-deep sequence
+  // (portfolio+settings Promise.all -> activeSellCount ->
+  // publication(LIMIT 2) -> allocations(LEFT JOIN, LIMIT MAX+1)) -- the
+  // exact "5 statements / depth <= 4" this task's own acceptance criterion
+  // names for `loadOwnedCapitalGains` alone, plus the page census's
+  // pre-existing +1 for baseWorkspaceLoad.
+  "/portfolio/:id/gains": 5,
   "/portfolio/:id/income/dividends": 6,
   // PRF-005: `/income`/`/income/multi-year` layer `loadHistoricalPortfolioValueAtDates`
   // (needed for `pastFinancialYears`) SEQUENTIALLY after the

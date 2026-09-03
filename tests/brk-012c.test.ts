@@ -30,6 +30,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { createSqliteSqlClient } from "../db/repositories/sql-client.ts";
+import type { SqlClient } from "../db/repositories/sql-client.ts";
 import {
   claimSharesightPriceGateLease,
   hasEnabledSharesightLink,
@@ -38,6 +39,7 @@ import {
   upsertSharesightDelayedPriceCache,
 } from "../db/repositories/sharesight-delayed-price-cache.ts";
 import {
+  loadSharesightPriceGateLinkStatus,
   loadSharesightPriceRefreshWatermark,
   recordSharesightPriceRefreshWatermark,
 } from "../db/repositories/sharesight-price-refresh.ts";
@@ -475,6 +477,149 @@ test("BRK-012C repository: hasEnabledSharesightLink reflects only THIS owner's e
   const client = createSqliteSqlClient(db);
   assert.equal(await hasEnabledSharesightLink(client, "owner-a"), true);
   assert.equal(await hasEnabledSharesightLink(client, "owner-b"), false);
+});
+
+// ---------------------------------------------------------------------------
+// PRF-011: `loadSharesightPriceGateLinkStatus` -- the ONE read replacing
+// gates 2+3's old `hasEnabledSharesightLink` + `loadSharesightPriceRefreshWatermark`
+// pair against the SAME `sharesight_sync_state` row. `hasEnabledSharesightLink`
+// and `loadSharesightPriceRefreshWatermark` both remain exported/tested
+// above for callers that only need one half of this fact.
+// ---------------------------------------------------------------------------
+
+test("BRK-012C repository (PRF-011): loadSharesightPriceGateLinkStatus reports linked:false for an owner with no enabled link", async () => {
+  const db = await gateFixture();
+  db.exec(`UPDATE sharesight_sync_state SET enabled = 0 WHERE id = 'sync-a'`);
+  const client = createSqliteSqlClient(db);
+  assert.deepEqual(await loadSharesightPriceGateLinkStatus(client, "owner-a"), {
+    linked: false,
+  });
+});
+
+test("BRK-012C repository (PRF-011): loadSharesightPriceGateLinkStatus reports linked:true with lastAttemptAt:null when enabled but never attempted", async () => {
+  const db = await gateFixture();
+  const client = createSqliteSqlClient(db);
+  assert.deepEqual(await loadSharesightPriceGateLinkStatus(client, "owner-a"), {
+    linked: true,
+    lastAttemptAt: null,
+  });
+});
+
+test("BRK-012C repository (PRF-011): loadSharesightPriceGateLinkStatus reports linked:true with the real watermark once an attempt has been recorded (fresh or stale -- staleness is the CALLER's decision, not this read's)", async () => {
+  const db = await gateFixture();
+  const client = createSqliteSqlClient(db);
+  await recordSharesightPriceRefreshWatermark(client, {
+    userId: "owner-a",
+    status: "ok",
+    errorKind: null,
+    now: "2026-08-20T05:50:01.000Z",
+  });
+  assert.deepEqual(await loadSharesightPriceGateLinkStatus(client, "owner-a"), {
+    linked: true,
+    lastAttemptAt: "2026-08-20T05:50:01.000Z",
+  });
+  // A later, staler-looking watermark value is still returned verbatim --
+  // this read never judges freshness itself (isSharesightPriceWatermarkStale
+  // does that, at the call site).
+  await recordSharesightPriceRefreshWatermark(client, {
+    userId: "owner-a",
+    status: "failed",
+    errorKind: "network",
+    now: "2026-08-20T05:49:59.000Z",
+  });
+  assert.deepEqual(await loadSharesightPriceGateLinkStatus(client, "owner-a"), {
+    linked: true,
+    lastAttemptAt: "2026-08-20T05:49:59.000Z",
+  });
+  // Owner-scoped -- owner-b's own status is untouched.
+  assert.deepEqual(await loadSharesightPriceGateLinkStatus(client, "owner-b"), {
+    linked: true,
+    lastAttemptAt: null,
+  });
+});
+
+/** Wraps a real SqliteSqlClient, recording every `all`/`get` call's SQL text
+ * -- lets a test assert the REAL query sequence a real gate call issues,
+ * mirroring `tests/prf-001.test.ts`'s `stageCensusClient` census method. */
+function countingClient(db: DatabaseSync): {
+  client: SqlClient;
+  calls: string[];
+} {
+  const base = createSqliteSqlClient(db);
+  const calls: string[] = [];
+  return {
+    calls,
+    client: {
+      all: <T extends Record<string, unknown>>(
+        sql: string,
+        params?: readonly unknown[],
+      ) => {
+        calls.push(sql);
+        return base.all<T>(sql, params);
+      },
+      get: <T extends Record<string, unknown>>(
+        sql: string,
+        params?: readonly unknown[],
+      ) => {
+        calls.push(sql);
+        return base.get<T>(sql, params);
+      },
+      run: (sql: string, params?: readonly unknown[]) => base.run(sql, params),
+      batch: (statements) => base.batch(statements),
+    },
+  };
+}
+
+test("BRK-012C gate (PRF-011): gates 2+3 together cost exactly ONE sharesight_sync_state read -- not_linked short-circuit stays zero-fetch AND zero extra reads", async () => {
+  const db = await gateFixture();
+  db.exec(`UPDATE sharesight_sync_state SET enabled = 0 WHERE id = 'sync-a'`);
+  const { client, calls } = countingClient(db);
+  const fake = fakeSharesightClient({ ok: true, value: [] });
+  const result = await ensureSharesightPriceFreshness(
+    client,
+    "owner-a",
+    ["security-a"],
+    { integration: integrationOf(fake), now: () => "2026-08-20T06:00:00.000Z" },
+  );
+  assert.deepEqual(result, { ok: true, action: "not_linked" });
+  assert.equal(fake.state.callCount, 0);
+  const syncStateCalls = calls.filter((sql) =>
+    sql.includes("sharesight_sync_state"),
+  );
+  assert.equal(
+    syncStateCalls.length,
+    1,
+    "expected exactly one sharesight_sync_state read for gates 2+3 combined",
+  );
+});
+
+test("BRK-012C gate (PRF-011): gates 2+3 together cost exactly ONE sharesight_sync_state read on the cache-fresh path too", async () => {
+  const db = await gateFixture();
+  const setup = createSqliteSqlClient(db);
+  await recordSharesightPriceRefreshWatermark(setup, {
+    userId: "owner-a",
+    status: "ok",
+    errorKind: null,
+    now: "2026-08-20T05:50:01.000Z",
+  });
+  const { client, calls } = countingClient(db);
+  const fake = fakeSharesightClient({ ok: true, value: [instrument()] });
+  const result = await ensureSharesightPriceFreshness(
+    client,
+    "owner-a",
+    ["security-a"],
+    { integration: integrationOf(fake), now: () => "2026-08-20T06:00:00.000Z" },
+  );
+  assert.deepEqual(result, { ok: true, action: "cache_fresh" });
+  assert.equal(fake.state.callCount, 0);
+  const syncStateCalls = calls.filter((sql) =>
+    sql.includes("sharesight_sync_state"),
+  );
+  assert.equal(
+    syncStateCalls.length,
+    1,
+    "expected exactly one sharesight_sync_state read for gates 2+3 combined",
+  );
 });
 
 // ---------------------------------------------------------------------------

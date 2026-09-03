@@ -1,13 +1,15 @@
 import { notFound } from "next/navigation";
 import { HistoryBackControl } from "../../../../components/back-control";
-import { loadAuthenticatedWorkspace } from "../../../../authenticated-workspace";
+import {
+  loadAuthenticatedWorkspace,
+  type AuthenticatedWorkspaceSqlContext,
+} from "../../../../authenticated-workspace";
 import { ManualLedgerEntry } from "../../../../components/manual-ledger-entry";
 import { createManualLedgerMutationKeyRepository } from "../../../../../db/repositories/manual-ledger-keys";
 import {
   loadOwnedManualLedgerOptions,
   type ManualLedgerOptions,
 } from "../../../../../db/repositories/manual-ledger-options";
-import { getAuthenticatedSqlContext } from "../../../../portfolio-actions";
 import {
   MANUAL_LEDGER_TYPES,
   type ManualLedgerType,
@@ -36,7 +38,19 @@ export default async function ManualLedgerEntryPage({
   const { portfolioId } = await params;
   const query = await searchParams;
   const initialType = initialEntryType(query.type);
-  const workspace = await loadAuthenticatedWorkspace(portfolioId);
+  // PRF-011: `sqlContextOut` recovers the SAME `client`/`userId`
+  // `loadAuthenticatedWorkspace` already resolved, instead of a second
+  // `getAuthenticatedSqlContext` call re-running the whole identity chain
+  // (including `touchWithAudit`'s 3-statement write batch) a second time
+  // per request. See `AuthenticatedWorkspaceSqlContext`'s doc comment.
+  const sqlContextOut: { current: AuthenticatedWorkspaceSqlContext } = {
+    current: { ok: false },
+  };
+  const workspace = await loadAuthenticatedWorkspace(
+    portfolioId,
+    {},
+    sqlContextOut,
+  );
 
   if (workspace.status === "unavailable") {
     return (
@@ -61,7 +75,7 @@ export default async function ManualLedgerEntryPage({
 
   if (workspace.activePortfolio === null) notFound();
 
-  const context = await getAuthenticatedSqlContext(portfolioId);
+  const context = sqlContextOut.current;
   if (!context.ok) {
     return (
       <main className="manual-workflow-placeholder">

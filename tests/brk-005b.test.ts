@@ -674,6 +674,155 @@ test("BRK-005B: loadOwnedSharesightLinks resolves multiple portfolios independen
 });
 
 // ---------------------------------------------------------------------------
+// PRF-011: loadOwnedSharesightLinks now issues one `WHERE user_id = ? AND
+// portfolio_id IN (...)` read (chunked at 50 ids) instead of one
+// `repository.list(userId, portfolioId)` call PER portfolio. These pin the
+// query-count reduction and prove the >50-portfolio chunking boundary
+// (mirrors `db/repositories/sharesight-delayed-price-cache.ts`'s own
+// `CACHE_READ_CHUNK_SIZE` test) never drops a row.
+// ---------------------------------------------------------------------------
+
+test("PRF-011: loadOwnedSharesightLinks issues exactly ONE sharesight_sync_state query for <=50 portfolios, not one per portfolio", async () => {
+  const database = await migratedDatabase();
+  database.exec(`
+    INSERT INTO portfolios (id, user_id, code, name, base_currency_code, timezone, accounting_method, status, created_at, updated_at, version)
+    VALUES ('portfolio-a2', 'user-a', 'A2', 'Second', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-15', '2026-08-15', 1),
+           ('portfolio-a3', 'user-a', 'A3', 'Third', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-15', '2026-08-15', 1);
+  `);
+  const base = createSqliteSqlClient(database);
+  await link(base, "user-a", "portfolio-a", "sp-1");
+  const calls: string[] = [];
+  const client: SqlClient = {
+    all: <T extends Record<string, unknown>>(
+      sql: string,
+      params?: readonly unknown[],
+    ) => {
+      calls.push(sql);
+      return base.all<T>(sql, params);
+    },
+    get: <T extends Record<string, unknown>>(
+      sql: string,
+      params?: readonly unknown[],
+    ) => base.get<T>(sql, params),
+    run: (sql: string, params?: readonly unknown[]) => base.run(sql, params),
+    batch: (statements) => base.batch(statements),
+  };
+  const links = await loadOwnedSharesightLinks(client, "user-a", [
+    "portfolio-a",
+    "portfolio-a2",
+    "portfolio-a3",
+  ]);
+  assert.deepEqual(links["portfolio-a"], {
+    status: "linked",
+    sharesightPortfolioId: "sp-1",
+  });
+  assert.deepEqual(links["portfolio-a2"], { status: "not_linked" });
+  assert.deepEqual(links["portfolio-a3"], { status: "not_linked" });
+  const syncStateCalls = calls.filter((sql) =>
+    sql.includes("sharesight_sync_state"),
+  );
+  assert.equal(
+    syncStateCalls.length,
+    1,
+    "expected exactly one chunked IN(...) read for all three portfolios",
+  );
+});
+
+test("PRF-011: loadOwnedSharesightLinks reports needs_repair for exactly the portfolio with >1 enabled link, alongside 0- and 1-enabled portfolios, all in one call", async () => {
+  const database = await migratedDatabase();
+  database.exec(`
+    INSERT INTO portfolios (id, user_id, code, name, base_currency_code, timezone, accounting_method, status, created_at, updated_at, version)
+    VALUES ('portfolio-a2', 'user-a', 'A2', 'Second', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-15', '2026-08-15', 1),
+           ('portfolio-a3', 'user-a', 'A3', 'Third', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-15', '2026-08-15', 1);
+  `);
+  const client = createSqliteSqlClient(database);
+  // portfolio-a: zero enabled links.
+  // portfolio-a2: exactly one enabled link.
+  await link(client, "user-a", "portfolio-a2", "sp-2");
+  // portfolio-a3: two enabled links (pre-existing-invariant-violation
+  // shape `upsert` alone permits -- see BRK-005B's own follow-up 1 test
+  // above).
+  await link(client, "user-a", "portfolio-a3", "sp-3a");
+  await link(client, "user-a", "portfolio-a3", "sp-3b");
+  const links = await loadOwnedSharesightLinks(client, "user-a", [
+    "portfolio-a",
+    "portfolio-a2",
+    "portfolio-a3",
+  ]);
+  assert.deepEqual(links["portfolio-a"], { status: "not_linked" });
+  assert.deepEqual(links["portfolio-a2"], {
+    status: "linked",
+    sharesightPortfolioId: "sp-2",
+  });
+  assert.deepEqual(links["portfolio-a3"], { status: "needs_repair" });
+});
+
+test("PRF-011: loadOwnedSharesightLinks chunks a 60-portfolio request into multiple <=50-id statements, still returns every portfolio's real status", async () => {
+  const database = await migratedDatabase();
+  const insertPortfolio = database.prepare(
+    `INSERT INTO portfolios (id, user_id, code, name, base_currency_code, timezone, accounting_method, status, created_at, updated_at, version)
+     VALUES (?, 'user-a', ?, ?, 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-15', '2026-08-15', 1)`,
+  );
+  const portfolioIds: string[] = [];
+  database.exec("BEGIN");
+  for (let index = 0; index < 60; index += 1) {
+    const id = `bulk-portfolio-${index}`;
+    portfolioIds.push(id);
+    insertPortfolio.run(id, `BULK${index}`, `Bulk ${index}`);
+  }
+  database.exec("COMMIT");
+  const client = createSqliteSqlClient(database);
+  // Link every 10th portfolio (0, 10, 20, 30, 40, 50 -- one on each side of
+  // the 50-id chunk boundary) so the assertions below prove no row is
+  // dropped or misattributed across chunks.
+  const linkedIndexes = [0, 10, 20, 30, 40, 50];
+  for (const index of linkedIndexes) {
+    await link(client, "user-a", `bulk-portfolio-${index}`, `sp-bulk-${index}`);
+  }
+  const calls: string[] = [];
+  const wrapped: SqlClient = {
+    all: <T extends Record<string, unknown>>(
+      sql: string,
+      params?: readonly unknown[],
+    ) => {
+      calls.push(sql);
+      return client.all<T>(sql, params);
+    },
+    get: <T extends Record<string, unknown>>(
+      sql: string,
+      params?: readonly unknown[],
+    ) => client.get<T>(sql, params),
+    run: (sql: string, params?: readonly unknown[]) => client.run(sql, params),
+    batch: (statements) => client.batch(statements),
+  };
+  const links = await loadOwnedSharesightLinks(wrapped, "user-a", portfolioIds);
+  const syncStateCalls = calls.filter((sql) =>
+    sql.includes("sharesight_sync_state"),
+  );
+  assert.equal(
+    syncStateCalls.length,
+    2,
+    "expected two chunked reads for 60 portfolios at a 50-id chunk size",
+  );
+  for (let index = 0; index < 60; index += 1) {
+    const id = `bulk-portfolio-${index}`;
+    if (linkedIndexes.includes(index)) {
+      assert.deepEqual(
+        links[id],
+        { status: "linked", sharesightPortfolioId: `sp-bulk-${index}` },
+        `expected ${id} to be linked`,
+      );
+    } else {
+      assert.deepEqual(
+        links[id],
+        { status: "not_linked" },
+        `expected ${id} to be not_linked`,
+      );
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
 // No new mutation surface: this task consumes BRK-005's three existing
 // routes only -- no new page, no new route.
 // ---------------------------------------------------------------------------

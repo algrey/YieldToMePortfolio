@@ -1,14 +1,28 @@
 import { ImportReview } from "../components/import-review";
 import { HistoryBackControl } from "../components/back-control";
-import { loadAuthenticatedWorkspace } from "../authenticated-workspace";
-import { getAuthenticatedSqlContext } from "../portfolio-actions";
+import {
+  loadAuthenticatedWorkspace,
+  type AuthenticatedWorkspaceSqlContext,
+} from "../authenticated-workspace";
 import { loadOwnedSharesightLinks } from "../owned-sharesight-links";
 import type { SharesightLinkStatus } from "../sharesight-sync-panel-helpers";
 
 export const dynamic = "force-dynamic";
 
 export default async function ImportPage() {
-  const workspace = await loadAuthenticatedWorkspace();
+  // PRF-011: `sqlContextOut` recovers the SAME `client`/`userId`
+  // `loadAuthenticatedWorkspace` already resolved, instead of a second
+  // `getAuthenticatedSqlContext` call re-running the whole identity chain
+  // (including `touchWithAudit`'s 3-statement write batch) a second time
+  // per request. See `AuthenticatedWorkspaceSqlContext`'s doc comment.
+  const sqlContextOut: { current: AuthenticatedWorkspaceSqlContext } = {
+    current: { ok: false },
+  };
+  const workspace = await loadAuthenticatedWorkspace(
+    undefined,
+    {},
+    sqlContextOut,
+  );
   if (workspace.status !== "ready" && workspace.status !== "empty") {
     return (
       <main className="import-review-page">
@@ -29,14 +43,14 @@ export default async function ImportPage() {
   // reachable; `ImportReview` itself degrades the CSV-import section when
   // `portfolios` is empty (see its own header note).
   // BRK-005B: `loadAuthenticatedWorkspace` already verified auth and D1
-  // access above -- a second `getAuthenticatedSqlContext` failure here is a
-  // rare double-failure, not a normal path. Review follow-up 1: degrading
-  // to "not linked" here would be dishonest (a real link could still exist
-  // -- this snapshot simply could not be read), so every portfolio gets the
-  // distinct `unknown` status instead; the section's own Link/Sync actions
-  // independently re-verify ownership server-side regardless of what this
-  // snapshot shows.
-  const context = await getAuthenticatedSqlContext();
+  // access above -- `sqlContextOut.current.ok === false` here is a rare
+  // failure of that same resolution, not a normal path. Review follow-up 1:
+  // degrading to "not linked" here would be dishonest (a real link could
+  // still exist -- this snapshot simply could not be read), so every
+  // portfolio gets the distinct `unknown` status instead; the section's own
+  // Link/Sync actions independently re-verify ownership server-side
+  // regardless of what this snapshot shows.
+  const context = sqlContextOut.current;
   const sharesightLinks: Record<string, SharesightLinkStatus> = context.ok
     ? await loadOwnedSharesightLinks(
         context.client,

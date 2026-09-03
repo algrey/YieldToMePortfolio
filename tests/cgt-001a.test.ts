@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import type { SqlClient } from "../db/repositories/sql-client.ts";
 import { createSqliteSqlClient } from "../db/repositories/sql-client.ts";
 import { loadOwnedCapitalGains } from "../app/owned-capital-gains.ts";
 import {
@@ -1266,4 +1267,257 @@ test("CGT-001A service: the empty-state short-circuit's reversal-exclusion branc
   const history = await loadOwnedCapitalGains(client, "user-a", "portfolio-a");
   assert.equal(history.disposalCount, 0);
   assert.deepEqual(history.fyTotals, []);
+});
+
+// ---------------------------------------------------------------------------
+// PRF-011 (owner-reported production CPU-limit follow-up audit): the
+// `projection_publications`/`lot_allocations` `count(*)` prechecks this
+// service used to run are gone -- exactly the anti-pattern PRF-004 removed
+// from `app/owned-holdings.ts`. These pin the removal itself (one query per
+// table instead of two) and prove the `lot_allocations` overflow/orphan
+// safety nets this service must never lose survive the rewrite.
+// ---------------------------------------------------------------------------
+
+/** Wraps a real SqliteSqlClient, recording every `all`/`get` call's SQL text
+ * -- lets a test assert on the REAL query sequence `loadOwnedCapitalGains`
+ * issues, mirroring `tests/prf-001.test.ts`'s `stageCensusClient` census
+ * method at a scale this file does not otherwise need. */
+function countingClient(database: DatabaseSync): {
+  client: SqlClient;
+  calls: string[];
+} {
+  const base = createSqliteSqlClient(database);
+  const calls: string[] = [];
+  const client: SqlClient = {
+    all: <T extends Record<string, unknown>>(
+      sql: string,
+      params?: readonly unknown[],
+    ) => {
+      calls.push(sql);
+      return base.all<T>(sql, params);
+    },
+    get: <T extends Record<string, unknown>>(
+      sql: string,
+      params?: readonly unknown[],
+    ) => {
+      calls.push(sql);
+      return base.get<T>(sql, params);
+    },
+    run: (sql: string, params?: readonly unknown[]) => base.run(sql, params),
+    batch: (statements) => base.batch(statements),
+  };
+  return { client, calls };
+}
+
+test("PRF-011: loadOwnedCapitalGains issues exactly ONE projection_publications query and ONE lot_allocations query -- no separate count(*) precheck for either", async () => {
+  const database = await createMigratedDatabase();
+  seedBase(database);
+  insertTransaction(database, {
+    id: "tx-buy",
+    type: "buy",
+    tradeAt: "2024-01-01T09:00:00Z",
+    localTradeDate: "2024-01-01",
+    quantityDecimal: "10",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "100",
+  });
+  insertTransaction(database, {
+    id: "tx-sell",
+    type: "sell",
+    tradeAt: "2026-01-15T09:00:00Z",
+    localTradeDate: "2026-01-15",
+    quantityDecimal: "5",
+    unitPriceDecimal: "20",
+    grossAmountDecimal: "100",
+  });
+  insertCalculationRun(database, {
+    id: "run-a",
+    highWaterStart: "tx-sell",
+    highWaterEnd: "tx-sell",
+  });
+  insertTaxLot(database, {
+    id: "lot-a",
+    openingTransactionId: "tx-buy",
+    acquiredAt: "2024-01-01T09:00:00Z",
+    calculationRunId: "run-a",
+  });
+  insertLotAllocation(database, {
+    id: "allocation-a",
+    sellTransactionId: "tx-sell",
+    taxLotId: "lot-a",
+    calculationRunId: "run-a",
+  });
+  insertPublication(database, {
+    calculationRunId: "run-a",
+    ledgerHighWater: "tx-sell",
+  });
+
+  const { client, calls } = countingClient(database);
+  const history = await loadOwnedCapitalGains(client, "user-a", "portfolio-a");
+  assert.equal(history.disposalCount, 1);
+
+  const publicationCalls = calls.filter((sql) =>
+    sql.includes("FROM projection_publications"),
+  );
+  assert.equal(
+    publicationCalls.length,
+    1,
+    "expected exactly one projection_publications read (count(*) precheck removed)",
+  );
+  assert.doesNotMatch(
+    publicationCalls[0]!,
+    /count\(\*\)/i,
+    "the surviving projection_publications query must be the LIMIT 2 data read, not a count",
+  );
+
+  const allocationCalls = calls.filter((sql) =>
+    sql.includes("FROM lot_allocations"),
+  );
+  assert.equal(
+    allocationCalls.length,
+    1,
+    "expected exactly one lot_allocations read (count(*) precheck removed)",
+  );
+  assert.doesNotMatch(
+    allocationCalls[0]!,
+    /count\(\*\)/i,
+    "the surviving lot_allocations query must be the LIMIT MAX_ALLOCATIONS+1 data read, not a count",
+  );
+});
+
+test("PRF-011: too_many_allocations still rejects a run whose lot_allocations exceed MAX_ALLOCATIONS (10,000), now derived from the LIMIT read's own length instead of a separate count(*)", async () => {
+  const database = await createMigratedDatabase();
+  seedBase(database);
+  insertTransaction(database, {
+    id: "tx-buy",
+    type: "buy",
+    tradeAt: "2024-01-01T09:00:00Z",
+    localTradeDate: "2024-01-01",
+    quantityDecimal: "20000",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "200000",
+  });
+  insertTransaction(database, {
+    id: "tx-sell",
+    type: "sell",
+    tradeAt: "2026-01-15T09:00:00Z",
+    localTradeDate: "2026-01-15",
+    quantityDecimal: "10001",
+    unitPriceDecimal: "20",
+    grossAmountDecimal: "200020",
+  });
+  insertCalculationRun(database, {
+    id: "run-a",
+    highWaterStart: "tx-sell",
+    highWaterEnd: "tx-sell",
+  });
+  insertTaxLot(database, {
+    id: "lot-a",
+    openingTransactionId: "tx-buy",
+    acquiredAt: "2024-01-01T09:00:00Z",
+    originalQuantityDecimal: "20000",
+    calculationRunId: "run-a",
+  });
+  // 10,001 allocations (MAX_ALLOCATIONS + 1) against the SAME tax lot/sell
+  // pair, varying only `allocation_sequence` -- the unique index
+  // (`sell_transaction_id`, `tax_lot_id`, `allocation_sequence`,
+  // `calculation_run_id`) permits this, and it is far cheaper to seed than
+  // 10,001 distinct lots while still exercising the real overflow path.
+  database.exec("BEGIN");
+  const insertAllocation = database.prepare(
+    `INSERT INTO lot_allocations (
+      id, user_id, portfolio_id, portfolio_security_id, sell_transaction_id,
+      tax_lot_id, allocation_sequence, matched_quantity_decimal,
+      allocated_base_basis_decimal, base_net_proceeds_decimal,
+      fee_base_decimal, tax_base_decimal, base_realised_gain_decimal,
+      basis_status, calculation_run_id, calculation_version
+    ) VALUES (?, 'user-a', 'portfolio-a', 'membership-a', 'tx-sell', 'lot-a', ?, '1', '1', '2', '0', '0', '1', 'complete', 'run-a', 1)`,
+  );
+  const ALLOCATION_COUNT = 10_001;
+  for (let index = 0; index < ALLOCATION_COUNT; index += 1) {
+    insertAllocation.run(`allocation-${index}`, index + 1);
+  }
+  database.exec("COMMIT");
+  insertPublication(database, {
+    calculationRunId: "run-a",
+    ledgerHighWater: "tx-sell",
+  });
+
+  const client = createSqliteSqlClient(database);
+  await assert.rejects(
+    () => loadOwnedCapitalGains(client, "user-a", "portfolio-a"),
+    /too_many_allocations/,
+  );
+});
+
+test("PRF-011: a lot_allocations row whose tax lot belongs to a DIFFERENT calculation run than the allocation itself still fails typed/closed (never silently dropped) now that the read is a LEFT JOIN driven off lot_allocations", async () => {
+  // The safety net the old `allocationCount !== allocationRows.length`
+  // aggregate check existed for: nothing in the schema's FKs stops a
+  // `lot_allocations` row from pointing at a `tax_lot_id` whose OWN
+  // `calculation_run_id` differs from the allocation's `calculation_run_id`
+  // -- the query's JOIN condition requires both to match, so under the OLD
+  // `INNER JOIN` this row was silently excluded from `allocationRows`
+  // (caught only by the separate count comparison, throwing
+  // `missing_allocation_dates`). Under the NEW `LEFT JOIN` (lot_allocations
+  // is now the driving table), this same row still appears -- with its
+  // `acquired_date` NULL, since `opening` only joins via `tl` -- and the
+  // existing `requiredText` validation rejects it directly, one query
+  // earlier, and by a different name (`invalid_acquired_date`, not
+  // `missing_allocation_dates`). Either way: a typed failure, never a
+  // fabricated or silently under-reported disposal (AGENTS.md).
+  const database = await createMigratedDatabase();
+  seedBase(database);
+  insertTransaction(database, {
+    id: "tx-buy",
+    type: "buy",
+    tradeAt: "2024-01-01T09:00:00Z",
+    localTradeDate: "2024-01-01",
+    quantityDecimal: "10",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "100",
+  });
+  insertTransaction(database, {
+    id: "tx-sell",
+    type: "sell",
+    tradeAt: "2026-01-15T09:00:00Z",
+    localTradeDate: "2026-01-15",
+    quantityDecimal: "5",
+    unitPriceDecimal: "20",
+    grossAmountDecimal: "100",
+  });
+  // The tax lot's OWN calculation run -- a prior run, never published.
+  insertCalculationRun(database, {
+    id: "run-old",
+    highWaterStart: "tx-buy",
+    highWaterEnd: "tx-buy",
+  });
+  // The CURRENT published run -- the allocation below claims this run, but
+  // its tax lot (created under `run-old`) never was.
+  insertCalculationRun(database, {
+    id: "run-a",
+    highWaterStart: "tx-sell",
+    highWaterEnd: "tx-sell",
+  });
+  insertTaxLot(database, {
+    id: "lot-mismatched",
+    openingTransactionId: "tx-buy",
+    acquiredAt: "2024-01-01T09:00:00Z",
+    calculationRunId: "run-old",
+  });
+  insertLotAllocation(database, {
+    id: "allocation-mismatched",
+    sellTransactionId: "tx-sell",
+    taxLotId: "lot-mismatched",
+    calculationRunId: "run-a",
+  });
+  insertPublication(database, {
+    calculationRunId: "run-a",
+    ledgerHighWater: "tx-sell",
+  });
+
+  const client = createSqliteSqlClient(database);
+  await assert.rejects(
+    () => loadOwnedCapitalGains(client, "user-a", "portfolio-a"),
+    /invalid_acquired_date/,
+  );
 });

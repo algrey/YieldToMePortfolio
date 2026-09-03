@@ -71,13 +71,12 @@
 import type { SqlClient } from "../db/repositories/sql-client.ts";
 import {
   claimSharesightPriceGateLease,
-  hasEnabledSharesightLink,
   loadSharesightDelayedPriceCache,
   releaseSharesightPriceGateLease,
   upsertSharesightDelayedPriceCache,
 } from "../db/repositories/sharesight-delayed-price-cache.ts";
 import {
-  loadSharesightPriceRefreshWatermark,
+  loadSharesightPriceGateLinkStatus,
   recordSharesightPriceRefreshWatermark,
   resolveScopedSharesightInstrumentSecurities,
   upsertSharesightPriceObservations,
@@ -190,26 +189,32 @@ export async function ensureSharesightPriceFreshness(
   const integration = await resolveIntegration(options);
   if (!integration.enabled) return { ok: true, action: "not_configured" };
 
-  // Gate 2: this owner has an enabled link -- one EXISTS query.
-  if (!(await hasEnabledSharesightLink(client, userId))) {
+  // Gates 2+3 (PRF-011): ONE read of `sharesight_sync_state` distinguishes
+  // "no enabled link at all" from "linked, here's the last attempt
+  // watermark" -- see `loadSharesightPriceGateLinkStatus`'s doc comment for
+  // why this replaces the old two-read sequence
+  // (`hasEnabledSharesightLink` then `loadSharesightPriceRefreshWatermark`,
+  // both against the identical row). The `not_linked` short-circuit stays
+  // zero-fetch beyond this single read, exactly as before. Reuses
+  // `sharesight_sync_state.last_price_refresh_at`/`_status`/`_error_kind`
+  // -- the SAME row BRK-012B's hourly cron already stamps on every attempt
+  // for this owner -- rather than a second, duplicate "gate attempt" column
+  // set: both the cron and this gate represent the IDENTICAL fact ("when
+  // did we last attempt a Sharesight price fetch for this owner, and did it
+  // succeed"), and the watermark already lives on the same row the lease
+  // columns do. Reusing it means an hourly cron run automatically "resets
+  // the gate clock" for free (review follow-up 2) -- the very next load
+  // after a cron sweep sees a fresh watermark and serves cache/
+  // `price_observations` with zero Sharesight calls, with no separate
+  // column to keep in sync.
+  const nowIso = now();
+  const linkStatus = await loadSharesightPriceGateLinkStatus(client, userId);
+  if (!linkStatus.linked) {
     return { ok: true, action: "not_linked" };
   }
-
-  // Gate 3 (review round B1 fix): PER-OWNER attempt watermark, not a
-  // per-security cache scan. Reuses `sharesight_sync_state.last_price_
-  // refresh_at`/`_status`/`_error_kind` -- the SAME row BRK-012B's hourly
-  // cron already stamps on every attempt for this owner -- rather than a
-  // second, duplicate "gate attempt" column set: both the cron and this
-  // gate represent the IDENTICAL fact ("when did we last attempt a
-  // Sharesight price fetch for this owner, and did it succeed"), and the
-  // watermark already lives on the same row the lease columns do. Reusing
-  // it means an hourly cron run automatically "resets the gate clock" for
-  // free (review follow-up 2) -- the very next load after a cron sweep sees
-  // a fresh watermark and serves cache/`price_observations` with zero
-  // Sharesight calls, with no separate column to keep in sync.
-  const nowIso = now();
-  const watermark = await loadSharesightPriceRefreshWatermark(client, userId);
-  if (!isSharesightPriceWatermarkStale(watermark, nowIso, maxAgeMs)) {
+  if (
+    !isSharesightPriceWatermarkStale(linkStatus.lastAttemptAt, nowIso, maxAgeMs)
+  ) {
     return { ok: true, action: "cache_fresh" };
   }
 

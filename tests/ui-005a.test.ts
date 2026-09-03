@@ -315,7 +315,7 @@ test("details UI is read-only, provenance-explicit, and linked to separate entry
   assert.match(component, /bounded inspection window/);
   assert.doesNotMatch(component, /<input\b|contentEditable/);
   assert.match(page, /loadAuthenticatedPortfolioInspection/);
-  assert.match(manualRoute, /loadAuthenticatedWorkspace\(portfolioId\)/);
+  assert.match(manualRoute, /loadAuthenticatedWorkspace\(\s*portfolioId,/);
   assert.match(manualRoute, /workspace\.activePortfolio === null/);
   assert.match(manualRoute, /ManualLedgerEntry/);
   assert.match(manualRoute, /getAuthenticatedSqlContext/);

@@ -376,3 +376,32 @@ export async function loadSharesightPriceRefreshWatermark(
   );
   return row?.last_price_refresh_at ?? null;
 }
+
+/** PRF-011: what `app/sharesight-price-gate-service.ts`'s gates 2 and 3
+ * actually need, from ONE read instead of the two separate reads
+ * (`hasEnabledSharesightLink` then `loadSharesightPriceRefreshWatermark`)
+ * it used to issue against this SAME `sharesight_sync_state` row. `linked:
+ * false` is the exact "no enabled row" case `hasEnabledSharesightLink`
+ * returned `false` for -- the gate's `not_linked` short-circuit stays
+ * zero-fetch beyond this single read. `linked: true` distinguishes a row
+ * that exists but has never recorded an attempt (`lastAttemptAt: null`,
+ * always stale) from one with a real watermark, exactly like the old
+ * two-call sequence did. Deliberately does not replace
+ * `hasEnabledSharesightLink`/`loadSharesightPriceRefreshWatermark` above --
+ * both remain exported and directly unit-tested (`tests/brk-012c.test.ts`)
+ * for callers that only need one half of this fact. */
+export type SharesightPriceGateLinkStatus =
+  { linked: false } | { linked: true; lastAttemptAt: string | null };
+
+export async function loadSharesightPriceGateLinkStatus(
+  client: SqlClient,
+  userId: string,
+): Promise<SharesightPriceGateLinkStatus> {
+  const row = await client.get<{ last_price_refresh_at: string | null }>(
+    `SELECT last_price_refresh_at FROM sharesight_sync_state
+      WHERE user_id = ? AND enabled = 1 ORDER BY id ASC LIMIT 1`,
+    [userId],
+  );
+  if (!row) return { linked: false };
+  return { linked: true, lastAttemptAt: row.last_price_refresh_at ?? null };
+}
