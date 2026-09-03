@@ -90,6 +90,9 @@ import { createOwnedUserSettingsRepository } from "../db/repositories/owned-port
 import { loadOwnedIncomeProjection } from "../app/owned-income-projection.ts";
 import { loadOwnedIncomeScenarios } from "../app/owned-income-scenarios.ts";
 import { loadOwnedDividendAssumptions } from "../app/owned-dividend-assumptions.ts";
+// PRF-008: the "before" reconstruction below needs the SAME two-read
+// composition `owned-income-projection.ts` itself uses.
+import { loadOwnedDividendHistory } from "../app/owned-dividend-history.ts";
 import { createDividendFyOverrideRepository } from "../db/repositories/dividends.ts";
 import {
   loadOwnedHoldingIdentity,
@@ -105,6 +108,18 @@ import {
 // never on the real page's own census row.
 import { loadOwnedSharesightLinks } from "../app/owned-sharesight-links.ts";
 import type { SqlClient, SqlStatement } from "../db/repositories/sql-client.ts";
+// PRF-008: the freshness-gate opt-out seam census below needs the SAME
+// injectable-integration shape `tests/brk-012c.test.ts` uses to drive
+// `ensureSharesightPriceFreshness` deterministically (a plain `node --test`
+// environment cannot reach the real `cloudflare:workers` import gate 1
+// otherwise falls back to, so an INJECTED integration is the only way to
+// observe gate 2+3/4 behaviour here).
+import type {
+  SharesightClient,
+  SharesightResult,
+  SharesightUserInstrument,
+} from "../domain/sharesight/index.ts";
+import type { SharesightIntegrationConfig } from "../worker/sharesight-config.ts";
 
 async function migratedDatabase(): Promise<DatabaseSync> {
   const db = new DatabaseSync(":memory:");
@@ -2032,5 +2047,426 @@ test("PRF-005 review F1 (honesty-material, non-blocking): a per-date tolerance w
     "expected the OLD full-range-only bound to see zero rows for this security (proving the old read's gap)",
   );
 
+  db.close();
+});
+
+// ---------------------------------------------------------------------------
+// PRF-008 -- scope the BRK-012C Sharesight freshness gate to pages that
+// display live prices; `/income` (and `/income/*`) opt OUT. This section
+// confirms the owner ruling's measured basis END TO END (the ~95-statement
+// figure in TASKS.md's PRF-008 entry was additive arithmetic over two
+// SEPARATELY measured components -- PRF-007 Finding C's standalone gate
+// measurement plus PRF-005's separately-measured `/income` baseline -- not
+// one combined cold-cache census; replaced here with a real single-fixture
+// measurement), and proves per-page placement: the gate fires on Holdings
+// (unchanged, default "enforce") and is provably absent from `/income`,
+// `/income/multi-year`, and `/income/assumptions` (explicit "skip").
+// ---------------------------------------------------------------------------
+
+/**
+ * Extends `productionScaleFixture` with an ENABLED, LINKED, COLD (no
+ * watermark ever recorded -- `last_price_refresh_at IS NULL`) Sharesight
+ * sync-state row, plus a `sharesight_instrument` identifier for every one
+ * of the 18 held securities -- the exact "18 Sharesight-matched
+ * securities, cold watermark" shape PRF-007 Finding C measured.
+ */
+async function productionScaleFixtureWithColdSharesight(): Promise<DatabaseSync> {
+  const db = await productionScaleFixture();
+  db.exec(`
+    INSERT INTO sharesight_sync_state (id, user_id, portfolio_id, sharesight_portfolio_id, enabled, created_at, updated_at, version, last_price_refresh_at, last_price_refresh_status)
+      VALUES ('sync-1', 'owner-1', 'portfolio-1', 'sp-1', 1, '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z', 1, NULL, NULL);
+  `);
+  const insertIdentifier = db.prepare(
+    `INSERT INTO security_identifiers (id, security_id, scheme, value, valid_from, valid_to, source)
+     VALUES (?, ?, 'sharesight_instrument', ?, '2015-01-01', NULL, 'sharesight')`,
+  );
+  for (let index = 0; index < SECURITY_COUNT; index += 1) {
+    insertIdentifier.run(
+      `ident-${index}`,
+      `security-${index}`,
+      String(9000 + index),
+    );
+  }
+  return db;
+}
+
+/** A resolving fake Sharesight client matching all 18 fixture securities --
+ * lets a cold-watermark gate run to completion (a real accretion write),
+ * not merely fail closed, so the measured statement count below reflects
+ * the FULL cost (fetch + cache upsert + `price_observations` accretion
+ * batch), matching PRF-007 Finding C's own "18 Sharesight-matched
+ * securities" methodology. */
+function coldSharesightFixtureIntegration(): {
+  integration: SharesightIntegrationConfig;
+  state: { callCount: number };
+} {
+  const state = { callCount: 0 };
+  const instruments: SharesightUserInstrument[] = Array.from(
+    { length: SECURITY_COUNT },
+    (_, index) => ({
+      id: String(9000 + index),
+      code: `SYM${index}`,
+      marketCode: "ASX",
+      currencyCode: "AUD",
+      currentPriceDecimal: "10.00",
+      // Before NOW (2026-08-01T12:00:00Z) -- the selection machinery's
+      // no-look-ahead rule rejects a future `observation_at`.
+      currentPriceUpdatedAt: "2026-08-01T09:00:00+00:00",
+    }),
+  );
+  const client: SharesightClient = {
+    async listPortfolios() {
+      return { ok: true, value: [] };
+    },
+    async getPortfolioHoldings() {
+      return { ok: true, value: [] };
+    },
+    async listTrades() {
+      return { ok: true, value: [] };
+    },
+    async listPayouts() {
+      return { ok: true, value: [] };
+    },
+    async listUserInstruments() {
+      state.callCount += 1;
+      return { ok: true, value: instruments } satisfies SharesightResult<
+        SharesightUserInstrument[]
+      >;
+    },
+  };
+  return { integration: { enabled: true, client }, state };
+}
+
+/**
+ * PRF-008 measurement helper -- reconstructs the PRE-FIX `/income` loader
+ * shape (before this task added the "skip" opt-out): `owned-income-
+ * projection.ts` used to call `loadOwnedHoldings` with NO gate options at
+ * all, so on a real Sharesight-configured, cold-watermark account gates 1
+ * and 2+3/4 always ran, unconditionally, on every `/income` load. Mirrors
+ * `censusIncomePage`'s own composition (`loadOwnedDividendHistory` +
+ * `loadOwnedHoldings`, run concurrently, per that function's own PRF-005
+ * comment) exactly, with the gate ENFORCED via an injected integration
+ * standing in for a real Sharesight credential (a plain `node --test`
+ * environment cannot reach the real `cloudflare:workers` import gate 1
+ * needs -- see this file's header). D1 call/statement counts are additive
+ * regardless of `Promise.all` concurrency (no query is shared or deduped
+ * across the two branches), so this combined, single-fixture measurement
+ * is equivalent to, and supersedes, PRF-007 Finding C's own
+ * separately-measured "gate alone" + "`/income` alone" arithmetic.
+ */
+async function censusIncomePageBeforePRF008(
+  client: SqlClient,
+  integration: SharesightIntegrationConfig,
+): Promise<void> {
+  await baseWorkspaceLoad(client);
+  await Promise.all([
+    loadOwnedDividendHistory(client, USER_ID, PORTFOLIO_ID, NOW),
+    loadOwnedHoldings(client, USER_ID, PORTFOLIO_ID, NOW, {
+      integration,
+      now: () => NOW.toISOString(),
+    }).catch(() => null),
+  ]);
+}
+
+// DISCLOSED LIMITATION (both tests below): this measures the "before"
+// shape via an explicit, injected `integration` (the same seam
+// `tests/brk-012c.test.ts` uses), NOT by reverting `owned-income-
+// projection.ts` and calling it directly -- that file itself never exposed
+// a way to inject a fake integration, and un-injected it always resolves
+// via a `cloudflare:workers` import that FAILS in a plain `node --test`
+// process regardless of this fix (caught by `resolveIntegration` as
+// `not_configured`, zero-cost). Concretely: running the REAL, pre-fix
+// `owned-income-projection.ts` in THIS test environment would ALSO show
+// zero `sharesight_sync_state` statements on `/income` -- not because the
+// gate was scoped out, but because gate 1 itself can never reach a real
+// credential here. These two tests therefore do NOT independently fail
+// against the pre-fix source (confirmed via `git stash` on
+// `app/owned-holdings.ts`/`app/owned-income-projection.ts`/`app/owned-
+// dividend-assumptions.ts`) -- they measure real, reproducible statement
+// counts and per-page placement on a fixture shape that DOES matter in
+// production (a real deployment's Sharesight credential resolves via the
+// real `cloudflare:workers` env, not this fallback). The regression proof
+// that the fix actually changed behaviour lives in the SOURCE-VERIFIED
+// caller-placement test below (which DOES fail pre-fix) and in
+// `tests/brk-012c.test.ts`'s `priceFreshnessMode` mechanism tests (three of
+// which DO fail pre-fix, using the same injected-integration seam at the
+// `loadOwnedHoldings` level where it is actually exposed).
+test("PRF-008: measured basis end to end -- /income's cold-cache Sharesight cost BEFORE this fix (gate enforced, reconstructed) versus AFTER (real loadOwnedIncomeProjection, gate scoped out)", async () => {
+  // BEFORE: the gate is enforced (mirrors pre-fix behaviour) against a
+  // cold watermark with 18 Sharesight-matched securities.
+  const beforeDb = await productionScaleFixtureWithColdSharesight();
+  const beforeFake = coldSharesightFixtureIntegration();
+  const { client: beforeClient, stats: beforeStats } = stageCensusClient(
+    createSqliteSqlClient(beforeDb),
+  );
+  await censusIncomePageBeforePRF008(beforeClient, beforeFake.integration);
+  assert.equal(
+    beforeFake.state.callCount,
+    1,
+    "expected the reconstructed pre-fix /income load to make exactly one Sharesight fetch on a cold watermark",
+  );
+  const beforeSharesightStatements = beforeStats.calls_.filter((call) =>
+    call.sql.includes("sharesight_sync_state"),
+  ).length;
+  assert.ok(
+    beforeSharesightStatements > 0,
+    "expected the reconstructed pre-fix /income load to touch sharesight_sync_state",
+  );
+
+  // AFTER: the REAL, current `loadOwnedIncomeProjection` (this task's fix)
+  // against the IDENTICAL fixture shape -- Sharesight configured, cold
+  // watermark, 18 matched securities. No integration is injected because
+  // none is needed: "skip" means `ensureSharesightPriceFreshness` is never
+  // even called, so this is the true, unconditional production cost.
+  const afterDb = await productionScaleFixtureWithColdSharesight();
+  const { client: afterClient, stats: afterStats } = stageCensusClient(
+    createSqliteSqlClient(afterDb),
+  );
+  await censusIncomePage(afterClient);
+  const afterSharesightStatements = afterStats.calls_.filter((call) =>
+    call.sql.includes("sharesight_sync_state"),
+  ).length;
+
+  console.log(
+    `\nPRF-008 measured basis (/income, cold watermark, 18 Sharesight-matched securities):\n` +
+      `  BEFORE (gate enforced, reconstructed): calls=${beforeStats.calls} statements=${beforeStats.statements} sharesight_sync_state statements=${beforeSharesightStatements}\n` +
+      `  AFTER  (real loadOwnedIncomeProjection, gate scoped out): calls=${afterStats.calls} statements=${afterStats.statements} sharesight_sync_state statements=${afterSharesightStatements}`,
+  );
+
+  // Acceptance: "/income issues zero Sharesight-gate calls and its census
+  // drops to the PRF-005 baseline" (33/33, confirmed separately by the
+  // existing per-page census test with NOT_CONFIGURED_SHARESIGHT).
+  assert.equal(
+    afterSharesightStatements,
+    0,
+    "expected zero sharesight_sync_state statements on /income after PRF-008",
+  );
+  assert.equal(afterStats.calls, 33);
+  assert.equal(afterStats.statements, 33);
+  // The BEFORE reconstruction must cost STRICTLY more than the AFTER real
+  // measurement -- proving the fix actually removes real, measured cost on
+  // this exact fixture, not merely an estimate.
+  assert.ok(
+    beforeStats.calls > afterStats.calls &&
+      beforeStats.statements > afterStats.statements,
+    `expected BEFORE (calls=${beforeStats.calls} statements=${beforeStats.statements}) to exceed AFTER (calls=${afterStats.calls} statements=${afterStats.statements})`,
+  );
+
+  beforeDb.close();
+  afterDb.close();
+});
+
+test("PRF-008: per-page census -- the gate fires on Holdings (default 'enforce', unchanged) and is provably ABSENT from /income, /income/multi-year, and /income/assumptions (explicit 'skip'), on the identical cold-watermark Sharesight fixture", async () => {
+  // Holdings: the UNCHANGED default ("enforce") call site -- the gate must
+  // still fire exactly once on a cold watermark.
+  const holdingsDb = await productionScaleFixtureWithColdSharesight();
+  const holdingsFake = coldSharesightFixtureIntegration();
+  const { client: holdingsClient, stats: holdingsStats } = stageCensusClient(
+    createSqliteSqlClient(holdingsDb),
+  );
+  await loadOwnedHoldings(holdingsClient, USER_ID, PORTFOLIO_ID, NOW, {
+    integration: holdingsFake.integration,
+    now: () => NOW.toISOString(),
+  });
+  assert.equal(
+    holdingsFake.state.callCount,
+    1,
+    "expected Holdings' default (enforce) call site to fire the gate exactly once",
+  );
+  assert.ok(
+    holdingsStats.calls_.some((call) =>
+      call.sql.includes("sharesight_sync_state"),
+    ),
+    "expected Holdings' load to touch sharesight_sync_state",
+  );
+  holdingsDb.close();
+
+  // /income, /income/multi-year, /income/assumptions: the REAL, current
+  // functions -- each must make ZERO Sharesight fetches and ZERO
+  // sharesight_sync_state statements on the IDENTICAL cold-watermark
+  // fixture that just proved Holdings pays real cost above.
+  const incomePages: Array<{
+    name: string;
+    run: (client: SqlClient) => Promise<void>;
+  }> = [
+    { name: "/portfolio/:id/income", run: censusIncomePage },
+    {
+      name: "/portfolio/:id/income/multi-year",
+      run: censusIncomeMultiYearPage,
+    },
+    {
+      name: "/portfolio/:id/income/assumptions",
+      run: censusIncomeAssumptionsPage,
+    },
+  ];
+  for (const page of incomePages) {
+    const db = await productionScaleFixtureWithColdSharesight();
+    const { client, stats } = stageCensusClient(createSqliteSqlClient(db));
+    await page.run(client);
+    const sharesightStatements = stats.calls_.filter((call) =>
+      call.sql.includes("sharesight_sync_state"),
+    ).length;
+    assert.equal(
+      sharesightStatements,
+      0,
+      `expected ${page.name} to make zero sharesight_sync_state statements on a cold, Sharesight-configured watermark`,
+    );
+    db.close();
+  }
+});
+
+test("PRF-008: caller placement is source-verified -- /income and /income/assumptions opt OUT of the freshness gate ('skip'); the Holdings/Overview call sites in authenticated-workspace.ts stay on the default (never pass 'skip')", async () => {
+  const [incomeProjectionSource, dividendAssumptionsSource, workspaceSource] =
+    await Promise.all([
+      readFile(
+        new URL("../app/owned-income-projection.ts", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../app/owned-dividend-assumptions.ts", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../app/authenticated-workspace.ts", import.meta.url),
+        "utf8",
+      ),
+    ]);
+
+  function loadOwnedHoldingsCallArgLists(source: string): string[] {
+    const argLists: string[] = [];
+    const marker = "loadOwnedHoldings(";
+    let searchFrom = 0;
+    for (;;) {
+      const start = source.indexOf(marker, searchFrom);
+      if (start === -1) break;
+      const closeIndex = source.indexOf(")", start + marker.length);
+      if (closeIndex === -1) break;
+      argLists.push(source.slice(start + marker.length, closeIndex));
+      searchFrom = closeIndex + 1;
+    }
+    return argLists;
+  }
+
+  const incomeCalls = loadOwnedHoldingsCallArgLists(incomeProjectionSource);
+  assert.equal(
+    incomeCalls.length,
+    1,
+    "expected exactly one loadOwnedHoldings call site in owned-income-projection.ts",
+  );
+  assert.match(
+    incomeCalls[0] ?? "",
+    /"skip"/,
+    "expected /income's loadOwnedHoldings call to opt out of the freshness gate",
+  );
+
+  const assumptionsCalls = loadOwnedHoldingsCallArgLists(
+    dividendAssumptionsSource,
+  );
+  assert.equal(
+    assumptionsCalls.length,
+    1,
+    "expected exactly one loadOwnedHoldings call site in owned-dividend-assumptions.ts",
+  );
+  assert.match(
+    assumptionsCalls[0] ?? "",
+    /"skip"/,
+    "expected /income/assumptions' loadOwnedHoldings call to opt out of the freshness gate",
+  );
+
+  const workspaceCalls = loadOwnedHoldingsCallArgLists(workspaceSource);
+  assert.equal(
+    workspaceCalls.length,
+    2,
+    "expected exactly two loadOwnedHoldings call sites in authenticated-workspace.ts (Holdings, Overview)",
+  );
+  for (const call of workspaceCalls) {
+    assert.doesNotMatch(
+      call,
+      /"skip"/,
+      "expected the Holdings/Overview call sites to omit priceFreshnessMode entirely (default 'enforce'), never pass 'skip'",
+    );
+  }
+});
+
+test("PRF-008: byte-identical output -- Holdings/Overview's unchanged call shape (5 positional args, no priceFreshnessMode) renders identically to explicitly passing 'enforce'", async () => {
+  const dbOmitted = await productionScaleFixture();
+  const omitted = await loadOwnedHoldings(
+    createSqliteSqlClient(dbOmitted),
+    USER_ID,
+    PORTFOLIO_ID,
+    NOW,
+    NOT_CONFIGURED_SHARESIGHT,
+  );
+  dbOmitted.close();
+
+  const dbExplicit = await productionScaleFixture();
+  const explicit = await loadOwnedHoldings(
+    createSqliteSqlClient(dbExplicit),
+    USER_ID,
+    PORTFOLIO_ID,
+    NOW,
+    NOT_CONFIGURED_SHARESIGHT,
+    "enforce",
+  );
+  dbExplicit.close();
+
+  assert.deepEqual(
+    explicit,
+    omitted,
+    "expected explicit 'enforce' to render byte-identically to the pages' existing omitted call shape",
+  );
+});
+
+/**
+ * Minimal fixture for the honesty test below: ONE Sharesight-linked,
+ * ENABLED, COLD-watermark owner/security, deliberately with NO
+ * `price_observations` row at all (no EOD backfill, no prior Sharesight
+ * accretion) -- the security is genuinely, honestly unpriced. Distinct
+ * from `productionScaleFixture` (which seeds ~60k real EOD
+ * `price_observations` rows unconditionally, so it can never demonstrate
+ * this case).
+ */
+async function minimalUnpricedIncomeFixture(): Promise<DatabaseSync> {
+  const db = await migratedDatabase();
+  const now = "2026-08-01T00:00:00.000Z";
+  db.exec(`
+    INSERT INTO currencies(code,numeric_code,name,minor_unit_digits) VALUES ('AUD',36,'Australian dollar',2);
+    INSERT INTO users(id,status,primary_email,timezone,created_at,updated_at) VALUES ('owner-x','active','x@example.test','Australia/Sydney','${now}','${now}');
+    INSERT INTO user_settings(user_id,home_currency_code,timezone,financial_year_start_month,created_at,updated_at,version) VALUES ('owner-x','AUD','Australia/Sydney',7,'${now}','${now}',1);
+    INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at) VALUES ('portfolio-x','owner-x','P','Portfolio','AUD','Australia/Sydney','fifo','active','${now}','${now}');
+    INSERT INTO securities(id,asset_type,primary_currency_code,canonical_name,created_at,updated_at) VALUES ('security-x','equity','AUD','Security X','${now}','${now}');
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at) VALUES ('holding-x','owner-x','portfolio-x','security-x','SYM','AUD','held','${now}','${now}');
+    INSERT INTO calculation_runs (id,user_id,portfolio_id,range_from,range_to,calculation_version,reason,ledger_high_water_start,ledger_high_water_end,idempotency_key,created_at,updated_at,status)
+      VALUES ('run-x','owner-x','portfolio-x','2018-01-01','2026-08-01',1,'test','0','1','run-x','${now}','${now}','completed');
+    INSERT INTO projection_publications (user_id,portfolio_id,calculation_run_id,calculation_version,ledger_high_water,published_at)
+      VALUES ('owner-x','portfolio-x','run-x',1,'1','${now}');
+    INSERT INTO holding_projections (id,user_id,portfolio_id,portfolio_security_id,quantity_decimal,native_open_basis_decimal,base_open_basis_decimal,average_base_cost_decimal,completeness,status,last_ledger_high_water,calculation_run_id,calculation_version,rebuilt_at)
+      VALUES ('projection-x','owner-x','portfolio-x','holding-x','10','100','100','10','complete','ready','1','run-x',1,'${now}');
+    INSERT INTO sharesight_sync_state (id, user_id, portfolio_id, sharesight_portfolio_id, enabled, created_at, updated_at, version, last_price_refresh_at, last_price_refresh_status)
+      VALUES ('sync-x', 'owner-x', 'portfolio-x', 'sp-x', 1, '${now}', '${now}', 1, NULL, NULL);
+    INSERT INTO security_identifiers (id, security_id, scheme, value, valid_from, valid_to, source)
+      VALUES ('ident-x', 'security-x', 'sharesight_instrument', '9999', '2015-01-01', NULL, 'sharesight');
+  `);
+  return db;
+}
+
+test("PRF-008: opting out on /income never fabricates a price or hides unavailability -- a genuinely unpriced, Sharesight-linked security under 'skip' still reads unavailable/partial, never a fabricated total or zero", async () => {
+  // Sharesight is configured, ENABLED, LINKED, and cold (would refetch
+  // under "enforce") -- but /income's real loader ("skip") never attempts
+  // that fetch, so this security's price stays exactly what it already is:
+  // genuinely absent. The portfolio value must read partial/unavailable,
+  // NEVER a confident "available" total that implicitly treats the missing
+  // price as zero, and NEVER the literal string "0".
+  const db = await minimalUnpricedIncomeFixture();
+  const client = createSqliteSqlClient(db);
+  const projection = await loadOwnedIncomeProjection(
+    client,
+    "owner-x",
+    "portfolio-x",
+    new Date("2026-08-01T12:00:00.000Z"),
+    { yearsBack: 1, yearsForward: 1 },
+  );
+  assert.notEqual(projection.portfolioValueStatus, "available");
+  assert.notEqual(projection.currentPortfolioValueDecimal, "0");
   db.close();
 });

@@ -1777,6 +1777,193 @@ test("BRK-012C owned-holdings: pinned end-to-end -- current-value selection read
   assert.notEqual(result.rows[0]?.nativePrice, "999.99");
 });
 
+// ---------------------------------------------------------------------------
+// (3b) PRF-008 -- the `priceFreshnessMode` ("enforce"/"skip") seam
+// ---------------------------------------------------------------------------
+
+test("PRF-008: priceFreshnessMode='skip' makes ZERO Sharesight requests and never touches sharesight_sync_state, even with an enabled link and no watermark ever recorded", async () => {
+  const db = await gateFixture();
+  const client = createSqliteSqlClient(db);
+  const fake = fakeSharesightClient({
+    ok: true,
+    value: [instrument({ currentPriceDecimal: "20.00" })],
+  });
+  const calls: string[] = [];
+  const countingClient: SqlClient = {
+    ...client,
+    all: async (sql, params) => {
+      calls.push(sql);
+      return client.all(sql, params);
+    },
+    get: async (sql, params) => {
+      calls.push(sql);
+      return client.get(sql, params);
+    },
+    run: async (sql, params) => {
+      calls.push(sql);
+      return client.run(sql, params);
+    },
+    batch: async (statements) => {
+      for (const statement of statements) calls.push(statement.sql);
+      return client.batch(statements);
+    },
+  };
+  const result = await loadOwnedHoldings(
+    countingClient,
+    "owner-a",
+    "portfolio-a",
+    new Date("2026-08-20T06:00:00.000Z"),
+    { integration: integrationOf(fake), leaseOwner: () => "lease-1" },
+    "skip",
+  );
+  assert.equal(
+    fake.state.callCount,
+    0,
+    "expected zero Sharesight fetches when priceFreshnessMode is 'skip'",
+  );
+  assert.ok(
+    !calls.some((sql) => sql.includes("sharesight_sync_state")),
+    "expected zero sharesight_sync_state statements when priceFreshnessMode is 'skip' -- the gate must never even READ the link/watermark, not merely skip the fetch",
+  );
+  // The read still succeeds, honestly -- nothing was ever fetched or
+  // cached for this owner, so the holding reads unavailable, never zero
+  // and never a fabricated live-looking figure.
+  assert.equal(result.rows[0]?.nativeValue.status, "unavailable");
+});
+
+test("PRF-008: priceFreshnessMode omitted (default) is unchanged from the pre-existing gate-enforced behaviour -- the gate still fires exactly once, byte-identical to passing 'enforce' explicitly", async () => {
+  const now = new Date("2026-08-20T06:00:00.000Z");
+  const instrumentValue = instrument({
+    currentPriceDecimal: "20.00",
+    currentPriceUpdatedAt: "2026-08-20T15:55:00+10:00",
+  });
+
+  const db1 = await gateFixture();
+  const fake1 = fakeSharesightClient({ ok: true, value: [instrumentValue] });
+  const omitted = await loadOwnedHoldings(
+    createSqliteSqlClient(db1),
+    "owner-a",
+    "portfolio-a",
+    now,
+    { integration: integrationOf(fake1), leaseOwner: () => "lease-1" },
+    // 6th argument omitted entirely -- this is the exact call shape
+    // Holdings/Overview (`app/authenticated-workspace.ts`) use.
+  );
+  assert.equal(fake1.state.callCount, 1);
+
+  // A SEPARATE, otherwise-identical cold fixture -- reusing `db1` for a
+  // second call would see the watermark/lease the first call just wrote
+  // and short-circuit as `cache_fresh`, which would prove nothing about
+  // "enforce" itself.
+  const db2 = await gateFixture();
+  const fake2 = fakeSharesightClient({ ok: true, value: [instrumentValue] });
+  const explicit = await loadOwnedHoldings(
+    createSqliteSqlClient(db2),
+    "owner-a",
+    "portfolio-a",
+    now,
+    { integration: integrationOf(fake2), leaseOwner: () => "lease-1" },
+    "enforce",
+  );
+  assert.equal(fake2.state.callCount, 1);
+  // Each independent refresh mints its OWN `providerRevisionId` (a random
+  // UUID, `crypto.randomUUID()`-sourced -- see `refreshAndCache`), embedded
+  // verbatim in the rendered `explanation` string ("source ID <uuid>") --
+  // an intentional per-write session tag (MKT-009B), not a value this
+  // seam's byte-identical guarantee is about. Normalized out before
+  // comparing so this test pins the SEAM's behaviour, not two independent
+  // fetches' incidental random ids.
+  const normalizeSourceId = (value: unknown): unknown =>
+    JSON.parse(
+      JSON.stringify(value).replace(
+        /source ID [0-9a-f-]{36}/g,
+        "source ID <normalized>",
+      ),
+    );
+  assert.deepEqual(
+    normalizeSourceId(explicit),
+    normalizeSourceId(omitted),
+    "expected explicit 'enforce' to render byte-identically to the omitted default",
+  );
+});
+
+test("PRF-008: opting out ('skip') never fabricates freshness or masks staleness -- an existing, genuinely stale Sharesight price still renders with its OWN honest (old) timestamp, and a fetch that would have returned a different price is never made", async () => {
+  const db = await gateFixture();
+  const client = createSqliteSqlClient(db);
+  // A price_observations row already exists from a refresh 2 HOURS ago --
+  // well outside the 10-minute window, so "enforce" would refetch here.
+  // The fake client would return a DIFFERENT (newer-looking) price if it
+  // were ever called -- "skip" must never let that happen.
+  db.exec(`
+    INSERT INTO security_provider_mappings (id, security_id, provider_id, provider_exchange, provider_symbol, valid_from, status)
+      VALUES ('mapping-sharesight-a', 'security-a', 'sharesight', 'ASX', 'ABC', '2026-08-01', 'candidate');
+    INSERT INTO price_observations (id,provider_id,access_scope,scope_user_id,scope_key,mapping_id,security_id,interval,observation_at,market_date,market_timezone,currency_code,close_decimal,previous_close_decimal,adjustment_state,quality,ingested_at)
+    VALUES ('price-sharesight-a','sharesight','user','owner-a','owner-a','mapping-sharesight-a','security-a','delayed','2026-08-20T04:00:00.000Z','2026-08-20','+10:00','AUD','15.00',NULL,'raw','observed','2026-08-20T04:00:00.000Z');
+  `);
+  await recordSharesightPriceRefreshWatermark(client, {
+    userId: "owner-a",
+    status: "ok",
+    errorKind: null,
+    now: "2026-08-20T04:00:00.000Z",
+  });
+  const fake = fakeSharesightClient({
+    ok: true,
+    value: [instrument({ currentPriceDecimal: "999.00" })],
+  });
+  const result = await loadOwnedHoldings(
+    client,
+    "owner-a",
+    "portfolio-a",
+    new Date("2026-08-20T06:00:00.000Z"), // 2 hours after the watermark
+    { integration: integrationOf(fake), leaseOwner: () => "lease-1" },
+    "skip",
+  );
+  assert.equal(
+    fake.state.callCount,
+    0,
+    "skip must never fetch, even when the already-stored data is genuinely stale",
+  );
+  assert.equal(
+    result.rows[0]?.nativePrice,
+    "15.00",
+    "expected the honestly-old stored price, never the fake newer one that was never fetched",
+  );
+  assert.match(
+    result.rows[0]?.explanation ?? "",
+    /Delayed \(Sharesight\) as of 2026-08-20T04:00:00\.000Z/,
+  );
+  assert.doesNotMatch(result.rows[0]?.explanation ?? "", /\blive\b/i);
+});
+
+test("PRF-008: cross-user isolation holds under priceFreshnessMode='skip' too -- owner-b's read never surfaces owner-a's data, and neither owner's read ever fetches", async () => {
+  const db = await gateFixture();
+  const client = createSqliteSqlClient(db);
+  const fake = fakeSharesightClient({
+    ok: true,
+    value: [instrument({ id: "101", currentPriceDecimal: "20.00" })],
+  });
+  const gateOptions = { integration: integrationOf(fake) };
+  const resultA = await loadOwnedHoldings(
+    client,
+    "owner-a",
+    "portfolio-a",
+    new Date("2026-08-20T06:00:00.000Z"),
+    gateOptions,
+    "skip",
+  );
+  const resultB = await loadOwnedHoldings(
+    client,
+    "owner-b",
+    "portfolio-b",
+    new Date("2026-08-20T06:00:01.000Z"),
+    gateOptions,
+    "skip",
+  );
+  assert.equal(fake.state.callCount, 0);
+  assert.equal(resultA.rows[0]?.nativeValue.status, "unavailable");
+  assert.equal(resultB.rows[0]?.nativeValue.status, "unavailable");
+});
+
 /** Strips `//`-prefixed comment LINES before a "live" grep -- a doc comment
  * honestly DOCUMENTING the "never label live" rule (e.g. "NEVER 'live'")
  * legitimately contains the word; only non-comment code (string literals

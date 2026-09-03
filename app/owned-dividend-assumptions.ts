@@ -181,7 +181,19 @@ export async function loadOwnedDividendAssumptions(
       // holdings-pipeline failure (e.g. no published calculation yet)
       // degrades every provider column to `price_unavailable` rather than
       // failing this whole screen.
-      loadOwnedHoldings(client, userId, portfolioId, now).catch(() => null),
+      //
+      // PRF-008 (owner ruling): this screen (`/income/assumptions`) uses
+      // `nativePrice` only as an input to `deriveTrailingDividendYield`'s
+      // derived "provider TTM yield" column -- it never renders a price
+      // itself, live or otherwise. Explicitly opts OUT of the BRK-012C
+      // freshness gate ("skip") for the same reason `owned-income-
+      // projection.ts` does: no live/current price is displayed here, so
+      // forcing a Sharesight fetch on a cold watermark buys nothing.
+      // Whatever price data already exists is still read and used exactly
+      // as before; the hourly cron remains the refresh path.
+      loadOwnedHoldings(client, userId, portfolioId, now, {}, "skip").catch(
+        () => null,
+      ),
       // DIV-016 part B: `hasFullYearHistoryEvidence` per security is
       // `computeSecurityDividendForecast`'s OWN already-computed evidence
       // determination (`loadOwnedDividendHistory`'s per-security

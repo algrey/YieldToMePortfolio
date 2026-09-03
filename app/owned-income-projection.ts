@@ -179,11 +179,27 @@ export async function loadOwnedIncomeProjection(
   // behaviour) so a holdings failure never propagates through this
   // Promise and never masks a genuine `loadOwnedDividendHistory` failure
   // the caller still needs to see thrown.
+  //
+  // PRF-008 (owner ruling): `/income` and `/income/multi-year` render
+  // dividend projections, not live quotes -- `holdings` here is read only
+  // for `homeCurrencyCode`/`cash.securitiesSubtotal`/coverage counts and
+  // each security's already-selected `nativePrice` (fed into the TTM-yield
+  // helper below), never a "this price is live/current" claim on screen.
+  // Explicitly opts OUT of the BRK-012C freshness gate ("skip") so a cold
+  // Sharesight watermark never forces a Sharesight fetch plus
+  // `price_observations`/cache upserts on this read path; whatever price
+  // data already exists is still read and labelled with its own honest
+  // staleness/provenance exactly as before -- this seam changes nothing
+  // about what is selected or how it is displayed, only whether this read
+  // ALSO tries to refresh Sharesight first. The hourly cron remains the
+  // refresh path.
   const holdingsPromise = loadOwnedHoldings(
     client,
     userId,
     portfolioId,
     now,
+    {},
+    "skip",
   ).catch(() => null);
   const history = await loadOwnedDividendHistory(
     client,

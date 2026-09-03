@@ -608,6 +608,23 @@ export async function loadOwnedHoldings(
   // the `cloudflare:workers` env import a plain node:sqlite test cannot
   // use. Production callers never pass this.
   sharesightGateOptions: SharesightPriceGateOptions = {},
+  // PRF-008: explicit, typed seam controlling whether the BRK-012C
+  // Sharesight freshness gate (`ensureSharesightPriceFreshness`) runs at
+  // all before this read serves prices. Default "enforce" preserves EVERY
+  // existing caller's behaviour unchanged by omission -- a caller must opt
+  // out explicitly, on purpose, per call site. Only a caller whose page
+  // never displays a live/current price to the owner should pass "skip"
+  // (currently `app/owned-income-projection.ts` for `/income` and
+  // `/income/multi-year`, and `app/owned-dividend-assumptions.ts` for
+  // `/income/assumptions` -- see the PRF-008 caller audit in
+  // docs/ARCHITECTURE.md). This does NOT change what is read or how
+  // honestly it is labelled: `price_observations` selection, staleness,
+  // and provenance are all untouched either way -- "skip" only omits the
+  // pre-read attempt to REFRESH Sharesight's delayed-price cache, it never
+  // fabricates freshness or suppresses a stale/unavailable label. The
+  // hourly cron (`worker/index.ts`) remains the refresh path when this is
+  // skipped.
+  priceFreshnessMode: "enforce" | "skip" = "enforce",
 ): Promise<{
   status: "complete" | "partial" | "empty" | "unavailable";
   homeCurrencyCode: string;
@@ -838,17 +855,26 @@ export async function loadOwnedHoldings(
     // above: a fetch failure, a lost lease race, or a genuine DB error here
     // must never block this read -- the existing price selection below
     // simply sees whatever data already exists, honestly.
-    ensureSharesightPriceFreshness(
-      client,
-      userId,
-      identities.map((identity) => identity.securityId),
-      // The gate's own clock defaults to this SAME request's `nowIso` (not
-      // a fresh `new Date()`) so its 10-minute staleness comparison is
-      // anchored to the read's own "now", not real wall-clock time -- a
-      // caller-supplied `now` override (test-only) still wins via spread
-      // order.
-      { now: () => nowIso, ...sharesightGateOptions },
-    ).catch(() => undefined),
+    //
+    // PRF-008: gated on `priceFreshnessMode` -- "skip" callers (pages that
+    // never display a live/current price) never issue this call at all,
+    // never touch `sharesight_sync_state`/the lease, and never write
+    // `price_observations`/`sharesight_delayed_prices`. This is a pure
+    // no-op branch, not a weakened gate: the gate itself, its lease, and
+    // its 10-minute threshold are untouched for every "enforce" caller.
+    priceFreshnessMode === "skip"
+      ? Promise.resolve(undefined)
+      : ensureSharesightPriceFreshness(
+          client,
+          userId,
+          identities.map((identity) => identity.securityId),
+          // The gate's own clock defaults to this SAME request's `nowIso`
+          // (not a fresh `new Date()`) so its 10-minute staleness
+          // comparison is anchored to the read's own "now", not real
+          // wall-clock time -- a caller-supplied `now` override (test-only)
+          // still wins via spread order.
+          { now: () => nowIso, ...sharesightGateOptions },
+        ).catch(() => undefined),
     client.all<Row>(
       `SELECT id, portfolio_security_id, quantity_decimal, native_open_basis_decimal, base_open_basis_decimal, completeness, status, calculation_run_id, calculation_version, last_ledger_high_water FROM holding_projections WHERE user_id = ? AND portfolio_id = ? AND calculation_run_id = ? AND status = 'ready' ORDER BY portfolio_security_id LIMIT ?`,
       [userId, portfolioId, runId, MAX_PROJECTIONS + 1],
