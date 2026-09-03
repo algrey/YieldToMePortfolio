@@ -89,9 +89,17 @@ export const IMPORT_COMMIT_LIMITS = {
   // CALC-005 (2026-08-31): the snapshot pipeline is retired -- `finalize`
   // no longer queues a sibling `calculation_runs` row per portfolio, so the
   // worst case dropped to `2 * affectedCount + 2` (52 at the 25-portfolio
-  // ceiling). `maxStatementsPerChunk` is left at 85 rather than tightened:
-  // it is a safety ceiling, not a precise target, and 85 still stays well
-  // under D1's real per-invocation constraint discussed below.
+  // ceiling).
+  //
+  // BUG-012 (2026-09-03): each affected portfolio's value-history
+  // invalidation now ALSO pushes a paired `unresolvableValueHistoryClear
+  // FromDateStatement` into the same atomic batch (a committed trade can
+  // turn a previously-marked-unresolvable date into a real holding) --
+  // back up to `3 * affectedCount + 2` (77 at the 25-portfolio ceiling,
+  // still under the 85-statement ceiling below). `maxStatementsPerChunk`
+  // is left at 85 rather than tightened: it is a safety ceiling, not a
+  // precise target, and 85 still stays well under D1's real
+  // per-invocation constraint discussed below.
   //
   // This bound was never a loosening of D1's real per-invocation ceiling:
   // it constrains ONE atomic `batch()` call within a single commit

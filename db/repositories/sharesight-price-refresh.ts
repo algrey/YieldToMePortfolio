@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 import type { SharesightPriceAccretionCandidate } from "../../domain/sharesight/price-accretion.ts";
+import { buildValueHistoryInvalidationStatementsForSecurities } from "./portfolio-value-history.ts";
 
 // BRK-012B: write path for accreting Sharesight's `listUserInstruments`
 // output into `price_observations`. Rulings (TASKS.md, BINDING):
@@ -25,11 +26,30 @@ export const SHARESIGHT_PRICE_PROVIDER_ID = "sharesight";
  * candidate security costs at most 2 statements in `upsertPriceObservations`'s
  * batch (1 guarded `security_provider_mappings` ensure -- a no-op SELECT
  * after the first successful run for that security -- plus 1 price_observations
- * upsert). `maxSecuritiesPerChunk: 25` therefore bounds a single `batch()`
- * call to at most 50 statements, comfortably under D1's documented 100-
- * statement `batch()` ceiling with 2x headroom for future per-candidate
- * statement growth, and well above BRK-012A's live-evidenced account size
- * (18 holdings) -- an owner-scale account fits in ONE chunk in practice.
+ * upsert). `maxSecuritiesPerChunk: 25` therefore bounds that part of a
+ * single `batch()` call to at most 50 statements.
+ *
+ * BUG-012 F1: this chunk's batch now ALSO carries the paired
+ * `portfolio_value_history` / `portfolio_value_history_unresolvable`
+ * invalidation for the (securityId, marketDate) targets this chunk just
+ * wrote -- see `buildValueHistoryInvalidationStatementsForSecurities`'s own
+ * doc comment (`db/repositories/portfolio-value-history.ts`) for why this
+ * is a plain cross-owner statement builder, not a second round trip.
+ * `maxInvalidationRowsPerChunk: 20` bounds that function's own `maxPortfolios`
+ * parameter (TOTAL `(user_id, portfolio_id, security_id)` rows across every
+ * target in the chunk, matching `MARKET_DATA_REFRESH_REPOSITORY_LIMITS
+ * .maxInvalidationPortfoliosPerChunk`'s identical precedent) to at most 20
+ * rows * 2 statements/row = 40 statements. Worst case per chunk is
+ * therefore 50 (writes) + 40 (invalidation) = 90 statements, comfortably
+ * under D1's documented 100-statement `batch()` ceiling with a documented
+ * 10-statement margin -- both bounds are compile-time constants, so this
+ * total is structurally fixed, not merely typical. This is a defensively-
+ * bounded, documented limitation matching the invalidation helper's own
+ * "excess portfolios simply are not invalidated THIS commit; a later write
+ * for the same security tries again" ruling -- BRK-012A's live-evidenced
+ * account size (18 holdings, one owner) is far inside this bound, and an
+ * owner-scale account fits in ONE chunk in practice.
+ *
  * Multiple chunks run as separate atomic `batch()` calls (not one giant
  * transaction) -- safe because accretion is idempotent, so a chunk that
  * fails after an earlier chunk committed leaves no partial/duplicated
@@ -40,6 +60,7 @@ export const SHARESIGHT_PRICE_PROVIDER_ID = "sharesight";
  */
 export const SHARESIGHT_PRICE_REFRESH_LIMITS = Object.freeze({
   maxSecuritiesPerChunk: 25,
+  maxInvalidationRowsPerChunk: 20,
   maxUsersPerRun: 50,
 });
 
@@ -281,6 +302,31 @@ export async function upsertSharesightPriceObservations(
         ],
       });
     }
+    // BUG-012 F1: a Sharesight write can land a fresher/backfilled price
+    // for a date this owner's held portfolios already have a stored
+    // value-history row (or unresolvable mark) for -- see this file's
+    // `SHARESIGHT_PRICE_REFRESH_LIMITS` doc comment for the statement-
+    // budget accounting. Built and appended into the SAME atomic
+    // `batch()` as this chunk's writes above (never a second, skippable
+    // round trip) -- one target per distinct security in this chunk,
+    // `[marketDate, marketDate]` (a single day, matching this write's own
+    // per-candidate date), resolved to every affected (owner, portfolio)
+    // pair via `buildValueHistoryInvalidationStatementsForSecurities`
+    // (cross-owner by design -- see its own doc comment -- since a
+    // security can be held in more than just the fetching owner's own
+    // portfolios).
+    const invalidationTargets = batchCandidates.map((candidate) => ({
+      securityId: candidate.securityId,
+      fromDate: candidate.marketDate,
+      toDate: candidate.marketDate,
+    }));
+    const invalidationStatements =
+      await buildValueHistoryInvalidationStatementsForSecurities(
+        client,
+        invalidationTargets,
+        SHARESIGHT_PRICE_REFRESH_LIMITS.maxInvalidationRowsPerChunk,
+      );
+    statements.push(...invalidationStatements);
     const results = await client.batch(statements);
     // `RETURNING id` (above) + counting returned ROWS, never `changes` --
     // portable across both the D1 batch adapter and the local

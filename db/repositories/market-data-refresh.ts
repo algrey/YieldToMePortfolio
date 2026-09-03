@@ -95,13 +95,29 @@ export const MARKET_DATA_REFRESH_REPOSITORY_LIMITS = {
   // HIST-002 review B2: raised from 6 (5 writes + 1 progress update) to make
   // room for the value-history invalidation DELETEs this commit now also
   // issues (`maxInvalidationPortfoliosPerChunk` below) -- see `commitChunk`.
-  maxStatementsPerChunk: 26,
+  // BUG-012 F3 (2026-09-03): raised again, 26 -> 46. BUG-012 made
+  // `buildValueHistoryInvalidationStatementsForSecurities` emit TWO DELETEs
+  // per affected (owner, portfolio) row (the original `portfolio_value_history`
+  // DELETE plus a paired `portfolio_value_history_unresolvable` clear), but
+  // this constant was never raised to match -- since the chunk's own
+  // fail-closed check below (`statements.length > maxStatementsPerChunk`
+  // -> `invalid-progress`) is unconditional, a security held across
+  // roughly 11+ portfolios made every refresh chunk touching it fail
+  // closed forever (reproduced at N=13/14/20 held portfolios: zero rows
+  // written, the job stuck `running`). 46 = 5 writes + 1 progress update +
+  // up to 20 invalidation ROWS * 2 statements/row.
+  maxStatementsPerChunk: 46,
   maxBoundParametersPerStatement: 100,
   // HIST-002 review B2: TOTAL portfolio rows one chunk's invalidation may
   // touch, across every distinct security in the chunk -- bounds the extra
   // statements this commit's atomic batch gains to stay well under D1's
   // practical per-batch ceiling (matches `maxStatementsPerChunk` above: 5
-  // writes + 1 progress update + up to 20 invalidation deletes = 26).
+  // writes + 1 progress update + up to 20 invalidation rows * 2
+  // statements/row (BUG-012 F3) = 46). `db/repositories/intraday-price-
+  // capture.ts`'s own standalone invalidation batch (that repository does
+  // not otherwise batch, so it has no analogous chunk-wide cap to breach)
+  // doubles the same way, 20 -> 40 statements, from the identical BUG-012
+  // change.
   maxInvalidationPortfoliosPerChunk: 20,
 } as const;
 

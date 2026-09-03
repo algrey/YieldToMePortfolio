@@ -562,12 +562,15 @@ test("limits Cron work to bounded job and provider request budgets", async () =>
   });
   // HIST-002 review B2: maxStatementsPerChunk raised from 6 (5 writes + 1
   // progress update) to make room for the value-history invalidation
-  // DELETEs commitChunk now also issues, bounded by the new
-  // maxInvalidationPortfoliosPerChunk (see market-data-refresh.ts's own
-  // comment: 5 + 1 + 20 = 26).
+  // DELETEs commitChunk now also issues, bounded by
+  // maxInvalidationPortfoliosPerChunk. BUG-012 F3 (2026-09-03): raised
+  // again, 26 -> 46 -- BUG-012 made the invalidation builder emit TWO
+  // DELETEs per affected (owner, portfolio) row, not one, so the constant
+  // must now be 5 + 1 + 20*2 = 46 (see market-data-refresh.ts's own
+  // comment).
   assert.deepEqual(MARKET_DATA_REFRESH_REPOSITORY_LIMITS, {
     maxObservationsPerChunk: 5,
-    maxStatementsPerChunk: 26,
+    maxStatementsPerChunk: 46,
     maxBoundParametersPerStatement: 100,
     maxInvalidationPortfoliosPerChunk: 20,
   });
@@ -710,4 +713,70 @@ test("HIST-002 review B2: a Yahoo-compatible price commit invalidates a pre-exis
     )
     .all();
   assert.equal(stored.length, 0);
+});
+
+test("BUG-012 F3: a security held across MAX_INVALIDATION_PORTFOLIOS_PER_CHUNK (20) portfolios still completes the chunk instead of failing closed with invalid-progress", async () => {
+  // BUG-012 made `buildValueHistoryInvalidationStatementsForSecurities`
+  // emit TWO DELETEs per affected (owner, portfolio) row (the original
+  // `portfolio_value_history` DELETE plus a paired
+  // `portfolio_value_history_unresolvable` clear) instead of one, but
+  // `MARKET_DATA_REFRESH_REPOSITORY_LIMITS.maxStatementsPerChunk` was left
+  // at its pre-BUG-012 value of 26 (5 writes + 1 progress + up to 20
+  // SINGLE deletes). Since `commitChunk`'s own fail-closed check
+  // (`statements.length > maxStatementsPerChunk` -> `invalid-progress`) is
+  // unconditional, a security held across roughly 11+ portfolios made
+  // every chunk touching it fail closed forever -- reproduced against
+  // 03bb87c at N=13/14/20 held portfolios: zero rows written, the job
+  // stuck `running`. This fixture seeds exactly
+  // `maxInvalidationPortfoliosPerChunk` (20) portfolios all holding the
+  // SAME security -- one write statement (a single-date chunk) + 1
+  // progress update + 20 invalidation rows * 2 statements/row = 42,
+  // comfortably inside the corrected 46-statement ceiling but ABOVE the
+  // stale 26-statement one this test would have failed against.
+  const database = await createMigratedDatabase();
+  seedMarketData(database);
+  const PORTFOLIO_COUNT = 20;
+  for (let index = 0; index < PORTFOLIO_COUNT; index += 1) {
+    database.exec(
+      `INSERT INTO portfolios (id, user_id, code, name, base_currency_code, timezone, accounting_method, status, created_at, updated_at, version)
+       VALUES ('portfolio-${index}', 'user-a', 'P${index}', 'Portfolio ${index}', 'AUD', 'Australia/Sydney', 'fifo', 'active', '2026-08-03', '2026-08-03', 1);
+       INSERT INTO portfolio_securities (id, user_id, portfolio_id, security_id, source_symbol, source_currency_code, status, created_at, updated_at)
+       VALUES ('membership-${index}', 'user-a', 'portfolio-${index}', 'security-a', 'AAA', 'AUD', 'held', '2026-08-03', '2026-08-03');
+       INSERT INTO portfolio_value_history (id, user_id, portfolio_id, value_date, value_decimal, completeness, held_security_count, priced_security_count, computed_at)
+       VALUES ('phv-${index}', 'user-a', 'portfolio-${index}', '2026-07-29', '1000.00', 'complete', 1, 1, '2026-08-03T00:00:00Z');`,
+    );
+  }
+  const provider = providerFor(async (request) => ({
+    ok: true,
+    value: [priceObservation(request.from, "105")],
+  }));
+  const service = serviceFor(database, provider);
+  await service.request(
+    priceJobInput(
+      "job-price-invalidate-20",
+      "invalidate-20",
+      "2026-07-29",
+      "2026-07-29",
+    ),
+  );
+  const run = await service.processPending();
+  assert.equal(
+    run.jobsCompleted,
+    1,
+    "the chunk must complete, not fail closed with invalid-progress",
+  );
+  assert.equal(run.jobsFailed, 0);
+
+  for (let index = 0; index < PORTFOLIO_COUNT; index += 1) {
+    const stored = database
+      .prepare(
+        `SELECT id FROM portfolio_value_history WHERE portfolio_id = 'portfolio-${index}' AND value_date = '2026-07-29'`,
+      )
+      .all();
+    assert.equal(
+      stored.length,
+      0,
+      `portfolio-${index}'s pre-existing stored row must have been invalidated`,
+    );
+  }
 });

@@ -50,6 +50,8 @@ import {
   type PriceUploadContext,
 } from "../app/price-upload-service.ts";
 import { parsePriceCsv } from "../domain/market-data/price-csv.ts";
+import { upsertSharesightPriceObservations } from "../db/repositories/sharesight-price-refresh.ts";
+import type { SharesightPriceAccretionCandidate } from "../domain/sharesight/price-accretion.ts";
 
 const NOW = new Date("2026-09-03T00:00:00Z");
 
@@ -170,11 +172,13 @@ test("BUG-012 migration: the purge-lock trigger actually fires -- an in-flight p
   db.close();
 });
 
-test("BUG-012 export/purge: portfolio_value_history_unresolvable is classified owned, user-keyed, and appears in the purge FK-order list (source-text check -- the const is not exported)", async () => {
+test("BUG-012 export/purge: portfolio_value_history_unresolvable is classified owned, user-keyed (behavioural, against the real exported const), and appears in the purge FK-order list (source-text check -- PURGE_TABLES_IN_FK_ORDER itself is not exported)", async () => {
   const source = await readFile(
     new URL("../db/repositories/account-lifecycle.ts", import.meta.url),
     "utf8",
   );
+  // `ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS` IS exported -- this asserts
+  // against the real imported value, never source text.
   const { ACCOUNT_EXPORT_TABLE_CLASSIFICATIONS } =
     await import("../db/repositories/account-lifecycle.ts");
   const classification =
@@ -183,6 +187,10 @@ test("BUG-012 export/purge: portfolio_value_history_unresolvable is classified o
   assert.equal(classification.classification, "owned");
   assert.equal(classification.ownerColumn, "user_id");
 
+  // `PURGE_TABLES_IN_FK_ORDER` is module-private (no export), so this half
+  // genuinely has no behavioural alternative -- a source-text pin is the
+  // only way to assert its membership without exporting a purge-internal
+  // ordering list purely for a test to read.
   const purgeOrderSection = source.slice(
     source.indexOf("const PURGE_TABLES_IN_FK_ORDER"),
     source.indexOf(
@@ -436,6 +444,12 @@ async function priceGapFixture(): Promise<DatabaseSync> {
     INSERT INTO security_provider_mappings (id,security_id,provider_id,provider_exchange,provider_symbol,valid_from,status) VALUES
       ('map-1','sec-1','owner-import','ASX','ONE','2023-01-01','verified'),
       ('map-2','sec-2','owner-import','ASX','TWO','2023-01-01','verified');
+    -- F1: a sharesight_instrument identifier for sec-1 only -- lets a
+    -- SEPARATE test drive the real Sharesight write path
+    -- (upsertSharesightPriceObservations) against this same fixture,
+    -- harmless to every other test that never references it.
+    INSERT INTO security_identifiers (id,security_id,scheme,value,valid_from,valid_to,source) VALUES
+      ('ident-sec-1','sec-1','sharesight_instrument','9001','2023-01-01',NULL,'sharesight');
     INSERT INTO transactions(id,user_id,portfolio_id,portfolio_security_id,type,status,trade_at,local_trade_date,quantity_decimal,unit_price_decimal,currency_code,gross_amount_decimal,fee_amount_decimal,tax_amount_decimal,source_type,created_by_user_id,calculation_version,created_at) VALUES
       ('tx-1','owner','pf','ps-1','buy','posted','${dates[0]}T00:00:00Z','${dates[0]}','100','10','AUD','1000','0','0','manual','owner',1,'${dates[0]}');
   `);
@@ -723,5 +737,322 @@ test("BUG-012 ownership: loadUnresolvableValueHistoryDates is scoped to the CALL
     100,
   );
   assert.ok(owned.size > 0);
+  db.close();
+});
+
+// ---------------------------------------------------------------------------
+// F1 (review round 2, blocking): the Sharesight price-refresh write path
+// (`upsertSharesightPriceObservations`) must clear an unresolvable mark it
+// makes newly resolvable, in the SAME atomic batch as its writes -- both
+// the ordinary fresh write (`app/sharesight-price-refresh-service.ts`) and
+// the MKT-015 `noDowngrade: true` prior-day backfill
+// (`app/sharesight-price-gate-service.ts`) share this one function.
+// ---------------------------------------------------------------------------
+
+function sharesightCandidateFor(
+  securityId: string,
+  marketDate: string,
+  closeDecimal: string,
+): SharesightPriceAccretionCandidate {
+  return {
+    securityId,
+    instrumentCode: "ONE",
+    marketCode: "ASX",
+    currencyCode: "AUD",
+    closeDecimal,
+    marketDate,
+    marketTimezone: "Australia/Sydney",
+    // A Z-suffixed UTC timestamp, matching what `normalizeTimestampToUtcIso`
+    // always produces in the real pipeline (never Sharesight's raw offset
+    // string, per `SharesightPriceAccretionCandidate.observationAt`'s own
+    // doc comment) -- `app/historical-portfolio-value.ts`'s `mapPrice`
+    // requires this exact `...Z` shape (`ISO` regex) or silently drops the
+    // row as malformed. Early UTC morning, matching every other fixture in
+    // this file, so it stays within `marketDate`'s own Sydney calendar day.
+    observationAt: `${marketDate}T04:10:00.000Z`,
+  };
+}
+
+test("BUG-012 F1: a fresh Sharesight write (upsertSharesightPriceObservations, no noDowngrade) clears an unresolvable mark and the next derivation resolves the date for real", async () => {
+  const dates = weekdays("2024-01-01", 12);
+  const gapDate = dates[GAP_INDEX]!;
+  const db = await priceGapFixture();
+  const client = createSqliteSqlClient(db);
+
+  // sec-1 (the only HELD security) has no price on gapDate -- genuinely
+  // unresolvable, marked.
+  await loadHistoricalPortfolioValueSeries(client, "owner", "pf", NOW);
+  assert.deepEqual(unresolvedRows(db), [
+    { value_date: gapDate, reason: "no_priceable_security" },
+  ]);
+
+  // The REAL write path a Sharesight cron refresh uses -- see
+  // `SHARESIGHT_PRICE_REFRESH_LIMITS`'s doc comment
+  // (`db/repositories/sharesight-price-refresh.ts`) for why this now also
+  // appends the paired value-history invalidation into the SAME atomic
+  // batch as this write.
+  const written = await upsertSharesightPriceObservations(client, {
+    userId: "owner",
+    candidates: [sharesightCandidateFor("sec-1", gapDate, "12.34")],
+    now: "2026-09-03T00:00:00.000Z",
+  });
+  assert.equal(written.written, 1);
+
+  // The mark must be cleared by that SAME write -- the load-bearing
+  // property F1 exists to prove (pre-fix, this write left the mark
+  // untouched and never invalidated `portfolio_value_history` at all).
+  assert.deepEqual(unresolvedRows(db), []);
+
+  // The NEXT derivation resolves it for real -- 100 shares * 12.34.
+  const after = await loadHistoricalPortfolioValueSeries(
+    client,
+    "owner",
+    "pf",
+    NOW,
+  );
+  assert.ok(after);
+  if (!after) return;
+  assert.equal(
+    after.points.find((p) => p.date === gapDate)?.valueDecimal,
+    "1234",
+  );
+  db.close();
+});
+
+test("BUG-012 F1: the MKT-015 prior-day backfill write (upsertSharesightPriceObservations, noDowngrade: true) also clears an unresolvable mark", async () => {
+  const dates = weekdays("2024-01-01", 12);
+  const gapDate = dates[GAP_INDEX]!;
+  const db = await priceGapFixture();
+  const client = createSqliteSqlClient(db);
+
+  await loadHistoricalPortfolioValueSeries(client, "owner", "pf", NOW);
+  assert.deepEqual(unresolvedRows(db), [
+    { value_date: gapDate, reason: "no_priceable_security" },
+  ]);
+
+  // Same write function, `noDowngrade: true` -- the MKT-015 prior-day gate
+  // backfill's own call shape (`app/sharesight-price-gate-service.ts`).
+  // Invalidation must append regardless of this flag: it governs whether
+  // an UPDATE downgrades an already-fresher row, not whether the paired
+  // value-history invalidation runs at all.
+  const written = await upsertSharesightPriceObservations(client, {
+    userId: "owner",
+    candidates: [sharesightCandidateFor("sec-1", gapDate, "13.00")],
+    now: "2026-09-03T00:00:00.000Z",
+    noDowngrade: true,
+  });
+  assert.equal(written.written, 1);
+  assert.deepEqual(unresolvedRows(db), []);
+
+  const after = await loadHistoricalPortfolioValueSeries(
+    client,
+    "owner",
+    "pf",
+    NOW,
+  );
+  assert.ok(after);
+  if (!after) return;
+  assert.equal(
+    after.points.find((p) => p.date === gapDate)?.valueDecimal,
+    "1300",
+  );
+  db.close();
+});
+
+// ---------------------------------------------------------------------------
+// F2 (review round 2, blocking): an FX-only gap must never be persisted as
+// unresolvable -- it must keep retrying on every read until the FX rate
+// arrives, since no FX write path invalidates `portfolio_value_history`.
+// ---------------------------------------------------------------------------
+
+const FX_GAP_INDEX = 4;
+
+/** One USD-denominated HELD security (`sec-1`), priced in USD on EVERY
+ * date (never a price gap) so the only possible failure on any date is
+ * the FX conversion -- `fx_rate_observations` (AUD/USD) is present on
+ * every date EXCEPT `FX_GAP_INDEX`, the genuine FX-only gap this section
+ * tests. */
+async function fxOnlyGapFixture(): Promise<{
+  db: DatabaseSync;
+  dates: string[];
+}> {
+  const dates = weekdays("2024-01-01", 12);
+  const db = await migratedDatabase();
+  db.exec(`
+    INSERT INTO currencies(code,numeric_code,name,minor_unit_digits) VALUES
+      ('AUD',36,'Australian dollar',2),('USD',840,'US dollar',2);
+    INSERT INTO users(id,status,primary_email,timezone,created_at,updated_at) VALUES('owner','active','o@example.test','Australia/Sydney','2026-08-01','2026-08-01');
+    INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at) VALUES('pf','owner','A','A','AUD','Australia/Sydney','fifo','active','2026-08-01','2026-08-01');
+    INSERT INTO exchanges (id,mic,name,country_code,timezone,calendar_code) VALUES('nasdaq','XNAS','NASDAQ','US','America/New_York','XNAS');
+    INSERT INTO securities(id,asset_type,exchange_id,primary_currency_code,canonical_name,created_at,updated_at) VALUES
+      ('sec-1','equity','nasdaq','USD','One','2026-08-01','2026-08-01');
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_exchange_alias,source_currency_code,status,created_at,updated_at) VALUES
+      ('ps-1','owner','pf','sec-1','ONE','NASDAQ','USD','held','2026-08-01','2026-08-01');
+    INSERT INTO security_provider_mappings (id,security_id,provider_id,provider_exchange,provider_symbol,valid_from,status) VALUES
+      ('map-1','sec-1','owner-import','NASDAQ','ONE','2023-01-01','verified');
+    INSERT INTO transactions(id,user_id,portfolio_id,portfolio_security_id,type,status,trade_at,local_trade_date,quantity_decimal,unit_price_decimal,currency_code,gross_amount_decimal,fee_amount_decimal,tax_amount_decimal,source_type,created_by_user_id,calculation_version,created_at) VALUES
+      ('tx-1','owner','pf','ps-1','buy','posted','${dates[0]}T00:00:00Z','${dates[0]}','100','10','USD','1000','0','0','manual','owner',1,'${dates[0]}');
+  `);
+  // Observation times deliberately EARLY UTC (matching every other
+  // fixture in this file, e.g. `priceGapFixture`'s `T04:00:00.000Z`) so
+  // `selectPriceObservation`'s look-ahead guard -- keyed on the
+  // PORTFOLIO's own timezone (`Australia/Sydney`, UTC+10) -- never rejects
+  // an observation as "after" its own `market_date`'s Sydney calendar day.
+  const priceRows = dates.map(
+    (date, index) =>
+      `('price-${index}','owner-import','user','owner','owner','map-1','sec-1','eod','${date}T04:00:00.000Z','${date}','America/New_York','USD','10.00','raw','observed','2026-08-24T00:00:00.000Z')`,
+  );
+  db.exec(
+    `INSERT INTO price_observations (id,provider_id,access_scope,scope_user_id,scope_key,mapping_id,security_id,interval,observation_at,market_date,market_timezone,currency_code,close_decimal,adjustment_state,quality,ingested_at) VALUES ${priceRows.join(",")};`,
+  );
+  const fxRows = dates
+    .filter((_date, index) => index !== FX_GAP_INDEX)
+    .map(
+      (date, counter) =>
+        `('fx-${counter}','yahoo-compatible','deployment',NULL,'deployment','AUD','USD','0.6700','eod','${date}T04:00:00.000Z','${date}','observed','2026-08-24T00:00:00.000Z')`,
+    );
+  db.exec(
+    `INSERT INTO fx_rate_observations (id,provider_id,access_scope,scope_user_id,scope_key,base_currency_code,quote_currency_code,rate_decimal,interval,observed_at,market_date,quality,ingested_at) VALUES ${fxRows.join(",")};`,
+  );
+  return { db, dates };
+}
+
+test("BUG-012 F2: an FX-only gap (priced security, missing FX rate) is never persisted as unresolvable", async () => {
+  const { db, dates } = await fxOnlyGapFixture();
+  const gapDate = dates[FX_GAP_INDEX]!;
+  const client = createSqliteSqlClient(db);
+
+  const first = await loadHistoricalPortfolioValueSeries(
+    client,
+    "owner",
+    "pf",
+    NOW,
+  );
+  assert.ok(first);
+  if (!first) return;
+  // Honestly absent/null -- this call DID attempt the date, so it is
+  // present with a null value, never a fabricated number.
+  assert.equal(
+    first.points.find((p) => p.date === gapDate)?.valueDecimal,
+    null,
+  );
+
+  // The load-bearing F2 property: no row in the unresolvable table at all,
+  // unlike a `no_priceable_security`/`no_holdings' gap.
+  assert.deepEqual(unresolvedRows(db), []);
+  db.close();
+});
+
+test("BUG-012 F2: the FX rate's later arrival resolves the gap on the very next read (never written off)", async () => {
+  const { db, dates } = await fxOnlyGapFixture();
+  const gapDate = dates[FX_GAP_INDEX]!;
+  const client = createSqliteSqlClient(db);
+
+  await loadHistoricalPortfolioValueSeries(client, "owner", "pf", NOW);
+  assert.deepEqual(unresolvedRows(db), []);
+
+  // A second read, still no FX for gapDate: still absent, still no mark --
+  // proves this is a genuine "retry every call" gap, not a one-shot fluke.
+  const stillMissing = await loadHistoricalPortfolioValueSeries(
+    client,
+    "owner",
+    "pf",
+    NOW,
+  );
+  assert.ok(stillMissing);
+  if (!stillMissing) return;
+  assert.equal(
+    stillMissing.points.find((p) => p.date === gapDate)?.valueDecimal,
+    null,
+  );
+  assert.deepEqual(unresolvedRows(db), []);
+
+  // The FX rate arrives (a real FX import/refresh write -- direct insert
+  // here since no dedicated FX-import writer exists to invoke; the
+  // load-bearing property under test is the READ side never having
+  // written the date off, not which writer supplies the rate).
+  db.exec(
+    `INSERT INTO fx_rate_observations (id,provider_id,access_scope,scope_user_id,scope_key,base_currency_code,quote_currency_code,rate_decimal,interval,observed_at,market_date,quality,ingested_at) VALUES
+     ('fx-gap','yahoo-compatible','deployment',NULL,'deployment','AUD','USD','0.6800','eod','${gapDate}T04:00:00.000Z','${gapDate}','observed','2026-08-24T00:00:00.000Z');`,
+  );
+
+  const resolved = await loadHistoricalPortfolioValueSeries(
+    client,
+    "owner",
+    "pf",
+    NOW,
+  );
+  assert.ok(resolved);
+  if (!resolved) return;
+  // 100 shares * 10.00 USD / 0.6800 AUD-per-USD = 1470.5882... -- assert
+  // only that it is resolved (non-null), not the exact rounding, since
+  // that is FX-conversion domain logic outside this task's scope.
+  assert.notEqual(
+    resolved.points.find((p) => p.date === gapDate)?.valueDecimal,
+    null,
+  );
+  const storedGapRow = db
+    .prepare(
+      `SELECT value_decimal FROM portfolio_value_history WHERE portfolio_id='pf' AND value_date=?`,
+    )
+    .get(gapDate) as { value_decimal: string } | undefined;
+  assert.ok(storedGapRow, "the newly-resolvable date must now be stored");
+  db.close();
+});
+
+// ---------------------------------------------------------------------------
+// Review follow-up: a future-dated candidate must never be persisted as
+// unresolvable -- it is "not yet due", not genuinely unresolvable, and
+// nothing invalidates a mark on it just because time passes.
+// ---------------------------------------------------------------------------
+
+test("BUG-012 review follow-up: a future-dated candidate (the portfolio-timezone-vs-UTC edge, not a contrived clock) is never persisted as unresolvable", async () => {
+  // A REAL trigger, not a contrived one: `resolveRange`'s `rangeTo` is
+  // "today" in the PORTFOLIO's own timezone (`Australia/Sydney`, UTC+10 in
+  // September -- outside AEDT), while `isFutureDate`
+  // (`domain/snapshots/historical-portfolio-value.ts`) compares against
+  // `now`'s UTC calendar day. At 20:00 UTC, Sydney local time has already
+  // rolled over to the NEXT calendar day -- so `rangeTo` (and this
+  // fixture's own priced "today" candidate) is one day AHEAD of what
+  // `isFutureDate` considers "today", making that perfectly legitimate,
+  // in-range, priced candidate date classify as future and return the
+  // `heldSecurityCount: 0` placeholder object -- which, pre-fix,
+  // `computeUnresolvedReason` reads as `'no_holdings'` and permanently
+  // marks, even though the security IS held and WILL resolve once local
+  // time catches up.
+  const dates = weekdays("2026-08-20", 12); // dates[11] === '2026-09-04'
+  assert.equal(dates[11], "2026-09-04");
+  const db = await singleSecurityFixture(dates, [
+    { type: "buy", date: dates[0]!, quantity: "100" },
+  ]);
+  const client = createSqliteSqlClient(db);
+  const now = new Date("2026-09-03T20:00:00.000Z"); // Sydney local: 2026-09-04T06:00
+
+  const read = await loadHistoricalPortfolioValueSeries(
+    client,
+    "owner",
+    "pf",
+    now,
+  );
+  assert.ok(read);
+  if (!read) return;
+
+  // The future-dated candidate must never be persisted as unresolvable --
+  // the load-bearing property this follow-up exists to prove.
+  assert.deepEqual(unresolvedRows(db), []);
+  // This call DID attempt the date (it was inside `toDerive`), so -- matching
+  // this file's own established "attempted this call" convention -- it is
+  // present in `points` with an honestly null value, never fabricated and
+  // never a stored row.
+  assert.equal(
+    read.points.find((p) => p.date === "2026-09-04")?.valueDecimal,
+    null,
+  );
+  const storedFutureRow = db
+    .prepare(
+      `SELECT id FROM portfolio_value_history WHERE portfolio_id='pf' AND value_date='2026-09-04'`,
+    )
+    .get();
+  assert.equal(storedFutureRow, undefined);
   db.close();
 });

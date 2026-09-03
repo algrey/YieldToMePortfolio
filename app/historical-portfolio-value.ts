@@ -81,11 +81,13 @@
  * construction rather than merely making it less likely. A date this call's
  * OWN derivation attempts (`toDerive`) and still cannot resolve is marked
  * immediately after (`recordUnresolvableValueHistoryDates`), categorised by
- * `unresolvableReasonFor`. This is a CACHED "not resolvable as of the last
- * attempt" fact, not a permanent write-off: see the Invalidation paragraph
- * below for why every write path that can make a date newly resolvable
- * also clears the mark, in the same atomic unit as its existing
- * `portfolio_value_history` invalidation. See db/schema.ts's
+ * `computeUnresolvedReason` -- EXCEPT a date whose only cause is a missing
+ * FX rate (`'no_fx_rate'`), which is deliberately never persisted (BUG-012
+ * F2 -- see that function's doc comment). This is a CACHED "not resolvable
+ * as of the last attempt" fact, not a permanent write-off: see the
+ * Invalidation paragraph below for why every write path that can make a
+ * date newly resolvable also clears the mark, in the same atomic unit as
+ * its existing `portfolio_value_history` invalidation. See db/schema.ts's
  * `portfolioValueHistoryUnresolvable` header comment for the full schema
  * design record (why a sibling table, not nullable columns).
  *
@@ -192,6 +194,7 @@ import type {
 import {
   computeHistoricalPortfolioValueAtDate,
   computeHistoricalPortfolioValueSeries,
+  isFutureDate,
   type HistoricalPortfolioValuePoint,
   type HistoricalValueSecurityFact,
 } from "../domain/snapshots/historical-portfolio-value.ts";
@@ -1014,14 +1017,29 @@ export type ValueHistoryBackfillOutcome = {
  * (`'no_holdings'`, e.g. a candidate date before this portfolio's first
  * trade in a currently-held security); otherwise every held security failed
  * to resolve a price/FX within tolerance (`'no_priceable_security'`).
- * Diagnostic categorisation only -- both reasons are cleared identically by
- * every existing invalidation path. */
-function unresolvableReasonFor(
+ * Diagnostic categorisation only -- both DB-persisted reasons are cleared
+ * identically by every existing invalidation path.
+ *
+ * BUG-012 F2, Orchestrator ruling: a THIRD, IN-MEMORY-ONLY reason,
+ * `'no_fx_rate'`, is never persisted to `portfolio_value_history_unresolvable`
+ * -- see `computeUnresolvedReason`'s caller below. `fxOnlyGap` (set by
+ * `valuePointAtDate` only when every held security had a resolvable price
+ * but no usable FX rate for the date) is the sole trigger: unlike a missing
+ * security price or holding gap, a missing FX rate is expected to fill in
+ * on the next FX import/refresh, so the date must keep its pre-BUG-012
+ * retry-on-every-read behaviour rather than being written off. This is a
+ * deliberate, disclosed residual: a genuinely FX-caused CONTIGUOUS run
+ * (e.g. an outage in FX ingestion) can still pin a bounded slice exactly
+ * as BUG-010 originally described, mitigated the same way -- opposite-end
+ * sweeps -- see `docs/ARCHITECTURE.md` §9.8. */
+type UnresolvedReason = UnresolvableValueHistoryReason | "no_fx_rate";
+
+function computeUnresolvedReason(
   point: HistoricalPortfolioValuePoint,
-): UnresolvableValueHistoryReason {
-  return point.heldSecurityCount === 0
-    ? "no_holdings"
-    : "no_priceable_security";
+): UnresolvedReason {
+  if (point.heldSecurityCount === 0) return "no_holdings";
+  if (point.fxOnlyGap) return "no_fx_rate";
+  return "no_priceable_security";
 }
 
 /**
@@ -1187,14 +1205,41 @@ async function resolveValueHistorySeries(
   // already excludes previously-marked dates (via `missingDates` above),
   // so this only ever writes NEW marks or refreshes one just cleared and
   // retried -- never the same mark on every read.
-  const unresolvedNow = derived.filter((point) => point.valueDecimal === null);
+  //
+  // BUG-012 F2: a date whose ONLY cause is a missing FX rate
+  // (`computeUnresolvedReason` returning the in-memory-only `'no_fx_rate'`)
+  // is deliberately EXCLUDED here -- never persisted -- so it keeps
+  // retrying on every read/cron call until the FX rate arrives, rather
+  // than being written off. See `computeUnresolvedReason`'s doc comment
+  // for the Orchestrator ruling and the disclosed residual.
+  //
+  // BUG-012 review follow-up: a FUTURE-dated candidate (`isFutureDate`,
+  // the same guard `computeHistoricalPortfolioValueSeries` itself uses to
+  // short-circuit to an honest `null` point) is also excluded -- it is
+  // "not yet due", not genuinely unresolvable, and nothing invalidates a
+  // mark on it just because time passes and the date stops being in the
+  // future.
+  const unresolvedNow = derived
+    .filter(
+      (point) =>
+        point.valueDecimal === null && !isFutureDate(point.date, nowIso),
+    )
+    .map((point) => ({ point, reason: computeUnresolvedReason(point) }))
+    .filter(
+      (
+        entry,
+      ): entry is {
+        point: HistoricalPortfolioValuePoint;
+        reason: UnresolvableValueHistoryReason;
+      } => entry.reason !== "no_fx_rate",
+    );
   if (unresolvedNow.length > 0) {
     await recordUnresolvableValueHistoryDates(client, {
       userId,
       portfolioId,
-      points: unresolvedNow.map((point) => ({
+      points: unresolvedNow.map(({ point, reason }) => ({
         date: point.date,
-        reason: unresolvableReasonFor(point),
+        reason,
         fingerprint: `held=${point.heldSecurityCount};priced=${point.pricedSecurityCount}`,
       })),
       now: nowIso,
