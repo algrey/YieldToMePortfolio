@@ -41,6 +41,10 @@ import {
   createDividendImportFrankingOverrideRepository,
   createDividendManualRecordRepository,
   createDividendReceiptRepository,
+  type DividendEventOverrideRecord,
+  type DividendImportFrankingOverrideRecord,
+  type DividendManualRecordRecord,
+  type DividendSecurityAssumptionsRecord,
 } from "../db/repositories/dividends.ts";
 import { createOwnedUserSettingsRepository } from "../db/repositories/owned-portfolios.ts";
 import { currentFyWindow } from "../domain/calculations/financial-year.ts";
@@ -110,6 +114,33 @@ export type OwnedDividendSecurityHistory = {
    * `defaultFrankingPercentDecimal`) are private to this per-security
    * derivation loop and never otherwise leave this module. */
   fyRemainderForecast: SecurityDividendForecast;
+  /** PRF-013: raw (un-derived) per-security records from the SAME batched
+   * reads that produce `rows` above -- populated ONLY when
+   * `loadOwnedDividendHistory` is called with a `portfolioSecurityIdFilter`
+   * filter. Lets a narrow, single-security caller
+   * (`app/owned-security-dividends.ts`) build its override/manual-record/
+   * franking-override lookup maps directly from THIS wave instead of
+   * re-reading the identical five tables a second time -- see that
+   * module's header for the defect this replaces. `null` for every
+   * whole-portfolio caller: the extra per-security grouping this requires
+   * is skipped entirely on that path (up to `MAX_SECURITIES` securities)
+   * rather than paid for by callers that never read it. */
+  rawDetail: OwnedDividendSecurityRawDetail | null;
+};
+
+/** See `OwnedDividendSecurityHistory.rawDetail`'s doc comment. */
+export type OwnedDividendSecurityRawDetail = {
+  /** Every event (active AND superseded) for this security -- id + lineage
+   * pointer only, exactly what `resolveEventOverrideForLineage` needs to
+   * walk the supersession chain. Sourced from the same `dividend_events`
+   * read that produces `rows`, so it carries the identical set of rows the
+   * old dedicated second-wave query used to re-fetch (order differs --
+   * lineage resolution is id-keyed, not order-sensitive). */
+  events: { id: string; supersedesEventId: string | null }[];
+  eventOverrides: DividendEventOverrideRecord[];
+  manualRecords: DividendManualRecordRecord[];
+  frankingOverrides: DividendImportFrankingOverrideRecord[];
+  assumptions: DividendSecurityAssumptionsRecord | null;
 };
 
 export type OwnedDividendHistory = {
@@ -122,6 +153,21 @@ export type OwnedDividendHistory = {
 
 function inClause(count: number): string {
   return Array.from({ length: count }, () => "?").join(",");
+}
+
+// PRF-013: groups an already-fetched record list by its own
+// `portfolioSecurityId` field -- used only to build `rawDetail`'s per-
+// security views of the SAME rows the derivation loop below already reads.
+function groupRecordsByPortfolioSecurityId<
+  T extends { portfolioSecurityId: string },
+>(records: readonly T[]): Map<string, T[]> {
+  const grouped = new Map<string, T[]>();
+  for (const record of records) {
+    const list = grouped.get(record.portfolioSecurityId) ?? [];
+    list.push(record);
+    grouped.set(record.portfolioSecurityId, list);
+  }
+  return grouped;
 }
 
 // UI-046: mirrors `domain/dividends/forecast.ts`'s identically-implemented
@@ -147,6 +193,17 @@ export async function loadOwnedDividendHistory(
   userId: string,
   portfolioId: string,
   now = new Date(),
+  // PRF-013: narrows every read below to these `portfolio_securities.id`
+  // values (NOT `securities.id` -- see the `securityIds` local below, a
+  // distinct, already-existing concept: the underlying security ids
+  // derived FROM the narrowed identities). Named distinctly from the
+  // existing `portfolioSecurityIds` local (the already-resolved, possibly
+  // narrowed, identity id list further down) to avoid shadowing it.
+  // `undefined` (every existing caller, unchanged by omission) loads the
+  // whole portfolio exactly as before. The single-security Dividends tab
+  // (`app/owned-security-dividends.ts`) passes its one id here instead of
+  // loading the whole portfolio purely to `.find()` it out afterward.
+  portfolioSecurityIdFilter?: string[],
 ): Promise<OwnedDividendHistory> {
   const portfolio = await client.get<Row>(
     `SELECT id, base_currency_code FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
@@ -219,14 +276,33 @@ export async function loadOwnedDividendHistory(
       )
     : undefined;
 
+  const narrowed = portfolioSecurityIdFilter !== undefined;
+  // Single-id fast path: every real caller of the narrow filter (the
+  // Dividends tab) passes exactly one id, letting the override/manual/
+  // franking/assumptions reads below narrow their OWN queries too (a
+  // multi-id filter is still correct -- it just falls back to an
+  // unfiltered portfolio-wide read for those four, filtered in memory --
+  // there is no current caller that exercises that path).
+  const narrowedToOne =
+    narrowed && portfolioSecurityIdFilter.length === 1
+      ? portfolioSecurityIdFilter[0]
+      : undefined;
+  const identityFilter = narrowed
+    ? `AND ps.id IN (${inClause(portfolioSecurityIdFilter.length)})`
+    : "";
   const identityRows = await client.all<Row>(
     `SELECT ps.id, ps.security_id, COALESCE(ps.display_symbol, ps.source_symbol) AS symbol,
             s.primary_currency_code
      FROM portfolio_securities ps
      JOIN securities s ON s.id = ps.security_id
-     WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held'
+     WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held' ${identityFilter}
      ORDER BY ps.id LIMIT ?`,
-    [userId, portfolioId, MAX_SECURITIES + 1],
+    [
+      userId,
+      portfolioId,
+      ...(narrowed ? portfolioSecurityIdFilter : []),
+      MAX_SECURITIES + 1,
+    ],
   );
   if (identityRows.length > MAX_SECURITIES)
     throw new Error("too_many_securities");
@@ -291,8 +367,16 @@ export async function loadOwnedDividendHistory(
        LIMIT ?`,
       [...securityIds, MAX_EVENTS_PER_PORTFOLIO + 1],
     ),
-    createDividendEventOverrideRepository(client).list(userId, portfolioId),
-    createDividendManualRecordRepository(client).list(userId, portfolioId),
+    createDividendEventOverrideRepository(client).list(
+      userId,
+      portfolioId,
+      narrowedToOne,
+    ),
+    createDividendManualRecordRepository(client).list(
+      userId,
+      portfolioId,
+      narrowedToOne,
+    ),
     // BRK-011: owner-entered franking-currency overrides, one per imported
     // record at most -- see db/schema.ts's header comment on
     // `dividendImportFrankingOverrides`. Keyed by `dividendManualRecordId`
@@ -301,12 +385,22 @@ export async function loadOwnedDividendHistory(
     createDividendImportFrankingOverrideRepository(client).list(
       userId,
       portfolioId,
+      narrowedToOne,
     ),
     createDividendReceiptRepository(client).list(userId, portfolioId),
-    createDividendAssumptionsRepository(client).listSecurityAssumptions(
-      userId,
-      portfolioId,
-    ),
+    // PRF-013: `listSecurityAssumptions` has no per-security filter -- the
+    // single-id fast path uses the already-scoped `getSecurityAssumptions`
+    // instead (identical query to the one the Dividends tab used to run as
+    // its own separate second-wave read) and wraps its single-or-null
+    // result into the same array shape the unfiltered list call returns.
+    narrowedToOne
+      ? createDividendAssumptionsRepository(client)
+          .getSecurityAssumptions(userId, portfolioId, narrowedToOne)
+          .then((record) => (record ? [record] : []))
+      : createDividendAssumptionsRepository(client).listSecurityAssumptions(
+          userId,
+          portfolioId,
+        ),
     client.all<Row>(
       `SELECT id, portfolio_security_id, type, status, local_trade_date, trade_at,
               quantity_decimal, unit_price_decimal, reverses_transaction_id
@@ -429,6 +523,24 @@ export async function loadOwnedDividendHistory(
     ]),
   );
 
+  // PRF-013: raw per-security groupings for `OwnedDividendSecurityHistory
+  // .rawDetail` -- built from the SAME rows already fetched above, never a
+  // new query. Skipped (left `undefined`) for a whole-portfolio load: the
+  // grouping cost scales with every override/manual/franking/assumptions
+  // row in the portfolio, and no whole-portfolio caller reads `rawDetail`.
+  const rawEventOverridesBySecurity = narrowed
+    ? groupRecordsByPortfolioSecurityId(overrideRecords)
+    : undefined;
+  const rawManualRecordsBySecurity = narrowed
+    ? groupRecordsByPortfolioSecurityId(manualRecords)
+    : undefined;
+  const rawFrankingOverridesBySecurity = narrowed
+    ? groupRecordsByPortfolioSecurityId(frankingOverrides)
+    : undefined;
+  const rawAssumptionsBySecurity = narrowed
+    ? new Map(assumptionsRecords.map((row) => [row.portfolioSecurityId, row]))
+    : undefined;
+
   if (transactionRows.length > MAX_TRANSACTIONS_PER_PORTFOLIO) {
     throw new Error("too_many_transactions");
   }
@@ -546,6 +658,20 @@ export async function loadOwnedDividendHistory(
         windowFromDate: fyRemainderWindowFromDate,
       });
 
+      const rawDetail: OwnedDividendSecurityRawDetail | null = narrowed
+        ? {
+            events: events.map((event) => ({
+              id: event.id,
+              supersedesEventId: event.supersedesEventId,
+            })),
+            eventOverrides: rawEventOverridesBySecurity?.get(identity.id) ?? [],
+            manualRecords: rawManualRecordsBySecurity?.get(identity.id) ?? [],
+            frankingOverrides:
+              rawFrankingOverridesBySecurity?.get(identity.id) ?? [],
+            assumptions: rawAssumptionsBySecurity?.get(identity.id) ?? null,
+          }
+        : null;
+
       return {
         portfolioSecurityId: identity.id,
         securityId: identity.securityId,
@@ -558,6 +684,7 @@ export async function loadOwnedDividendHistory(
         fyTotalsStatus,
         forecast,
         fyRemainderForecast,
+        rawDetail,
       };
     },
   );

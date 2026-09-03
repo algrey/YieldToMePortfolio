@@ -190,6 +190,95 @@ test("UI-006C: loadOwnedSecurityDividendDetail denies a cross-owner portfolioSec
 });
 
 // ---------------------------------------------------------------------------
+// PRF-013: the narrowed `loadOwnedDividendHistory(..., [portfolioSecurityId])`
+// composition must produce BYTE-IDENTICAL output to the old
+// load-everything-then-.find()-one-row-then-re-read-five-tables pattern --
+// in particular, another security in the SAME portfolio (whose rows are no
+// longer even fetched by the narrowed first wave) must never change the
+// target security's figures, and another OWNER's facts on a security they
+// happen to share must never leak in.
+// ---------------------------------------------------------------------------
+
+test("PRF-013: psa1's detail is byte-identical regardless of psa2's (a different security in the SAME portfolio) dividend data", async () => {
+  const db = await fixture();
+  const client = createSqliteSqlClient(db);
+  const before = await loadDetail(client, "a", "psa1");
+
+  // Pile MORE dividend facts onto psa2 -- an override, a standalone manual
+  // record, a franking override, and a changed assumptions row -- touching
+  // every one of the five tables PRF-013's fix stopped double-reading.
+  // None of this is scoped to psa1, so none of it may change psa1's output.
+  db.exec(`
+    INSERT INTO dividend_event_overrides(id,user_id,portfolio_id,portfolio_security_id,dividend_event_id,shares_decimal,dividend_per_share_decimal,franking_credit_per_share_decimal,exclude,created_at,updated_at,version) VALUES
+      ('ov2','a','pa','psa2','de4',NULL,'0.60','0.10',0,'2026-08-01','2026-08-01',1);
+    INSERT INTO dividend_manual_records(id,user_id,portfolio_id,portfolio_security_id,payment_date,shares_decimal,dividend_per_share_decimal,franking_credit_per_share_decimal,import_batch_id,created_at,updated_at,version) VALUES
+      ('mr3','a','pa','psa2','2026-05-01','20','1.00',NULL,'batch-y','2026-08-01','2026-08-01',1);
+    INSERT INTO dividend_import_franking_overrides(id,user_id,portfolio_id,portfolio_security_id,dividend_manual_record_id,franking_total_decimal,created_at,updated_at,version) VALUES
+      ('fov1','a','pa','psa2','mr3','5.00','2026-08-01','2026-08-01',1);
+    INSERT INTO dividend_security_assumptions(id,user_id,portfolio_id,portfolio_security_id,dividend_yield_percent_decimal,franking_percent_decimal,dividend_growth_percent_decimal,created_at,updated_at,version) VALUES
+      ('das2','a','pa','psa2','6','80','1','2026-08-01','2026-08-01',1);
+  `);
+
+  const after = await loadDetail(client, "a", "psa1");
+  assert.deepEqual(after, before);
+});
+
+test("PRF-013: loadOwnedSecurityDividendDetail never leaks another owner's override/manual/assumption facts for a security they both happen to hold", async () => {
+  // Two DIFFERENT owners, each with their own portfolio_securities row for
+  // the SAME underlying security (s1/"Alpha Co") -- dividend_events is
+  // shared, deliberately unscoped, global market data (unchanged by
+  // PRF-013), but every owner-entered override/manual-record/franking-
+  // override/assumptions row is scoped to (user_id, portfolio_id,
+  // portfolio_security_id) and must stay owner-isolated even though the
+  // narrowed `loadOwnedDividendHistory` read now groups those rows by
+  // `portfolioSecurityId` rather than `securityId`.
+  const db = await fixture();
+  db.exec(`
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at) VALUES
+      ('psb1','b','pb','s1','ALPHA','AUD','held','2026-08-01','2026-08-01');
+    INSERT INTO dividend_event_overrides(id,user_id,portfolio_id,portfolio_security_id,dividend_event_id,shares_decimal,dividend_per_share_decimal,franking_credit_per_share_decimal,exclude,created_at,updated_at,version) VALUES
+      ('ovb1','b','pb','psb1','de1',NULL,'9.99','0.99',0,'2026-08-01','2026-08-01',1);
+    INSERT INTO dividend_manual_records(id,user_id,portfolio_id,portfolio_security_id,payment_date,shares_decimal,dividend_per_share_decimal,franking_credit_per_share_decimal,import_batch_id,created_at,updated_at,version) VALUES
+      ('mrb1','b','pb','psb1','2026-06-01','999','99.00',NULL,NULL,'2026-08-01','2026-08-01',1);
+    INSERT INTO dividend_security_assumptions(id,user_id,portfolio_id,portfolio_security_id,dividend_yield_percent_decimal,franking_percent_decimal,dividend_growth_percent_decimal,created_at,updated_at,version) VALUES
+      ('dasb1','b','pb','psb1','99','1','9','2026-08-01','2026-08-01',1);
+    INSERT INTO transactions(id,user_id,portfolio_id,portfolio_security_id,type,status,trade_at,local_trade_date,quantity_decimal,unit_price_decimal,currency_code,gross_amount_decimal,fee_amount_decimal,tax_amount_decimal,source_type,created_by_user_id,calculation_version,created_at) VALUES
+      ('txb1','b','pb','psb1','buy','posted','2026-01-01T00:00:00Z','2026-01-01','999','1','AUD','999','0','0','manual','b',1,'2026-01-01');
+  `);
+  const client = createSqliteSqlClient(db);
+
+  // User a's own override on the SAME event (de1) must still resolve to
+  // THEIR OWN stored override -- not user b's -- and no user-b fact
+  // (`ovb1`/`mrb1`/`dasb1`) appears anywhere in user a's detail.
+  const detailA = await loadDetail(client, "a", "psa1");
+  assert.equal(detailA.overridesByEventId["de1"]?.id, "ov1");
+  assert.equal(
+    detailA.overridesByEventId["de1"]?.dividendPerShareDecimal,
+    "1.50",
+  );
+  assert.equal(detailA.manualRecordsById["mrb1"], undefined);
+  assert.equal(detailA.assumptions.dividendYieldPercentDecimal, "4");
+
+  // And symmetrically, user b's own detail for their holding of the same
+  // security sees only THEIR facts.
+  const detailB = await loadOwnedSecurityDividendDetail(
+    client,
+    "b",
+    "pb",
+    "psb1",
+    NOW,
+  );
+  assert.equal(detailB.overridesByEventId["de1"]?.id, "ovb1");
+  assert.equal(
+    detailB.overridesByEventId["de1"]?.dividendPerShareDecimal,
+    "9.99",
+  );
+  assert.equal(detailB.manualRecordsById["ov1"], undefined);
+  assert.equal(detailB.manualRecordsById["mr1"], undefined);
+  assert.equal(detailB.assumptions.dividendYieldPercentDecimal, "99");
+});
+
+// ---------------------------------------------------------------------------
 // buildDialogPrefill: every row must be clickable and pre-fill correctly.
 // ---------------------------------------------------------------------------
 
@@ -768,6 +857,11 @@ test("UI-006C: the security dividends page loads via the owner-scoped context an
   assert.match(page, /AuthenticatedWorkspaceSqlContext/);
   assert.doesNotMatch(page, /getAuthenticatedSqlContext\(/);
   assert.match(page, /loadOwnedSecurityDividendDetail\(/);
+  // PRF-013: `loadOwnedHoldingIdentity` a few lines above this call already
+  // resolved and checked ownership (`if (!identity) notFound();`), so the
+  // page must tell `loadOwnedSecurityDividendDetail` not to re-run its own
+  // redundant ownership SELECT.
+  assert.match(page, /\{\s*identityConfirmed:\s*true\s*\}/);
   assert.match(page, /workspace\.activePortfolio === null\) notFound\(\)/);
   assert.match(page, /error\.message === "not_found"\) notFound\(\)/);
   // The legacy route keeps old links/bookmarks working but holds NO data

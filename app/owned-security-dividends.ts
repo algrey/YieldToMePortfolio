@@ -6,6 +6,20 @@
 // raw override/manual-record/assumptions facts the per-row edit dialog
 // (UI-006B's `RecordDividendDialog`) needs to pre-fill correctly:
 //
+// PRF-013 (census fix): an earlier version called `loadOwnedDividendHistory`
+// with NO filter (a 7-table, ALL-securities batch) purely to `.find()` this
+// one row out, then issued a SECOND wave re-reading `dividend_events`,
+// `dividend_event_overrides`, `dividend_manual_records`,
+// `dividend_import_franking_overrides`, and `dividend_security_assumptions`
+// narrowed to this one security -- every one of those five tables read
+// twice for a single-security page. `loadOwnedDividendHistory` now accepts
+// a `portfolioSecurityIdFilter` (this module passes its one id) and returns
+// the matched security's raw, un-derived facts on `rawDetail`, so this
+// module builds every lookup map below from that ONE wave -- see
+// `owned-dividend-history.ts`'s `rawDetail` doc comment for exactly which
+// rows it carries and why they are byte-identical to what the old second
+// wave fetched.
+//
 // - `overridesByEventId`: the RAW (sparse, possibly null-field) persisted
 //   `dividend_event_overrides` row that WINS for a row's CURRENT active
 //   event, keyed by that active event's id, with its `version` -- required
@@ -79,12 +93,7 @@
 // shares value server-side -- so this filter cannot hide an owner's
 // explicit correction.
 import type { SqlClient } from "../db/repositories/sql-client.ts";
-import {
-  createDividendAssumptionsRepository,
-  createDividendEventOverrideRepository,
-  createDividendImportFrankingOverrideRepository,
-  createDividendManualRecordRepository,
-} from "../db/repositories/dividends.ts";
+import { createDividendAssumptionsRepository } from "../db/repositories/dividends.ts";
 import { loadOwnedDividendHistory } from "./owned-dividend-history.ts";
 import {
   computeLifetimeDividendTotals,
@@ -96,9 +105,6 @@ import {
   type EventOverrideLineageNode,
   type LifetimeDividendTotals,
 } from "../domain/dividends/index.ts";
-
-type Row = Record<string, unknown>;
-const MAX_EVENTS_PER_SECURITY = 20_000;
 
 export type OwnedSecurityDividendOverrideFact = {
   id: string;
@@ -199,69 +205,55 @@ export async function loadOwnedSecurityDividendDetail(
   portfolioId: string,
   portfolioSecurityId: string,
   now = new Date(),
+  // PRF-013: the page (`app/portfolio/[portfolioId]/[section]/[holdingId]/
+  // dividends/page.tsx`) already resolves and checks ownership via
+  // `loadOwnedHoldingIdentity` (for the tab subtitle) BEFORE ever calling
+  // this function, so its call passes `identityConfirmed: true` to skip the
+  // second, redundant ownership SELECT below. Left required-by-default (a
+  // direct caller, e.g. this module's own tests, may not have resolved
+  // identity first) so a nonexistent/cross-owner id still throws the
+  // distinct `not_found` a direct caller expects, independent of whatever
+  // `not_dividend_eligible` the narrowed load below would otherwise raise.
+  options?: { identityConfirmed?: boolean },
 ): Promise<OwnedSecurityDividendDetail> {
-  const identity = await client.get<{ id: string }>(
-    `SELECT ps.id FROM portfolio_securities ps
-     WHERE ps.id = ? AND ps.user_id = ? AND ps.portfolio_id = ?
-       AND ps.security_id IS NOT NULL
-     LIMIT 1`,
-    [portfolioSecurityId, userId, portfolioId],
-  );
-  if (!identity) throw new Error("not_found");
+  if (!options?.identityConfirmed) {
+    const identity = await client.get<{ id: string }>(
+      `SELECT ps.id FROM portfolio_securities ps
+       WHERE ps.id = ? AND ps.user_id = ? AND ps.portfolio_id = ?
+         AND ps.security_id IS NOT NULL
+       LIMIT 1`,
+      [portfolioSecurityId, userId, portfolioId],
+    );
+    if (!identity) throw new Error("not_found");
+  }
 
-  // Reuses DIV-001's whole-portfolio composition rather than duplicating its
-  // batched events/overrides/manual/receipts/transactions derivation -- see
-  // the module header. Bounded by that function's own MAX_SECURITIES/etc
-  // caps.
-  const full = await loadOwnedDividendHistory(client, userId, portfolioId, now);
+  // PRF-013: narrows DIV-001's composition to just this ONE security instead
+  // of loading the whole portfolio purely to `.find()` it out, and carries
+  // back the raw override/manual-record/franking-override/assumptions/
+  // event-lineage records this detail view needs (`rawDetail`) so no second
+  // five-table wave re-reading the exact same rows is required -- see
+  // `owned-dividend-history.ts`'s `portfolioSecurityIdFilter` param and
+  // `rawDetail` doc comments, and this module's header for the defect this
+  // replaces. Bounded by that function's own MAX_SECURITIES/etc caps.
+  const full = await loadOwnedDividendHistory(
+    client,
+    userId,
+    portfolioId,
+    now,
+    [portfolioSecurityId],
+  );
   const security = full.securities.find(
     (row) => row.portfolioSecurityId === portfolioSecurityId,
   );
   if (!security) throw new Error("not_dividend_eligible");
+  // Always set when `loadOwnedDividendHistory` is called with a filter (see
+  // its `rawDetail` doc comment); this null-check is defensive only.
+  const raw = security.rawDetail;
+  if (!raw) throw new Error("not_dividend_eligible");
 
-  const assumptionsRepository = createDividendAssumptionsRepository(client);
-  const [
-    eventRows,
-    overrideRecords,
-    manualRecords,
-    frankingOverrideRecords,
-    securityAssumptions,
-    portfolioAssumptions,
-  ] = await Promise.all([
-    // Every event (active AND superseded) for this security, needed to walk
-    // the supersession lineage (B1 fix) -- matches
-    // `owned-dividend-history.ts`'s own events query, narrowed to one
-    // security.
-    client.all<Row>(
-      `SELECT id, supersedes_event_id FROM dividend_events
-       WHERE security_id = ? LIMIT ?`,
-      [security.securityId, MAX_EVENTS_PER_SECURITY + 1],
-    ),
-    createDividendEventOverrideRepository(client).list(
-      userId,
-      portfolioId,
-      portfolioSecurityId,
-    ),
-    createDividendManualRecordRepository(client).list(
-      userId,
-      portfolioId,
-      portfolioSecurityId,
-    ),
-    createDividendImportFrankingOverrideRepository(client).list(
-      userId,
-      portfolioId,
-      portfolioSecurityId,
-    ),
-    assumptionsRepository.getSecurityAssumptions(
-      userId,
-      portfolioId,
-      portfolioSecurityId,
-    ),
-    assumptionsRepository.getPortfolioAssumptions(userId, portfolioId),
-  ]);
-  if (eventRows.length > MAX_EVENTS_PER_SECURITY) {
-    throw new Error("too_many_dividend_events");
-  }
+  const portfolioAssumptions = await createDividendAssumptionsRepository(
+    client,
+  ).getPortfolioAssumptions(userId, portfolioId);
 
   // B1 fix: resolve each row's WINNING override the identical way
   // `deriveDividendHistoryForSecurity` does (`resolveEventOverrideForLineage`,
@@ -269,12 +261,8 @@ export async function loadOwnedSecurityDividendDetail(
   // event id), then key the result by that current id -- never by the
   // override's own stored (possibly since-superseded) `dividendEventId`. See
   // the module header for the full defect this replaces.
-  const lineageNodes: EventOverrideLineageNode[] = eventRows.map((row) => ({
-    id: String(row.id),
-    supersedesEventId:
-      row.supersedes_event_id === null ? null : String(row.supersedes_event_id),
-  }));
-  const overrideFacts: EventOverrideFact[] = overrideRecords.map(
+  const lineageNodes: EventOverrideLineageNode[] = raw.events;
+  const overrideFacts: EventOverrideFact[] = raw.eventOverrides.map(
     (override) => ({
       dividendEventId: override.dividendEventId,
       sharesDecimal: override.sharesDecimal,
@@ -284,7 +272,7 @@ export async function loadOwnedSecurityDividendDetail(
     }),
   );
   const overrideRecordByStoredEventId = new Map(
-    overrideRecords.map((override) => [override.dividendEventId, override]),
+    raw.eventOverrides.map((override) => [override.dividendEventId, override]),
   );
   const activeEventIds = [
     ...new Set(
@@ -319,7 +307,7 @@ export async function loadOwnedSecurityDividendDetail(
   }
 
   const manualRecordsById: Record<string, OwnedSecurityDividendManualFact> = {};
-  for (const record of manualRecords) {
+  for (const record of raw.manualRecords) {
     manualRecordsById[record.id] = {
       version: record.version,
       importBatchId: record.importBatchId,
@@ -330,7 +318,7 @@ export async function loadOwnedSecurityDividendDetail(
     string,
     OwnedSecurityDividendFrankingOverrideFact
   > = {};
-  for (const override of frankingOverrideRecords) {
+  for (const override of raw.frankingOverrides) {
     frankingOverridesByManualRecordId[override.dividendManualRecordId] = {
       id: override.id,
       version: override.version,
@@ -377,12 +365,11 @@ export async function loadOwnedSecurityDividendDetail(
     frankingOverridesByManualRecordId,
     assumptions: {
       dividendYieldPercentDecimal:
-        securityAssumptions?.dividendYieldPercentDecimal ?? null,
-      frankingPercentDecimal:
-        securityAssumptions?.frankingPercentDecimal ?? null,
+        raw.assumptions?.dividendYieldPercentDecimal ?? null,
+      frankingPercentDecimal: raw.assumptions?.frankingPercentDecimal ?? null,
       dividendGrowthPercentDecimal:
-        securityAssumptions?.dividendGrowthPercentDecimal ?? null,
-      version: securityAssumptions?.version ?? null,
+        raw.assumptions?.dividendGrowthPercentDecimal ?? null,
+      version: raw.assumptions?.version ?? null,
     },
     portfolioAssumptions: {
       valueGrowthPercentDecimal:

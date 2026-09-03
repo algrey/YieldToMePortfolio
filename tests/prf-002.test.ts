@@ -1069,7 +1069,10 @@ async function censusHoldingNewsPage(client: SqlClient): Promise<void> {
 
 /** `/portfolio/:id/holdings/:holdingId/dividends`. Mirrors
  * `[holdingId]/dividends/page.tsx`'s plain `loadAuthenticatedWorkspace(portfolioId)`
- * + identity + `loadOwnedSecurityDividendDetail`. */
+ * + identity + `loadOwnedSecurityDividendDetail`. PRF-013: the real page
+ * passes `identityConfirmed: true` (it already resolved ownership via
+ * `loadOwnedHoldingIdentity` immediately above), so this mirrors that exact
+ * call rather than paying for the function's own defensive re-check. */
 async function censusHoldingDividendsPage(client: SqlClient): Promise<void> {
   await baseWorkspaceLoad(client);
   const identity = await loadOwnedHoldingIdentity(
@@ -1085,6 +1088,7 @@ async function censusHoldingDividendsPage(client: SqlClient): Promise<void> {
     PORTFOLIO_ID,
     HOLDING_ID,
     NOW,
+    { identityConfirmed: true },
   );
 }
 
@@ -1607,7 +1611,13 @@ const DEPTH_CEILING: Record<string, number> = {
   "/portfolio/:id/holdings/:holdingId": 7,
   "/portfolio/:id/holdings/:holdingId/transactions": 3,
   "/portfolio/:id/holdings/:holdingId/news": 2,
-  "/portfolio/:id/holdings/:holdingId/dividends": 9,
+  // PRF-013: dropped from 9 -- the old second five-table wave added its own
+  // depth notch (and, before that, a since-removed standalone identity
+  // pre-check) after the first whole-portfolio wave resolved. Narrowing
+  // `loadOwnedDividendHistory` to this one security folds everything into
+  // ONE wave; measured post-fix depth is 8 (statements: 21 -> 15). See
+  // `docs/ARCHITECTURE.md`'s PRF section for the full before/after figures.
+  "/portfolio/:id/holdings/:holdingId/dividends": 8,
 };
 
 test("PRF-003: per-page SEQUENTIAL DEPTH census -- critical-path length (longest non-overlapping D1 round-trip chain) and modeled wall time at a simulated 40ms round trip", async () => {
@@ -2543,4 +2553,82 @@ test("PRF-008: opting out on /income never fabricates a price or hides unavailab
   assert.notEqual(projection.portfolioValueStatus, "available");
   assert.notEqual(projection.currentPortfolioValueDecimal, "0");
   db.close();
+});
+
+// ---------------------------------------------------------------------------
+// PRF-013 -- `/portfolio/:id/holdings/:holdingId/dividends` used to call
+// `loadOwnedDividendHistory` with NO filter (a 7-table, ALL-securities
+// batch) purely to `.find()` this one row out, then issued a SECOND wave
+// re-reading `dividend_events`, `dividend_event_overrides`,
+// `dividend_manual_records`, `dividend_import_franking_overrides`, and
+// `dividend_security_assumptions` narrowed to this one security -- every one
+// of those five tables read TWICE for a single-security page. Fixed via a
+// `portfolioSecurityIdFilter` on `loadOwnedDividendHistory` (see that
+// module's `rawDetail` doc comment) so the page's single wave now supplies
+// everything the detail view needs.
+// ---------------------------------------------------------------------------
+
+test("PRF-013: the holding Dividends tab reads every dividend table exactly once (was twice)", async () => {
+  const db = await productionScaleFixture();
+  const { client, stats } = stageCensusClient(createSqliteSqlClient(db));
+  await censusHoldingDividendsPage(client);
+
+  // The five tables the old second wave re-read, plus dividend_receipts
+  // (always single-wave, unaffected, checked here for completeness).
+  for (const table of [
+    "dividend_events",
+    "dividend_event_overrides",
+    "dividend_manual_records",
+    "dividend_import_franking_overrides",
+    "dividend_security_assumptions",
+    "dividend_receipts",
+  ]) {
+    const calls = stats.calls_.filter((call) =>
+      call.sql.includes(`FROM ${table}`),
+    );
+    assert.equal(
+      calls.length,
+      1,
+      `expected exactly one ${table} read, got ${calls.length}: ${calls
+        .map((call) => call.sql)
+        .join(" || ")}`,
+    );
+  }
+
+  // PRF-013 measured figures (productionScaleFixture, 18 securities, one
+  // holding narrowed to): statements dropped 21 -> 15, sequential depth
+  // dropped 9 -> 8 (this file's own DEPTH_CEILING entry, asserted in the
+  // PRF-003 census test below) -- recorded in docs/ARCHITECTURE.md's PRF
+  // section (dated 2026-09-03 append) alongside the full before/after
+  // per-table breakdown.
+  assert.equal(
+    stats.statements,
+    15,
+    `expected 15 statements post-fix, got ${stats.statements}`,
+  );
+  db.close();
+});
+
+test("PRF-013: every existing loadOwnedDividendHistory caller is unchanged -- still passes exactly (client, userId, portfolioId, now), no filter", async () => {
+  // Source-pin: `loadOwnedDividendHistory`'s new `portfolioSecurityIdFilter`
+  // parameter is optional and appended AFTER `now`, so every caller that
+  // does not know about it must keep loading the whole portfolio exactly as
+  // before. Enumerated callers (excluding `owned-security-dividends.ts`
+  // itself, this task's own new narrow caller, and test files):
+  // app/owned-income-projection.ts, app/owned-dividend-assumptions.ts,
+  // app/owned-dividend-list.ts.
+  const callSitePattern =
+    /loadOwnedDividendHistory\(\s*client,\s*userId,\s*portfolioId,\s*now,?\s*\)/;
+  for (const file of [
+    "../app/owned-income-projection.ts",
+    "../app/owned-dividend-assumptions.ts",
+    "../app/owned-dividend-list.ts",
+  ]) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    assert.match(
+      source,
+      callSitePattern,
+      `${file} should still call loadOwnedDividendHistory with exactly (client, userId, portfolioId, now)`,
+    );
+  }
 });

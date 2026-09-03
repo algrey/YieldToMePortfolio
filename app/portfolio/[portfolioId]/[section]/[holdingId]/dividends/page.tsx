@@ -86,12 +86,16 @@ export default async function HoldingDividendsPage({
 
   let detail: Awaited<ReturnType<typeof loadOwnedSecurityDividendDetail>>;
   try {
+    // PRF-013: `loadOwnedHoldingIdentity` above already confirmed ownership
+    // (and threw `notFound()` if it failed), so this skips
+    // `loadOwnedSecurityDividendDetail`'s own redundant ownership SELECT.
     detail = await loadOwnedSecurityDividendDetail(
       context.client,
       context.userId,
       portfolioId,
       holdingId,
       new Date(),
+      { identityConfirmed: true },
     );
   } catch (error) {
     if (error instanceof Error && error.message === "not_found") notFound();
