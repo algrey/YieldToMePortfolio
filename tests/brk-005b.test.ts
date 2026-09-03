@@ -1208,6 +1208,31 @@ test('BRK-015: resolveSharesightSyncMode maps ?mode=full to "full", and anything
   );
 });
 
+test("BRK-015 follow-up (c): the sharesight-sync route actually calls resolveSharesightSyncMode(request.url) and forwards the result into the sync call, so a route edit that drops the parse can't silently make every sync a Full resync (or never allow one)", async () => {
+  const source = await readFile(
+    new URL(
+      "../app/api/portfolios/[portfolioId]/sharesight-sync/route.ts",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /import \{ resolveSharesightSyncMode \} from ".*sharesight-sync-panel-helpers(\.ts)?";/,
+    "route must import the shared mode-parsing helper",
+  );
+  assert.match(
+    source,
+    /const mode = resolveSharesightSyncMode\(request\.url\);/,
+    "route must call resolveSharesightSyncMode(request.url)",
+  );
+  assert.match(
+    source,
+    /runSharesightSyncAction\(portfolioId, mode\)/,
+    "route must forward the parsed mode into the sync call, not a hard-coded literal",
+  );
+});
+
 test('BRK-015: the panel wires the Sync-from-Sharesight and Full-resync buttons to runSync("routine") / runSync("full") respectively', async () => {
   const source = await readFile(new URL(PANEL_PATH, import.meta.url), "utf8");
   assert.match(source, /onClick=\{\(\) => void runSync\("routine"\)\}/);
@@ -1336,6 +1361,17 @@ test("BRK-005B follow-up 5: .sharesight-dialog p.sharesight-sync-error/.sharesig
     ".sharesight-dialog p.sharesight-sync-inert",
   );
   assert.ok(bareIndex >= 0 && errorIndex > bareIndex && inertIndex > bareIndex);
+});
+
+test("BRK-015 follow-up (b): .sharesight-full-resync-hint has a CSS rule, styled as visible hint text (not the plain body colour, not hidden)", async () => {
+  const styles = await readFile(
+    new URL("../app/globals.css", import.meta.url),
+    "utf8",
+  );
+  const block = extractBlock(styles, ".sharesight-full-resync-hint");
+  assert.match(block, /color:\s*var\(--muted\)/);
+  assert.doesNotMatch(block, /display:\s*none/);
+  assert.doesNotMatch(block, /visibility:\s*hidden/);
 });
 
 test("BRK-005B: the panel section and dialog are labelled via aria-labelledby, not a bare visual heading alone", () => {

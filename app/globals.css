@@ -3028,6 +3028,18 @@ dd {
   opacity: 0.6;
 }
 
+/* BRK-015 follow-up (b): the Full-resync explanation's visible-text hint,
+   wired to its button via aria-describedby -- mirrors the established
+   `.import-upload-hint` one-line hint-text pattern (same muted colour,
+   size, and line-height tokens), so it stays readable in both themes
+   without introducing a new colour. */
+.sharesight-full-resync-hint {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
 .sharesight-sync-result,
 .sharesight-sync-error,
 .sharesight-sync-inert {
