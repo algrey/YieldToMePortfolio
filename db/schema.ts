@@ -693,12 +693,35 @@ export const importBatches = sqliteTable(
       sql`${table.warningCount} >= 0`,
     ),
     check("import_batches_info_count_check", sql`${table.infoCount} >= 0`),
-    uniqueIndex("import_batches_user_file_parser_unique").on(
-      table.userId,
-      table.fileSha256,
-      table.parserFormat,
-      table.parserVersion,
-    ),
+    // BRK-020: the file-level dedup key used to be a FULL unique index, so a
+    // re-upload/re-sync whose content hash matched a REVERSED batch resolved
+    // (via `import-staging.ts`'s `startUpload` `ON CONFLICT ... DO NOTHING`)
+    // to that terminal batch -- whose rows are already `commit_status =
+    // 'reversed'` and can never be readied or committed again. A Sharesight
+    // re-sync after reversing a batch hashes byte-identically whenever
+    // nothing else changed in the account (`canonicalFetchDigestSource` is a
+    // pure function of the fetched content), so that route was permanently
+    // stuck; CSV's `supersedesBatchId` escape hatch had the same hole for an
+    // identical corrected file. A reversed batch is an immutable audit record
+    // (never rewritten to free the key), so the constraint itself is narrowed
+    // to a PARTIAL unique index that only governs NON-reversed batches --
+    // BUG-018's own precedent on `transactions_portfolio_source_reference_
+    // unique`. `startUpload` is the ONLY `ON CONFLICT` clause targeting these
+    // columns (grepped before this change) and repeats the predicate verbatim
+    // (SQLite matches an `ON CONFLICT` target against a partial index only
+    // when the `WHERE` matches); its duplicate-lookup fallback filters the
+    // same way. A batch mid-reversal (`'reversing'`) still occupies the key.
+    // `app/portfolio-bundle-service.ts`'s bundle-restore scaffold reads this
+    // key with a plain SELECT (no `ON CONFLICT`) and only ever INSERTs when
+    // NO row exists, so it never creates a second live row.
+    uniqueIndex("import_batches_user_file_parser_unique")
+      .on(
+        table.userId,
+        table.fileSha256,
+        table.parserFormat,
+        table.parserVersion,
+      )
+      .where(sql`${table.status} <> 'reversed'`),
     uniqueIndex("import_batches_id_user_unique").on(table.id, table.userId),
     uniqueIndex("import_batches_commit_idempotency_unique")
       .on(table.userId, table.commitIdempotencyKey)

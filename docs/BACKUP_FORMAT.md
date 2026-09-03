@@ -183,7 +183,11 @@ bundle instead of CSV rows:
   `(user_id, file_sha256, parser_format, parser_version)` unique index).
   Re-importing the identical bundle for the same owner finds the
   already-`committed` batch and returns its existing portfolio as a
-  no-op — never a duplicate.
+  no-op — never a duplicate. (`BRK-020`, 2026-09-03: that index is now
+  PARTIAL, `WHERE status <> 'reversed'`, see `docs/DATA_MODEL.md`. The
+  restore path is unaffected — it reads the key with a plain `SELECT` and
+  only ever `INSERT`s when no row exists at all — but "structurally
+  impossible" below now holds for non-reversed rows only.)
 - **Batch-attributable**: at the PORTFOLIO level. A bundle-import always
   creates a brand-new portfolio (see "Design decisions"), so
   `import_batches.target_portfolio_id` names the ONE batch that created

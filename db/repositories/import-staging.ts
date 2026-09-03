@@ -1023,6 +1023,14 @@ export function createOwnedImportStagingRepository(
         }
         targetPortfolioId = superseded.target_portfolio_id;
       }
+      // BRK-020: `import_batches_user_file_parser_unique` is a PARTIAL unique
+      // index (`WHERE status <> 'reversed'`, db/schema.ts), so the `ON
+      // CONFLICT` target below must repeat that predicate verbatim for SQLite
+      // to match it. A reversed batch therefore no longer "occupies" the file
+      // key: an identical re-upload/re-sync after a reversal INSERTs a fresh
+      // batch instead of resolving to the terminal reversed one, and the
+      // duplicate-lookup fallback further down filters reversed rows out for
+      // the same reason.
       const insertedRows = await client.all<Record<string, unknown>>(
         `
           INSERT INTO import_batches (
@@ -1039,6 +1047,7 @@ export function createOwnedImportStagingRepository(
             NULL, NULL, ?, NULL, NULL, ?, ?, NULL, NULL, NULL, 1
           )
           ON CONFLICT(user_id, file_sha256, parser_format, parser_version)
+            WHERE status <> 'reversed'
           DO NOTHING
           RETURNING
             id, user_id, target_portfolio_id, parser_format, parser_version,
@@ -1093,6 +1102,7 @@ export function createOwnedImportStagingRepository(
             reversed_at, version
           FROM import_batches
           WHERE user_id = ? AND file_sha256 = ? AND parser_format = ? AND parser_version = ?
+            AND status <> 'reversed'
           LIMIT 1
         `,
         [userId, input.fileSha256, input.parserFormat, input.parserVersion],

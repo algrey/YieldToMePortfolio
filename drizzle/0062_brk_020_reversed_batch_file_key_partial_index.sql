@@ -1,0 +1,2 @@
+DROP INDEX `import_batches_user_file_parser_unique`;--> statement-breakpoint
+CREATE UNIQUE INDEX `import_batches_user_file_parser_unique` ON `import_batches` (`user_id`,`file_sha256`,`parser_format`,`parser_version`) WHERE "import_batches"."status" <> 'reversed';

@@ -435,6 +435,13 @@
       "when": 1788470243073,
       "tag": "0061_ops_005_bundle_ref_digests",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "6",
+      "when": 1788470343073,
+      "tag": "0062_brk_020_reversed_batch_file_key_partial_index",
+      "breakpoints": true
     }
   ]
 }
