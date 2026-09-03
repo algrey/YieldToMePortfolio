@@ -4,6 +4,10 @@ import {
   type ImportReversalSuccess,
   type SqlClient,
 } from "../db/repositories/index.ts";
+import {
+  advanceCalculationRunsForCommit,
+  POST_COMMIT_CALCULATION_BUDGET,
+} from "./calculation-executor-service.ts";
 
 export type ImportReversalActionFailure = {
   ok: false;
@@ -77,7 +81,29 @@ export async function reverseImportWithContext(
     confirmation,
     requestId: context.requestId,
   });
-  if (result.ok) return { ok: true, reversal: result };
+  if (result.ok) {
+    // BUG-016 fold-in: identical rationale to the commit routes
+    // (`app/import-commit-actions.ts`, `app/import-accept-service.ts`) --
+    // a reversal that just finished queues `calculation_runs` rows (the
+    // per-transaction `ledger_mutation` rows `ledger.reverse()` queues for
+    // every reversed trade, plus, on the finalizing invocation, the
+    // dividend-parity `import_reverse` row) that nothing else would advance
+    // in-request, leaving them `queued` until the cron sweep. Best-effort
+    // and bounded -- a failure here must never turn an already-successful
+    // reversal into an error response; the read-time and cron triggers
+    // still cover anything left queued or interrupted.
+    if (result.rebuildJobIds.length > 0) {
+      await advanceCalculationRunsForCommit(
+        { client: context.client },
+        {
+          userId: context.userId,
+          calculationRunIds: result.rebuildJobIds,
+          budget: POST_COMMIT_CALCULATION_BUDGET,
+        },
+      ).catch(() => undefined);
+    }
+    return { ok: true, reversal: result };
+  }
   return {
     ok: false,
     status:

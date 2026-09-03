@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { markImportReadyWithContext } from "../app/import-ready-service.ts";
 import { buildImportReviewPreview } from "../app/import-preview.ts";
+import { advanceCalculationRuns } from "../app/calculation-executor-service.ts";
 import {
   createOwnedImportCommitRepository,
   createOwnedImportReversalRepository,
@@ -1032,6 +1033,119 @@ test("a dividend-only reversal (no trade rows at all) still audits its deleted i
     1,
     "a dividend-only reversal must not read as '0 reversed' while it deletes an income fact",
   );
+});
+
+// BUG-016 review B2: the dividend-only reversal case is the one that always
+// finalizes on the FIRST invocation (no trades at all to chunk through), and
+// portfolio-a here has ZERO posted/reversed transactions -- exercising the
+// `COALESCE(..., '')` branch of the queued run's `ledger_high_water_start`
+// (never the literal string "null", see the fold-in's own doc comment).
+// Also proves the queued run is a genuinely USABLE `calculation_runs` row:
+// `advanceCalculationRuns` claims and completes it, and
+// `projection_publications` ends up valid and current.
+test("BUG-016 review B2: a dividend-only reversal finalizes on the first invocation, queues exactly one usable import_reverse run, and a repeated final call queues no second row", async () => {
+  const database = await migratedDatabase();
+  stageRow(database, "batch-a", "row-1", 2, dividendRow());
+  const client = createSqliteSqlClient(database);
+
+  await commitBatch(client, "batch-a", "bug-016-b2-commit");
+  const manualRepo = createDividendManualRecordRepository(client);
+  assert.equal((await manualRepo.list("user-a", "portfolio-a")).length, 1);
+  assert.equal(
+    (
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM transactions WHERE user_id = 'user-a' AND portfolio_id = 'portfolio-a'",
+        )
+        .get() as { count: number }
+    ).count,
+    0,
+    "portfolio-a must have zero ledger transactions for this fixture to exercise the genuinely-absent high-water branch",
+  );
+
+  const committedBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    "batch-a",
+  );
+  assert.ok(committedBatch);
+  const reversalRepo = createOwnedImportReversalRepository(client);
+  const reversalInput = {
+    expectedVersion: committedBatch!.version,
+    idempotencyKey: "bug-016-b2-reverse",
+    confirmation: true,
+    requestId: "bug-016-b2-reverse-request",
+  };
+
+  // A dividend-only batch has no ledger targets at all, so the very FIRST
+  // invocation is already finalizing.
+  const first = await reversalRepo.reverse("user-a", "batch-a", reversalInput);
+  assert.equal(first.ok, true);
+  if (first.ok) {
+    assert.equal(first.status, "reversed");
+    assert.equal(first.reversedTransactions, 0);
+    assert.equal(first.remainingTransactions, 0);
+    assert.deepEqual(first.rebuildJobIds, [
+      "import-reversal-rebuild:batch-a:portfolio-a",
+    ]);
+  }
+
+  const runs = database
+    .prepare(
+      `SELECT id, status, ledger_high_water_start FROM calculation_runs
+       WHERE reason = 'import_reverse' AND user_id = 'user-a' AND portfolio_id = 'portfolio-a'`,
+    )
+    .all() as { id: string; status: string; ledger_high_water_start: string }[];
+  assert.equal(runs.length, 1, "exactly one import_reverse run row queued");
+  const run = runs[0]!;
+  assert.equal(run.id, "import-reversal-rebuild:batch-a:portfolio-a");
+  assert.equal(run.status, "queued");
+  assert.equal(
+    run.ledger_high_water_start,
+    "",
+    "a genuinely absent ledger high-water must be the '' sentinel, never the string \"null\"",
+  );
+
+  const advanced = await advanceCalculationRuns(
+    { client, now: () => "2026-08-13T01:00:00Z" },
+    { userId: "user-a", portfolioId: "portfolio-a", budget: 100_000 },
+  );
+  assert.equal(advanced.completed, 1);
+
+  const completedRun = database
+    .prepare(`SELECT status FROM calculation_runs WHERE id = ?`)
+    .get(run.id) as { status: string };
+  assert.equal(completedRun.status, "completed");
+
+  const publication = database
+    .prepare(
+      `SELECT calculation_run_id, ledger_high_water FROM projection_publications
+       WHERE user_id = 'user-a' AND portfolio_id = 'portfolio-a'`,
+    )
+    .get() as
+    { calculation_run_id: string; ledger_high_water: string } | undefined;
+  assert.ok(publication, "expected a current projection publication");
+  assert.equal(publication?.calculation_run_id, run.id);
+  assert.equal(publication?.ledger_high_water, "");
+
+  // A repeated FINAL invocation (same idempotency key, batch already
+  // `reversed`) must be a no-op -- no second `import_reverse` run queued.
+  const repeated = await reversalRepo.reverse(
+    "user-a",
+    "batch-a",
+    reversalInput,
+  );
+  assert.equal(repeated.ok, true);
+  if (repeated.ok) {
+    assert.equal(repeated.resumed, true);
+    assert.equal(repeated.idempotent, true);
+  }
+  const runsAfterRepeat = database
+    .prepare(
+      `SELECT count(*) AS count FROM calculation_runs
+       WHERE reason = 'import_reverse' AND user_id = 'user-a' AND portfolio_id = 'portfolio-a'`,
+    )
+    .get() as { count: number };
+  assert.equal(runsAfterRepeat.count, 1, "no duplicate rebuild run queued");
 });
 
 test("cross-user access is denied at the repository boundary for a dividend-containing batch (no route changes needed)", async () => {

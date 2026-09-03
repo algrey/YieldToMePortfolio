@@ -1,6 +1,7 @@
 import { createAuditInsertStatement } from "./audit.ts";
 import { createOwnedLedgerRepository } from "./ledger.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
+import { emitStructuredLog } from "../../domain/observability/logger.ts";
 
 const DEFAULT_CHUNK_SIZE = 2;
 const MAX_CHUNK_SIZE = 2;
@@ -17,6 +18,14 @@ export const IMPORT_REVERSAL_LIMITS = {
   maxStatementsPerAtomicUnit: 10,
   maxStatementsPerInvocation: 56,
   maxParametersPerStatement: 100,
+  // BUG-016 review B1 fix (2026-09-03): mirrors `import-commit.ts`'s
+  // `IMPORT_COMMIT_LIMITS.maxAffectedPortfolios` -- the same ceiling on how
+  // many distinct portfolios one finalizing reversal will queue an
+  // `import_reverse` rebuild run for. Unlike commit, a reversal must never
+  // fail closed on overflow (see `finalize`'s doc comment): the first N
+  // portfolios (ordered by id) are queued and the rest are logged as a
+  // structured warning, never thrown.
+  maxAffectedPortfolios: 25,
 } as const;
 
 export type ImportReversalInput = {
@@ -334,6 +343,14 @@ export function createOwnedImportReversalRepository(
       },
     ];
     let dividendRebuildJobIds: string[] = [];
+    // BUG-016 review B1 fix (2026-09-03): the per-portfolio `calculation_runs`
+    // INSERT statements are computed inside the `if (reversed)` block below
+    // (while `dividend_manual_records` still holds this batch's rows, before
+    // the DELETE further down removes them) but are NOT pushed into the
+    // atomic `statements` array -- they are issued in their own chunked
+    // `client.batch()` calls after `atomic()` below succeeds. See that
+    // block's own doc comment for the full rationale.
+    let dividendRebuildInserts: { id: string; statement: SqlStatement }[] = [];
     // BUG-016: the dividend side of a reversal (the flip below, the DIV-016C
     // restore, and the hard DELETE) must never run on a non-final CHUNK --
     // only the finalizing invocation (`reversed === true`) may touch income
@@ -409,6 +426,35 @@ export function createOwnedImportReversalRepository(
       // this data actually needs. Guarded by `dividendRecordCount` (read
       // just before `finalize` was called): a trade-only reversal skips the
       // extra SELECT and queues nothing.
+      //
+      // Review B1 fix (2026-09-03): this per-portfolio SELECT+INSERT used to
+      // build one `calculation_runs` INSERT per row returned and push every
+      // one of them into THIS function's single atomic `client.batch()` --
+      // an atomic unit whose size was therefore controlled by how many
+      // distinct portfolios a batch's dividend rows happened to span, with
+      // no LIMIT on the SELECT at all. A 10-statement `maxStatementsPerAtomicUnit`
+      // budget (measured: 9 statements trade-only, 12 with 6 dividend-bearing
+      // portfolios) made a wide dividend-bearing batch's reversal exceed the
+      // atomic-unit budget -- and unlike commit's `revalidation_failed`
+      // fail-closed response to the same shape of problem, a REVERSAL must
+      // never fail closed here: the ledger side has already been reversed
+      // (this is the FINALIZING invocation), so refusing to finish would
+      // strand the batch. The fix below still reads this SELECT here, before
+      // the DELETE two statements below removes its own source rows -- but
+      // defers actually ISSUING the per-portfolio INSERTs until after the
+      // fixed-size atomic unit below has committed, chunked into their own
+      // separate `client.batch()` calls capped at `maxStatementsPerAtomicUnit`
+      // each (see the `dividendRebuildInserts` loop after `atomic()`
+      // succeeds). That keeps the ONE atomic unit that must complete
+      // together with the reversal itself (row flip, dividend flip,
+      // DIV-016C restore, delete, audit, batch-status -- 6 statements,
+      // fixed regardless of dividend-portfolio count) genuinely fixed-size,
+      // while the parity rebuild queueing -- non-essential per PRF-007's own
+      // B3 retraction above -- becomes best-effort and bounded instead of a
+      // reversal-blocking liability. `LIMIT maxAffectedPortfolios + 1`
+      // mirrors `import-commit.ts`'s identical overflow probe; on overflow
+      // the first N portfolios (by id) are still queued and the rest are
+      // logged, never thrown.
       if (dividendRecordCount > 0) {
         const dividendPortfolios = await client.all<Record<string, unknown>>(
           `
@@ -426,34 +472,65 @@ export function createOwnedImportReversalRepository(
             WHERE dmr.user_id = ? AND dmr.import_batch_id = ?
             GROUP BY dmr.portfolio_id
             ORDER BY dmr.portfolio_id ASC
+            LIMIT ?
           `,
-          [userId, userId, batchId],
+          [
+            userId,
+            userId,
+            batchId,
+            IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios + 1,
+          ],
         );
-        dividendRebuildJobIds = dividendPortfolios.map((row) => {
+        let affectedPortfolioRows = dividendPortfolios;
+        if (
+          affectedPortfolioRows.length >
+          IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios
+        ) {
+          emitStructuredLog({
+            level: "warn",
+            event: "import.reverse",
+            action: "import.reverse.dividend_rebuild_overflow",
+            result: "failure",
+            requestId,
+            metadata: {
+              batchId,
+              affectedPortfolios: affectedPortfolioRows.length,
+              queuedPortfolios: IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios,
+            },
+          });
+          affectedPortfolioRows = affectedPortfolioRows.slice(
+            0,
+            IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios,
+          );
+        }
+        dividendRebuildInserts = affectedPortfolioRows.map((row) => {
           const portfolioId = String(row.portfolio_id);
           const rebuildJobId = `import-reversal-rebuild:${batchId}:${portfolioId}`;
-          statements.push({
-            sql: `INSERT INTO calculation_runs (
-              id, user_id, portfolio_id, range_from, range_to, calculation_version,
-              reason, invalidation_source, status, attempt, ledger_high_water_start,
-              idempotency_key, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 1, 'import_reverse', ?, 'queued', 0, ?, ?, ?, ?)
-            ON CONFLICT (user_id, portfolio_id, calculation_version, idempotency_key) DO NOTHING`,
-            params: [
-              rebuildJobId,
-              userId,
-              portfolioId,
-              String(row.range_from),
-              String(row.range_to),
-              batchId,
-              String(row.ledger_high_water),
-              rebuildJobId,
-              at,
-              at,
-            ],
-          });
-          return rebuildJobId;
+          return {
+            id: rebuildJobId,
+            statement: {
+              sql: `INSERT INTO calculation_runs (
+                id, user_id, portfolio_id, range_from, range_to, calculation_version,
+                reason, invalidation_source, status, attempt, ledger_high_water_start,
+                idempotency_key, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, 1, 'import_reverse', ?, 'queued', 0, ?, ?, ?, ?)
+              ON CONFLICT (user_id, portfolio_id, calculation_version, idempotency_key) DO NOTHING`,
+              params: [
+                rebuildJobId,
+                userId,
+                portfolioId,
+                String(row.range_from),
+                String(row.range_to),
+                batchId,
+                String(row.ledger_high_water),
+                rebuildJobId,
+                at,
+                at,
+              ],
+            },
+          };
         });
+        dividendRebuildJobIds = dividendRebuildInserts.map((entry) => entry.id);
       }
 
       statements.push({
@@ -500,10 +577,52 @@ export function createOwnedImportReversalRepository(
     );
     try {
       await atomic(client, statements);
-      return { ok: true, dividendRebuildJobIds };
     } catch {
       return { ok: false };
     }
+
+    // BUG-016 review B1 fix (2026-09-03): the reversal itself is already
+    // durable at this point (the atomic unit above committed, including the
+    // batch's terminal `reversed` status) -- everything from here down is
+    // best-effort parity queueing (see the doc comment where
+    // `dividendRebuildInserts` is built) and must NEVER turn an
+    // already-successful reversal into a failure response, nor strand the
+    // batch. Each chunk is its own `client.batch()` call capped at
+    // `maxStatementsPerAtomicUnit` statements; a failed chunk stops further
+    // queueing (nothing later depends on ordering) and is logged, but the
+    // ids that landed before the failure are still returned so callers can
+    // still advance what did get queued.
+    const landedDividendRebuildJobIds: string[] = [];
+    for (
+      let index = 0;
+      index < dividendRebuildInserts.length;
+      index += IMPORT_REVERSAL_LIMITS.maxStatementsPerAtomicUnit
+    ) {
+      const chunk = dividendRebuildInserts.slice(
+        index,
+        index + IMPORT_REVERSAL_LIMITS.maxStatementsPerAtomicUnit,
+      );
+      try {
+        await client.batch(chunk.map((entry) => entry.statement));
+        landedDividendRebuildJobIds.push(...chunk.map((entry) => entry.id));
+      } catch {
+        emitStructuredLog({
+          level: "error",
+          event: "import.reverse",
+          action: "import.reverse.dividend_rebuild_queue_failed",
+          result: "failure",
+          requestId,
+          metadata: {
+            batchId,
+            queuedCount: landedDividendRebuildJobIds.length,
+            intendedCount: dividendRebuildInserts.length,
+          },
+        });
+        break;
+      }
+    }
+
+    return { ok: true, dividendRebuildJobIds: landedDividendRebuildJobIds };
   }
 
   return {

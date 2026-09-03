@@ -357,6 +357,76 @@ test("authenticated reversal action rejects malformed, unconfirmed, and stale re
   );
 });
 
+// BUG-016 fold-in (F1): `reverseImportWithContext` used to discard
+// `result.rebuildJobIds` entirely -- the queued `calculation_runs` rows
+// (here, the per-transaction `ledger_mutation` row `ledger.reverse()`
+// queues) sat `queued` until the cron sweep. Mirrors the commit routes'
+// `advanceCalculationRunsForCommit` best-effort call: after a successful
+// reversal the portfolio's projection publication must already be CURRENT,
+// with no queued run left over, in the SAME request.
+test("BUG-016 fold-in: a reversal advances its own queued calculation runs in-request, leaving the portfolio's projection publication current", async () => {
+  const { database, version } = await commitBatch(await migratedDatabase(), 1);
+  // The commit above already queued its own (now-stale) `calculation_runs`
+  // rows for portfolio-a; `advanceCalculationRuns`'s bulk
+  // `supersedeStaleQueuedRuns` step correctly recognizes and supersedes
+  // them once the reversal's own NEWER run exists -- but its "newer" test
+  // ties on `created_at` at millisecond resolution and falls back to
+  // comparing row ids (not chronological) on an exact tie. A real clock
+  // gap here (unlike production, where a commit and its reversal are
+  // always separate requests) keeps this assertion about the REVERSAL's
+  // own run deterministic without touching that pre-existing tie-break
+  // logic, which is out of this task's scope.
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const context = {
+    client: createSqliteSqlClient(database),
+    userId: "user-a",
+    requestId: "fold-in-request",
+  };
+  const result = await reverseImportWithContext(
+    context,
+    "batch-a",
+    reversalInput(version, "fold-in-reverse"),
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.reversal.status, "reversed");
+  assert.equal(result.reversal.rebuildJobIds.length, 1);
+  const runId = result.reversal.rebuildJobIds[0]!;
+
+  const run = database
+    .prepare(`SELECT status FROM calculation_runs WHERE id = ?`)
+    .get(runId) as { status: string } | undefined;
+  assert.equal(
+    run?.status,
+    "completed",
+    "the reversal's own queued run must already be advanced by the time the request returns",
+  );
+
+  const publication = database
+    .prepare(
+      `SELECT calculation_run_id FROM projection_publications
+       WHERE user_id = 'user-a' AND portfolio_id = 'portfolio-a'`,
+    )
+    .get() as { calculation_run_id: string } | undefined;
+  assert.equal(
+    publication?.calculation_run_id,
+    runId,
+    "expected the projection publication to be current, pointing at the just-completed run",
+  );
+
+  const stillQueued = database
+    .prepare(
+      `SELECT count(*) AS count FROM calculation_runs
+       WHERE user_id = 'user-a' AND portfolio_id = 'portfolio-a' AND status = 'queued'`,
+    )
+    .get() as { count: number };
+  assert.equal(
+    stillQueued.count,
+    0,
+    "no queued run should remain when the post-reversal budget suffices",
+  );
+});
+
 test("reversal route enforces CSRF before its authenticated action and returns private progress", async () => {
   let calls = 0;
   const rejectedPost = createImportReversalPost(async () => {
@@ -475,6 +545,105 @@ test("one reversal invocation stays within D1 query, statement, and parameter bu
         chunkSize: IMPORT_REVERSAL_LIMITS.maxChunkSize + 1,
       }),
     /invalid_import_reversal_chunk_size/,
+  );
+});
+
+// BUG-016 review B1 regression pin: before the fix, `finalize`'s single
+// atomic `client.batch()` call grew by one `calculation_runs` INSERT per
+// distinct dividend-bearing portfolio in the batch, with no LIMIT on the
+// grouped SELECT driving it -- a batch spanning 6 dividend-bearing
+// portfolios produced a 12-statement atomic unit against the 10-statement
+// `maxStatementsPerAtomicUnit` ceiling. This fixture seeds a dividend-only,
+// 6-portfolio batch (finalizing on the very first invocation -- no trades
+// to chunk) and pins that the fixed atomic unit inside `finalize` itself
+// stays exactly 6 statements (row flip, dividend flip, DIV-016C restore,
+// delete, audit, batch-status) regardless of portfolio count, with the
+// per-portfolio rebuild queueing issued as its OWN separate, bounded
+// `client.batch()` call afterward.
+function seedDividendBearingPortfolio(
+  database: DatabaseSync,
+  index: number,
+): void {
+  const portfolioId = `portfolio-div-${index}`;
+  const membershipId = `membership-div-${index}`;
+  database.exec(`
+    INSERT INTO portfolios (
+      id, user_id, code, name, base_currency_code, timezone,
+      accounting_method, status, created_at, updated_at, version
+    ) VALUES ('${portfolioId}', 'user-a', 'D${index}', 'Div ${index}', 'AUD',
+      'Australia/Sydney', 'fifo', 'active', '2026-08-03', '2026-08-03', 1);
+    INSERT INTO portfolio_securities (
+      id, user_id, portfolio_id, security_id, source_symbol,
+      source_currency_code, status, created_at, updated_at
+    ) VALUES ('${membershipId}', 'user-a', '${portfolioId}', 'security-a',
+      'ABC${index}', 'AUD', 'held', '2026-08-03', '2026-08-03');
+    INSERT INTO dividend_manual_records (
+      id, user_id, portfolio_id, portfolio_security_id, payment_date,
+      shares_decimal, dividend_per_share_decimal,
+      franking_credit_per_share_decimal, import_batch_id, source_reference,
+      created_at, updated_at, version
+    ) VALUES ('div-${index}', 'user-a', '${portfolioId}', '${membershipId}',
+      '2026-08-10', '5', '0.5', NULL, 'batch-a', NULL, '2026-08-03',
+      '2026-08-03', 1);
+  `);
+}
+
+test("BUG-016 review B1: a finalizing reversal across 6 dividend-bearing portfolios keeps every atomic unit fixed-size, not data-controlled", async () => {
+  const database = await migratedDatabase();
+  const portfolioCount = 6;
+  for (let index = 1; index <= portfolioCount; index += 1) {
+    seedDividendBearingPortfolio(database, index);
+  }
+  // Dividend-only batch: no trade rows staged at all, so this batch commits
+  // trivially and the very first reversal invocation is already finalizing
+  // (`remainingTransactions` is 0 from the start).
+  const { version } = await commitBatch(database, 0);
+  const base = createSqliteSqlClient(database);
+  const batchSizes: number[] = [];
+  const client: SqlClient = {
+    all: (sql, params) => base.all(sql, params),
+    get: (sql, params) => base.get(sql, params),
+    run: (sql, params) => base.run(sql, params),
+    async batch(statements) {
+      batchSizes.push(statements.length);
+      return base.batch!(statements);
+    },
+  };
+  const result = await createOwnedImportReversalRepository(client).reverse(
+    "user-a",
+    "batch-a",
+    reversalInput(version, "reverse-dividend-portfolios"),
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.status, "reversed");
+  assert.equal(result.rebuildJobIds.length, portfolioCount);
+  for (let index = 1; index <= portfolioCount; index += 1) {
+    assert.ok(
+      result.rebuildJobIds.includes(
+        `import-reversal-rebuild:batch-a:portfolio-div-${index}`,
+      ),
+    );
+  }
+  assert.ok(
+    batchSizes.every(
+      (size) => size <= IMPORT_REVERSAL_LIMITS.maxStatementsPerAtomicUnit,
+    ),
+    `every atomic unit must stay within the ${IMPORT_REVERSAL_LIMITS.maxStatementsPerAtomicUnit}-statement budget, saw ${JSON.stringify(batchSizes)}`,
+  );
+  // Exactly two atomic calls: `finalize`'s own fixed 6-statement unit, then
+  // ONE separate chunk queueing all 6 portfolios' rebuild rows (6 <=
+  // maxStatementsPerAtomicUnit, so a single chunk suffices).
+  assert.deepEqual(batchSizes, [6, portfolioCount]);
+  assert.equal(
+    (
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM calculation_runs WHERE reason = 'import_reverse' AND user_id = 'user-a'",
+        )
+        .get() as { count: number }
+    ).count,
+    portfolioCount,
   );
 });
 
