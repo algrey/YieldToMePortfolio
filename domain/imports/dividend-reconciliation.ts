@@ -148,6 +148,31 @@ export function cashTotalsWithinTolerance(a: string, b: string): boolean {
   return compareDecimal(diff, threshold) <= 0;
 }
 
+// BUG-014 correction round (B1): `cashTotalsWithinTolerance` above parses
+// BOTH sides with `parseDecimalResult` and THROWS on a non-canonical or
+// over-scale string. Every caller of `computeDividendReconciliation` below
+// is expected to have already excluded any candidate/incoming row whose
+// `cashTotalDecimal` failed to validate -- but `computeDividendCashTotal`'s
+// own totals-mode branch returns `fields.totalCashDecimal` VERBATIM,
+// unparsed, so a caller that skips (or gets wrong) that pre-validation step
+// can still hand this matching function a syntactically-`string`,
+// semantically-garbage value. A match PREDICATE throwing turns one bad
+// row/candidate anywhere in the pool into a hard failure of the WHOLE
+// reconciliation call, not just a missed comparison -- the same lesson
+// `domain/imports/reconciliation.ts`'s `decimalEqual` (F4) and
+// `safeCashTotalsWithinTolerance` already apply one layer up. This function
+// is the one place that actually owns the compare, so it applies the same
+// fail-safe here too, independent of whether every caller got its own
+// pre-validation right: an unparseable pair can never be fabricated into a
+// match, it simply never matches.
+function cashTotalsWithinToleranceSafe(a: string, b: string): boolean {
+  try {
+    return cashTotalsWithinTolerance(a, b);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * MATCHING RULE (DIV-016 part C): an incoming row matches a candidate when
  * they share the SAME `portfolioSecurityId`, the SAME `paymentDate` (exact
@@ -188,7 +213,7 @@ export function computeDividendReconciliation(
       if (candidate.portfolioSecurityId !== row.portfolioSecurityId) continue;
       if (candidate.paymentDate !== row.paymentDate) continue;
       if (
-        !cashTotalsWithinTolerance(
+        !cashTotalsWithinToleranceSafe(
           row.cashTotalDecimal,
           candidate.cashTotalDecimal,
         )

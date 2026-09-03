@@ -856,6 +856,118 @@ test("DIV-004 B2: a dividend row near an existing owner-typed manual record warn
 });
 
 // ---------------------------------------------------------------------------
+// BUG-014 correction round (B2, BLOCKING): a staged dividend row whose
+// `normalized_fields_json` genuinely lacks `sharesOwned` (deserializes to
+// `undefined`, not `null` -- a legacy blob predating the field) passes
+// preview with a visible, non-blocking
+// DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE warning and reaches
+// `ready`. Before this fix, `db/repositories/import-commit.ts`'s
+// `revalidate()` re-derived the SAME comparable total via the raw,
+// unguarded `computeDividendCashTotal` (not the
+// `safeComputeDividendCashTotalDiagnosed`-guarded preview path) and threw
+// `Invalid decimal string.` straight out of `commitRepo.commit()` --
+// `app/import-commit-actions.ts`'s catch-all then turned that into a
+// permanent, unrecoverable 503 "Import commit is temporarily unavailable."
+// for a row that could never validly commit anyway. Fixed by using the
+// exported, exception-safe `safeComputeDividendCashTotal` at both
+// `revalidate()` call sites: the row is excluded from the reconciliation
+// matching pool (exactly like a genuinely-empty row always was), commit
+// proceeds past `revalidate()`, and the row's OWN insert then fails its
+// normal, honest `mapping_incomplete` validation
+// (`buildDividendManualRecordImportInsertStatements`'s
+// `isPositiveDecimalString` rejecting the empty
+// `sharesDecimal: normalized.sharesOwned ?? ""`) -- never a crash, and no
+// `dividend_manual_records` row is ever written.
+// ---------------------------------------------------------------------------
+
+test("BUG-014 correction round (B2): a staged dividend row with undefined sharesOwned stages, warns, reaches ready, and fails commit with mapping_incomplete (not a crash) -- no dividend_manual_records row is written", async () => {
+  const database = await migratedDatabase();
+  const legacyNormalized = dividendNormalizedRow(
+    "2026-08-05",
+    "0.50",
+  ) as unknown as Record<string, unknown>;
+  delete legacyNormalized.sharesOwned;
+  database
+    .prepare(
+      `INSERT INTO import_rows (
+         id, user_id, batch_id, physical_row_number, row_class,
+         original_fields_json, normalized_fields_json, normalized_fingerprint,
+         validation_status, target_portfolio_id, commit_status, created_at, updated_at, version
+       ) VALUES (?, 'user-a', 'batch-a', 2, 'transaction', '[]', ?, ?, 'valid',
+         NULL, 'staged', '2026-08-10', '2026-08-10', 1)`,
+    )
+    .run(
+      "row-div-no-shares",
+      JSON.stringify(legacyNormalized),
+      "fingerprint-row-div-no-shares",
+    );
+
+  const client = createSqliteSqlClient(database);
+  const context = { client, userId: "user-a" };
+
+  const pageReviewBeforeReady = await pagePreview(client, "user-a", "batch-a");
+  const warning = pageReviewBeforeReady.preview.issues.find(
+    (issue) => issue.code === "DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE",
+  );
+  assert.ok(
+    warning,
+    "expected the amount-unavailable warning on the page preview",
+  );
+  assert.equal(
+    pageReviewBeforeReady.preview.ready,
+    true,
+    "the warning must never block readiness",
+  );
+
+  const ready = await markImportReadyWithContext(context, "batch-a", {
+    expectedVersion: 1,
+    expectedPreviewVersion: pageReviewBeforeReady.previewVersion,
+  });
+  assert.equal(ready.ok, true);
+  if (!ready.ok) return;
+  const readyVersion = ready.review.batch.version;
+
+  const pageReviewAfterReady = await pagePreview(client, "user-a", "batch-a");
+  const commitRepo = createOwnedImportCommitRepository(client);
+
+  // BUG-014 correction round (B2): before the fix, this call threw
+  // `Invalid decimal string.` out of `revalidate()`'s unguarded
+  // `computeDividendCashTotal` (confirmed against `90c24db`, this task's
+  // own round-1 commit -- see the worker report). After the fix it resolves
+  // to the honest `mapping_incomplete` failure instead of throwing.
+  const commitInput: ImportCommitInput = {
+    expectedVersion: readyVersion,
+    expectedPreviewVersion: pageReviewAfterReady.previewVersion,
+    idempotencyKey: "imp-004a-bug-014-b2-commit",
+    confirmation: true,
+    requestId: "imp-004a-bug-014-b2-commit-request",
+  };
+  const commitResult = await commitRepo.commit(
+    "user-a",
+    "batch-a",
+    commitInput,
+  );
+  assert.equal(commitResult.ok, false);
+  if (commitResult.ok) return;
+  assert.equal(
+    commitResult.reason,
+    "mapping_incomplete",
+    "an unparseable/incomplete dividend amount must fail commit with the same honest, expected reason a genuinely-empty row would -- never crash the whole commit",
+  );
+
+  const manualRecordCount = database
+    .prepare(
+      `SELECT COUNT(*) as count FROM dividend_manual_records WHERE user_id = 'user-a'`,
+    )
+    .get() as { count: number };
+  assert.equal(
+    manualRecordCount.count,
+    0,
+    "nothing malformed is ever persisted -- the failed row must leave no dividend_manual_records row behind",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // BUG-011 review round F1/F3: DB-level coverage for `loadReview`'s
 // existing-trade query wiring (`app/import-actions.ts`), which the original
 // task's pure-function tests (`tests/bug-011.test.ts`) never exercised.

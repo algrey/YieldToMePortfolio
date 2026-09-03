@@ -28,11 +28,19 @@ import {
   SHARESIGHT_SYNC_PARSER_VERSION,
 } from "../../domain/sharesight-sync/index.ts";
 import {
-  computeDividendCashTotal,
   computeDividendReconciliation,
   type DividendReconciliationCandidate,
   type DividendReconciliationIncomingRow,
 } from "../../domain/imports/dividend-reconciliation.ts";
+// BUG-014 correction round (B2, BLOCKING): the exported, exception-safe
+// wrapper -- `revalidate()` below used to call the raw `computeDividendCashTotal`
+// unguarded at both reconciliation-matching sites, which could throw
+// `Invalid decimal string.` straight out of `commit()` (via `revalidate()`)
+// for a staged row/DB-stored candidate with an unparseable amount, turning
+// a request that should fail with an honest `mapping_incomplete` into a
+// permanent 503 (`app/import-commit-actions.ts`'s catch-all). See
+// `safeComputeDividendCashTotal`'s doc comment.
+import { safeComputeDividendCashTotal } from "../../domain/imports/reconciliation.ts";
 
 // BRK-005: mirrors `app/import-ready-service.ts`'s identical widening of the
 // CSV parser's `(parserFormat, parserVersion)` allowlist by exactly one
@@ -526,7 +534,20 @@ export function createOwnedImportCommitRepository(
         )
       )
         continue;
-      const cashTotalDecimal = computeDividendCashTotal({
+      // BUG-014 correction round (B2, BLOCKING): was the raw, unguarded
+      // `computeDividendCashTotal` -- a staged row whose `normalizedFields`
+      // genuinely lacked `sharesOwned` (deserializes to `undefined`, `!==
+      // null`, sails past the `=== null` guards) or carried a non-canonical/
+      // over-scale decimal threw `Invalid decimal string.` straight out of
+      // `revalidate()` -- called by `commit()` on every commit attempt --
+      // permanently 503ing a batch that had already passed preview with a
+      // (correctly non-blocking) `DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE`
+      // warning. `safeComputeDividendCashTotal` never throws, so this row is
+      // instead excluded from the matching pool below (`cashTotalDecimal ===
+      // null` -- unchanged), exactly like a genuinely-empty row already was;
+      // its own insert then fails its normal `mapping_incomplete` validation
+      // instead of crashing the whole commit.
+      const cashTotalDecimal = safeComputeDividendCashTotal({
         totalCashDecimal: normalized.totalCashDecimal ?? null,
         sharesDecimal: normalized.sharesOwned,
         dividendPerShareDecimal: normalized.costPerShare,
@@ -545,7 +566,13 @@ export function createOwnedImportCommitRepository(
           id: String(row.id),
           portfolioSecurityId: String(row.portfolio_security_id),
           paymentDate: String(row.payment_date),
-          cashTotalDecimal: computeDividendCashTotal({
+          // BUG-014 correction round (B2, BLOCKING): the DB-sourced twin of
+          // the fix above -- was the raw `computeDividendCashTotal`, exposed
+          // to a corrupt/non-canonical stored `dividend_manual_records`
+          // decimal column the same way the widened `existingManualRows`
+          // query in `app/import-actions.ts` already is (BUG-013's own
+          // established exposure).
+          cashTotalDecimal: safeComputeDividendCashTotal({
             totalCashDecimal:
               row.total_cash_decimal === null
                 ? null

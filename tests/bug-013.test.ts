@@ -841,9 +841,15 @@ test("source pin: DIV-016 part C's OWN reconciliation-candidates query is left u
     new URL("../app/import-actions.ts", import.meta.url),
     "utf8",
   );
+  // BUG-014 correction round (follow-up): this query now also LEFT JOINs
+  // `portfolio_securities` for a display-only security symbol label (see
+  // `ImportPreviewDividendReconciliationCandidate.securitySymbol`'s doc
+  // comment) -- the regex is updated for the new column list/JOIN, but the
+  // SAME `import_batch_id IS NULL` / `superseded_by_record_id IS NULL`
+  // predicate this test exists to pin is still required, unchanged.
   assert.match(
     source,
-    /SELECT id, portfolio_security_id, payment_date, shares_decimal,\s*\n\s*dividend_per_share_decimal, total_cash_decimal\s*\n\s*FROM dividend_manual_records\s*\n\s*WHERE user_id = \? AND import_batch_id IS NULL\s*\n\s*AND superseded_by_record_id IS NULL/,
+    /SELECT dmr\.id AS id, dmr\.portfolio_security_id AS portfolio_security_id,\s*\n\s*dmr\.payment_date AS payment_date, dmr\.shares_decimal AS shares_decimal,\s*\n\s*dmr\.dividend_per_share_decimal AS dividend_per_share_decimal,\s*\n\s*dmr\.total_cash_decimal AS total_cash_decimal,\s*\n\s*COALESCE\(ps\.display_symbol, ps\.source_symbol\) AS security_symbol\s*\n\s*FROM dividend_manual_records dmr\s*\n\s*LEFT JOIN portfolio_securities ps ON ps\.id = dmr\.portfolio_security_id\s*\n\s*WHERE dmr\.user_id = \? AND dmr\.import_batch_id IS NULL\s*\n\s*AND dmr\.superseded_by_record_id IS NULL/,
   );
 });
 

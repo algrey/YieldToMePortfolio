@@ -161,12 +161,24 @@ async function loadReview(
     // carries amounts): this is the advisory PREVIEW-only disclosure --
     // `db/repositories/import-commit.ts`'s `revalidate()` runs the
     // authoritative, live-DB-state equivalent independently at commit time.
+    // BUG-014 correction round (follow-up): joins `portfolio_securities`
+    // for a display label only (`display_symbol`, falling back to
+    // `source_symbol` -- the same "always populated, sometimes owner-
+    // resolved" pair `import-review.tsx` displays elsewhere) -- see
+    // `ImportPreviewDividendReconciliationCandidate.securitySymbol`'s doc
+    // comment. Never used for matching/identity; a missing membership row
+    // (should not happen -- `portfolio_security_id` is a foreign key) just
+    // leaves the label absent via the LEFT JOIN, never blocking the query.
     client.all<Record<string, unknown>>(
-      `SELECT id, portfolio_security_id, payment_date, shares_decimal,
-              dividend_per_share_decimal, total_cash_decimal
-       FROM dividend_manual_records
-       WHERE user_id = ? AND import_batch_id IS NULL
-         AND superseded_by_record_id IS NULL`,
+      `SELECT dmr.id AS id, dmr.portfolio_security_id AS portfolio_security_id,
+              dmr.payment_date AS payment_date, dmr.shares_decimal AS shares_decimal,
+              dmr.dividend_per_share_decimal AS dividend_per_share_decimal,
+              dmr.total_cash_decimal AS total_cash_decimal,
+              COALESCE(ps.display_symbol, ps.source_symbol) AS security_symbol
+       FROM dividend_manual_records dmr
+       LEFT JOIN portfolio_securities ps ON ps.id = dmr.portfolio_security_id
+       WHERE dmr.user_id = ? AND dmr.import_batch_id IS NULL
+         AND dmr.superseded_by_record_id IS NULL`,
       [userId],
     ),
     // DIV-016 part C, review round 1 B1 (BLOCKING): every dividend row
@@ -392,6 +404,8 @@ async function loadReview(
         row.dividend_per_share_decimal === null
           ? null
           : String(row.dividend_per_share_decimal),
+      securitySymbol:
+        row.security_symbol === null ? null : String(row.security_symbol),
     }));
   // BUG-011 review round F2/F-a: the cap/degrade DECISION is a pure
   // function (`capExistingTradeRows`), unit-tested directly since this file

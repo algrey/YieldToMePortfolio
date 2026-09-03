@@ -116,6 +116,30 @@ function safeCashTotalsWithinTolerance(left: string, right: string): boolean {
 // only for that second, genuinely-unexpected case -- a row/candidate simply
 // never carrying enough data is not malformed, and must stay silent exactly
 // as it always has.
+//
+// BUG-014 CORRECTION ROUND (B1, BLOCKING): the check above is necessary but
+// NOT sufficient. `computeDividendCashTotal`'s TOTALS-mode branch (used
+// whenever `totalCashDecimal !== null`) returns that field VERBATIM --
+// `parseDecimal`/`parseDecimalResult` are never called on it, so it can
+// NEVER throw regardless of how malformed the stored/staged string is (a
+// trailing space, a non-canonical `+`/leading-zero form, or a value whose
+// scale exceeds even `parseDecimalResult`'s wide 96-scale/256-digit "result"
+// bound -- see `domain/calculations/decimal.ts`'s `DECIMAL_LIMITS`). Without
+// this second check, such a value came back `cashTotalDecimal !== null` /
+// `malformed: false` -- reported as a clean, comparable amount -- and then
+// reached `cashTotalsWithinTolerance` (via `computeDividendReconciliation`,
+// or the raw compare below) for the first time, where it WOULD throw,
+// 500ing the page or crashing commit-time `revalidate()`. Fixed by forcing
+// the exact same parse this value will actually be checked against at match
+// time: `safeCashTotalsWithinTolerance`'s self-compare (`v` against itself)
+// parses `v` through `parseDecimalResult` and returns `false` -- never
+// throws -- when it doesn't parse. A value that fails this trivially-true
+// self-compare is reclassified as malformed instead of silently passing
+// through as clean. Per-share-mode values are already covered by the
+// existing throw-inside-the-try-block path above; this covers the ONE shape
+// that path structurally cannot (see this module's F1 correction to the
+// over-claiming comments at the two call sites below for the exact
+// per-mode bound each branch is validated against).
 function safeComputeDividendCashTotalDiagnosed(fields: {
   totalCashDecimal: string | null;
   sharesDecimal: string | null;
@@ -123,6 +147,9 @@ function safeComputeDividendCashTotalDiagnosed(fields: {
 }): { cashTotalDecimal: string | null; malformed: boolean } {
   const cashTotalDecimal = safeComputeDividendCashTotal(fields);
   if (cashTotalDecimal !== null) {
+    if (!safeCashTotalsWithinTolerance(cashTotalDecimal, cashTotalDecimal)) {
+      return { cashTotalDecimal: null, malformed: true };
+    }
     return { cashTotalDecimal, malformed: false };
   }
   const genuinelyAbsent =
@@ -418,6 +445,16 @@ export type ImportPreviewDividendReconciliationCandidate = Readonly<{
   totalCashDecimal: string | null;
   sharesDecimal: string | null;
   dividendPerShareDecimal: string | null;
+  // BUG-014 correction round (follow-up): display-only label (e.g.
+  // `portfolio_securities.display_symbol`/`source_symbol`) for the
+  // `DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE` warning message
+  // -- this batch-level issue has no `rowId` for the review UI's row-fact
+  // lookup to key off, so the message names the record itself instead.
+  // Optional/nullable and never used for matching -- omitted entirely by a
+  // caller/fixture that predates this field (message then falls back to
+  // payment date alone), and never fabricated when the caller has no
+  // symbol to offer.
+  securitySymbol?: string | null;
 }>;
 
 export type ImportReconciliationPreview = Readonly<{
@@ -1188,9 +1225,28 @@ export function createImportReconciliationPreview(
       // BUG-014: `computeDividendCashTotal` used to be called unguarded
       // here -- a staged row whose `normalized_fields_json` genuinely
       // lacked `sharesOwned` (deserializes to `undefined`, which sails past
-      // the `=== null` guards) or carried a non-canonical/over-scale
-      // decimal threw `Invalid decimal string.` straight out of this pure
-      // function, 500ing the entire `/import` review page for one bad row.
+      // the `=== null` guards) threw `Invalid decimal string.` straight out
+      // of this pure function, 500ing the entire `/import` review page for
+      // one bad row. A non-canonical/over-scale PER-SHARE-mode
+      // (`sharesDecimal`/`dividendPerShareDecimal`) value is caught the same
+      // way, bound by `parseDecimal`'s narrower "input" limit (scale 24,
+      // 64 digits -- `domain/calculations/decimal.ts`'s `DECIMAL_LIMITS`).
+      //
+      // CORRECTION (BUG-014 correction round, B1): this comment previously
+      // claimed "or carried a non-canonical/over-scale decimal" covered
+      // EVERY case reaching this row, which was false for TOTALS-mode --
+      // `computeDividendCashTotal` returns a non-null `totalCashDecimal`
+      // VERBATIM, never parsing it, so a malformed totals-mode value never
+      // threw here and sailed through as `malformed: false`.
+      // `safeComputeDividendCashTotalDiagnosed` now additionally validates
+      // that verbatim value via a self-compare through
+      // `safeCashTotalsWithinTolerance` (bound by `parseDecimalResult`'s
+      // WIDER "result" limit: scale 96, 256 digits -- a deliberately
+      // different bound than the per-share-mode path above, since a
+      // Sharesight-reported total is a transported result figure, not a
+      // fresh input). Both modes are now covered, each by the bound that
+      // actually applies to it.
+      //
       // An unparseable value is now "cannot compare" -- the row still
       // stages and renders, it is simply excluded from the reconciliation
       // matching pool below (via the `cashTotalDecimal !== null` filter,
@@ -1211,8 +1267,16 @@ export function createImportReconciliationPreview(
           rowId: row.id,
           physicalRowNumber: row.physicalRowNumber,
           sourceKey: membershipId,
+          // BUG-014 correction round: this dividend row has no per-field
+          // edit affordance anywhere in the import review UI (see
+          // `app/components/import-review.tsx`) -- "review the amount
+          // fields before committing" told the owner to do something the
+          // product cannot do. The two actual remedies: skip the row (IMP-
+          // 008's "Skip this row" -- it will not be committed and can be
+          // included again later), or fix the amount in the source file and
+          // re-import as a new batch.
           message:
-            "This dividend's cash total could not be read (a missing or unparseable amount field) -- it cannot be checked against existing manually entered records automatically; review the amount fields before committing.",
+            "This dividend's cash total could not be read (a missing or unparseable amount field) -- it cannot be checked against existing manually entered records automatically. This row cannot be edited in place: skip it (\"Skip this row\", below) if you don't need it, or fix the amount in the source file and re-import.",
         });
       }
       return {
@@ -1244,12 +1308,21 @@ export function createImportReconciliationPreview(
   // used to be called unguarded here too, and this candidate set is
   // DB-sourced (`dividend_manual_records` decimal columns), so it is
   // exposed to a corrupt/non-canonical STORED value as well as a legacy
-  // staged blob. `db/repositories/dividends.ts`'s `isDecimalString` does
-  // not bound scale, but `parseDecimal` does (>24), so a legitimately
-  // stored row can still be unparseable at read time. An unparseable
-  // candidate is excluded from matching (unchanged `cashTotalDecimal !==
-  // null` filter below) and now also raises a visible, batch-level warning
-  // -- never a silent drop.
+  // staged blob.
+  //
+  // CORRECTION (BUG-014 correction round, B1): this comment previously
+  // claimed "`isDecimalString` does not bound scale, but `parseDecimal`
+  // does (>24)" as if that were the ONE bound guarding every column here --
+  // it is the bound for the PER-SHARE-mode columns (`shares_decimal`/
+  // `dividend_per_share_decimal`) only. A TOTALS-mode `total_cash_decimal`
+  // is never passed through `parseDecimal` at all (`computeDividendCashTotal`
+  // returns it verbatim); it is now validated via
+  // `safeComputeDividendCashTotalDiagnosed`'s self-compare, bound by
+  // `parseDecimalResult`'s WIDER "result" limit (scale 96, 256 digits) --
+  // see that function's own doc comment for why the two modes need
+  // different bounds. An unparseable candidate (either mode) is excluded
+  // from matching (unchanged `cashTotalDecimal !== null` filter below) and
+  // now also raises a visible, batch-level warning -- never a silent drop.
   const reconciliationCandidates = (input.reconciliationCandidates ?? []).map(
     (candidate) => {
       const { cashTotalDecimal, malformed } =
@@ -1259,12 +1332,24 @@ export function createImportReconciliationPreview(
           dividendPerShareDecimal: candidate.dividendPerShareDecimal,
         });
       if (malformed) {
+        // BUG-014 correction round (follow-up): this is a BATCH-level issue
+        // (no `rowId`) -- `app/components/import-review.tsx`'s issue list
+        // only attaches row-fact context (security/date) to a `rowId`-
+        // linked issue, so without naming the record here the owner has no
+        // way to find WHICH existing manually entered record this is about
+        // besides the raw `sourceKey` (the record id, never rendered).
+        // Names the payment date (always present) and the security symbol
+        // (when the caller supplied one -- see
+        // `ImportPreviewDividendReconciliationCandidate.securitySymbol`'s
+        // doc comment; omitted rather than fabricated when unknown).
+        const securityLabel = candidate.securitySymbol
+          ? ` (${candidate.securitySymbol}, paid ${candidate.paymentDate})`
+          : ` (paid ${candidate.paymentDate})`;
         issues.push({
           code: "DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE",
           severity: "warning",
           sourceKey: candidate.id,
-          message:
-            "An existing manually entered dividend record has a stored amount that could not be read -- it was excluded from automatic reconciliation matching; open and correct that record directly.",
+          message: `An existing manually entered dividend record${securityLabel} has a stored amount that could not be read -- it was excluded from automatic reconciliation matching; open and correct that record directly.`,
         });
       }
       return {
@@ -1331,12 +1416,20 @@ export function createImportReconciliationPreview(
   // ambiguity machinery -- this row can never actually reconcile regardless
   // of how many candidates it resembles, so "would it match at least one"
   // is the only relevant question.
+  //
+  // BUG-014 correction round (B1): uses the SAFE wrapper, not the raw
+  // `cashTotalsWithinTolerance` this used to call directly. Both operands
+  // here are already filtered through the (now self-validating)
+  // `safeComputeDividendCashTotalDiagnosed` above, so neither should be able
+  // to throw in practice -- this is defense-in-depth against a future
+  // caller of this same loop shape getting that pre-validation wrong, not a
+  // sign either operand is currently expected to be malformed.
   for (const row of alreadyImportedRows) {
     const wouldHaveMatched = dividendCandidatesWithCash.some(
       (candidate) =>
         candidate.portfolioSecurityId === row.portfolioSecurityId &&
         candidate.paymentDate === row.paymentDate &&
-        cashTotalsWithinTolerance(
+        safeCashTotalsWithinTolerance(
           row.cashTotalDecimal,
           candidate.cashTotalDecimal,
         ),

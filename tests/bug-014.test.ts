@@ -368,6 +368,173 @@ test("a malformed candidate does not poison a sibling well-formed candidate's no
 });
 
 // ---------------------------------------------------------------------------
+// BUG-014 correction round (B1, BLOCKING): the TOTALS-mode verbatim
+// passthrough. `computeDividendCashTotal`'s totals-mode branch
+// (`totalCashDecimal !== null`) returns that field UNPARSED -- unlike the
+// per-share-mode branch above (which always calls `parseDecimal`), nothing
+// in round-1's code ever validated it, so a malformed TOTALS-mode value
+// (unlike a malformed per-share-mode value) sailed through as
+// `malformed: false` and later threw the FIRST time it was actually
+// compared (`cashTotalsWithinTolerance`'s `parseDecimalResult`). Fixed by
+// `safeComputeDividendCashTotalDiagnosed`'s self-compare validation. Note
+// the bound is DELIBERATELY WIDER than the per-share-mode path's
+// `parseDecimal` (scale 24): totals-mode is validated via
+// `parseDecimalResult` (scale 96), so a value that would be malformed for
+// a FRESH per-share input can still be well-formed as a transported
+// totals-mode result -- `OVER_RESULT_SCALE_DECIMAL` below is deliberately
+// past even that wider bound.
+// ---------------------------------------------------------------------------
+
+// Past even `parseDecimalResult`'s WIDER "result" scale bound (96
+// fractional digits, `DECIMAL_LIMITS.resultScale`) -- 97 fractional digits
+// exceeds it, unlike `OVER_SCALE_DECIMAL` above (25 digits), which is
+// over `parseDecimal`'s narrower 24-digit "input" bound but well within
+// `parseDecimalResult`'s.
+const OVER_RESULT_SCALE_DECIMAL = `0.${"1".repeat(97)}`;
+
+test("a staged dividend row with a non-canonical TOTALS-mode totalCashDecimal ('2.50 ', trailing space) never throws, and surfaces a visible per-row warning instead of being reported as clean", () => {
+  const row = dividendRow({
+    rowId: "row-totals-noncanonical",
+    shape: "totals",
+  });
+  const malformedRow: ImportReconciliationRow = {
+    ...row,
+    normalized: { ...row.normalized, totalCashDecimal: "2.50 " },
+  };
+  assert.doesNotThrow(() => {
+    const preview = createImportReconciliationPreview({
+      rows: [malformedRow],
+      portfolios: PORTFOLIOS,
+      securityCandidates: SECURITY_CANDIDATES,
+      reconciliationCandidates: [candidate({ totalCashDecimal: "2.50" })],
+    });
+    const warning = preview.issues.find(
+      (issue) =>
+        issue.code === "DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE",
+    );
+    assert.ok(
+      warning,
+      "a malformed TOTALS-mode value must be reclassified as malformed, not silently reported as clean (the B1 regression)",
+    );
+    assert.equal(warning!.rowId, "row-totals-noncanonical");
+    assert.equal(
+      preview.proposedReconciliations.length,
+      0,
+      "a row whose own total could not be validated must never be proposed as a match",
+    );
+  });
+});
+
+test("a staged dividend row with an over-96-scale TOTALS-mode totalCashDecimal never throws, and surfaces a visible per-row warning", () => {
+  const row = dividendRow({ rowId: "row-totals-overscale", shape: "totals" });
+  const malformedRow: ImportReconciliationRow = {
+    ...row,
+    normalized: {
+      ...row.normalized,
+      totalCashDecimal: OVER_RESULT_SCALE_DECIMAL,
+    },
+  };
+  assert.doesNotThrow(() => {
+    const preview = createImportReconciliationPreview({
+      rows: [malformedRow],
+      portfolios: PORTFOLIOS,
+      securityCandidates: SECURITY_CANDIDATES,
+      reconciliationCandidates: [],
+    });
+    const warning = preview.issues.find(
+      (issue) =>
+        issue.code === "DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE",
+    );
+    assert.ok(warning);
+    assert.equal(warning!.rowId, "row-totals-overscale");
+  });
+});
+
+test("a reconciliation candidate with a non-canonical TOTALS-mode total_cash_decimal ('2.50 ', trailing space) never throws, and surfaces a visible batch-level warning instead of being reported as clean", () => {
+  const row = dividendRow({ rowId: "row-1", shape: "totals" });
+  assert.doesNotThrow(() => {
+    const preview = createImportReconciliationPreview({
+      rows: [row],
+      portfolios: PORTFOLIOS,
+      securityCandidates: SECURITY_CANDIDATES,
+      reconciliationCandidates: [
+        candidate({
+          id: "manual-totals-noncanonical",
+          totalCashDecimal: "2.50 ",
+          sharesDecimal: null,
+          dividendPerShareDecimal: null,
+        }),
+      ],
+    });
+    const warning = preview.issues.find(
+      (issue) =>
+        issue.code === "DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE",
+    );
+    assert.ok(
+      warning,
+      "a malformed TOTALS-mode stored value must be reclassified as malformed, not silently reported as clean (the B1 regression)",
+    );
+    assert.equal(warning!.sourceKey, "manual-totals-noncanonical");
+    assert.equal(
+      preview.proposedReconciliations.length,
+      0,
+      "the incoming row must never be matched against a candidate whose total could not be validated",
+    );
+  });
+});
+
+test("a reconciliation candidate with an over-96-scale TOTALS-mode total_cash_decimal never throws, and surfaces the same warning", () => {
+  const row = dividendRow({ rowId: "row-2", shape: "totals" });
+  assert.doesNotThrow(() => {
+    const preview = createImportReconciliationPreview({
+      rows: [row],
+      portfolios: PORTFOLIOS,
+      securityCandidates: SECURITY_CANDIDATES,
+      reconciliationCandidates: [
+        candidate({
+          id: "manual-totals-overscale",
+          totalCashDecimal: OVER_RESULT_SCALE_DECIMAL,
+          sharesDecimal: null,
+          dividendPerShareDecimal: null,
+        }),
+      ],
+    });
+    const warning = preview.issues.find(
+      (issue) =>
+        issue.code === "DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE",
+    );
+    assert.ok(warning);
+    assert.equal(warning!.sourceKey, "manual-totals-overscale");
+  });
+});
+
+test("the candidate amount-unavailable warning names the security symbol and payment date when the caller supplies one, so the owner can find the record without decoding sourceKey", () => {
+  const row = dividendRow({ rowId: "row-1" });
+  const preview = createImportReconciliationPreview({
+    rows: [row],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    reconciliationCandidates: [
+      candidate({
+        id: "manual-labelled",
+        paymentDate: "2026-08-05",
+        totalCashDecimal: "2.50 ",
+        sharesDecimal: null,
+        dividendPerShareDecimal: null,
+        securitySymbol: "ABC",
+      }),
+    ],
+  });
+  const warning = preview.issues.find(
+    (issue) =>
+      issue.code === "DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE",
+  );
+  assert.ok(warning);
+  assert.match(warning!.message, /ABC/);
+  assert.match(warning!.message, /2026-08-05/);
+});
+
+// ---------------------------------------------------------------------------
 // Both sites together: the review page still renders end to end.
 // ---------------------------------------------------------------------------
 
