@@ -52,6 +52,8 @@ import {
   capExistingDividendRows,
   MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
 } from "./import-dividend-duplicate-check.ts";
+import { capSuppressionReferenceRows } from "./import-suppression-cap.ts";
+import { emitStructuredLog } from "../domain/observability/index.ts";
 
 type ImportActionFailure = {
   ok: false;
@@ -176,10 +178,15 @@ async function loadReview(
     // `DIVIDEND_RECONCILIATION_PROPOSED` promise (see
     // `ImportReconciliationInput.existingDividendSourceReferences`'s doc
     // comment).
+    //
+    // BUG-013 review follow-up ("fail-open cap"): bounded with `LIMIT MAX +
+    // 1` -- see the fail-open/fail-closed asymmetry comment on the capped
+    // result below.
     client.all<Record<string, unknown>>(
       `SELECT portfolio_id, source_reference FROM dividend_manual_records
-       WHERE user_id = ? AND source_reference IS NOT NULL`,
-      [userId],
+       WHERE user_id = ? AND source_reference IS NOT NULL
+       LIMIT ?`,
+      [userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1],
     ),
     // BUG-013 review round (ruling 1): the trade analog of the query just
     // above -- every EXISTING `transactions.source_reference` this owner has
@@ -188,14 +195,34 @@ async function loadReview(
     // (`db/repositories/import-commit.ts`'s own dedupe check at the trade
     // branch, reproduced here EXACTLY: `source_type = 'csv_import'`, no
     // `status` filter -- a reversed trade's row still counts as "will be
-    // skipped," matching that check's own behaviour). Deliberately NOT
-    // capped, mirroring the identical, already-shipped, uncapped precedent
-    // of the dividend query above -- this is a cheap Set-membership lookup,
-    // not a per-row comparison loop like `existingTradeRows` below.
+    // skipped," matching that check's own behaviour).
+    //
+    // BUG-013 review follow-up ("fail-open cap"): this query -- and its
+    // dividend twin above -- was previously left deliberately UNBOUNDED,
+    // reasoning it was "a cheap Set-membership lookup, not a per-row
+    // comparison loop like `existingTradeRows` below." The Orchestrator's
+    // own F2 precedent (a truncated read must fail CLOSED, per BUG-011)
+    // does not apply here and the reviewer correctly departed from it: F2
+    // caps a COMPARISON set, where truncation produces a silent FALSE
+    // NEGATIVE indistinguishable from a genuine non-match. This is a
+    // SUPPRESSION set instead -- `existingTradeSourceReferences`/
+    // `existingDividendSourceReferences` only ever SILENCE an advisory
+    // warning for a row already bound for an identical commit-time skip
+    // (see `sourceReferenceKey` in `domain/imports/reconciliation.ts`).
+    // Truncating it can only ADD noise (a row that would have been
+    // suppressed just shows its warning again), never hide a duplicate --
+    // the truncated-comparison-set failure mode this file's OTHER caps
+    // (`existingTradeRows`, `existingManualRows`, `existingReceiptRows`)
+    // exist to prevent cannot happen here. `LIMIT MAX + 1` therefore fails
+    // OPEN: on overflow the whole set for that route is dropped to empty
+    // (below), which simply reverts to the noisier pre-BUG-013 behaviour a
+    // sync already regularly produced before this fix, not a fail-CLOSED
+    // degrade (which would be strictly wrong for a suppression set).
     client.all<Record<string, unknown>>(
       `SELECT portfolio_id, source_reference FROM transactions
-       WHERE user_id = ? AND source_type = 'csv_import' AND source_reference IS NOT NULL`,
-      [userId],
+       WHERE user_id = ? AND source_type = 'csv_import' AND source_reference IS NOT NULL
+       LIMIT ?`,
+      [userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1],
     ),
     // BUG-011: every existing POSTED buy/sell transaction across the WHOLE
     // OWNER (any portfolio, any source route, any prior batch/import), for
@@ -242,12 +269,27 @@ async function loadReview(
     // duplicate-check.ts`) degrades to `existingTradeEntriesUnavailable`
     // rather than silently comparing against a truncated (and therefore
     // unreliable) set.
+    //
+    // PRF-009 fold-in (a): `reverses_transaction_id IS NULL` hijacked the
+    // planner away from `user_id` -- `EXPLAIN QUERY PLAN` across BUG-011's
+    // own revisions seeks `transactions_one_reversal_unique
+    // (reverses_transaction_id=?)` (the NULL group of that unique index,
+    // which holds every non-mirror transaction of EVERY owner) instead of
+    // `transactions_owner_portfolio_idempotency_unique (user_id=?)`.
+    // Correctness/ownership are unaffected (`user_id = ?` is still in the
+    // `WHERE`, applied as a per-row filter), but the read stops being
+    // owner-scoped at the index level, exactly the `rows_read` dimension
+    // PRF-009/PRF-010 exist to protect. `+reverses_transaction_id IS NULL`
+    // (SQLite's unary-plus no-index hint) restores the `user_id` seek with
+    // identical semantics -- verified by `EXPLAIN QUERY PLAN` on a 2,000-row
+    // synthetic fixture: `SEARCH transactions USING INDEX
+    // transactions_owner_portfolio_idempotency_unique (user_id=?)`.
     client.all<Record<string, unknown>>(
       `SELECT portfolio_security_id, type, local_trade_date,
               quantity_decimal, unit_price_decimal
        FROM transactions
        WHERE user_id = ? AND status = 'posted'
-         AND type IN ('buy', 'sell') AND reverses_transaction_id IS NULL
+         AND type IN ('buy', 'sell') AND +reverses_transaction_id IS NULL
          AND portfolio_security_id IS NOT NULL
          AND quantity_decimal IS NOT NULL AND unit_price_decimal IS NOT NULL
        LIMIT ?`,
@@ -368,14 +410,55 @@ async function loadReview(
       quantityDecimal: String(row.quantity_decimal),
       priceDecimal: String(row.unit_price_decimal),
     }));
+  // BUG-013 review follow-up ("fail-open cap"): the cap/degrade DECISION is
+  // the shared pure function above -- see its doc comment for why this
+  // degrades the OPPOSITE way from this file's comparison-set caps
+  // (`capExistingTradeRows`/`capExistingDividendRows`, which fail closed).
+  const cappedDividendSourceReferenceRows = capSuppressionReferenceRows(
+    existingSourceReferenceRows,
+    MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
+  );
+  if (cappedDividendSourceReferenceRows.overflowed) {
+    emitStructuredLog({
+      level: "warn",
+      event: "import.preview",
+      action: "import.preview.dividend_suppression_overflow",
+      result: "failure",
+      requestId: "import-preview-suppression-overflow",
+      metadata: {
+        batchId,
+        rows: existingSourceReferenceRows.length,
+        max: MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
+      },
+    });
+  }
   const existingDividendSourceReferences = new Set(
-    existingSourceReferenceRows.map(
+    cappedDividendSourceReferenceRows.rows.map(
       (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
     ),
   );
-  // BUG-013 review round (ruling 1): the trade analog, same key shape.
+  // BUG-013 review round (ruling 1): the trade analog, same key shape and
+  // same fail-open cap as the dividend set above.
+  const cappedTradeSourceReferenceRows = capSuppressionReferenceRows(
+    existingTradeSourceReferenceRows,
+    MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
+  );
+  if (cappedTradeSourceReferenceRows.overflowed) {
+    emitStructuredLog({
+      level: "warn",
+      event: "import.preview",
+      action: "import.preview.trade_suppression_overflow",
+      result: "failure",
+      requestId: "import-preview-suppression-overflow",
+      metadata: {
+        batchId,
+        rows: existingTradeSourceReferenceRows.length,
+        max: MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
+      },
+    });
+  }
   const existingTradeSourceReferences = new Set(
-    existingTradeSourceReferenceRows.map(
+    cappedTradeSourceReferenceRows.rows.map(
       (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
     ),
   );

@@ -16,6 +16,7 @@ import {
   capExistingDividendRows,
   MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
 } from "../app/import-dividend-duplicate-check.ts";
+import { capSuppressionReferenceRows } from "../app/import-suppression-cap.ts";
 // BUG-013 review round (ruling 2): the exported, exception-safe wrapper --
 // mirrors `app/import-actions.ts`'s own fix, since this mirror faithfully
 // copied that call site's unguarded form before the fix.
@@ -268,22 +269,31 @@ async function pagePreview(
     // `existingSourceReferenceRows`/`existingTradeSourceReferenceRows`
     // queries, used to suppress a guaranteed-noise advisory warning for a
     // row already bound for an identical commit-time exact-match skip.
+    // PRF-009 follow-up ("fail-open cap"): now bounded with `LIMIT MAX + 1`,
+    // same as `loadReview` -- see `tests/bug-013.test.ts`'s source pin for
+    // the production wiring this mirrors.
     client.all<Record<string, unknown>>(
       `SELECT portfolio_id, source_reference FROM dividend_manual_records
-       WHERE user_id = ? AND source_reference IS NOT NULL`,
-      [userId],
+       WHERE user_id = ? AND source_reference IS NOT NULL
+       LIMIT ?`,
+      [userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1],
     ),
     client.all<Record<string, unknown>>(
       `SELECT portfolio_id, source_reference FROM transactions
-       WHERE user_id = ? AND source_type = 'csv_import' AND source_reference IS NOT NULL`,
-      [userId],
+       WHERE user_id = ? AND source_type = 'csv_import' AND source_reference IS NOT NULL
+       LIMIT ?`,
+      [userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1],
     ),
+    // PRF-009 fold-in (a): `+reverses_transaction_id IS NULL` mirrors
+    // `loadReview`'s own no-index hint (see `tests/bug-011.test.ts`'s
+    // widened F-a source pin) -- semantics unchanged, only the planner's
+    // index choice differs, so this mirror stays behaviourally identical.
     client.all<Record<string, unknown>>(
       `SELECT portfolio_security_id, type, local_trade_date,
               quantity_decimal, unit_price_decimal
        FROM transactions
        WHERE user_id = ? AND status = 'posted'
-         AND type IN ('buy', 'sell') AND reverses_transaction_id IS NULL
+         AND type IN ('buy', 'sell') AND +reverses_transaction_id IS NULL
          AND portfolio_security_id IS NOT NULL
          AND quantity_decimal IS NOT NULL AND unit_price_decimal IS NOT NULL
        LIMIT ?`,
@@ -353,12 +363,18 @@ async function pagePreview(
       priceDecimal: String(row.unit_price_decimal),
     }));
   const existingDividendSourceReferences = new Set(
-    existingSourceReferenceRows.map(
+    capSuppressionReferenceRows(
+      existingSourceReferenceRows,
+      MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
+    ).rows.map(
       (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
     ),
   );
   const existingTradeSourceReferences = new Set(
-    existingTradeSourceReferenceRows.map(
+    capSuppressionReferenceRows(
+      existingTradeSourceReferenceRows,
+      MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
+    ).rows.map(
       (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
     ),
   );

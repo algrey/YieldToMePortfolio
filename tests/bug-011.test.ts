@@ -602,9 +602,19 @@ test("F-a source pin: loadReview's existing-trade query excludes a reversal's co
   );
   // F1: the compensating reversal mirror row (status='posted', own
   // reverses_transaction_id set) must be excluded.
+  //
+  // PRF-009 fold-in (b): widened to also pin `WHERE user_id = ? AND
+  // status = 'posted'` and the `type IN (...)` clause in the SAME match --
+  // mutating the file to drop user scoping (or the posted-status/buy-sell
+  // filter) was previously caught by nothing here; ownership was only
+  // mirror-covered. `\+?` tolerates PRF-009 fold-in (a)'s unary-plus
+  // no-index hint on `reverses_transaction_id` (restores the `user_id`
+  // index seek -- see that fold-in's own comment in app/import-actions.ts)
+  // without requiring it, so this pin does not silently stop matching if
+  // the hint is ever removed.
   assert.match(
     source,
-    /AND type IN \('buy', 'sell'\) AND reverses_transaction_id IS NULL/,
+    /WHERE user_id = \? AND status = 'posted'\s*\n\s*AND type IN \('buy', 'sell'\) AND \+?reverses_transaction_id IS NULL/,
   );
   // F2: the query caps at MAX + 1 rows...
   assert.match(

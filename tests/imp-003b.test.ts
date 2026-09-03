@@ -733,9 +733,25 @@ test("BUG-016 review B1: a finalizing reversal at exactly the 25-portfolio ceili
   // invocation carries the maximum trade work AND the maximum dividend work.
   const { version } = await commitBatch(database, 2);
   const { client, counts } = countingClient(createSqliteSqlClient(database));
-  const result = await createOwnedImportReversalRepository(client, {
-    chunkSize: IMPORT_REVERSAL_LIMITS.maxChunkSize,
-  }).reverse("user-a", "batch-a", reversalInput(version, "ceiling-reversal"));
+  // PRF-009 BUG-016 follow-up (c): this fixture is the one that actually
+  // REACHES `affectedPortfolioIdsForBatch`'s overflow branch (25 dividend
+  // portfolios + the trade-bearing `portfolio-a` = 26, one past the
+  // ceiling) -- `import.reverse.calculation_advance_overflow` was emitted
+  // here but never asserted. Capture stdout the same way the dedicated
+  // dividend-overflow test below does.
+  const logLines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: unknown) => {
+    logLines.push(String(line));
+  };
+  let result;
+  try {
+    result = await createOwnedImportReversalRepository(client, {
+      chunkSize: IMPORT_REVERSAL_LIMITS.maxChunkSize,
+    }).reverse("user-a", "batch-a", reversalInput(version, "ceiling-reversal"));
+  } finally {
+    console.log = originalLog;
+  }
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.status, "reversed");
@@ -753,6 +769,18 @@ test("BUG-016 review B1: a finalizing reversal at exactly the 25-portfolio ceili
   );
   assert.equal(result.affectedPortfolioIds[0], "portfolio-a");
   assert.ok(!result.affectedPortfolioIds.includes("portfolio-div-9"));
+  const advanceOverflowWarnings = logLines
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter(
+      (entry) => entry.action === "import.reverse.calculation_advance_overflow",
+    );
+  assert.equal(advanceOverflowWarnings.length, 1);
+  assert.equal(advanceOverflowWarnings[0]!.level, "warn");
+  assert.deepEqual(advanceOverflowWarnings[0]!.metadata, {
+    batchId: "batch-a",
+    affectedPortfolios: portfolioCount + 1,
+    advancedPortfolios: IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios,
+  });
   assert.ok(
     counts.queries <= IMPORT_REVERSAL_LIMITS.maxQueriesPerInvocation,
     `${counts.queries} D1 queries at the ${portfolioCount}-portfolio ceiling exceeds the ${IMPORT_REVERSAL_LIMITS.maxQueriesPerInvocation} budget`,
@@ -867,6 +895,147 @@ test("BUG-016: a reversal over more dividend-bearing portfolios than the ceiling
     affectedPortfolios: portfolioCount,
     queuedPortfolios: IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios,
   });
+});
+
+/** Captures every `all`/`get` call's exact SQL/params -- lets a test re-run
+ * `EXPLAIN QUERY PLAN` on precisely what the real code path just executed
+ * (the `tests/prf-002.test.ts` `stageCensusClient` / `tests/prf-010.test.ts`
+ * `censusClient` convention), rather than a hand-copied literal that could
+ * drift from the source. */
+function capturingClient(base: SqlClient): {
+  client: SqlClient;
+  calls: Array<{ sql: string; params: readonly unknown[] | undefined }>;
+} {
+  const calls: Array<{ sql: string; params: readonly unknown[] | undefined }> =
+    [];
+  const client: SqlClient = {
+    async all(sql, params) {
+      calls.push({ sql, params });
+      return base.all(sql, params);
+    },
+    async get(sql, params) {
+      calls.push({ sql, params });
+      return base.get(sql, params);
+    },
+    run: (sql, params) => base.run(sql, params),
+    batch: (statements) => base.batch!(statements),
+  };
+  return { client, calls };
+}
+
+// PRF-009 / BUG-016 follow-up (b): `affectedPortfolioIdsForBatch`'s
+// `+source_row.user_id` no-index hint (added round-4, mirroring PRF-009
+// fold-in (a)'s identical technique on the commit side) had no EXPLAIN or
+// source pin proving it does what its own comment claims -- keep the
+// planner off `import_rows_user_normalized_fingerprint_idx (user_id=?)`
+// (a user-wide range covering every batch this owner has ever reversed)
+// and onto the batch-scoped `import_rows_batch_physical_row_unique
+// (batch_id=?)` seek instead. Seeded with 40 prior REVERSED batches (200
+// rows) for user-a so a hint-less planner would have real user-wide history
+// to prefer -- not just an empty table where either index looks free.
+test("PRF-009 BUG-016 (b): affectedPortfolioIdsForBatch's +user_id hint keeps the planner on the batch-scoped seek, not a user-wide one", async () => {
+  const database = await migratedDatabase();
+  // Prior, already-fully-reversed batches: same shape (import_rows.commit_
+  // status = 'reversed', matched via source_row.import_row_id) as the batch
+  // under test, so they would be visible to a user-id-wide seek if the hint
+  // were removed.
+  for (let batch = 0; batch < 40; batch += 1) {
+    const database_ = database;
+    database_.exec(
+      `INSERT INTO import_batches (id, user_id, target_portfolio_id, parser_format, parser_version, filename, byte_size, file_sha256, status, created_at, updated_at, version)
+       VALUES ('batch-old-${batch}', 'user-a', 'portfolio-a', 'strict-versioned-csv', '${SUPPORTED_IMPORT_PARSER_VERSION}', 'old.csv', 100, 'sha-old-${batch}', 'ready', '2026-08-03T00:00:00Z', '2026-08-03T00:00:00Z', 1)`,
+    );
+    for (let row = 0; row < 5; row += 1) {
+      const suffix = `${batch}-${row}`;
+      database_.exec(
+        `INSERT INTO import_rows (id, user_id, batch_id, physical_row_number, row_class, original_fields_json, normalized_fingerprint, target_portfolio_id, target_portfolio_security_id, commit_status, commit_transaction_id, created_at, updated_at, version)
+         VALUES ('row-old-${suffix}', 'user-a', 'batch-old-${batch}', ${row + 2}, 'transaction', '[]', 'fp-old-${suffix}', 'portfolio-a', 'membership-a', 'staged', NULL, '2026-08-03', '2026-08-03', 1)`,
+      );
+      database_.exec(
+        `INSERT INTO transactions (id, user_id, portfolio_id, portfolio_security_id, type, status, trade_at, local_trade_date, currency_code, source_type, source_reference, import_row_id, created_by_user_id, calculation_version, created_at, version)
+         VALUES ('tx-old-${suffix}', 'user-a', 'portfolio-a', 'membership-a', 'buy', 'reversed', '2026-08-01T00:00:00.000Z', '2026-08-01', 'AUD', 'csv_import', 'src-old-${suffix}', 'row-old-${suffix}', 'user-a', 1, '2026-08-03', 1)`,
+      );
+      database_.exec(
+        `UPDATE import_rows SET commit_status = 'reversed', commit_transaction_id = 'tx-old-${suffix}' WHERE id = 'row-old-${suffix}'`,
+      );
+    }
+  }
+  assert.equal(
+    (
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM import_rows WHERE user_id = 'user-a' AND commit_status = 'reversed'",
+        )
+        .get() as { count: number }
+    ).count,
+    200,
+    "prior reversed history must be seeded before the batch under test",
+  );
+
+  const { database: committed, version } = await commitBatch(database, 2);
+  const { client, calls } = capturingClient(createSqliteSqlClient(committed));
+  const result = await createOwnedImportReversalRepository(client).reverse(
+    "user-a",
+    "batch-a",
+    reversalInput(version, "explain-reversal"),
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.status, "reversed");
+
+  const affectedPortfolioCall = calls.find((call) =>
+    call.sql.includes("SELECT DISTINCT source.portfolio_id"),
+  );
+  assert.ok(
+    affectedPortfolioCall,
+    "expected affectedPortfolioIdsForBatch's query to have run",
+  );
+  const plan = committed
+    .prepare(`EXPLAIN QUERY PLAN ${affectedPortfolioCall!.sql}`)
+    .all(...((affectedPortfolioCall!.params ?? []) as never[])) as Array<{
+    detail: string;
+  }>;
+  const details = plan.map((row) => row.detail);
+  assert.ok(
+    details.some((detail) =>
+      /SEARCH source_row USING INDEX import_rows_batch_physical_row_unique \(batch_id=\?\)/.test(
+        detail,
+      ),
+    ),
+    `expected a batch-scoped seek, got: ${JSON.stringify(details)}`,
+  );
+  assert.ok(
+    !details.some((detail) =>
+      detail.includes("import_rows_user_normalized_fingerprint_idx"),
+    ),
+    `must not fall back to the user-wide index, got: ${JSON.stringify(details)}`,
+  );
+
+  // Mutation check: removing the hint on the SAME captured SQL/params must
+  // NOT keep the batch-scoped plan -- whichever table the planner ends up
+  // driving from (import_rows via its user-wide fingerprint index, or
+  // transactions via its own user-wide idempotency index -- SQLite's choice
+  // between the two is an implementation detail, not the point here), it
+  // must stop being a `batch_id=?` seek. That is the regression the hint
+  // exists to prevent.
+  const unhinted = affectedPortfolioCall!.sql.replace(
+    "+source_row.user_id = ?",
+    "source_row.user_id = ?",
+  );
+  assert.notEqual(unhinted, affectedPortfolioCall!.sql);
+  const unhintedPlan = committed
+    .prepare(`EXPLAIN QUERY PLAN ${unhinted}`)
+    .all(...((affectedPortfolioCall!.params ?? []) as never[])) as Array<{
+    detail: string;
+  }>;
+  assert.ok(
+    !unhintedPlan.some((row) =>
+      /USING INDEX import_rows_batch_physical_row_unique \(batch_id=\?\)/.test(
+        row.detail,
+      ),
+    ),
+    `expected removing the hint to give up the batch-scoped seek, got: ${JSON.stringify(unhintedPlan.map((row) => row.detail))}`,
+  );
 });
 
 // BUG-016 review round-3 B2 regression pin: `reverseImportWithContext` used

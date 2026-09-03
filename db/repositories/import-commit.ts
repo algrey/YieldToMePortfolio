@@ -978,6 +978,31 @@ export function createOwnedImportCommitRepository(
     // across both kinds -- per `docs/ARCHITECTURE.md`'s CALC-004 entry the
     // projection pipeline rebuilds the full ledger regardless of its
     // `range_*` columns, so the wider run range costs nothing.
+    // PRF-009: the UNION ALL above (two `import_rows` passes, each planned
+    // as a range scan of `import_rows_user_normalized_fingerprint_idx
+    // (user_id=?)` -- filtering `batch_id`/`commit_status` in the VM) read
+    // every `import_rows` row this user has EVER committed, TWICE, on every
+    // finalize -- `import_rows` grows monotonically with each Sharesight
+    // sync (PRF-007 Finding D). Measured on a synthetic 12,005-row/300-batch
+    // fixture with a 5-row target batch: the old shape visited ~24,010
+    // `import_rows` rows (`EXPLAIN QUERY PLAN` seeking `user_id=?` in both
+    // UNION branches); this single LEFT JOIN pass, with `+r.user_id` as a
+    // no-index hint (SQLite's documented unary-plus trick to disable an
+    // index without changing semantics -- same technique BUG-016 round-4
+    // proved for `affectedPortfolioIdsForBatch`'s identical polymorphic
+    // shape), visits exactly the batch's own 5 rows: `EXPLAIN QUERY PLAN`
+    // now seeks `import_rows_batch_physical_row_unique (batch_id=?)` ONCE,
+    // with `t`/`d` each resolved by their own unique-id seek as a LEFT
+    // JOIN. No new index: the existing batch/physical-row unique index
+    // already makes the batch-scoped seek free, and an index would be pure
+    // write cost on a table every import writes to (see this task's
+    // TASKS.md entry). `COALESCE(t.portfolio_id, d.portfolio_id)` picks
+    // whichever side matched -- a committed row's `commit_transaction_id`
+    // matches EXACTLY ONE of the two tables by construction (PRF-007's
+    // comment above) -- and `(t.id IS NOT NULL OR d.id IS NOT NULL)` guards
+    // against grouping a hypothetical unmatched row under a NULL portfolio
+    // id, which the old UNION ALL shape could never produce (an unmatched
+    // row simply satisfied neither branch's JOIN).
     const affected = await client.all<Record<string, unknown>>(
       `SELECT combined.portfolio_id AS portfolio_id,
               MIN(combined.effective_date) AS range_from,
@@ -992,27 +1017,23 @@ export function createOwnedImportCommitRepository(
                 ''
               ) AS ledger_high_water
        FROM (
-         SELECT t.portfolio_id AS portfolio_id, t.local_trade_date AS effective_date,
-                t.local_trade_date AS trade_effective_date
+         SELECT
+           COALESCE(t.portfolio_id, d.portfolio_id) AS portfolio_id,
+           COALESCE(t.local_trade_date, d.payment_date) AS effective_date,
+           t.local_trade_date AS trade_effective_date
          FROM import_rows r
-         JOIN transactions t ON t.id = r.commit_transaction_id
+         LEFT JOIN transactions t ON t.id = r.commit_transaction_id
            AND t.user_id = r.user_id
-         WHERE r.user_id = ? AND r.batch_id = ? AND r.commit_status = 'committed'
-         UNION ALL
-         SELECT d.portfolio_id AS portfolio_id, d.payment_date AS effective_date,
-                NULL AS trade_effective_date
-         FROM import_rows r
-         JOIN dividend_manual_records d ON d.id = r.commit_transaction_id
+         LEFT JOIN dividend_manual_records d ON d.id = r.commit_transaction_id
            AND d.user_id = r.user_id
-         WHERE r.user_id = ? AND r.batch_id = ? AND r.commit_status = 'committed'
+         WHERE +r.user_id = ? AND r.batch_id = ? AND r.commit_status = 'committed'
+           AND (t.id IS NOT NULL OR d.id IS NOT NULL)
        ) AS combined
        GROUP BY combined.portfolio_id
        ORDER BY combined.portfolio_id ASC
        LIMIT ?`,
       [
         userId,
-        userId,
-        batch.id,
         userId,
         batch.id,
         IMPORT_COMMIT_LIMITS.maxAffectedPortfolios + 1,

@@ -41,6 +41,8 @@ import {
   capExistingDividendRows,
   MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
 } from "../app/import-dividend-duplicate-check.ts";
+import { MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK } from "../app/import-trade-duplicate-check.ts";
+import { capSuppressionReferenceRows } from "../app/import-suppression-cap.ts";
 
 const PORTFOLIOS: ImportPreviewPortfolio[] = [
   {
@@ -401,6 +403,54 @@ test("with no existingDividendSourceReferences supplied at all (the ready-servic
       (issue) => issue.code === "DIVIDEND_MATCHES_EXISTING_ENTRY",
     ),
   );
+});
+
+// PRF-009 follow-up ("fail-open cap"): end-to-end proof of what
+// `capSuppressionReferenceRows`'s overflow degrade actually produces --
+// `loadReview` passes an EMPTY set (not the omitted/undefined shape the two
+// tests above cover) for the SAME row that would otherwise have been
+// suppressed. This is the identical fixture as "a row already bound for a
+// commit-time exact source_reference skip raises NEITHER dividend advisory
+// warning" above, with `capSuppressionReferenceRows`'s overflow output
+// (`{ rows: [], overflowed: true }` -> an empty Set) substituted for the
+// non-overflowed set that test supplies -- proving the fail-open cap
+// reverts exactly to the noisier pre-BUG-013 behaviour, never a silent
+// partial suppression.
+test("PRF-009 fail-open cap: on suppression-set overflow (empty Set), a row already bound for a commit-time skip warns anyway -- reverting to pre-BUG-013 noise, still advisory only", () => {
+  const row = dividendRow({ rowId: "row-22", shape: "totals" });
+  const overflowed = capSuppressionReferenceRows(
+    [
+      {
+        portfolioId: "portfolio-1",
+        sourceReference: `import-fingerprint:${row.fingerprint}`,
+      },
+    ],
+    0, // simulate overflow with a trivial max -- any max < 1 row overflows.
+  );
+  assert.equal(overflowed.overflowed, true);
+  assert.equal(overflowed.rows.length, 0);
+  const preview = createImportReconciliationPreview({
+    rows: [row],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    existingDividendEntries: [EXISTING_PER_SHARE],
+    existingDividendSourceReferences: new Set(
+      overflowed.rows.map(
+        (entry) => `${entry.portfolioId}::${entry.sourceReference}`,
+      ),
+    ),
+  });
+  assert.ok(
+    preview.issues.some(
+      (issue) => issue.code === "DIVIDEND_MATCHES_EXISTING_ENTRY",
+    ),
+    "fail-open must not silently keep this row suppressed",
+  );
+  // Still advisory only: BUG-011's binding constraint (never auto-skip a
+  // genuinely importable row) and this task's own "the skip set is
+  // unaffected by this preview-side cap" statement both hold -- `ready`
+  // is unaffected by which advisory warnings fired.
+  assert.equal(preview.ready, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -794,5 +844,94 @@ test("source pin: DIV-016 part C's OWN reconciliation-candidates query is left u
   assert.match(
     source,
     /SELECT id, portfolio_security_id, payment_date, shares_decimal,\s*\n\s*dividend_per_share_decimal, total_cash_decimal\s*\n\s*FROM dividend_manual_records\s*\n\s*WHERE user_id = \? AND import_batch_id IS NULL\s*\n\s*AND superseded_by_record_id IS NULL/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// PRF-009 follow-up ("fail-open cap"): the two suppression-set queries
+// feeding `existingDividendSourceReferences`/`existingTradeSourceReferences`
+// were recorded by BUG-013's review as a non-blocking follow-up -- they were
+// deliberately left UNBOUNDED. Bounded now with a FAIL-OPEN cap: unlike this
+// file's comparison-set caps above (`capExistingDividendRows`/
+// `capExistingTradeRows`, which fail CLOSED because a truncated comparison
+// set risks a silent false negative), a truncated SUPPRESSION set can only
+// ever add noise, never hide a duplicate -- see `capSuppressionReferenceRows`'s
+// own doc comment (`app/import-suppression-cap.ts`).
+// ---------------------------------------------------------------------------
+
+test("capSuppressionReferenceRows: at or below the cap, every row passes through unmodified and overflowed is false", () => {
+  const rows = [1, 2, 3];
+  assert.deepEqual(capSuppressionReferenceRows(rows, 3), {
+    rows,
+    overflowed: false,
+  });
+  assert.deepEqual(capSuppressionReferenceRows(rows, 5), {
+    rows,
+    overflowed: false,
+  });
+  assert.deepEqual(capSuppressionReferenceRows([], 0), {
+    rows: [],
+    overflowed: false,
+  });
+});
+
+test("capSuppressionReferenceRows: exactly one row OVER the cap degrades to an EMPTY set (fail-open), not a truncated one -- the exact length > max boundary", () => {
+  const rows = [1, 2, 3, 4];
+  assert.deepEqual(capSuppressionReferenceRows(rows, 3), {
+    rows: [],
+    overflowed: true,
+  });
+});
+
+test("capSuppressionReferenceRows: the real dividend and trade MAX boundaries (5,000) behave the same way -- at the cap is fine, one row over degrades to empty", () => {
+  for (const max of [
+    MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
+    MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
+  ]) {
+    const atCap = new Array<number>(max).fill(0);
+    assert.equal(capSuppressionReferenceRows(atCap, max).overflowed, false);
+    const overCap = new Array<number>(max + 1).fill(0);
+    const result = capSuppressionReferenceRows(overCap, max);
+    assert.equal(result.overflowed, true);
+    assert.deepEqual(result.rows, []);
+  }
+});
+
+test("source pin: loadReview's suppression-set queries (dividend and trade) are bounded with LIMIT MAX + 1 and delegate the fail-open cap/degrade decision to the shared capSuppressionReferenceRows, with a structured warn log on overflow naming the batch", async () => {
+  const source = await readFile(
+    new URL("../app/import-actions.ts", import.meta.url),
+    "utf8",
+  );
+  // Both suppression-set queries now cap at MAX + 1, mirroring (not
+  // reusing) the comparison-set queries' own LIMIT convention.
+  assert.match(
+    source,
+    /SELECT portfolio_id, source_reference FROM dividend_manual_records\s*\n\s*WHERE user_id = \? AND source_reference IS NOT NULL\s*\n\s*LIMIT \?`,\s*\n\s*\[userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK \+ 1\],/,
+  );
+  assert.match(
+    source,
+    /SELECT portfolio_id, source_reference FROM transactions\s*\n\s*WHERE user_id = \? AND source_type = 'csv_import' AND source_reference IS NOT NULL\s*\n\s*LIMIT \?`,\s*\n\s*\[userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK \+ 1\],/,
+  );
+  // The cap/degrade DECISION is delegated to the shared pure function, one
+  // call per route, each anchored to its own rows array so a mutation
+  // dropping EITHER call is caught independently.
+  assert.match(
+    source,
+    /capSuppressionReferenceRows\(\s*existingSourceReferenceRows,\s*MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,\s*\)/,
+  );
+  assert.match(
+    source,
+    /capSuppressionReferenceRows\(\s*existingTradeSourceReferenceRows,\s*MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,\s*\)/,
+  );
+  // Overflow is never silent: a structured warn log names the batch, for
+  // each route independently.
+  assert.match(
+    source,
+    /action: "import\.preview\.dividend_suppression_overflow"/,
+  );
+  assert.match(source, /action: "import\.preview\.trade_suppression_overflow"/);
+  assert.match(
+    source,
+    /level: "warn",\s*\n\s*event: "import\.preview",\s*\n\s*action: "import\.preview\.dividend_suppression_overflow"/,
   );
 });
