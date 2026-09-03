@@ -12,6 +12,11 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Orchestrator hygiene (2026-09-03): Claude Code may create nested git
+    // worktrees under `.claude/worktrees/` for spawned sessions; ESLint must
+    // never walk into another checkout's files (it reported that worktree's
+    // own lint state as this repository's).
+    ".claude/**",
   ]),
   // BRK-003/BRK-004 review: `domain/sharesight/transport.ts` is the
   // package's raw GET-only fetch primitive. It must never be imported
