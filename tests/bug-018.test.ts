@@ -23,6 +23,11 @@ import test from "node:test";
 import { randomUUID } from "node:crypto";
 import { buildImportReviewPreview } from "../app/import-preview.ts";
 import {
+  existingTradeRowsQuery,
+  existingTradeSourceReferenceRowsQuery,
+} from "../app/import-review-queries.ts";
+import { MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK } from "../app/import-trade-duplicate-check.ts";
+import {
   commitPortfolioBundleImport,
   commitPortfolioBundleScaffold,
   commitPortfolioBundleTransactionsPart,
@@ -257,23 +262,29 @@ function batchVersion(database: DatabaseSync, batchId: string): number {
 }
 
 // The exact suppression query BUG-018 adds `status <> 'reversed'` to
-// (`app/import-actions.ts`'s `existingTradeSourceReferences`) -- reproduced
-// here because that file transitively imports `next/headers` and cannot be
-// imported by this plain Node test runner (established precedent, see
-// tests/bug-011.test.ts's F-a source-pin doc comment).
+// (`existingTradeSourceReferenceRowsQuery`, `app/import-review-queries.ts`,
+// wired in by `app/import-actions.ts`'s `existingTradeSourceReferences`) --
+// PRF-015 correction round: read through the shared builder itself (rather
+// than a hand-typed copy, which had already drifted -- missing `LIMIT ?` and
+// the BUG-011 `+` hint) so this test can never diverge from production again
+// (established precedent, see tests/bug-011.test.ts's F-a source-pin doc
+// comment).
 function suppressionSetContains(
   database: DatabaseSync,
   userId: string,
   portfolioId: string,
   sourceReference: string,
 ): boolean {
+  const q = existingTradeSourceReferenceRowsQuery(
+    userId,
+    MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
+  );
   const rows = database
-    .prepare(
-      `SELECT portfolio_id, source_reference FROM transactions
-       WHERE user_id = ? AND source_type = 'csv_import' AND source_reference IS NOT NULL
-         AND status <> 'reversed'`,
-    )
-    .all(userId) as { portfolio_id: string; source_reference: string }[];
+    .prepare(q.sql)
+    .all(...((q.params ?? []) as never[])) as {
+    portfolio_id: string;
+    source_reference: string;
+  }[];
   return rows.some(
     (row) =>
       row.portfolio_id === portfolioId &&
@@ -282,9 +293,11 @@ function suppressionSetContains(
 }
 
 // The exact economic-identity comparison query BUG-011 built
-// (`app/import-actions.ts`'s `existingTradeRows`), reproduced for the same
-// reason as above -- used to prove a re-imported trade never warns against
-// its own reversed self or the reversal's compensating mirror.
+// (`existingTradeRowsQuery`, `app/import-review-queries.ts`, wired in by
+// `app/import-actions.ts`'s `existingTradeRows`) -- PRF-015 correction round:
+// read through the shared builder itself, for the same reason as above, used
+// to prove a re-imported trade never warns against its own reversed self or
+// the reversal's compensating mirror.
 function economicIdentityMatches(
   database: DatabaseSync,
   userId: string,
@@ -294,17 +307,13 @@ function economicIdentityMatches(
   quantityDecimal: string,
   unitPriceDecimal: string,
 ): number {
+  const q = existingTradeRowsQuery(
+    userId,
+    MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK,
+  );
   const rows = database
-    .prepare(
-      `SELECT portfolio_security_id, type, local_trade_date,
-              quantity_decimal, unit_price_decimal
-       FROM transactions
-       WHERE user_id = ? AND status = 'posted'
-         AND type IN ('buy', 'sell') AND reverses_transaction_id IS NULL
-         AND portfolio_security_id IS NOT NULL
-         AND quantity_decimal IS NOT NULL AND unit_price_decimal IS NOT NULL`,
-    )
-    .all(userId) as {
+    .prepare(q.sql)
+    .all(...((q.params ?? []) as never[])) as {
     portfolio_security_id: string;
     type: string;
     local_trade_date: string;

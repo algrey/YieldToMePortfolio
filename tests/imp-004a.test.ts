@@ -1424,8 +1424,11 @@ test("BUG-013 filter fix: a previously import-sourced dividend record (import_ba
 
 test("BUG-013 ownership isolation: the widened dividend query never returns another owner's dividend records, even when they share an identical economic identity", async () => {
   // Review round (ruling 5): re-typing the widened SELECT a THIRD time (this
-  // file's `pagePreview` mirror already carries it once, matching
-  // `app/import-actions.ts` once) added a third copy to drift out of sync,
+  // file's `pagePreview` mirror already carries it once, matching one
+  // shared builder -- corrected 2026-09-03 after review: originally said
+  // "matching `app/import-actions.ts` once"; PRF-015 extracted the query
+  // into `app/import-review-queries.ts`, which is the module `pagePreview`
+  // and `loadReview` both now import) added a third copy to drift out of sync,
   // and only ever checked the POSITIVE case (user-a warns) -- which a leaked
   // cross-user match could equally satisfy, so it never actually proved
   // isolation. Rewritten to go entirely through `pagePreview` (the SAME

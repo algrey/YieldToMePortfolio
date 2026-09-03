@@ -123,7 +123,18 @@ export function existingTradeSourceReferenceRowsQuery(
  * unary-plus no-index hint (PRF-009 fold-in (a)) to keep the planner on the
  * `user_id` seek instead of the `reverses_transaction_id` unique index's
  * NULL group, which spans every owner. Bounded at `limit` so the caller's
- * `capExistingTradeRows` can detect overflow exactly (F2). */
+ * `capExistingTradeRows` can detect overflow exactly (F2).
+ *
+ * F2 ruling, restored here (TASKS.md's BUG-011 record): an Orchestrator
+ * cleanup round briefly scoped this query to `batch.targetPortfolioId` --
+ * that was WRONG and reverted in review. `portfolioFor`
+ * (`domain/imports/reconciliation.ts`) resolves a row's destination THREE
+ * ways (the batch target is only one of them; a `kind:"portfolio"` mapping
+ * decision can redirect a row into any owned portfolio, and a null-target
+ * batch resolves by unique name match instead), so a portfolio-scoped
+ * comparison set produced silent false negatives. This set stays user-wide
+ * by design; per-portfolio precision is enforced downstream by membership
+ * identity, not by narrowing this query. */
 export function existingTradeRowsQuery(
   userId: string,
   limit: number,
