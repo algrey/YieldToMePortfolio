@@ -929,6 +929,28 @@ This log records durable architecture decisions previously maintained in `AGENTS
   anyway). Triggers (2) read-time and (3) cron remain the backstop and are
   unchanged. No prior text edited; this entry is the correction.
 
+- `2026-09-03` (`BUG-020`, calculation-run tie-break; found during `BUG-016`): while adding
+  the reversal's in-request `advanceCalculationRuns` regression test, an
+  intermittent (~25% of runs) failure surfaced in which the reversal's
+  JUST-QUEUED `calculation_runs` row was failed as `superseded_by_newer_run`
+  even though it was the newest row for its user/portfolio/pipeline. Root
+  cause: `created_at` is millisecond-resolution and a commit's own rows and
+  its reversal's row can share an exact value; the tie-break in
+  `db/repositories/calculation-runs.ts`'s `supersedeStaleQueuedRuns`,
+  `hasNewerRun`, and `nextClaimable` was the random-UUID `id`, which has no
+  relationship to creation order, so on a tie an older row could be treated
+  as newer. This is not test-only: two triggers within one clock tick under
+  real load hit the same path. **Decision**: the tie-break is SQLite's
+  implicit `rowid` (insertion order for this TEXT-keyed, rowid table with no
+  delete path -- `docs/DATA_MODEL.md`'s `calculation_runs` section records
+  the guarantee and the rejected alternatives: a dedicated sequence column,
+  sub-millisecond timestamps). No migration, no new column, and the
+  repository's public interface is unchanged. Regression test
+  (`tests/calc-003.test.ts`): two runs queued with an EXPLICITLY identical
+  `created_at` whose ids sort in the opposite order to their insertion --
+  the later-inserted run is reported newest by all three queries and is the
+  one the executor completes and publishes. The `tests/imp-003b.test.ts`
+  fold-in test's interim 10ms sleep workaround is removed.
 - `2026-09-02` (`PRF-010` correction, review): the entry immediately below
   overclaimed on two points, both corrected in §9.5's own appended
   correction paragraph rather than by editing that entry or the paragraph

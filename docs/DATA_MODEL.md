@@ -975,6 +975,26 @@ Type-specific values may move to separate tables if query complexity justifies i
   and session open/close instants; the payload is shared across holdings rather
   than a duplicated per-holding market-date map;
 - started/completed timestamps;
+- `created_at` ordering and the `rowid` tie-break (`BUG-016` fold-in,
+  2026-09-03, no migration): `created_at` is an ISO string at MILLISECOND
+  resolution, and two rows for one user/portfolio/pipeline can share an
+  exact value (a commit's own `import_commit`/`ledger_mutation` rows
+  followed by a reversal's row inside one request chain, or any two
+  triggers resolving within one clock tick). Every "which row is newest"
+  query (`nextClaimable`, `hasNewerRun`, `supersedeStaleQueuedRuns`) orders
+  by `(created_at, rowid)`. The tie-break used to be `id` -- a random UUID
+  that carries no creation-order information -- so on a tie the genuinely
+  latest run could be failed as `superseded_by_newer_run` while a stale one
+  survived to be claimed. SQLite's implicit `rowid` is insertion order for
+  this table: it has a TEXT primary key and is not `WITHOUT ROWID`, so each
+  insert takes `max(rowid) + 1`; no code path deletes a `calculation_runs`
+  row, and `VACUUM` preserves relative rowid order. No new column, index,
+  or migration is required, and the repository's public interface is
+  unchanged (`hasNewerRun` still takes `createdAt`/`runId` and resolves the
+  run's own rowid in-query). Rejected alternatives: a dedicated sequence
+  column (a migration plus a write-path change for the same ordering the
+  engine already assigns) and sub-millisecond `created_at` (JavaScript's
+  `Date` cannot produce it, and it would still not be a guarantee);
 - redacted error category -- includes `stall_limit_exceeded` (`CALC-004`
   review-round B1 fix, replacing an earlier, INCORRECT `attempt_limit_exceeded`
   design that counted `attempt` directly and would have terminated any

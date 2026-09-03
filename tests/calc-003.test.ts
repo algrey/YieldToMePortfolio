@@ -825,6 +825,136 @@ test("CALC-003 coalescing: a superseded run fails fast oldest-first while the cu
   assert.equal(holdings.rows[0]?.quantity, "5");
 });
 
+// BUG-016 fold-in regression: `created_at` is millisecond-resolution, so
+// two runs for one user/portfolio/pipeline can share an EXACT `created_at`
+// (a commit's own rows and a reversal's row inside one request chain, or
+// simply two triggers within one clock tick). The tie-break used to be the
+// random-UUID `id`, which carries no creation-order information -- so on a
+// tie the genuinely latest run could be superseded while a stale one
+// survived to be claimed. The ids below are chosen so that lexicographic
+// id order CONTRADICTS insertion order: under the old tie-break this test
+// fails deterministically (the older row "wins"); with the `rowid`
+// insertion-order tie-break the later-inserted run is newest regardless.
+test("BUG-016 fold-in regression: on an identical created_at the later-INSERTED run is newer, regardless of id ordering", async () => {
+  const database = await migratedDatabase();
+  insertTransaction(database, {
+    id: "buy-1",
+    type: "buy",
+    tradeAt: "2026-01-01T00:00:00Z",
+    quantityDecimal: "3",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "30",
+  });
+  const client = createSqliteSqlClient(database);
+  const runs = createCalculationRunRepository(client);
+  const sameInstant = "2026-09-03T00:00:00.000Z";
+  // Inserted FIRST, but with the lexicographically GREATER id.
+  await queueLedgerMutationRun(client, {
+    id: "run-zz-inserted-first",
+    ledgerHighWater: "buy-1",
+    localDate: "2026-01-01",
+    now: sameInstant,
+  });
+  insertTransaction(database, {
+    id: "buy-2",
+    type: "buy",
+    tradeAt: "2026-01-02T00:00:00Z",
+    quantityDecimal: "2",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "20",
+  });
+  // Inserted SECOND, with the lexicographically SMALLER id.
+  await queueLedgerMutationRun(client, {
+    id: "run-aa-inserted-second",
+    ledgerHighWater: "buy-2",
+    localDate: "2026-01-02",
+    now: sameInstant,
+  });
+  const created = await client.all<{ id: string; created_at: string }>(
+    `SELECT id, created_at FROM calculation_runs ORDER BY rowid ASC`,
+  );
+  assert.deepEqual(
+    created.map((row) => row.created_at),
+    [sameInstant, sameInstant],
+    "precondition: both runs share an exact created_at",
+  );
+  assert.deepEqual(
+    created.map((row) => row.id),
+    ["run-zz-inserted-first", "run-aa-inserted-second"],
+  );
+
+  // Per-claim signal: only the FIRST-inserted run has a newer sibling.
+  assert.equal(
+    await runs.hasNewerRun(
+      "user-a",
+      "portfolio-a",
+      "projection",
+      sameInstant,
+      "run-zz-inserted-first",
+    ),
+    true,
+  );
+  assert.equal(
+    await runs.hasNewerRun(
+      "user-a",
+      "portfolio-a",
+      "projection",
+      sameInstant,
+      "run-aa-inserted-second",
+    ),
+    false,
+  );
+  // Oldest-first claim order follows insertion order on the tie too.
+  const oldest = await runs.nextClaimable(
+    "user-a",
+    "portfolio-a",
+    "projection",
+    sameInstant,
+  );
+  assert.equal(oldest?.id, "run-zz-inserted-first");
+
+  // Bulk pre-pass: exactly the first-inserted run is superseded.
+  assert.equal(
+    await runs.supersedeStaleQueuedRuns(
+      "user-a",
+      "portfolio-a",
+      "projection",
+      "2026-09-03T00:00:01Z",
+    ),
+    1,
+  );
+  const older = await client.get<Record<string, unknown>>(
+    `SELECT status, failure_category FROM calculation_runs WHERE id = 'run-zz-inserted-first'`,
+  );
+  assert.equal(older?.status, "failed");
+  assert.equal(older?.failure_category, "superseded_by_newer_run");
+  const newer = await client.get<Record<string, unknown>>(
+    `SELECT status, failure_category FROM calculation_runs WHERE id = 'run-aa-inserted-second'`,
+  );
+  assert.equal(newer?.status, "queued");
+  assert.equal(newer?.failure_category, null);
+
+  // End to end: the executor completes the genuinely latest run and its
+  // publication reflects the full ledger.
+  const result = await advanceCalculationRuns(
+    { client, now: () => "2026-09-03T00:00:02Z" },
+    { userId: "user-a", portfolioId: "portfolio-a", budget: 100 },
+  );
+  assert.equal(result.completed, 1);
+  assert.equal(result.remaining, false);
+  const publication = await client.get<Record<string, unknown>>(
+    `SELECT calculation_run_id FROM projection_publications WHERE user_id = 'user-a' AND portfolio_id = 'portfolio-a'`,
+  );
+  assert.equal(publication?.calculation_run_id, "run-aa-inserted-second");
+  const holdings = await loadOwnedHoldings(
+    client,
+    "user-a",
+    "portfolio-a",
+    new Date("2026-09-03T02:00:00Z"),
+  );
+  assert.equal(holdings.rows[0]?.quantity, "5");
+});
+
 function ledgerInput(
   overrides: Partial<LedgerPostingInput> = {},
 ): LedgerPostingInput {
@@ -854,9 +984,11 @@ function ledgerInput(
 // `calculation_runs` rows with distinct, correctly-ordered `created_at`
 // values -- matching real wall-clock behaviour (never two ledger
 // mutations sharing one instant). A fixed `now()` shared across multiple
-// calls would give every queued run the SAME `created_at`, making
-// `hasNewerRun`'s tie-break (`id`, a random UUID) decide "which one is
-// newer" arbitrarily -- flaky by construction, not a real scenario.
+// calls would give every queued run the SAME `created_at`; since the
+// BUG-016 fold-in that tie is broken on insertion order (`rowid`) rather
+// than the random-UUID `id`, so a shared instant is no longer flaky -- the
+// dedicated same-`created_at` regression below pins that -- but distinct
+// instants still read as the realistic scenario here.
 function sequentialNow(startIso: string): () => string {
   let current = Date.parse(startIso);
   return () => {

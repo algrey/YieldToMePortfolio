@@ -379,15 +379,11 @@ test("BUG-016 fold-in: a reversal advances its own queued calculation runs in-re
   const { database, version } = await commitBatch(await migratedDatabase(), 1);
   // The commit above already queued its own (now-stale) `calculation_runs`
   // rows for portfolio-a; `advanceCalculationRuns`'s bulk
-  // `supersedeStaleQueuedRuns` step correctly recognizes and supersedes
-  // them once the reversal's own NEWER run exists -- but its "newer" test
-  // ties on `created_at` at millisecond resolution and falls back to
-  // comparing row ids (not chronological) on an exact tie. A real clock
-  // gap here (unlike production, where a commit and its reversal are
-  // always separate requests) keeps this assertion about the REVERSAL's
-  // own run deterministic without touching that pre-existing tie-break
-  // logic, which is out of this task's scope.
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  // `supersedeStaleQueuedRuns` step recognizes and supersedes them once
+  // the reversal's own NEWER run exists. No clock gap is needed between
+  // the commit and the reversal: an exact `created_at` tie (millisecond
+  // resolution, easily hit here) is broken on insertion order (`rowid`),
+  // never on the random-UUID id -- `tests/calc-003.test.ts` pins that.
   const context = {
     client: createSqliteSqlClient(database),
     userId: "user-a",

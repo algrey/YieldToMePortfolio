@@ -352,7 +352,7 @@ export function createCalculationRunRepository(sql: SqlClient) {
               OR (status = 'running' AND lease_expires_at IS NOT NULL
                   AND lease_expires_at <= ?)
             )
-          ORDER BY created_at ASC, id ASC LIMIT 1
+          ORDER BY created_at ASC, rowid ASC LIMIT 1
         `,
         [userId, portfolioId, pipeline, now],
       );
@@ -388,6 +388,26 @@ export function createCalculationRunRepository(sql: SqlClient) {
     // superseding a healthy sibling pipeline's run that was never actually
     // superseded by anything in ITS OWN pipeline. This is the core
     // structural risk this task's tests probe.
+    //
+    // BUG-016 fold-in (tie-break correction): `created_at` is an ISO string
+    // at MILLISECOND resolution, and two rows for one user/portfolio/
+    // pipeline can legitimately land in the same millisecond (a commit's
+    // own `import_commit`/`ledger_mutation` rows followed by a reversal's
+    // row inside one request chain; more generally any two triggers
+    // resolving within one clock tick). The tie-break used to fall back to
+    // comparing `id` -- a random UUID, which carries NO creation-order
+    // information -- so on an exact `created_at` tie an OLDER row could be
+    // treated as "newer" than the genuinely latest one, superseding the
+    // real latest run and leaving a stale one to be claimed instead. The
+    // tie-break is now the table's implicit SQLite `rowid`: this table has
+    // a TEXT primary key and is not `WITHOUT ROWID`, so SQLite assigns each
+    // new row `max(rowid) + 1`, i.e. rowid order IS insertion order among
+    // every row that exists (rows are never deleted from this table, and
+    // `VACUUM` preserves relative rowid order). `nextClaimable` and
+    // `supersedeStaleQueuedRuns` use the identical `(created_at, rowid)`
+    // ordering so all three agree on which row is newest. The `createdAt`/
+    // `runId` signature is unchanged; the run's own rowid is resolved
+    // in-query from its id.
     async hasNewerRun(
       userId: string,
       portfolioId: string,
@@ -399,10 +419,27 @@ export function createCalculationRunRepository(sql: SqlClient) {
         `
           SELECT 1 AS marker FROM calculation_runs
           WHERE user_id = ? AND portfolio_id = ? AND pipeline = ?
-            AND (created_at > ? OR (created_at = ? AND id > ?))
+            AND (
+              created_at > ?
+              OR (created_at = ?
+                  AND rowid > (
+                    SELECT own.rowid FROM calculation_runs own
+                    WHERE own.user_id = ? AND own.portfolio_id = ?
+                      AND own.id = ?
+                  ))
+            )
           LIMIT 1
         `,
-        [userId, portfolioId, pipeline, createdAt, createdAt, runId],
+        [
+          userId,
+          portfolioId,
+          pipeline,
+          createdAt,
+          createdAt,
+          userId,
+          portfolioId,
+          runId,
+        ],
       );
       return row !== undefined;
     },
@@ -528,7 +565,9 @@ export function createCalculationRunRepository(sql: SqlClient) {
     // that rarer case). Returns the number of runs superseded.
     // CALC-004: scoped by `pipeline` on BOTH the outer stale-candidate row
     // and the `newer` subquery -- see `hasNewerRun`'s doc comment for why a
-    // cross-pipeline row must never count as "newer" here either.
+    // cross-pipeline row must never count as "newer" here either, and for
+    // why an exact `created_at` tie is broken on `rowid` (insertion order),
+    // never on the random-UUID `id` (BUG-016 fold-in).
     async supersedeStaleQueuedRuns(
       userId: string,
       portfolioId: string,
@@ -550,7 +589,7 @@ export function createCalculationRunRepository(sql: SqlClient) {
                 AND (
                   newer.created_at > calculation_runs.created_at
                   OR (newer.created_at = calculation_runs.created_at
-                      AND newer.id > calculation_runs.id)
+                      AND newer.rowid > calculation_runs.rowid)
                 )
             )
         `,
