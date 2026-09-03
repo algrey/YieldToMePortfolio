@@ -885,6 +885,28 @@ This log records durable architecture decisions previously maintained in `AGENTS
 
 ## Decision log
 
+- `2026-09-03` (`BUG-016` correction, review round 4): the entry immediately
+  below describes trigger 1's third call site
+  (`app/import-reversal-service.ts`) as advancing the reversal's queued
+  `calculation_runs` rows by RUN ID, like the two commit call sites. That is
+  no longer how it works, because for a chunked reversal it was wrong:
+  `advanceCalculationRunsForCommit` resolves portfolios from the ids it is
+  given, and a reversal's finalizing invocation only ever holds ids for the
+  portfolios ITS OWN chunk touched (or, when resumed, none at all), so a
+  portfolio fully reversed by an earlier chunk was left `queued` until the
+  cron sweep. The reversal repository now resolves the BATCH's affected
+  portfolios (one bounded, owner-scoped query, capped at the same
+  `maxAffectedPortfolios` ceiling, degrading by logging rather than failing)
+  and the service advances them through a new portfolio-addressed sibling,
+  `advanceCalculationRunsForPortfolios`. Everything else about the call site
+  is unchanged -- same terminal-status gate, same best-effort `.catch`, same
+  `POST_COMMIT_CALCULATION_BUDGET` -- and both COMMIT call sites keep using
+  the run-id entry point, which is correct for them: a commit's
+  `rebuildJobIds` already name every portfolio its `finalize` touched. See
+  `docs/CSV_IMPORT_SPEC.md` §3's round-4 correction for the reproduction and
+  the re-measured per-invocation budget table. No prior text edited; this
+  entry is the correction.
+
 - `2026-09-03` (`BUG-016` correction, review round 3): the `CALC-003`
   execution-model entry below enumerates trigger 1's call sites as "both the
   manual commit route (`app/import-commit-actions.ts`) and the atomic accept

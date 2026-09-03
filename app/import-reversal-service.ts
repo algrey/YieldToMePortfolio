@@ -5,7 +5,7 @@ import {
   type SqlClient,
 } from "../db/repositories/index.ts";
 import {
-  advanceCalculationRunsForCommit,
+  advanceCalculationRunsForPortfolios,
   POST_COMMIT_CALCULATION_BUDGET,
 } from "./calculation-executor-service.ts";
 
@@ -102,18 +102,38 @@ export async function reverseImportWithContext(
     // reversed -- measured 75/72/65 D1 statements across a 3-chunk reversal
     // versus 46/45/65 with this gate, for an identical end state, since the
     // intermediate rebuilds are superseded by the next chunk's run anyway.
-    // Runs queued by a non-final chunk are not lost: the finalizing call
-    // resolves its own ids to their DISTINCT portfolios and then advances
-    // each portfolio's whole projection pipeline (see
-    // `advanceCalculationRunsForCommit`), so earlier chunks' queued rows for
-    // those portfolios are completed or superseded there. The read-time and
-    // cron triggers remain the backstop if the finalizing call never comes.
-    if (result.status === "reversed" && result.rebuildJobIds.length > 0) {
-      await advanceCalculationRunsForCommit(
+    //
+    // Round-4 B1 fix (2026-09-03), replacing this comment's earlier claim
+    // that nothing was stranded by that gate -- it was FALSE as shipped.
+    // The finalizing call used to advance `result.rebuildJobIds`, which
+    // `advanceCalculationRunsForCommit` resolves to the portfolios of THOSE
+    // ids only: the finalizing chunk's own `ledger.reverse()` ids plus the
+    // dividend-parity ids. A portfolio whose transactions were ALL reversed
+    // by an earlier chunk contributed no id, so its queued rows really were
+    // left `queued` until the cron sweep (reproduced: 4 trades across two
+    // portfolios reversed at `maxChunkSize` 2 left the first portfolio with
+    // 5 `queued` rows after the reversal reported `reversed`). A RESUMED
+    // finalizing invocation was worse still: it reverses nothing, returns no
+    // ids, and so advanced nothing at all.
+    //
+    // Fixed by addressing the work by PORTFOLIO instead of by run id: the
+    // repository resolves the whole BATCH's affected-portfolio set
+    // (`affectedPortfolioIds`, bounded at `maxAffectedPortfolios`) on the
+    // finalizing invocation, and `advanceCalculationRunsForPortfolios`
+    // advances each portfolio's whole projection pipeline, completing or
+    // superseding every earlier chunk's queued row. Still gated on the
+    // terminal status, still best-effort, still the same budget. The
+    // read-time and cron triggers remain the backstop if the finalizing call
+    // never comes (or lands outside the bounded set).
+    if (
+      result.status === "reversed" &&
+      result.affectedPortfolioIds.length > 0
+    ) {
+      await advanceCalculationRunsForPortfolios(
         { client: context.client },
         {
           userId: context.userId,
-          calculationRunIds: result.rebuildJobIds,
+          portfolioIds: result.affectedPortfolioIds,
           budget: POST_COMMIT_CALCULATION_BUDGET,
         },
       ).catch(() => undefined);

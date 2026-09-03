@@ -648,9 +648,43 @@ export async function advanceCalculationRunsForCommit(
      WHERE user_id = ? AND id IN (${placeholders})`,
     [input.userId, ...input.calculationRunIds],
   );
+  return advanceCalculationRunsForPortfolios(context, {
+    userId: input.userId,
+    portfolioIds: rows.map((row) => String(row.portfolio_id)),
+    budget: input.budget,
+  });
+}
+
+/**
+ * Trigger 1 helper, portfolio-addressed sibling of
+ * `advanceCalculationRunsForCommit` above: advances the projection pipeline
+ * for each of `portfolioIds` within its own budget, skipping the run-id ->
+ * portfolio lookup entirely. Identical owner scoping (every advance is
+ * `userId`-filtered), identical per-portfolio budget semantics.
+ *
+ * BUG-016 round-4 B1 fix (2026-09-03): a chunked import REVERSAL cannot
+ * address this work by run id. It reverses at most
+ * `IMPORT_REVERSAL_LIMITS.maxChunkSize` (2) transactions per invocation, so
+ * the run ids the FINALIZING invocation returns cover only the portfolios
+ * that invocation's own chunk happened to touch -- a portfolio whose
+ * transactions were all reversed by an EARLIER chunk (or a resumed
+ * finalizing invocation, which reverses nothing at all and returns no ids)
+ * would never be advanced in-request. `db/repositories/import-reversal.ts`
+ * resolves the whole BATCH's affected-portfolio set instead and passes it
+ * here. Commit and accept keep calling the run-id entry point above,
+ * unchanged: their `rebuildJobIds` already cover every portfolio their
+ * finalize touched.
+ */
+export async function advanceCalculationRunsForPortfolios(
+  context: CalculationExecutorContext,
+  input: {
+    userId: string;
+    portfolioIds: readonly string[];
+    budget: number;
+  },
+): Promise<AdvanceCalculationRunsResult[]> {
   const results: AdvanceCalculationRunsResult[] = [];
-  for (const row of rows) {
-    const portfolioId = String(row.portfolio_id);
+  for (const portfolioId of input.portfolioIds) {
     results.push(
       await advanceCalculationRuns(context, {
         userId: input.userId,

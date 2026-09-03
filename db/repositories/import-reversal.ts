@@ -8,6 +8,26 @@ const MAX_CHUNK_SIZE = 2;
 
 export const IMPORT_REVERSAL_LIMITS = {
   maxChunkSize: MAX_CHUNK_SIZE,
+  // BUG-016 review F2 (2026-09-03), stated here as
+  // `IMPORT_COMMIT_LIMITS.maxQueriesPerInvocation` states it for the commit
+  // side: `maxQueriesPerInvocation` and `maxStatementsPerInvocation` below
+  // are DOCUMENTATION-LEVEL budget targets, pinned by `tests/imp-003b.test.ts`
+  // at the `maxAffectedPortfolios` ceiling -- nothing enforces them at
+  // runtime, and no code path checks a counter against them and fails.
+  // (`maxChunkSize` and `maxStatementsPerAtomicUnit`, by contrast, ARE
+  // enforced: the constructor rejects an out-of-range `chunkSize`, and the
+  // phase-2 queueing loop slices its `client.batch()` calls to
+  // `maxStatementsPerAtomicUnit`.)
+  //
+  // The "queries" figure is also a STATEMENT count, not a count of calls to
+  // the D1 client: the counting client in `tests/imp-003b.test.ts` adds
+  // `batch.length` per `batch()` call, matching how the commit side has
+  // always counted. Measured real D1 client calls at the 25-portfolio
+  // ceiling: 33 (27 individual `all`/`get`/`run` calls plus 6 `batch()`
+  // calls, each of which D1 sends as ONE round trip). The statement-level
+  // figure is the conservative one and is what both bounds are sized
+  // against.
+  //
   // HIST-002 review B2 fix (2026-08-25): each reversed transaction now
   // routes through `ledger.ts`'s `persist()`, which pushes one additional
   // `valueHistoryInvalidationFromDateStatement` DELETE into that
@@ -30,8 +50,17 @@ export const IMPORT_REVERSAL_LIMITS = {
   //   queries      | 49 | 51 | 52 | 56 | 57 | 60 | 75 | 75
   //   statements   | 25 | 26 | 27 | 31 | 32 | 35 | 50 | 50
   //
+  // BUG-016 round-4 B1 re-measurement (2026-09-03): the finalizing
+  // invocation now also runs `affectedPortfolioIdsForBatch`'s single
+  // bounded SELECT (see its doc comment) -- exactly +1 query and +0
+  // statements at every N, on the finalizing invocation only:
+  //
+  //   N portfolios |  0 |  1 |  2 |  6 |  7 | 10 | 25 | 26
+  //   queries      | 50 | 52 | 53 | 57 | 58 | 61 | 76 | 76
+  //   statements   | 25 | 26 | 27 | 31 | 32 | 35 | 50 | 50
+  //
   // N=25 is the true worst case: `maxAffectedPortfolios` caps the queued
-  // set, so N=26 (and any larger batch) clamps to the same 75/50 (the
+  // set, so N=26 (and any larger batch) clamps to the same 76/50 (the
   // overflow branch queues 25 and logs the rest). Raised to 90/60 -- the
   // measured worst case plus the same ~20% headroom precedent CALC-004
   // review B2 used when it raised `IMPORT_COMMIT_LIMITS.maxStatementsPerChunk`
@@ -48,6 +77,13 @@ export const IMPORT_REVERSAL_LIMITS = {
   // fail closed on overflow (see `finalize`'s doc comment): the first N
   // portfolios (ordered by id) are queued and the rest are logged as a
   // structured warning, never thrown.
+  //
+  // BUG-016 round-4 B1 fix (2026-09-03): the same ceiling now also bounds
+  // `affectedPortfolioIds` -- the batch-wide set the caller advances
+  // in-request -- with the identical never-fail-closed degrade. A batch
+  // spanning both 25 dividend-bearing portfolios AND a trade-bearing one
+  // therefore advances the first 25 by id and logs the remainder; the
+  // read-time and cron CALC-003 triggers cover the rest.
   maxAffectedPortfolios: 25,
 } as const;
 
@@ -82,6 +118,28 @@ export type ImportReversalSuccess = {
   reversedTransactions: number;
   remainingTransactions: number;
   rebuildJobIds: string[];
+  /**
+   * BUG-016 round-4 B1 fix (2026-09-03): the DISTINCT portfolios THIS BATCH
+   * reversed, resolved from the batch's own rows rather than from
+   * `rebuildJobIds` -- which only ever names what the CURRENT invocation
+   * queued. Populated only on the FINALIZING invocation (`status ===
+   * "reversed"` reached by this call), empty on every non-final chunk, and
+   * bounded by `IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios`.
+   *
+   * Callers advancing `calculation_runs` in-request must use THIS set, not
+   * `rebuildJobIds`: a reversal chunks at `maxChunkSize` (2), so a portfolio
+   * whose transactions were all reversed by an earlier chunk contributes no
+   * id to the finalizing invocation, and a RESUMED finalizing invocation
+   * (the previous attempt's ledger work already durable, its `finalize`
+   * atomic unit not) reverses nothing and returns no ids at all.
+   *
+   * Deliberately EMPTY on `reverse()`'s idempotent early return for a batch
+   * already `reversed`: that path is unchanged by this fix (it returned no
+   * ids before it either), and the read-time and cron `CALC-003` triggers
+   * own the residual case where a finalizing invocation's own advancement
+   * never ran.
+   */
+  affectedPortfolioIds: string[];
 };
 
 export type ImportReversalFailure = {
@@ -330,6 +388,99 @@ export function createOwnedImportReversalRepository(
     return Number(row?.count ?? 0);
   }
 
+  // BUG-016 round-4 B1 fix (2026-09-03): the DISTINCT portfolios this BATCH
+  // reversed -- every portfolio any chunk of this reversal touched, not just
+  // the finalizing chunk's own. Read AFTER `finalize`'s atomic unit commits,
+  // when every reversed row's `commit_status` is `'reversed'` (the first
+  // statement in that unit is exactly that flip), so this returns only work
+  // that is already durable.
+  //
+  // Mirrors `import-commit.ts`'s PRF-007 affected-portfolio resolution: the
+  // same owner-scoped `import_rows` -> `transactions` join, the same
+  // `LIMIT maxAffectedPortfolios + 1` overflow probe. `commit_transaction_id`
+  // is POLYMORPHIC with no discriminator column (a trade row points at
+  // `transactions.id`, a dividend row at `dividend_manual_records.id`), so
+  // the join itself is the discriminator -- exactly as `impactsFor` and
+  // `pendingTargets` above do it, and with their same
+  // `source.import_row_id = source_row.id` back-reference so the set of
+  // portfolios advanced is precisely the set `pendingTargets` ever reversed.
+  // Dividend-side portfolios cannot come from here at all (their
+  // `dividend_manual_records` rows were hard-DELETEd inside the same atomic
+  // unit); they are passed in by the caller from the phase-1 grouped SELECT
+  // that ran while those rows still existed.
+  //
+  // `+source_row.user_id` is PRF-009 fold-in (a)'s unary-plus no-index hint,
+  // applied here for the same reason and verified the same way. Measured
+  // EXPLAIN QUERY PLAN without it:
+  //
+  //   SEARCH source USING INDEX transactions_owner_portfolio_idempotency_unique (user_id=?)
+  //   SEARCH source_row USING INDEX import_rows_id_user_unique (id=? AND user_id=?)
+  //
+  // -- owner-scoped, but driven from EVERY transaction this owner has ever
+  // posted, to find the handful belonging to one batch. With the hint, the
+  // plan is the one the sibling `pendingTargets` above already gets, scoped
+  // to this BATCH rather than to the whole owner:
+  //
+  //   SEARCH source_row USING INDEX import_rows_batch_physical_row_unique (batch_id=?)
+  //   SEARCH source USING INDEX transactions_id_user_unique (id=? AND user_id=?)
+  //   USE TEMP B-TREE FOR DISTINCT
+  //
+  // Ownership is unchanged and still checked twice (`source_row.user_id = ?`
+  // as a row filter, and the `transactions` seek itself is `(id, user_id)`),
+  // so a batch id belonging to another owner still matches nothing. The
+  // `LIMIT` bounds the portfolios RETURNED, not the rows read: the rows read
+  // are this batch's own reversed rows, the same set `pendingTargets` walks
+  // chunk by chunk.
+  async function affectedPortfolioIdsForBatch(
+    userId: string,
+    batchId: string,
+    requestId: string,
+    dividendPortfolioIds: readonly string[],
+  ): Promise<string[]> {
+    const rows = await client.all<Record<string, unknown>>(
+      `
+        SELECT DISTINCT source.portfolio_id AS portfolio_id
+        FROM import_rows source_row
+        JOIN transactions source
+          ON source.id = source_row.commit_transaction_id
+         AND source.user_id = source_row.user_id
+         AND source.import_row_id = source_row.id
+        WHERE +source_row.user_id = ?
+          AND source_row.batch_id = ?
+          AND source_row.commit_status = 'reversed'
+        ORDER BY source.portfolio_id ASC
+        LIMIT ?
+      `,
+      [userId, batchId, IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios + 1],
+    );
+    const merged = new Set<string>(rows.map((row) => String(row.portfolio_id)));
+    for (const portfolioId of dividendPortfolioIds) merged.add(portfolioId);
+    const ordered = [...merged].sort();
+    if (ordered.length <= IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios) {
+      return ordered;
+    }
+    // Same degrade as the phase-2 queueing below: advance the first N by
+    // portfolio id and log the rest. A reversal must NEVER fail here -- the
+    // ledger side is already reversed and durable by the time this runs --
+    // and the read-time/cron `CALC-003` triggers still cover whatever this
+    // invocation does not advance. `affectedPortfolios` is a lower bound at
+    // the probe limit (the SELECT stops at N + 1), matching the dividend
+    // overflow log's identical convention.
+    emitStructuredLog({
+      level: "warn",
+      event: "import.reverse",
+      action: "import.reverse.calculation_advance_overflow",
+      result: "failure",
+      requestId,
+      metadata: {
+        batchId,
+        affectedPortfolios: ordered.length,
+        advancedPortfolios: IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios,
+      },
+    });
+    return ordered.slice(0, IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios);
+  }
+
   async function finalize(
     userId: string,
     batchId: string,
@@ -348,7 +499,18 @@ export function createOwnedImportReversalRepository(
     // braces guard, not the only one.
     dividendRecordCount: number,
     metadata: Record<string, unknown>,
-  ): Promise<{ ok: true; dividendRebuildJobIds: string[] } | { ok: false }> {
+  ): Promise<
+    | {
+        ok: true;
+        dividendRebuildJobIds: string[];
+        // BUG-016 round-4 B1 fix: the portfolios behind those ids, captured
+        // here because `affectedPortfolioIdsForBatch` cannot recover them --
+        // the atomic unit below hard-DELETEs the `dividend_manual_records`
+        // rows they were read from.
+        dividendPortfolioIds: string[];
+      }
+    | { ok: false }
+  > {
     const at = now();
     const statusFields = reversed
       ? "status = 'reversed', reversed_at = ?"
@@ -383,7 +545,11 @@ export function createOwnedImportReversalRepository(
     // atomic `statements` array -- they are issued in their own chunked
     // `client.batch()` calls after `atomic()` below succeeds. See that
     // block's own doc comment for the full rationale.
-    let dividendRebuildInserts: { id: string; statement: SqlStatement }[] = [];
+    let dividendRebuildInserts: {
+      id: string;
+      portfolioId: string;
+      statement: SqlStatement;
+    }[] = [];
     // BUG-016: the dividend side of a reversal (the flip below, the DIV-016C
     // restore, and the hard DELETE) must never run on a non-final CHUNK --
     // only the finalizing invocation (`reversed === true`) may touch income
@@ -541,6 +707,7 @@ export function createOwnedImportReversalRepository(
           const rebuildJobId = `import-reversal-rebuild:${batchId}:${portfolioId}`;
           return {
             id: rebuildJobId,
+            portfolioId,
             statement: {
               sql: `INSERT INTO calculation_runs (
                 id, user_id, portfolio_id, range_from, range_to, calculation_version,
@@ -664,7 +831,21 @@ export function createOwnedImportReversalRepository(
       }
     }
 
-    return { ok: true, dividendRebuildJobIds: landedDividendRebuildJobIds };
+    return {
+      ok: true,
+      dividendRebuildJobIds: landedDividendRebuildJobIds,
+      // BUG-016 round-4 B1 fix: deliberately the INTENDED portfolios, not
+      // only the ones whose parity INSERT landed. This names what the
+      // reversal actually affected (their `dividend_manual_records` rows are
+      // deleted either way, inside the atomic unit above), so the caller's
+      // `affectedPortfolioIds` stays honest even when a phase-2 chunk
+      // failed; advancing a portfolio whose parity row never landed is a
+      // cheap no-op, never a wrong result. Already bounded by
+      // `maxAffectedPortfolios` where `dividendRebuildInserts` was built.
+      dividendPortfolioIds: dividendRebuildInserts.map(
+        (entry) => entry.portfolioId,
+      ),
+    };
   }
 
   return {
@@ -691,6 +872,12 @@ export function createOwnedImportReversalRepository(
               reversedTransactions: 0,
               remainingTransactions: 0,
               rebuildJobIds: [],
+              // Intentionally empty -- see `affectedPortfolioIds`' own doc
+              // comment on `ImportReversalSuccess`. This early return is for
+              // a batch that already reached `reversed`; its finalizing
+              // invocation already had its chance to advance, and this path
+              // deliberately stays a pure, query-free idempotent replay.
+              affectedPortfolioIds: [],
             }
           : { ok: false, reason: "conflict" };
       }
@@ -809,6 +996,20 @@ export function createOwnedImportReversalRepository(
         return { ok: false, reason: "atomic_failure", resumable: true };
       }
 
+      // BUG-016 round-4 B1 fix (2026-09-03): resolved ONLY on the finalizing
+      // invocation -- one extra bounded query on the one invocation per
+      // reversal whose caller actually advances calculation runs (see
+      // `app/import-reversal-service.ts`'s terminal-status gate); a non-final
+      // chunk pays nothing for it.
+      const affectedPortfolioIds = finalizing
+        ? await affectedPortfolioIdsForBatch(
+            userId,
+            batchId,
+            input.requestId,
+            finalized.dividendPortfolioIds,
+          )
+        : [];
+
       return {
         ok: true,
         batchId,
@@ -818,6 +1019,7 @@ export function createOwnedImportReversalRepository(
         reversedTransactions,
         remainingTransactions: remaining,
         rebuildJobIds: [...rebuildJobIds, ...finalized.dividendRebuildJobIds],
+        affectedPortfolioIds,
       };
     },
   };

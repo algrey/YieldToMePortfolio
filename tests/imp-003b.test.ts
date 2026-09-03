@@ -52,7 +52,10 @@ async function migratedDatabase(): Promise<DatabaseSync> {
   return database;
 }
 
-function normalized(rowNumber: number) {
+function normalized(
+  rowNumber: number,
+  overrides: Record<string, unknown> = {},
+) {
   return {
     id: `source-${rowNumber}`,
     symbol: "ABC",
@@ -74,6 +77,7 @@ function normalized(rowNumber: number) {
     tradeAtUtc: `2026-08-01T00:00:${String(rowNumber).padStart(2, "0")}.000Z`,
     localTradeDate: "2026-08-01",
     cashEvent: null,
+    ...overrides,
   };
 }
 
@@ -103,6 +107,13 @@ async function commitBatch(
   count: number,
 ): Promise<{ database: DatabaseSync; version: number }> {
   stageRows(database, count);
+  return commitStagedBatch(database);
+}
+
+/** `commitBatch` without the staging step, for fixtures that stage their own rows. */
+async function commitStagedBatch(
+  database: DatabaseSync,
+): Promise<{ database: DatabaseSync; version: number }> {
   const client = createSqliteSqlClient(database);
   const repository = createOwnedImportCommitRepository(client);
   const validated = await repository.validate("user-a", "batch-a");
@@ -735,6 +746,17 @@ test("BUG-016 review B1: a finalizing reversal at exactly the 25-portfolio ceili
   // 2 per-transaction `ledger_mutation` ids + one `import_reverse` id per
   // dividend-bearing portfolio.
   assert.equal(result.rebuildJobIds.length, 2 + portfolioCount);
+  // BUG-016 round-4 B1: the batch-wide advance set is 25 dividend-bearing
+  // portfolios PLUS the trade-bearing `portfolio-a` = 26, one past
+  // `maxAffectedPortfolios` -- so this fixture also exercises the advance
+  // set's never-fail-closed overflow degrade (log, keep the first N by id;
+  // `portfolio-a` sorts first, so `portfolio-div-9` is the one dropped).
+  assert.equal(
+    result.affectedPortfolioIds.length,
+    IMPORT_REVERSAL_LIMITS.maxAffectedPortfolios,
+  );
+  assert.equal(result.affectedPortfolioIds[0], "portfolio-a");
+  assert.ok(!result.affectedPortfolioIds.includes("portfolio-div-9"));
   assert.ok(
     counts.queries <= IMPORT_REVERSAL_LIMITS.maxQueriesPerInvocation,
     `${counts.queries} D1 queries at the ${portfolioCount}-portfolio ceiling exceeds the ${IMPORT_REVERSAL_LIMITS.maxQueriesPerInvocation} budget`,
@@ -937,6 +959,315 @@ test("BUG-016 review B2: a chunked reversal advances calculation runs once, on t
     completedRunId,
     "the publication must be current at the end of a chunked reversal, pointing at its single completed run",
   );
+});
+
+// BUG-016 round-4 B1 fixture: a batch whose trade rows span TWO portfolios,
+// the second portfolio's rows physically LAST. Reversing at `maxChunkSize`
+// (2) therefore fully reverses portfolio-a on the FIRST (non-final)
+// invocation, leaving only portfolio-c's rows for the finalizing one -- so
+// the finalizing invocation's own `rebuildJobIds` name portfolio-c ONLY.
+// Portfolio resolution follows the `tests/imp-003a.test.ts` 25-portfolio
+// precedent: a distinct source symbol per portfolio is what revalidation
+// resolves the row's target from.
+function seedSecondTradePortfolio(database: DatabaseSync): void {
+  database.exec(`
+    INSERT INTO portfolios (
+      id, user_id, code, name, base_currency_code, timezone,
+      accounting_method, status, created_at, updated_at, version
+    ) VALUES ('portfolio-c', 'user-a', 'C', 'Second', 'AUD',
+      'Australia/Sydney', 'fifo', 'active', '2026-08-03', '2026-08-03', 1);
+    INSERT INTO securities (
+      id, canonical_name, asset_type, primary_currency_code, status,
+      created_at, updated_at
+    ) VALUES ('security-c', 'Gamma', 'equity', 'AUD', 'active', '2026-08-03',
+      '2026-08-03');
+    INSERT INTO portfolio_securities (
+      id, user_id, portfolio_id, security_id, source_symbol,
+      source_currency_code, status, created_at, updated_at
+    ) VALUES ('membership-c', 'user-a', 'portfolio-c', 'security-c', 'XYZ',
+      'AUD', 'held', '2026-08-03', '2026-08-03');
+  `);
+}
+
+function stageTwoPortfolioRows(database: DatabaseSync): void {
+  const insert = database.prepare(
+    `INSERT INTO import_rows (
+       id, user_id, batch_id, physical_row_number, row_class,
+       original_fields_json, normalized_fields_json, normalized_fingerprint,
+       validation_status, target_portfolio_id, target_portfolio_security_id,
+       commit_status, created_at, updated_at, version
+     ) VALUES (?, 'user-a', 'batch-a', ?, 'transaction', '[]', ?, ?, 'valid',
+       ?, ?, 'staged', '2026-08-03', '2026-08-03', 1)`,
+  );
+  const targets = [
+    ["portfolio-a", "membership-a", "ABC", "Alpha"],
+    ["portfolio-a", "membership-a", "ABC", "Alpha"],
+    ["portfolio-c", "membership-c", "XYZ", "Gamma"],
+    ["portfolio-c", "membership-c", "XYZ", "Gamma"],
+  ] as const;
+  targets.forEach(([portfolioId, membershipId, symbol, name], index) => {
+    const rowNumber = index + 2;
+    insert.run(
+      `row-${index + 1}`,
+      rowNumber,
+      JSON.stringify(normalized(rowNumber, { symbol, name })),
+      `fingerprint-${index + 1}`,
+      portfolioId,
+      membershipId,
+    );
+  });
+}
+
+async function commitTwoPortfolioBatch(): Promise<{
+  database: DatabaseSync;
+  version: number;
+}> {
+  const database = await migratedDatabase();
+  seedSecondTradePortfolio(database);
+  stageTwoPortfolioRows(database);
+  const committed = await commitStagedBatch(database);
+  assert.deepEqual(
+    database
+      .prepare(
+        `SELECT portfolio_id, count(*) AS count FROM transactions
+         WHERE user_id = 'user-a' GROUP BY portfolio_id ORDER BY portfolio_id`,
+      )
+      .all()
+      .map((row) => ({
+        portfolioId: String(row.portfolio_id),
+        count: Number(row.count),
+      })),
+    [
+      { portfolioId: "portfolio-a", count: 2 },
+      { portfolioId: "portfolio-c", count: 2 },
+    ],
+    "the fixture must actually span two portfolios",
+  );
+  // Same clock-gap rationale as the single-portfolio fold-in tests above:
+  // keeps the commit's own now-stale runs from tying with the reversal's on
+  // `created_at`.
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  return committed;
+}
+
+function pipelineState(
+  database: DatabaseSync,
+  portfolioId: string,
+): { pending: number; completed: number; publishedRunId: string | null } {
+  const pending = (
+    database
+      .prepare(
+        `SELECT count(*) AS count FROM calculation_runs
+         WHERE user_id = 'user-a' AND portfolio_id = ?
+           AND status IN ('queued', 'running')`,
+      )
+      .get(portfolioId) as { count: number }
+  ).count;
+  const completedRows = database
+    .prepare(
+      `SELECT id FROM calculation_runs
+       WHERE user_id = 'user-a' AND portfolio_id = ? AND status = 'completed'`,
+    )
+    .all(portfolioId) as Array<{ id: string }>;
+  const publication = database
+    .prepare(
+      `SELECT calculation_run_id FROM projection_publications
+       WHERE user_id = 'user-a' AND portfolio_id = ?`,
+    )
+    .get(portfolioId) as { calculation_run_id: string } | undefined;
+  return {
+    pending,
+    completed: completedRows.length,
+    publishedRunId: publication ? String(publication.calculation_run_id) : null,
+  };
+}
+
+/** Asserts a portfolio's projection pipeline is fully settled and current. */
+function assertSettled(database: DatabaseSync, portfolioId: string): void {
+  const state = pipelineState(database, portfolioId);
+  assert.equal(
+    state.pending,
+    0,
+    `${portfolioId} still has ${state.pending} queued/running calculation runs after the finalizing reversal`,
+  );
+  assert.equal(
+    state.completed,
+    1,
+    `${portfolioId} must have exactly one completed run, saw ${state.completed}`,
+  );
+  assert.ok(
+    state.publishedRunId,
+    `${portfolioId} must have a projection publication`,
+  );
+  const completedId = (
+    database
+      .prepare(
+        `SELECT id FROM calculation_runs
+         WHERE user_id = 'user-a' AND portfolio_id = ? AND status = 'completed'`,
+      )
+      .get(portfolioId) as { id: string }
+  ).id;
+  assert.equal(
+    state.publishedRunId,
+    String(completedId),
+    `${portfolioId}'s publication must point at its completed run`,
+  );
+}
+
+// BUG-016 round-4 B1 regression pin (BLOCKING finding, reproduced): the
+// finalizing invocation advanced `result.rebuildJobIds`, and
+// `advanceCalculationRunsForCommit` resolves portfolios from THOSE ids only
+// -- the finalizing chunk's own `ledger.reverse()` ids plus the dividend
+// parity ids. A portfolio whose transactions were all reversed by an EARLIER
+// chunk contributes no id, so it was never advanced in-request: against
+// `5c656a4` this fixture left portfolio-a with 5 `queued` rows (its commit's
+// `import_commit` run, two `ledger_mutation` rows from the commit's postings,
+// and two more from the reversal) while portfolio-c completed normally.
+// Fixed by advancing the BATCH's affected-portfolio set instead.
+test("BUG-016 round-4 B1: a chunked reversal advances every portfolio the BATCH reversed, not just the finalizing chunk's own", async () => {
+  const { database, version } = await commitTwoPortfolioBatch();
+  const context = {
+    client: createSqliteSqlClient(database),
+    userId: "user-a",
+    requestId: "two-portfolio-request",
+  };
+
+  const first = await reverseImportWithContext(
+    context,
+    "batch-a",
+    reversalInput(version, "two-portfolio-reverse"),
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  assert.equal(first.reversal.status, "reversing");
+  // The non-final chunk must still advance nothing at all (the round-3 B2
+  // gate), even though it just reversed the whole of portfolio-a.
+  assert.deepEqual(first.reversal.affectedPortfolioIds, []);
+  assert.equal(
+    (
+      database
+        .prepare(
+          `SELECT count(*) AS count FROM calculation_runs
+           WHERE user_id = 'user-a' AND status = 'completed'`,
+        )
+        .get() as { count: number }
+    ).count,
+    0,
+    "a non-final chunk must not advance any calculation run",
+  );
+
+  const final = await reverseImportWithContext(
+    context,
+    "batch-a",
+    reversalInput(version, "two-portfolio-reverse"),
+  );
+  assert.equal(final.ok, true);
+  if (!final.ok) return;
+  assert.equal(final.reversal.status, "reversed");
+  // The defect in one line: the finalizing invocation's own ids name
+  // portfolio-c only, while the batch reversed both portfolios.
+  assert.deepEqual(
+    database
+      .prepare(
+        `SELECT DISTINCT portfolio_id FROM calculation_runs
+         WHERE user_id = 'user-a' AND id IN (${final.reversal.rebuildJobIds
+           .map(() => "?")
+           .join(",")})`,
+      )
+      .all(...final.reversal.rebuildJobIds)
+      .map((row) => String(row.portfolio_id)),
+    ["portfolio-c"],
+  );
+  assert.deepEqual(final.reversal.affectedPortfolioIds, [
+    "portfolio-a",
+    "portfolio-c",
+  ]);
+
+  assertSettled(database, "portfolio-a");
+  assertSettled(database, "portfolio-c");
+});
+
+// BUG-016 round-4 F1 regression pin: a RESUMED finalizing invocation reverses
+// nothing (the previous attempt's `ledger.reverse()` work is already durable
+// in its own atomic units) and therefore returns NO run ids of its own, so
+// the old id-addressed advancement did nothing whatsoever -- both portfolios
+// stayed queued. The batch's affected-portfolio set does not depend on what
+// this invocation happened to do, so the resumed call still settles both.
+test("BUG-016 round-4 F1: a resumed finalizing reversal, with no run ids of its own, still advances every portfolio the batch reversed", async () => {
+  const { database, version } = await commitTwoPortfolioBatch();
+  const base = createSqliteSqlClient(database);
+  const context = {
+    client: base,
+    userId: "user-a",
+    requestId: "resumed-finalize-request",
+  };
+  const input = reversalInput(version, "resumed-finalize");
+
+  const first = await reverseImportWithContext(context, "batch-a", input);
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  assert.equal(first.reversal.status, "reversing");
+
+  // Fail the finalizing invocation inside `finalize`'s own atomic unit --
+  // AFTER its `ledger.reverse()` calls have already committed portfolio-c's
+  // reversals in their own units. `finalize` is the only atomic unit that
+  // touches `import_rows`.
+  let injected = 0;
+  const failingClient: SqlClient = {
+    ...base,
+    async batch(statements) {
+      if (
+        statements.some((statement) => /UPDATE import_rows/.test(statement.sql))
+      ) {
+        injected += 1;
+        throw new Error("injected D1 failure inside finalize");
+      }
+      return base.batch!(statements);
+    },
+  };
+  const interrupted = await reverseImportWithContext(
+    { ...context, client: failingClient },
+    "batch-a",
+    input,
+  );
+  assert.equal(injected, 1);
+  assert.deepEqual(interrupted, {
+    ok: false,
+    status: 503,
+    message:
+      "The import reversal is still in progress and can be resumed safely.",
+    impacts: undefined,
+  });
+  assert.equal(
+    (
+      database
+        .prepare("SELECT status FROM import_batches WHERE id = 'batch-a'")
+        .get() as { status: string }
+    ).status,
+    "reversing",
+  );
+
+  const resumed = await reverseImportWithContext(context, "batch-a", input);
+  assert.equal(resumed.ok, true);
+  if (!resumed.ok) return;
+  assert.equal(resumed.reversal.status, "reversed");
+  assert.equal(
+    resumed.reversal.reversedTransactions,
+    0,
+    "a resumed finalizing invocation reverses nothing of its own",
+  );
+  assert.deepEqual(
+    resumed.reversal.rebuildJobIds,
+    [],
+    "...and so returns no run ids of its own -- the id-addressed advancement had nothing to work with",
+  );
+  assert.deepEqual(resumed.reversal.affectedPortfolioIds, [
+    "portfolio-a",
+    "portfolio-c",
+  ]);
+
+  assertSettled(database, "portfolio-a");
+  assertSettled(database, "portfolio-c");
 });
 
 test("reversal resumes after a bounded failure and corrected upload supersedes only reversed batches", async () => {
