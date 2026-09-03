@@ -1,3 +1,4 @@
+import { parseDecimal } from "../calculations/decimal.ts";
 import type { NormalizedImportRow } from "./strict-versioned-parser.ts";
 // DIV-004: reuse DIV-001's documented proximity window rather than
 // re-deriving a second "how close counts as a duplicate" constant.
@@ -103,6 +104,32 @@ function safeCashTotalsWithinTolerance(left: string, right: string): boolean {
   }
 }
 
+// BUG-014 correction round 3: the bound a TOTALS-mode amount is actually
+// validated against -- `parseDecimal`'s "input" limits (24 fractional digits /
+// 64 total, `domain/calculations/decimal.ts`'s `DECIMAL_LIMITS`), referenced
+// through the parse function itself rather than restated as a number here.
+//
+// Round 2 validated a totals-mode value against `parseDecimalResult`'s WIDER
+// 96-scale "result" bound instead (via a self-compare through
+// `safeCashTotalsWithinTolerance`), reasoning that a transported total is a
+// result, not a fresh input. That reasoning was wrong about where the value
+// ENDS UP: a staged totals-mode amount is stored verbatim in
+// `dividend_manual_records.total_cash_decimal` and read back through
+// `parseDecimal` (`domain/dividends/history.ts`), so 24 -- not 96 -- is the
+// only scale this system can actually carry for a stored dividend amount.
+// `db/repositories/dividends.ts`'s insert builder now enforces exactly that
+// bound at the write boundary; this makes the preview WARN about the same
+// value the commit will reject, rather than passing a 25-to-96-digit total
+// through silently and only failing later.
+function parsesWithinStoredAmountBounds(value: string): boolean {
+  try {
+    parseDecimal(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // BUG-014: reuses `safeComputeDividendCashTotal` above (never re-derives the
 // parsing logic) and adds only a diagnosis of WHY the result came back
 // `null`, for the two DIV-016C reconciliation-candidate sites below.
@@ -129,17 +156,21 @@ function safeCashTotalsWithinTolerance(left: string, right: string): boolean {
 // `malformed: false` -- reported as a clean, comparable amount -- and then
 // reached `cashTotalsWithinTolerance` (via `computeDividendReconciliation`,
 // or the raw compare below) for the first time, where it WOULD throw,
-// 500ing the page or crashing commit-time `revalidate()`. Fixed by forcing
-// the exact same parse this value will actually be checked against at match
-// time: `safeCashTotalsWithinTolerance`'s self-compare (`v` against itself)
-// parses `v` through `parseDecimalResult` and returns `false` -- never
-// throws -- when it doesn't parse. A value that fails this trivially-true
-// self-compare is reclassified as malformed instead of silently passing
-// through as clean. Per-share-mode values are already covered by the
-// existing throw-inside-the-try-block path above; this covers the ONE shape
-// that path structurally cannot (see this module's F1 correction to the
-// over-claiming comments at the two call sites below for the exact
-// per-mode bound each branch is validated against).
+// 500ing the page or crashing commit-time `revalidate()`. Fixed by parsing
+// that verbatim value here instead of trusting it.
+//
+// CORRECTION ROUND 3 (reviewer F1): round 2 parsed it through
+// `safeCashTotalsWithinTolerance`'s self-compare, i.e. against
+// `parseDecimalResult`'s WIDER 96-scale "result" bound, so a 25-to-96-digit
+// totals value still passed here as clean -- and, since a staged totals
+// amount is PERSISTED verbatim and read back through `parseDecimal` (24
+// scale), such a value committed successfully and then crashed `/income`
+// forever. It is now bounded by `parseDecimal` itself
+// (`parsesWithinStoredAmountBounds`), matching both the read path and
+// `db/repositories/dividends.ts`'s insert boundary. Per-share-mode values are
+// covered by the existing throw-inside-the-try-block path above (each operand
+// is `parseDecimal`d) plus the self-compare on their computed product; this
+// covers the ONE shape that path structurally cannot.
 function safeComputeDividendCashTotalDiagnosed(fields: {
   totalCashDecimal: string | null;
   sharesDecimal: string | null;
@@ -147,7 +178,25 @@ function safeComputeDividendCashTotalDiagnosed(fields: {
 }): { cashTotalDecimal: string | null; malformed: boolean } {
   const cashTotalDecimal = safeComputeDividendCashTotal(fields);
   if (cashTotalDecimal !== null) {
-    if (!safeCashTotalsWithinTolerance(cashTotalDecimal, cashTotalDecimal)) {
+    // The branch condition MIRRORS `computeDividendCashTotal`'s own
+    // (`totalCashDecimal !== null` selects the verbatim-passthrough branch),
+    // so each mode is validated against the bound that actually applies to
+    // its result:
+    //  - TOTALS mode: the value is the staged/stored string itself and will
+    //    be persisted verbatim, so it is bounded by `parseDecimal`'s "input"
+    //    limits -- the same bound the read path and the insert builder use
+    //    (correction round 3; round 2 wrongly used the wider 96-scale
+    //    "result" bound here -- see `parsesWithinStoredAmountBounds`).
+    //  - PER-SHARE mode: the value is a COMPUTED product of two already-
+    //    `parseDecimal`-validated operands, so its scale can legitimately
+    //    reach 48 and the wider "result" bound is the correct one; the
+    //    self-compare also re-checks it can survive the actual match-time
+    //    parse.
+    const withinBound =
+      fields.totalCashDecimal !== null
+        ? parsesWithinStoredAmountBounds(cashTotalDecimal)
+        : safeCashTotalsWithinTolerance(cashTotalDecimal, cashTotalDecimal);
+    if (!withinBound) {
       return { cashTotalDecimal: null, malformed: true };
     }
     return { cashTotalDecimal, malformed: false };
@@ -1238,14 +1287,16 @@ export function createImportReconciliationPreview(
       // `computeDividendCashTotal` returns a non-null `totalCashDecimal`
       // VERBATIM, never parsing it, so a malformed totals-mode value never
       // threw here and sailed through as `malformed: false`.
-      // `safeComputeDividendCashTotalDiagnosed` now additionally validates
-      // that verbatim value via a self-compare through
-      // `safeCashTotalsWithinTolerance` (bound by `parseDecimalResult`'s
-      // WIDER "result" limit: scale 96, 256 digits -- a deliberately
-      // different bound than the per-share-mode path above, since a
-      // Sharesight-reported total is a transported result figure, not a
-      // fresh input). Both modes are now covered, each by the bound that
-      // actually applies to it.
+      // `safeComputeDividendCashTotalDiagnosed` now additionally parses that
+      // verbatim value through `parseDecimal` -- the SAME "input" bound
+      // (scale 24, 64 digits) the per-share-mode path above is held to, and
+      // the same bound `db/repositories/dividends.ts` enforces before the
+      // amount can be stored and `domain/dividends/history.ts` re-parses it
+      // at read time (correction round 3, reviewer F1: round 2 used
+      // `parseDecimalResult`'s wider 96-scale "result" bound here, which let
+      // a 25-to-96-digit total pass preview silently and then commit).
+      // Both modes are now covered, by the one bound that applies to a
+      // stored dividend amount.
       //
       // An unparseable value is now "cannot compare" -- the row still
       // stages and renders, it is simply excluded from the reconciliation
@@ -1316,11 +1367,11 @@ export function createImportReconciliationPreview(
   // it is the bound for the PER-SHARE-mode columns (`shares_decimal`/
   // `dividend_per_share_decimal`) only. A TOTALS-mode `total_cash_decimal`
   // is never passed through `parseDecimal` at all (`computeDividendCashTotal`
-  // returns it verbatim); it is now validated via
-  // `safeComputeDividendCashTotalDiagnosed`'s self-compare, bound by
-  // `parseDecimalResult`'s WIDER "result" limit (scale 96, 256 digits) --
-  // see that function's own doc comment for why the two modes need
-  // different bounds. An unparseable candidate (either mode) is excluded
+  // returns it verbatim); `safeComputeDividendCashTotalDiagnosed` now parses
+  // it explicitly, at that same `parseDecimal` "input" bound (scale 24, 64
+  // digits) -- correction round 3, reviewer F1: round 2 bounded it at
+  // `parseDecimalResult`'s wider 96 scale, which is not a scale this system
+  // can store or read back. An unparseable candidate (either mode) is excluded
   // from matching (unchanged `cashTotalDecimal !== null` filter below) and
   // now also raises a visible, batch-level warning -- never a silent drop.
   const reconciliationCandidates = (input.reconciliationCandidates ?? []).map(

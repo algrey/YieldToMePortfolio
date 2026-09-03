@@ -376,13 +376,21 @@ test("a malformed candidate does not poison a sibling well-formed candidate's no
 // (unlike a malformed per-share-mode value) sailed through as
 // `malformed: false` and later threw the FIRST time it was actually
 // compared (`cashTotalsWithinTolerance`'s `parseDecimalResult`). Fixed by
-// `safeComputeDividendCashTotalDiagnosed`'s self-compare validation. Note
-// the bound is DELIBERATELY WIDER than the per-share-mode path's
-// `parseDecimal` (scale 24): totals-mode is validated via
-// `parseDecimalResult` (scale 96), so a value that would be malformed for
-// a FRESH per-share input can still be well-formed as a transported
-// totals-mode result -- `OVER_RESULT_SCALE_DECIMAL` below is deliberately
-// past even that wider bound.
+// `safeComputeDividendCashTotalDiagnosed`'s explicit validation of that
+// verbatim value.
+//
+// CORRECTION ROUND 3 (reviewer F1): round 2 validated it against
+// `parseDecimalResult`'s WIDER 96-scale "result" bound, on the reasoning
+// that a transported total is a result rather than a fresh input. That was
+// wrong about where the value ENDS UP: a staged totals-mode amount is
+// PERSISTED verbatim in `dividend_manual_records.total_cash_decimal` and
+// read back through `parseDecimal` (scale 24), so anything past 24 cannot
+// survive a round trip. The bound here is now `parseDecimal`'s, matching
+// both the read path and `db/repositories/dividends.ts`'s insert boundary --
+// so `OVER_SCALE_DECIMAL` (25 digits) now warns in TOTALS mode too, not just
+// `OVER_RESULT_SCALE_DECIMAL` (97). A per-share-mode COMPUTED product keeps
+// the wider bound (two 24-scale operands legitimately multiply out to 48) --
+// pinned by its own test at the end of this section.
 // ---------------------------------------------------------------------------
 
 // Past even `parseDecimalResult`'s WIDER "result" scale bound (96
@@ -391,6 +399,11 @@ test("a malformed candidate does not poison a sibling well-formed candidate's no
 // over `parseDecimal`'s narrower 24-digit "input" bound but well within
 // `parseDecimalResult`'s.
 const OVER_RESULT_SCALE_DECIMAL = `0.${"1".repeat(97)}`;
+
+// The band round 2 waved through as clean: past `parseDecimal`'s 24-digit
+// "input" bound (so it can never be stored or read back) but well inside
+// `parseDecimalResult`'s 96.
+const OVER_INPUT_SCALE_TOTAL_DECIMAL = `0.${"1".repeat(30)}`;
 
 test("a staged dividend row with a non-canonical TOTALS-mode totalCashDecimal ('2.50 ', trailing space) never throws, and surfaces a visible per-row warning instead of being reported as clean", () => {
   const row = dividendRow({
@@ -532,6 +545,90 @@ test("the candidate amount-unavailable warning names the security symbol and pay
   assert.ok(warning);
   assert.match(warning!.message, /ABC/);
   assert.match(warning!.message, /2026-08-05/);
+});
+
+// ---------------------------------------------------------------------------
+// Correction round 3 (reviewer F1): the 25-to-96-fractional-digit band --
+// past `parseDecimal`'s 24 "input" bound (so it can never be stored and read
+// back) but inside `parseDecimalResult`'s 96, which is exactly the band round
+// 2's totals-mode validation reported as CLEAN. It must warn at preview, the
+// same as any other amount this system cannot carry.
+// ---------------------------------------------------------------------------
+
+test("correction round 3: a staged dividend row with a 30-fractional-digit TOTALS-mode totalCashDecimal (inside parseDecimalResult's 96 bound, past parseDecimal's 24) surfaces the per-row warning", () => {
+  const row = dividendRow({ rowId: "row-totals-30", shape: "totals" });
+  const preview = createImportReconciliationPreview({
+    rows: [
+      {
+        ...row,
+        normalized: {
+          ...row.normalized,
+          totalCashDecimal: OVER_INPUT_SCALE_TOTAL_DECIMAL,
+        },
+      },
+    ],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    reconciliationCandidates: [],
+  });
+  const warning = preview.issues.find(
+    (issue) => issue.code === "DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE",
+  );
+  assert.ok(
+    warning,
+    "a total this system cannot store or read back must not be reported as a clean, comparable amount",
+  );
+  assert.equal(warning!.rowId, "row-totals-30");
+});
+
+test("correction round 3: a reconciliation candidate with a 30-fractional-digit TOTALS-mode total_cash_decimal surfaces the batch-level warning", () => {
+  const row = dividendRow({ rowId: "row-3", shape: "totals" });
+  const preview = createImportReconciliationPreview({
+    rows: [row],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    reconciliationCandidates: [
+      candidate({
+        id: "manual-totals-30",
+        totalCashDecimal: OVER_INPUT_SCALE_TOTAL_DECIMAL,
+        sharesDecimal: null,
+        dividendPerShareDecimal: null,
+      }),
+    ],
+  });
+  const warning = preview.issues.find(
+    (issue) =>
+      issue.code === "DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE",
+  );
+  assert.ok(warning);
+  assert.equal(warning!.sourceKey, "manual-totals-30");
+});
+
+test("correction round 3 (no over-tightening): a PER-SHARE-mode row whose two 24-scale operands multiply out to a 48-scale product is still clean -- the narrower bound applies to a STORED totals value, never to a computed product", () => {
+  const row = dividendRow({ rowId: "row-pershare-48" });
+  const preview = createImportReconciliationPreview({
+    rows: [
+      {
+        ...row,
+        normalized: {
+          ...row.normalized,
+          sharesOwned: `1.${"1".repeat(24)}`,
+          costPerShare: `0.${"1".repeat(24)}`,
+        },
+      },
+    ],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    reconciliationCandidates: [],
+  });
+  assert.equal(
+    preview.issues.some(
+      (issue) =>
+        issue.code === "DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE",
+    ),
+    false,
+    "both operands are within parseDecimal's own bound, so their exact product is a legitimate comparable amount",
+  );
 });
 
 // ---------------------------------------------------------------------------

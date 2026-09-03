@@ -538,15 +538,32 @@ export function createOwnedImportCommitRepository(
       // `computeDividendCashTotal` -- a staged row whose `normalizedFields`
       // genuinely lacked `sharesOwned` (deserializes to `undefined`, `!==
       // null`, sails past the `=== null` guards) or carried a non-canonical/
-      // over-scale decimal threw `Invalid decimal string.` straight out of
-      // `revalidate()` -- called by `commit()` on every commit attempt --
-      // permanently 503ing a batch that had already passed preview with a
-      // (correctly non-blocking) `DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE`
-      // warning. `safeComputeDividendCashTotal` never throws, so this row is
-      // instead excluded from the matching pool below (`cashTotalDecimal ===
-      // null` -- unchanged), exactly like a genuinely-empty row already was;
-      // its own insert then fails its normal `mapping_incomplete` validation
-      // instead of crashing the whole commit.
+      // over-scale PER-SHARE-mode decimal threw `Invalid decimal string.`
+      // straight out of `revalidate()` -- called by `commit()` on every
+      // commit attempt -- permanently 503ing a batch that had already passed
+      // preview with a (correctly non-blocking)
+      // `DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE` warning.
+      // `safeComputeDividendCashTotal` never throws, so such a row is instead
+      // excluded from the matching pool below (`cashTotalDecimal === null` --
+      // unchanged), exactly like a genuinely-empty row already was.
+      //
+      // CORRECTION ROUND 3 (B2): the sentence this comment used to end with
+      // ("its own insert then fails its normal `mapping_incomplete`
+      // validation") was NOT true for a malformed TOTALS-mode amount, and
+      // this wrapper is not what makes it true now. A TOTALS-mode value is
+      // forwarded into the pool VERBATIM -- `computeDividendCashTotal`'s
+      // totals branch never parses it, so `safeComputeDividendCashTotal`
+      // returns it NON-null and the row DOES enter `dividendIncomingRows`
+      // below. Nothing throws only because
+      // `domain/imports/dividend-reconciliation.ts`'s
+      // `cashTotalsWithinToleranceSafe` swallows the parse failure in the
+      // match predicate (the row simply never matches). What actually stops a
+      // malformed amount from being PERSISTED is the bound
+      // `buildDividendManualRecordImportInsertStatements` now applies to
+      // every stored amount column (`isWithinReadPathDecimalBounds`,
+      // `db/repositories/dividends.ts`) -- without it, an over-scale total
+      // committed successfully here and then crashed `/income` on every
+      // later render.
       const cashTotalDecimal = safeComputeDividendCashTotal({
         totalCashDecimal: normalized.totalCashDecimal ?? null,
         sharesDecimal: normalized.sharesOwned,

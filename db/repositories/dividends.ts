@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  DECIMAL_LIMITS,
   compareDecimal,
   parseDecimalResult,
 } from "../../domain/calculations/decimal.ts";
@@ -63,6 +64,38 @@ function hasDecimalScaleWithinLimit(value: string, maxScale: number): boolean {
   const dotIndex = value.indexOf(".");
   if (dotIndex === -1) return true;
   return value.length - dotIndex - 1 <= maxScale;
+}
+
+// BUG-014 correction round 3 (B2, BLOCKING): the ONE bound for stored
+// dividend money on the import-commit path, expressed as the READ path's own
+// limits rather than a second hard-coded copy of them.
+//
+// `DECIMAL_PATTERN`/`isPositiveDecimalString` below bound a value's FORM but
+// not its SIZE, and nothing upstream of this boundary bounds a TOTALS-mode
+// amount at all: `domain/imports/dividend-reconciliation.ts`'s
+// `computeDividendCashTotal` returns `totalCashDecimal` VERBATIM (it is never
+// parsed), so a Sharesight payout amount with, say, 97 fractional digits used
+// to reach this builder, satisfy `isPositiveDecimalString`, and be PERSISTED.
+// Every one of these columns is then read back through `parseDecimal`
+// (`domain/dividends/history.ts`'s `computeCashGross`/`computeCashGrossOrTotals`
+// and `domain/dividends/history-row-derivation.ts`'s `deriveHistoryRowDps`),
+// which enforces `DECIMAL_LIMITS.inputDigits`/`inputScale` and THROWS -- so an
+// over-bound value did not fail the import, it committed cleanly and then
+// crashed `/income` on every subsequent render, permanently (ledger facts are
+// immutable; the crash simply moved from a recoverable import failure to an
+// unrecoverable read failure). Rejecting here returns `invalid_input`, which
+// `db/repositories/import-commit.ts` surfaces as the honest, expected
+// `mapping_incomplete` -- nothing malformed is ever written.
+//
+// Deliberately references `DECIMAL_LIMITS` (not the local
+// `MAX_FX_RATE_DECIMAL_SCALE`, whose 24 comes from a DIFFERENT decision --
+// `FX_CONVERSION_SCALE`, the read-time conversion rounding) so this bound
+// cannot drift away from the parse it exists to protect.
+function isWithinReadPathDecimalBounds(value: string): boolean {
+  return (
+    hasDecimalScaleWithinLimit(value, DECIMAL_LIMITS.inputScale) &&
+    value.replace("-", "").replace(".", "").length <= DECIMAL_LIMITS.inputDigits
+  );
 }
 
 const DECIMAL_PATTERN = /^-?(0|[1-9]\d*)(\.\d+)?$/;
@@ -1186,6 +1219,23 @@ export function buildDividendManualRecordImportInsertStatements(
     }
     totalCashDecimal = input.totalCashDecimal;
     totalFrankingDecimal = input.totalFrankingDecimal ?? null;
+  }
+
+  // BUG-014 correction round 3 (B2, BLOCKING): both modes' amount columns are
+  // bounded at the read path's own `parseDecimal` limits before anything is
+  // written -- see `isWithinReadPathDecimalBounds` above for why form-only
+  // validation was not enough, and why the TOTALS-mode columns in particular
+  // had no size bound anywhere upstream of this line.
+  for (const amount of [
+    sharesDecimal,
+    dividendPerShareDecimal,
+    frankingCreditPerShareDecimal,
+    totalCashDecimal,
+    totalFrankingDecimal,
+  ]) {
+    if (amount !== null && !isWithinReadPathDecimalBounds(amount)) {
+      return { ok: false, reason: "invalid_input" };
+    }
   }
 
   // BRK-010 review finding B4: `fxRateToPortfolioDecimal`/`fxRateSource` are

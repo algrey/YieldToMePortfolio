@@ -876,14 +876,24 @@ test("DIV-004 B2: a dividend row near an existing owner-typed manual record warn
 // permanent, unrecoverable 503 "Import commit is temporarily unavailable."
 // for a row that could never validly commit anyway. Fixed by using the
 // exported, exception-safe `safeComputeDividendCashTotal` at both
-// `revalidate()` call sites: the row is excluded from the reconciliation
-// matching pool (exactly like a genuinely-empty row always was), commit
-// proceeds past `revalidate()`, and the row's OWN insert then fails its
-// normal, honest `mapping_incomplete` validation
+// `revalidate()` call sites: this PER-SHARE-mode row is excluded from the
+// reconciliation matching pool (exactly like a genuinely-empty row always
+// was), commit proceeds past `revalidate()`, and the row's OWN insert then
+// fails its normal, honest `mapping_incomplete` validation
 // (`buildDividendManualRecordImportInsertStatements`'s
 // `isPositiveDecimalString` rejecting the empty
 // `sharesDecimal: normalized.sharesOwned ?? ""`) -- never a crash, and no
 // `dividend_manual_records` row is ever written.
+//
+// CORRECTION ROUND 3: that description is true for THIS test's shape (a
+// per-share row missing an amount field entirely) but was written as if it
+// covered every malformed row, which it did not. A TOTALS-mode amount is
+// returned VERBATIM by `computeDividendCashTotal`, so the safe wrapper
+// returns it non-null, the row DOES enter the matching pool, and
+// `isPositiveDecimalString` ACCEPTS it at insert time -- an over-scale total
+// therefore committed and persisted. The bound that actually stops that is
+// `isWithinReadPathDecimalBounds` in `db/repositories/dividends.ts`; see the
+// two totals-mode commit drills added below.
 // ---------------------------------------------------------------------------
 
 test("BUG-014 correction round (B2): a staged dividend row with undefined sharesOwned stages, warns, reaches ready, and fails commit with mapping_incomplete (not a crash) -- no dividend_manual_records row is written", async () => {
@@ -970,6 +980,173 @@ test("BUG-014 correction round (B2): a staged dividend row with undefined shares
     manualRecordCount.count,
     0,
     "nothing malformed is ever persisted -- the failed row must leave no dividend_manual_records row behind",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// BUG-014 correction round 3 (B2, BLOCKING): the TOTALS-mode half of the
+// same defect, which rounds 1-2 did NOT close -- they moved the crash rather
+// than preventing the bad write.
+//
+// `computeDividendCashTotal`'s totals branch returns `totalCashDecimal`
+// VERBATIM (never parsed), so at commit time `safeComputeDividendCashTotal`
+// returns an over-scale total NON-null and the row DOES enter the
+// reconciliation pool; nothing throws only because
+// `cashTotalsWithinToleranceSafe` swallows the failure inside the match
+// predicate. `buildDividendManualRecordImportInsertStatements` then ACCEPTED
+// it (`isPositiveDecimalString`/`DECIMAL_PATTERN` bound form, never size), so
+// against `b60776b` (round 2) these two commits returned
+// `{ ok: true, committedRows: 1 }` and PERSISTED the value -- after which
+// every `/income` render threw out of `parseDecimal`
+// (`domain/dividends/history.ts`, `domain/dividends/history-row-derivation.ts`)
+// for good, since a committed ledger fact cannot be edited in place. The
+// insert boundary now bounds every stored amount column at the read path's
+// own `parseDecimal` limits (`isWithinReadPathDecimalBounds`,
+// `db/repositories/dividends.ts`), so the batch fails with the honest,
+// recoverable `mapping_incomplete` and writes nothing.
+//
+// Two scales are drilled deliberately: 97 fractional digits (past even
+// `parseDecimalResult`'s 96 "result" bound -- the reviewer's own repro) and
+// 30 (past `parseDecimal`'s 24 "input" bound but WELL WITHIN 96, the band
+// round 2's preview validation waved through as clean).
+// ---------------------------------------------------------------------------
+
+function stageTotalsDividendRow(
+  database: DatabaseSync,
+  rowId: string,
+  totalCashDecimal: string,
+): void {
+  const normalized = {
+    ...dividendNormalizedRow("2026-08-05", "0.50"),
+    // BRK-005 totals shape: a Sharesight payout reports a total only --
+    // never a share count or a per-share amount.
+    sharesOwned: null,
+    costPerShare: null,
+    totalCashDecimal,
+    totalFrankingDecimal: null,
+  };
+  database
+    .prepare(
+      `INSERT INTO import_rows (
+         id, user_id, batch_id, physical_row_number, row_class,
+         original_fields_json, normalized_fields_json, normalized_fingerprint,
+         validation_status, target_portfolio_id, commit_status, created_at, updated_at, version
+       ) VALUES (?, 'user-a', 'batch-a', 2, 'transaction', '[]', ?, ?, 'valid',
+         NULL, 'staged', '2026-08-10', '2026-08-10', 1)`,
+    )
+    .run(rowId, JSON.stringify(normalized), `fingerprint-${rowId}`);
+}
+
+async function commitStagedBatchExpectingFailure(
+  database: DatabaseSync,
+  idempotencyKey: string,
+): Promise<{ reason: string; warned: boolean; manualRecordCount: number }> {
+  const client = createSqliteSqlClient(database);
+  const context = { client, userId: "user-a" };
+  const pageReviewBeforeReady = await pagePreview(client, "user-a", "batch-a");
+  const warned = pageReviewBeforeReady.preview.issues.some(
+    (issue) => issue.code === "DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE",
+  );
+  assert.equal(
+    pageReviewBeforeReady.preview.ready,
+    true,
+    "an amount-unavailable warning must never block readiness",
+  );
+  const ready = await markImportReadyWithContext(context, "batch-a", {
+    expectedVersion: 1,
+    expectedPreviewVersion: pageReviewBeforeReady.previewVersion,
+  });
+  assert.equal(ready.ok, true);
+  if (!ready.ok) throw new Error("expected the batch to reach ready");
+  const pageReviewAfterReady = await pagePreview(client, "user-a", "batch-a");
+  const commitInput: ImportCommitInput = {
+    expectedVersion: ready.review.batch.version,
+    expectedPreviewVersion: pageReviewAfterReady.previewVersion,
+    idempotencyKey,
+    confirmation: true,
+    requestId: `${idempotencyKey}-request`,
+  };
+  const commitResult = await createOwnedImportCommitRepository(client).commit(
+    "user-a",
+    "batch-a",
+    commitInput,
+  );
+  assert.equal(
+    commitResult.ok,
+    false,
+    "an amount this system cannot read back must never commit successfully",
+  );
+  const manualRecordCount = (
+    database
+      .prepare(
+        `SELECT COUNT(*) as count FROM dividend_manual_records WHERE user_id = 'user-a'`,
+      )
+      .get() as { count: number }
+  ).count;
+  return {
+    reason: commitResult.ok ? "" : commitResult.reason,
+    warned,
+    manualRecordCount,
+  };
+}
+
+test("BUG-014 correction round 3 (B2): a TOTALS-mode dividend row with a 97-fractional-digit total fails commit with mapping_incomplete and persists nothing (round 2 committed it successfully, then crashed /income forever)", async () => {
+  const database = await migratedDatabase();
+  stageTotalsDividendRow(database, "row-div-totals-97", `0.${"1".repeat(97)}`);
+  const result = await commitStagedBatchExpectingFailure(
+    database,
+    "imp-004a-bug-014-r3-totals-97",
+  );
+  assert.equal(result.reason, "mapping_incomplete");
+  assert.equal(
+    result.manualRecordCount,
+    0,
+    "no dividend_manual_records row may exist -- the value cannot be read back by parseDecimal",
+  );
+});
+
+test("BUG-014 correction round 3 (B2/F1): a TOTALS-mode dividend row with a 30-fractional-digit total warns at PREVIEW and fails commit with mapping_incomplete, persisting nothing (round 2's 96-scale preview bound waved this band through as clean)", async () => {
+  const database = await migratedDatabase();
+  stageTotalsDividendRow(database, "row-div-totals-30", `0.${"1".repeat(30)}`);
+  const result = await commitStagedBatchExpectingFailure(
+    database,
+    "imp-004a-bug-014-r3-totals-30",
+  );
+  assert.equal(
+    result.warned,
+    true,
+    "a total past parseDecimal's 24-digit bound must surface DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE at preview, not pass silently and fail only at commit",
+  );
+  assert.equal(result.reason, "mapping_incomplete");
+  assert.equal(result.manualRecordCount, 0);
+});
+
+test("BUG-014 correction round 3 (B2): a PER-SHARE-mode dividend row with a 25-fractional-digit per-share amount also fails commit with mapping_incomplete and persists nothing", async () => {
+  const database = await migratedDatabase();
+  const normalized = dividendNormalizedRow("2026-08-05", `0.${"1".repeat(25)}`);
+  database
+    .prepare(
+      `INSERT INTO import_rows (
+         id, user_id, batch_id, physical_row_number, row_class,
+         original_fields_json, normalized_fields_json, normalized_fingerprint,
+         validation_status, target_portfolio_id, commit_status, created_at, updated_at, version
+       ) VALUES (?, 'user-a', 'batch-a', 2, 'transaction', '[]', ?, ?, 'valid',
+         NULL, 'staged', '2026-08-10', '2026-08-10', 1)`,
+    )
+    .run(
+      "row-div-pershare-25",
+      JSON.stringify(normalized),
+      "fingerprint-row-div-pershare-25",
+    );
+  const result = await commitStagedBatchExpectingFailure(
+    database,
+    "imp-004a-bug-014-r3-pershare-25",
+  );
+  assert.equal(result.reason, "mapping_incomplete");
+  assert.equal(
+    result.manualRecordCount,
+    0,
+    "the per-share columns are read back through parseDecimal too -- an over-scale DPS must never be stored",
   );
 });
 
