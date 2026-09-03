@@ -2315,23 +2315,16 @@ test("PRF-008: per-page census -- the gate fires on Holdings (default 'enforce',
   }
 });
 
-test("PRF-008: caller placement is source-verified -- /income and /income/assumptions opt OUT of the freshness gate ('skip'); the Holdings/Overview call sites in authenticated-workspace.ts stay on the default (never pass 'skip')", async () => {
-  const [incomeProjectionSource, dividendAssumptionsSource, workspaceSource] =
-    await Promise.all([
-      readFile(
-        new URL("../app/owned-income-projection.ts", import.meta.url),
-        "utf8",
-      ),
-      readFile(
-        new URL("../app/owned-dividend-assumptions.ts", import.meta.url),
-        "utf8",
-      ),
-      readFile(
-        new URL("../app/authenticated-workspace.ts", import.meta.url),
-        "utf8",
-      ),
-    ]);
-
+test("PRF-008: caller placement is source-verified across the ENTIRE app/ and worker/ trees (not just the three known files) -- exactly {app/owned-income-projection.ts, app/owned-dividend-assumptions.ts} pass 'skip', and no other loadOwnedHoldings call site passes a 6th argument other than 'enforce'", async () => {
+  // Follow-up 2 (PRF-008 correction round): the original version of this
+  // pin only read three hard-coded files (owned-income-projection.ts,
+  // owned-dividend-assumptions.ts, authenticated-workspace.ts), so a
+  // fourth call site added anywhere else in app/ or worker/ -- with or
+  // without "skip" -- would have gone entirely unchecked. This version
+  // globs every .ts/.tsx file under app/ and worker/ instead, so the
+  // assertion is over the COMPLETE set of loadOwnedHoldings call sites in
+  // production source, not an enumeration this test's author had to keep
+  // in sync by hand.
   function loadOwnedHoldingsCallArgLists(source: string): string[] {
     const argLists: string[] = [];
     const marker = "loadOwnedHoldings(";
@@ -2339,53 +2332,134 @@ test("PRF-008: caller placement is source-verified -- /income and /income/assump
     for (;;) {
       const start = source.indexOf(marker, searchFrom);
       if (start === -1) break;
-      const closeIndex = source.indexOf(")", start + marker.length);
-      if (closeIndex === -1) break;
-      argLists.push(source.slice(start + marker.length, closeIndex));
-      searchFrom = closeIndex + 1;
+      // Skip the function's own declaration in owned-holdings.ts -- not a
+      // call site -- identified by "function" immediately preceding the
+      // marker (allowing for "export async function ").
+      const precedingText = source.slice(Math.max(0, start - 24), start);
+      if (/\bfunction\s*$/.test(precedingText)) {
+        searchFrom = start + marker.length;
+        continue;
+      }
+      // Depth-aware scan for the matching close paren -- robust to a
+      // nested call (e.g. `new Date()`) inside the argument list, unlike
+      // a naive "first close paren" search.
+      let depth = 1;
+      let index = start + marker.length;
+      while (depth > 0 && index < source.length) {
+        if (source[index] === "(") depth += 1;
+        else if (source[index] === ")") depth -= 1;
+        index += 1;
+      }
+      if (depth !== 0) break; // unterminated -- malformed source, stop scanning
+      argLists.push(source.slice(start + marker.length, index - 1));
+      searchFrom = index;
     }
     return argLists;
   }
 
-  const incomeCalls = loadOwnedHoldingsCallArgLists(incomeProjectionSource);
-  assert.equal(
-    incomeCalls.length,
-    1,
-    "expected exactly one loadOwnedHoldings call site in owned-income-projection.ts",
-  );
-  assert.match(
-    incomeCalls[0] ?? "",
-    /"skip"/,
-    "expected /income's loadOwnedHoldings call to opt out of the freshness gate",
+  // Splits an argument list on TOP-LEVEL commas only (depth-aware over
+  // (), [], {}, and string/template literals) so the 6th positional
+  // argument -- priceFreshnessMode -- can be inspected directly, rather
+  // than substring-matching the whole call for "skip" and hoping it
+  // never appears as an unrelated string elsewhere in the call.
+  function splitTopLevelArgs(argList: string): string[] {
+    const args: string[] = [];
+    let depth = 0;
+    let current = "";
+    let inString: string | null = null;
+    for (let i = 0; i < argList.length; i += 1) {
+      const ch = argList[i];
+      if (inString) {
+        current += ch;
+        if (ch === "\\") {
+          i += 1;
+          current += argList[i] ?? "";
+        } else if (ch === inString) {
+          inString = null;
+        }
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") {
+        inString = ch;
+        current += ch;
+        continue;
+      }
+      if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+      if (ch === ")" || ch === "]" || ch === "}") depth -= 1;
+      if (ch === "," && depth === 0) {
+        args.push(current);
+        current = "";
+        continue;
+      }
+      current += ch;
+    }
+    if (current.trim().length > 0 || args.length > 0) args.push(current);
+    return args.map((arg) => arg.trim());
+  }
+
+  async function listSourceFilesUnder(dirName: string): Promise<string[]> {
+    const relativePaths = await readdir(
+      new URL(`../${dirName}/`, import.meta.url),
+      { recursive: true },
+    );
+    return relativePaths
+      .filter((relativePath) => /\.tsx?$/.test(relativePath))
+      .map((relativePath) => `${dirName}/${relativePath.replace(/\\/g, "/")}`);
+  }
+
+  const files = [
+    ...(await listSourceFilesUnder("app")),
+    ...(await listSourceFilesUnder("worker")),
+  ].sort();
+  assert.ok(
+    files.includes("app/owned-holdings.ts"),
+    "sanity check: the repo-wide glob should find app/owned-holdings.ts",
   );
 
-  const assumptionsCalls = loadOwnedHoldingsCallArgLists(
-    dividendAssumptionsSource,
+  const skipModules: string[] = [];
+  const violations: string[] = [];
+  for (const file of files) {
+    const source = await readFile(
+      new URL(`../${file}`, import.meta.url),
+      "utf8",
+    );
+    const argLists = loadOwnedHoldingsCallArgLists(source);
+    for (const argList of argLists) {
+      const positionalArgs = splitTopLevelArgs(argList);
+      const sixthArg = positionalArgs[5];
+      if (sixthArg === undefined) continue; // omitted -- defaults to "enforce"
+      if (/^["']skip["']$/.test(sixthArg)) {
+        skipModules.push(file);
+      } else if (!/^["']enforce["']$/.test(sixthArg)) {
+        violations.push(
+          `${file}: loadOwnedHoldings(${argList}) passes priceFreshnessMode = ${sixthArg}, expected "enforce" or "skip"`,
+        );
+      }
+    }
+  }
+
+  assert.deepEqual(
+    violations,
+    [],
+    `expected every explicit priceFreshnessMode argument to be "enforce" or "skip":\n${violations.join("\n")}`,
   );
-  assert.equal(
-    assumptionsCalls.length,
-    1,
-    "expected exactly one loadOwnedHoldings call site in owned-dividend-assumptions.ts",
-  );
-  assert.match(
-    assumptionsCalls[0] ?? "",
-    /"skip"/,
-    "expected /income/assumptions' loadOwnedHoldings call to opt out of the freshness gate",
+  assert.deepEqual(
+    [...new Set(skipModules)].sort(),
+    ["app/owned-dividend-assumptions.ts", "app/owned-income-projection.ts"],
+    'expected exactly {app/owned-income-projection.ts, app/owned-dividend-assumptions.ts} to pass priceFreshnessMode = "skip"',
   );
 
-  const workspaceCalls = loadOwnedHoldingsCallArgLists(workspaceSource);
+  const workspaceCalls = loadOwnedHoldingsCallArgLists(
+    await readFile(
+      new URL("../app/authenticated-workspace.ts", import.meta.url),
+      "utf8",
+    ),
+  );
   assert.equal(
     workspaceCalls.length,
     2,
     "expected exactly two loadOwnedHoldings call sites in authenticated-workspace.ts (Holdings, Overview)",
   );
-  for (const call of workspaceCalls) {
-    assert.doesNotMatch(
-      call,
-      /"skip"/,
-      "expected the Holdings/Overview call sites to omit priceFreshnessMode entirely (default 'enforce'), never pass 'skip'",
-    );
-  }
 });
 
 test("PRF-008: byte-identical output -- Holdings/Overview's unchanged call shape (5 positional args, no priceFreshnessMode) renders identically to explicitly passing 'enforce'", async () => {
