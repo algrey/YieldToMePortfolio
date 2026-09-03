@@ -230,6 +230,17 @@ export function buildImportReview(
   // best-effort, point-in-time disclosure of what commit is LIKELY to do,
   // not a contract of exactly what it will do; the reverse case (a manual
   // row deleted/edited after preview) is symmetric and equally expected.
+  //
+  // BUG-014: `DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE` follows
+  // the IDENTICAL rule as `DIVIDEND_RECONCILIATION_PROPOSED` et al. just
+  // above -- it too is derived from the page-only-supplied
+  // `evidence.reconciliationCandidates`, so it is excluded here for the
+  // same reason. `DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE` is
+  // deliberately NOT in this list: it is derived purely from
+  // `evidence.rows`, which every caller (ready-service,
+  // security-verification-service, commit revalidation, and the page/
+  // refresh preview path) supplies identically, so it is exactly as
+  // hash-stable across callers as e.g. `OVERSELL`/`FX_RATE_INCOMPLETE`.
   const hashedPreview: ImportReconciliationPreview = {
     ...preview,
     proposedReconciliations: [],
@@ -242,7 +253,8 @@ export function buildImportReview(
         issue.code !== "DIVIDEND_DUPLICATE_CHECK_UNAVAILABLE" &&
         issue.code !== "DIVIDEND_RECONCILIATION_PROPOSED" &&
         issue.code !== "DIVIDEND_RECONCILIATION_AMBIGUOUS" &&
-        issue.code !== "DIVIDEND_ALREADY_IMPORTED_MANUAL_DUPLICATE",
+        issue.code !== "DIVIDEND_ALREADY_IMPORTED_MANUAL_DUPLICATE" &&
+        issue.code !== "DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE",
     ),
   };
   const canonicalEvidence = {

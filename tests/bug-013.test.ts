@@ -495,10 +495,17 @@ test("an incoming per-share row missing frankingPerShare entirely (as a 17-colum
   // `string | null` (non-optional). `totalCashDecimal`/`sharesOwned`/
   // `costPerShare` are base fields present since the original schema and
   // stay untouched here -- this isolates the guard around the FRANKING
-  // computation specifically, without also tripping DIV-016 part C's own
-  // (separately scoped, unguarded-by-design) cash-total computation further
-  // down this same function, which every dividend row already flows through
-  // regardless of this task's fix.
+  // computation specifically.
+  //
+  // BUG-014 UPDATE: at the time this test was written, DIV-016 part C's own
+  // `dividendReconciliationRowsAll` cash-total computation further down this
+  // same function was UNGUARDED BY DESIGN, and an identical `undefined`
+  // `sharesOwned` there would have thrown out of the whole preview -- this
+  // fixture deliberately avoided tripping it. That site (and its DB-sourced
+  // sibling over `reconciliationCandidates`) is now guarded the same way;
+  // real coverage for exactly that previously-unguarded throw shape (plus
+  // the DB-sourced non-canonical/over-scale variants) lives in
+  // `tests/bug-014.test.ts`.
   delete legacyNormalized.frankingPerShare;
   const legacyRow: ImportReconciliationRow = {
     ...row,

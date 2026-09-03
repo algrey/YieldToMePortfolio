@@ -103,6 +103,34 @@ function safeCashTotalsWithinTolerance(left: string, right: string): boolean {
   }
 }
 
+// BUG-014: reuses `safeComputeDividendCashTotal` above (never re-derives the
+// parsing logic) and adds only a diagnosis of WHY the result came back
+// `null`, for the two DIV-016C reconciliation-candidate sites below.
+// `computeDividendCashTotal` returns `null` from a genuinely clean early
+// return in exactly one shape: `totalCashDecimal` strictly `null` AND
+// (`sharesDecimal` strictly `null` OR `dividendPerShareDecimal` strictly
+// `null`) -- anything else that still comes back `null` here (a legacy
+// `undefined` field slipping past those `=== null` guards, a non-canonical
+// stored string, an over-scale value) must have thrown inside
+// `safeComputeDividendCashTotal`'s try block instead. `malformed` is true
+// only for that second, genuinely-unexpected case -- a row/candidate simply
+// never carrying enough data is not malformed, and must stay silent exactly
+// as it always has.
+function safeComputeDividendCashTotalDiagnosed(fields: {
+  totalCashDecimal: string | null;
+  sharesDecimal: string | null;
+  dividendPerShareDecimal: string | null;
+}): { cashTotalDecimal: string | null; malformed: boolean } {
+  const cashTotalDecimal = safeComputeDividendCashTotal(fields);
+  if (cashTotalDecimal !== null) {
+    return { cashTotalDecimal, malformed: false };
+  }
+  const genuinelyAbsent =
+    fields.totalCashDecimal === null &&
+    (fields.sharesDecimal === null || fields.dividendPerShareDecimal === null);
+  return { cashTotalDecimal: null, malformed: !genuinelyAbsent };
+}
+
 function add(left: string, right: string): string {
   const a = decimal(left);
   const b = decimal(right);
@@ -255,7 +283,34 @@ export type ImportReconciliationIssue = Readonly<{
     // supersede a manual record) -- this code states that truth instead of
     // a false `DIVIDEND_RECONCILIATION_PROPOSED` promise. See the matching
     // block's own comment in `createImportReconciliationPreview` below.
-    | "DIVIDEND_ALREADY_IMPORTED_MANUAL_DUPLICATE";
+    | "DIVIDEND_ALREADY_IMPORTED_MANUAL_DUPLICATE"
+    // BUG-014: an incoming STAGED dividend row could not be checked against
+    // `input.reconciliationCandidates` at all, because its own comparable
+    // cash total genuinely could not be computed -- either a legacy
+    // `normalized_fields_json` blob predating a field (deserializes to
+    // `undefined`, not `null`) or a non-canonical/over-scale value slipped
+    // past a prior writer's validation. Distinct from the SILENT, EXPECTED
+    // `null` `computeDividendCashTotal` already returns when a row simply
+    // never carried enough data (both `totalCashDecimal` and one of
+    // `sharesOwned`/`costPerShare` are genuinely absent, i.e. strictly
+    // `null`) -- that case is not this code; only an actually-thrown parse
+    // failure is. Row-linked, derived purely from `evidence.rows` (present
+    // on every caller, not a page-only-supplied signal), so unlike the
+    // codes above it is NOT excluded from `previewVersion` hashing -- see
+    // `domain/imports/review.ts`.
+    | "DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE"
+    // BUG-014: the DB-sourced analog -- an existing
+    // `dividend_manual_records` reconciliation candidate's stored decimal
+    // columns could not be parsed (a corrupt/non-canonical value, or one
+    // whose scale exceeds `parseDecimal`'s bound even though
+    // `db/repositories/dividends.ts`'s `isDecimalString` does not enforce
+    // that bound at write time). The candidate is excluded from the
+    // matching pool entirely rather than fabricating a comparable amount.
+    // Batch-level (no `rowId`): depends on the page-only-supplied
+    // `input.reconciliationCandidates`, so -- like
+    // `DIVIDEND_RECONCILIATION_PROPOSED` et al. -- it IS excluded from
+    // `previewVersion` hashing; see `domain/imports/review.ts`.
+    | "DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE";
   severity: "error" | "warning" | "info";
   rowId?: string;
   physicalRowNumber?: number;
@@ -1129,19 +1184,47 @@ export function createImportReconciliationPreview(
         row.normalized.cashEvent === null &&
         row.normalized.localTradeDate !== null,
     )
-    .map(({ row, portfolio, membershipId }) => ({
-      rowId: row.id,
-      physicalRowNumber: row.physicalRowNumber,
-      portfolioId: portfolio.id,
-      portfolioSecurityId: membershipId,
-      paymentDate: row.normalized.localTradeDate as string,
-      sourceReference: `import-fingerprint:${row.fingerprint}`,
-      cashTotalDecimal: computeDividendCashTotal({
-        totalCashDecimal: row.normalized.totalCashDecimal ?? null,
-        sharesDecimal: row.normalized.sharesOwned,
-        dividendPerShareDecimal: row.normalized.costPerShare,
-      }),
-    }))
+    .map(({ row, portfolio, membershipId }) => {
+      // BUG-014: `computeDividendCashTotal` used to be called unguarded
+      // here -- a staged row whose `normalized_fields_json` genuinely
+      // lacked `sharesOwned` (deserializes to `undefined`, which sails past
+      // the `=== null` guards) or carried a non-canonical/over-scale
+      // decimal threw `Invalid decimal string.` straight out of this pure
+      // function, 500ing the entire `/import` review page for one bad row.
+      // An unparseable value is now "cannot compare" -- the row still
+      // stages and renders, it is simply excluded from the reconciliation
+      // matching pool below (via the `cashTotalDecimal !== null` filter,
+      // unchanged), and the malformed case additionally raises a visible
+      // warning so the owner sees WHY, rather than the row silently
+      // vanishing from consideration exactly like a benign no-data row
+      // would.
+      const { cashTotalDecimal, malformed } =
+        safeComputeDividendCashTotalDiagnosed({
+          totalCashDecimal: row.normalized.totalCashDecimal ?? null,
+          sharesDecimal: row.normalized.sharesOwned,
+          dividendPerShareDecimal: row.normalized.costPerShare,
+        });
+      if (malformed) {
+        issues.push({
+          code: "DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE",
+          severity: "warning",
+          rowId: row.id,
+          physicalRowNumber: row.physicalRowNumber,
+          sourceKey: membershipId,
+          message:
+            "This dividend's cash total could not be read (a missing or unparseable amount field) -- it cannot be checked against existing manually entered records automatically; review the amount fields before committing.",
+        });
+      }
+      return {
+        rowId: row.id,
+        physicalRowNumber: row.physicalRowNumber,
+        portfolioId: portfolio.id,
+        portfolioSecurityId: membershipId,
+        paymentDate: row.normalized.localTradeDate as string,
+        sourceReference: `import-fingerprint:${row.fingerprint}`,
+        cashTotalDecimal,
+      };
+    })
     .filter(
       (entry): entry is typeof entry & { cashTotalDecimal: string } =>
         entry.cashTotalDecimal !== null,
@@ -1157,17 +1240,40 @@ export function createImportReconciliationPreview(
       `${row.portfolioId}::${row.sourceReference}`,
     ),
   );
+  // BUG-014: mirrors the staged-row fix above -- `computeDividendCashTotal`
+  // used to be called unguarded here too, and this candidate set is
+  // DB-sourced (`dividend_manual_records` decimal columns), so it is
+  // exposed to a corrupt/non-canonical STORED value as well as a legacy
+  // staged blob. `db/repositories/dividends.ts`'s `isDecimalString` does
+  // not bound scale, but `parseDecimal` does (>24), so a legitimately
+  // stored row can still be unparseable at read time. An unparseable
+  // candidate is excluded from matching (unchanged `cashTotalDecimal !==
+  // null` filter below) and now also raises a visible, batch-level warning
+  // -- never a silent drop.
   const reconciliationCandidates = (input.reconciliationCandidates ?? []).map(
-    (candidate) => ({
-      id: candidate.id,
-      portfolioSecurityId: candidate.portfolioSecurityId,
-      paymentDate: candidate.paymentDate,
-      cashTotalDecimal: computeDividendCashTotal({
-        totalCashDecimal: candidate.totalCashDecimal,
-        sharesDecimal: candidate.sharesDecimal,
-        dividendPerShareDecimal: candidate.dividendPerShareDecimal,
-      }),
-    }),
+    (candidate) => {
+      const { cashTotalDecimal, malformed } =
+        safeComputeDividendCashTotalDiagnosed({
+          totalCashDecimal: candidate.totalCashDecimal,
+          sharesDecimal: candidate.sharesDecimal,
+          dividendPerShareDecimal: candidate.dividendPerShareDecimal,
+        });
+      if (malformed) {
+        issues.push({
+          code: "DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE",
+          severity: "warning",
+          sourceKey: candidate.id,
+          message:
+            "An existing manually entered dividend record has a stored amount that could not be read -- it was excluded from automatic reconciliation matching; open and correct that record directly.",
+        });
+      }
+      return {
+        id: candidate.id,
+        portfolioSecurityId: candidate.portfolioSecurityId,
+        paymentDate: candidate.paymentDate,
+        cashTotalDecimal,
+      };
+    },
   );
   const dividendCandidatesWithCash = reconciliationCandidates.filter(
     (candidate): candidate is typeof candidate & { cashTotalDecimal: string } =>
