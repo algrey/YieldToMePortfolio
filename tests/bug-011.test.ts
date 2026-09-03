@@ -595,7 +595,15 @@ test("capExistingTradeRows: the real MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CH
   );
 });
 
-test("F-a source pin: loadReview's existing-trade query excludes a reversal's compensating mirror row and applies the MAX + 1 cap via the shared pure capExistingTradeRows -- app/import-actions.ts cannot be imported directly by this test runner (next/headers, transitively), so its WIRING is pinned by source text instead of a live call", async () => {
+test("F-a source pin: existingTradeRowsQuery (app/import-review-queries.ts) excludes a reversal's compensating mirror row and is bounded at MAX + 1, and loadReview applies the cap via the shared pure capExistingTradeRows -- app/import-actions.ts cannot be imported directly by this test runner (next/headers, transitively), so its WIRING is pinned by source text instead of a live call", async () => {
+  // PRF-015: query text moved to `app/import-review-queries.ts` (`loadReview`
+  // and `tests/imp-004a.test.ts`'s `pagePreview` mirror both import the SAME
+  // function now), so the SQL/LIMIT pin reads that module and the
+  // cap-delegation pin reads `app/import-actions.ts` separately.
+  const querySource = await readFile(
+    new URL("../app/import-review-queries.ts", import.meta.url),
+    "utf8",
+  );
   const source = await readFile(
     new URL("../app/import-actions.ts", import.meta.url),
     "utf8",
@@ -619,13 +627,15 @@ test("F-a source pin: loadReview's existing-trade query excludes a reversal's co
   // pin silently. Now `\+` (mandatory): removing the hint from the source
   // fails this test.
   assert.match(
-    source,
+    querySource,
     /WHERE user_id = \? AND status = 'posted'\s*\n\s*AND type IN \('buy', 'sell'\) AND \+reverses_transaction_id IS NULL/,
   );
-  // F2: the query caps at MAX + 1 rows...
+  // F2: the query itself takes a `limit` parameter and binds it directly...
+  assert.match(querySource, /params: \[userId, limit\],/);
+  // ...and loadReview passes MAX + 1 as that limit.
   assert.match(
     source,
-    /\[userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK \+ 1\]/,
+    /existingTradeRowsQuery\(\s*userId,\s*MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK \+ 1,\s*\)/,
   );
   // ...and the cap/degrade DECISION is delegated to the shared, directly
   // tested pure function above, using the SAME constant the query's LIMIT

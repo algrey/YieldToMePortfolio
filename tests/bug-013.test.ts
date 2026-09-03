@@ -808,7 +808,17 @@ test("capExistingDividendRows: the real MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLIC
 // `tests/bug-011.test.ts`'s established remedy for the identical constraint.
 // ---------------------------------------------------------------------------
 
-test("source pin: loadReview's dividend_manual_records query is widened off import_batch_id IS NULL, carries the amount/franking/currency columns, and applies the MAX + 1 cap via the shared capExistingDividendRows", async () => {
+test("source pin: existingManualDividendRowsQuery/existingReceiptDividendRowsQuery (app/import-review-queries.ts) are widened off import_batch_id IS NULL, carry the amount/franking/currency columns, and loadReview applies the MAX + 1 cap via the shared capExistingDividendRows", async () => {
+  // PRF-015: the query TEXT/bind pair moved into
+  // `app/import-review-queries.ts` (`loadReview` and
+  // `tests/imp-004a.test.ts`'s `pagePreview` mirror now import the SAME
+  // functions instead of each hand-typing the SQL), so this pin now reads
+  // that module for the SQL text and `app/import-actions.ts` separately for
+  // the cap-delegation wiring.
+  const querySource = await readFile(
+    new URL("../app/import-review-queries.ts", import.meta.url),
+    "utf8",
+  );
   const source = await readFile(
     new URL("../app/import-actions.ts", import.meta.url),
     "utf8",
@@ -818,20 +828,28 @@ test("source pin: loadReview's dividend_manual_records query is widened off impo
   // superseded_by_record_id, with no import_batch_id restriction. The
   // LIMIT/bind pair is checked in the SAME regex as its own query's SQL
   // text (review round, ruling 4) -- the manual and receipt queries bind an
-  // IDENTICAL-looking `[userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK
-  // + 1]` array, so a regex matching that bind alone (anywhere in the file)
-  // would still pass if ONE of the two queries were mutated to a bare `MAX`
-  // (the exact off-by-one BUG-011's F2 exists to prevent) as long as the
-  // OTHER, untouched query's occurrence still satisfied it -- silently
-  // catching nothing. Anchoring the bind to its OWN query's preceding SQL
-  // makes each pin fail independently.
+  // IDENTICAL-looking `[userId, limit]` array, so a regex matching that bind
+  // alone (anywhere in the file) would still pass if ONE of the two queries
+  // were mutated as long as the OTHER, untouched query's occurrence still
+  // satisfied it -- silently catching nothing. Anchoring the bind to its OWN
+  // query's preceding SQL makes each pin fail independently.
+  assert.match(
+    querySource,
+    /SELECT portfolio_security_id, payment_date, shares_decimal,\s*\n\s*dividend_per_share_decimal, franking_credit_per_share_decimal,\s*\n\s*total_cash_decimal, total_franking_decimal, currency_code\s*\n\s*FROM dividend_manual_records\s*\n\s*WHERE user_id = \? AND superseded_by_record_id IS NULL\s*\n\s*LIMIT \?`,\s*\n\s*params: \[userId, limit\],/,
+  );
+  assert.match(
+    querySource,
+    /SELECT portfolio_security_id, payment_date FROM dividend_receipts\s*\n\s*WHERE user_id = \?\s*\n\s*LIMIT \?`,\s*\n\s*params: \[userId, limit\],/,
+  );
+  // Both call sites in loadReview pass MAX + 1 as the limit -- the exact
+  // off-by-one BUG-011's F2 exists to prevent.
   assert.match(
     source,
-    /SELECT portfolio_security_id, payment_date, shares_decimal,\s*\n\s*dividend_per_share_decimal, franking_credit_per_share_decimal,\s*\n\s*total_cash_decimal, total_franking_decimal, currency_code\s*\n\s*FROM dividend_manual_records\s*\n\s*WHERE user_id = \? AND superseded_by_record_id IS NULL\s*\n\s*LIMIT \?`,\s*\n\s*\[userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK \+ 1\],/,
+    /existingManualDividendRowsQuery\(\s*userId,\s*MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK \+ 1,\s*\)/,
   );
   assert.match(
     source,
-    /SELECT portfolio_security_id, payment_date FROM dividend_receipts\s*\n\s*WHERE user_id = \?\s*\n\s*LIMIT \?`,\s*\n\s*\[userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK \+ 1\],/,
+    /existingReceiptDividendRowsQuery\(\s*userId,\s*MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK \+ 1,\s*\)/,
   );
   // The cap/degrade DECISION delegated to the shared, directly tested pure
   // function, using the SAME constant, for EACH query's own rows array.
@@ -921,14 +939,24 @@ test("capSuppressionReferenceRows: the real dividend and trade MAX boundaries (5
   }
 });
 
-test("source pin: loadReview's trade suppression-set query is bounded with LIMIT MAX + 1 and delegates the fail-open cap/degrade decision to the shared capSuppressionReferenceRows, with a structured warn log on overflow naming the batch", async () => {
+test("source pin: existingTradeSourceReferenceRowsQuery (app/import-review-queries.ts) is bounded with LIMIT MAX + 1 and excludes reversed rows, and loadReview delegates the fail-open cap/degrade decision to the shared capSuppressionReferenceRows, with a structured warn log on overflow naming the batch", async () => {
+  // PRF-015: query text moved to `app/import-review-queries.ts`.
+  const querySource = await readFile(
+    new URL("../app/import-review-queries.ts", import.meta.url),
+    "utf8",
+  );
   const source = await readFile(
     new URL("../app/import-actions.ts", import.meta.url),
     "utf8",
   );
   assert.match(
+    querySource,
+    /SELECT portfolio_id, source_reference FROM transactions\s*\n\s*WHERE user_id = \? AND source_type = 'csv_import' AND source_reference IS NOT NULL\s*\n\s*AND status <> 'reversed'\s*\n\s*LIMIT \?`,\s*\n\s*params: \[userId, limit\],/,
+  );
+  // loadReview passes MAX + 1 as the limit.
+  assert.match(
     source,
-    /SELECT portfolio_id, source_reference FROM transactions\s*\n\s*WHERE user_id = \? AND source_type = 'csv_import' AND source_reference IS NOT NULL\s*\n\s*AND status <> 'reversed'\s*\n\s*LIMIT \?`,\s*\n\s*\[userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK \+ 1\],/,
+    /existingTradeSourceReferenceRowsQuery\(\s*userId,\s*MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK \+ 1,\s*\)/,
   );
   // The cap/degrade DECISION is delegated to the shared pure function for
   // the trade route only.
@@ -951,14 +979,19 @@ test("source pin: loadReview's trade suppression-set query is bounded with LIMIT
 // "deliberately left unbounded" source pins (e.g. the pre-BUG-013 comment
 // trail above) so a future change re-introducing the cap here is caught,
 // not silently reintroducing the false-PROPOSED risk this correction fixed.
-test("source pin: loadReview's dividend suppression-set (comparison-set) query has NO LIMIT and is never passed through capSuppressionReferenceRows", async () => {
+test("source pin: existingDividendSourceReferenceRowsQuery (app/import-review-queries.ts) has NO LIMIT, and loadReview never passes it through capSuppressionReferenceRows", async () => {
+  // PRF-015: query text moved to `app/import-review-queries.ts`.
+  const querySource = await readFile(
+    new URL("../app/import-review-queries.ts", import.meta.url),
+    "utf8",
+  );
   const source = await readFile(
     new URL("../app/import-actions.ts", import.meta.url),
     "utf8",
   );
   assert.match(
-    source,
-    /SELECT portfolio_id, source_reference FROM dividend_manual_records\s*\n\s*WHERE user_id = \? AND source_reference IS NOT NULL`,\s*\n\s*\[userId\],/,
+    querySource,
+    /SELECT portfolio_id, source_reference FROM dividend_manual_records\s*\n\s*WHERE user_id = \? AND source_reference IS NOT NULL`,\s*\n\s*params: \[userId\],/,
     "the dividend query must be unbounded -- no LIMIT clause",
   );
   assert.doesNotMatch(

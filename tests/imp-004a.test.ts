@@ -21,6 +21,17 @@ import { capSuppressionReferenceRows } from "../app/import-suppression-cap.ts";
 // mirrors `app/import-actions.ts`'s own fix, since this mirror faithfully
 // copied that call site's unguarded form before the fix.
 import { safeComputeDividendCashTotal } from "../domain/imports/reconciliation.ts";
+// PRF-015: the SAME query builders `app/import-actions.ts`'s `loadReview`
+// imports -- see `app/import-review-queries.ts`'s doc comment for why this
+// mirror existed and why it kept drifting before this fix.
+import {
+  existingDividendSourceReferenceRowsQuery,
+  existingManualDividendRowsQuery,
+  existingReceiptDividendRowsQuery,
+  existingTradeRowsQuery,
+  existingTradeSourceReferenceRowsQuery,
+  portfolioSecurityCandidatesQuery,
+} from "../app/import-review-queries.ts";
 import {
   createOwnedImportCommitRepository,
   createOwnedImportMappingDecisionRepository,
@@ -139,6 +150,7 @@ async function currentPreviewVersion(
   const staging = createOwnedImportStagingRepository(client);
   const batch = await staging.get(userId, batchId);
   if (!batch) throw new Error("expected batch to exist");
+  const candidatesQuery = portfolioSecurityCandidatesQuery(userId);
   const [rows, issues, mappings, portfolios, candidateRows] = await Promise.all(
     [
       staging.listRows(userId, batchId),
@@ -146,11 +158,8 @@ async function currentPreviewVersion(
       createOwnedImportMappingDecisionRepository(client).list(userId, batchId),
       createOwnedPortfolioRepository(client).list(userId),
       client.all<Record<string, unknown>>(
-        `SELECT id, portfolio_id, source_symbol, source_exchange_alias,
-                source_currency_code, security_id
-           FROM portfolio_securities WHERE user_id = ?
-          ORDER BY source_symbol ASC, id ASC`,
-        [userId],
+        candidatesQuery.sql,
+        candidatesQuery.params,
       ),
     ],
   );
@@ -227,6 +236,28 @@ async function pagePreview(
   const staging = createOwnedImportStagingRepository(client);
   const batch = await staging.get(userId, batchId);
   if (!batch) throw new Error("expected batch to exist");
+  // PRF-015: every query below now comes from `app/import-review-queries.ts`
+  // -- the SAME functions `loadReview` calls -- instead of a hand-typed
+  // copy, so this mirror cannot drift from production again.
+  const candidatesQuery = portfolioSecurityCandidatesQuery(userId);
+  const manualDividendQuery = existingManualDividendRowsQuery(
+    userId,
+    MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1,
+  );
+  const receiptDividendQuery = existingReceiptDividendRowsQuery(
+    userId,
+    MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1,
+  );
+  const dividendSourceReferenceQuery =
+    existingDividendSourceReferenceRowsQuery(userId);
+  const tradeSourceReferenceQuery = existingTradeSourceReferenceRowsQuery(
+    userId,
+    MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1,
+  );
+  const tradeRowsQuery = existingTradeRowsQuery(
+    userId,
+    MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1,
+  );
   const [
     rows,
     issues,
@@ -244,66 +275,33 @@ async function pagePreview(
     createOwnedImportMappingDecisionRepository(client).list(userId, batchId),
     createOwnedPortfolioRepository(client).list(userId),
     client.all<Record<string, unknown>>(
-      `SELECT id, portfolio_id, source_symbol, source_exchange_alias,
-                source_currency_code, security_id
-           FROM portfolio_securities WHERE user_id = ?
-          ORDER BY source_symbol ASC, id ASC`,
-      [userId],
+      candidatesQuery.sql,
+      candidatesQuery.params,
     ),
     client.all<Record<string, unknown>>(
-      `SELECT portfolio_security_id, payment_date, shares_decimal,
-              dividend_per_share_decimal, franking_credit_per_share_decimal,
-              total_cash_decimal, total_franking_decimal, currency_code
-       FROM dividend_manual_records
-       WHERE user_id = ? AND superseded_by_record_id IS NULL
-       LIMIT ?`,
-      [userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1],
+      manualDividendQuery.sql,
+      manualDividendQuery.params,
     ),
     client.all<Record<string, unknown>>(
-      `SELECT portfolio_security_id, payment_date FROM dividend_receipts
-       WHERE user_id = ?
-       LIMIT ?`,
-      [userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1],
+      receiptDividendQuery.sql,
+      receiptDividendQuery.params,
     ),
     // BUG-013 review round (ruling 1): mirrors `loadReview`'s
     // `existingSourceReferenceRows`/`existingTradeSourceReferenceRows`
-    // queries.
-    // PRF-009 correction round B1 (BLOCKING): the DIVIDEND set is DIV-016C's
-    // COMPARISON set -- `createImportReconciliationPreview` uses membership
-    // to split `dividendReconciliationRowsAll` into
-    // `freshRows`/`alreadyImportedRows`, so it is DELIBERATELY UNBOUNDED in
-    // `loadReview` (a fail-open collapse to empty would restore a
-    // dedupe-bound row to `freshRows` and earn it a false
-    // `DIVIDEND_RECONCILIATION_PROPOSED`). This mirror carries NO `LIMIT`
-    // and NO cap, exactly like production (`app/import-actions.ts`) -- see
-    // `tests/bug-013.test.ts`'s source pin for the production wiring this
-    // mirrors. Only the TRADE set below is a pure SUPPRESSION set and keeps
-    // the fail-open `LIMIT MAX + 1` cap.
+    // queries -- see `app/import-review-queries.ts`'s doc comments for why
+    // the dividend set is deliberately unbounded (DIV-016C comparison set)
+    // while the trade set keeps a fail-open cap.
     client.all<Record<string, unknown>>(
-      `SELECT portfolio_id, source_reference FROM dividend_manual_records
-       WHERE user_id = ? AND source_reference IS NOT NULL`,
-      [userId],
+      dividendSourceReferenceQuery.sql,
+      dividendSourceReferenceQuery.params,
     ),
     client.all<Record<string, unknown>>(
-      `SELECT portfolio_id, source_reference FROM transactions
-       WHERE user_id = ? AND source_type = 'csv_import' AND source_reference IS NOT NULL
-       LIMIT ?`,
-      [userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1],
+      tradeSourceReferenceQuery.sql,
+      tradeSourceReferenceQuery.params,
     ),
-    // PRF-009 fold-in (a): `+reverses_transaction_id IS NULL` mirrors
-    // `loadReview`'s own no-index hint (see `tests/bug-011.test.ts`'s
-    // widened F-a source pin) -- semantics unchanged, only the planner's
-    // index choice differs, so this mirror stays behaviourally identical.
     client.all<Record<string, unknown>>(
-      `SELECT portfolio_security_id, type, local_trade_date,
-              quantity_decimal, unit_price_decimal
-       FROM transactions
-       WHERE user_id = ? AND status = 'posted'
-         AND type IN ('buy', 'sell') AND +reverses_transaction_id IS NULL
-         AND portfolio_security_id IS NOT NULL
-         AND quantity_decimal IS NOT NULL AND unit_price_decimal IS NOT NULL
-       LIMIT ?`,
-      [userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1],
+      tradeRowsQuery.sql,
+      tradeRowsQuery.params,
     ),
   ]);
   const cappedManualDividendRows = capExistingDividendRows(

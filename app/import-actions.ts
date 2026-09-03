@@ -54,6 +54,14 @@ import {
 } from "./import-dividend-duplicate-check.ts";
 import { capSuppressionReferenceRows } from "./import-suppression-cap.ts";
 import { emitStructuredLog } from "../domain/observability/index.ts";
+import {
+  existingDividendSourceReferenceRowsQuery,
+  existingManualDividendRowsQuery,
+  existingReceiptDividendRowsQuery,
+  existingTradeRowsQuery,
+  existingTradeSourceReferenceRowsQuery,
+  portfolioSecurityCandidatesQuery,
+} from "./import-review-queries.ts";
 
 type ImportActionFailure = {
   ok: false;
@@ -72,6 +80,29 @@ async function loadReview(
   const batch = await staging.get(userId, batchId);
   if (!batch)
     return { ok: false, status: 404, message: "Import batch not found." };
+  // PRF-015: query text for every one of these lives in
+  // `./import-review-queries.ts`, imported by `tests/imp-004a.test.ts`'s
+  // `pagePreview`/`currentPreviewVersion` mirrors too, so the two sides
+  // cannot diverge -- see that module's doc comment for the full history.
+  const candidatesQuery = portfolioSecurityCandidatesQuery(userId);
+  const manualDividendQuery = existingManualDividendRowsQuery(
+    userId,
+    MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1,
+  );
+  const receiptDividendQuery = existingReceiptDividendRowsQuery(
+    userId,
+    MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1,
+  );
+  const dividendSourceReferenceQuery =
+    existingDividendSourceReferenceRowsQuery(userId);
+  const tradeSourceReferenceQuery = existingTradeSourceReferenceRowsQuery(
+    userId,
+    MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1,
+  );
+  const tradeRowsQuery = existingTradeRowsQuery(
+    userId,
+    MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1,
+  );
   const [
     rows,
     issues,
@@ -89,14 +120,12 @@ async function loadReview(
     staging.listIssues(userId, batchId),
     createOwnedImportMappingDecisionRepository(client).list(userId, batchId),
     createOwnedPortfolioRepository(client).list(userId),
+    // PRF-015: query text lives in `./import-review-queries.ts` so
+    // `tests/imp-004a.test.ts`'s mirror can import the SAME function -- see
+    // that module's doc comment for the BRK-009C canonical_name history.
     client.all<Record<string, unknown>>(
-      `SELECT ps.id, ps.portfolio_id, ps.source_symbol, ps.source_exchange_alias,
-        ps.source_currency_code, ps.security_id, s.canonical_name
-       FROM portfolio_securities ps
-       LEFT JOIN securities s ON s.id = ps.security_id
-       WHERE ps.user_id = ?
-       ORDER BY ps.source_symbol ASC, ps.id ASC`,
-      [userId],
+      candidatesQuery.sql,
+      candidatesQuery.params,
     ),
     // BUG-013: WIDENED from "owner-typed only" (`import_batch_id IS NULL`)
     // -- that filter was the confirmed root cause of a SILENT cross-route
@@ -127,32 +156,19 @@ async function loadReview(
     // an immutable ledger entry). A reversed dividend import therefore
     // leaves NO row here to warn against -- `superseded_by_record_id IS
     // NULL` above is the only exclusion this table needs.
-    // BUG-013: `LIMIT MAX + 1` caps the comparison set, mirroring BUG-011's
-    // F2 lesson -- `capExistingDividendRows` (`./import-dividend-duplicate-
-    // check.ts`) degrades to `existingDividendEntriesUnavailable` rather
-    // than silently comparing against a truncated (and therefore
-    // unreliable) set. This query was previously UNBOUNDED.
+    // PRF-015: query text moved to `./import-review-queries.ts`'s
+    // `existingManualDividendRowsQuery` -- see that function's doc comment
+    // for the BUG-013 widening/cap history.
     client.all<Record<string, unknown>>(
-      `SELECT portfolio_security_id, payment_date, shares_decimal,
-              dividend_per_share_decimal, franking_credit_per_share_decimal,
-              total_cash_decimal, total_franking_decimal, currency_code
-       FROM dividend_manual_records
-       WHERE user_id = ? AND superseded_by_record_id IS NULL
-       LIMIT ?`,
-      [userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1],
+      manualDividendQuery.sql,
+      manualDividendQuery.params,
     ),
-    // BUG-013: `dividend_receipts` is a provider-observed fact outside the
-    // CSV/Sharesight IMPORT routes this task's cross-route gap is about (it
-    // has no `import_batch_id`/route concept at all), so it stays out of
-    // scope for `DIVIDEND_MATCHES_EXISTING_ENTRY`'s amount check -- only
-    // DIV-004's payment-date-proximity check uses it, unchanged. Now capped
-    // like the query above (was previously unbounded) since both feed the
-    // same combined, capped `existingDividendEntries` array.
+    // PRF-015: query text moved to `./import-review-queries.ts`'s
+    // `existingReceiptDividendRowsQuery` -- see that function's doc comment
+    // for the BUG-013 scope/cap history.
     client.all<Record<string, unknown>>(
-      `SELECT portfolio_security_id, payment_date FROM dividend_receipts
-       WHERE user_id = ?
-       LIMIT ?`,
-      [userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1],
+      receiptDividendQuery.sql,
+      receiptDividendQuery.params,
     ),
     // DIV-016 part C: existing owner-typed, non-superseded manual dividend
     // records eligible to be matched and superseded by an incoming
@@ -189,153 +205,35 @@ async function loadReview(
     // actually insert this commit, so it must never be offered a
     // `DIVIDEND_RECONCILIATION_PROPOSED` promise (see
     // `ImportReconciliationInput.existingDividendSourceReferences`'s doc
-    // comment).
-    //
-    // PRF-009 correction round B1 (BLOCKING): PRF-009 round 1 wrongly
-    // classified this set as a pure SUPPRESSION set and capped it fail-open
-    // (`LIMIT MAX + 1`, dropping to empty on overflow) alongside the trade
-    // set below. It is NOT pure suppression: `createImportReconciliationPreview`
-    // (`domain/imports/reconciliation.ts`) ALSO uses it to split
-    // `dividendReconciliationRowsAll` into `freshRows`/`alreadyImportedRows`
-    // -- membership here removes a row from the matching pool entirely. A
-    // fail-open overflow (set collapses to empty) put a genuinely
-    // dedupe-bound row BACK into `freshRows`, where it could earn a false
-    // `DIVIDEND_RECONCILIATION_PROPOSED` ("committing will supersede the
-    // manual record" -- exactly the false promise B1 originally existed to
-    // remove) and consume/poison a manual candidate a sibling fresh row
-    // could otherwise have cleanly matched. This is a COMPARISON set
-    // (DIV-016C), not a suppression set, so it is deliberately left
-    // UNBOUNDED, matching `capExistingTradeRows`/`capExistingDividendRows`'s
-    // fail-closed comparison-set treatment in spirit (there is no size
-    // threshold past which the correct answer becomes "not computed" here --
-    // membership must be exact or the split above silently mis-derives).
-    // Only `existingTradeSourceReferences` below is a genuine pure
-    // suppression set (its sole consumer, `tradeAlreadyBoundForSkip` in
-    // `domain/imports/reconciliation.ts`, only silences an advisory
-    // warning) and stays capped fail-open.
+    // comment). PRF-015: query text moved to `./import-review-queries.ts`'s
+    // `existingDividendSourceReferenceRowsQuery` -- see that function's doc
+    // comment for the PRF-009 correction-round B1 history (this is a
+    // COMPARISON set, deliberately unbounded, unlike the trade suppression
+    // set below).
     client.all<Record<string, unknown>>(
-      `SELECT portfolio_id, source_reference FROM dividend_manual_records
-       WHERE user_id = ? AND source_reference IS NOT NULL`,
-      [userId],
+      dividendSourceReferenceQuery.sql,
+      dividendSourceReferenceQuery.params,
     ),
     // BUG-013 review round (ruling 1): the trade analog of the dividend
-    // query above -- every EXISTING `transactions.source_reference` this
-    // owner has (any portfolio, any non-reversed status), used to suppress
-    // `TRADE_NEAR_EXISTING_ENTRY` for a row already bound for an identical
-    // commit-time exact-match SKIP (`db/repositories/import-commit.ts`'s own
-    // dedupe check at the trade branch, reproduced here EXACTLY:
-    // `source_type = 'csv_import'`).
-    //
-    // BUG-018 fix: `status <> 'reversed'` added to match the commit-time
-    // lookup's own new predicate. A reversed row no longer occupies the
-    // `source_reference` key (the partial unique index in `db/schema.ts` was
-    // narrowed the same way) and commit no longer skips a re-import against
-    // it, so this suppression set must stop treating a reversed row as
-    // "will be skipped" too -- BUG-013's proven invariant (suppression set
-    // == commit skip set) requires the two predicates stay identical, not
-    // just the two `source_type`/`source_reference` columns.
-    //
-    // BUG-013 review follow-up ("fail-open cap"): this query was previously
-    // left deliberately UNBOUNDED, reasoning it was "a cheap Set-membership
-    // lookup, not a per-row comparison loop like `existingTradeRows` below."
-    // The Orchestrator's own F2 precedent (a truncated read must fail
-    // CLOSED, per BUG-011) does not apply here and the reviewer correctly
-    // departed from it: F2 caps a COMPARISON set, where truncation produces
-    // a silent FALSE NEGATIVE indistinguishable from a genuine non-match.
-    // `existingTradeSourceReferences` IS a pure SUPPRESSION set -- its sole
-    // consumer, `tradeAlreadyBoundForSkip` in
-    // `domain/imports/reconciliation.ts`, only ever SILENCES an advisory
-    // warning for a row already bound for an identical commit-time skip
-    // (see `sourceReferenceKey` there); it never feeds a matching-pool split
-    // the way `existingDividendSourceReferences` does (see that query's own
-    // comment above -- PRF-009's correction round removed its cap after
-    // finding it was NOT a pure suppression set). Truncating THIS set can
-    // only ADD noise (a row that would have been suppressed just shows its
-    // warning again), never hide a duplicate -- the truncated-comparison-set
-    // failure mode this file's OTHER caps (`existingTradeRows`,
-    // `existingManualRows`, `existingReceiptRows`) exist to prevent cannot
-    // happen here. `LIMIT MAX + 1` therefore fails
-    // OPEN: on overflow the whole set for that route is dropped to empty
-    // (below), which simply reverts to the noisier pre-BUG-013 behaviour a
-    // sync already regularly produced before this fix, not a fail-CLOSED
-    // degrade (which would be strictly wrong for a suppression set).
+    // query above -- a pure SUPPRESSION set, unlike the comparison set
+    // above, so it keeps a fail-open `LIMIT MAX + 1` cap. PRF-015: query
+    // text moved to `./import-review-queries.ts`'s
+    // `existingTradeSourceReferenceRowsQuery` -- see that function's doc
+    // comment for the BUG-013/BUG-018 history.
     client.all<Record<string, unknown>>(
-      `SELECT portfolio_id, source_reference FROM transactions
-       WHERE user_id = ? AND source_type = 'csv_import' AND source_reference IS NOT NULL
-         AND status <> 'reversed'
-       LIMIT ?`,
-      [userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1],
+      tradeSourceReferenceQuery.sql,
+      tradeSourceReferenceQuery.params,
     ),
     // BUG-011: every existing POSTED buy/sell transaction across the WHOLE
     // OWNER (any portfolio, any source route, any prior batch/import), for
     // the preview-time cross-route duplicate-trade warning -- see
-    // `ImportPreviewExistingTradeEntry`'s doc comment for scope.
-    //
-    // Review round F2 RULING CORRECTION (this query was briefly scoped to
-    // `batch.targetPortfolioId` in an earlier round; that was WRONG and is
-    // reverted here). `portfolioFor` (`domain/imports/reconciliation.ts`)
-    // resolves a row's portfolio THREE ways -- a `kind:"portfolio"` mapping
-    // decision's `targetId` (any OWNED portfolio, not just the batch's own
-    // target -- the mapping picker offers every one and
-    // `saveImportMappingAction` accepts any owned `targetId`), the row's own
-    // `targetPortfolioId`, or a unique portfolio NAME match -- so a row can
-    // resolve into a DIFFERENT portfolio than `batch.targetPortfolioId`, and
-    // a batch with no target at all (`null`) still resolves fully by name.
-    // Scoping the comparison set to `batch.targetPortfolioId` therefore
-    // produced silent FALSE NEGATIVES for exactly those rows -- indistin-
-    // guishable from a genuine non-match, i.e. exactly the failure mode this
-    // task's own cap/degrade design (below) is built to avoid. Reverted to
-    // user-wide with no loss of precision: `portfolio_securities.id` is
-    // unique per portfolio and every match below compares against the row's
-    // own already-resolved, portfolio-correct `membershipId`
-    // (`createImportReconciliationPreview`'s `candidate.portfolioId ===
-    // portfolio.id` filter upstream), so a portfolio-A trade can never match
-    // a portfolio-B row's `membershipId` regardless of how wide this read
-    // is -- per-portfolio correctness is enforced by membership identity,
-    // not by this query's `WHERE` clause.
-    //
-    // Review round F1: `status = 'posted'` alone is NOT enough to exclude a
-    // reversed trade's ledger footprint -- `ledger.reverse()` re-runs
-    // `prepareLedgerPosting` on the ORIGINAL input, so the COMPENSATING
-    // MIRROR row it inserts is itself `status = 'posted'`, with the same
-    // type/quantity/price/date/`portfolio_security_id` as the reversed
-    // trade, and only `reverses_transaction_id` set to distinguish it. The
-    // reversed trade's own ORIGINAL row is excluded by `status = 'posted'`
-    // (it flips to `'reversed'`), but without also excluding
-    // `reverses_transaction_id IS NOT NULL`, the mirror row would still
-    // match and warn on exactly the reverse-then-re-import remediation this
-    // task's own diagnostic step prescribes.
-    //
-    // Review round F2: `LIMIT MAX + 1` caps the comparison set; a
-    // `length > MAX` check (`capExistingTradeRows`, `./import-trade-
-    // duplicate-check.ts`) degrades to `existingTradeEntriesUnavailable`
-    // rather than silently comparing against a truncated (and therefore
-    // unreliable) set.
-    //
-    // PRF-009 fold-in (a): `reverses_transaction_id IS NULL` hijacked the
-    // planner away from `user_id` -- `EXPLAIN QUERY PLAN` across BUG-011's
-    // own revisions seeks `transactions_one_reversal_unique
-    // (reverses_transaction_id=?)` (the NULL group of that unique index,
-    // which holds every non-mirror transaction of EVERY owner) instead of
-    // `transactions_owner_portfolio_idempotency_unique (user_id=?)`.
-    // Correctness/ownership are unaffected (`user_id = ?` is still in the
-    // `WHERE`, applied as a per-row filter), but the read stops being
-    // owner-scoped at the index level, exactly the `rows_read` dimension
-    // PRF-009/PRF-010 exist to protect. `+reverses_transaction_id IS NULL`
-    // (SQLite's unary-plus no-index hint) restores the `user_id` seek with
-    // identical semantics -- verified by `EXPLAIN QUERY PLAN` on a 2,000-row
-    // synthetic fixture: `SEARCH transactions USING INDEX
-    // transactions_owner_portfolio_idempotency_unique (user_id=?)`.
+    // `ImportPreviewExistingTradeEntry`'s doc comment for scope. PRF-015:
+    // query text moved to `./import-review-queries.ts`'s
+    // `existingTradeRowsQuery` -- see that function's doc comment for the
+    // BUG-011 F1/F2 and PRF-009 fold-in (a) history.
     client.all<Record<string, unknown>>(
-      `SELECT portfolio_security_id, type, local_trade_date,
-              quantity_decimal, unit_price_decimal
-       FROM transactions
-       WHERE user_id = ? AND status = 'posted'
-         AND type IN ('buy', 'sell') AND +reverses_transaction_id IS NULL
-         AND portfolio_security_id IS NOT NULL
-         AND quantity_decimal IS NOT NULL AND unit_price_decimal IS NOT NULL
-       LIMIT ?`,
-      [userId, MAX_EXISTING_TRADE_ENTRIES_FOR_DUPLICATE_CHECK + 1],
+      tradeRowsQuery.sql,
+      tradeRowsQuery.params,
     ),
   ]);
   const previewPortfolios: ImportPreviewPortfolio[] = portfolios.map(
