@@ -17,6 +17,11 @@ const eslintConfig = defineConfig([
     // never walk into another checkout's files (it reported that worktree's
     // own lint state as this repository's).
     ".claude/**",
+    // Orchestrator hygiene (2026-09-03): the owner's design-sync tool drops an
+    // untracked bundle and machine state into the repo root; never lint them.
+    "ds-bundle/**",
+    ".ds-sync/**",
+    ".design-sync/**",
   ]),
   // BRK-003/BRK-004 review: `domain/sharesight/transport.ts` is the
   // package's raw GET-only fetch primitive. It must never be imported
