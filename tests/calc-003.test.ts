@@ -5,6 +5,7 @@
 // mechanics already covered by `tests/calc-002-repository.test.ts` and
 // `tests/led-002b.test.ts` (this executor reuses those unmodified).
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
@@ -946,6 +947,144 @@ test("BUG-016 fold-in regression: on an identical created_at the later-INSERTED 
     `SELECT calculation_run_id FROM projection_publications WHERE user_id = 'user-a' AND portfolio_id = 'portfolio-a'`,
   );
   assert.equal(publication?.calculation_run_id, "run-aa-inserted-second");
+  const holdings = await loadOwnedHoldings(
+    client,
+    "user-a",
+    "portfolio-a",
+    new Date("2026-09-03T02:00:00Z"),
+  );
+  assert.equal(holdings.rows[0]?.quantity, "5");
+});
+
+// BUG-020 GUARD (reversed insertion order vs. the BUG-016 fold-in test
+// above): the ids there were chosen so insertion order CONTRADICTS
+// lexicographic id order, which is what exposes the old random-UUID
+// tie-break bug. Here the ids are realistic production shapes -- a random
+// UUID (`queueLedgerMutationRun`'s usual id) and an import-rebuild job's
+// deterministic composite id (`db/repositories/import-commit.ts`'s
+// `import-rebuild:${batch.id}:${portfolioId}:${commitKey}`) -- and
+// insertion order happens to AGREE with lexicographic id order (the UUID's
+// leading hex-digit/`a`-`f` character always sorts below `import-rebuild`'s
+// leading `i`). That means this ordering passes under BOTH the old
+// (buggy) id-based tie-break and the current rowid-based one: it is not a
+// regression test, it is a GUARD confirming the fix didn't flip behavior
+// for the order the BUG-016 test doesn't cover.
+test("BUG-020 guard: on an identical created_at the later-INSERTED run is newer when insertion order matches id order too", async () => {
+  const database = await migratedDatabase();
+  insertTransaction(database, {
+    id: "buy-1",
+    type: "buy",
+    tradeAt: "2026-01-01T00:00:00Z",
+    quantityDecimal: "3",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "30",
+  });
+  const client = createSqliteSqlClient(database);
+  const runs = createCalculationRunRepository(client);
+  const sameInstant = "2026-09-03T00:00:00.000Z";
+  const uuidId = randomUUID();
+  const rebuildId = "import-rebuild:b:p:k";
+  // Inserted FIRST: the random UUID.
+  await queueLedgerMutationRun(client, {
+    id: uuidId,
+    ledgerHighWater: "buy-1",
+    localDate: "2026-01-01",
+    now: sameInstant,
+  });
+  insertTransaction(database, {
+    id: "buy-2",
+    type: "buy",
+    tradeAt: "2026-01-02T00:00:00Z",
+    quantityDecimal: "2",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "20",
+  });
+  // Inserted SECOND: the deterministic import-rebuild id.
+  await queueLedgerMutationRun(client, {
+    id: rebuildId,
+    ledgerHighWater: "buy-2",
+    localDate: "2026-01-02",
+    now: sameInstant,
+  });
+  const created = await client.all<{ id: string; created_at: string }>(
+    `SELECT id, created_at FROM calculation_runs ORDER BY rowid ASC`,
+  );
+  assert.deepEqual(
+    created.map((row) => row.created_at),
+    [sameInstant, sameInstant],
+    "precondition: both runs share an exact created_at",
+  );
+  assert.deepEqual(
+    created.map((row) => row.id),
+    [uuidId, rebuildId],
+  );
+
+  // Per-claim signal: only the FIRST-inserted (UUID) run has a newer
+  // sibling.
+  assert.equal(
+    await runs.hasNewerRun(
+      "user-a",
+      "portfolio-a",
+      "projection",
+      sameInstant,
+      uuidId,
+    ),
+    true,
+  );
+  assert.equal(
+    await runs.hasNewerRun(
+      "user-a",
+      "portfolio-a",
+      "projection",
+      sameInstant,
+      rebuildId,
+    ),
+    false,
+  );
+  // Oldest-first claim order follows insertion order on the tie too.
+  const oldest = await runs.nextClaimable(
+    "user-a",
+    "portfolio-a",
+    "projection",
+    sameInstant,
+  );
+  assert.equal(oldest?.id, uuidId);
+
+  // Bulk pre-pass: exactly the first-inserted (UUID) run is superseded.
+  assert.equal(
+    await runs.supersedeStaleQueuedRuns(
+      "user-a",
+      "portfolio-a",
+      "projection",
+      "2026-09-03T00:00:01Z",
+    ),
+    1,
+  );
+  const older = await client.get<Record<string, unknown>>(
+    `SELECT status, failure_category FROM calculation_runs WHERE id = ?`,
+    [uuidId],
+  );
+  assert.equal(older?.status, "failed");
+  assert.equal(older?.failure_category, "superseded_by_newer_run");
+  const newer = await client.get<Record<string, unknown>>(
+    `SELECT status, failure_category FROM calculation_runs WHERE id = ?`,
+    [rebuildId],
+  );
+  assert.equal(newer?.status, "queued");
+  assert.equal(newer?.failure_category, null);
+
+  // End to end: the executor completes the genuinely latest (rebuildId)
+  // run and its publication reflects the full ledger.
+  const result = await advanceCalculationRuns(
+    { client, now: () => "2026-09-03T00:00:02Z" },
+    { userId: "user-a", portfolioId: "portfolio-a", budget: 100 },
+  );
+  assert.equal(result.completed, 1);
+  assert.equal(result.remaining, false);
+  const publication = await client.get<Record<string, unknown>>(
+    `SELECT calculation_run_id FROM projection_publications WHERE user_id = 'user-a' AND portfolio_id = 'portfolio-a'`,
+  );
+  assert.equal(publication?.calculation_run_id, rebuildId);
   const holdings = await loadOwnedHoldings(
     client,
     "user-a",

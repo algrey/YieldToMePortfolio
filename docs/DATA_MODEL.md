@@ -987,8 +987,19 @@ Type-specific values may move to separate tables if query complexity justifies i
   latest run could be failed as `superseded_by_newer_run` while a stale one
   survived to be claimed. SQLite's implicit `rowid` is insertion order for
   this table: it has a TEXT primary key and is not `WITHOUT ROWID`, so each
-  insert takes `max(rowid) + 1`; no code path deletes a `calculation_runs`
-  row, and `VACUUM` preserves relative rowid order. No new column, index,
+  insert takes `max(rowid) + 1` over the rows that currently exist, so
+  rowid order is insertion order among all coexisting rows; this holds even
+  though an account purge (`db/repositories/account-lifecycle.ts`'s
+  `PURGE_TABLES_IN_FK_ORDER`) deletes a user's `calculation_runs` rows,
+  because a delete can only lower the next assigned rowid to a value still
+  above every surviving row, and the ordering is only ever compared within
+  one user/portfolio/pipeline. `VACUUM` preserves relative rowid order. Any
+  future drizzle table-rebuild migration of this table (as
+  `drizzle/0017_bouncy_morgan_stark.sql` and
+  `drizzle/0040_bright_blindfold.sql` already did, reassigning rowids via
+  an ORDER-BY-free `INSERT INTO __new_calculation_runs ... SELECT ... FROM
+calculation_runs`) must preserve insertion order (`ORDER BY rowid` in the
+  copy) and must be checked against this guarantee. No new column, index,
   or migration is required, and the repository's public interface is
   unchanged (`hasNewerRun` still takes `createdAt`/`runId` and resolves the
   run's own rowid in-query). Rejected alternatives: a dedicated sequence

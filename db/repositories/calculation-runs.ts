@@ -401,9 +401,14 @@ export function createCalculationRunRepository(sql: SqlClient) {
     // real latest run and leaving a stale one to be claimed instead. The
     // tie-break is now the table's implicit SQLite `rowid`: this table has
     // a TEXT primary key and is not `WITHOUT ROWID`, so SQLite assigns each
-    // new row `max(rowid) + 1`, i.e. rowid order IS insertion order among
-    // every row that exists (rows are never deleted from this table, and
-    // `VACUUM` preserves relative rowid order). `nextClaimable` and
+    // new row `max(rowid) + 1` over the rows that currently exist, so
+    // rowid order IS insertion order among all coexisting rows. This holds
+    // even though an account purge (`db/repositories/account-lifecycle.ts`'s
+    // `PURGE_TABLES_IN_FK_ORDER`) deletes a user's `calculation_runs` rows,
+    // because a delete can only lower the next assigned rowid to a value
+    // still above every surviving row, and the ordering is only ever
+    // compared within one user/portfolio/pipeline. `VACUUM` preserves
+    // relative rowid order. `nextClaimable` and
     // `supersedeStaleQueuedRuns` use the identical `(created_at, rowid)`
     // ordering so all three agree on which row is newest. The `createdAt`/
     // `runId` signature is unchanged; the run's own rowid is resolved

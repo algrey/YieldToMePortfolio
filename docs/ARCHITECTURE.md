@@ -941,10 +941,18 @@ This log records durable architecture decisions previously maintained in `AGENTS
   relationship to creation order, so on a tie an older row could be treated
   as newer. This is not test-only: two triggers within one clock tick under
   real load hit the same path. **Decision**: the tie-break is SQLite's
-  implicit `rowid` (insertion order for this TEXT-keyed, rowid table with no
-  delete path -- `docs/DATA_MODEL.md`'s `calculation_runs` section records
-  the guarantee and the rejected alternatives: a dedicated sequence column,
-  sub-millisecond timestamps). No migration, no new column, and the
+  implicit `rowid` (insertion order for this TEXT-keyed rowid table: each
+  insert takes `max(rowid) + 1` over the rows that currently exist, so
+  rowid order is insertion order among all coexisting rows; this holds even
+  though an account purge (`db/repositories/account-lifecycle.ts`'s
+  `PURGE_TABLES_IN_FK_ORDER`) deletes a user's `calculation_runs` rows,
+  because a delete can only lower the next assigned rowid to a value still
+  above every surviving row, and the ordering is only ever compared within
+  one user/portfolio/pipeline -- corrected 2026-09-03 after review: this
+  entry originally, INCORRECTLY, called it "a rowid table with no delete
+  path" -- `docs/DATA_MODEL.md`'s `calculation_runs` section records the
+  full guarantee and the rejected alternatives: a dedicated sequence
+  column, sub-millisecond timestamps). No migration, no new column, and the
   repository's public interface is unchanged. Regression test
   (`tests/calc-003.test.ts`): two runs queued with an EXPLICITLY identical
   `created_at` whose ids sort in the opposite order to their insertion --
