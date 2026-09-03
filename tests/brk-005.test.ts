@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { markImportReadyWithContext } from "../app/import-ready-service.ts";
 import { buildImportReviewPreview } from "../app/import-preview.ts";
+import { formatSyncResultMessage } from "../app/sharesight-sync-panel-helpers.ts";
 import {
   linkSharesightPortfolioWithContext,
   listSharesightPortfoliosWithContext,
@@ -55,7 +56,8 @@ async function migratedDatabase(): Promise<DatabaseSync> {
   }
   database.exec(`
     INSERT INTO currencies (code, numeric_code, name, minor_unit_digits, is_active)
-    VALUES ('AUD', 36, 'Australian dollar', 2, 1);
+    VALUES ('AUD', 36, 'Australian dollar', 2, 1),
+           ('USD', 840, 'US dollar', 2, 1);
     INSERT INTO users (id, status, primary_email, timezone, created_at, updated_at, version)
     VALUES ('user-a', 'active', 'a@example.com', 'Australia/Sydney', '2026-08-13', '2026-08-13', 1),
            ('user-b', 'active', 'b@example.com', 'Australia/Sydney', '2026-08-13', '2026-08-13', 1);
@@ -1983,6 +1985,364 @@ test("BRK-014 review B1: a trade-date-only correction to a committed trade re-sy
     "a trade-date-only correction must count as new, never already imported",
   );
   assert.equal(second.alreadyImportedRows, 0);
+});
+
+// ---------------------------------------------------------------------------
+// BRK-014 review round 3 (BLOCKING, correction to round 2's own doc comments
+// -- commit `8097185`): round 2 additionally claimed `symbol`/`exchange`/
+// `currency` were "identity fields already folded into `sourceReference`"
+// and that `exchangeRateDecimal` "has no committed counterpart on either
+// table" -- both false. This block adds the two FAITHFUL counterparts round
+// 2 wrongly wrote off (trade `currency` vs `transactions.currency_code`;
+// payout `exchangeRateDecimal` vs `dividend_manual_records.fx_rate_to_portfolio_decimal`,
+// but only when the stored value is non-null) and pins the residual case
+// (a native-currency payout, whose FX rate is never independently stored,
+// must NOT be reported as changed just because it re-syncs). All four tests
+// below FAIL against the pre-fix code (`8097185`, verified by temporarily
+// reverting the round-3 comparison additions): the FX-only and
+// currency-only correction tests report `newRows: 0, alreadyImportedRows: 1`
+// instead of `newRows: 1, alreadyImportedRows: 0`; the symbol-only
+// correction test reports `newRows: 0` with the old, self-contradictory "No
+// new rows -- every staged row already matches an existing record." message.
+// ---------------------------------------------------------------------------
+
+test("BRK-014 review round 3: an FX-only correction to a foreign-currency payout re-syncs as newRows -- not alreadyImportedRows", async () => {
+  const database = await migratedDatabase();
+  // security-a's own currency is AUD (fixture default) and the portfolio's
+  // base currency is also AUD, so a USD payout is "foreign to its security"
+  // with an ACHIEVABLE conversion (`import-commit.ts`'s case B) -- a rate is
+  // required and, once supplied, is stored as honest provenance. The
+  // pre-seeded membership's OWN `source_currency_code` is updated to match
+  // the payout's currency so the dividend-class row resolves against the
+  // existing `security-a` membership (`security-resolution.ts`'s
+  // `linkResolvedSecurity` dividend exemption still requires the candidate
+  // to resolve to A security at all; symbol+exchange+currency is the exact
+  // lookup key for an unresolved candidate row) -- this is independent of
+  // `securities.primary_currency_code` (AUD, unchanged), which is what
+  // `import-commit.ts`'s foreign-to-security check actually reads.
+  database.exec(
+    `UPDATE portfolio_securities SET source_currency_code = 'USD' WHERE id = 'membership-a';`,
+  );
+  const { client, sharesightClient: firstClient } = await linkedFixture(
+    database,
+    {
+      portfolios: [fakePortfolio()],
+      trades: [],
+      payouts: [
+        fakePayout({
+          id: "payout-fx-corrected",
+          paidOnDate: "2026-08-05",
+          currencyCode: "USD",
+          amountDecimal: "2.50",
+          frankingCreditsDecimal: null,
+          exchangeRateDecimal: "0.65",
+        }),
+      ],
+    },
+  );
+
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: { enabled: true, client: firstClient } },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  const firstBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    first.batchId,
+  );
+  assert.ok(firstBatch);
+  await commitBatch(
+    client,
+    first.batchId,
+    "brk-014-r3-fx-commit",
+    firstBatch!.version,
+  );
+  const committedPayout = await client.get<{
+    fx_rate_to_portfolio_decimal: string | null;
+  }>(
+    `SELECT fx_rate_to_portfolio_decimal FROM dividend_manual_records
+      WHERE user_id = ? AND portfolio_id = ?
+        AND source_reference LIKE 'import-fingerprint:sharesight-payout:%'`,
+    ["user-a", "portfolio-a"],
+  );
+  assert.ok(
+    committedPayout?.fx_rate_to_portfolio_decimal,
+    "the first sync must have committed a stored FX rate to correct against",
+  );
+
+  // Sharesight reports the SAME payout (same id, holding, paid-on-date,
+  // cash amount, currency) with a CORRECTED exchange rate only.
+  const correctedClient = fakeSharesightClient({
+    trades: [],
+    payouts: [
+      fakePayout({
+        id: "payout-fx-corrected",
+        paidOnDate: "2026-08-05",
+        currencyCode: "USD",
+        amountDecimal: "2.50",
+        frankingCreditsDecimal: null,
+        exchangeRateDecimal: "0.70",
+      }),
+    ],
+  });
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    { integration: { enabled: true, client: correctedClient } },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  assert.notEqual(
+    second.batchId,
+    first.batchId,
+    "an FX correction must produce a NEW batch, never silently reuse the prior one",
+  );
+  assert.equal(second.reused, false);
+  assert.equal(
+    second.newRows,
+    1,
+    "an FX-only correction must count as new, never already imported",
+  );
+  assert.equal(second.alreadyImportedRows, 0);
+});
+
+test("BRK-014 review round 3: a currency-only correction to a committed trade re-syncs as newRows -- not alreadyImportedRows", async () => {
+  const database = await migratedDatabase();
+  const { client, sharesightClient: firstClient } = await linkedFixture(
+    database,
+    {
+      portfolios: [fakePortfolio()],
+      trades: [
+        fakeTrade({
+          id: "trade-currency-corrected",
+          transactionDate: "2026-08-01",
+          currencyCode: "AUD",
+          quantityDecimal: "5",
+          priceDecimal: "10",
+          valueDecimal: "50",
+        }),
+      ],
+      payouts: [],
+    },
+  );
+
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: { enabled: true, client: firstClient } },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  const firstBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    first.batchId,
+  );
+  assert.ok(firstBatch);
+  await commitBatch(
+    client,
+    first.batchId,
+    "brk-014-r3-currency-commit",
+    firstBatch!.version,
+  );
+
+  // Sharesight reports the SAME trade id (same quantity/price/date) with a
+  // CORRECTED currency -- e.g. a mis-tagged market/currency fixed at the
+  // source. `fingerprint`/`source_reference` stay keyed on the trade id
+  // alone, so this must be recognised as a correction, not a different
+  // trade.
+  const correctedClient = fakeSharesightClient({
+    trades: [
+      fakeTrade({
+        id: "trade-currency-corrected",
+        transactionDate: "2026-08-01",
+        currencyCode: "USD",
+        quantityDecimal: "5",
+        priceDecimal: "10",
+        valueDecimal: "50",
+      }),
+    ],
+    payouts: [],
+  });
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    { integration: { enabled: true, client: correctedClient } },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  assert.notEqual(
+    second.batchId,
+    first.batchId,
+    "a currency correction must produce a NEW batch, never silently reuse the prior one",
+  );
+  assert.equal(second.reused, false);
+  assert.equal(
+    second.newRows,
+    1,
+    "a currency-only correction must count as new, never already imported",
+  );
+  assert.equal(second.alreadyImportedRows, 0);
+});
+
+test("BRK-014 review round 3: a native-currency payout with no independently stored FX rate re-syncs UNCHANGED as alreadyImportedRows -- a stored-null rate must never be mistaken for 'changed'", async () => {
+  const database = await migratedDatabase();
+  const fixtures = {
+    portfolios: [fakePortfolio()],
+    trades: [] as SharesightTrade[],
+    payouts: [
+      fakePayout({
+        id: "payout-native-fx",
+        paidOnDate: "2026-08-05",
+        // Native to security-a's own currency (AUD) -- `import-commit.ts`'s
+        // case A -- so `fx_rate_to_portfolio_decimal` commits as NULL even
+        // though Sharesight supplied a (economically meaningless, since the
+        // payout is already native) exchange rate here.
+        currencyCode: "AUD",
+        amountDecimal: "2.50",
+        frankingCreditsDecimal: "1.07",
+        exchangeRateDecimal: "1.0",
+      }),
+    ],
+  };
+  const { client, sharesightClient } = await linkedFixture(database, fixtures);
+  const integration = { enabled: true as const, client: sharesightClient };
+
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  const firstBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    first.batchId,
+  );
+  assert.ok(firstBatch);
+  await commitBatch(
+    client,
+    first.batchId,
+    "brk-014-r3-native-fx-commit",
+    firstBatch!.version,
+  );
+  const committedPayout = await client.get<{
+    fx_rate_to_portfolio_decimal: string | null;
+    currency_code: string | null;
+  }>(
+    `SELECT fx_rate_to_portfolio_decimal, currency_code FROM dividend_manual_records
+      WHERE user_id = ? AND portfolio_id = ?
+        AND source_reference LIKE 'import-fingerprint:sharesight-payout:%'`,
+    ["user-a", "portfolio-a"],
+  );
+  assert.equal(
+    committedPayout?.fx_rate_to_portfolio_decimal,
+    null,
+    "a native-currency payout must commit with no independently stored FX rate",
+  );
+
+  // Sharesight reports the IDENTICAL payout on the next routine sync.
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    { integration },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  assert.equal(
+    second.newRows,
+    0,
+    "a stored-null FX rate must be treated as not-comparable, never as a false 'changed'",
+  );
+  assert.equal(second.alreadyImportedRows, 1);
+});
+
+test("BRK-014 review round 3: a symbol-only correction to a committed payout stages a genuinely new batch that is NOT 'new' by any compared field -- the sync message must name the residual, not claim every row already matches", async () => {
+  const database = await migratedDatabase();
+  const { client, sharesightClient: firstClient } = await linkedFixture(
+    database,
+    {
+      portfolios: [fakePortfolio()],
+      trades: [],
+      payouts: [
+        fakePayout({
+          id: "payout-symbol-corrected",
+          symbol: "ABC",
+          paidOnDate: "2026-08-05",
+          amountDecimal: "2.50",
+          frankingCreditsDecimal: "1.07",
+        }),
+      ],
+    },
+  );
+
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: { enabled: true, client: firstClient } },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  const firstBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    first.batchId,
+  );
+  assert.ok(firstBatch);
+  await commitBatch(
+    client,
+    first.batchId,
+    "brk-014-r3-symbol-commit",
+    firstBatch!.version,
+  );
+
+  // Sharesight reports the SAME payout (same id, holding, paid-on-date,
+  // cash amount, franking) but with a CORRECTED symbol -- e.g. a ticker
+  // rename. `symbol`/`exchange` are genuinely residual (no committed column
+  // records them independently of security resolution -- see
+  // `isRowAlreadyImported`'s doc comment), so this must still be caught as
+  // a new batch by the digest, even though the classifier itself cannot
+  // tell this one row apart from a true no-op.
+  const correctedClient = fakeSharesightClient({
+    trades: [],
+    payouts: [
+      fakePayout({
+        id: "payout-symbol-corrected",
+        symbol: "ABCX",
+        paidOnDate: "2026-08-05",
+        amountDecimal: "2.50",
+        frankingCreditsDecimal: "1.07",
+      }),
+    ],
+  });
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    { integration: { enabled: true, client: correctedClient } },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  assert.notEqual(
+    second.batchId,
+    first.batchId,
+    "a symbol correction must still produce a NEW batch via the digest",
+  );
+  assert.equal(second.reused, false);
+  assert.equal(
+    second.newRows,
+    0,
+    "symbol is a residual, uncompared field -- the classifier cannot see this change",
+  );
+  assert.equal(second.alreadyImportedRows, 1);
+
+  const message = formatSyncResultMessage(second);
+  assert.doesNotMatch(
+    message,
+    /every staged row already matches/,
+    "a NEW batch (reused: false) must never claim every row already matches -- that is self-contradictory",
+  );
+  assert.match(message, /not compared/);
+  assert.match(message, /review the batch before accepting/);
 });
 
 test("BRK-005: reviewer PROBE 3 -- the reused-batch path reports the STORED rowsStaged/skippedPayouts against a KNOWN-correct absolute count (1 skipped payout), not merely self-consistent with a possibly-buggy DB read, and the omission's detail (symbol/paid_on) is visible in the stored issue", async () => {

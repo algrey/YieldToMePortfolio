@@ -547,14 +547,34 @@ export type SharesightCommittedRowValues = Readonly<{
       feeAmountDecimal: string | null;
       localTradeDate: string | null;
       type: string | null;
+      currencyCode: string | null;
     }
   >;
+  // BRK-014 round 3: `dividend_manual_records.currency_code` is deliberately
+  // NOT carried here. Unlike `transactions.currency_code` (`NOT NULL`,
+  // stored verbatim from `normalized.currency` on every trade --
+  // `import-commit.ts:909`), the dividend column is only populated when
+  // `import-commit.ts`'s dividend branch finds the payout's currency FOREIGN
+  // to its own security's currency (`isForeignToSecurity`); a payout NATIVE
+  // to its security -- the common case for this owner's AU holdings --
+  // commits with this column NULL even though `normalized.currency` held a
+  // real value at commit time. It is therefore not a faithful counterpart of
+  // `normalized.currency` the way `transactions.currency_code` is, and
+  // comparing it would report every native payout's routine re-sync as
+  // "changed" the moment `normalized.currency` is populated. See
+  // `isRowAlreadyImported`'s doc comment for the full residual-fields list.
   payouts: ReadonlyMap<
     string,
     {
       cashTotalDecimal: string | null;
       totalFrankingDecimal: string | null;
       paymentDate: string | null;
+      // Populated only for a payout FOREIGN to its security's currency with
+      // a Sharesight-supplied rate (`import-commit.ts`'s case B/C-with-rate)
+      // -- NULL for a native payout (case A) or a foreign payout with no
+      // rate (case C-no-rate). See `isRowAlreadyImported`'s doc comment for
+      // the not-comparable handling this NULL requires.
+      fxRateToPortfolioDecimal: string | null;
     }
   >;
 }>;
@@ -583,13 +603,31 @@ export type SharesightCommittedRowValues = Readonly<{
  * happened to match) -- a directly self-contradictory sync result. Fixed by
  * widening this function to also carry `total_franking_decimal`/
  * `payment_date` for payouts and `fee_amount_decimal`/`local_trade_date`/
- * `type` for trades, so `isRowAlreadyImported` in the service module can
- * compare the SAME set of value-bearing fields the digest does (every
- * digest field except the identity-only `fingerprint`, `symbol`,
- * `exchange`, `currency`, and the FX-only `exchangeRateDecimal`, which a
- * Sharesight trade/payout row never carries independently of price/cash
- * fields already compared here). See `isRowAlreadyImported`'s doc comment
- * for the exact field-by-field list this now supports.
+ * `type` for trades.
+ *
+ * Review round 2 (BLOCKING, correction to round-1's own doc comment): round
+ * 1 additionally claimed `symbol`/`exchange`/`currency` were "identity
+ * fields already folded into `sourceReference`" and that
+ * `exchangeRateDecimal` "has no committed counterpart on either table" --
+ * both false. `sourceReference` is `sharesight-trade:<id>` /
+ * `<portfolioId>:<holdingId>:<paidOnDate>` and never encodes
+ * symbol/exchange/currency at all, and `dividend_manual_records.fx_rate_to_portfolio_decimal`
+ * IS a committed counterpart of `normalized.exchangeRateDecimal`
+ * (`import-commit.ts`'s dividend branch writes it with `fx_rate_source =
+ * 'sharesight'` whenever the payout is foreign to its security AND a rate
+ * was supplied). Round 3 now also carries `currency_code` for trades (a
+ * faithful, `NOT NULL`, verbatim-stored counterpart of `normalized.currency`
+ * -- `import-commit.ts:909`) and `fx_rate_to_portfolio_decimal` for payouts
+ * (a faithful counterpart ONLY when non-null; see that field's own comment
+ * above for why a stored NULL is "not comparable", not "unchanged", and why
+ * `isRowAlreadyImported` still treats it as a pass). `symbol`/`exchange`
+ * remain genuinely residual (no committed column at all -- a mapping
+ * decision can point the same Sharesight identity at a different resolved
+ * security without changing any digest-adjacent stored column here), and so
+ * does payout `currency_code` (populated only for a payout foreign to its
+ * security -- see its own field comment above). See `isRowAlreadyImported`'s
+ * doc comment for the exact field-by-field list this now supports and the
+ * residual list that remains.
  *
  * Deliberately mirrors `db/repositories/import-commit.ts`'s own exact-match
  * commit-time identity predicates (no `status`/`superseded_by_record_id`
@@ -611,9 +649,10 @@ export async function loadCommittedSharesightRowValues(
     fee_amount_decimal: string | null;
     local_trade_date: string | null;
     type: string | null;
+    currency_code: string | null;
   }>(
     `SELECT source_reference, quantity_decimal, unit_price_decimal,
-            fee_amount_decimal, local_trade_date, type
+            fee_amount_decimal, local_trade_date, type, currency_code
        FROM transactions
       WHERE user_id = ? AND portfolio_id = ? AND source_type = 'csv_import'
         AND source_reference LIKE 'import-fingerprint:sharesight-trade:%'`,
@@ -624,9 +663,10 @@ export async function loadCommittedSharesightRowValues(
     total_cash_decimal: string | null;
     total_franking_decimal: string | null;
     payment_date: string | null;
+    fx_rate_to_portfolio_decimal: string | null;
   }>(
     `SELECT source_reference, total_cash_decimal, total_franking_decimal,
-            payment_date
+            payment_date, fx_rate_to_portfolio_decimal
        FROM dividend_manual_records
       WHERE user_id = ? AND portfolio_id = ?
         AND source_reference LIKE 'import-fingerprint:sharesight-payout:%'`,
@@ -642,6 +682,7 @@ export async function loadCommittedSharesightRowValues(
           feeAmountDecimal: row.fee_amount_decimal,
           localTradeDate: row.local_trade_date,
           type: row.type,
+          currencyCode: row.currency_code,
         },
       ]),
     ),
@@ -652,6 +693,7 @@ export async function loadCommittedSharesightRowValues(
           cashTotalDecimal: row.total_cash_decimal,
           totalFrankingDecimal: row.total_franking_decimal,
           paymentDate: row.payment_date,
+          fxRateToPortfolioDecimal: row.fx_rate_to_portfolio_decimal,
         },
       ]),
     ),

@@ -401,12 +401,44 @@ function decimalValuesMatch(
  *   `cashEvent ?? type` remapping is needed here the way `import-commit.ts`
  *   does for the general CSV path).
  *
- * `symbol`/`exchange`/`currency`/`fingerprint` are identity fields already
- * folded into `sourceReference`/security resolution, not independent value
- * facts to re-check; `exchangeRateDecimal` has no committed counterpart on
- * either table (FX is resolved and stored on the transaction as
- * `fx_rate_to_base_decimal`, a commit-time DERIVED value, not a normalized
- * input field this function can compare against). Every comparison stays
+ * Review round 2 (BLOCKING, correction to round-1's own doc comment above):
+ * round 1 claimed `symbol`/`exchange`/`currency` were "identity fields
+ * already folded into `sourceReference`" -- false, `sourceReference` is
+ * `sharesight-trade:<id>` / `<portfolioId>:<holdingId>:<paidOnDate>` and
+ * never encodes any of the three -- and that `exchangeRateDecimal` "has no
+ * committed counterpart on either table" -- also false,
+ * `dividend_manual_records.fx_rate_to_portfolio_decimal` IS its committed
+ * counterpart (`import-commit.ts`'s dividend branch writes it, with
+ * `fx_rate_source = 'sharesight'`, whenever the payout is foreign to its
+ * security and a rate was supplied).
+ *
+ * Round 3 widens the comparison again with the two faithful counterparts
+ * round 2 wrongly wrote off:
+ *
+ * - trade: `currency` vs `currency_code` (exact string -- `NOT NULL`,
+ *   stored verbatim from `normalized.currency` on every trade,
+ *   `import-commit.ts:909`; no not-comparable case exists for trades).
+ * - payout: `exchangeRateDecimal` vs `fx_rate_to_portfolio_decimal`, but
+ *   ONLY when the STORED value is non-null. `import-commit.ts`'s dividend
+ *   branch writes this column only when the payout is foreign to its
+ *   security's own currency AND Sharesight supplied a rate -- a NATIVE
+ *   payout (this owner's common case) always commits with this column NULL,
+ *   even though `normalized.exchangeRateDecimal` may hold a real value.
+ *   A stored NULL therefore means "not independently recorded", not
+ *   "changed" -- see `fxRateNotComparableOrMatches` below for why this is a
+ *   pass, not a `decimalValuesMatch` call, and why getting this wrong would
+ *   report every native-currency payout as "new" on every routine re-sync.
+ *
+ * `symbol`/`exchange`/`fingerprint` remain genuinely RESIDUAL for both
+ * trades and payouts: no committed column records them independently of
+ * security resolution, and a mapping decision can point the same Sharesight
+ * identity at a different resolved security without changing any other
+ * digest-adjacent stored value here. Payout `currency` is ALSO residual --
+ * `dividend_manual_records.currency_code` is populated only when the payout
+ * is foreign to its security (same condition as the FX rate above), so
+ * unlike the trade's `currency_code` it is not a faithful counterpart for
+ * every payout and comparing it would misreport every native payout the
+ * same way an unguarded FX comparison would. Every comparison stays
  * conservative: an unrecognised/malformed value or a missing committed row
  * returns `false` ("new"), never a false "already imported".
  *
@@ -419,6 +451,32 @@ function decimalValuesMatch(
  * visible to the owner as a decision, even though this task does not
  * change what accepting it actually does.
  */
+/**
+ * BRK-014 round 3: `dividend_manual_records.fx_rate_to_portfolio_decimal` is
+ * only ever written when the payout is foreign to its security AND
+ * Sharesight supplied a rate (see `sharesight-sync-state.ts`'s
+ * `SharesightCommittedRowValues` doc comment for the full case breakdown) --
+ * a stored `null` means "not independently recorded", never "no rate
+ * supplied" and never "confirmed equal to the incoming value". Treating a
+ * stored `null` as a mismatch (the way `decimalValuesMatch` conservatively
+ * treats every other null) would report EVERY native-currency payout --
+ * this owner's common case -- as `newRows` on every routine re-sync the
+ * moment Sharesight includes any `exchangeRateDecimal` in its feed at all,
+ * breaking this task's own "a re-sync that adds nothing reads unambiguously
+ * as no new rows" acceptance criterion. So this field is deliberately NOT
+ * COMPARABLE when nothing is stored to compare against, and "not
+ * comparable" here means "does not by itself indicate a change" -- the
+ * opposite default from `decimalValuesMatch`, which exists to catch a
+ * comparison that ought to have been possible but failed.
+ */
+function fxRateNotComparableOrMatches(
+  incoming: string | null,
+  storedFxRateToPortfolioDecimal: string | null,
+): boolean {
+  if (storedFxRateToPortfolioDecimal === null) return true;
+  return decimalValuesMatch(incoming, storedFxRateToPortfolioDecimal);
+}
+
 function isRowAlreadyImported(
   row: {
     fingerprint: string;
@@ -431,6 +489,8 @@ function isRowAlreadyImported(
       | "totalFrankingDecimal"
       | "localTradeDate"
       | "commission"
+      | "currency"
+      | "exchangeRateDecimal"
     >;
   },
   existing: SharesightCommittedRowValues,
@@ -448,7 +508,11 @@ function isRowAlreadyImported(
         row.normalized.totalFrankingDecimal ?? null,
         existingPayout.totalFrankingDecimal,
       ) &&
-      row.normalized.localTradeDate === existingPayout.paymentDate
+      row.normalized.localTradeDate === existingPayout.paymentDate &&
+      fxRateNotComparableOrMatches(
+        row.normalized.exchangeRateDecimal ?? null,
+        existingPayout.fxRateToPortfolioDecimal,
+      )
     );
   }
   const existingTrade = existing.trades.get(sourceReference);
@@ -467,7 +531,8 @@ function isRowAlreadyImported(
       existingTrade.feeAmountDecimal,
     ) &&
     row.normalized.localTradeDate === existingTrade.localTradeDate &&
-    row.normalized.type === existingTrade.type
+    row.normalized.type === existingTrade.type &&
+    row.normalized.currency === existingTrade.currencyCode
   );
 }
 
@@ -483,6 +548,8 @@ function countAlreadyImported(
       | "totalFrankingDecimal"
       | "localTradeDate"
       | "commission"
+      | "currency"
+      | "exchangeRateDecimal"
     >;
   }[],
   existing: SharesightCommittedRowValues,

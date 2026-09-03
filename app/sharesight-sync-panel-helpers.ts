@@ -179,14 +179,45 @@ function windowLabel(window: SharesightSyncWindowSummary): string {
  * no-op sync from one that will actually change their ledger BEFORE they
  * open the preview. Only rendered when rows were actually staged (a
  * zero-staged sync already reads unambiguously from `rowsLine` alone).
- * Three shapes, deliberately distinct wording rather than one templated
- * sentence: the all-already-imported case states "No new rows" literally
- * (unambiguous, never read as a full re-import); the all-new case omits the
+ *
+ * Review round 3 (BLOCKING, correction to the round-1/round-2 wording): a
+ * `newRows === 0` sync can happen two structurally different ways, and they
+ * must not share one sentence.
+ *
+ * - `reused === true`: `startUpload`'s content-addressed dedupe resolved
+ *   this fetch to the SAME batch as last time -- the fetched rows were
+ *   BYTE-IDENTICAL to the prior sync (see `canonicalFetchDigestSource`),
+ *   so "every staged row already matches an existing record" is literally
+ *   true. Keeps the original "No new rows" copy.
+ * - `reused === false`: a NEW batch was created, which only happens when
+ *   `canonicalRowDigestFields`'s thirteen-field digest differed from every
+ *   prior sync's -- something in the fetched rows genuinely changed. If
+ *   `isRowAlreadyImported` still counts every row as already-imported, the
+ *   only way both facts can be true is that the change landed on a field
+ *   this function does NOT compare (`symbol`/`exchange` for either row
+ *   kind, or a payout's `currency`/native-payout FX rate -- see
+ *   `app/sharesight-sync-service.ts`'s `isRowAlreadyImported` doc comment
+ *   for the exact residual list). Saying "already matches" here would be
+ *   self-contradictory (a new batch that changed nothing cannot exist), so
+ *   this case gets its own honest sentence naming what WAS checked and that
+ *   something outside that set changed.
+ *
+ * The all-new and mixed shapes are unchanged: the all-new case omits the
  * redundant "0 already imported" clause; the mixed case names both counts.
  */
 function newVsAlreadyImportedLine(result: SharesightSyncSuccess): string {
   if (result.rowsStaged === 0) return "";
   if (result.newRows === 0) {
+    if (!result.reused) {
+      return (
+        " None differ from your ledger on the compared fields (quantity, " +
+        "price, fee, date, type, currency for trades; cash, franking, " +
+        "payment date, FX where recorded for payouts), but Sharesight's " +
+        "data differs from the previous sync on a field that is not " +
+        "compared (for example a symbol, exchange or market code change) " +
+        "-- review the batch before accepting."
+      );
+    }
     return " No new rows -- every staged row already matches an existing record.";
   }
   const newLabel = `${result.newRows} new row${result.newRows === 1 ? "" : "s"}`;
