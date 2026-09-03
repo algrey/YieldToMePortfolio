@@ -2180,9 +2180,9 @@ async function censusIncomePageBeforePRF008(
 // zero `sharesight_sync_state` statements on `/income` -- not because the
 // gate was scoped out, but because gate 1 itself can never reach a real
 // credential here. These two tests therefore do NOT independently fail
-// against the pre-fix source (confirmed via `git stash` on
-// `app/owned-holdings.ts`/`app/owned-income-projection.ts`/`app/owned-
-// dividend-assumptions.ts`) -- they measure real, reproducible statement
+// against the pre-fix source (confirmed by running this file inside a
+// `git archive 7115bb1^ | tar -x` scratch tree with a `node_modules`
+// symlink -- never by stashing the shared checkout) -- they measure real, reproducible statement
 // counts and per-page placement on a fixture shape that DOES matter in
 // production (a real deployment's Sharesight credential resolves via the
 // real `cloudflare:workers` env, not this fallback). The regression proof
