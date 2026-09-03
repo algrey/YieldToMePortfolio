@@ -169,6 +169,20 @@ export type SharesightAccessToken = Readonly<{
 
 export type SharesightTokenProvider = Readonly<{
   getAccessToken(): Promise<SharesightResult<string>>;
+  /**
+   * BRK-016: clears the cached access token (if any) so the NEXT
+   * `getAccessToken()` call starts a fresh exchange, without disturbing an
+   * exchange that is already in flight -- this never touches `inFlight`,
+   * so a concurrent legitimate refresh still resolves normally and still
+   * populates the cache with its own fresh result regardless of whether
+   * `invalidate()` was called while it was running (see
+   * `createSharesightTokenProvider`'s doc comment for the concurrency
+   * argument). Optional on the type so a minimal test fake implementing
+   * only `getAccessToken` remains a valid `SharesightTokenProvider`; a real
+   * caller (`domain/sharesight/client.ts`'s 401 mapping) always calls it
+   * via `?.()`.
+   */
+  invalidate?(): void;
 }>;
 
 export class SharesightTokenUrlRejectedError extends Error {
@@ -929,6 +943,12 @@ export function createSharesightTokenProvider(
       }
       cached = result.value;
       return { ok: true, value: result.value.accessToken };
+    },
+    // BRK-016: see `SharesightTokenProvider.invalidate`'s doc comment. Only
+    // clears `cached` -- `inFlight` (and therefore any exchange already
+    // under way) is left completely alone.
+    invalidate(): void {
+      cached = null;
     },
   };
 }

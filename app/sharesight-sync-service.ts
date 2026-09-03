@@ -749,10 +749,18 @@ export async function runSharesightSyncWithContext(
       : undefined;
 
   const client: SharesightClient = integration.client;
-  const tradesResult = await client.listTrades(
-    link.sharesightPortfolioId,
-    tradeListParams,
-  );
+  // BRK-016: the trade and payout streams are independent fetches -- issue
+  // both before waiting on either, rather than paying their two timeouts
+  // back-to-back. Failure handling is UNCHANGED from the prior sequential
+  // code: the trades check runs first, so if both streams fail the trades
+  // message is what's reported (matches what a sequential await would have
+  // surfaced first, since `listTrades` used to run to completion before
+  // `listPayouts` was even attempted); either stream failing alone still
+  // reports that stream's own message.
+  const [tradesResult, payoutsResult] = await Promise.all([
+    client.listTrades(link.sharesightPortfolioId, tradeListParams),
+    client.listPayouts(link.sharesightPortfolioId, payoutListParams),
+  ]);
   if (!tradesResult.ok) {
     return {
       ok: false,
@@ -760,10 +768,6 @@ export async function runSharesightSyncWithContext(
       message: "Sharesight did not return a usable trade list.",
     };
   }
-  const payoutsResult = await client.listPayouts(
-    link.sharesightPortfolioId,
-    payoutListParams,
-  );
   if (!payoutsResult.ok) {
     return {
       ok: false,

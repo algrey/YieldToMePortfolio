@@ -626,6 +626,19 @@ export function createSharesightClient(
 
     if (!response.ok) {
       const retryable = response.status >= 500;
+      // BRK-016: a 401 means the token this request just used is no longer
+      // good (expired server-side ahead of our local clock, or revoked) --
+      // invalidate the provider's cache so the NEXT call (in this same
+      // invocation, or a later one sharing the memoized provider via
+      // worker/sharesight-config.ts) re-exchanges instead of repeating the
+      // now-known-bad token. This module never retries the DATA call itself
+      // (out of scope -- a 502 to the owner stays visible and actionable);
+      // it only ensures the FOLLOWING call starts clean. `invalidate` is
+      // optional on `SharesightTokenProvider` so a minimal test fake that
+      // only implements `getAccessToken` still works unchanged.
+      if (response.status === 401) {
+        options.tokenProvider.invalidate?.();
+      }
       // BRK-008 (2026-08-15 follow-up): this branch previously returned with
       // NO diagnostic evidence at all for ANY non-2xx status -- that gap is
       // exactly the observed live `listPayouts` symptom (invalid_response

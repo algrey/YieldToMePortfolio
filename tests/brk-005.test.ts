@@ -292,6 +292,206 @@ async function linkedFixture(
   return { client, sharesightClient };
 }
 
+/** BRK-016: a fake `SharesightClient` whose `listTrades`/`listPayouts` are
+ * held pending until the test explicitly resolves them, recording the
+ * ORDER in which each is called/resolved -- used to prove the sync issues
+ * both list calls before either settles (`Promise.all`, not a sequential
+ * await). `listPortfolios`/`getPortfolioHoldings`/`listUserInstruments` are
+ * unused by `runSharesightSyncWithContext` and resolve immediately, same as
+ * `fakeSharesightClient`'s stubs above. */
+function deferredSharesightClient(): {
+  client: SharesightClient;
+  callOrder: string[];
+  resolveTrades: (result: SharesightResult<SharesightTrade[]>) => void;
+  resolvePayouts: (result: SharesightResult<SharesightPayout[]>) => void;
+} {
+  const callOrder: string[] = [];
+  let resolveTradesFn:
+    ((result: SharesightResult<SharesightTrade[]>) => void) | null = null;
+  let resolvePayoutsFn:
+    ((result: SharesightResult<SharesightPayout[]>) => void) | null = null;
+  const tradesPromise = new Promise<SharesightResult<SharesightTrade[]>>(
+    (resolve) => {
+      resolveTradesFn = resolve;
+    },
+  );
+  const payoutsPromise = new Promise<SharesightResult<SharesightPayout[]>>(
+    (resolve) => {
+      resolvePayoutsFn = resolve;
+    },
+  );
+  const client: SharesightClient = {
+    async listPortfolios() {
+      return { ok: true, value: [] };
+    },
+    async getPortfolioHoldings() {
+      return { ok: true, value: [] };
+    },
+    async listTrades() {
+      callOrder.push("listTrades-called");
+      const result = await tradesPromise;
+      callOrder.push("listTrades-resolved");
+      return result;
+    },
+    async listPayouts() {
+      callOrder.push("listPayouts-called");
+      const result = await payoutsPromise;
+      callOrder.push("listPayouts-resolved");
+      return result;
+    },
+    async listUserInstruments() {
+      return { ok: true, value: [] };
+    },
+  };
+  if (!resolveTradesFn || !resolvePayoutsFn) {
+    throw new Error("Promise executors must run synchronously");
+  }
+  return {
+    client,
+    callOrder,
+    resolveTrades: resolveTradesFn,
+    resolvePayouts: resolvePayoutsFn,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// BRK-016: listTrades/listPayouts run concurrently (Promise.all), and
+// per-stream failure messages are unchanged from the prior sequential code.
+// ---------------------------------------------------------------------------
+
+test("BRK-016: runSharesightSyncWithContext issues listTrades and listPayouts BEFORE either resolves", async () => {
+  const database = await migratedDatabase();
+  const { client } = await linkedFixture(database);
+  const deferred = deferredSharesightClient();
+
+  const syncPromise = runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "req-order" },
+    "portfolio-a",
+    { integration: { enabled: true, client: deferred.client } },
+  );
+
+  // Flush the microtask queue (portfolio/link/watermark DB reads, all
+  // synchronous sqlite under an async wrapper) so the service reaches its
+  // Promise.all before this test inspects call order.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    deferred.callOrder,
+    ["listTrades-called", "listPayouts-called"],
+    "both streams must be requested before either is allowed to resolve",
+  );
+
+  deferred.resolveTrades({ ok: true, value: [] });
+  deferred.resolvePayouts({ ok: true, value: [] });
+  const result = await syncPromise;
+  assert.equal(result.ok, true);
+});
+
+test("BRK-016: a listTrades failure alone reports the trade-list message (unchanged from the prior sequential behaviour)", async () => {
+  const database = await migratedDatabase();
+  const { client } = await linkedFixture(database);
+  const result = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "req-trades-fail" },
+    "portfolio-a",
+    {
+      integration: {
+        enabled: true,
+        client: fakeSharesightClient({
+          tradesResult: {
+            ok: false,
+            error: {
+              kind: "invalid_response",
+              message: "boom",
+              retryable: false,
+            },
+          },
+          payouts: [],
+        }),
+      },
+    },
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.status, 502);
+    assert.equal(
+      result.message,
+      "Sharesight did not return a usable trade list.",
+    );
+  }
+});
+
+test("BRK-016: a listPayouts failure alone reports the payout-list message", async () => {
+  const database = await migratedDatabase();
+  const { client } = await linkedFixture(database);
+  const result = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "req-payouts-fail" },
+    "portfolio-a",
+    {
+      integration: {
+        enabled: true,
+        client: fakeSharesightClient({
+          trades: [],
+          payoutsResult: {
+            ok: false,
+            error: {
+              kind: "invalid_response",
+              message: "boom",
+              retryable: false,
+            },
+          },
+        }),
+      },
+    },
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.status, 502);
+    assert.equal(
+      result.message,
+      "Sharesight did not return a usable payout list.",
+    );
+  }
+});
+
+test("BRK-016: when BOTH streams fail, the trades message is reported (documented precedence, matching what the prior sequential await would have surfaced first)", async () => {
+  const database = await migratedDatabase();
+  const { client } = await linkedFixture(database);
+  const result = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "req-both-fail" },
+    "portfolio-a",
+    {
+      integration: {
+        enabled: true,
+        client: fakeSharesightClient({
+          tradesResult: {
+            ok: false,
+            error: {
+              kind: "invalid_response",
+              message: "trades boom",
+              retryable: false,
+            },
+          },
+          payoutsResult: {
+            ok: false,
+            error: {
+              kind: "invalid_response",
+              message: "payouts boom",
+              retryable: false,
+            },
+          },
+        }),
+      },
+    },
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.status, 502);
+    assert.equal(
+      result.message,
+      "Sharesight did not return a usable trade list.",
+    );
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Transform: trade direction mapping
 // ---------------------------------------------------------------------------

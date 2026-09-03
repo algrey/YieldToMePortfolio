@@ -2964,6 +2964,198 @@ test("BRK-003 transport errors: 401 arriving after a cached token was believed v
   }
 });
 
+// --- BRK-016: 401 invalidates the cached token ----------------------------
+
+test("BRK-016: client.ts calls the token provider's invalidate() on a 401, and does NOT call it on other statuses", async () => {
+  let invalidateCalls = 0;
+  const provider: SharesightTokenProvider = {
+    getAccessToken: async () => ({ ok: true, value: FIXTURE_ACCESS_TOKEN }),
+    invalidate: () => {
+      invalidateCalls += 1;
+    },
+  };
+  const client401 = createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => jsonResponse(401, { error: "token_expired" }),
+  });
+  await client401.listPortfolios();
+  assert.equal(invalidateCalls, 1);
+
+  const client500 = createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => jsonResponse(500, {}),
+  });
+  await client500.listPortfolios();
+  assert.equal(
+    invalidateCalls,
+    1,
+    "a non-401 failure must never invalidate the cached token",
+  );
+});
+
+test("BRK-016: client.ts tolerates a token provider that does not implement invalidate() (a minimal fake) on a 401 -- optional chaining, never a thrown error", async () => {
+  const provider: SharesightTokenProvider = {
+    getAccessToken: async () => ({ ok: true, value: FIXTURE_ACCESS_TOKEN }),
+  };
+  const client = createSharesightClient({
+    tokenProvider: provider,
+    fetcher: async () => jsonResponse(401, { error: "token_expired" }),
+  });
+  const result = await client.listPortfolios();
+  assert.equal(result.ok, false);
+});
+
+test("BRK-016: a 401 on a data call invalidates the cached token so the NEXT call re-exchanges exactly once; a 401 on BOTH calls does not loop", async () => {
+  let tokenCalls = 0;
+  let dataCallCount = 0;
+  const fetcher: SharesightFetcher = async (url) => {
+    const href = String(url);
+    if (href.includes("/oauth2/token")) {
+      tokenCalls += 1;
+      return tokenFixtureResponse(`brk-016-token-${tokenCalls}`);
+    }
+    dataCallCount += 1;
+    return dataCallCount === 1
+      ? jsonResponse(401, { error: "token_expired" })
+      : jsonResponse(200, { portfolios: [] });
+  };
+  const provider = createSharesightTokenProvider({
+    clientId: FIXTURE_CLIENT_ID,
+    clientSecret: FIXTURE_CLIENT_SECRET,
+    fetcher,
+    now: () => 0,
+  });
+  const client = createSharesightClient({ tokenProvider: provider, fetcher });
+
+  const first = await client.listPortfolios();
+  assert.equal(first.ok, false);
+  if (!first.ok) assert.equal(first.error.kind, "authentication");
+  assert.equal(tokenCalls, 1, "one exchange before the first data call");
+
+  const second = await client.listPortfolios();
+  assert.equal(second.ok, true);
+  assert.equal(
+    tokenCalls,
+    2,
+    "the 401 must have invalidated the cache, forcing exactly one re-exchange before the second data call",
+  );
+});
+
+test("BRK-016: a 401 on BOTH data calls invalidates each time but never loops -- exactly one re-exchange per call, never a retry within a single call", async () => {
+  let tokenCalls = 0;
+  let dataCallCount = 0;
+  const fetcher: SharesightFetcher = async (url) => {
+    const href = String(url);
+    if (href.includes("/oauth2/token")) {
+      tokenCalls += 1;
+      return tokenFixtureResponse(`brk-016-token-${tokenCalls}`);
+    }
+    dataCallCount += 1;
+    return jsonResponse(401, { error: "token_expired" });
+  };
+  const provider = createSharesightTokenProvider({
+    clientId: FIXTURE_CLIENT_ID,
+    clientSecret: FIXTURE_CLIENT_SECRET,
+    fetcher,
+    now: () => 0,
+  });
+  const client = createSharesightClient({ tokenProvider: provider, fetcher });
+
+  const first = await client.listPortfolios();
+  assert.equal(first.ok, false);
+  assert.equal(
+    dataCallCount,
+    1,
+    "no retry of the data call itself -- out of scope, a 502 stays visible",
+  );
+  assert.equal(tokenCalls, 1);
+
+  const second = await client.listPortfolios();
+  assert.equal(second.ok, false);
+  assert.equal(dataCallCount, 2);
+  assert.equal(
+    tokenCalls,
+    2,
+    "the second call re-exchanges once (cache invalidated by the first call's 401) and does not loop or accumulate further exchanges",
+  );
+});
+
+test("BRK-016: invalidate() forces the next getAccessToken() call to re-exchange even though the cached token has not expired", async () => {
+  let clock = 0;
+  let tokenCalls = 0;
+  const fetcher: SharesightFetcher = async () => {
+    tokenCalls += 1;
+    return tokenFixtureResponse(`brk-016-token-${tokenCalls}`);
+  };
+  const provider = createSharesightTokenProvider({
+    clientId: FIXTURE_CLIENT_ID,
+    clientSecret: FIXTURE_CLIENT_SECRET,
+    fetcher,
+    now: () => clock,
+  });
+  const first = await provider.getAccessToken();
+  assert.equal(tokenCalls, 1);
+  clock += 1_000; // still well within the 1800s expiry
+  provider.invalidate?.();
+  const second = await provider.getAccessToken();
+  assert.equal(
+    tokenCalls,
+    2,
+    "invalidate() must force a re-exchange even though the cached token was not yet expired",
+  );
+  assert.notDeepEqual(second, first);
+});
+
+test("BRK-016: invalidate() racing an in-flight refresh never drops that refresh's result", async () => {
+  let clock = 0;
+  let tokenCalls = 0;
+  let resolveSecondExchange: ((response: Response) => void) | null = null;
+  const fetcher: SharesightFetcher = async () => {
+    tokenCalls += 1;
+    if (tokenCalls === 1) {
+      return tokenFixtureResponse("brk-016-race-token-1");
+    }
+    return new Promise<Response>((resolve) => {
+      resolveSecondExchange = resolve;
+    });
+  };
+  const provider = createSharesightTokenProvider({
+    clientId: FIXTURE_CLIENT_ID,
+    clientSecret: FIXTURE_CLIENT_SECRET,
+    fetcher,
+    now: () => clock,
+  });
+
+  const first = await provider.getAccessToken();
+  assert.equal(first.ok, true);
+  assert.equal(tokenCalls, 1);
+
+  clock += 1800 * 1000; // past expiry -> the next call starts a fresh exchange
+  const secondPending = provider.getAccessToken();
+  assert.equal(tokenCalls, 2, "expiry triggered a fresh in-flight exchange");
+
+  // Racing invalidate() while that exchange is still pending must not
+  // discard its eventual result (BRK-016 concurrency decision: invalidate()
+  // only ever clears `cached`, never touches `inFlight`).
+  provider.invalidate?.();
+
+  assert.ok(resolveSecondExchange);
+  resolveSecondExchange!(tokenFixtureResponse("brk-016-race-token-2"));
+  const second = await secondPending;
+  assert.equal(second.ok, true);
+  if (second.ok) assert.equal(second.value, "brk-016-race-token-2");
+
+  // The in-flight exchange's own result must have been cached -- a THIRD
+  // call must reuse it, not trigger a THIRD exchange.
+  const third = await provider.getAccessToken();
+  assert.equal(
+    tokenCalls,
+    2,
+    "invalidate() during the in-flight refresh must not have discarded its cached result",
+  );
+  assert.deepEqual(third, second);
+});
+
 // --- BRK-008: payouts endpoint path fix + onBodyParseDiagnostic -----------
 
 test("BRK-008 (2026-08-15 third pass): listPayouts requests the .json-suffixed endpoint path against the LEGACY v2 API version, not v3 (per markcatley/sharesight.rs, a third-party client generated from Sharesight's published API documentation -- see docs/ARCHITECTURE.md §8.2)", async () => {

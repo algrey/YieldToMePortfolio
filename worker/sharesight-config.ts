@@ -27,12 +27,27 @@
 // OUT of this comment deliberately, so the grep has nothing benign to match
 // against) so a future edit that reintroduces one of them fails that test
 // rather than silently reappearing.
+//
+// BRK-016: `createSharesightIntegrationConfig` used to build a brand-new
+// `createSharesightTokenProvider` on every call, so every entry point that
+// resolves the integration per-invocation (both Sharesight crons in
+// `worker/scheduled-refresh.ts`, the per-page gate in
+// `app/sharesight-price-gate-service.ts`, and the three actions in
+// `app/sharesight-sync-service.ts`) paid a fresh OAuth token exchange before
+// every data GET, even when nothing about the credentials had changed. The
+// module-scope memo below (`cachedTokenProviderSlot` /
+// `memoizedTokenProvider`) keeps ONE provider alive per isolate for the real
+// production path (no injected `dependencies`), so a warm isolate reuses the
+// provider's own in-closure access-token cache across calls instead of
+// re-exchanging every time. See that memo's doc comment for the isolate-
+// eviction/security discussion.
 
 import {
   createSharesightClient,
   createSharesightTokenProvider,
   type SharesightClient,
   type SharesightFetcher,
+  type SharesightTokenProvider,
 } from "../domain/sharesight/index.ts";
 
 export type SharesightConfigEnvInput = Readonly<{
@@ -61,6 +76,73 @@ function normalizeSecret(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+// BRK-016: module-scope memo for the token provider, ONLY consulted when a
+// caller passes NO `dependencies` (production callers -- every real entry
+// point, `worker/scheduled-refresh.ts`'s two crons,
+// `app/sharesight-price-gate-service.ts`'s per-page gate, and
+// `app/sharesight-sync-service.ts`'s three actions -- calls
+// `createSharesightIntegrationConfig(env)` with a single argument). Tests
+// inject `dependencies` (a fake `fetcher`/`now`) and must always get a fresh
+// provider, since sharing one across fixtures would leak state between
+// cases -- see the `dependencies` branch below, which never reads or writes
+// this slot.
+//
+// Holds AT MOST ONE provider, matched by strict-equality comparison against
+// the (clientId, clientSecret) pair that built it -- never a hash/digest of
+// either secret (nothing derived from them is ever computed, logged, or
+// otherwise observable), and this slot itself is never exported. A changed
+// pair simply replaces the slot with a fresh provider built for the new
+// credentials; there is no eviction policy beyond "one slot, LRU-of-one."
+//
+// The actual access token lives ONLY inside the provider's own in-closure
+// cache (`domain/sharesight/token.ts`) -- this slot's entire job is keeping
+// the SAME provider instance (and therefore that cache) alive across
+// repeated `createSharesightIntegrationConfig(env)` calls within one
+// Worker isolate, so a cron tick / page load / sync that reuses an
+// already-warm isolate skips the OAuth exchange entirely. A Cloudflare
+// Workers isolate can be evicted (and this slot along with it) at any time
+// for reasons outside this module's control -- that is harmless by design:
+// the next call in a fresh isolate simply finds an empty slot, builds a new
+// provider, and re-exchanges for a token on first use. The token is never
+// written to D1, never logged, and never persists beyond isolate memory.
+let cachedTokenProviderSlot: {
+  clientId: string;
+  clientSecret: string;
+  provider: SharesightTokenProvider;
+} | null = null;
+
+function memoizedTokenProvider(
+  clientId: string,
+  clientSecret: string,
+): SharesightTokenProvider {
+  if (
+    cachedTokenProviderSlot &&
+    cachedTokenProviderSlot.clientId === clientId &&
+    cachedTokenProviderSlot.clientSecret === clientSecret
+  ) {
+    return cachedTokenProviderSlot.provider;
+  }
+  const provider = createSharesightTokenProvider({
+    clientId,
+    clientSecret,
+    grantType: "client_credentials",
+  });
+  cachedTokenProviderSlot = { clientId, clientSecret, provider };
+  return provider;
+}
+
+/**
+ * BRK-016 test-only seam: clears the module-scope memo so test cases don't
+ * leak a cached provider (and therefore its cached access token) into one
+ * another. Never called from production code -- there is no production
+ * reason to evict the slot early, since a stale/failed token is instead
+ * handled by `invalidate()` (see `domain/sharesight/client.ts`'s 401
+ * mapping) and isolate eviction handles the rest.
+ */
+export function __resetSharesightIntegrationCacheForTests(): void {
+  cachedTokenProviderSlot = null;
+}
+
 /**
  * Builds the sealed Sharesight client + `client_credentials` token provider
  * from Worker env, or returns a typed disabled state. Never throws for
@@ -69,6 +151,14 @@ function normalizeSecret(value: unknown): string | null {
  * its own shape validation), which would be a genuine programming error, not
  * a runtime configuration state this factory is responsible for handling
  * gracefully.
+ *
+ * BRK-016: when `dependencies` is omitted (every real production call site),
+ * the token provider is reused across calls within the same isolate via
+ * `memoizedTokenProvider` above -- a fresh client is still built every call
+ * (cheap: it holds no state of its own beyond the shared provider
+ * reference), but it wraps the SAME provider, so its access-token cache
+ * survives. Passing `dependencies` (every test) always builds a brand-new,
+ * unmemoized provider, exactly as before this change.
  */
 export function createSharesightIntegrationConfig(
   env: SharesightConfigEnvInput,
@@ -84,13 +174,20 @@ export function createSharesightIntegrationConfig(
     return { enabled: false, reason: "incomplete_configuration" };
   }
 
-  const tokenProvider = createSharesightTokenProvider({
-    clientId,
-    clientSecret,
-    grantType: "client_credentials",
-    fetcher: dependencies?.fetcher,
-    now: dependencies?.now,
-  });
+  // BRK-016: memoize ONLY the real production path (no injected
+  // `dependencies`) -- see `memoizedTokenProvider`'s doc comment. A caller
+  // that injects `dependencies` (every test) always gets a brand-new
+  // provider built with its own fetcher/clock, exactly as before this
+  // change, so fixtures never share state through this module-scope slot.
+  const tokenProvider = dependencies
+    ? createSharesightTokenProvider({
+        clientId,
+        clientSecret,
+        grantType: "client_credentials",
+        fetcher: dependencies.fetcher,
+        now: dependencies.now,
+      })
+    : memoizedTokenProvider(clientId, clientSecret);
 
   const client = createSharesightClient({
     tokenProvider,

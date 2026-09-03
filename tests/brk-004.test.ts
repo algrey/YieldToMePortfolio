@@ -27,7 +27,10 @@ import {
   createSharesightSyncStateRepository,
   createSqliteSqlClient,
 } from "../db/repositories/index.ts";
-import { createSharesightIntegrationConfig } from "../worker/sharesight-config.ts";
+import {
+  __resetSharesightIntegrationCacheForTests,
+  createSharesightIntegrationConfig,
+} from "../worker/sharesight-config.ts";
 import { completedExport, finishPurge, fixture } from "./fixtures/ops-003.ts";
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -104,6 +107,161 @@ test("BRK-004 config factory: present client id/secret build an enabled client p
   assert.ok(calls[0].body?.includes("client_id=cid"));
   assert.ok(calls[0].body?.includes("client_secret=csecret"));
   assert.equal(calls[1].url, "https://api.sharesight.com/api/v3/portfolios");
+});
+
+// ---------------------------------------------------------------------------
+// BRK-016: module-scope token-provider memoization (real production path
+// only -- every case that injects `dependencies` must stay unmemoized).
+// ---------------------------------------------------------------------------
+
+test("BRK-016: two consecutive createSharesightIntegrationConfig(env) calls with the same credential pair share one token provider, so two data calls across them cost exactly ONE token exchange", async () => {
+  __resetSharesightIntegrationCacheForTests();
+  const originalFetch = globalThis.fetch;
+  let tokenCalls = 0;
+  let dataCalls = 0;
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    const href = String(url);
+    if (href.includes("/oauth2/token")) {
+      tokenCalls += 1;
+      return jsonResponse(200, {
+        access_token: `brk-016-token-${tokenCalls}`,
+        token_type: "Bearer",
+        expires_in: 1800,
+      });
+    }
+    dataCalls += 1;
+    return jsonResponse(200, { portfolios: [] });
+  }) as typeof fetch;
+  try {
+    // No `dependencies` argument on either call -- this is the real
+    // production shape (every entry point calls it this way); that is
+    // exactly what makes the memo eligible.
+    const first = createSharesightIntegrationConfig({
+      SHARESIGHT_CLIENT_ID: "brk-016-cid",
+      SHARESIGHT_CLIENT_SECRET: "brk-016-secret",
+    });
+    const second = createSharesightIntegrationConfig({
+      SHARESIGHT_CLIENT_ID: "brk-016-cid",
+      SHARESIGHT_CLIENT_SECRET: "brk-016-secret",
+    });
+    assert.equal(first.enabled, true);
+    assert.equal(second.enabled, true);
+    if (!first.enabled || !second.enabled) return;
+
+    const resultA = await first.client.listPortfolios();
+    const resultB = await second.client.listPortfolios();
+    assert.equal(resultA.ok, true);
+    assert.equal(resultB.ok, true);
+    assert.equal(dataCalls, 2, "expected both data calls to actually go out");
+    assert.equal(
+      tokenCalls,
+      1,
+      "expected the second config's client to reuse the first's provider (and its cached access token), not re-exchange",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    __resetSharesightIntegrationCacheForTests();
+  }
+});
+
+test("BRK-016: a different credential pair builds a brand-new, unshared provider", async () => {
+  __resetSharesightIntegrationCacheForTests();
+  const originalFetch = globalThis.fetch;
+  let tokenCalls = 0;
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    const href = String(url);
+    if (href.includes("/oauth2/token")) {
+      tokenCalls += 1;
+      return jsonResponse(200, {
+        access_token: `brk-016-diff-token-${tokenCalls}`,
+        token_type: "Bearer",
+        expires_in: 1800,
+      });
+    }
+    return jsonResponse(200, { portfolios: [] });
+  }) as typeof fetch;
+  try {
+    const first = createSharesightIntegrationConfig({
+      SHARESIGHT_CLIENT_ID: "brk-016-cid-a",
+      SHARESIGHT_CLIENT_SECRET: "brk-016-secret-a",
+    });
+    const second = createSharesightIntegrationConfig({
+      SHARESIGHT_CLIENT_ID: "brk-016-cid-b",
+      SHARESIGHT_CLIENT_SECRET: "brk-016-secret-b",
+    });
+    assert.equal(first.enabled, true);
+    assert.equal(second.enabled, true);
+    if (!first.enabled || !second.enabled) return;
+
+    await first.client.listPortfolios();
+    await second.client.listPortfolios();
+    assert.equal(
+      tokenCalls,
+      2,
+      "a changed credential pair must never reuse the prior pair's provider/token",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    __resetSharesightIntegrationCacheForTests();
+  }
+});
+
+test("BRK-016: an injected `dependencies` argument always bypasses the memo, even across two configs built with the identical credential pair", async () => {
+  __resetSharesightIntegrationCacheForTests();
+  let firstExchanges = 0;
+  const firstFetcher: SharesightFetcher = async (url) => {
+    if (String(url).includes("/oauth2/token")) firstExchanges += 1;
+    return jsonResponse(200, {
+      access_token: "brk-016-dep-token-1",
+      token_type: "Bearer",
+      expires_in: 1800,
+    });
+  };
+  let secondExchanges = 0;
+  const secondFetcher: SharesightFetcher = async (url) => {
+    if (String(url).includes("/oauth2/token")) secondExchanges += 1;
+    return jsonResponse(200, {
+      access_token: "brk-016-dep-token-2",
+      token_type: "Bearer",
+      expires_in: 1800,
+    });
+  };
+  const first = createSharesightIntegrationConfig(
+    {
+      SHARESIGHT_CLIENT_ID: "brk-016-dep-cid",
+      SHARESIGHT_CLIENT_SECRET: "brk-016-dep-secret",
+    },
+    { fetcher: firstFetcher },
+  );
+  const second = createSharesightIntegrationConfig(
+    {
+      SHARESIGHT_CLIENT_ID: "brk-016-dep-cid",
+      SHARESIGHT_CLIENT_SECRET: "brk-016-dep-secret",
+    },
+    { fetcher: secondFetcher },
+  );
+  assert.equal(first.enabled, true);
+  assert.equal(second.enabled, true);
+  if (!first.enabled || !second.enabled) return;
+  await first.client.listPortfolios();
+  await second.client.listPortfolios();
+  assert.equal(firstExchanges, 1);
+  assert.equal(
+    secondExchanges,
+    1,
+    "each dependencies-injected config must build and use its own unmemoized provider, never share the other's",
+  );
+});
+
+test("BRK-016 source pin: createSharesightIntegrationConfig only takes the memoized provider path when no dependencies were supplied", async () => {
+  const source = await readFile(
+    new URL("../worker/sharesight-config.ts", import.meta.url),
+    "utf-8",
+  );
+  assert.match(
+    source,
+    /dependencies\s*\?\s*createSharesightTokenProvider\(\{[\s\S]{0,300}?\}\)\s*:\s*memoizedTokenProvider\(clientId,\s*clientSecret\)/,
+  );
 });
 
 test("BRK-004 binding guard: worker/sharesight-config.ts's source never references the host-pinning override flag or a custom token/base URL option", async () => {
