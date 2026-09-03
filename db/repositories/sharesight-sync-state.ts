@@ -541,9 +541,22 @@ export async function loadCommittedSharesightWatermarks(
 export type SharesightCommittedRowValues = Readonly<{
   trades: ReadonlyMap<
     string,
-    { quantityDecimal: string | null; priceDecimal: string | null }
+    {
+      quantityDecimal: string | null;
+      priceDecimal: string | null;
+      feeAmountDecimal: string | null;
+      localTradeDate: string | null;
+      type: string | null;
+    }
   >;
-  payouts: ReadonlyMap<string, { cashTotalDecimal: string | null }>;
+  payouts: ReadonlyMap<
+    string,
+    {
+      cashTotalDecimal: string | null;
+      totalFrankingDecimal: string | null;
+      paymentDate: string | null;
+    }
+  >;
 }>;
 
 /**
@@ -552,13 +565,31 @@ export type SharesightCommittedRowValues = Readonly<{
  * genuinely new versus already imported). The VALUE-BEARING counterpart to
  * `loadCommittedSharesightWatermarks` above: returns, keyed by each row's
  * own `source_reference`, the economic fields a Sharesight-side CORRECTION
- * would change (trade quantity/price; payout cash total). This is what lets
- * the caller tell a genuinely unchanged re-fetched row (same identity, same
- * value -- truly "already imported") apart from a Sharesight-side value
- * correction to the SAME identity (same `source_reference`, changed value
- * -- must never read as "already imported"; see
- * `app/sharesight-sync-service.ts`'s `canonicalRowDigestFields` doc comment
- * for the BRK-005 finding-B1 incident this distinction guards against).
+ * would change. This is what lets the caller tell a genuinely unchanged
+ * re-fetched row (same identity, same value -- truly "already imported")
+ * apart from a Sharesight-side value correction to the SAME identity (same
+ * `source_reference`, changed value -- must never read as "already
+ * imported"; see `app/sharesight-sync-service.ts`'s
+ * `canonicalRowDigestFields` doc comment for the BRK-005 finding-B1 incident
+ * this distinction guards against).
+ *
+ * Review round B1 (BLOCKING, correction to the original version of this
+ * function): the original comparison covered only trade quantity/price and
+ * payout cash-total -- three of the thirteen value-bearing fields
+ * `canonicalRowDigestFields` hashes to decide whether a re-fetch is a new
+ * batch at all. A franking-only or trade-date-only Sharesight correction
+ * therefore staged as a genuinely new batch (digest differed) while this
+ * function reported it as "already imported" (its three narrow fields
+ * happened to match) -- a directly self-contradictory sync result. Fixed by
+ * widening this function to also carry `total_franking_decimal`/
+ * `payment_date` for payouts and `fee_amount_decimal`/`local_trade_date`/
+ * `type` for trades, so `isRowAlreadyImported` in the service module can
+ * compare the SAME set of value-bearing fields the digest does (every
+ * digest field except the identity-only `fingerprint`, `symbol`,
+ * `exchange`, `currency`, and the FX-only `exchangeRateDecimal`, which a
+ * Sharesight trade/payout row never carries independently of price/cash
+ * fields already compared here). See `isRowAlreadyImported`'s doc comment
+ * for the exact field-by-field list this now supports.
  *
  * Deliberately mirrors `db/repositories/import-commit.ts`'s own exact-match
  * commit-time identity predicates (no `status`/`superseded_by_record_id`
@@ -577,8 +608,12 @@ export async function loadCommittedSharesightRowValues(
     source_reference: string;
     quantity_decimal: string | null;
     unit_price_decimal: string | null;
+    fee_amount_decimal: string | null;
+    local_trade_date: string | null;
+    type: string | null;
   }>(
-    `SELECT source_reference, quantity_decimal, unit_price_decimal
+    `SELECT source_reference, quantity_decimal, unit_price_decimal,
+            fee_amount_decimal, local_trade_date, type
        FROM transactions
       WHERE user_id = ? AND portfolio_id = ? AND source_type = 'csv_import'
         AND source_reference LIKE 'import-fingerprint:sharesight-trade:%'`,
@@ -587,8 +622,11 @@ export async function loadCommittedSharesightRowValues(
   const payoutRows = await client.all<{
     source_reference: string;
     total_cash_decimal: string | null;
+    total_franking_decimal: string | null;
+    payment_date: string | null;
   }>(
-    `SELECT source_reference, total_cash_decimal
+    `SELECT source_reference, total_cash_decimal, total_franking_decimal,
+            payment_date
        FROM dividend_manual_records
       WHERE user_id = ? AND portfolio_id = ?
         AND source_reference LIKE 'import-fingerprint:sharesight-payout:%'`,
@@ -601,13 +639,20 @@ export async function loadCommittedSharesightRowValues(
         {
           quantityDecimal: row.quantity_decimal,
           priceDecimal: row.unit_price_decimal,
+          feeAmountDecimal: row.fee_amount_decimal,
+          localTradeDate: row.local_trade_date,
+          type: row.type,
         },
       ]),
     ),
     payouts: new Map(
       payoutRows.map((row) => [
         row.source_reference,
-        { cashTotalDecimal: row.total_cash_decimal },
+        {
+          cashTotalDecimal: row.total_cash_decimal,
+          totalFrankingDecimal: row.total_franking_decimal,
+          paymentDate: row.payment_date,
+        },
       ]),
     ),
   };

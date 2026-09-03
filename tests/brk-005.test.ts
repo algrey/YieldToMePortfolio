@@ -1823,6 +1823,168 @@ test("BRK-014: a Full resync combining rows already committed via separate earli
   );
 });
 
+// ---------------------------------------------------------------------------
+// BRK-014 review round B1 (BLOCKING): `isRowAlreadyImported` originally
+// compared only trade quantity/price and payout cash-total -- three of the
+// thirteen value-bearing fields `canonicalRowDigestFields` hashes to decide
+// whether a re-fetch is even a new batch. A franking-only or trade-date-only
+// Sharesight correction stages as a genuinely NEW batch (digest differs) but
+// was reported as `alreadyImportedRows` (its narrow three fields still
+// matched) -- a directly self-contradictory sync result. Both regression
+// tests below FAIL against the pre-fix code (verified by temporarily
+// reverting `isRowAlreadyImported`/`loadCommittedSharesightRowValues` to the
+// three-field comparison): each reported `newRows: 0, alreadyImportedRows: 1`
+// instead of the `newRows: 1, alreadyImportedRows: 0` asserted here.
+// ---------------------------------------------------------------------------
+
+test("BRK-014 review B1: a franking-only correction to a committed payout re-syncs as newRows -- not alreadyImportedRows", async () => {
+  const database = await migratedDatabase();
+  const { client, sharesightClient: firstClient } = await linkedFixture(
+    database,
+    {
+      portfolios: [fakePortfolio()],
+      trades: [],
+      payouts: [
+        fakePayout({
+          id: "payout-franking-corrected",
+          paidOnDate: "2026-08-05",
+          amountDecimal: "2.50",
+          frankingCreditsDecimal: "1.07",
+        }),
+      ],
+    },
+  );
+
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: { enabled: true, client: firstClient } },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  const firstBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    first.batchId,
+  );
+  assert.ok(firstBatch);
+  await commitBatch(
+    client,
+    first.batchId,
+    "brk-014-b1-franking-commit",
+    firstBatch!.version,
+  );
+
+  // Sharesight reports the SAME payout (same id, holding, paid-on-date, and
+  // cash amount) with CORRECTED franking credits -- the identity key
+  // (`payoutIdentityKey`) is unchanged, so this must be recognised as a
+  // correction to the same row, not a different payout.
+  const correctedClient = fakeSharesightClient({
+    trades: [],
+    payouts: [
+      fakePayout({
+        id: "payout-franking-corrected",
+        paidOnDate: "2026-08-05",
+        amountDecimal: "2.50",
+        frankingCreditsDecimal: "2.50",
+      }),
+    ],
+  });
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    { integration: { enabled: true, client: correctedClient } },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  assert.notEqual(
+    second.batchId,
+    first.batchId,
+    "a franking correction must produce a NEW batch, never silently reuse the prior one",
+  );
+  assert.equal(second.reused, false);
+  assert.equal(
+    second.newRows,
+    1,
+    "a franking-only correction must count as new, never already imported",
+  );
+  assert.equal(second.alreadyImportedRows, 0);
+});
+
+test("BRK-014 review B1: a trade-date-only correction to a committed trade re-syncs as newRows -- not alreadyImportedRows", async () => {
+  const database = await migratedDatabase();
+  const { client, sharesightClient: firstClient } = await linkedFixture(
+    database,
+    {
+      portfolios: [fakePortfolio()],
+      trades: [
+        fakeTrade({
+          id: "trade-date-corrected",
+          transactionDate: "2026-08-01",
+          quantityDecimal: "5",
+          priceDecimal: "10",
+          valueDecimal: "50",
+        }),
+      ],
+      payouts: [],
+    },
+  );
+
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: { enabled: true, client: firstClient } },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  const firstBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    first.batchId,
+  );
+  assert.ok(firstBatch);
+  await commitBatch(
+    client,
+    first.batchId,
+    "brk-014-b1-trade-date-commit",
+    firstBatch!.version,
+  );
+
+  // Sharesight reports the SAME trade id (same quantity/price/commission)
+  // with a CORRECTED transaction date -- `fingerprint`/`source_reference`
+  // stay keyed on the trade id alone, so this must be recognised as a
+  // correction to the same row, not a different trade.
+  const correctedClient = fakeSharesightClient({
+    trades: [
+      fakeTrade({
+        id: "trade-date-corrected",
+        transactionDate: "2026-08-15",
+        quantityDecimal: "5",
+        priceDecimal: "10",
+        valueDecimal: "50",
+      }),
+    ],
+    payouts: [],
+  });
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    { integration: { enabled: true, client: correctedClient } },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  assert.notEqual(
+    second.batchId,
+    first.batchId,
+    "a trade-date correction must produce a NEW batch, never silently reuse the prior one",
+  );
+  assert.equal(second.reused, false);
+  assert.equal(
+    second.newRows,
+    1,
+    "a trade-date-only correction must count as new, never already imported",
+  );
+  assert.equal(second.alreadyImportedRows, 0);
+});
+
 test("BRK-005: reviewer PROBE 3 -- the reused-batch path reports the STORED rowsStaged/skippedPayouts against a KNOWN-correct absolute count (1 skipped payout), not merely self-consistent with a possibly-buggy DB read, and the omission's detail (symbol/paid_on) is visible in the stored issue", async () => {
   const database = await migratedDatabase();
   // BRK-005C: must stay FUTURE-dated relative to the injected `now` below --

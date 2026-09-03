@@ -371,6 +371,45 @@ function decimalValuesMatch(
  * (a corrected trade silently resolving to the OLD batch with no visible
  * signal at all).
  *
+ * Review round B1 (BLOCKING, correction to the original version of this
+ * function): comparing only trade quantity/price and payout cash-total (a
+ * strict subset of `canonicalRowDigestFields`'s thirteen value-bearing
+ * fields) meant a franking-only or trade-date-only Sharesight correction
+ * staged as a genuinely NEW batch (the digest differed) while this function
+ * still reported it as `alreadyImportedRows` (its narrower three fields
+ * happened to match) -- a directly self-contradictory sync result ("no new
+ * rows" printed for a batch that exists only because something changed).
+ * Fixed by comparing every digest field a payout/trade row can independently
+ * vary on:
+ *
+ * - payout: `totalCashDecimal` vs `cash_total_decimal`, `totalFrankingDecimal`
+ *   vs `total_franking_decimal` (both `decimalValuesMatch`), and
+ *   `localTradeDate` (holds the payment date for a dividend-class row --
+ *   see `strict-versioned-parser.ts`/`reconciliation.ts`'s `paymentDate:
+ *   row.normalized.localTradeDate` precedent) vs `payment_date` (exact
+ *   string equality -- a business date, not a decimal).
+ * - trade: `sharesOwned`/`costPerShare` vs `quantity_decimal`/
+ *   `unit_price_decimal` (`decimalValuesMatch`, as before); `commission ??
+ *   "0"` vs `fee_amount_decimal` (`decimalValuesMatch`, mirroring
+ *   `import-commit.ts`'s own `feeAmountDecimal: normalized.commission ??
+ *   "0"` mapping exactly -- commission is not asserted non-null upstream,
+ *   so comparing the raw field against a NOT-NULL-default column would
+ *   spuriously mismatch); `localTradeDate` vs `local_trade_date` (exact
+ *   string); `type` vs `type` (exact string -- the Sharesight transform
+ *   never sets `cashEvent`, so `normalized.type` alone, "buy"/"sell",
+ *   already matches the vocabulary `transactions.type` stores; no
+ *   `cashEvent ?? type` remapping is needed here the way `import-commit.ts`
+ *   does for the general CSV path).
+ *
+ * `symbol`/`exchange`/`currency`/`fingerprint` are identity fields already
+ * folded into `sourceReference`/security resolution, not independent value
+ * facts to re-check; `exchangeRateDecimal` has no committed counterpart on
+ * either table (FX is resolved and stored on the transaction as
+ * `fx_rate_to_base_decimal`, a commit-time DERIVED value, not a normalized
+ * input field this function can compare against). Every comparison stays
+ * conservative: an unrecognised/malformed value or a missing committed row
+ * returns `false` ("new"), never a false "already imported".
+ *
  * Note: this is honest about what the SYNC RESULT reports, not a claim
  * about commit behaviour -- `db/repositories/import-commit.ts`'s own
  * exact-`source_reference` skip check is identity-only and will, today,
@@ -385,7 +424,13 @@ function isRowAlreadyImported(
     fingerprint: string;
     normalized: Pick<
       NormalizedImportRow,
-      "type" | "sharesOwned" | "costPerShare" | "totalCashDecimal"
+      | "type"
+      | "sharesOwned"
+      | "costPerShare"
+      | "totalCashDecimal"
+      | "totalFrankingDecimal"
+      | "localTradeDate"
+      | "commission"
     >;
   },
   existing: SharesightCommittedRowValues,
@@ -394,9 +439,16 @@ function isRowAlreadyImported(
   if (row.normalized.type === "dividend") {
     const existingPayout = existing.payouts.get(sourceReference);
     if (!existingPayout) return false;
-    return decimalValuesMatch(
-      row.normalized.totalCashDecimal ?? null,
-      existingPayout.cashTotalDecimal,
+    return (
+      decimalValuesMatch(
+        row.normalized.totalCashDecimal ?? null,
+        existingPayout.cashTotalDecimal,
+      ) &&
+      decimalValuesMatch(
+        row.normalized.totalFrankingDecimal ?? null,
+        existingPayout.totalFrankingDecimal,
+      ) &&
+      row.normalized.localTradeDate === existingPayout.paymentDate
     );
   }
   const existingTrade = existing.trades.get(sourceReference);
@@ -406,7 +458,16 @@ function isRowAlreadyImported(
       row.normalized.sharesOwned,
       existingTrade.quantityDecimal,
     ) &&
-    decimalValuesMatch(row.normalized.costPerShare, existingTrade.priceDecimal)
+    decimalValuesMatch(
+      row.normalized.costPerShare,
+      existingTrade.priceDecimal,
+    ) &&
+    decimalValuesMatch(
+      row.normalized.commission ?? "0",
+      existingTrade.feeAmountDecimal,
+    ) &&
+    row.normalized.localTradeDate === existingTrade.localTradeDate &&
+    row.normalized.type === existingTrade.type
   );
 }
 
@@ -415,7 +476,13 @@ function countAlreadyImported(
     fingerprint: string;
     normalized: Pick<
       NormalizedImportRow,
-      "type" | "sharesOwned" | "costPerShare" | "totalCashDecimal"
+      | "type"
+      | "sharesOwned"
+      | "costPerShare"
+      | "totalCashDecimal"
+      | "totalFrankingDecimal"
+      | "localTradeDate"
+      | "commission"
     >;
   }[],
   existing: SharesightCommittedRowValues,
