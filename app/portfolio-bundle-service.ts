@@ -1173,6 +1173,17 @@ export type BundleScaffoldResult = {
    * see `docs/BACKUP_FORMAT.md`'s "Resume evidence" section.
    */
   missingTransactionRefs: readonly string[];
+  /**
+   * OPS-005 round 2: the SAME mechanism as `missingTransactionRefs`, applied
+   * to the dividend phase (`dividend_manual_records`'s own bundle
+   * idempotency keys). Round 1 fixed only the transactions phase, leaving
+   * the dividend phase resuming by `chainOrder(...).slice(committedDividendCount)`
+   * -- a stale count sliced against whichever chain order the CURRENT
+   * request happens to recompute, exactly the hazard round 1 closed for
+   * transactions. `system-backup-panel.tsx` sends exactly this list, in this
+   * order, to the dividend part(s).
+   */
+  missingDividendRefs: readonly string[];
 };
 
 /**
@@ -1217,27 +1228,10 @@ export function bundleKeyPrefixRange(fingerprint: string): {
   };
 }
 
-async function countByIdempotencyPrefix(
-  client: SqlClient,
-  table: "transactions" | "dividend_manual_records",
-  userId: string,
-  portfolioId: string,
-  fingerprint: string,
-): Promise<number> {
-  const range = bundleKeyPrefixRange(fingerprint);
-  const row = await client.get<{ count: number }>(
-    `SELECT COUNT(*) AS count FROM ${table}
-     WHERE user_id = ? AND portfolio_id = ?
-       AND idempotency_key >= ? AND idempotency_key < ?`,
-    [userId, portfolioId, range.start, range.endExclusive],
-  );
-  return Number(row?.count ?? 0);
-}
-
 /**
  * OPS-005: the resume mechanism's core primitive -- a bounded, chunked,
- * owner-scoped existence probe over a bundle's own transaction refs.
- * Replaces the old "slice the chain-ordered array at a server-reported
+ * owner-scoped existence probe over a bundle's own transaction/dividend
+ * refs. Replaces the old "slice the chain-ordered array at a server-reported
  * COUNT" resume strategy, which silently dropped rows whenever the chain
  * order used to WRITE part 1 differed from the chain order used to compute
  * the resume slice (an ordering change straddling a deploy -- exactly what
@@ -1253,9 +1247,18 @@ async function countByIdempotencyPrefix(
  * plus the two scoping params is comfortably under SQLite/D1's default
  * bound-variable ceiling, and mirrors the 50-row dividend part size already
  * used elsewhere in this module.
+ *
+ * Generic apart from `table`: `dividend_manual_records`' unique index is
+ * additionally scoped by `portfolio_security_id`
+ * (`dividend_manual_records_security_idempotency_unique`), but a bundle's
+ * refs are unique within the whole portfolio regardless of security, so a
+ * plain `(user_id, portfolio_id, idempotency_key)` lookup -- identical in
+ * shape to the transactions probe -- is exact here too; no per-security
+ * scoping is needed for existence.
  */
-async function listMissingTransactionRefs(
+async function listMissingRefsByIdempotencyKey(
   client: SqlClient,
+  table: "transactions" | "dividend_manual_records",
   userId: string,
   portfolioId: string,
   fingerprint: string,
@@ -1268,7 +1271,7 @@ async function listMissingTransactionRefs(
     const keys = chunk.map((ref) => `${prefix}${ref}`);
     const placeholders = keys.map(() => "?").join(", ");
     const rows = await client.all<{ idempotency_key: string }>(
-      `SELECT idempotency_key FROM transactions
+      `SELECT idempotency_key FROM ${table}
        WHERE user_id = ? AND portfolio_id = ? AND idempotency_key IN (${placeholders})`,
       [userId, portfolioId, ...keys],
     );
@@ -1277,6 +1280,40 @@ async function listMissingTransactionRefs(
     }
   }
   return missing;
+}
+
+function listMissingTransactionRefs(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  fingerprint: string,
+  refs: readonly string[],
+): Promise<Set<string>> {
+  return listMissingRefsByIdempotencyKey(
+    client,
+    "transactions",
+    userId,
+    portfolioId,
+    fingerprint,
+    refs,
+  );
+}
+
+function listMissingDividendRefs(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  fingerprint: string,
+  refs: readonly string[],
+): Promise<Set<string>> {
+  return listMissingRefsByIdempotencyKey(
+    client,
+    "dividend_manual_records",
+    userId,
+    portfolioId,
+    fingerprint,
+    refs,
+  );
 }
 
 async function findTransactionIdByRef(
@@ -1468,6 +1505,7 @@ export async function commitValidatedPortfolioBundleScaffold(
         committedTransactionCount: bundle.transactions.length,
         committedDividendCount: bundle.dividendManualRecords.length,
         missingTransactionRefs: [],
+        missingDividendRefs: [],
       },
     };
   }
@@ -1702,12 +1740,63 @@ export async function commitValidatedPortfolioBundleScaffold(
   // it can never disagree with `missingTransactionRefs`.
   const committedTransactionCount =
     orderedTransactionRefs.length - missingTransactionRefs.length;
-  const committedDividendCount = await countByIdempotencyPrefix(
+
+  // OPS-005 round 2: the same probe, applied to the dividend phase.
+  // `chainOrder`'s ordering matters for the dividend phase for the identical
+  // reason it matters for transactions -- a supersession record must never
+  // be sent before the record it supersedes -- so it is recomputed fresh
+  // here too, never carried over from a prior request.
+  const orderedDividendRefs = chainOrder(
+    bundle.dividendManualRecords,
+    (record) => record.supersedesRef,
+  ).map((record) => record.ref);
+  const missingDividendRefsSet = await listMissingDividendRefs(
     ctx.client,
-    "dividend_manual_records",
     ctx.userId,
     portfolioId,
     fingerprint,
+    orderedDividendRefs,
+  );
+  const missingDividendRefs = orderedDividendRefs.filter((ref) =>
+    missingDividendRefsSet.has(ref),
+  );
+  // `committedDividendCount` is now purely informational/diagnostic, derived
+  // from the SAME probe as `missingDividendRefs`, mirroring
+  // `committedTransactionCount` above -- it can never disagree with
+  // `missingDividendRefs`.
+  const committedDividendCount =
+    orderedDividendRefs.length - missingDividendRefs.length;
+
+  // OPS-005 round 2 (F1): persist the bundle's OWN expected ref set -- a
+  // sha256 digest and count over every transaction/dividend ref, sorted so
+  // the digest is order-independent -- so finalize can compare the client's
+  // supplied lists against something the SERVER derived, not merely
+  // re-verify existence of whatever list the client happens to send (a
+  // client sending a SHORTER list previously passed finalize's existence
+  // probe trivially -- see `docs/BACKUP_FORMAT.md`'s "Resume evidence"
+  // section). Recomputed and rewritten on EVERY scaffold call, fresh from
+  // this same fingerprinted bundle -- deterministic and idempotent, exactly
+  // like the security-resolution loop above, so a resume can never disagree
+  // with an earlier scaffold's own write.
+  const transactionRefsDigest = await sha256Hex(
+    [...orderedTransactionRefs].sort().join("\n"),
+  );
+  const dividendRefsDigest = await sha256Hex(
+    [...orderedDividendRefs].sort().join("\n"),
+  );
+  await ctx.client.run(
+    `UPDATE import_batches SET
+       bundle_transaction_refs_digest = ?, bundle_transaction_refs_count = ?,
+       bundle_dividend_refs_digest = ?, bundle_dividend_refs_count = ?
+     WHERE id = ? AND user_id = ?`,
+    [
+      transactionRefsDigest,
+      orderedTransactionRefs.length,
+      dividendRefsDigest,
+      orderedDividendRefs.length,
+      batchId,
+      ctx.userId,
+    ],
   );
 
   return {
@@ -1725,6 +1814,7 @@ export async function commitValidatedPortfolioBundleScaffold(
       committedTransactionCount,
       committedDividendCount,
       missingTransactionRefs,
+      missingDividendRefs,
     },
   };
 }
@@ -2381,6 +2471,66 @@ export async function commitPortfolioBundleFinalize(
   const securityRefToId = new Map(
     input.securities.map((s) => [s.ref, s.portfolioSecurityId]),
   );
+
+  // OPS-005 round 2 (F1): compare the client-supplied ref lists against the
+  // SERVER's own persisted record of what this bundle was scaffolded with
+  // (written by `commitPortfolioBundleScaffold`, never client-supplied).
+  // The existence probe just below this only proves that every ref the
+  // client CLAIMS it sent was actually written -- a client sending a
+  // SHORTER list than the bundle actually contains passes that probe
+  // trivially, since the omitted rows are simply never checked. Comparing
+  // against a persisted, independently-derived digest+count closes that
+  // gap. NULL on a legacy batch scaffolded before this column existed --
+  // skipped rather than failing closed on a batch this code cannot verify
+  // (see the migration's own comment, `drizzle/0061_*.sql`).
+  const persistedRefSet = await ctx.client.get<{
+    bundle_transaction_refs_digest: string | null;
+    bundle_transaction_refs_count: number | null;
+    bundle_dividend_refs_digest: string | null;
+    bundle_dividend_refs_count: number | null;
+  }>(
+    `SELECT bundle_transaction_refs_digest, bundle_transaction_refs_count,
+            bundle_dividend_refs_digest, bundle_dividend_refs_count
+     FROM import_batches WHERE id = ? AND user_id = ? LIMIT 1`,
+    [input.batchId, ctx.userId],
+  );
+  if (persistedRefSet?.bundle_transaction_refs_digest != null) {
+    const sortedTransactionRefs = [...input.transactionRefs].sort();
+    const clientTransactionRefsDigest = await sha256Hex(
+      sortedTransactionRefs.join("\n"),
+    );
+    if (
+      clientTransactionRefsDigest !==
+        persistedRefSet.bundle_transaction_refs_digest ||
+      sortedTransactionRefs.length !==
+        persistedRefSet.bundle_transaction_refs_count
+    ) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        `This restore expected ${persistedRefSet.bundle_transaction_refs_count} transaction ref(s) but finalize received ${sortedTransactionRefs.length} -- restore every transactions part before finalizing.`,
+      );
+    }
+  }
+  if (persistedRefSet?.bundle_dividend_refs_digest != null) {
+    const sortedDividendRefs = input.dividendLinkage
+      .map((item) => item.ref)
+      .sort();
+    const clientDividendRefsDigest = await sha256Hex(
+      sortedDividendRefs.join("\n"),
+    );
+    if (
+      clientDividendRefsDigest !==
+        persistedRefSet.bundle_dividend_refs_digest ||
+      sortedDividendRefs.length !== persistedRefSet.bundle_dividend_refs_count
+    ) {
+      return commitFailure(
+        ctx,
+        input.batchId,
+        `This restore expected ${persistedRefSet.bundle_dividend_refs_count} dividend record ref(s) but finalize received ${sortedDividendRefs.length} -- restore every dividends part before finalizing.`,
+      );
+    }
+  }
 
   // OPS-005 (defence in depth): re-verify every transaction ref was
   // actually written before doing anything else, mirroring the dividend-

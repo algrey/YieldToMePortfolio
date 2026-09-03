@@ -722,22 +722,29 @@ restore interrupted before this task's round-2 depth-first `chainOrder` fix
 is deployed must be started over from scratch, not resumed, once the new
 build is live.
 
-**Superseding correction (2026-09-04, OPS-005):** the same-build condition
-above is now REMOVED, not merely documented as a hazard -- resume no longer
-depends on any chain order agreeing across two requests at all.
+**Superseding correction (2026-09-04, OPS-005, extended round 2 the same
+day):** the same-build condition above is now REMOVED, not merely documented
+as a hazard -- resume no longer depends on any chain order agreeing across
+two requests at all, for EITHER the transactions or the dividends phase.
 `commitPortfolioBundleScaffold` recomputes the bundle's chain order fresh on
 every call (never carried over from an earlier request) and, for each ref in
-that order, runs a bounded, chunked, owner-scoped existence probe against
-`transactions.idempotency_key` (`bundle:<fingerprint>:<ref>`, chunked at <=50
-refs per `IN (...)` lookup -- e.g. a 200-transaction portfolio costs 4 SELECT
-statements). The scaffold response's new `missingTransactionRefs` field is
-the actual resume mechanism: every ref not yet written, already in the
-server's own current chain order. `system-backup-panel.tsx` sends exactly
-that list back on the following transactions part(s) -- it no longer derives
-"what remains" from `committedTransactionCount` sliced against its own
-locally recomputed chain order at all. `committedTransactionCount` is kept
-only as an informational/diagnostic figure (now derived from the same probe,
-so it can never disagree with `missingTransactionRefs`).
+that order, runs a bounded, chunked, owner-scoped existence probe
+(`listMissingRefsByIdempotencyKey`, one shared helper parameterised only by
+table) against `transactions.idempotency_key` and, separately,
+`dividend_manual_records.idempotency_key` (`bundle:<fingerprint>:<ref>`,
+chunked at <=50 refs per `IN (...)` lookup -- e.g. a 200-transaction
+portfolio costs 4 SELECT statements). The scaffold response's
+`missingTransactionRefs` and `missingDividendRefs` fields are the actual
+resume mechanism for their respective phases: every ref not yet written,
+already in the server's own current chain order. `system-backup-panel.tsx`
+sends exactly each list back on its following part(s) -- it no longer
+derives "what remains" from `committedTransactionCount`/
+`committedDividendCount` sliced against its own locally recomputed chain
+order for EITHER phase (round 1 fixed only the transactions phase; a
+reviewer reproduced the identical hazard still standing in the dividend
+phase the same day, closed here). Both committed-counts are kept only as
+informational/diagnostic figures (now derived from their own probe, so
+neither can ever disagree with its corresponding missing-refs list).
 
 Because resume is now a ref-membership question ("is this specific row
 durably written?") rather than a position question ("how many rows are
@@ -748,8 +755,8 @@ across this specific deploy) no longer applies to any FUTURE chain-order
 change; it is retained only as a historical record of the hazard this fix
 closes.
 
-Defence in depth: `commitPortfolioBundleFinalize` now runs the identical
-existence probe over every transaction ref the bundle carries (a new
+Defence in depth: `commitPortfolioBundleFinalize` runs the identical
+existence probe over every transaction ref the bundle carries (a
 `transactionRefs` field, mirroring `dividendLinkage`'s pre-existing role for
 dividends) before doing anything else, and fails closed -- a typed 409
 naming how many refs are missing, marking the batch `failed`, never
@@ -757,6 +764,29 @@ naming how many refs are missing, marking the batch `failed`, never
 skipped, replayed out of order, or a row removed between parts by some other
 means, exactly as the pre-existing dividend-linkage re-lookup already
 protects the dividend side.
+
+**Hardening (2026-09-04, OPS-005 round 2, F1):** the existence probes above
+only ever proved that every ref the CLIENT claimed to have sent was actually
+written -- they never proved the client's claimed list was itself complete.
+A client finalizing with a genuinely SHORTER `transactionRefs`/
+`dividendLinkage` list than the bundle actually contains passed both probes
+trivially (the omitted rows were simply never checked) and could reach
+`committed` with silently fewer rows than the backup file described.
+`commitPortfolioBundleScaffold` now additionally persists, onto four new
+nullable `import_batches` columns (`bundle_transaction_refs_digest`/`_count`
+and `bundle_dividend_refs_digest`/`_count` -- migration
+`0061_ops_005_bundle_ref_digests.sql`, a plain `ALTER TABLE ... ADD COLUMN`),
+a sha256 digest and count over the bundle's OWN sorted transaction refs and,
+separately, its sorted dividend refs -- recomputed and overwritten on every
+scaffold call from the same fingerprinted bundle content, so a resume can
+never disagree with an earlier scaffold's own write. `commitPortfolioBundleFinalize`
+now compares the client-supplied ref lists' own digest+count against this
+persisted, server-derived record BEFORE running the existence probes above,
+failing closed with a typed 409 naming the expected-vs-received count
+difference on any mismatch. A legacy batch scaffolded before this migration
+landed has NULL digests; finalize treats that as "cannot verify" and skips
+this comparison rather than failing closed on a batch it has no record for
+(see `docs/DATA_MODEL.md`).
 
 ### Partial-failure messaging (per-phase, honest)
 

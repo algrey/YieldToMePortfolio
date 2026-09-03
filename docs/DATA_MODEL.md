@@ -664,7 +664,8 @@ Do not create until a concrete Details screen requirement and provider capabilit
 - commit/reversal idempotency keys;
 - uploaded/committed/reversed actors/timestamps;
 - supersedes batch;
-- failure category and redacted detail.
+- failure category and redacted detail;
+- `bundle_transaction_refs_digest`/`bundle_transaction_refs_count`, `bundle_dividend_refs_digest`/`bundle_dividend_refs_count` (`OPS-005` round 2, F1): nullable, set only by a portfolio-bundle restore's `commitPortfolioBundleScaffold` (`NULL` for every ordinary CSV import, and for a bundle-restore batch scaffolded before this migration). A sha256 hex digest and count over the bundle's own sorted transaction refs, and separately its sorted dividend refs, recomputed and overwritten on every scaffold call from the same fingerprinted bundle content (idempotent). `commitPortfolioBundleFinalize` compares the client-supplied `transactionRefs`/`dividendLinkage` ref lists' own digest+count against these persisted values before its existence probes run, failing closed with the expected-vs-received count named in the message on any mismatch -- closing a gap where a client-supplied list that was merely INCOMPLETE (not merely unverified for existence) could otherwise reach `committed`. Added by a plain `ALTER TABLE ADD COLUMN` (no rebuild, no CHECK); see `docs/BACKUP_FORMAT.md`'s "Resume evidence" section for the full design.
 
 Exact file duplicate is owner-scoped unique by hash and parser version as policy permits.
 

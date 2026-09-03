@@ -368,6 +368,9 @@ export type SystemBackupScaffoldPortfolio = {
   /** OPS-005: see `BundleScaffoldResult.missingTransactionRefs`'s own
    * comment -- the resume mechanism itself, not merely diagnostic. */
   missingTransactionRefs: readonly string[];
+  /** OPS-005 round 2: see `BundleScaffoldResult.missingDividendRefs`'s own
+   * comment -- the same mechanism for the dividend phase. */
+  missingDividendRefs: readonly string[];
 };
 
 export type SystemBackupScaffoldResult = {
@@ -458,6 +461,7 @@ export async function commitSystemBackupCoreScaffold(
       transactionsCount: bundle.transactions.length,
       dividendRecordsCount: bundle.dividendManualRecords.length,
       missingTransactionRefs: result.result.missingTransactionRefs,
+      missingDividendRefs: result.result.missingDividendRefs,
     });
   }
 

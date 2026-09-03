@@ -621,6 +621,32 @@ export const importBatches = sqliteTable(
     reversedAt: text("reversed_at"),
     commitHighWaterRow: integer("commit_high_water_row").notNull().default(1),
     version: integer("version").notNull().default(1),
+    /**
+     * OPS-005 round 2 (F1): the server's OWN record of a portfolio-bundle
+     * restore's expected ref set, written by `commitPortfolioBundleScaffold`
+     * on every scaffold call (idempotent -- recomputed fresh each time from
+     * the same fingerprinted bundle, never client-supplied). NULL for every
+     * batch that is not a bundle restore (ordinary CSV imports never set
+     * these) and for a bundle-restore batch scaffolded before this column
+     * existed.
+     *
+     * Exists because `commitPortfolioBundleFinalize`'s pre-existing
+     * existence probe only checks that every ref the CLIENT claims to have
+     * sent was actually written -- a client sending a SHORTER list than the
+     * bundle actually contains passes that probe trivially (the rows it
+     * omitted were simply never checked) and the batch reaches `committed`
+     * with silently fewer rows than the backup file described. Comparing the
+     * client's list against this persisted, server-derived set at finalize
+     * closes that gap: `bundle_transaction_refs_digest`/`_count` are a
+     * sha256 hex digest and count over every transaction ref (sorted, joined
+     * by `\n`) the bundle was scaffolded with; `bundle_dividend_refs_digest`/
+     * `_count` are the same shape for dividend refs. See
+     * `docs/BACKUP_FORMAT.md`'s "Resume evidence" section.
+     */
+    bundleTransactionRefsDigest: text("bundle_transaction_refs_digest"),
+    bundleTransactionRefsCount: integer("bundle_transaction_refs_count"),
+    bundleDividendRefsDigest: text("bundle_dividend_refs_digest"),
+    bundleDividendRefsCount: integer("bundle_dividend_refs_count"),
   },
   (table) => [
     foreignKey({

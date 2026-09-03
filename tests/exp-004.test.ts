@@ -43,6 +43,7 @@ import {
 import {
   canonicalBundleJson,
   sha256Hex,
+  type BundleDividendManualRecord,
   type BundleTransaction,
   type PortfolioBundleV1,
 } from "../domain/exports/portfolio-bundle.ts";
@@ -425,6 +426,88 @@ async function reversedPlusUnrelatedRootFixture(): Promise<{
     requestId: randomUUID(),
   });
   assert.equal(twinA.ok, true);
+
+  return { client };
+}
+
+/** OPS-005 round 2 regression fixture. One portfolio, THREE dividend
+ * records, timed with a deterministic clock (never the real one) so the
+ * pre-BUG-018-round-2 breadth-first order and the current depth-first order
+ * provably disagree, mirroring `reversedPlusUnrelatedRootFixture` above but
+ * for the DIVIDEND phase (round 1 fixed only transactions):
+ *   divOriginal (root, t0) --superseded by--> divChild (child, t2)
+ *   divExtra (unrelated root, t1)
+ *
+ *   OLD (breadth-first) order: [divOriginal, divExtra, divChild]
+ *   NEW (depth-first)   order: [divOriginal, divChild, divExtra]
+ * A part boundary that commits the OLD order's first TWO items
+ * (`{divOriginal, divExtra}`) sits at NEW-order position 2 -- but position 2
+ * of the NEW order is `divExtra` (already written), not `divChild` (still
+ * missing). A stale positional resume (`newOrder.slice(committedCount)`)
+ * would therefore compute an EMPTY remainder here and never send
+ * `divChild` at all.
+ */
+async function dividendOrderMismatchFixture(): Promise<{ client: SqlClient }> {
+  const db = await migratedDatabase();
+  db.exec(`
+    INSERT INTO currencies(code,numeric_code,name,minor_unit_digits) VALUES
+      ('AUD',36,'Australian dollar',2);
+    INSERT INTO users(id,status,primary_email,timezone,created_at,updated_at) VALUES
+      ('a','active','a@example.test','Australia/Sydney','2026-08-01','2026-08-01');
+    INSERT INTO user_settings(user_id,home_currency_code,timezone,financial_year_start_month,created_at,updated_at,version) VALUES
+      ('a','AUD','Australia/Sydney',7,'2026-08-01','2026-08-01',1);
+    INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at) VALUES
+      ('pa','a','A','Portfolio A','AUD','Australia/Sydney','fifo','active','2026-08-01','2026-08-01');
+    INSERT INTO securities(id,asset_type,primary_currency_code,canonical_name,created_at,updated_at) VALUES
+      ('s1','equity','AUD','Alpha Co','2026-08-01','2026-08-01');
+    INSERT INTO security_identifiers(id,security_id,scheme,value,valid_from,source) VALUES
+      ('si1','s1','ticker','ALPHA','2026-08-01','owner_attested');
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at) VALUES
+      ('psa1','a','pa','s1','ALPHA','AUD','held','2026-08-01','2026-08-01');
+  `);
+  const client = createSqliteSqlClient(db);
+  let clockMs = new Date("2026-01-01T00:00:00.000Z").getTime();
+  const nextTimestamp = (): string => {
+    const iso = new Date(clockMs).toISOString();
+    clockMs += 1000;
+    return iso;
+  };
+  const manualRecords = createDividendManualRecordRepository(
+    client,
+    nextTimestamp,
+  );
+
+  const divOriginal = await manualRecords.create("a", "pa", {
+    portfolioSecurityId: "psa1",
+    paymentDate: "2026-03-01",
+    sharesDecimal: "100",
+    dividendPerShareDecimal: "1.0",
+    requestId: randomUUID(),
+  });
+  assert.equal(divOriginal.ok, true);
+  if (!divOriginal.ok) throw new Error("fixture divOriginal failed");
+
+  const divExtra = await manualRecords.create("a", "pa", {
+    portfolioSecurityId: "psa1",
+    paymentDate: "2026-04-01",
+    sharesDecimal: "50",
+    dividendPerShareDecimal: "0.5",
+    requestId: randomUUID(),
+  });
+  assert.equal(divExtra.ok, true);
+
+  const divChild = await manualRecords.supersede(
+    "a",
+    "pa",
+    divOriginal.record.id,
+    {
+      sharesDecimal: "100",
+      dividendPerShareDecimal: "1.2",
+      expectedVersion: divOriginal.record.version,
+      requestId: randomUUID(),
+    },
+  );
+  assert.equal(divChild.ok, true);
 
   return { client };
 }
@@ -1768,6 +1851,510 @@ test("OPS-005: finalize's transaction-ref verification fails closed, and the bat
 });
 
 // ---------------------------------------------------------------------------
+// OPS-005 round 2: the SAME ref-probe resume mechanism, extended to the
+// DIVIDEND phase (round 1 fixed only transactions), plus finalize's new
+// persisted-digest hardening (F1) -- a client-supplied ref list that is
+// merely SHORT (every ref it sends is real and written) previously passed
+// both existence probes trivially.
+// ---------------------------------------------------------------------------
+
+test("OPS-005 round 2 regression (guard): resume via the ref-probe survives a chain-order change for the DIVIDEND phase too -- the pre-fix count/slice strategy would have silently dropped the supersession record here", async () => {
+  const { client: sourceClient } = await dividendOrderMismatchFixture();
+  const exported = await exportPortfolioBundle(ctxFor(sourceClient, "a"), "pa");
+  assert.equal(exported.ok, true);
+  if (!exported.ok) return;
+  const bundle = exported.bundle;
+  assert.equal(bundle.dividendManualRecords.length, 3);
+
+  const divOriginal = bundle.dividendManualRecords.find(
+    (r) => r.supersedesRef === null && r.paymentDate === "2026-03-01",
+  );
+  assert.ok(divOriginal, "the fixture must leave the original record");
+  const divExtra = bundle.dividendManualRecords.find(
+    (r) => r.supersedesRef === null && r.paymentDate === "2026-04-01",
+  );
+  assert.ok(divExtra, "the fixture must leave the unrelated root");
+  const divChild = bundle.dividendManualRecords.find(
+    (r) => r.supersedesRef !== null,
+  );
+  assert.ok(divChild, "the fixture must leave the supersession record");
+  assert.equal(divChild.supersedesRef, divOriginal.ref);
+
+  const dependencyOf = (record: BundleDividendManualRecord): string | null =>
+    record.supersedesRef;
+  const oldOrder = oldBreadthFirstChainOrder(
+    bundle.dividendManualRecords,
+    dependencyOf,
+  );
+  const newOrder = chainOrder(bundle.dividendManualRecords, dependencyOf);
+  // Sanity-check the fixture's own timing actually produces the disagreement
+  // this test exists to exploit.
+  assert.deepEqual(
+    oldOrder.map((r) => r.ref),
+    [divOriginal.ref, divExtra.ref, divChild.ref],
+  );
+  assert.deepEqual(
+    newOrder.map((r) => r.ref),
+    [divOriginal.ref, divChild.ref, divExtra.ref],
+  );
+
+  const targetDb = await migratedDatabase();
+  seedFreshAccount(targetDb, "target");
+  const targetClient = createSqliteSqlClient(targetDb);
+
+  const scaffold1 = await commitPortfolioBundleScaffold(
+    ctxFor(targetClient, "target"),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(scaffold1.ok, true);
+  if (!scaffold1.ok) return;
+
+  // Part 1 committed under the OLD (pre-BUG-018-round-2) order -- exactly
+  // what a restore begun before OPS-005 round 1's own deploy would have
+  // durably written by the time a chunk boundary at position 2 landed.
+  const part1 = await commitPortfolioBundleDividendsPart(
+    ctxFor(targetClient, "target"),
+    {
+      portfolioId: scaffold1.result.portfolioId,
+      batchId: scaffold1.result.batchId,
+      fingerprint: scaffold1.result.fingerprint,
+      securities: scaffold1.result.securities,
+      records: oldOrder.slice(0, 2),
+    },
+  );
+  assert.equal(part1.ok, true, part1.ok ? "" : part1.message);
+
+  // The deploy now ships the fix. The owner reloads and confirms again:
+  // scaffold must report exactly what remains from the ACTUAL database
+  // state -- never from an assumption about which order wrote part 1.
+  const resumed = await commitPortfolioBundleScaffold(
+    ctxFor(targetClient, "target"),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(resumed.ok, true);
+  if (!resumed.ok) return;
+  assert.equal(resumed.result.committedDividendCount, 2);
+
+  // GUARD: proves this was a genuine, reproducible defect for the DIVIDEND
+  // phase, mirroring the transaction-side guard above -- the retired
+  // count/slice strategy resumes by slicing the CURRENT (new) order at the
+  // live count, which drops `divChild` here: position 2 of the new order is
+  // `divExtra` (already written), not `divChild` (still missing). This
+  // computation touches no service code; it only shows what the retired
+  // strategy would have sent.
+  const oldStyleSlice = newOrder.slice(resumed.result.committedDividendCount);
+  assert.ok(
+    !oldStyleSlice.some((r) => r.ref === divChild.ref),
+    "pre-fix guard: the count/slice resume drops the supersession record when the write order and the resume order disagree",
+  );
+
+  // THE FIX: the ref-probe names exactly the unwritten row, independent of
+  // either order, in the server's own current chain order.
+  assert.deepEqual(resumed.result.missingDividendRefs, [divChild.ref]);
+
+  // The browser (post-fix) sends exactly this list, in this order -- and
+  // every row lands, none twice.
+  const dividendsByRef = new Map(
+    bundle.dividendManualRecords.map((r) => [r.ref, r]),
+  );
+  const part2 = await commitPortfolioBundleDividendsPart(
+    ctxFor(targetClient, "target"),
+    {
+      portfolioId: resumed.result.portfolioId,
+      batchId: resumed.result.batchId,
+      fingerprint: resumed.result.fingerprint,
+      securities: resumed.result.securities,
+      records: resumed.result.missingDividendRefs.map((ref) =>
+        dividendsByRef.get(ref)!,
+      ),
+    },
+  );
+  assert.equal(part2.ok, true, part2.ok ? "" : part2.message);
+
+  const rows = await targetClient.all<{ id: string }>(
+    "SELECT id FROM dividend_manual_records WHERE user_id = 'target' AND portfolio_id = ?",
+    [resumed.result.portfolioId],
+  );
+  assert.equal(
+    rows.length,
+    3,
+    "every dividend record restored exactly once -- none dropped, none duplicated",
+  );
+
+  const finalized = await commitPortfolioBundleFinalize(
+    ctxFor(targetClient, "target"),
+    {
+      portfolioId: resumed.result.portfolioId,
+      batchId: resumed.result.batchId,
+      fingerprint: resumed.result.fingerprint,
+      securities: resumed.result.securities,
+      dividendLinkage: dividendLinkageFor(bundle),
+      dividendSecurityAssumptions: bundle.dividendSecurityAssumptions,
+      dividendPortfolioAssumption: bundle.dividendPortfolioAssumption,
+      dividendFyOverrides: bundle.dividendFyOverrides,
+      dividendEventOverrides: bundle.dividendEventOverrides,
+      dividendImportFrankingOverrides: bundle.dividendImportFrankingOverrides,
+      whatifScenarios: bundle.whatifScenarios,
+      portfolioStatus: bundle.portfolio.status,
+      transactionsCount: bundle.transactions.length,
+      dividendRecordsCount: bundle.dividendManualRecords.length,
+      transactionRefs: bundle.transactions.map((tx) => tx.ref),
+    },
+  );
+  assert.equal(finalized.ok, true, finalized.ok ? "" : finalized.message);
+});
+
+test("OPS-005 round 2 (F1): finalize fails closed, naming the count mismatch, when the client's transactionRefs list is SHORTER than what scaffold persisted", async () => {
+  const bundle = await buildBundle();
+  assert.ok(
+    bundle.transactions.length > 1,
+    "fixture must have more than one transaction to prove a shorter list is caught",
+  );
+  const db = await migratedDatabase();
+  seedFreshAccount(db, "target");
+  const client = createSqliteSqlClient(db);
+
+  const scaffold = await commitPortfolioBundleScaffold(
+    ctxFor(client, "target"),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(scaffold.ok, true);
+  if (!scaffold.ok) return;
+
+  const orderedTransactions = chainOrder(
+    bundle.transactions,
+    (tx) => tx.reversesRef ?? tx.supersedesRef,
+  );
+  const txResult = await commitPortfolioBundleTransactionsPart(
+    ctxFor(client, "target"),
+    {
+      portfolioId: scaffold.result.portfolioId,
+      batchId: scaffold.result.batchId,
+      fingerprint: scaffold.result.fingerprint,
+      securities: scaffold.result.securities,
+      transactions: orderedTransactions,
+    },
+  );
+  assert.equal(txResult.ok, true);
+  const divResult = await commitPortfolioBundleDividendsPart(
+    ctxFor(client, "target"),
+    {
+      portfolioId: scaffold.result.portfolioId,
+      batchId: scaffold.result.batchId,
+      fingerprint: scaffold.result.fingerprint,
+      securities: scaffold.result.securities,
+      records: chainOrder(
+        bundle.dividendManualRecords,
+        (record) => record.supersedesRef,
+      ),
+    },
+  );
+  assert.equal(divResult.ok, true);
+
+  // Every row is ACTUALLY, durably written -- only the client's own claimed
+  // list is incomplete (e.g. a browser-side bug/corruption dropped a ref).
+  // The pre-existing existence probe passes this trivially, since it only
+  // ever checks the refs the client DOES send.
+  const shortTransactionRefs = bundle.transactions
+    .slice(0, -1)
+    .map((tx) => tx.ref);
+  const finalized = await commitPortfolioBundleFinalize(
+    ctxFor(client, "target"),
+    {
+      portfolioId: scaffold.result.portfolioId,
+      batchId: scaffold.result.batchId,
+      fingerprint: scaffold.result.fingerprint,
+      securities: scaffold.result.securities,
+      dividendLinkage: dividendLinkageFor(bundle),
+      dividendSecurityAssumptions: bundle.dividendSecurityAssumptions,
+      dividendPortfolioAssumption: bundle.dividendPortfolioAssumption,
+      dividendFyOverrides: bundle.dividendFyOverrides,
+      dividendEventOverrides: bundle.dividendEventOverrides,
+      dividendImportFrankingOverrides: bundle.dividendImportFrankingOverrides,
+      whatifScenarios: bundle.whatifScenarios,
+      portfolioStatus: bundle.portfolio.status,
+      transactionsCount: bundle.transactions.length,
+      dividendRecordsCount: bundle.dividendManualRecords.length,
+      transactionRefs: shortTransactionRefs,
+    },
+  );
+  assert.equal(finalized.ok, false);
+  if (finalized.ok) return;
+  assert.equal(finalized.status, 409);
+  assert.match(
+    finalized.message,
+    new RegExp(
+      `expected ${bundle.transactions.length} transaction ref\\(s\\) but finalize received ${shortTransactionRefs.length}`,
+    ),
+  );
+
+  const batchRow = await client.get<{ status: string }>(
+    "SELECT status FROM import_batches WHERE id = ?",
+    [scaffold.result.batchId],
+  );
+  assert.equal(
+    batchRow?.status,
+    "failed",
+    "a batch failing the persisted-digest check must never reach committed",
+  );
+});
+
+test("OPS-005 round 2 (F1): finalize fails closed, naming the count mismatch, when the client's dividendLinkage list is SHORTER than what scaffold persisted", async () => {
+  const bundle = await buildBundle();
+  assert.ok(
+    bundle.dividendManualRecords.length > 1,
+    "fixture must have more than one dividend record to prove a shorter list is caught",
+  );
+  const db = await migratedDatabase();
+  seedFreshAccount(db, "target");
+  const client = createSqliteSqlClient(db);
+
+  const scaffold = await commitPortfolioBundleScaffold(
+    ctxFor(client, "target"),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(scaffold.ok, true);
+  if (!scaffold.ok) return;
+
+  const txResult = await commitPortfolioBundleTransactionsPart(
+    ctxFor(client, "target"),
+    {
+      portfolioId: scaffold.result.portfolioId,
+      batchId: scaffold.result.batchId,
+      fingerprint: scaffold.result.fingerprint,
+      securities: scaffold.result.securities,
+      transactions: chainOrder(
+        bundle.transactions,
+        (tx) => tx.reversesRef ?? tx.supersedesRef,
+      ),
+    },
+  );
+  assert.equal(txResult.ok, true);
+  const divResult = await commitPortfolioBundleDividendsPart(
+    ctxFor(client, "target"),
+    {
+      portfolioId: scaffold.result.portfolioId,
+      batchId: scaffold.result.batchId,
+      fingerprint: scaffold.result.fingerprint,
+      securities: scaffold.result.securities,
+      records: chainOrder(
+        bundle.dividendManualRecords,
+        (record) => record.supersedesRef,
+      ),
+    },
+  );
+  assert.equal(divResult.ok, true);
+
+  // Every dividend record is ACTUALLY, durably written -- only the client's
+  // own claimed `dividendLinkage` list is incomplete.
+  const shortDividendLinkage = dividendLinkageFor(bundle).slice(0, -1);
+  const finalized = await commitPortfolioBundleFinalize(
+    ctxFor(client, "target"),
+    {
+      portfolioId: scaffold.result.portfolioId,
+      batchId: scaffold.result.batchId,
+      fingerprint: scaffold.result.fingerprint,
+      securities: scaffold.result.securities,
+      dividendLinkage: shortDividendLinkage,
+      dividendSecurityAssumptions: bundle.dividendSecurityAssumptions,
+      dividendPortfolioAssumption: bundle.dividendPortfolioAssumption,
+      dividendFyOverrides: bundle.dividendFyOverrides,
+      dividendEventOverrides: bundle.dividendEventOverrides,
+      dividendImportFrankingOverrides: bundle.dividendImportFrankingOverrides,
+      whatifScenarios: bundle.whatifScenarios,
+      portfolioStatus: bundle.portfolio.status,
+      transactionsCount: bundle.transactions.length,
+      dividendRecordsCount: bundle.dividendManualRecords.length,
+      transactionRefs: bundle.transactions.map((tx) => tx.ref),
+    },
+  );
+  assert.equal(finalized.ok, false);
+  if (finalized.ok) return;
+  assert.equal(finalized.status, 409);
+  assert.match(
+    finalized.message,
+    new RegExp(
+      `expected ${bundle.dividendManualRecords.length} dividend record ref\\(s\\) but finalize received ${shortDividendLinkage.length}`,
+    ),
+  );
+
+  const batchRow = await client.get<{ status: string }>(
+    "SELECT status FROM import_batches WHERE id = ?",
+    [scaffold.result.batchId],
+  );
+  assert.equal(
+    batchRow?.status,
+    "failed",
+    "a batch failing the persisted-digest check must never reach committed",
+  );
+});
+
+test("OPS-005 round 2 (F1): the persisted ref digest+count is written on scaffold and survives a scaffold retry byte-for-byte (idempotent, recomputed fresh each time, never carried forward as mutable state)", async () => {
+  const bundle = await buildBundle();
+  const db = await migratedDatabase();
+  seedFreshAccount(db, "target");
+  const client = createSqliteSqlClient(db);
+
+  const scaffold1 = await commitPortfolioBundleScaffold(
+    ctxFor(client, "target"),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(scaffold1.ok, true);
+  if (!scaffold1.ok) return;
+  const batchId = scaffold1.result.batchId;
+
+  const readDigestRow = () =>
+    client.get<{
+      bundle_transaction_refs_digest: string | null;
+      bundle_transaction_refs_count: number | null;
+      bundle_dividend_refs_digest: string | null;
+      bundle_dividend_refs_count: number | null;
+    }>(
+      `SELECT bundle_transaction_refs_digest, bundle_transaction_refs_count,
+              bundle_dividend_refs_digest, bundle_dividend_refs_count
+       FROM import_batches WHERE id = ?`,
+      [batchId],
+    );
+
+  const row1 = await readDigestRow();
+  assert.ok(row1?.bundle_transaction_refs_digest);
+  assert.equal(row1?.bundle_transaction_refs_count, bundle.transactions.length);
+  assert.ok(row1?.bundle_dividend_refs_digest);
+  assert.equal(
+    row1?.bundle_dividend_refs_count,
+    bundle.dividendManualRecords.length,
+  );
+
+  // A partial write in between -- simulating a resume in progress -- must
+  // not disturb the persisted digest, since it is derived only from the
+  // bundle's OWN content, never from what has been written so far.
+  const orderedTransactions = chainOrder(
+    bundle.transactions,
+    (tx) => tx.reversesRef ?? tx.supersedesRef,
+  );
+  const partial = await commitPortfolioBundleTransactionsPart(
+    ctxFor(client, "target"),
+    {
+      portfolioId: scaffold1.result.portfolioId,
+      batchId: scaffold1.result.batchId,
+      fingerprint: scaffold1.result.fingerprint,
+      securities: scaffold1.result.securities,
+      transactions: orderedTransactions.slice(0, 1),
+    },
+  );
+  assert.equal(partial.ok, true);
+
+  const scaffold2 = await commitPortfolioBundleScaffold(
+    ctxFor(client, "target"),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(scaffold2.ok, true);
+  if (!scaffold2.ok) return;
+  assert.equal(scaffold2.result.batchId, scaffold1.result.batchId);
+
+  const row2 = await readDigestRow();
+  assert.equal(
+    row2?.bundle_transaction_refs_digest,
+    row1?.bundle_transaction_refs_digest,
+  );
+  assert.equal(
+    row2?.bundle_transaction_refs_count,
+    row1?.bundle_transaction_refs_count,
+  );
+  assert.equal(
+    row2?.bundle_dividend_refs_digest,
+    row1?.bundle_dividend_refs_digest,
+  );
+  assert.equal(
+    row2?.bundle_dividend_refs_count,
+    row1?.bundle_dividend_refs_count,
+  );
+});
+
+test("OPS-005 round 2: the transaction/dividend ref probes are owner-scoped -- another owner's identically-keyed rows are never treated as this owner's own committed rows", async () => {
+  const bundle = await buildBundle();
+  const db = await migratedDatabase();
+  seedFreshAccount(db, "owner-a");
+  seedFreshAccount(db, "owner-b");
+  const client = createSqliteSqlClient(db);
+
+  // Owner A restores the bundle fully.
+  const scaffoldA = await commitPortfolioBundleScaffold(
+    ctxFor(client, "owner-a"),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(scaffoldA.ok, true);
+  if (!scaffoldA.ok) return;
+  const txA = await commitPortfolioBundleTransactionsPart(
+    ctxFor(client, "owner-a"),
+    {
+      portfolioId: scaffoldA.result.portfolioId,
+      batchId: scaffoldA.result.batchId,
+      fingerprint: scaffoldA.result.fingerprint,
+      securities: scaffoldA.result.securities,
+      transactions: chainOrder(
+        bundle.transactions,
+        (tx) => tx.reversesRef ?? tx.supersedesRef,
+      ),
+    },
+  );
+  assert.equal(txA.ok, true);
+  const divA = await commitPortfolioBundleDividendsPart(
+    ctxFor(client, "owner-a"),
+    {
+      portfolioId: scaffoldA.result.portfolioId,
+      batchId: scaffoldA.result.batchId,
+      fingerprint: scaffoldA.result.fingerprint,
+      securities: scaffoldA.result.securities,
+      records: chainOrder(
+        bundle.dividendManualRecords,
+        (record) => record.supersedesRef,
+      ),
+    },
+  );
+  assert.equal(divA.ok, true);
+
+  // Owner B scaffolds the exact SAME bundle content -- same fingerprint,
+  // since it is derived from content alone, never from the owner -- into a
+  // SEPARATE destination portfolio. Neither probe may be satisfied by owner
+  // A's rows: every ref must still read as missing for owner B.
+  const scaffoldB = await commitPortfolioBundleScaffold(
+    ctxFor(client, "owner-b"),
+    bundle,
+    "backup.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(scaffoldB.ok, true);
+  if (!scaffoldB.ok) return;
+  assert.notEqual(scaffoldB.result.portfolioId, scaffoldA.result.portfolioId);
+  assert.equal(scaffoldB.result.fingerprint, scaffoldA.result.fingerprint);
+  assert.equal(scaffoldB.result.committedTransactionCount, 0);
+  assert.equal(scaffoldB.result.committedDividendCount, 0);
+  assert.deepEqual(
+    new Set(scaffoldB.result.missingTransactionRefs),
+    new Set(bundle.transactions.map((tx) => tx.ref)),
+  );
+  assert.deepEqual(
+    new Set(scaffoldB.result.missingDividendRefs),
+    new Set(bundle.dividendManualRecords.map((r) => r.ref)),
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Wiring pins: `system-backup-panel.tsx` cannot be imported/executed under
 // the plain Node test runner (`.tsx`, and it transitively needs a DOM) --
 // mirrors tests/exp-002.test.ts's own identically-justified source-grep
@@ -1796,8 +2383,19 @@ test("wiring: system-backup-panel.tsx drives all four EXP-004 core-restore phase
   assert.match(source, /phase: "transactions"/);
   assert.match(source, /phase: "dividends"/);
   assert.match(source, /phase: "finalize"/);
-  assert.match(source, /from "\.\.\/\.\.\/domain\/exports\/chain-order\.ts"/);
   assert.match(source, /from "\.\.\/\.\.\/domain\/exports\/chunk-rows\.ts"/);
+  // OPS-005 round 2: the panel no longer runs `chainOrder` itself for EITHER
+  // phase's resume -- `missingTransactionRefs`/`missingDividendRefs` from
+  // the scaffold response ARE the resume mechanism, so the panel no longer
+  // imports `chain-order.ts` at all (it still recomputes chain order only
+  // inside `commitPortfolioBundleImport`'s non-chunked whole-bundle path,
+  // server-side, which this file never touches).
+  assert.doesNotMatch(
+    source,
+    /from "\.\.\/\.\.\/domain\/exports\/chain-order\.ts"/,
+  );
+  assert.match(source, /missingTransactionRefs/);
+  assert.match(source, /missingDividendRefs/);
   // Resume evidence is server-derived, never a client-trusted claim -- the
   // panel must read the scaffold response's own counts, not invent its own.
   assert.match(source, /committedTransactionCount/);

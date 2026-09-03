@@ -428,6 +428,13 @@
       "when": 1788423587237,
       "tag": "0060_bug_018_reversed_source_reference_partial_index",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "6",
+      "when": 1788470243073,
+      "tag": "0061_ops_005_bundle_ref_digests",
+      "breakpoints": true
     }
   ]
 }

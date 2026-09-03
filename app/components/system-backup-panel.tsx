@@ -20,7 +20,6 @@ import {
   type PriceBackupMalformedReason,
 } from "../../domain/market-data/price-backup-csv.ts";
 import type { SystemBackupV1 } from "../../domain/exports/system-backup.ts";
-import { chainOrder } from "../../domain/exports/chain-order.ts";
 import { chunkRows } from "../../domain/exports/chunk-rows.ts";
 import {
   EMPTY_RESTORE_PROGRESS,
@@ -270,6 +269,11 @@ type ScaffoldPortfolio = {
   // silently (BUG-018 round 3's documented, now-closed hazard). See
   // `docs/BACKUP_FORMAT.md`'s "Resume evidence" section.
   missingTransactionRefs: string[];
+  // OPS-005 round 2: the same mechanism, applied to the dividend phase --
+  // see `missingTransactionRefs`'s comment above and
+  // `BundleScaffoldResult.missingDividendRefs`'s own doc comment
+  // (`app/portfolio-bundle-service.ts`).
+  missingDividendRefs: string[];
 };
 type ScaffoldResult = {
   watchlist: {
@@ -557,6 +561,14 @@ export function SystemBackupPanel() {
         const transactionsByRef = new Map(
           bundle.transactions.map((tx) => [tx.ref, tx]),
         );
+        // A ref absent from this map (impossible for a bundle unmodified
+        // since scaffold, since the server computed `missingTransactionRefs`
+        // from this SAME bundle's own refs) is silently dropped here rather
+        // than aborting the restore -- safe only because finalize
+        // independently re-probes every one of `bundle.transactions`' own
+        // refs against what is actually durably written (OPS-005 defence in
+        // depth below) and fails closed on any gap, so an omission here can
+        // never reach `committed` unnoticed.
         const remainingTransactions = portfolioScaffold.missingTransactionRefs
           .map((ref) => transactionsByRef.get(ref))
           .filter(
@@ -597,13 +609,28 @@ export function SystemBackupPanel() {
           await waitBetweenChunks();
         }
 
-        const orderedDividends = chainOrder(
-          bundle.dividendManualRecords,
-          (record) => record.supersedesRef,
+        // OPS-005 round 2: the SAME ref-membership mechanism as
+        // `missingTransactionRefs` above, now applied to the dividend
+        // phase -- `missingDividendRefs` is a server-derived, always-live
+        // list of exactly the refs not yet written, already in the
+        // server's own current chain order. This browser no longer derives
+        // "how much is left" from `chainOrder(...).slice(committedDividendCount)`
+        // against its own locally recomputed chain order, which was only
+        // skip-proof when both requests agreed on ordering (the same hazard
+        // round 1 closed for transactions -- see
+        // `docs/BACKUP_FORMAT.md`'s "Resume evidence" section).
+        const dividendsByRef = new Map(
+          bundle.dividendManualRecords.map((record) => [record.ref, record]),
         );
-        const remainingDividends = orderedDividends.slice(
-          portfolioScaffold.committedDividendCount,
-        );
+        // See the transactions-side comment above: an absent ref is dropped
+        // here but caught by finalize's own dividend-linkage re-lookup,
+        // which fails closed on any record not actually written.
+        const remainingDividends = portfolioScaffold.missingDividendRefs
+          .map((ref) => dividendsByRef.get(ref))
+          .filter(
+            (record): record is (typeof bundle.dividendManualRecords)[number] =>
+              record !== undefined,
+          );
         const dividendParts = chunkRows(
           remainingDividends,
           DIVIDENDS_RESTORE_CHUNK_ROWS,
