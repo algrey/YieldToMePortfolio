@@ -54,8 +54,16 @@ function GainsUnavailable({
  * other typed failure (invalid FY window, invalid decimal boundary,
  * unexpected too-many-allocations bound, etc.) falls back to the generic
  * "error" reason -- still typed, still never a fabricated $0 result.
+ *
+ * Exported (PRF-011 correction round 2, review B1) solely so
+ * `tests/cgt-001a.test.ts` can drive a real orphan-allocation DB fixture's
+ * thrown error through this ACTUAL function (via a `tsx`-loader child
+ * process, since this file transitively imports `next/headers` and so
+ * cannot be imported by the plain Node test runner -- see
+ * `tests/cgt-001b.test.ts`'s `renderComponent` for the same technique)
+ * rather than re-implementing/duplicating its mapping in the test.
  */
-function reasonForError(
+export function reasonForError(
   message: string,
 ): CapitalGainsScreenResult & { status: "unavailable" } {
   if (

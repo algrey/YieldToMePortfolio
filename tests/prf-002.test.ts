@@ -100,6 +100,10 @@ import {
   DEFAULT_YEARS_BACK,
   DEFAULT_YEARS_FORWARD,
 } from "../app/income-year-range.ts";
+// PRF-011 correction (round 2, F2 fold-in): `/import`'s Sharesight-link leg
+// (fix (d)) had only ever been measured in isolation (`tests/brk-005b.test.ts`),
+// never on the real page's own census row.
+import { loadOwnedSharesightLinks } from "../app/owned-sharesight-links.ts";
 import type { SqlClient, SqlStatement } from "../db/repositories/sql-client.ts";
 
 async function migratedDatabase(): Promise<DatabaseSync> {
@@ -938,6 +942,21 @@ async function censusDividendsPage(client: SqlClient): Promise<void> {
   await loadOwnedDividendList(client, USER_ID, PORTFOLIO_ID, NOW);
 }
 
+/** `/import` (via `app/import/page.tsx`): `loadAuthenticatedWorkspace(undefined,
+ * {})` -- no active portfolio requested, so the real loader takes its
+ * `activePortfolio === null` early return right after the SAME
+ * settings/FX `Promise.all` wave every other census page's
+ * `baseWorkspaceLoad` already stands in for (see that function's own
+ * comment; the `portfolioRecords` list read in that same wave is the one
+ * cost `baseWorkspaceLoad` has always omitted, uniformly, for every page
+ * in this census -- not a new omission for this page). The page's own
+ * REAL extra cost beyond that shared wave is fix (d)'s
+ * `loadOwnedSharesightLinks` call over every owned portfolio id. */
+async function censusImportPage(client: SqlClient): Promise<void> {
+  await baseWorkspaceLoad(client);
+  await loadOwnedSharesightLinks(client, USER_ID, [PORTFOLIO_ID]);
+}
+
 // ---------------------------------------------------------------------------
 // PRF-005 -- the Income area's REMAINING pages (never censused by PRF-002,
 // which covered only `/income/dividends`): `/income` (the reported Error
@@ -1064,6 +1083,7 @@ const PAGES: Array<{
   { name: "/portfolio/:id/details", run: censusDetailsPage },
   { name: "/portfolio/:id/gains", run: censusGainsPage },
   { name: "/portfolio/:id/income/dividends", run: censusDividendsPage },
+  { name: "/import", run: censusImportPage },
   { name: "/portfolio/:id/income", run: censusIncomePage },
   { name: "/portfolio/:id/income/multi-year", run: censusIncomeMultiYearPage },
   {
@@ -1548,6 +1568,12 @@ const DEPTH_CEILING: Record<string, number> = {
   // pre-existing +1 for baseWorkspaceLoad.
   "/portfolio/:id/gains": 5,
   "/portfolio/:id/income/dividends": 6,
+  // PRF-011 correction (F2 fold-in): baseWorkspaceLoad's settings/FX wave
+  // (depth 1) then fix (d)'s single chunked `loadOwnedSharesightLinks`
+  // read (depth 2) -- the shortest chain in this census, since `/import`
+  // takes the `activePortfolio === null` early return right after the
+  // shared wave and never reaches any holdings/overview branch.
+  "/import": 2,
   // PRF-005: `/income`/`/income/multi-year` layer `loadHistoricalPortfolioValueAtDates`
   // (needed for `pastFinancialYears`) SEQUENTIALLY after the
   // holdings/history wave -- it genuinely cannot start earlier, since it

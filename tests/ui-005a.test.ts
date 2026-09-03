@@ -318,7 +318,16 @@ test("details UI is read-only, provenance-explicit, and linked to separate entry
   assert.match(manualRoute, /loadAuthenticatedWorkspace\(\s*portfolioId,/);
   assert.match(manualRoute, /workspace\.activePortfolio === null/);
   assert.match(manualRoute, /ManualLedgerEntry/);
-  assert.match(manualRoute, /getAuthenticatedSqlContext/);
+  // PRF-011 correction (round 2, review B2): `getAuthenticatedSqlContext`
+  // no longer appears anywhere in this route except inside a PRF-011
+  // comment explaining why it is NOT called a second time -- matching that
+  // name alone is vacuous. Assert the REAL mechanism instead: the
+  // `sqlContextOut` output slot `loadAuthenticatedWorkspace` writes into,
+  // and the real code line that reads it back (`const context =
+  // sqlContextOut.current`, `:78`) -- a literal that appears only in code,
+  // never in the explanatory comment above it.
+  assert.match(manualRoute, /sqlContextOut/);
+  assert.match(manualRoute, /const context = sqlContextOut\.current/);
   assert.doesNotMatch(manualRoute, /Manual entry is not available yet/);
   assert.match(repository, /t\.user_id = \? AND t\.portfolio_id = \?/);
   assert.match(repository, /l\.user_id = \? AND l\.portfolio_id = \?/);

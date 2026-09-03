@@ -12,6 +12,7 @@
 // split across an eligible and an ineligible tax lot, and the empty
 // "no disposals yet" state.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFile, readdir } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
@@ -1460,10 +1461,13 @@ test("PRF-011: a lot_allocations row whose tax lot belongs to a DIFFERENT calcul
   // (caught only by the separate count comparison, throwing
   // `missing_allocation_dates`). Under the NEW `LEFT JOIN` (lot_allocations
   // is now the driving table), this same row still appears -- with its
-  // `acquired_date` NULL, since `opening` only joins via `tl` -- and the
-  // existing `requiredText` validation rejects it directly, one query
-  // earlier, and by a different name (`invalid_acquired_date`, not
-  // `missing_allocation_dates`). Either way: a typed failure, never a
+  // `acquired_date` NULL, since `opening` only joins via `tl`.
+  // PRF-011 correction (round 2, review B1): `unresolvedChainField` in
+  // `app/owned-capital-gains.ts` catches this NULL explicitly and restores
+  // the ORIGINAL `missing_allocation_dates` failure identity (not the
+  // round-1 `invalid_acquired_date`) -- `reasonForError` in
+  // `gains/page.tsx`, CGT-001B's screen copy, and docs/CALCULATIONS.md all
+  // key off that one literal. A typed failure either way, never a
   // fabricated or silently under-reported disposal (AGENTS.md).
   const database = await createMigratedDatabase();
   seedBase(database);
@@ -1518,6 +1522,96 @@ test("PRF-011: a lot_allocations row whose tax lot belongs to a DIFFERENT calcul
   const client = createSqliteSqlClient(database);
   await assert.rejects(
     () => loadOwnedCapitalGains(client, "user-a", "portfolio-a"),
-    /invalid_acquired_date/,
+    /missing_allocation_dates/,
   );
+});
+
+test("PRF-011 correction (review B1): the SAME orphan-allocation failure, driven through the REAL reasonForError in gains/page.tsx, maps to the missing_dates reason CGT-001B renders distinct copy for", async () => {
+  // Reproduces the identical DB fixture as the test above (a lot_allocations
+  // row whose tax lot belongs to a different, unpublished calculation run,
+  // so its `acquired_date` LEFT JOIN comes back NULL) and confirms the
+  // thrown `missing_allocation_dates` error is not just the loader's
+  // literal -- it is what the ACTUAL page-level `reasonForError` function
+  // maps to `reason: "missing_dates"`, the reason CGT-001B's screen gives
+  // distinct "missing the acquisition or disposal dates" copy for (see
+  // `tests/cgt-001b.test.ts`). `reasonForError` lives in a `.tsx` file that
+  // transitively imports `next/headers` (via `authenticated-workspace.ts`),
+  // so it cannot be imported by this plain Node test runner -- it is
+  // exported and invoked via the same `tsx`-loader child-process technique
+  // `tests/cgt-001b.test.ts`'s `renderComponent` uses, rather than
+  // re-implemented/duplicated here (see `tests/test-runner-constraints`
+  // convention).
+  const database = await createMigratedDatabase();
+  seedBase(database);
+  insertTransaction(database, {
+    id: "tx-buy",
+    type: "buy",
+    tradeAt: "2024-01-01T09:00:00Z",
+    localTradeDate: "2024-01-01",
+    quantityDecimal: "10",
+    unitPriceDecimal: "10",
+    grossAmountDecimal: "100",
+  });
+  insertTransaction(database, {
+    id: "tx-sell",
+    type: "sell",
+    tradeAt: "2026-01-15T09:00:00Z",
+    localTradeDate: "2026-01-15",
+    quantityDecimal: "5",
+    unitPriceDecimal: "20",
+    grossAmountDecimal: "100",
+  });
+  insertCalculationRun(database, {
+    id: "run-old",
+    highWaterStart: "tx-buy",
+    highWaterEnd: "tx-buy",
+  });
+  insertCalculationRun(database, {
+    id: "run-a",
+    highWaterStart: "tx-sell",
+    highWaterEnd: "tx-sell",
+  });
+  insertTaxLot(database, {
+    id: "lot-mismatched",
+    openingTransactionId: "tx-buy",
+    acquiredAt: "2024-01-01T09:00:00Z",
+    calculationRunId: "run-old",
+  });
+  insertLotAllocation(database, {
+    id: "allocation-mismatched",
+    sellTransactionId: "tx-sell",
+    taxLotId: "lot-mismatched",
+    calculationRunId: "run-a",
+  });
+  insertPublication(database, {
+    calculationRunId: "run-a",
+    ledgerHighWater: "tx-sell",
+  });
+
+  const client = createSqliteSqlClient(database);
+  let thrownMessage: string | null = null;
+  try {
+    await loadOwnedCapitalGains(client, "user-a", "portfolio-a");
+  } catch (error) {
+    thrownMessage = error instanceof Error ? error.message : String(error);
+  }
+  assert.equal(thrownMessage, "missing_allocation_dates");
+
+  const pageUrl = new URL(
+    "../app/portfolio/[portfolioId]/gains/page.tsx",
+    import.meta.url,
+  ).href;
+  const script = `
+    import { reasonForError } from ${JSON.stringify(pageUrl)};
+    process.stdout.write(JSON.stringify(reasonForError(${JSON.stringify(thrownMessage)})));
+  `;
+  const output = execFileSync(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "--eval", script],
+    { encoding: "utf8" },
+  );
+  assert.deepEqual(JSON.parse(output), {
+    status: "unavailable",
+    reason: "missing_dates",
+  });
 });

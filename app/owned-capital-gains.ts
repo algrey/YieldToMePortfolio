@@ -105,6 +105,30 @@ export type OwnedCapitalGainsHistory = {
 function field(row: Row, key: string): unknown {
   return row[key];
 }
+// PRF-011 correction (round 2, review B1): the four LEFT-JOINed columns
+// below (`acquired_date`, `disposed_date`, `symbol`, `name`) are NULL if
+// and only if the allocation's tax-lot/opening/sell/security chain failed
+// to resolve -- every OTHER column on this SELECT comes straight off the
+// driving `lot_allocations` row and is never NULL. Checking for exactly
+// `null` here (not pattern-validity) is deliberate: a chain that resolves
+// but returns a malformed value is a different, rarer defect (real but
+// corrupt data) that the `requiredText`/DATE-pattern validation below
+// still catches as its own specific `invalid_<field>` failure, unchanged
+// from before this correction.
+const UNRESOLVED_CHAIN_FIELDS = [
+  "acquired_date",
+  "disposed_date",
+  "symbol",
+  "name",
+] as const;
+function unresolvedChainField(
+  row: Row,
+): (typeof UNRESOLVED_CHAIN_FIELDS)[number] | null {
+  for (const key of UNRESOLVED_CHAIN_FIELDS) {
+    if (field(row, key) === null || field(row, key) === undefined) return key;
+  }
+  return null;
+}
 function requiredText(row: Row, key: string, pattern?: RegExp): string {
   const value = field(row, key);
   if (
@@ -419,11 +443,13 @@ async function loadCapitalGainDisposalRows(
   // table with LEFT JOINs for tl/opening/sell/ps, so every matching
   // allocation row is guaranteed to appear in `allocationRows` regardless
   // of whether the chain resolved; a broken chain now surfaces as NULL
-  // joined columns, which the existing `requiredText` calls below already
-  // reject with a specific `invalid_<field>` error (acquired_date,
-  // disposed_date, symbol, name) instead of the old aggregate
-  // `missing_allocation_dates`. Same closed-failure guarantee, one query
-  // instead of two.
+  // joined columns. PRF-011 correction (round 2, review B1): the ORIGINAL
+  // `missing_allocation_dates` contract is preserved below
+  // (`unresolvedChainField`) rather than replaced by a per-field
+  // `invalid_<field>` failure -- `reasonForError` in
+  // `app/portfolio/[portfolioId]/gains/page.tsx`, CGT-001B's screen copy,
+  // and docs/CALCULATIONS.md all key off that one literal. Same
+  // closed-failure guarantee, one query instead of two.
   const allocationRows = await client.all<Row>(
     `SELECT la.id AS allocation_id, la.portfolio_security_id,
             la.matched_quantity_decimal, la.allocated_base_basis_decimal,
@@ -454,6 +480,32 @@ async function loadCapitalGainDisposalRows(
   );
   if (allocationRows.length > MAX_ALLOCATIONS)
     throw new Error("too_many_allocations");
+
+  // PRF-011 correction (round 2, review B1): restore the pre-fix aggregate
+  // failure exactly -- an allocation whose chain didn't resolve throws
+  // `missing_allocation_dates`, matching what the old INNER-JOIN-plus-count
+  // implementation threw for the identical condition. WHICH field was
+  // unresolved is recorded as a structured warning (never silently
+  // dropped, per AGENTS.md), not surfaced as a different error identity.
+  for (const row of allocationRows) {
+    const brokenField = unresolvedChainField(row);
+    if (brokenField) {
+      emitStructuredLog({
+        level: "warn",
+        event: "capital_gains.unresolved_allocation_chain",
+        action: "owned_capital_gains.load",
+        result: "failure",
+        requestId: "read-time-validation",
+        metadata: {
+          portfolioId,
+          calculationRunId: runId,
+          allocationId: requiredText(row, "allocation_id"),
+          unresolvedField: brokenField,
+        },
+      });
+      throw new Error("missing_allocation_dates");
+    }
+  }
 
   const facts: CapitalGainAllocationFact[] = allocationRows.map((row) => ({
     allocationId: requiredText(row, "allocation_id"),
