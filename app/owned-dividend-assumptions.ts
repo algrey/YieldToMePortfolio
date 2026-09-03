@@ -31,9 +31,9 @@
 // constant, never derived.
 import type { SqlClient } from "../db/repositories/sql-client.ts";
 import { createDividendAssumptionsRepository } from "../db/repositories/dividends.ts";
-import { createOwnedUserSettingsRepository } from "../db/repositories/owned-portfolios.ts";
 import { loadOwnedHoldings } from "./owned-holdings.ts";
 import { loadOwnedDividendHistory } from "./owned-dividend-history.ts";
+import { resolveOwnedPortfolioContext } from "./owned-portfolio-context.ts";
 import { currentFyWindow } from "../domain/calculations/financial-year.ts";
 import {
   deriveTrailingDividendYield,
@@ -103,19 +103,18 @@ export async function loadOwnedDividendAssumptions(
   portfolioId: string,
   now = new Date(),
 ): Promise<OwnedDividendAssumptions> {
-  // PRF-005 (Income area census): `portfolio` (ownership gate) and
-  // `settings` (needed only for the FY window below) are mutually
-  // independent reads -- neither's SQL/output feeds the other -- started
-  // concurrently instead of two sequential round trips.
-  const [portfolio, settings] = await Promise.all([
-    client.get<Row>(
-      `SELECT id FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
-      [portfolioId, userId],
-    ),
-    createOwnedUserSettingsRepository(client).get(userId),
-  ]);
-  if (!portfolio) throw new Error("not_owned");
-  if (!settings) throw new Error("missing_user_settings");
+  // PRF-012: resolves the portfolio/`user_settings`/held-identity facts
+  // ONCE for this whole screen -- this function's own ownership gate plus
+  // FY-window settings, its own held-identity read below, and the
+  // `loadOwnedHoldings`/`loadOwnedDividendHistory` calls further down all
+  // independently re-read the SAME facts. Each still asserts the context
+  // belongs to `userId`/`portfolioId` before trusting it.
+  const context = await resolveOwnedPortfolioContext(
+    client,
+    userId,
+    portfolioId,
+  );
+  const settings = context.settings;
   const currentWindow = currentFyWindow(
     now.toISOString(),
     settings.financialYearStartMonth,
@@ -126,21 +125,10 @@ export async function loadOwnedDividendAssumptions(
   const today = currentWindow.window.endDate;
 
   const assumptions = createDividendAssumptionsRepository(client);
-  // PRF-005: `portfolioAssumptions` and `identityRows` are also mutually
-  // independent (both scoped by userId/portfolioId alone) -- one wave
-  // instead of two.
-  const [portfolioAssumptions, identityRows] = await Promise.all([
-    assumptions.getPortfolioAssumptions(userId, portfolioId),
-    client.all<Row>(
-      `SELECT ps.id, ps.security_id, COALESCE(ps.display_symbol, ps.source_symbol) AS symbol,
-              s.primary_currency_code
-       FROM portfolio_securities ps
-       JOIN securities s ON s.id = ps.security_id
-       WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held'
-       ORDER BY ps.id LIMIT ?`,
-      [userId, portfolioId, MAX_SECURITIES + 1],
-    ),
-  ]);
+  const portfolioAssumptions = await assumptions.getPortfolioAssumptions(
+    userId,
+    portfolioId,
+  );
   const portfolioRow: DividendAssumptionsPortfolioRow = {
     valueGrowthPercentDecimal:
       portfolioAssumptions?.valueGrowthPercentDecimal ?? null,
@@ -149,14 +137,20 @@ export async function loadOwnedDividendAssumptions(
     version: portfolioAssumptions?.version ?? null,
   };
 
-  if (identityRows.length > MAX_SECURITIES)
+  // PRF-012: `context.identities`, filtered to held, is the SAME row set
+  // this screen's own identity query used to fetch separately -- the
+  // `MAX_SECURITIES` cap below is unchanged, still enforced on the same
+  // held-only subset.
+  const identities = context.identities
+    .filter((identity) => identity.status === "held")
+    .map((identity) => ({
+      id: identity.id,
+      securityId: identity.securityId,
+      symbol: identity.symbol,
+      currencyCode: identity.primaryCurrencyCode,
+    }));
+  if (identities.length > MAX_SECURITIES)
     throw new Error("too_many_securities");
-  const identities = identityRows.map((row) => ({
-    id: String(row.id),
-    securityId: String(row.security_id),
-    symbol: String(row.symbol),
-    currencyCode: String(row.primary_currency_code),
-  }));
 
   if (identities.length === 0) {
     return { today, securities: [], portfolio: portfolioRow };
@@ -191,9 +185,15 @@ export async function loadOwnedDividendAssumptions(
       // forcing a Sharesight fetch on a cold watermark buys nothing.
       // Whatever price data already exists is still read and used exactly
       // as before; the hourly cron remains the refresh path.
-      loadOwnedHoldings(client, userId, portfolioId, now, {}, "skip").catch(
-        () => null,
-      ),
+      loadOwnedHoldings(
+        client,
+        userId,
+        portfolioId,
+        now,
+        {},
+        "skip",
+        context,
+      ).catch(() => null),
       // DIV-016 part B: `hasFullYearHistoryEvidence` per security is
       // `computeSecurityDividendForecast`'s OWN already-computed evidence
       // determination (`loadOwnedDividendHistory`'s per-security
@@ -204,9 +204,14 @@ export async function loadOwnedDividendAssumptions(
       // live override has gone dormant when evidence genuinely could not
       // be checked) rather than failing this whole screen, matching the
       // holdings-pipeline degrade above.
-      loadOwnedDividendHistory(client, userId, portfolioId, now).catch(
-        () => null,
-      ),
+      loadOwnedDividendHistory(
+        client,
+        userId,
+        portfolioId,
+        now,
+        undefined,
+        context,
+      ).catch(() => null),
       client.all<Row>(
         `SELECT security_id, kind, status, ex_date, currency_code, gross_per_share_decimal
          FROM dividend_events

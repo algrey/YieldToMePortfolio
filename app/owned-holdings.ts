@@ -2,6 +2,7 @@ import type { SqlClient } from "../db/repositories/sql-client.ts";
 import { createOwnedManualOverrideRepository } from "../db/repositories/market-data.ts";
 import {
   createOwnedUserSettingsRepository,
+  type OwnedUserSettingsRecord,
   type PriceSourcePreference,
 } from "../db/repositories/owned-portfolios.ts";
 import {
@@ -56,6 +57,10 @@ import {
   READ_TIME_CALCULATION_BUDGET,
 } from "./calculation-executor-service.ts";
 import { emitStructuredLog } from "../domain/observability/index.ts";
+import {
+  assertOwnedPortfolioContext,
+  type OwnedPortfolioContext,
+} from "./owned-portfolio-context.ts";
 
 const MAX_HELD = 500;
 const MAX_PROJECTIONS = 500;
@@ -625,6 +630,15 @@ export async function loadOwnedHoldings(
   // hourly cron (`worker/index.ts`) remains the refresh path when this is
   // skipped.
   priceFreshnessMode: "enforce" | "skip" = "enforce",
+  // PRF-012: an optional, pre-resolved `{userId, portfolio, settings,
+  // identities}` a page-level caller (e.g. `owned-income-projection.ts`)
+  // resolved ONCE and threads through here instead of paying this
+  // function's own portfolio/`portfolio_securities` reads again.
+  // `undefined` (every existing caller, unchanged by omission) self-loads
+  // exactly as before. Asserted below, never trusted blindly -- a context
+  // resolved for a different user/portfolio is rejected, not silently
+  // used.
+  context?: OwnedPortfolioContext,
 ): Promise<{
   status: "complete" | "partial" | "empty" | "unavailable";
   homeCurrencyCode: string;
@@ -649,22 +663,38 @@ export async function loadOwnedHoldings(
   // to stale-check and always reports `{ pending: false }`.
   projectionPending: ProjectionPendingState;
 }> {
+  if (context) assertOwnedPortfolioContext(context, userId, portfolioId);
   const nowIso = now.toISOString();
   // PRF-003 (owner-reported slow tab navigation): `portfolio` and
   // `heldCountRow` are independent reads (different tables, neither's SQL
   // references the other's output) -- run concurrently rather than paying
   // two sequential D1 round trips before this read can even decide which
   // branch (empty-portfolio vs normal) to take.
-  const [portfolio, heldCountRow] = await Promise.all([
-    client.get<Row>(
-      `SELECT base_currency_code, timezone FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
-      [portfolioId, userId],
-    ),
-    client.get<Row>(
-      `SELECT count(*) AS count FROM portfolio_securities WHERE user_id = ? AND portfolio_id = ? AND status = 'held'`,
-      [userId, portfolioId],
-    ),
-  ]);
+  // PRF-012: `context`, when supplied, already has both facts below --
+  // skip both reads entirely rather than re-querying what the caller
+  // already resolved.
+  const [portfolio, heldCountRow]: [Row | undefined, Row | undefined] = context
+    ? [
+        {
+          base_currency_code: context.portfolio.baseCurrencyCode,
+          timezone: context.portfolio.timezone,
+        },
+        {
+          count: context.identities.filter(
+            (identity) => identity.status === "held",
+          ).length,
+        },
+      ]
+    : await Promise.all([
+        client.get<Row>(
+          `SELECT base_currency_code, timezone FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
+          [portfolioId, userId],
+        ),
+        client.get<Row>(
+          `SELECT count(*) AS count FROM portfolio_securities WHERE user_id = ? AND portfolio_id = ? AND status = 'held'`,
+          [userId, portfolioId],
+        ),
+      ]);
   if (!portfolio) throw new Error("not_owned");
   const timezone = requiredText(portfolio, "timezone");
   const asOf = localDate(now, timezone);
@@ -738,9 +768,25 @@ export async function loadOwnedHoldings(
   // `advanceCalculationRuns` -- the row(s) fetched BEFORE a self-heal are by
   // definition stale once one runs, so they are never reused across that
   // boundary.
+  // PRF-012: `context.identities`, filtered to `status === "held"`, is the
+  // SAME row set `IDENTITIES_SQL` would fetch -- reused instead of a
+  // second query when a caller supplied one.
   const [firstPublicationRows, identityRows] = await Promise.all([
     client.all<Row>(PUBLICATION_SQL, [userId, portfolioId]),
-    client.all<Row>(IDENTITIES_SQL, [userId, portfolioId, MAX_HELD]),
+    context
+      ? Promise.resolve(
+          context.identities
+            .filter((identity) => identity.status === "held")
+            .map((identity): Row => ({
+              id: identity.id,
+              security_id: identity.securityId,
+              symbol: identity.symbol,
+              name: identity.name,
+              exchange: identity.exchange,
+              primary_currency_code: identity.primaryCurrencyCode,
+            })),
+        )
+      : client.all<Row>(IDENTITIES_SQL, [userId, portfolioId, MAX_HELD]),
   ]);
   let publicationRows = firstPublicationRows;
   if (publicationRows.length !== 1) {
@@ -1120,7 +1166,11 @@ export async function loadOwnedHoldings(
     // for an owner with a live portfolio) fails HONEST, not silent -- the
     // same `sharesight_delayed` default the column itself carries, never
     // a thrown error over a preference lookup alone.
-    createOwnedUserSettingsRepository(client).get(userId),
+    // PRF-012: `context.settings` is the SAME PK lookup -- skip re-reading
+    // `user_settings` when a caller already resolved it.
+    context
+      ? Promise.resolve<OwnedUserSettingsRecord | null>(context.settings)
+      : createOwnedUserSettingsRepository(client).get(userId),
   ]);
   if (cashAccountRows.length > MAX_CASH_ACCOUNTS)
     throw new Error("cash_account_limit");

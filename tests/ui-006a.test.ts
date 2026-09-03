@@ -794,7 +794,7 @@ test("UI-006A: no API route exists for the what-if overlay (nothing to persist i
 // --- Route ownership / no-store ---------------------------------------
 
 test("UI-006A: both Income routes load via the owner-scoped context, deny an unowned portfolio through loadOwnedIncomeProjection's own re-check, and are force-dynamic", async () => {
-  const [landingPage, multiYearPage, service] = await Promise.all([
+  const [landingPage, multiYearPage, service, context] = await Promise.all([
     readFile(
       new URL(
         "../app/portfolio/[portfolioId]/income/page.tsx",
@@ -813,6 +813,10 @@ test("UI-006A: both Income routes load via the owner-scoped context, deny an uno
       new URL("../app/owned-income-projection.ts", import.meta.url),
       "utf8",
     ),
+    readFile(
+      new URL("../app/owned-portfolio-context.ts", import.meta.url),
+      "utf8",
+    ),
   ]);
   for (const page of [landingPage, multiYearPage]) {
     assert.match(page, /export const dynamic = "force-dynamic"/);
@@ -829,11 +833,18 @@ test("UI-006A: both Income routes load via the owner-scoped context, deny an uno
     assert.match(page, /loadOwnedIncomeProjection\(/);
     assert.match(page, /workspace\.activePortfolio === null\) notFound\(\)/);
   }
+  // PRF-012: the ownership re-check moved from an inline `SELECT id FROM
+  // portfolios ...` in this module to `resolveOwnedPortfolioContext`
+  // (`app/owned-portfolio-context.ts`), called once and threaded through
+  // to `loadOwnedHoldings`/`loadOwnedDividendHistory`/
+  // `loadHistoricalPortfolioValueAtDates` -- the SAME re-check, just
+  // shared instead of duplicated per loader.
+  assert.match(service, /resolveOwnedPortfolioContext\(/);
   assert.match(
-    service,
-    /SELECT id FROM portfolios WHERE id = \? AND user_id = \?/,
+    context,
+    /SELECT id, base_currency_code, timezone FROM portfolios WHERE id = \? AND user_id = \?/,
   );
-  assert.match(service, /if \(!portfolio\) throw new Error\("not_owned"\)/);
+  assert.match(context, /if \(!portfolioRow\) throw new Error\("not_owned"\)/);
 });
 
 test("UI-016 (supersedes follow-up 3; UI-037 supersedes the currentFinancialYear-unused claim below): the landing page now requests real past-FY history (5 back / 1 forward), since it renders pastFinancialYears; multiYear is still unused and not fetched wider than necessary", async () => {

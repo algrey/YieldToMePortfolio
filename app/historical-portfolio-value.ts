@@ -212,6 +212,10 @@ import {
   upsertStoredValueHistory,
   type UnresolvableValueHistoryReason,
 } from "../db/repositories/portfolio-value-history.ts";
+import {
+  assertOwnedPortfolioContext,
+  type OwnedPortfolioContext,
+} from "./owned-portfolio-context.ts";
 
 // Bounds, documented (free-plan READ discipline -- this feature performs no
 // writes at all, so the binding budget is D1's per-request statement/row
@@ -565,6 +569,15 @@ async function loadFacts(
   rangeFrom: string,
   rangeTo: string,
   priceWindows?: ReadonlyArray<{ from: string; to: string }>,
+  // PRF-012: an optional, already-verified context (see
+  // `resolveOwnedPortfolioContext`'s own doc comment) -- when supplied,
+  // both reads below are skipped in favour of `context.portfolio`/
+  // `context.identities` (ALL statuses, matching `securityRows`' own
+  // unfiltered query -- a sold security can still be held ON a requested
+  // past date). Callers must have already asserted this context belongs
+  // to `userId`/`portfolioId` (`loadHistoricalPortfolioValueAtDates` does
+  // this once, at its own entry point).
+  context?: OwnedPortfolioContext,
 ): Promise<{
   baseCurrencyCode: string;
   timezone: string;
@@ -584,18 +597,30 @@ async function loadFacts(
   // SQL references the other) -- fetched concurrently rather than paying
   // two sequential round trips before this function even knows how many
   // securities it is dealing with.
-  const [portfolio, securityRows] = await Promise.all([
-    client.get<Row>(
-      `SELECT base_currency_code, timezone FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
-      [portfolioId, userId],
-    ),
-    client.all<Row>(
-      `SELECT ps.id AS portfolio_security_id, ps.security_id, ps.source_currency_code
+  const [portfolio, securityRows]: [Row | undefined, Row[]] = context
+    ? [
+        {
+          base_currency_code: context.portfolio.baseCurrencyCode,
+          timezone: context.portfolio.timezone,
+        },
+        context.identities.map((identity): Row => ({
+          portfolio_security_id: identity.id,
+          security_id: identity.securityId,
+          source_currency_code: identity.sourceCurrencyCode,
+        })),
+      ]
+    : await Promise.all([
+        client.get<Row>(
+          `SELECT base_currency_code, timezone FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
+          [portfolioId, userId],
+        ),
+        client.all<Row>(
+          `SELECT ps.id AS portfolio_security_id, ps.security_id, ps.source_currency_code
        FROM portfolio_securities ps WHERE ps.user_id = ? AND ps.portfolio_id = ?
        ORDER BY ps.id LIMIT ?`,
-      [userId, portfolioId, MAX_SECURITIES + 1],
-    ),
-  ]);
+          [userId, portfolioId, MAX_SECURITIES + 1],
+        ),
+      ]);
   if (!portfolio) return null;
   const baseCurrencyCode = String(portfolio.base_currency_code ?? "");
   const timezone = String(portfolio.timezone ?? "");
@@ -746,6 +771,12 @@ async function resolveRange(
   userId: string,
   portfolioId: string,
   now: string,
+  // PRF-012: when supplied, `context.portfolio.timezone` replaces this
+  // function's own `portfolios` read for that column -- ownership is
+  // already verified by the caller (`loadHistoricalPortfolioValueAtDates`
+  // asserts it once) -- so only the earliest-trade-date lookup against
+  // `transactions` still needs to run.
+  context?: OwnedPortfolioContext,
 ): Promise<{
   rangeFrom: string;
   rangeTo: string;
@@ -757,17 +788,31 @@ async function resolveRange(
    * price rows in the first place). */
   rangeClamped: boolean;
 } | null> {
-  const portfolio = await client.get<Row>(
-    `SELECT timezone,
+  // PRF-012: `context`, when supplied, already carries a verified
+  // `timezone` -- only the earliest-trade-date lookup still needs to run,
+  // scoped by `userId`/`portfolioId` directly (no `portfolios` join
+  // needed; ownership was already asserted once by the caller).
+  const row: Row | undefined = context
+    ? await client.get<Row>(
+        `SELECT t.local_trade_date AS earliest_trade_date FROM transactions t
+         WHERE t.user_id = ? AND t.portfolio_id = ?
+           AND t.status IN ('posted', 'reversed')
+         ORDER BY t.local_trade_date ASC, t.id ASC LIMIT 1`,
+        [userId, portfolioId],
+      )
+    : await client.get<Row>(
+        `SELECT timezone,
        (SELECT t.local_trade_date FROM transactions t
         WHERE t.user_id = p.user_id AND t.portfolio_id = p.id
           AND t.status IN ('posted', 'reversed')
         ORDER BY t.local_trade_date ASC, t.id ASC LIMIT 1) AS earliest_trade_date
      FROM portfolios p WHERE p.id = ? AND p.user_id = ?`,
-    [portfolioId, userId],
+        [portfolioId, userId],
+      );
+  if (!context && !row) return null;
+  const timezone = String(
+    context ? context.portfolio.timezone : (row?.timezone ?? ""),
   );
-  if (!portfolio) return null;
-  const timezone = String(portfolio.timezone ?? "");
   let rangeTo: string;
   try {
     rangeTo = new Intl.DateTimeFormat("en-CA", {
@@ -781,8 +826,8 @@ async function resolveRange(
   }
   if (!DATE.test(rangeTo)) rangeTo = now.slice(0, 10);
   const earliestTradeDate =
-    typeof portfolio.earliest_trade_date === "string"
-      ? portfolio.earliest_trade_date
+    typeof row?.earliest_trade_date === "string"
+      ? row.earliest_trade_date
       : null;
   let rangeFrom =
     earliestTradeDate && DATE.test(earliestTradeDate)
@@ -1445,12 +1490,27 @@ export async function loadHistoricalPortfolioValueAtDates(
   portfolioId: string,
   requestedDates: readonly string[],
   now: Date = new Date(),
+  // PRF-012: an optional, pre-resolved `{userId, portfolio, settings,
+  // identities}` a page-level caller resolved ONCE and threads through
+  // here instead of paying this function's (and its internal
+  // `resolveRange`/`loadFacts` helpers') own portfolio/`portfolio_securities`
+  // reads again. `undefined` (every existing caller, unchanged by
+  // omission) self-loads exactly as before. Asserted below, never trusted
+  // blindly.
+  context?: OwnedPortfolioContext,
 ): Promise<Map<string, HistoricalPortfolioValuePoint> | null> {
+  if (context) assertOwnedPortfolioContext(context, userId, portfolioId);
   const validDates = [...new Set(requestedDates.filter((d) => DATE.test(d)))];
   if (validDates.length === 0) return new Map();
   const nowIso = now.toISOString();
   const sortedRequested = [...validDates].sort();
-  const range = await resolveRange(client, userId, portfolioId, nowIso);
+  const range = await resolveRange(
+    client,
+    userId,
+    portfolioId,
+    nowIso,
+    context,
+  );
   if (!range) return null;
   // Widen the read window (never narrow it) so an FY-end date older than
   // the range's own earliest-trade-derived floor still gets its own facts
@@ -1521,6 +1581,7 @@ export async function loadHistoricalPortfolioValueAtDates(
     boundedRangeFrom,
     range.rangeTo,
     priceWindows,
+    context,
   );
   if (!facts) return null;
 

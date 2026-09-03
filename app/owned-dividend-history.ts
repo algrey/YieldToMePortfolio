@@ -47,6 +47,10 @@ import {
   type DividendSecurityAssumptionsRecord,
 } from "../db/repositories/dividends.ts";
 import { createOwnedUserSettingsRepository } from "../db/repositories/owned-portfolios.ts";
+import {
+  assertOwnedPortfolioContext,
+  type OwnedPortfolioContext,
+} from "./owned-portfolio-context.ts";
 import { currentFyWindow } from "../domain/calculations/financial-year.ts";
 import { fyWindowForDate } from "../domain/dividends/fy-window.ts";
 import {
@@ -204,11 +208,24 @@ export async function loadOwnedDividendHistory(
   // (`app/owned-security-dividends.ts`) passes its one id here instead of
   // loading the whole portfolio purely to `.find()` it out afterward.
   portfolioSecurityIdFilter?: string[],
+  // PRF-012: an optional, pre-resolved `{userId, portfolio, settings,
+  // identities}` a page-level caller resolved ONCE and threads through
+  // here instead of paying this function's own portfolio/`user_settings`/
+  // identity reads again. `undefined` (every existing caller, unchanged
+  // by omission) self-loads exactly as before. Asserted below, never
+  // trusted blindly.
+  context?: OwnedPortfolioContext,
 ): Promise<OwnedDividendHistory> {
-  const portfolio = await client.get<Row>(
-    `SELECT id, base_currency_code FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
-    [portfolioId, userId],
-  );
+  if (context) assertOwnedPortfolioContext(context, userId, portfolioId);
+  const portfolio: Row | undefined = context
+    ? {
+        id: context.portfolio.id,
+        base_currency_code: context.portfolio.baseCurrencyCode,
+      }
+    : await client.get<Row>(
+        `SELECT id, base_currency_code FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
+        [portfolioId, userId],
+      );
   if (!portfolio) throw new Error("not_owned");
   // BRK-010 review finding B4: threaded into `deriveDividendHistoryForSecurity`
   // below so it can assert a stored FX rate is only ever applied toward the
@@ -225,7 +242,9 @@ export async function loadOwnedDividendHistory(
   // read of this column (`app/owned-capital-gains.ts`) is a SEPARATE,
   // unrelated consumer and is untouched.
 
-  const settings = await createOwnedUserSettingsRepository(client).get(userId);
+  const settings = context
+    ? context.settings
+    : await createOwnedUserSettingsRepository(client).get(userId);
   if (!settings) throw new Error("missing_user_settings");
   const currentWindow = currentFyWindow(
     now.toISOString(),
@@ -290,20 +309,34 @@ export async function loadOwnedDividendHistory(
   const identityFilter = narrowed
     ? `AND ps.id IN (${inClause(portfolioSecurityIdFilter.length)})`
     : "";
-  const identityRows = await client.all<Row>(
-    `SELECT ps.id, ps.security_id, COALESCE(ps.display_symbol, ps.source_symbol) AS symbol,
+  // PRF-012: `context.identities`, filtered to held (and, when narrowed,
+  // to the requested ids), is the SAME row set the query below would
+  // fetch -- reused instead of a second query when a caller supplied one.
+  const narrowedIds = new Set(narrowed ? portfolioSecurityIdFilter : []);
+  const identityRows: Row[] = context
+    ? context.identities
+        .filter((identity) => identity.status === "held")
+        .filter((identity) => !narrowed || narrowedIds.has(identity.id))
+        .map((identity) => ({
+          id: identity.id,
+          security_id: identity.securityId,
+          symbol: identity.symbol,
+          primary_currency_code: identity.primaryCurrencyCode,
+        }))
+    : await client.all<Row>(
+        `SELECT ps.id, ps.security_id, COALESCE(ps.display_symbol, ps.source_symbol) AS symbol,
             s.primary_currency_code
      FROM portfolio_securities ps
      JOIN securities s ON s.id = ps.security_id
      WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held' ${identityFilter}
      ORDER BY ps.id LIMIT ?`,
-    [
-      userId,
-      portfolioId,
-      ...(narrowed ? portfolioSecurityIdFilter : []),
-      MAX_SECURITIES + 1,
-    ],
-  );
+        [
+          userId,
+          portfolioId,
+          ...(narrowed ? portfolioSecurityIdFilter : []),
+          MAX_SECURITIES + 1,
+        ],
+      );
   if (identityRows.length > MAX_SECURITIES)
     throw new Error("too_many_securities");
   const identities = identityRows.map((row) => ({

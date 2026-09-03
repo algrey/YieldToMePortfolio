@@ -93,6 +93,7 @@ import { loadOwnedDividendAssumptions } from "../app/owned-dividend-assumptions.
 // PRF-008: the "before" reconstruction below needs the SAME two-read
 // composition `owned-income-projection.ts` itself uses.
 import { loadOwnedDividendHistory } from "../app/owned-dividend-history.ts";
+import { resolveOwnedPortfolioContext } from "../app/owned-portfolio-context.ts";
 import { createDividendFyOverrideRepository } from "../db/repositories/dividends.ts";
 import {
   loadOwnedHoldingIdentity,
@@ -1605,9 +1606,19 @@ const DEPTH_CEILING: Record<string, number> = {
   // full-range-scan defect that caused the reported Error 1102, a CPU
   // limit, not a latency one); further depth reduction here is a real,
   // not-yet-closed PRF-003-class follow-up, not attempted in this task.
-  "/portfolio/:id/income": 11,
-  "/portfolio/:id/income/multi-year": 11,
-  "/portfolio/:id/income/assumptions": 8,
+  // PRF-012: dropped 11 -> 9 (`/income`/`/income/multi-year`) and 8 -> 7
+  // (`/income/assumptions`) -- a page-level `resolveOwnedPortfolioContext`
+  // call now resolves the portfolio/`user_settings`/held-identity facts
+  // ONCE and threads the result through `loadOwnedHoldings`/
+  // `loadOwnedDividendHistory`/`loadHistoricalPortfolioValueAtDates`,
+  // removing several of those functions' own duplicate self-load waves
+  // from the critical path. The remaining depth is still the SAME
+  // genuinely-sequential shape this comment already documents (holdings'
+  // 6-deep internal chain, then the dividend-history-derived FY window
+  // gating `loadHistoricalPortfolioValueAtDates`) -- not a new follow-up.
+  "/portfolio/:id/income": 9,
+  "/portfolio/:id/income/multi-year": 9,
+  "/portfolio/:id/income/assumptions": 7,
   "/portfolio/:id/holdings/:holdingId": 7,
   "/portfolio/:id/holdings/:holdingId/transactions": 3,
   "/portfolio/:id/holdings/:holdingId/news": 2,
@@ -2244,15 +2255,17 @@ test("PRF-008: measured basis end to end -- /income's cold-cache Sharesight cost
   );
 
   // Acceptance: "/income issues zero Sharesight-gate calls and its census
-  // drops to the PRF-005 baseline" (33/33, confirmed separately by the
-  // existing per-page census test with NOT_CONFIGURED_SHARESIGHT).
+  // drops to the PRF-005 baseline" (33/33 at the time PRF-008 landed;
+  // PRF-012 (resolved-portfolio-context threading) later dropped this
+  // further to 26/26 -- confirmed separately by the existing per-page
+  // census test with NOT_CONFIGURED_SHARESIGHT).
   assert.equal(
     afterSharesightStatements,
     0,
     "expected zero sharesight_sync_state statements on /income after PRF-008",
   );
-  assert.equal(afterStats.calls, 33);
-  assert.equal(afterStats.statements, 33);
+  assert.equal(afterStats.calls, 26);
+  assert.equal(afterStats.statements, 26);
   // The BEFORE reconstruction must cost STRICTLY more than the AFTER real
   // measurement -- proving the fix actually removes real, measured cost on
   // this exact fixture, not merely an estimate.
@@ -2609,21 +2622,19 @@ test("PRF-013: the holding Dividends tab reads every dividend table exactly once
   db.close();
 });
 
-test("PRF-013: every existing loadOwnedDividendHistory caller is unchanged -- still passes exactly (client, userId, portfolioId, now), no filter", async () => {
-  // Source-pin: `loadOwnedDividendHistory`'s new `portfolioSecurityIdFilter`
-  // parameter is optional and appended AFTER `now`, so every caller that
-  // does not know about it must keep loading the whole portfolio exactly as
-  // before. Enumerated callers (excluding `owned-security-dividends.ts`
-  // itself, this task's own new narrow caller, and test files):
-  // app/owned-income-projection.ts, app/owned-dividend-assumptions.ts,
-  // app/owned-dividend-list.ts.
+test("PRF-013: every loadOwnedDividendHistory caller NOT threading a PRF-012 context is unchanged -- still passes exactly (client, userId, portfolioId, now), no filter, no context", async () => {
+  // Source-pin: `loadOwnedDividendHistory`'s `portfolioSecurityIdFilter`
+  // (PRF-013) and `context` (PRF-012) parameters are both optional and
+  // appended AFTER `now`, so every caller that does not know about them
+  // must keep loading the whole portfolio exactly as before. Enumerated
+  // callers (excluding `owned-security-dividends.ts`'s own narrow
+  // `portfolioSecurityIdFilter` caller, `owned-income-projection.ts`/
+  // `owned-dividend-assumptions.ts` -- PRF-012's own two context-threading
+  // callers, covered by their own dedicated source pin below -- and test
+  // files): app/owned-dividend-list.ts.
   const callSitePattern =
     /loadOwnedDividendHistory\(\s*client,\s*userId,\s*portfolioId,\s*now,?\s*\)/;
-  for (const file of [
-    "../app/owned-income-projection.ts",
-    "../app/owned-dividend-assumptions.ts",
-    "../app/owned-dividend-list.ts",
-  ]) {
+  for (const file of ["../app/owned-dividend-list.ts"]) {
     const source = await readFile(new URL(file, import.meta.url), "utf8");
     assert.match(
       source,
@@ -2631,4 +2642,320 @@ test("PRF-013: every existing loadOwnedDividendHistory caller is unchanged -- st
       `${file} should still call loadOwnedDividendHistory with exactly (client, userId, portfolioId, now)`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// PRF-012 -- `/income`'s loaders re-read the portfolio, `user_settings`, and
+// held-security identities three to four times per request:
+// `loadOwnedIncomeProjection` did its own portfolio-ownership read, then
+// `loadOwnedHoldings` and `loadOwnedDividendHistory` (called concurrently
+// from inside it) each independently re-read portfolio/settings/identities,
+// then a fallback `resolvedBaseCurrencyCode` read re-read `base_currency_code`
+// a fourth time, then `loadHistoricalPortfolioValueAtDates` re-read
+// portfolio + `portfolio_securities` again inside its own `resolveRange`/
+// `loadFacts` helpers. `loadOwnedDividendAssumptions` (`/income/assumptions`)
+// independently duplicated the SAME shape (its own portfolio+settings+
+// identity reads, THEN calling `loadOwnedHoldings`/`loadOwnedDividendHistory`,
+// which read all three again).
+//
+// Fixed via a single, explicit, typed "resolved portfolio context"
+// (`app/owned-portfolio-context.ts`'s `resolveOwnedPortfolioContext`,
+// `{userId, portfolio, settings, identities}`) that `loadOwnedIncomeProjection`
+// and `loadOwnedDividendAssumptions` each resolve ONCE and thread through as
+// an OPTIONAL, TRAILING argument to `loadOwnedHoldings`/
+// `loadOwnedDividendHistory`/`loadHistoricalPortfolioValueAtDates`. Omitted
+// (every pre-existing caller -- `authenticated-workspace.ts`,
+// `owned-security-dividends.ts`, `owned-dividend-list.ts`) is unchanged --
+// each loader still self-loads exactly as before. Every one of the three
+// loaders asserts `context.userId === userId && context.portfolio.id ===
+// portfolioId` before trusting anything on it (`assertOwnedPortfolioContext`).
+// ---------------------------------------------------------------------------
+
+test("PRF-012: per-page census -- /income and /income/multi-year drop 33/34 -> 26/27 statements, /income/assumptions drops to 25 (regression pin: fails against the pre-fix source -- see this file's own git-archive verification note in docs/ARCHITECTURE.md)", async () => {
+  const EXPECTED: Record<string, number> = {
+    "/portfolio/:id/income": 26,
+    "/portfolio/:id/income/multi-year": 27,
+    "/portfolio/:id/income/assumptions": 25,
+  };
+  for (const [name, expected] of Object.entries(EXPECTED)) {
+    const page = PAGES.find((candidate) => candidate.name === name);
+    assert.ok(page, `expected a registered census page named ${name}`);
+    const db = await productionScaleFixture();
+    const { client, stats } = stageCensusClient(createSqliteSqlClient(db));
+    await page!.run(client);
+    assert.equal(
+      stats.statements,
+      expected,
+      `expected ${name} to issue exactly ${expected} statements post-PRF-012, got ${stats.statements}`,
+    );
+    db.close();
+  }
+});
+
+test("PRF-012: loadOwnedHoldings renders byte-identically whether given a resolved context or self-loading (context is a pure read-dedup optimization, never a behavior change)", async () => {
+  const contextDb = await productionScaleFixture();
+  const context = await resolveOwnedPortfolioContext(
+    createSqliteSqlClient(contextDb),
+    USER_ID,
+    PORTFOLIO_ID,
+  );
+  contextDb.close();
+
+  const dbSelf = await productionScaleFixture();
+  const selfLoaded = await loadOwnedHoldings(
+    createSqliteSqlClient(dbSelf),
+    USER_ID,
+    PORTFOLIO_ID,
+    NOW,
+    NOT_CONFIGURED_SHARESIGHT,
+    "skip",
+  );
+  dbSelf.close();
+
+  const dbContext = await productionScaleFixture();
+  const withContext = await loadOwnedHoldings(
+    createSqliteSqlClient(dbContext),
+    USER_ID,
+    PORTFOLIO_ID,
+    NOW,
+    NOT_CONFIGURED_SHARESIGHT,
+    "skip",
+    context,
+  );
+  dbContext.close();
+
+  assert.deepEqual(
+    withContext,
+    selfLoaded,
+    "expected loadOwnedHoldings' output to be unaffected by a supplied context",
+  );
+});
+
+test("PRF-012: loadOwnedDividendHistory renders byte-identically whether given a resolved context or self-loading", async () => {
+  const contextDb = await productionScaleFixture();
+  const context = await resolveOwnedPortfolioContext(
+    createSqliteSqlClient(contextDb),
+    USER_ID,
+    PORTFOLIO_ID,
+  );
+  contextDb.close();
+
+  const dbSelf = await productionScaleFixture();
+  const selfLoaded = await loadOwnedDividendHistory(
+    createSqliteSqlClient(dbSelf),
+    USER_ID,
+    PORTFOLIO_ID,
+    NOW,
+  );
+  dbSelf.close();
+
+  const dbContext = await productionScaleFixture();
+  const withContext = await loadOwnedDividendHistory(
+    createSqliteSqlClient(dbContext),
+    USER_ID,
+    PORTFOLIO_ID,
+    NOW,
+    undefined,
+    context,
+  );
+  dbContext.close();
+
+  assert.deepEqual(
+    withContext,
+    selfLoaded,
+    "expected loadOwnedDividendHistory's output to be unaffected by a supplied context",
+  );
+});
+
+test("PRF-012: loadHistoricalPortfolioValueAtDates renders byte-identically whether given a resolved context or self-loading", async () => {
+  const requestedDates = ["2026-06-30", "2025-06-30", "2024-06-30"];
+
+  const contextDb = await productionScaleFixture();
+  const context = await resolveOwnedPortfolioContext(
+    createSqliteSqlClient(contextDb),
+    USER_ID,
+    PORTFOLIO_ID,
+  );
+  contextDb.close();
+
+  const dbSelf = await productionScaleFixture();
+  const selfLoaded = await loadHistoricalPortfolioValueAtDates(
+    createSqliteSqlClient(dbSelf),
+    USER_ID,
+    PORTFOLIO_ID,
+    requestedDates,
+    NOW,
+  );
+  dbSelf.close();
+
+  const dbContext = await productionScaleFixture();
+  const withContext = await loadHistoricalPortfolioValueAtDates(
+    createSqliteSqlClient(dbContext),
+    USER_ID,
+    PORTFOLIO_ID,
+    requestedDates,
+    NOW,
+    context,
+  );
+  dbContext.close();
+
+  assert.deepEqual(
+    withContext,
+    selfLoaded,
+    "expected loadHistoricalPortfolioValueAtDates' output to be unaffected by a supplied context",
+  );
+});
+
+test("PRF-012: loadOwnedIncomeProjection and loadOwnedDividendAssumptions render byte-identically on a multi-security fixture regardless of the internal context threading (both functions' own public signature/behavior is unchanged)", async () => {
+  // Both functions now ALWAYS resolve and thread a context internally --
+  // there is no toggle left at this level to compare against. What IS
+  // verifiable, permanently, is that calling each twice against two
+  // independently-built copies of the SAME fixture produces byte-identical
+  // output -- i.e. the composition is deterministic and the context
+  // threading introduces no read-ordering-dependent divergence. Combined
+  // with the three loader-level byte-identical tests above (which DO
+  // compare context-supplied vs self-loaded output directly), this closes
+  // the loop: every fact these two functions consume is proven unaffected
+  // by the context, so their own composed output must be too.
+  const dbA = await productionScaleFixture();
+  const projectionA = await loadOwnedIncomeProjection(
+    createSqliteSqlClient(dbA),
+    USER_ID,
+    PORTFOLIO_ID,
+    NOW,
+    { yearsBack: 5, yearsForward: 1 },
+  );
+  dbA.close();
+
+  const dbB = await productionScaleFixture();
+  const projectionB = await loadOwnedIncomeProjection(
+    createSqliteSqlClient(dbB),
+    USER_ID,
+    PORTFOLIO_ID,
+    NOW,
+    { yearsBack: 5, yearsForward: 1 },
+  );
+  dbB.close();
+
+  assert.deepEqual(projectionA, projectionB);
+
+  const dbC = await productionScaleFixture();
+  const assumptionsA = await loadOwnedDividendAssumptions(
+    createSqliteSqlClient(dbC),
+    USER_ID,
+    PORTFOLIO_ID,
+    NOW,
+  );
+  dbC.close();
+
+  const dbD = await productionScaleFixture();
+  const assumptionsB = await loadOwnedDividendAssumptions(
+    createSqliteSqlClient(dbD),
+    USER_ID,
+    PORTFOLIO_ID,
+    NOW,
+  );
+  dbD.close();
+
+  assert.deepEqual(assumptionsA, assumptionsB);
+});
+
+test("PRF-012: a context resolved for a different userId or a different portfolioId is REJECTED, never silently trusted, by every one of the three loaders", async () => {
+  const db = await productionScaleFixture();
+  const client = createSqliteSqlClient(db);
+  const validContext = await resolveOwnedPortfolioContext(
+    client,
+    USER_ID,
+    PORTFOLIO_ID,
+  );
+  const wrongUser = { ...validContext, userId: "someone-else" };
+  const wrongPortfolio = {
+    ...validContext,
+    portfolio: { ...validContext.portfolio, id: "someone-elses-portfolio" },
+  };
+
+  for (const badContext of [wrongUser, wrongPortfolio]) {
+    await assert.rejects(
+      loadOwnedHoldings(
+        client,
+        USER_ID,
+        PORTFOLIO_ID,
+        NOW,
+        NOT_CONFIGURED_SHARESIGHT,
+        "skip",
+        badContext,
+      ),
+      /invalid_portfolio_context/,
+      "expected loadOwnedHoldings to reject a mismatched context",
+    );
+    await assert.rejects(
+      loadOwnedDividendHistory(
+        client,
+        USER_ID,
+        PORTFOLIO_ID,
+        NOW,
+        undefined,
+        badContext,
+      ),
+      /invalid_portfolio_context/,
+      "expected loadOwnedDividendHistory to reject a mismatched context",
+    );
+    await assert.rejects(
+      loadHistoricalPortfolioValueAtDates(
+        client,
+        USER_ID,
+        PORTFOLIO_ID,
+        ["2026-06-30"],
+        NOW,
+        badContext,
+      ),
+      /invalid_portfolio_context/,
+      "expected loadHistoricalPortfolioValueAtDates to reject a mismatched context",
+    );
+  }
+  db.close();
+});
+
+test("PRF-012: every loadOwnedHoldings caller NOT threading a resolved context is source-pinned unchanged -- authenticated-workspace.ts's two call sites still pass no 7th argument", async () => {
+  // `context` is appended AFTER `priceFreshnessMode` (the 6th, PRF-008
+  // argument), so an unaware caller omitting it self-loads exactly as
+  // before. `owned-income-projection.ts`/`owned-dividend-assumptions.ts`
+  // (PRF-012's own two context-threading callers) are covered by the
+  // byte-identical/rejection tests above, not this source pin.
+  const source = await readFile(
+    new URL("../app/authenticated-workspace.ts", import.meta.url),
+    "utf8",
+  );
+  const sevenArgCallPattern =
+    /loadOwnedHoldings\([^)]*,[^)]*,[^)]*,[^)]*,[^)]*,[^)]*,[^)]*\)/;
+  assert.ok(
+    !sevenArgCallPattern.test(source),
+    "expected no loadOwnedHoldings call site in authenticated-workspace.ts to pass a 7th (context) argument",
+  );
+});
+
+test("PRF-012: loadHistoricalPortfolioValueAtDates has exactly one production caller (app/owned-income-projection.ts), which is this task's own context-threading call site", async () => {
+  const files = [
+    ...(await readdir(new URL("../app/", import.meta.url), {
+      recursive: true,
+    })),
+  ]
+    .filter((relativePath) => /\.tsx?$/.test(relativePath))
+    .map((relativePath) => `app/${relativePath.replace(/\\/g, "/")}`);
+  const callers: string[] = [];
+  for (const file of files) {
+    if (file === "app/historical-portfolio-value.ts") continue;
+    const source = await readFile(
+      new URL(`../${file}`, import.meta.url),
+      "utf8",
+    );
+    if (source.includes("loadHistoricalPortfolioValueAtDates(")) {
+      callers.push(file);
+    }
+  }
+  assert.deepEqual(
+    callers,
+    ["app/owned-income-projection.ts"],
+    "expected loadHistoricalPortfolioValueAtDates to have exactly one production caller",
+  );
 });

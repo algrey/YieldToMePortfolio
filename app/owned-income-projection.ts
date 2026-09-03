@@ -24,6 +24,7 @@ import { loadOwnedDividendHistory } from "./owned-dividend-history.ts";
 import { loadOwnedHoldings } from "./owned-holdings.ts";
 import { createDividendAssumptionsRepository } from "../db/repositories/dividends.ts";
 import { loadHistoricalPortfolioValueAtDates } from "./historical-portfolio-value.ts";
+import { resolveOwnedPortfolioContext } from "./owned-portfolio-context.ts";
 import { fyWindowForDate } from "../domain/dividends/fy-window.ts";
 import { deriveYieldFromResolvedTtm } from "../domain/market-data/dividend-yield.ts";
 import {
@@ -59,7 +60,6 @@ export type { WhatIfGrowthOverrides } from "../domain/dividends/projection.ts";
 
 const MAX_YEARS = 10;
 
-type Row = Record<string, unknown>;
 type PortfolioValueStatus = "available" | "partial" | "unavailable";
 
 function clampYearsBack(value: number | undefined, fallback: number): number {
@@ -160,13 +160,19 @@ export async function loadOwnedIncomeProjection(
   const yearsForward = options.yearsForward ?? MAX_YEARS;
   const yearsBack = clampYearsBack(options.yearsBack, MAX_YEARS);
 
-  // Ownership gate mirrors every other owned-* service: a portfolio id alone
-  // never discloses whether another owner has one.
-  const portfolio = await client.get<Row>(
-    `SELECT id FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
-    [portfolioId, userId],
+  // PRF-012: resolves the portfolio/`user_settings`/held-identity facts
+  // ONCE for this whole projection -- `loadOwnedHoldings`,
+  // `loadOwnedDividendHistory` and `loadHistoricalPortfolioValueAtDates`
+  // below each independently self-loaded the SAME facts (portfolio
+  // ownership doubles as this function's own ownership gate, mirroring
+  // every other owned-* service). Passed through to all three so each
+  // skips its own re-read; each still asserts the context belongs to
+  // `userId`/`portfolioId` before trusting it.
+  const context = await resolveOwnedPortfolioContext(
+    client,
+    userId,
+    portfolioId,
   );
-  if (!portfolio) throw new Error("not_owned");
 
   // PRF-005 (owner-reported Error 1102 on `/portfolio/:id/income`):
   // `loadOwnedDividendHistory` and `loadOwnedHoldings` are mutually
@@ -200,12 +206,15 @@ export async function loadOwnedIncomeProjection(
     now,
     {},
     "skip",
+    context,
   ).catch(() => null);
   const history = await loadOwnedDividendHistory(
     client,
     userId,
     portfolioId,
     now,
+    undefined,
+    context,
   );
   const today = history.today;
   const holdings: Awaited<ReturnType<typeof loadOwnedHoldings>> | null =
@@ -264,18 +273,11 @@ export async function loadOwnedIncomeProjection(
 
   // Fall back to the portfolio's own base currency for aggregation scope
   // even when the holdings pipeline is unavailable (e.g. no published
-  // calculation yet) -- read it directly rather than leaving every
-  // base-currency-scoped aggregate permanently unavailable too.
+  // calculation yet) -- PRF-012: `context.portfolio.baseCurrencyCode` is
+  // this SAME fact, already resolved once above, so this no longer needs
+  // its own second `portfolios` read.
   const resolvedBaseCurrencyCode =
-    baseCurrencyCode ??
-    String(
-      (
-        await client.get<Row>(
-          `SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
-          [portfolioId, userId],
-        )
-      )?.base_currency_code ?? "",
-    );
+    baseCurrencyCode ?? context.portfolio.baseCurrencyCode;
 
   const holdingsByPortfolioSecurityId = new Map(
     (holdings?.rows ?? []).map((row) => [row.id, row]),
@@ -624,6 +626,7 @@ export async function loadOwnedIncomeProjection(
         portfolioId,
         [...endDatesByYear.values()],
         now,
+        context,
       );
       if (valuesByDate) {
         for (const [endingYear, endDate] of endDatesByYear) {
