@@ -233,6 +233,7 @@ function row(overrides: Partial<OwnedDividendListRow>): OwnedDividendListRow {
     exDate: null,
     notPaid: false,
     cashDecimal: null,
+    amountUnreadable: false,
     frankingTotalDecimal: null,
     frankingDerivedZero: false,
     grossDecimal: null,
@@ -349,6 +350,7 @@ function toListRow(dRow: {
   exDate: string | null;
   status: string;
   cashDecimal: string | null;
+  amountUnreadable?: boolean;
   frankingTotalDecimal: string | null;
   frankingDerivedZero: boolean;
   grossDecimal: string | null;
@@ -367,6 +369,7 @@ function toListRow(dRow: {
     exDate: dRow.exDate,
     notPaid: dRow.status === "declared_pending",
     cashDecimal: dRow.cashDecimal,
+    amountUnreadable: dRow.amountUnreadable === true,
     frankingTotalDecimal: dRow.frankingTotalDecimal,
     frankingDerivedZero: dRow.frankingDerivedZero,
     grossDecimal: dRow.grossDecimal,

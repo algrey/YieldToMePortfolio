@@ -56,6 +56,13 @@ export type OwnedDividendListRow = {
   /** True for a declared-but-unpaid row -- rendered as the existing "not paid" status text, never a fabricated cash amount. */
   notPaid: boolean;
   cashDecimal: string | null;
+  /** BUG-021: `true` when `cashDecimal` above is `null` because the
+   * underlying stored `dividend_manual_records` amount could not be read
+   * (`DerivedDividendRow.amountUnreadable`), not because nothing was ever
+   * recorded -- lets the list render the distinct "needs correction" copy
+   * rather than the generic missing-data label a plain unknown amount
+   * gets. */
+  amountUnreadable: boolean;
   frankingTotalDecimal: string | null;
   /** DIV-007: `true` when `frankingTotalDecimal` above is an INFERRED $0
    * (the imported Sharesight fact omitted its franking field entirely),
@@ -144,6 +151,7 @@ export async function loadOwnedDividendList(
     exDate: row.exDate,
     notPaid: row.status === "declared_pending",
     cashDecimal: row.cashDecimal,
+    amountUnreadable: row.amountUnreadable === true,
     frankingTotalDecimal: row.frankingTotalDecimal,
     frankingDerivedZero: row.frankingDerivedZero,
     grossDecimal: row.grossDecimal,

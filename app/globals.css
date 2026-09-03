@@ -5305,6 +5305,15 @@ dd {
   font-weight: 650;
 }
 
+/* BUG-021: a stored dividend amount this app could not read (not merely
+   absent) -- mirrors `.dividend-status-not-paid`'s convention of pairing
+   the warning colour with literal, non-colour status text ("needs
+   correction"), never colour alone. */
+.dividend-status-unreadable {
+  color: var(--warning);
+  font-weight: 650;
+}
+
 .dividend-franking-default {
   display: flex;
   flex-wrap: wrap;

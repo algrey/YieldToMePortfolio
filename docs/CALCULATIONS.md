@@ -566,6 +566,54 @@ Implemented ahead of the rest of section 11 to feed `DIV-003`'s assumptions-grid
 
 This keeps this module's existing per-security single-currency invariant intact for the achievable case, and degrades honestly for the non-achievable one, without any downstream matching/aggregation code needing special-casing beyond the one conversion call site. **F2**: provenance (`DerivedDividendRow.originalCurrencyCode`/`fxRateToPortfolioDecimal`/`fxRateSource`, and the equivalent `DominatedImported` fields) is populated ONLY when a conversion actually occurred (case "achievable" above) -- a degraded fact instead surfaces via the row's own overridden `currencyCode`, never both at once. **UI-014 (2026-08-19):** this provenance is now rendered -- the per-security Dividends tab (`app/components/security-dividends-tab.tsx`) shows a compact "converted from `<originalCurrencyCode>` @ `<rate, display-trimmed>` (`<fxRateSource>`)" line beneath a converted row's Cash figure, text not colour; the ORIGINAL (pre-conversion) amount itself is not threaded onto `DerivedDividendRow` (only the converted total survives -- `resolveImportedRecordCurrency` overwrites `totalCashDecimal` in place), so this renders currency/rate/source only, never a back-derived amount. The rate display trims the stored 24dp value to 6dp (half-even, trailing zeros dropped, `app/dividend-history-prefill.ts`'s `formatFxRate`) for READABILITY ONLY -- the stored, full-precision value is what every calculation above still uses. **F3**: a stored FX rate over 24 decimal places is rejected at write time (`db/repositories/dividends.ts`); the read-time multiply/round arithmetic is wrapped in try/catch so one malformed/over-precision rate degrades only that record's totals, never aborts the whole security's dividend history load. At import-commit time (`db/repositories/import-commit.ts`), a payout foreign to its own security with no rate, where conversion IS achievable (case "achievable" above), never reaches `dividend_manual_records` -- it stages with a blocking, IMP-008-excludable `SHARESIGHT_PAYOUT_FX_RATE_MISSING` issue instead (`domain/sharesight-sync/transform.ts`, using a best-effort same-fetch-trade-evidence proxy for the security's currency pre-resolution, gated on the SAME achievability condition -- never blocking case C); commit re-checks the identical condition with the REAL, DB-resolved security currency. See `docs/DATA_MODEL.md`'s `dividend_manual_records` entry for the schema.
 
+**A stored dividend amount this app cannot read -- BUG-021 read-time isolation (2026-09-03), mirroring BRK-010 F3.** BUG-014 (2026-09-03) closed the import-commit write boundary for a `dividend_manual_records` amount (`isWithinReadPathDecimalBounds` in `db/repositories/dividends.ts`, expressed as `domain/calculations/decimal.ts`'s own `DECIMAL_LIMITS.inputDigits`/`inputScale` -- 64 digits, 24 fractional places), but a value written BEFORE that fix, or by any direct-DB path that bound does not gate (BUG-022 tracks closing every remaining writer), can still reach `domain/dividends/history.ts` raw. Before this fix, `computeCashGrossOrTotals`'s and `history-row-derivation.ts`'s `deriveHistoryRowDps`'s own `parseDecimal` re-parse of that stored value threw UNCAUGHT, aborting `deriveDividendHistoryForSecurity` for the WHOLE security -- every other event/record for that security 500'd on `/income` and the security's own Dividends tab, permanently (ledger/import facts are immutable, so the crash never self-resolved). Fixed the same way BRK-010 F3 isolates a malformed FX rate: `sanitizeManualRecordAmounts` runs as a read-time pre-pass over EVERY `dividend_manual_records` fact (owner-typed and imported tiers alike) before any matching/currency-conversion logic sees it, classifying each of `sharesDecimal`/`dividendPerShareDecimal`/`frankingCreditPerShareDecimal`/`totalCashDecimal`/`totalFrankingDecimal` as readable/unreadable via `isReadableStoredDecimal` -- literally "does `parseDecimal` accept this?", so the bound can never drift from the parse it protects. An unreadable field is nulled (this module's existing "genuinely unknown" representation -- never a fabricated "0"); `DerivedDividendRow.amountUnreadable` is set (only when the nulled field actually left `cashDecimal` unknown, never for an unrelated field like franking) so the security Dividends tab and the `/income` dividends list render the distinct "Amount unavailable — needs correction" copy instead of the generic missing-data label, the record still appears with its real date, and `computeLifetimeDividendTotals`/`computeFyDividendTotals` exclude it from sums via the pre-existing `amountUnknown`-keyed `unknownAmountCount`/`frankingUnknownCount` disclosure (never silently understated). Exactly one structured warning is emitted per affected record, naming the record id and which column(s) failed to parse -- never the value itself.
+
+_Ops note (read-only, run manually against production D1 when investigating a `/income` incident -- never automated, per AGENTS.md's owner-data discipline; counts only, no amounts)._ This mirrors `isWithinReadPathDecimalBounds`'s own bound (64 total digits, 24 fractional digits) for every amount column `sanitizeManualRecordAmounts` checks, plus the non-canonical shapes `parseDecimal`'s format check rejects (a leading zero, a stray space, `-0`) via `GLOB`, since D1/SQLite has no regex function:
+
+```sql
+SELECT user_id, COUNT(*) AS unreadable_amount_count
+FROM dividend_manual_records
+WHERE (
+  shares_decimal IS NOT NULL AND (
+    LENGTH(REPLACE(REPLACE(shares_decimal, '-', ''), '.', '')) > 64
+    OR LENGTH(shares_decimal) - INSTR(shares_decimal, '.') > 24
+    OR shares_decimal GLOB '0[0-9]*' OR shares_decimal GLOB '-0[0-9]*'
+    OR shares_decimal LIKE '% ' OR shares_decimal LIKE ' %' OR shares_decimal = '-0'
+  )
+) OR (
+  dividend_per_share_decimal IS NOT NULL AND (
+    LENGTH(REPLACE(REPLACE(dividend_per_share_decimal, '-', ''), '.', '')) > 64
+    OR LENGTH(dividend_per_share_decimal) - INSTR(dividend_per_share_decimal, '.') > 24
+    OR dividend_per_share_decimal GLOB '0[0-9]*' OR dividend_per_share_decimal GLOB '-0[0-9]*'
+    OR dividend_per_share_decimal LIKE '% ' OR dividend_per_share_decimal LIKE ' %' OR dividend_per_share_decimal = '-0'
+  )
+) OR (
+  franking_credit_per_share_decimal IS NOT NULL AND (
+    LENGTH(REPLACE(REPLACE(franking_credit_per_share_decimal, '-', ''), '.', '')) > 64
+    OR LENGTH(franking_credit_per_share_decimal) - INSTR(franking_credit_per_share_decimal, '.') > 24
+    OR franking_credit_per_share_decimal GLOB '0[0-9]*' OR franking_credit_per_share_decimal GLOB '-0[0-9]*'
+    OR franking_credit_per_share_decimal LIKE '% ' OR franking_credit_per_share_decimal LIKE ' %' OR franking_credit_per_share_decimal = '-0'
+  )
+) OR (
+  total_cash_decimal IS NOT NULL AND (
+    LENGTH(REPLACE(REPLACE(total_cash_decimal, '-', ''), '.', '')) > 64
+    OR LENGTH(total_cash_decimal) - INSTR(total_cash_decimal, '.') > 24
+    OR total_cash_decimal GLOB '0[0-9]*' OR total_cash_decimal GLOB '-0[0-9]*'
+    OR total_cash_decimal LIKE '% ' OR total_cash_decimal LIKE ' %' OR total_cash_decimal = '-0'
+  )
+) OR (
+  total_franking_decimal IS NOT NULL AND (
+    LENGTH(REPLACE(REPLACE(total_franking_decimal, '-', ''), '.', '')) > 64
+    OR LENGTH(total_franking_decimal) - INSTR(total_franking_decimal, '.') > 24
+    OR total_franking_decimal GLOB '0[0-9]*' OR total_franking_decimal GLOB '-0[0-9]*'
+    OR total_franking_decimal LIKE '% ' OR total_franking_decimal LIKE ' %' OR total_franking_decimal = '-0'
+  )
+)
+GROUP BY user_id;
+```
+
+Note: `LENGTH(col) - INSTR(col, '.')` is 0 (not the fractional-digit count) for a value with no `.`, which never over-counts a false positive since an integer has no fractional digits to bound; `INSTR` returns 0 when there is no `.`, making the subtraction negative and so never exceeding 24 either way -- both are safe under-triggers, not silent misses, since the total-digit check above still catches an over-length integer. The `= '-0'` check only catches the bare negative-zero shape; a non-canonical negative-zero-with-fractional-zeros (`-0.00`) is not distinguished here (a precise GLOB would also misclassify a genuinely valid negative fraction like `-0.5`), so this SCREEN can under-count that one exotic shape -- the code's own `isReadableStoredDecimal` (`domain/dividends/history.ts`) is the exact, authoritative check; this query is a best-effort diagnostic aid for sizing an incident, not a substitute for it. Verified against a migrated fixture DB before publishing this note (5 of 7 seeded rows correctly counted: over-scale, 97-fractional-digit, trailing-space, leading-zero, and 65-digit cases; two canonical rows correctly excluded). This is a COUNT-only diagnostic (per user, per AGENTS.md); it does not select or print any amount value.
+
 **Franking on a foreign-currency payout -- BRK-011 resolution cascade (owner ruling, 2026-08-19; evidence step and implementation, 2026-08-21).** Franking credits are an Australian tax construct. Whether Sharesight denominates a FOREIGN payout's franking fields (`franking_credits`, etc.) in AUD or in the payout's own currency was genuinely UNVERIFIED at BRK-010 time (this codebase will not resolve it by inspecting the owner's real tax amounts -- AGENTS.md's secrets/tax-data discipline forbids printing them to find out). The owner's BINDING cascade, in priority order, plus what a live-evidence spike (`scripts/sharesight-franking-fx-spike.mjs`, see `docs/ARCHITECTURE.md` §8.2's 2026-08-21 entry for the full evidence transcript) established about each tier:
 
 1. **Sharesight-supplied AUD franking.** UNCONFIRMED (review-corrected 2026-08-21 -- an earlier draft of this section overclaimed this as "conclusively unavailable"; the honest state is bounded, not proven). The owner's data contains no franked FOREIGN payout, so whether Sharesight would ever populate a tier-1-shaped field on one is genuinely untested. What WAS checked live on 2026-08-21, through the sealed client (`scripts/sharesight-franking-fx-spike.mjs`): the documented `payouts.tax_credit` field (third-party `markcatley/sharesight.rs` docs, "always returned in the portfolio currency") was absent from all 10 of the owner's foreign (USD) payouts -- but those are all UNFRANKED, so an absent field there proves nothing about a franked one. The spike therefore ALSO checked `tax_credit` directly against all 61 of the owner's franked NATIVE (AUD) payouts (DIV-007's established franked/unfranked split) and found it present on ZERO of them either. This is real evidence the field does not populate on this account's wire at all, regardless of currency or franking status -- but the specific foreign-AND-franked combination remains untested, so this stops short of proof and no code path is added for this tier (would be speculative on unconfirmed evidence).

@@ -259,6 +259,19 @@ export type DividendManualRecordFact = {
   // `deriveAbsentImportedFranking` runs, that function's absent-value
   // derivation naturally never fires for an overridden record either.
   frankingCurrencySource?: "owner_manual" | null;
+  // BUG-021: INTERNAL bookkeeping flag, set ONLY by this module's own
+  // `sanitizeManualRecordAmounts` pre-pass (never by any external caller,
+  // mirroring `convertedToSecurityCurrency`/`frankingDerivedZero`'s
+  // established convention) -- `true` when at least one of this record's
+  // OWN stored decimal columns (`sharesDecimal`, `dividendPerShareDecimal`,
+  // `frankingCreditPerShareDecimal`, `totalCashDecimal`,
+  // `totalFrankingDecimal`) could not be read by `parseDecimal` (over
+  // `DECIMAL_LIMITS.inputDigits`/`inputScale`, or simply non-canonical) --
+  // a value written before BUG-014's write-time bound, or any other
+  // direct-DB path that bound does not gate. That field is nulled by the
+  // same pre-pass rather than left to throw downstream; see
+  // `sanitizeManualRecordAmounts`'s doc comment.
+  amountUnreadable?: boolean;
 };
 
 export type DerivedDividendRowSource =
@@ -380,6 +393,19 @@ export type DerivedDividendRow = {
    * `DividendManualRecordFact.frankingCurrencySource`'s doc comment for the
    * live-spike evidence this reflects. */
   frankingCurrencySource: "owner_manual" | null;
+  /** BUG-021: `true` exactly when this row's `amountUnknown` (`cashDecimal
+   * === null`) is caused by a stored `dividend_manual_records` amount this
+   * module could not read (`sanitizeManualRecordAmounts`), NOT by a
+   * genuinely absent one -- lets a consumer render the distinct
+   * "amount unavailable -- needs correction" copy rather than the generic
+   * missing-data label a plain unknown amount gets. Always implies
+   * `amountUnknown: true`; never the reverse (a genuinely blank field is
+   * NOT unreadable). `false`/`undefined` for `"auto"`/`"edited"` sources
+   * (never built from a `dividend_manual_records` row) and for a clean
+   * manual/receipt/imported record. Optional so every pre-BUG-021
+   * fixture/caller that never mentions it keeps compiling and behaving
+   * unchanged, mirroring this module's other internal-flag fields. */
+  amountUnreadable?: boolean;
 };
 
 export type DeriveDividendHistoryInput = {
@@ -614,6 +640,123 @@ function isNonZeroStoredDecimal(value: string | null): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * BUG-021: does `domain/calculations/decimal.ts`'s own `parseDecimal`
+ * accept this stored decimal string? Delegates to the EXACT function every
+ * consumer of a `dividend_manual_records` amount column re-parses it with
+ * (`computeCashGrossOrTotals` below; `history-row-derivation.ts`'s
+ * `deriveHistoryRowDps`/`deriveHistoryRowFrankingPerShare`) rather than
+ * re-checking `DECIMAL_LIMITS.inputDigits`/`inputScale` a second time -- the
+ * READ-path mirror of `db/repositories/dividends.ts`'s write-time
+ * `isWithinReadPathDecimalBounds`, which references those SAME
+ * `DECIMAL_LIMITS` constants for the identical reason: this bound must
+ * never drift away from the parse it exists to protect. Catches both an
+ * over-bound value (more digits than `DECIMAL_LIMITS.inputDigits`, or more
+ * fractional places than `DECIMAL_LIMITS.inputScale`) AND a non-canonical
+ * one (a stray trailing space, a leading zero, "-0", ...) -- `parseDecimal`'s
+ * own format check already rejects the latter, so there is no separate
+ * canonical-form rule to keep in sync here.
+ */
+export function isReadableStoredDecimal(value: string): boolean {
+  try {
+    parseDecimal(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeStoredAmount(
+  value: string | null,
+  fieldName: string,
+  unreadableFields: string[],
+): string | null {
+  if (value === null) return null;
+  if (isReadableStoredDecimal(value)) return value;
+  unreadableFields.push(fieldName);
+  return null;
+}
+
+/**
+ * BUG-021: per-record isolation for a stored `dividend_manual_records`
+ * amount this module's downstream arithmetic cannot parse -- mirrors
+ * `resolveImportedRecordCurrency`'s BRK-010 F3 precedent (a malformed FX
+ * rate degrades only ITS OWN record's conversion, never aborts the whole
+ * security's derivation) for the read-path amount columns BUG-014 only
+ * closed at the WRITE boundary. A value written before that fix (or by any
+ * direct-DB path BUG-014 does not gate -- BUG-022 tracks closing every
+ * writer) would otherwise reach `computeCashGrossOrTotals`'s/
+ * `deriveHistoryRowDps`'s own `parseDecimal` calls raw and THROW, aborting
+ * `deriveDividendHistoryForSecurity` for EVERY event/record of the whole
+ * security (see this module's header note).
+ *
+ * Runs as the VERY FIRST thing `deriveDividendHistoryForSecurity` does to
+ * `input.manualRecords`, before the owner/imported tier split and every
+ * other pre-pass (`applyFrankingCurrencyOverride`,
+ * `resolveImportedRecordCurrency`, `deriveAbsentImportedFranking`) -- every
+ * downstream consumer of a manual record (tier matching, `resolveOwnerFact`,
+ * `computeCashGrossOrTotals`) therefore only ever sees an already-validated
+ * (or already-nulled) amount, never a raw corrupt one. This matters even
+ * for a NATIVE-currency record: `resolveImportedRecordCurrency`'s very
+ * first branch returns a same-currency record UNCHANGED (there is no FX
+ * question), so it never validates `totalCashDecimal` either -- isolation
+ * has to happen here, upstream of that function, not inside it.
+ *
+ * Never fabricates "0": an unreadable field becomes `null` (this module's
+ * existing "genuinely unknown" representation, which `amountUnknown`
+ * already surfaces and every aggregation/projection already excludes from
+ * its sums), and `amountUnreadable` is set alongside it so a consumer can
+ * render the DISTINCT "needs correction" copy rather than the generic
+ * missing-data label a plain absent value gets. Emits exactly ONE
+ * structured warning per affected record, naming the record id and which
+ * column(s) failed to parse -- never the value itself (AGENTS.md: keep
+ * financial values out of logs).
+ */
+function sanitizeManualRecordAmounts(
+  record: DividendManualRecordFact,
+): DividendManualRecordFact {
+  const unreadableFields: string[] = [];
+  const sharesDecimal = sanitizeStoredAmount(
+    record.sharesDecimal,
+    "sharesDecimal",
+    unreadableFields,
+  );
+  const dividendPerShareDecimal = sanitizeStoredAmount(
+    record.dividendPerShareDecimal,
+    "dividendPerShareDecimal",
+    unreadableFields,
+  );
+  const frankingCreditPerShareDecimal = sanitizeStoredAmount(
+    record.frankingCreditPerShareDecimal,
+    "frankingCreditPerShareDecimal",
+    unreadableFields,
+  );
+  const totalCashDecimal = sanitizeStoredAmount(
+    record.totalCashDecimal ?? null,
+    "totalCashDecimal",
+    unreadableFields,
+  );
+  const totalFrankingDecimal = sanitizeStoredAmount(
+    record.totalFrankingDecimal ?? null,
+    "totalFrankingDecimal",
+    unreadableFields,
+  );
+  if (unreadableFields.length === 0) return record;
+  console.warn("dividend_manual_records amount unreadable", {
+    recordId: record.id,
+    fields: unreadableFields,
+  });
+  return {
+    ...record,
+    sharesDecimal,
+    dividendPerShareDecimal,
+    frankingCreditPerShareDecimal,
+    totalCashDecimal,
+    totalFrankingDecimal,
+    amountUnreadable: true,
+  };
 }
 
 /**
@@ -1044,11 +1187,19 @@ export function deriveDividendHistoryForSecurity(
     return { latest: sorted[0]!, additionalCount: sorted.length - 1 };
   }
 
+  // BUG-021: isolate any unreadable stored amount BEFORE anything else in
+  // this function ever looks at `input.manualRecords` -- see
+  // `sanitizeManualRecordAmounts`'s doc comment for why this must run
+  // first, ahead of even the tier split immediately below.
+  const sanitizedManualRecords = input.manualRecords.map((record) =>
+    sanitizeManualRecordAmounts(record),
+  );
+
   // DIV-004: split `dividend_manual_records` rows by `importBatchId` into
   // the owner-typed tier (2) and the imported tier (4) BEFORE any matching
   // happens, so the two tiers are matched to events independently and can
   // never be confused with each other downstream.
-  const ownerManualRecords = input.manualRecords.filter(
+  const ownerManualRecords = sanitizedManualRecords.filter(
     (record) => record.importBatchId === null,
   );
   // BRK-010 review finding B4: attempt to convert every imported
@@ -1061,7 +1212,7 @@ export function deriveDividendHistoryForSecurity(
   // currency, so `importedFactCurrencyDisplay` below can surface it
   // honestly at row-construction time rather than the rest of this module
   // silently assuming every imported fact is already security-native.
-  const importedRecords = input.manualRecords
+  const importedRecords = sanitizedManualRecords
     .filter((record) => record.importBatchId !== null)
     .map((record) => applyFrankingCurrencyOverride(record))
     .map((record) =>
@@ -1154,6 +1305,11 @@ export function deriveDividendHistoryForSecurity(
     // BRK-011: non-null only when `source === "imported"` -- see
     // `DerivedDividendRow.frankingCurrencySource`'s doc comment.
     frankingCurrencySource: "owner_manual" | null;
+    // BUG-021: mirrors `DividendManualRecordFact.amountUnreadable` for the
+    // winning fact -- see that field's doc comment. Always `false` for a
+    // receipt (this module never sanitizes `dividend_receipts`; out of
+    // BUG-021's scope, which is `dividend_manual_records` only).
+    amountUnreadable: boolean;
   } | null {
     if (manual) {
       return {
@@ -1182,6 +1338,7 @@ export function deriveDividendHistoryForSecurity(
         fxRateSource: null,
         frankingDerivedZero: false,
         frankingCurrencySource: null,
+        amountUnreadable: manual.amountUnreadable === true,
       };
     }
     if (receiptResolution) {
@@ -1204,6 +1361,7 @@ export function deriveDividendHistoryForSecurity(
         fxRateSource: null,
         frankingDerivedZero: false,
         frankingCurrencySource: null,
+        amountUnreadable: false,
       };
     }
     if (imported) {
@@ -1225,6 +1383,7 @@ export function deriveDividendHistoryForSecurity(
         fxRateSource: display.fxRateSource,
         frankingDerivedZero: imported.frankingDerivedZero === true,
         frankingCurrencySource: imported.frankingCurrencySource ?? null,
+        amountUnreadable: imported.amountUnreadable === true,
       };
     }
     return null;
@@ -1338,6 +1497,7 @@ export function deriveDividendHistoryForSecurity(
     let currencyCodeOverride: string | null = null;
     let frankingDerivedZero = false;
     let frankingCurrencySource: "owner_manual" | null = null;
+    let amountUnreadableFact = false;
 
     if (override) {
       source = "edited";
@@ -1366,6 +1526,7 @@ export function deriveDividendHistoryForSecurity(
       currencyCodeOverride = ownerFact.currencyCodeOverride;
       frankingDerivedZero = ownerFact.frankingDerivedZero;
       frankingCurrencySource = ownerFact.frankingCurrencySource;
+      amountUnreadableFact = ownerFact.amountUnreadable;
       // DIV-005 Round A: an imported row that missed this event's own
       // window but is within window of the WINNING manual/receipt fact's
       // own date chains in here instead of surfacing as a second row.
@@ -1435,6 +1596,11 @@ export function deriveDividendHistoryForSecurity(
       fxRateSource,
       frankingDerivedZero,
       frankingCurrencySource,
+      // BUG-021: only meaningful when the amount actually ended up unknown
+      // -- a record with some OTHER unreadable field (e.g. franking) whose
+      // cash figure still resolved must not show the "needs correction"
+      // cash-cell copy for a cash amount that is, in fact, fine.
+      amountUnreadable: amountUnreadableFact && cashDecimal === null,
     });
   }
 
@@ -1635,6 +1801,12 @@ export function deriveDividendHistoryForSecurity(
     // franking total came from an owner override -- see
     // `DerivedDividendRow.frankingCurrencySource`'s doc comment.
     frankingCurrencySource?: "owner_manual" | null;
+    // BUG-021: mirrors `DividendManualRecordFact.amountUnreadable` for the
+    // manual/imported record this eventless row was built from -- see
+    // `DerivedDividendRow.amountUnreadable`'s doc comment. Omitted (falsy)
+    // for a `source === "receipt"` row, matching `resolveOwnerFact`'s own
+    // receipt branch.
+    amountUnreadable?: boolean;
   }): void {
     const franking = resolveFrankingPerShare(
       fields.overrideFrankingPerShare,
@@ -1684,6 +1856,9 @@ export function deriveDividendHistoryForSecurity(
       fxRateSource: fields.fxRateSource ?? null,
       frankingDerivedZero: fields.frankingDerivedZero ?? false,
       frankingCurrencySource: fields.frankingCurrencySource ?? null,
+      // BUG-021: see the main per-event loop's identical guard above.
+      amountUnreadable:
+        (fields.amountUnreadable ?? false) && cashDecimal === null,
     });
   }
 
@@ -1758,6 +1933,7 @@ export function deriveDividendHistoryForSecurity(
           dominatedImported: matchedImported
             ? toDominatedImported(matchedImported)
             : null,
+          amountUnreadable: record.amountUnreadable === true,
         });
       }
       for (const receiptFact of clusterReceipts) {
@@ -1799,6 +1975,7 @@ export function deriveDividendHistoryForSecurity(
           fxRateSource: display.fxRateSource,
           frankingDerivedZero: record.frankingDerivedZero === true,
           frankingCurrencySource: record.frankingCurrencySource ?? null,
+          amountUnreadable: record.amountUnreadable === true,
         });
       }
       continue;
@@ -1837,6 +2014,7 @@ export function deriveDividendHistoryForSecurity(
           ? toDominatedImported(importedPick.winner)
           : null,
         additionalImportedCount: importedPick?.additionalCount ?? 0,
+        amountUnreadable: manualPick.winner.amountUnreadable === true,
       });
     } else if (receiptPick) {
       const rawEvent =
@@ -1878,6 +2056,7 @@ export function deriveDividendHistoryForSecurity(
         frankingDerivedZero: importedPick.winner.frankingDerivedZero === true,
         frankingCurrencySource:
           importedPick.winner.frankingCurrencySource ?? null,
+        amountUnreadable: importedPick.winner.amountUnreadable === true,
       });
     }
   }
@@ -1965,6 +2144,8 @@ export function deriveDividendHistoryForSecurity(
       fxRateSource: ownerFact.fxRateSource,
       frankingDerivedZero: ownerFact.frankingDerivedZero,
       frankingCurrencySource: ownerFact.frankingCurrencySource,
+      // BUG-021: see the main per-event loop's identical guard above.
+      amountUnreadable: ownerFact.amountUnreadable && cashDecimal === null,
     });
   }
 

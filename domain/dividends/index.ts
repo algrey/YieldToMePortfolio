@@ -20,6 +20,7 @@ export {
 } from "./fy-window.ts";
 export {
   deriveDividendHistoryForSecurity,
+  isReadableStoredDecimal,
   PROXIMITY_WINDOW_DAYS,
   type DeriveDividendHistoryInput,
   type DerivedDividendRow,

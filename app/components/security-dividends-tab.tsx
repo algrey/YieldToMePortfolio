@@ -747,6 +747,16 @@ export function SecurityDividendsTab({
                         row.currencyCode,
                         baseCurrencyCode,
                         row.cashDecimal,
+                        // BUG-021: a stored amount this app could not read
+                        // (as opposed to nothing ever being recorded) gets
+                        // its own actionable copy, never the generic
+                        // "Unavailable" label.
+                        row.amountUnreadable
+                          ? {
+                              unavailableLabel:
+                                "Amount unavailable — needs correction",
+                            }
+                          : undefined,
                       )}
                       {fxProvenance ? (
                         <>
@@ -762,6 +772,12 @@ export function SecurityDividendsTab({
                         row.currencyCode,
                         baseCurrencyCode,
                         row.grossDecimal,
+                        row.amountUnreadable
+                          ? {
+                              unavailableLabel:
+                                "Amount unavailable — needs correction",
+                            }
+                          : undefined,
                       )}
                     </td>
                     <td>
@@ -788,7 +804,11 @@ export function SecurityDividendsTab({
                       ) : null}
                     </td>
                     <td>
-                      {notPaid ? (
+                      {row.amountUnreadable ? (
+                        <span className="dividend-status-unreadable">
+                          needs correction
+                        </span>
+                      ) : notPaid ? (
                         <span className="dividend-status-not-paid">
                           not paid
                         </span>

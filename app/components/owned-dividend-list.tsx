@@ -241,6 +241,16 @@ export function OwnedDividendList({
                         row.currencyCode,
                         baseCurrencyCode,
                         row.cashDecimal,
+                        // BUG-021: a stored amount this app could not read
+                        // (as opposed to nothing ever being recorded) gets
+                        // its own actionable copy, never the generic
+                        // "Unavailable" label.
+                        row.amountUnreadable
+                          ? {
+                              unavailableLabel:
+                                "Amount unavailable — needs correction",
+                            }
+                          : undefined,
                       )}
                       {fxProvenance ? (
                         <>
@@ -271,6 +281,12 @@ export function OwnedDividendList({
                         row.currencyCode,
                         baseCurrencyCode,
                         row.grossDecimal,
+                        row.amountUnreadable
+                          ? {
+                              unavailableLabel:
+                                "Amount unavailable — needs correction",
+                            }
+                          : undefined,
                       )}
                     </td>
                     <td>
@@ -280,7 +296,11 @@ export function OwnedDividendList({
                       </span>
                     </td>
                     <td>
-                      {row.notPaid ? (
+                      {row.amountUnreadable ? (
+                        <span className="dividend-status-unreadable">
+                          needs correction
+                        </span>
+                      ) : row.notPaid ? (
                         <span className="dividend-status-not-paid">
                           not paid
                         </span>
