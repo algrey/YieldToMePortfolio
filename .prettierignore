@@ -15,3 +15,8 @@ docs/source-evidence/03_CALCULATIONS_AND_INTERFACE.md
 docs/source-evidence/04_VIDEO_UNKNOWNS_AND_REBUILD_PLAN.md
 docs/source-evidence/YieldToMe_Visual_Style_Guide.md
 docs/Example_Portfolio.csv
+
+# design-sync (claude.ai/design) machine state -- owner tooling, never formatted here
+.design-sync
+ds-bundle
+.ds-sync
