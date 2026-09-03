@@ -1,0 +1,7 @@
+{
+  "name": "yieldtome-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "design-sync package manifest: presents app/components as a library for claude.ai/design. Generated siblings (index.ts, types/, yieldtome.css) come from `node .design-sync/build-pkg.mjs`.",
+  "types": "types/.design-sync/pkg/index.d.ts"
+}

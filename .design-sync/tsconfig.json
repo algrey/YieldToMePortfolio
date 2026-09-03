@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "baseUrl": "..",
+    "paths": {
+      "@/*": ["./*"],
+      "next/link": ["./.design-sync/shims/next-link.tsx"],
+      "next/navigation": ["./.design-sync/shims/next-navigation.ts"],
+      "node:crypto": ["./.design-sync/shims/node-crypto.ts"]
+    }
+  }
+}

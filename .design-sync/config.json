@@ -1,0 +1,95 @@
+{
+  "projectId": "46f72383-e2c4-44c3-9380-354f1ba8c471",
+  "shape": "package",
+  "pkg": "yieldtome-ui",
+  "globalName": "YieldToMe",
+  "buildCmd": "node .design-sync/build-pkg.mjs",
+  "entry": ".design-sync/pkg/index.ts",
+  "srcDir": "../../app/components",
+  "tsconfig": "../tsconfig.json",
+  "cssEntry": "yieldtome.css",
+  "docsDir": "../docs",
+  "extraEntries": [
+    "../shims/app-canvas.tsx"
+  ],
+  "provider": {
+    "component": "AppCanvas"
+  },
+  "overrides": {
+    "OwnedDividendList": {
+      "cardMode": "column"
+    },
+    "HoldingNav": {
+      "cardMode": "column"
+    },
+    "IncomeNav": {
+      "cardMode": "column"
+    },
+    "PortfolioValueChart": {
+      "cardMode": "column"
+    },
+    "PriceHistoryChartView": {
+      "cardMode": "column"
+    },
+    "ChartBody": {
+      "cardMode": "column"
+    },
+    "HoldingPriceChart": {
+      "cardMode": "column"
+    },
+    "OwnedPortfolioDetails": {
+      "cardMode": "column",
+      "viewport": "900x2600"
+    },
+    "IncomeLanding": {
+      "cardMode": "column",
+      "viewport": "900x1500"
+    },
+    "HoldingDetailScreen": {
+      "cardMode": "column",
+      "viewport": "900x1100"
+    },
+    "HoldingTransactionsScreen": {
+      "cardMode": "column",
+      "viewport": "900x1100"
+    },
+    "HoldingAreaUnavailable": {
+      "cardMode": "single",
+      "viewport": "900x900"
+    },
+    "FyDetailDialog": {
+      "cardMode": "single",
+      "viewport": "900x1600"
+    },
+    "RecordDividendDialog": {
+      "cardMode": "single",
+      "viewport": "900x1100"
+    },
+    "CapitalGainsScreen": {
+      "cardMode": "single",
+      "viewport": "1400x1400"
+    },
+    "AreaExitBackControl": {
+      "cardMode": "column"
+    },
+    "BrandMark": {
+      "cardMode": "column"
+    },
+    "HistoryBackControl": {
+      "cardMode": "column"
+    },
+    "SubNav": {
+      "cardMode": "column"
+    },
+    "MultiFileRunStatus": {
+      "cardMode": "column"
+    },
+    "PriceUploadList": {
+      "cardMode": "column"
+    },
+    "SinglePreviewSummary": {
+      "cardMode": "column"
+    }
+  },
+  "readmeHeader": ".design-sync/conventions.md"
+}

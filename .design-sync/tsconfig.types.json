@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "incremental": false,
+    "outDir": "pkg/types",
+    "rootDir": "..",
+    "plugins": []
+  },
+  "include": ["pkg/index.ts", "../worker-configuration.d.ts"]
+}
