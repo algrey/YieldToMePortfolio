@@ -36,6 +36,7 @@ import {
   createDividendImportFrankingOverrideRepository,
   createDividendManualRecordRepository,
   createDividendReceiptRepository,
+  isWithinReadPathDecimalBounds,
   type DividendManualRecordRecord,
   type SqlClient,
 } from "../db/repositories/index.ts";
@@ -635,6 +636,20 @@ export async function saveDividendEntryWithContext(
   let frankingPerShareForSave: string | null = null;
   let totalCashForSave: string | null = null;
   let totalFrankingForSave: string | null = null;
+  // BUG-022: `isPositiveDecimalString`/`isNonNegativeDecimalString` above
+  // bound FORM only (digits and an optional decimal point), never SIZE.
+  // `db/repositories/dividends.ts`'s `validateManualRecordAmounts`/
+  // `resolveSupersedeAmounts` are the authoritative boundary (bounded at
+  // `isWithinReadPathDecimalBounds`, this file's follow-up import) and
+  // reject a too-large value regardless of what happens here -- but a
+  // generic "could not be saved" from that repository rejection gives the
+  // owner no way to tell WHICH field was wrong. Pre-checking the same bound
+  // here, on this file's already-parsed local variables, lets the field
+  // actually at fault name itself before the request even reaches the
+  // repository.
+  function amountBoundMessage(field: string): string {
+    return `${field} must have at most 24 decimal places and 64 digits in total.`;
+  }
   if (amountMode === "totals") {
     if (
       totalCashDecimal === null ||
@@ -644,6 +659,23 @@ export async function saveDividendEntryWithContext(
         ok: false,
         status: 400,
         message: "Total cash must be a positive number.",
+      };
+    }
+    if (!isWithinReadPathDecimalBounds(totalCashDecimal)) {
+      return {
+        ok: false,
+        status: 400,
+        message: amountBoundMessage("Total cash"),
+      };
+    }
+    if (
+      totalFrankingDecimal !== null &&
+      !isWithinReadPathDecimalBounds(totalFrankingDecimal)
+    ) {
+      return {
+        ok: false,
+        status: 400,
+        message: amountBoundMessage("Total franking credits"),
       };
     }
     totalCashForSave = totalCashDecimal;
@@ -656,6 +688,13 @@ export async function saveDividendEntryWithContext(
         message: "Shares must be a positive number.",
       };
     }
+    if (!isWithinReadPathDecimalBounds(sharesDecimal)) {
+      return {
+        ok: false,
+        status: 400,
+        message: amountBoundMessage("Shares"),
+      };
+    }
     if (
       dividendPerShareDecimal === null ||
       !isPositiveDecimalString(dividendPerShareDecimal)
@@ -664,6 +703,23 @@ export async function saveDividendEntryWithContext(
         ok: false,
         status: 400,
         message: "Dividend per share must be a positive number.",
+      };
+    }
+    if (!isWithinReadPathDecimalBounds(dividendPerShareDecimal)) {
+      return {
+        ok: false,
+        status: 400,
+        message: amountBoundMessage("Dividend per share"),
+      };
+    }
+    if (
+      frankingCreditPerShareDecimal !== null &&
+      !isWithinReadPathDecimalBounds(frankingCreditPerShareDecimal)
+    ) {
+      return {
+        ok: false,
+        status: 400,
+        message: amountBoundMessage("Franking credit per share"),
       };
     }
     sharesForSave = sharesDecimal;

@@ -66,6 +66,19 @@ function hasDecimalScaleWithinLimit(value: string, maxScale: number): boolean {
   return value.length - dotIndex - 1 <= maxScale;
 }
 
+// BUG-022: the TOTAL-digit half of a decimal bound, factored out of
+// `isWithinReadPathDecimalBounds` below so `fxRateToPortfolioDecimal`'s
+// write-time check (which already had a scale bound, `MAX_FX_RATE_DECIMAL_SCALE`,
+// but never a digit-count one -- an unbounded integer part could still
+// overflow `parseDecimal`'s `DECIMAL_LIMITS.inputDigits` at read time) can
+// apply the SAME digit-count bound without re-typing it.
+function hasDecimalDigitCountWithinLimit(
+  value: string,
+  maxDigits: number,
+): boolean {
+  return value.replace("-", "").replace(".", "").length <= maxDigits;
+}
+
 // BUG-014 correction round 3 (B2, BLOCKING): the ONE bound for stored
 // dividend money on the import-commit path, expressed as the READ path's own
 // limits rather than a second hard-coded copy of them.
@@ -91,11 +104,36 @@ function hasDecimalScaleWithinLimit(value: string, maxScale: number): boolean {
 // `MAX_FX_RATE_DECIMAL_SCALE`, whose 24 comes from a DIFFERENT decision --
 // `FX_CONVERSION_SCALE`, the read-time conversion rounding) so this bound
 // cannot drift away from the parse it exists to protect.
-function isWithinReadPathDecimalBounds(value: string): boolean {
+export function isWithinReadPathDecimalBounds(value: string): boolean {
   return (
     hasDecimalScaleWithinLimit(value, DECIMAL_LIMITS.inputScale) &&
-    value.replace("-", "").replace(".", "").length <= DECIMAL_LIMITS.inputDigits
+    hasDecimalDigitCountWithinLimit(value, DECIMAL_LIMITS.inputDigits)
   );
+}
+
+// BUG-022: the shared bound-check every `dividend_manual_records` amount
+// writer (`buildDividendManualRecordImportInsertStatements`,
+// `validateManualRecordAmounts` for `create()`, `resolveSupersedeAmounts`
+// for `supersede()`) applies to its five amount columns before returning a
+// value to be persisted -- one place, so the bound cannot drift between
+// writers the way form-only validation (`isPositiveDecimalString`) already
+// had (see this file's BUG-014 header comment on `isWithinReadPathDecimalBounds`
+// above). A `null` field (absent in the row's active amount mode) is not
+// checked -- only a *present* value must satisfy the bound.
+function allAmountsWithinReadPathBounds(amounts: {
+  sharesDecimal: string | null;
+  dividendPerShareDecimal: string | null;
+  frankingCreditPerShareDecimal: string | null;
+  totalCashDecimal: string | null;
+  totalFrankingDecimal: string | null;
+}): boolean {
+  return [
+    amounts.sharesDecimal,
+    amounts.dividendPerShareDecimal,
+    amounts.frankingCreditPerShareDecimal,
+    amounts.totalCashDecimal,
+    amounts.totalFrankingDecimal,
+  ].every((amount) => amount === null || isWithinReadPathDecimalBounds(amount));
 }
 
 const DECIMAL_PATTERN = /^-?(0|[1-9]\d*)(\.\d+)?$/;
@@ -1262,11 +1300,22 @@ export function buildDividendManualRecordImportInsertStatements(
   if (fxRateToPortfolioDecimal !== null) {
     // F3: an over-precision rate is rejected here, with an honest message,
     // rather than ever reaching storage.
+    //
+    // BUG-022: F3 only bounded SCALE (`MAX_FX_RATE_DECIMAL_SCALE`) -- an
+    // unbounded integer part (e.g. a 70-digit whole number with no
+    // fractional part at all) satisfied that check yet still exceeded
+    // `parseDecimal`'s `DECIMAL_LIMITS.inputDigits` total-digit bound at
+    // read time. Bounded here too, referencing the same shared limit
+    // `isWithinReadPathDecimalBounds` uses (not re-typed).
     if (
       !isPositiveDecimalString(fxRateToPortfolioDecimal) ||
       !hasDecimalScaleWithinLimit(
         fxRateToPortfolioDecimal,
         MAX_FX_RATE_DECIMAL_SCALE,
+      ) ||
+      !hasDecimalDigitCountWithinLimit(
+        fxRateToPortfolioDecimal,
+        DECIMAL_LIMITS.inputDigits,
       ) ||
       !isFxRateSourceString(fxRateSource)
     ) {
@@ -2666,6 +2715,17 @@ function manualRecordMaterialFieldsDiffer(
  * (`dividend_manual_records_amount_mode_check`) has a single re-validation
  * shape shared by every write path, never a second drifted copy. Returns
  * `null` on any invalid shape/value.
+ *
+ * BUG-022: the owner-facing `create()` path this function guards had been
+ * bounding these five columns' FORM only (`isPositiveDecimalString`/
+ * `isNonNegativeDecimalString`), never their SIZE -- unlike
+ * `buildDividendManualRecordImportInsertStatements` (BUG-014), which the
+ * import-commit path already routes through. A manual entry with, say, a
+ * 30-fractional-digit total therefore saved cleanly and then crashed
+ * `/income` permanently on every later render, exactly BUG-014's defect,
+ * just reachable from a different writer. Bounded here with the same
+ * `isWithinReadPathDecimalBounds` (`DECIMAL_LIMITS.inputScale`/`inputDigits`,
+ * referenced not re-typed) so every writer shares one bound.
  */
 function validateManualRecordAmounts(input: {
   sharesDecimal?: string | null;
@@ -2698,7 +2758,7 @@ function validateManualRecordAmounts(input: {
     ) {
       return null;
     }
-    return {
+    const result = {
       sharesDecimal: input.sharesDecimal,
       dividendPerShareDecimal: input.dividendPerShareDecimal,
       frankingCreditPerShareDecimal:
@@ -2706,6 +2766,7 @@ function validateManualRecordAmounts(input: {
       totalCashDecimal: null,
       totalFrankingDecimal: null,
     };
+    return allAmountsWithinReadPathBounds(result) ? result : null;
   }
   if (
     !isPositiveDecimalString(input.totalCashDecimal) ||
@@ -2713,13 +2774,14 @@ function validateManualRecordAmounts(input: {
   ) {
     return null;
   }
-  return {
+  const result = {
     sharesDecimal: null,
     dividendPerShareDecimal: null,
     frankingCreditPerShareDecimal: null,
     totalCashDecimal: input.totalCashDecimal,
     totalFrankingDecimal: input.totalFrankingDecimal ?? null,
   };
+  return allAmountsWithinReadPathBounds(result) ? result : null;
 }
 
 /**
@@ -2733,6 +2795,14 @@ function validateManualRecordAmounts(input: {
  * neither a total nor a per-share field at all, the mode carries forward
  * from `original` too (a pure date/franking-only correction that never
  * touches the amount shape).
+ *
+ * BUG-022: bounded at `isWithinReadPathDecimalBounds` like every other
+ * writer (see `validateManualRecordAmounts`'s header comment) -- this
+ * function's `supersede()` was the other owner-facing write path that
+ * checked FORM only. A carried-forward (unchanged) field is bounded too:
+ * whatever value is about to be persisted for the new row must satisfy the
+ * read path's limits regardless of whether this request supplied it fresh
+ * or it came from `original`.
  */
 function resolveSupersedeAmounts(
   original: DividendManualRecordRecord,
@@ -2771,13 +2841,14 @@ function resolveSupersedeAmounts(
     ) {
       return null;
     }
-    return {
+    const result = {
       sharesDecimal: null,
       dividendPerShareDecimal: null,
       frankingCreditPerShareDecimal: null,
       totalCashDecimal,
       totalFrankingDecimal,
     };
+    return allAmountsWithinReadPathBounds(result) ? result : null;
   }
   const sharesDecimal = hasOwn(input, "sharesDecimal")
     ? (input.sharesDecimal ?? null)
@@ -2798,13 +2869,14 @@ function resolveSupersedeAmounts(
   ) {
     return null;
   }
-  return {
+  const result = {
     sharesDecimal,
     dividendPerShareDecimal,
     frankingCreditPerShareDecimal,
     totalCashDecimal: null,
     totalFrankingDecimal: null,
   };
+  return allAmountsWithinReadPathBounds(result) ? result : null;
 }
 
 /**

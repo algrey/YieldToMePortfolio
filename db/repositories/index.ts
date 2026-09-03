@@ -242,6 +242,7 @@ export {
   type DividendReceiptRecord,
   type DividendReceiptSource,
   type DividendSecurityAssumptionsRecord,
+  isWithinReadPathDecimalBounds,
   type RecordDividendEventInput,
   type RecordSplitEventInput,
   type SaveDividendEventOverrideInput,

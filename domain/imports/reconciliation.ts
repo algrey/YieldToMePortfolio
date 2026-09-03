@@ -375,6 +375,22 @@ export type ImportReconciliationIssue = Readonly<{
     // codes above it is NOT excluded from `previewVersion` hashing -- see
     // `domain/imports/review.ts`.
     | "DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE"
+    // BUG-022: the FRANKING analog of the code above -- an incoming staged
+    // dividend row's comparable franking total (`totalFrankingDecimal`, or
+    // `sharesOwned x frankingPerShare`) could not be computed, because it is
+    // over `parseDecimal`'s "input" bound (the same `DECIMAL_LIMITS` scale
+    // 24 / 64 digits `buildDividendManualRecordImportInsertStatements`
+    // enforces at write time). Before this warning existed, such a row
+    // staged and reached `ready` with no disclosure at all, then failed
+    // commit with only the generic `mapping_incomplete` copy -- this warning
+    // tells the owner WHY, at preview time, same as the cash-total warning
+    // above. Distinct from the SILENT, EXPECTED `null` case (the row simply
+    // never reports franking at all -- most CSV headers do not); only an
+    // actually-thrown parse failure raises this. Row-linked, derived purely
+    // from `evidence.rows`, so like `DIVIDEND_RECONCILIATION_ROW_AMOUNT_UNAVAILABLE`
+    // it is NOT excluded from `previewVersion` hashing -- see
+    // `domain/imports/review.ts`.
+    | "DIVIDEND_RECONCILIATION_ROW_FRANKING_AMOUNT_UNAVAILABLE"
     // BUG-014: the DB-sourced analog -- an existing
     // `dividend_manual_records` reconciliation candidate's stored decimal
     // columns could not be parsed (a corrupt/non-canonical value, or one
@@ -1328,6 +1344,34 @@ export function createImportReconciliationPreview(
           // re-import as a new batch.
           message:
             "This dividend's cash total could not be read (a missing or unparseable amount field) -- it cannot be checked against existing manually entered records automatically. This row cannot be edited in place: skip it (\"Skip this row\", below) if you don't need it, or fix the amount in the source file and re-import.",
+        });
+      }
+      // BUG-022: the franking analog of the cash-total check just above,
+      // reusing the same diagnosed wrapper against the franking fields
+      // (`computeDividendCashTotal` is a generic "total = given, or shares x
+      // per-unit" helper -- see this file's BUG-013 header comment) rather
+      // than re-deriving the parsing logic. Before this, an over-scale
+      // `totalFrankingDecimal`/`frankingPerShare` staged cleanly, reached
+      // `ready` with no disclosure, and only failed at commit with the
+      // generic `mapping_incomplete` copy
+      // (`buildDividendManualRecordImportInsertStatements`'s
+      // `isWithinReadPathDecimalBounds` check on `total_franking_decimal`/
+      // `franking_credit_per_share_decimal`).
+      const { malformed: frankingMalformed } =
+        safeComputeDividendCashTotalDiagnosed({
+          totalCashDecimal: row.normalized.totalFrankingDecimal ?? null,
+          sharesDecimal: row.normalized.sharesOwned,
+          dividendPerShareDecimal: row.normalized.frankingPerShare,
+        });
+      if (frankingMalformed) {
+        issues.push({
+          code: "DIVIDEND_RECONCILIATION_ROW_FRANKING_AMOUNT_UNAVAILABLE",
+          severity: "warning",
+          rowId: row.id,
+          physicalRowNumber: row.physicalRowNumber,
+          sourceKey: membershipId,
+          message:
+            "This dividend's franking credit amount could not be read (an unparseable or too-large value) -- committing will fail for this row until it is corrected. This row cannot be edited in place: skip it (\"Skip this row\", below) if you don't need the franking figure, or fix the amount in the source file and re-import.",
         });
       }
       return {
