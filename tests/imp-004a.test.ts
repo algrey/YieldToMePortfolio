@@ -267,16 +267,22 @@ async function pagePreview(
     ),
     // BUG-013 review round (ruling 1): mirrors `loadReview`'s
     // `existingSourceReferenceRows`/`existingTradeSourceReferenceRows`
-    // queries, used to suppress a guaranteed-noise advisory warning for a
-    // row already bound for an identical commit-time exact-match skip.
-    // PRF-009 follow-up ("fail-open cap"): now bounded with `LIMIT MAX + 1`,
-    // same as `loadReview` -- see `tests/bug-013.test.ts`'s source pin for
-    // the production wiring this mirrors.
+    // queries.
+    // PRF-009 correction round B1 (BLOCKING): the DIVIDEND set is DIV-016C's
+    // COMPARISON set -- `createImportReconciliationPreview` uses membership
+    // to split `dividendReconciliationRowsAll` into
+    // `freshRows`/`alreadyImportedRows`, so it is DELIBERATELY UNBOUNDED in
+    // `loadReview` (a fail-open collapse to empty would restore a
+    // dedupe-bound row to `freshRows` and earn it a false
+    // `DIVIDEND_RECONCILIATION_PROPOSED`). This mirror carries NO `LIMIT`
+    // and NO cap, exactly like production (`app/import-actions.ts`) -- see
+    // `tests/bug-013.test.ts`'s source pin for the production wiring this
+    // mirrors. Only the TRADE set below is a pure SUPPRESSION set and keeps
+    // the fail-open `LIMIT MAX + 1` cap.
     client.all<Record<string, unknown>>(
       `SELECT portfolio_id, source_reference FROM dividend_manual_records
-       WHERE user_id = ? AND source_reference IS NOT NULL
-       LIMIT ?`,
-      [userId, MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK + 1],
+       WHERE user_id = ? AND source_reference IS NOT NULL`,
+      [userId],
     ),
     client.all<Record<string, unknown>>(
       `SELECT portfolio_id, source_reference FROM transactions
@@ -362,11 +368,11 @@ async function pagePreview(
       quantityDecimal: String(row.quantity_decimal),
       priceDecimal: String(row.unit_price_decimal),
     }));
+  // PRF-009 correction round B1 (BLOCKING): NOT capped, mirroring
+  // `loadReview` -- this is DIV-016C's comparison set, not a suppression
+  // set (see this mirror's own query comment above).
   const existingDividendSourceReferences = new Set(
-    capSuppressionReferenceRows(
-      existingSourceReferenceRows,
-      MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK,
-    ).rows.map(
+    existingSourceReferenceRows.map(
       (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
     ),
   );
