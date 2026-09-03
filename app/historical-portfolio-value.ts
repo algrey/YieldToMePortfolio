@@ -81,9 +81,9 @@
  * construction rather than merely making it less likely. A date this call's
  * OWN derivation attempts (`toDerive`) and still cannot resolve is marked
  * immediately after (`recordUnresolvableValueHistoryDates`), categorised by
- * `computeUnresolvedReason` -- EXCEPT a date whose only cause is a missing
- * FX rate (`'no_fx_rate'`), which is deliberately never persisted (BUG-012
- * F2 -- see that function's doc comment). This is a CACHED "not resolvable
+ * `computeUnresolvedReason` -- EXCEPT a date with ANY FX-caused missing
+ * component (`'no_fx_rate'`), which is deliberately never persisted
+ * (BUG-012 F2 and round-3 FU1 -- see that function's doc comment). This is a CACHED "not resolvable
  * as of the last attempt" fact, not a permanent write-off: see the
  * Invalidation paragraph below for why every write path that can make a
  * date newly resolvable also clears the mark, in the same atomic unit as
@@ -1022,23 +1022,33 @@ export type ValueHistoryBackfillOutcome = {
  *
  * BUG-012 F2, Orchestrator ruling: a THIRD, IN-MEMORY-ONLY reason,
  * `'no_fx_rate'`, is never persisted to `portfolio_value_history_unresolvable`
- * -- see `computeUnresolvedReason`'s caller below. `fxOnlyGap` (set by
- * `valuePointAtDate` only when every held security had a resolvable price
- * but no usable FX rate for the date) is the sole trigger: unlike a missing
- * security price or holding gap, a missing FX rate is expected to fill in
- * on the next FX import/refresh, so the date must keep its pre-BUG-012
- * retry-on-every-read behaviour rather than being written off. This is a
- * deliberate, disclosed residual: a genuinely FX-caused CONTIGUOUS run
- * (e.g. an outage in FX ingestion) can still pin a bounded slice exactly
+ * -- see `computeUnresolvedReason`'s caller below. Unlike a missing security
+ * price or holding gap, a missing FX rate is expected to fill in on the next
+ * FX import/refresh -- and no FX write path invalidates that table at all --
+ * so such a date must keep its pre-BUG-012 retry-on-every-read behaviour
+ * rather than being written off.
+ *
+ * BUG-012 round-3 FU1 CORRECTION: the trigger is `fxMissingComponent` --
+ * ANY held security whose failure was FX-caused -- not the round-2
+ * "every held security's failure was FX" predicate. A MIXED date (one
+ * unpriced base-currency security plus one FX-gapped foreign one) is
+ * unresolvable for BOTH reasons at once; marking it `'no_priceable_security'`
+ * meant the FX arrival could never clear it and a later price arrival for
+ * the unpriced security would clear a mark on a date that is STILL FX-blocked.
+ * Any FX-caused component therefore suppresses the mark entirely.
+ *
+ * This is a deliberate, disclosed residual: a genuinely FX-caused CONTIGUOUS
+ * run (e.g. an outage in FX ingestion) can still pin a bounded slice exactly
  * as BUG-010 originally described, mitigated the same way -- opposite-end
- * sweeps -- see `docs/ARCHITECTURE.md` §9.8. */
+ * sweeps -- see `docs/ARCHITECTURE.md` §9.8, which also records the standing
+ * free-plan `rows_read` cost such a run carries. */
 type UnresolvedReason = UnresolvableValueHistoryReason | "no_fx_rate";
 
 function computeUnresolvedReason(
   point: HistoricalPortfolioValuePoint,
 ): UnresolvedReason {
   if (point.heldSecurityCount === 0) return "no_holdings";
-  if (point.fxOnlyGap) return "no_fx_rate";
+  if (point.fxMissingComponent) return "no_fx_rate";
   return "no_priceable_security";
 }
 
@@ -1206,11 +1216,14 @@ async function resolveValueHistorySeries(
   // so this only ever writes NEW marks or refreshes one just cleared and
   // retried -- never the same mark on every read.
   //
-  // BUG-012 F2: a date whose ONLY cause is a missing FX rate
-  // (`computeUnresolvedReason` returning the in-memory-only `'no_fx_rate'`)
-  // is deliberately EXCLUDED here -- never persisted -- so it keeps
-  // retrying on every read/cron call until the FX rate arrives, rather
-  // than being written off. See `computeUnresolvedReason`'s doc comment
+  // BUG-012 F2, corrected by round-3 FU1: a date with ANY FX-caused
+  // missing component (`computeUnresolvedReason` returning the in-memory-
+  // only `'no_fx_rate'`) is deliberately EXCLUDED here -- never persisted
+  // -- so it keeps retrying on every read/cron call until the FX rate
+  // arrives, rather than being written off. A MIXED date (an unpriced
+  // base-currency security AND an FX-gapped foreign one) counts as
+  // FX-caused for this purpose, because the FX half can never be repaired
+  // by a mark-clearing write. See `computeUnresolvedReason`'s doc comment
   // for the Orchestrator ruling and the disclosed residual.
   //
   // BUG-012 review follow-up: a FUTURE-dated candidate (`isFutureDate`,

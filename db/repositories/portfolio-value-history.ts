@@ -712,3 +712,135 @@ export async function buildValueHistoryInvalidationStatementsForSecurities(
   }
   return statements;
 }
+
+/** BUG-012 round-3 B1: the fail-closed ceiling on how many of ONE owner's
+ * portfolios a single `buildOwnerValueHistoryInvalidationStatementGroups`
+ * call resolves. Unlike the cross-owner builder above -- whose
+ * `maxPortfolios` SILENTLY truncates, the defect this function exists to
+ * avoid -- exceeding this THROWS (the `import-commit`/`import-reversal`
+ * overflow-probe precedent: an honest failure, never a quietly incomplete
+ * invalidation). It is a corrupted/pathological-data guard, not an expected
+ * bound: one owner holding a single write chunk's securities across more
+ * than 200 of their OWN portfolios is far outside anything this
+ * deployment's data shape produces. */
+export const MAX_OWNER_INVALIDATION_PORTFOLIOS = 200;
+
+/**
+ * BUG-012 round-3 B1 -- the OWNER-SCOPED, COMPLETE sibling of
+ * `buildValueHistoryInvalidationStatementsForSecurities` above, for a write
+ * whose new price rows can only ever affect the WRITER's own portfolios.
+ *
+ * `db/repositories/sharesight-price-refresh.ts` writes
+ * `access_scope = 'user'` / `scope_user_id = <writer>` rows, and the read
+ * path's `PRICE_SCOPE` admits a user-scoped observation ONLY for its own
+ * owner -- so invalidating a DIFFERENT owner's portfolio for such a write
+ * is a provable no-op. Under the cross-owner builder's silently-truncating
+ * `LIMIT` those no-ops still consumed the budget, starving the writer's own
+ * portfolios (reproduced: 25 unrelated owners crowded out the writer). Two
+ * changes close that:
+ *
+ * 1. `user_id = ?` in the query, so only the writer's own portfolios are
+ *    ever considered. Ownership is still derived from
+ *    `portfolio_securities`'s own authoritative `user_id` column, never a
+ *    client-supplied id.
+ * 2. Targets are GROUPED per portfolio rather than per (portfolio,
+ *    security): one `portfolio_value_history` DELETE plus one
+ *    `portfolio_value_history_unresolvable` clear per portfolio, spanning
+ *    `[MIN(fromDate), MAX(toDate)]` across the chunk securities THAT
+ *    portfolio actually holds. A value-history row is a whole-portfolio
+ *    aggregate, so one ranged DELETE per portfolio invalidates everything N
+ *    per-security DELETEs would have (a superset only in also covering any
+ *    calendar date BETWEEN two targeted dates -- deleting a cached row is
+ *    always safe, the read path re-derives it honestly, and a cleared mark
+ *    is simply re-attempted). The statement count is therefore
+ *    2 x (the owner's portfolios holding any chunk security), INDEPENDENT
+ *    of how many securities the chunk carries -- the property that makes a
+ *    per-chunk budget expressible at all.
+ *
+ * Returns one 2-statement GROUP per affected portfolio (never a flat list)
+ * so the caller can append as many groups as its own atomic batch has room
+ * for and issue the remainder as follow-on batches -- see
+ * `upsertSharesightPriceObservations`. The result is COMPLETE for the
+ * owner: no group is ever silently dropped.
+ */
+export async function buildOwnerValueHistoryInvalidationStatementGroups(
+  client: SqlClient,
+  userId: string,
+  targets: readonly ValueHistoryInvalidationTarget[],
+  maxPortfolios: number = MAX_OWNER_INVALIDATION_PORTFOLIOS,
+): Promise<SqlStatement[][]> {
+  // Folded per security (MIN from / MAX to), never a last-write-wins Map:
+  // one chunk can legitimately carry two dates for the SAME security (the
+  // hourly refresh's own day plus an MKT-015 prior-day backfill), and
+  // keeping only the last one would silently leave the other date's stale
+  // row/mark in place.
+  const bySecurityId = new Map<string, { fromDate: string; toDate: string }>();
+  for (const target of targets) {
+    const existing = bySecurityId.get(target.securityId);
+    if (!existing) {
+      bySecurityId.set(target.securityId, {
+        fromDate: target.fromDate,
+        toDate: target.toDate,
+      });
+      continue;
+    }
+    if (target.fromDate < existing.fromDate)
+      existing.fromDate = target.fromDate;
+    if (target.toDate > existing.toDate) existing.toDate = target.toDate;
+  }
+  const securityIds = [...bySecurityId.keys()];
+  if (securityIds.length === 0) return [];
+  // A ROW bound, not a portfolio bound: this result set is at most (the
+  // owner's portfolios holding one of these securities) x (chunk
+  // securities), so `maxPortfolios * securityIds.length + 1` can only be
+  // reached when the owner genuinely exceeds `maxPortfolios` -- which the
+  // explicit distinct count below turns into a throw, never a truncation.
+  const rows = await client.all<Record<string, unknown>>(
+    `SELECT DISTINCT portfolio_id, security_id FROM portfolio_securities
+     WHERE user_id = ? AND security_id IN (${securityIds.map(() => "?").join(",")})
+     ORDER BY portfolio_id ASC, security_id ASC LIMIT ?`,
+    [userId, ...securityIds, maxPortfolios * securityIds.length + 1],
+  );
+  const byPortfolioId = new Map<string, { fromDate: string; toDate: string }>();
+  for (const row of rows) {
+    if (
+      typeof row.portfolio_id !== "string" ||
+      typeof row.security_id !== "string"
+    ) {
+      continue;
+    }
+    const target = bySecurityId.get(row.security_id);
+    if (!target) continue;
+    const existing = byPortfolioId.get(row.portfolio_id);
+    if (!existing) {
+      byPortfolioId.set(row.portfolio_id, {
+        fromDate: target.fromDate,
+        toDate: target.toDate,
+      });
+      continue;
+    }
+    // ISO `YYYY-MM-DD` text compares in true date order.
+    if (target.fromDate < existing.fromDate)
+      existing.fromDate = target.fromDate;
+    if (target.toDate > existing.toDate) existing.toDate = target.toDate;
+  }
+  if (byPortfolioId.size > maxPortfolios) {
+    throw new Error("owner_value_history_invalidation_overflow");
+  }
+  return [...byPortfolioId.entries()].map(([portfolioId, range]) => [
+    {
+      sql: `DELETE FROM portfolio_value_history
+            WHERE user_id = ? AND portfolio_id = ? AND value_date BETWEEN ? AND ?`,
+      params: [userId, portfolioId, range.fromDate, range.toDate],
+    },
+    {
+      // BUG-012: the paired mark clear -- a fresher/backfilled price for a
+      // security this portfolio holds can turn a `'no_priceable_security'`
+      // mark into a resolvable date, so it is cleared in the SAME unit as
+      // the value-history DELETE, never as a skippable follow-up.
+      sql: `DELETE FROM portfolio_value_history_unresolvable
+            WHERE user_id = ? AND portfolio_id = ? AND value_date BETWEEN ? AND ?`,
+      params: [userId, portfolioId, range.fromDate, range.toDate],
+    },
+  ]);
+}

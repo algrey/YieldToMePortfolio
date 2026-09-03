@@ -155,24 +155,26 @@ export type HistoricalPortfolioValuePoint = {
   completeness: "complete" | "partial";
   heldSecurityCount: number;
   pricedSecurityCount: number;
-  /** BUG-012 F2: `true` only when `valueDecimal === null` (nothing
-   * resolved at all) AND every held security's failure was SPECIFICALLY a
-   * missing/unusable FX rate for an otherwise-priced foreign-currency
-   * security (`resolveFx`'s `!fxSelection.selected` branch in
-   * `valuePointAtDate` below) -- never when a price was also missing, or a
-   * data-integrity throw occurred, for ANY held security on this date.
-   * Orchestrator ruling: a date unresolvable ONLY because of a missing FX
-   * rate must never be persisted as a `portfolio_value_history_unresolvable`
-   * mark (`app/historical-portfolio-value.ts`'s in-memory-only `'no_fx_rate'`
-   * reason) -- an FX gap is expected to fill in on a predictable near-term
-   * cadence (the daily FX refresh), unlike a genuinely absent security
-   * price/holding, so it keeps the pre-BUG-012 retry-on-next-read
-   * behaviour rather than being written off. OMITTED (never explicit
-   * `false`) for every other point, including a fully-resolved one -- so a
-   * point that round-trips through `portfolio_value_history` (which has no
-   * such column) stays structurally identical to its own fresh derivation,
-   * matching `tests/hist-002.test.ts`'s stored/derived parity property. */
-  fxOnlyGap?: true;
+  /** BUG-012 F2, corrected by round-3 FU1: `true` when `valueDecimal ===
+   * null` (nothing resolved at all) and AT LEAST ONE held security's
+   * failure was a missing/unusable FX rate for an otherwise-priced
+   * foreign-currency security (`resolveFx`'s `!fxSelection.selected` branch
+   * in `valuePointAtDate` below). The round-2 predicate required EVERY
+   * held security's failure to be FX-caused, which is why it is renamed:
+   * a MIXED date (one unpriced base-currency security plus one FX-gapped
+   * foreign one) reported `false`, was persisted as
+   * `'no_priceable_security'`, and the FX rate's later arrival never
+   * cleared it -- no FX write path invalidates that table, so the date was
+   * written off permanently. Orchestrator ruling: ANY FX-caused component
+   * means "do not persist" (`app/historical-portfolio-value.ts`'s
+   * in-memory-only `'no_fx_rate'` reason), because the FX half of such a
+   * date can only ever be repaired by a write that clears nothing.
+   * OMITTED (never explicit `false`) for every other point, including a
+   * fully-resolved one -- so a point that round-trips through
+   * `portfolio_value_history` (which has no such column) stays structurally
+   * identical to its own fresh derivation, matching
+   * `tests/hist-002.test.ts`'s stored/derived parity property. */
+  fxMissingComponent?: true;
 };
 
 function toFxEvidence(selection: FxSelection): FxEvidence | null {
@@ -315,10 +317,11 @@ function valuePointAtDate(
   let pricedSecurityCount = 0;
   let anyComponentKnown = false;
   let anyComponentMissing = false;
-  // BUG-012 F2: starts optimistic, flips to `false` the moment ANY held
-  // security's failure is NOT the "priced but no usable FX" case -- see
-  // `HistoricalPortfolioValuePoint.fxOnlyGap`'s doc comment above.
-  let missingCauseIsFxOnly = true;
+  // BUG-012 F2, corrected by round-3 FU1: starts `false`, flips to `true`
+  // the moment ANY held security's failure IS the "priced but no usable
+  // FX" case -- see `HistoricalPortfolioValuePoint.fxMissingComponent`'s
+  // doc comment above for why "any", not "every".
+  let anyMissingCauseIsFx = false;
 
   const resolveFx = (quoteCurrencyCode: string): FxSelection => {
     const candidates = candidatesWithinTolerance(fxByDate, date, toleranceDays);
@@ -343,7 +346,6 @@ function valuePointAtDate(
       // problem, not "nothing held" -- must not silently report this
       // point as fully "complete".
       anyComponentMissing = true;
-      missingCauseIsFxOnly = false; // BUG-012 F2: a data-integrity throw, never fx-only
       continue;
     }
     let parsedQuantity: DecimalFraction;
@@ -351,7 +353,6 @@ function valuePointAtDate(
       parsedQuantity = parseDecimal(quantity);
     } catch {
       anyComponentMissing = true;
-      missingCauseIsFxOnly = false;
       continue;
     }
     if (isZero(parsedQuantity)) continue; // not held on this date: not counted, not partial
@@ -373,7 +374,6 @@ function valuePointAtDate(
     });
     if (!priceSelection.selected) {
       anyComponentMissing = true;
-      missingCauseIsFxOnly = false; // BUG-012 F2: price itself missing, never fx-only
       continue;
     }
 
@@ -381,9 +381,12 @@ function valuePointAtDate(
     if (security.currencyCode !== baseCurrencyCode) {
       fxSelection = resolveFx(security.currencyCode);
       if (!fxSelection.selected) {
-        // BUG-012 F2: a priced security with no usable FX rate -- the ONE
-        // failure shape `missingCauseIsFxOnly` stays `true` for.
+        // BUG-012 F2 / round-3 FU1: a priced security with no usable FX
+        // rate -- the ONE failure shape that sets `anyMissingCauseIsFx`.
+        // Its presence ALONE (not its exclusivity) suppresses the
+        // unresolvable mark, because no FX write path clears one.
         anyComponentMissing = true;
+        anyMissingCauseIsFx = true;
         continue;
       }
     }
@@ -397,7 +400,6 @@ function valuePointAtDate(
     });
     if (holding.facts.homeMarketValue.status !== "available") {
       anyComponentMissing = true;
-      missingCauseIsFxOnly = false;
       continue;
     }
     try {
@@ -407,7 +409,6 @@ function valuePointAtDate(
       );
     } catch {
       anyComponentMissing = true;
-      missingCauseIsFxOnly = false;
       continue;
     }
     pricedSecurityCount += 1;
@@ -418,12 +419,15 @@ function valuePointAtDate(
   const completeness: "complete" | "partial" = anyComponentMissing
     ? "partial"
     : "complete";
-  // BUG-012 F2: only meaningful when `valueDecimal === null` (nothing
-  // resolved) -- see `HistoricalPortfolioValuePoint.fxOnlyGap`'s doc
-  // comment. `heldSecurityCount > 0` excludes the "nothing held at all"
-  // case, which `missingCauseIsFxOnly` starts vacuously `true` for.
-  const fxOnlyGap =
-    valueDecimal === null && heldSecurityCount > 0 && missingCauseIsFxOnly;
+  // BUG-012 F2 / round-3 FU1: only meaningful when `valueDecimal === null`
+  // (nothing resolved at all) -- the only shape the caller can persist a
+  // mark for -- so a PARTIAL point that happens to have an FX-gapped
+  // component never carries this key, preserving the stored/derived
+  // structural parity noted below. `heldSecurityCount > 0` is implied by
+  // `anyMissingCauseIsFx` (only a held security can reach the FX branch)
+  // and kept explicit for readability.
+  const fxMissingComponent =
+    valueDecimal === null && heldSecurityCount > 0 && anyMissingCauseIsFx;
 
   return {
     date,
@@ -431,7 +435,7 @@ function valuePointAtDate(
     completeness,
     heldSecurityCount,
     pricedSecurityCount,
-    // Key OMITTED (never `fxOnlyGap: false`) when not applicable -- a
+    // Key OMITTED (never `fxMissingComponent: false`) when not applicable -- a
     // RESOLVED point (`valueDecimal !== null`) must stay structurally
     // IDENTICAL to the same point reloaded from `portfolio_value_history`
     // (which has no such column, see `mapRow` in
@@ -439,7 +443,7 @@ function valuePointAtDate(
     // `tests/hist-002.test.ts`'s stored/derived round-trip parity
     // property -- never a spurious extra field only the fresh-derivation
     // path carries.
-    ...(fxOnlyGap ? { fxOnlyGap: true as const } : {}),
+    ...(fxMissingComponent ? { fxMissingComponent: true as const } : {}),
   };
 }
 

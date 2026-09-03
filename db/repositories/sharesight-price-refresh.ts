@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 import type { SharesightPriceAccretionCandidate } from "../../domain/sharesight/price-accretion.ts";
-import { buildValueHistoryInvalidationStatementsForSecurities } from "./portfolio-value-history.ts";
+import { buildOwnerValueHistoryInvalidationStatementGroups } from "./portfolio-value-history.ts";
 
 // BRK-012B: write path for accreting Sharesight's `listUserInstruments`
 // output into `price_observations`. Rulings (TASKS.md, BINDING):
@@ -21,34 +21,54 @@ import { buildValueHistoryInvalidationStatementsForSecurities } from "./portfoli
 
 export const SHARESIGHT_PRICE_PROVIDER_ID = "sharesight";
 
+/** D1's documented per-`batch()` statement ceiling. BUG-012 round-3 FU3:
+ * the ONE place this number appears in this module -- every invalidation
+ * budget below is DERIVED from it and from `maxSecuritiesPerChunk`, so the
+ * two can never drift apart the way BUG-012 F3's hand-maintained
+ * `MARKET_DATA_REFRESH_REPOSITORY_LIMITS.maxStatementsPerChunk` did. */
+const D1_MAX_STATEMENTS_PER_BATCH = 100;
+
+/** BRK-012B: each candidate security costs at most 2 statements in the
+ * write half of this module's batch (1 guarded `security_provider_mappings`
+ * ensure -- a no-op SELECT after that security's first successful run --
+ * plus 1 `price_observations` upsert). */
+const STATEMENTS_PER_SECURITY = 2;
+
+/** BUG-012: `buildOwnerValueHistoryInvalidationStatementGroups` emits
+ * exactly 2 statements per affected portfolio (the `portfolio_value_history`
+ * DELETE plus the paired `portfolio_value_history_unresolvable` clear). */
+const STATEMENTS_PER_INVALIDATED_PORTFOLIO = 2;
+
+const MAX_SECURITIES_PER_CHUNK = 25;
+
 /**
- * BRK-012B statement-budget discipline (CALC-003/UI-013 precedent): each
- * candidate security costs at most 2 statements in `upsertPriceObservations`'s
- * batch (1 guarded `security_provider_mappings` ensure -- a no-op SELECT
- * after the first successful run for that security -- plus 1 price_observations
- * upsert). `maxSecuritiesPerChunk: 25` therefore bounds that part of a
- * single `batch()` call to at most 50 statements.
+ * BRK-012B statement-budget discipline (CALC-003/UI-013 precedent).
+ * `maxSecuritiesPerChunk: 25` x `STATEMENTS_PER_SECURITY` bounds the WRITE
+ * half of one `batch()` call to at most 50 statements.
  *
- * BUG-012 F1: this chunk's batch now ALSO carries the paired
+ * BUG-012 F1: that same batch also carries the paired
  * `portfolio_value_history` / `portfolio_value_history_unresolvable`
- * invalidation for the (securityId, marketDate) targets this chunk just
- * wrote -- see `buildValueHistoryInvalidationStatementsForSecurities`'s own
- * doc comment (`db/repositories/portfolio-value-history.ts`) for why this
- * is a plain cross-owner statement builder, not a second round trip.
- * `maxInvalidationRowsPerChunk: 20` bounds that function's own `maxPortfolios`
- * parameter (TOTAL `(user_id, portfolio_id, security_id)` rows across every
- * target in the chunk, matching `MARKET_DATA_REFRESH_REPOSITORY_LIMITS
- * .maxInvalidationPortfoliosPerChunk`'s identical precedent) to at most 20
- * rows * 2 statements/row = 40 statements. Worst case per chunk is
- * therefore 50 (writes) + 40 (invalidation) = 90 statements, comfortably
- * under D1's documented 100-statement `batch()` ceiling with a documented
- * 10-statement margin -- both bounds are compile-time constants, so this
- * total is structurally fixed, not merely typical. This is a defensively-
- * bounded, documented limitation matching the invalidation helper's own
- * "excess portfolios simply are not invalidated THIS commit; a later write
- * for the same security tries again" ruling -- BRK-012A's live-evidenced
- * account size (18 holdings, one owner) is far inside this bound, and an
- * owner-scale account fits in ONE chunk in practice.
+ * invalidation for the (securityId, marketDate) targets the chunk just
+ * wrote. BUG-012 round-3 B1 replaced the cross-owner, row-capped builder
+ * with `buildOwnerValueHistoryInvalidationStatementGroups`
+ * (`db/repositories/portfolio-value-history.ts`), which is scoped to the
+ * WRITER's own `user_id` (a Sharesight write is `access_scope = 'user'`, so
+ * another owner's portfolio is a provable no-op) and GROUPED per portfolio.
+ * The invalidation cost is therefore 2 statements per affected portfolio of
+ * the writer's, independent of the chunk's security count:
+ *
+ * - `maxInvalidationPortfoliosPerWriteBatch` = (100 - 25*2) / 2 = 25
+ *   portfolio groups fit ALONGSIDE a full 25-security chunk's writes, in
+ *   the same atomic batch. Computed from `D1_MAX_STATEMENTS_PER_BATCH` and
+ *   `maxSecuritiesPerChunk`, never a hand-maintained literal; the call site
+ *   recomputes the remaining room from the batch it ACTUALLY built (a
+ *   short chunk leaves room for more groups than this worst case).
+ * - `maxInvalidationPortfoliosPerFollowOnBatch` = 100 / 2 = 50 groups per
+ *   follow-on `batch()` for any REMAINDER past that -- the remainder is
+ *   ISSUED, never dropped. Pre-BUG-012-round-3 the excess was silently
+ *   truncated by a `LIMIT`, which deterministically left marks and stale
+ *   rows in place on every hourly run (reviewer-reproduced at 25 securities
+ *   in one portfolio and at 22 portfolios on one security).
  *
  * Multiple chunks run as separate atomic `batch()` calls (not one giant
  * transaction) -- safe because accretion is idempotent, so a chunk that
@@ -59,8 +79,18 @@ export const SHARESIGHT_PRICE_PROVIDER_ID = "sharesight";
  * not a measured production ceiling.
  */
 export const SHARESIGHT_PRICE_REFRESH_LIMITS = Object.freeze({
-  maxSecuritiesPerChunk: 25,
-  maxInvalidationRowsPerChunk: 20,
+  maxSecuritiesPerChunk: MAX_SECURITIES_PER_CHUNK,
+  d1MaxStatementsPerBatch: D1_MAX_STATEMENTS_PER_BATCH,
+  statementsPerSecurity: STATEMENTS_PER_SECURITY,
+  statementsPerInvalidatedPortfolio: STATEMENTS_PER_INVALIDATED_PORTFOLIO,
+  maxInvalidationPortfoliosPerWriteBatch: Math.floor(
+    (D1_MAX_STATEMENTS_PER_BATCH -
+      MAX_SECURITIES_PER_CHUNK * STATEMENTS_PER_SECURITY) /
+      STATEMENTS_PER_INVALIDATED_PORTFOLIO,
+  ),
+  maxInvalidationPortfoliosPerFollowOnBatch: Math.floor(
+    D1_MAX_STATEMENTS_PER_BATCH / STATEMENTS_PER_INVALIDATED_PORTFOLIO,
+  ),
   maxUsersPerRun: 50,
 });
 
@@ -304,29 +334,45 @@ export async function upsertSharesightPriceObservations(
     }
     // BUG-012 F1: a Sharesight write can land a fresher/backfilled price
     // for a date this owner's held portfolios already have a stored
-    // value-history row (or unresolvable mark) for -- see this file's
+    // value-history row (or an unresolvable mark) for -- see this file's
     // `SHARESIGHT_PRICE_REFRESH_LIMITS` doc comment for the statement-
-    // budget accounting. Built and appended into the SAME atomic
-    // `batch()` as this chunk's writes above (never a second, skippable
-    // round trip) -- one target per distinct security in this chunk,
-    // `[marketDate, marketDate]` (a single day, matching this write's own
-    // per-candidate date), resolved to every affected (owner, portfolio)
-    // pair via `buildValueHistoryInvalidationStatementsForSecurities`
-    // (cross-owner by design -- see its own doc comment -- since a
-    // security can be held in more than just the fetching owner's own
-    // portfolios).
+    // budget accounting.
+    //
+    // BUG-012 round-3 B1: OWNER-SCOPED and GROUPED PER PORTFOLIO. This
+    // write is `access_scope = 'user'` / `scope_user_id = input.userId`,
+    // and the read path's `PRICE_SCOPE` admits a user-scoped observation
+    // only for its own owner -- so a statement against ANOTHER owner's
+    // portfolio could never change what that owner reads, while (under the
+    // old cross-owner builder's row cap) it did consume the budget and
+    // starve this writer's own portfolios. Grouping per portfolio also
+    // makes the cost 2 statements per affected portfolio instead of 2 per
+    // (portfolio, security) row, so a 25-security chunk in ONE portfolio
+    // costs 2 statements, not 50.
     const invalidationTargets = batchCandidates.map((candidate) => ({
       securityId: candidate.securityId,
       fromDate: candidate.marketDate,
       toDate: candidate.marketDate,
     }));
-    const invalidationStatements =
-      await buildValueHistoryInvalidationStatementsForSecurities(
+    const invalidationGroups =
+      await buildOwnerValueHistoryInvalidationStatementGroups(
         client,
+        input.userId,
         invalidationTargets,
-        SHARESIGHT_PRICE_REFRESH_LIMITS.maxInvalidationRowsPerChunk,
       );
-    statements.push(...invalidationStatements);
+    // Room left in THIS chunk's atomic batch, measured against the
+    // statements actually built (not the worst case) -- see
+    // `SHARESIGHT_PRICE_REFRESH_LIMITS.maxInvalidationPortfoliosPerWriteBatch`.
+    const inlineGroupCapacity = Math.max(
+      0,
+      Math.floor(
+        (SHARESIGHT_PRICE_REFRESH_LIMITS.d1MaxStatementsPerBatch -
+          statements.length) /
+          SHARESIGHT_PRICE_REFRESH_LIMITS.statementsPerInvalidatedPortfolio,
+      ),
+    );
+    const inlineGroups = invalidationGroups.slice(0, inlineGroupCapacity);
+    const tailGroups = invalidationGroups.slice(inlineGroups.length);
+    for (const group of inlineGroups) statements.push(...group);
     const results = await client.batch(statements);
     // `RETURNING id` (above) + counting returned ROWS, never `changes` --
     // portable across both the D1 batch adapter and the local
@@ -336,6 +382,33 @@ export async function upsertSharesightPriceObservations(
     // either backend.
     for (const index of priceObservationStatementIndices) {
       written += results[index]?.results.length ?? 0;
+    }
+    // Any REMAINDER past the atomic batch's room is ISSUED immediately
+    // after it, never dropped (the defect BUG-012 round-3 B1 fixed) --
+    // follow-on `client.batch()` calls, the same non-atomic-tail shape
+    // `db/repositories/intraday-price-capture.ts`'s rollup invalidation and
+    // `db/repositories/import-reversal.ts`'s deferred rebuild queueing
+    // already use.
+    //
+    // SAFETY OF THE NON-ATOMIC TAIL (stated as a bound, not an assumption):
+    // the price rows are already durable when a tail batch runs, so a
+    // failure between the two leaves ONLY a stale cached value-history row
+    // or an uncleared mark for the tail portfolios -- never a wrong price,
+    // never a fabricated value; a stale mark still renders as an honestly
+    // absent date. It self-heals on the next write of the same dates, which
+    // recomputes the SAME grouped targets from the same query: the hourly
+    // refresh rewrites today's date every tick, so today's tail is retried
+    // within the hour. For a one-off PRIOR-day backfill (MKT-015) there is
+    // no such guaranteed next write, so that residual persists until
+    // another write touches the date -- the identical residual the intraday
+    // rollup's own separate-batch invalidation already accepts. This tail
+    // only exists at all for an owner holding one chunk's securities across
+    // more than ~25 of their OWN portfolios.
+    for (const followOnGroups of chunk(
+      tailGroups,
+      SHARESIGHT_PRICE_REFRESH_LIMITS.maxInvalidationPortfoliosPerFollowOnBatch,
+    )) {
+      await client.batch(followOnGroups.flat());
     }
   }
   return { written };

@@ -50,7 +50,10 @@ import {
   type PriceUploadContext,
 } from "../app/price-upload-service.ts";
 import { parsePriceCsv } from "../domain/market-data/price-csv.ts";
-import { upsertSharesightPriceObservations } from "../db/repositories/sharesight-price-refresh.ts";
+import {
+  SHARESIGHT_PRICE_REFRESH_LIMITS,
+  upsertSharesightPriceObservations,
+} from "../db/repositories/sharesight-price-refresh.ts";
 import type { SharesightPriceAccretionCandidate } from "../domain/sharesight/price-accretion.ts";
 
 const NOW = new Date("2026-09-03T00:00:00Z");
@@ -753,10 +756,15 @@ function sharesightCandidateFor(
   securityId: string,
   marketDate: string,
   closeDecimal: string,
+  // Distinct per security wherever a fixture writes more than one:
+  // `security_provider_mappings` is UNIQUE on (provider_id,
+  // provider_exchange, provider_symbol, valid_from), and this write path
+  // guard-creates one mapping per security from these very fields.
+  instrumentCode = "ONE",
 ): SharesightPriceAccretionCandidate {
   return {
     securityId,
-    instrumentCode: "ONE",
+    instrumentCode,
     marketCode: "ASX",
     currencyCode: "AUD",
     closeDecimal,
@@ -1054,5 +1062,449 @@ test("BUG-012 review follow-up: a future-dated candidate (the portfolio-timezone
     )
     .get();
   assert.equal(storedFutureRow, undefined);
+  db.close();
+});
+
+// ---------------------------------------------------------------------------
+// Round-3 B1: the Sharesight write's invalidation must be OWNER-SCOPED and
+// COMPLETE. The round-2 implementation passed a 20-row cap into the
+// CROSS-OWNER builder, whose `LIMIT` silently dropped every row past it --
+// so marks and stale rows survived every hourly run, deterministically, and
+// unrelated owners' portfolios consumed a budget their own reads could
+// never even use (a Sharesight row is `access_scope = 'user'`, admitted by
+// the read path's `PRICE_SCOPE` only for its own owner).
+// ---------------------------------------------------------------------------
+
+type OwnerSeed = Readonly<{ userId: string; portfolioIds: readonly string[] }>;
+
+/** Seeds owners IN THE GIVEN ORDER (row order matters: the pre-fix
+ * `LIMIT`-capped query had no `ORDER BY`, so what survived the cap was
+ * insertion order), each portfolio holding EVERY `securityId`, with one
+ * stored `portfolio_value_history` row AND one `'no_priceable_security'`
+ * mark per (portfolio, date). Marks are seeded directly rather than derived
+ * -- the property under test is which rows a WRITE clears, not how a mark
+ * comes to exist (the derivation path is covered above). */
+async function sharesightInvalidationFixture(input: {
+  owners: readonly OwnerSeed[];
+  securityIds: readonly string[];
+  dates: readonly string[];
+}): Promise<DatabaseSync> {
+  const db = await migratedDatabase();
+  db.exec(`
+    INSERT INTO currencies(code,numeric_code,name,minor_unit_digits) VALUES('AUD',36,'Australian dollar',2);
+    INSERT INTO exchanges (id,mic,name,country_code,timezone,calendar_code) VALUES('asx','XASX','ASX','AU','Australia/Sydney','XASX');
+  `);
+  for (const securityId of input.securityIds) {
+    db.exec(
+      `INSERT INTO securities(id,asset_type,exchange_id,primary_currency_code,canonical_name,created_at,updated_at)
+       VALUES('${securityId}','equity','asx','AUD','${securityId}','2026-08-01','2026-08-01');`,
+    );
+  }
+  for (const owner of input.owners) {
+    db.exec(
+      `INSERT INTO users(id,status,primary_email,timezone,created_at,updated_at)
+       VALUES('${owner.userId}','active','${owner.userId}@example.test','Australia/Sydney','2026-08-01','2026-08-01');`,
+    );
+    for (const portfolioId of owner.portfolioIds) {
+      db.exec(
+        `INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at)
+         VALUES('${portfolioId}','${owner.userId}','${portfolioId}','${portfolioId}','AUD','Australia/Sydney','fifo','active','2026-08-01','2026-08-01');`,
+      );
+      for (const securityId of input.securityIds) {
+        db.exec(
+          `INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_exchange_alias,source_currency_code,status,created_at,updated_at)
+           VALUES('ps-${portfolioId}-${securityId}','${owner.userId}','${portfolioId}','${securityId}','ONE','ASX','AUD','held','2026-08-01','2026-08-01');`,
+        );
+      }
+      for (const date of input.dates) {
+        db.exec(
+          `INSERT INTO portfolio_value_history(id,user_id,portfolio_id,value_date,value_decimal,completeness,held_security_count,priced_security_count,computed_at)
+           VALUES('pvh-${portfolioId}-${date}','${owner.userId}','${portfolioId}','${date}','1000.00','partial',1,0,'2026-08-01T00:00:00.000Z');
+           INSERT INTO portfolio_value_history_unresolvable(id,user_id,portfolio_id,value_date,reason,attempted_at,fingerprint)
+           VALUES('pvhu-${portfolioId}-${date}','${owner.userId}','${portfolioId}','${date}','no_priceable_security','2026-08-01T00:00:00.000Z','held=1;priced=0');`,
+        );
+      }
+    }
+  }
+  return db;
+}
+
+function markCount(db: DatabaseSync, portfolioId: string): number {
+  return (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM portfolio_value_history_unresolvable WHERE portfolio_id = ?`,
+      )
+      .get(portfolioId) as { n: number }
+  ).n;
+}
+
+function storedCount(db: DatabaseSync, portfolioId: string): number {
+  return (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM portfolio_value_history WHERE portfolio_id = ?`,
+      )
+      .get(portfolioId) as { n: number }
+  ).n;
+}
+
+/** Records every statement this client executes, so a test can assert what
+ * was NEVER issued (the cross-owner no-op statements) rather than only what
+ * the database ended up holding. */
+function recordingClient(db: DatabaseSync): {
+  client: SqlClient;
+  statements: Array<{ sql: string; params: readonly unknown[] }>;
+  batchCalls: number;
+} {
+  const inner = createSqliteSqlClient(db);
+  const recorded: Array<{ sql: string; params: readonly unknown[] }> = [];
+  const state = { batchCalls: 0 };
+  const client: SqlClient = {
+    all: (sql, params) => inner.all(sql, params),
+    get: (sql, params) => inner.get(sql, params),
+    run: (sql, params) => {
+      recorded.push({ sql, params: params ?? [] });
+      return inner.run(sql, params);
+    },
+    batch: (statements) => {
+      state.batchCalls += 1;
+      for (const statement of statements) {
+        recorded.push({ sql: statement.sql, params: statement.params ?? [] });
+      }
+      return inner.batch(statements);
+    },
+  };
+  return {
+    client,
+    statements: recorded,
+    get batchCalls() {
+      return state.batchCalls;
+    },
+  };
+}
+
+test("BUG-012 round-3 B1: 25 securities in ONE portfolio, each with its own market date, clears EVERY mark and EVERY stale row in a single run", async () => {
+  // Reproduces the reviewer's first case: 25 securities is exactly
+  // `SHARESIGHT_PRICE_REFRESH_LIMITS.maxSecuritiesPerChunk`, so this is ONE
+  // chunk. Pre-fix, the cross-owner builder resolved (owner, portfolio,
+  // security) ROWS capped at 20 and emitted a per-security single-date
+  // DELETE for each, so the 5 rows past the cap were dropped -- and
+  // dropped deterministically on every subsequent run too, since the query
+  // has no `ORDER BY` and the data never changes. Post-fix the targets are
+  // grouped per portfolio, so this costs 2 statements regardless of the
+  // security count.
+  const securityIds = Array.from({ length: 25 }, (_, i) => `sec-${i}`);
+  const dates = weekdays("2026-06-01", 25);
+  const db = await sharesightInvalidationFixture({
+    owners: [{ userId: "owner", portfolioIds: ["pf"] }],
+    securityIds,
+    dates,
+  });
+  const client = createSqliteSqlClient(db);
+  assert.equal(markCount(db, "pf"), 25);
+  assert.equal(storedCount(db, "pf"), 25);
+
+  // One candidate per security, each carrying a DIFFERENT market date --
+  // the per-instrument date shape a real Sharesight `listUserInstruments`
+  // response has when instruments last traded on different days.
+  const written = await upsertSharesightPriceObservations(client, {
+    userId: "owner",
+    candidates: securityIds.map((securityId, index) =>
+      sharesightCandidateFor(securityId, dates[index]!, "12.34", securityId),
+    ),
+    now: "2026-09-03T00:00:00.000Z",
+  });
+  assert.equal(written.written, 25);
+
+  assert.equal(
+    markCount(db, "pf"),
+    0,
+    "every mark this write made resolvable must be cleared in the same run",
+  );
+  assert.equal(
+    storedCount(db, "pf"),
+    0,
+    "every stale stored row for a repriced date must be invalidated in the same run",
+  );
+  db.close();
+});
+
+test("BUG-012 round-3 B1: one security held across 22 of the owner's OWN portfolios invalidates all 22", async () => {
+  // The reviewer's second case: 22 > the pre-fix 20-row cap, so two
+  // portfolios were never invalidated -- again deterministically, every
+  // run. Post-fix this is 22 groups x 2 statements = 44, which still fits
+  // beside a 1-security chunk's 2 write statements in ONE atomic batch
+  // (46 <= 100), so no follow-on batch is needed here.
+  const portfolioIds = Array.from({ length: 22 }, (_, i) => `pf-${i}`);
+  const db = await sharesightInvalidationFixture({
+    owners: [{ userId: "owner", portfolioIds }],
+    securityIds: ["sec-1"],
+    dates: ["2026-06-01"],
+  });
+  const recorder = recordingClient(db);
+
+  await upsertSharesightPriceObservations(recorder.client, {
+    userId: "owner",
+    candidates: [sharesightCandidateFor("sec-1", "2026-06-01", "12.34")],
+    now: "2026-09-03T00:00:00.000Z",
+  });
+
+  for (const portfolioId of portfolioIds) {
+    assert.equal(markCount(db, portfolioId), 0, `${portfolioId}: mark left`);
+    assert.equal(
+      storedCount(db, portfolioId),
+      0,
+      `${portfolioId}: stale row left`,
+    );
+  }
+  assert.equal(
+    recorder.batchCalls,
+    1,
+    "22 groups fit inside the write batch -- no follow-on batch expected at this size",
+  );
+  db.close();
+});
+
+test("BUG-012 round-3 B1: 25 unrelated owners holding the same security cost the writer NOTHING -- their portfolios get no statement at all, and the writer's own is still invalidated", async () => {
+  // The reviewer's third case, and the reason scoping (not just a bigger
+  // cap) is the fix: a Sharesight write is `access_scope = 'user'` /
+  // `scope_user_id = <writer>`, and the read path's `PRICE_SCOPE` admits a
+  // user-scoped observation ONLY for its own owner -- so a DELETE against
+  // another owner's portfolio can never change what that owner reads. It
+  // is a provable no-op that, pre-fix, still consumed the row cap. The
+  // unrelated owners are seeded FIRST so the pre-fix `LIMIT 20` (no
+  // `ORDER BY`) filled entirely with their rows and never reached the
+  // writer's own -- F1's defect, reproduced, after F1 was "fixed".
+  const otherOwners: OwnerSeed[] = Array.from({ length: 25 }, (_, i) => ({
+    userId: `other-${i}`,
+    portfolioIds: [`pf-other-${i}`],
+  }));
+  const db = await sharesightInvalidationFixture({
+    owners: [...otherOwners, { userId: "owner", portfolioIds: ["pf"] }],
+    securityIds: ["sec-1"],
+    dates: ["2026-06-01"],
+  });
+  const recorder = recordingClient(db);
+
+  await upsertSharesightPriceObservations(recorder.client, {
+    userId: "owner",
+    candidates: [sharesightCandidateFor("sec-1", "2026-06-01", "12.34")],
+    now: "2026-09-03T00:00:00.000Z",
+  });
+
+  assert.equal(markCount(db, "pf"), 0, "the WRITER's own mark must be cleared");
+  assert.equal(storedCount(db, "pf"), 0, "the WRITER's stale row must go");
+
+  // Not merely "their rows survived" (a DELETE could have matched nothing
+  // for an unrelated reason) -- no statement mentioning another owner or
+  // their portfolio was ISSUED at all.
+  const invalidationStatements = recorder.statements.filter((statement) =>
+    statement.sql.includes("DELETE FROM portfolio_value_history"),
+  );
+  assert.equal(
+    invalidationStatements.length,
+    2,
+    "exactly one group: 2 DELETEs",
+  );
+  for (const statement of invalidationStatements) {
+    assert.deepEqual(
+      [statement.params[0], statement.params[1]],
+      ["owner", "pf"],
+      "an invalidation statement must only ever name the writer's own owner/portfolio",
+    );
+  }
+  for (const owner of otherOwners) {
+    assert.equal(markCount(db, owner.portfolioIds[0]!), 1);
+    assert.equal(storedCount(db, owner.portfolioIds[0]!), 1);
+  }
+  db.close();
+});
+
+test("BUG-012 round-3 B1/FU3: a remainder past the write batch's room is ISSUED in follow-on batches, never dropped, and the budget is derived from D1's ceiling", async () => {
+  // FU3: every invalidation bound is computed from `maxSecuritiesPerChunk`
+  // and D1's 100-statement `batch()` ceiling in one place, so the two can
+  // never drift apart the way BUG-012 F3's hand-maintained
+  // `MARKET_DATA_REFRESH_REPOSITORY_LIMITS.maxStatementsPerChunk` did.
+  assert.deepEqual(SHARESIGHT_PRICE_REFRESH_LIMITS, {
+    maxSecuritiesPerChunk: 25,
+    d1MaxStatementsPerBatch: 100,
+    statementsPerSecurity: 2,
+    statementsPerInvalidatedPortfolio: 2,
+    maxInvalidationPortfoliosPerWriteBatch: 25, // (100 - 25*2) / 2
+    maxInvalidationPortfoliosPerFollowOnBatch: 50, // 100 / 2
+    maxUsersPerRun: 50,
+  });
+
+  // 25 securities (a FULL chunk: 50 write statements, leaving room for
+  // exactly 25 groups) x 30 of the owner's own portfolios -> 5 groups must
+  // spill into a follow-on batch. Every one of the 30 portfolios must still
+  // end up fully invalidated.
+  const securityIds = Array.from({ length: 25 }, (_, i) => `sec-${i}`);
+  const portfolioIds = Array.from({ length: 30 }, (_, i) => `pf-${i}`);
+  const db = await sharesightInvalidationFixture({
+    owners: [{ userId: "owner", portfolioIds }],
+    securityIds,
+    dates: ["2026-06-01"],
+  });
+  const recorder = recordingClient(db);
+
+  await upsertSharesightPriceObservations(recorder.client, {
+    userId: "owner",
+    candidates: securityIds.map((securityId) =>
+      sharesightCandidateFor(securityId, "2026-06-01", "12.34", securityId),
+    ),
+    now: "2026-09-03T00:00:00.000Z",
+  });
+
+  for (const portfolioId of portfolioIds) {
+    assert.equal(markCount(db, portfolioId), 0, `${portfolioId}: mark left`);
+    assert.equal(
+      storedCount(db, portfolioId),
+      0,
+      `${portfolioId}: stale row left`,
+    );
+  }
+  assert.equal(
+    recorder.batchCalls,
+    2,
+    "one atomic write batch plus exactly one follow-on batch for the 5-group remainder",
+  );
+  // No batch may exceed D1's ceiling -- the bound the whole derivation exists
+  // to respect.
+  assert.ok(
+    recorder.statements.length <=
+      SHARESIGHT_PRICE_REFRESH_LIMITS.d1MaxStatementsPerBatch * 2,
+  );
+  db.close();
+});
+
+// ---------------------------------------------------------------------------
+// Round-3 FU1: F2 covered only the ALL-FX case. A MIXED date -- one unpriced
+// base-currency security plus one FX-gapped foreign one -- was still
+// persisted as `'no_priceable_security'`, and the FX rate's later arrival
+// never cleared it (no FX write path touches that table).
+// ---------------------------------------------------------------------------
+
+/** Two HELD securities on the same date: `sec-aud` (base currency, NO price
+ * on `MIXED_GAP_INDEX`) and `sec-usd` (priced every date in USD, with the
+ * AUD/USD rate missing on `MIXED_GAP_INDEX`). The date is therefore
+ * unresolvable for TWO different causes at once. */
+const MIXED_GAP_INDEX = 4;
+
+async function mixedGapFixture(): Promise<{
+  db: DatabaseSync;
+  dates: string[];
+}> {
+  const dates = weekdays("2024-01-01", 12);
+  const db = await migratedDatabase();
+  db.exec(`
+    INSERT INTO currencies(code,numeric_code,name,minor_unit_digits) VALUES
+      ('AUD',36,'Australian dollar',2),('USD',840,'US dollar',2);
+    INSERT INTO users(id,status,primary_email,timezone,created_at,updated_at) VALUES('owner','active','o@example.test','Australia/Sydney','2026-08-01','2026-08-01');
+    INSERT INTO portfolios(id,user_id,code,name,base_currency_code,timezone,accounting_method,status,created_at,updated_at) VALUES('pf','owner','A','A','AUD','Australia/Sydney','fifo','active','2026-08-01','2026-08-01');
+    INSERT INTO exchanges (id,mic,name,country_code,timezone,calendar_code) VALUES
+      ('asx','XASX','ASX','AU','Australia/Sydney','XASX'),('nasdaq','XNAS','NASDAQ','US','America/New_York','XNAS');
+    INSERT INTO securities(id,asset_type,exchange_id,primary_currency_code,canonical_name,created_at,updated_at) VALUES
+      ('sec-aud','equity','asx','AUD','Aud One','2026-08-01','2026-08-01'),
+      ('sec-usd','equity','nasdaq','USD','Usd One','2026-08-01','2026-08-01');
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_exchange_alias,source_currency_code,status,created_at,updated_at) VALUES
+      ('ps-aud','owner','pf','sec-aud','AUDONE','ASX','AUD','held','2026-08-01','2026-08-01'),
+      ('ps-usd','owner','pf','sec-usd','USDONE','NASDAQ','USD','held','2026-08-01','2026-08-01');
+    INSERT INTO security_provider_mappings (id,security_id,provider_id,provider_exchange,provider_symbol,valid_from,status) VALUES
+      ('map-aud','sec-aud','owner-import','ASX','AUDONE','2023-01-01','verified'),
+      ('map-usd','sec-usd','owner-import','NASDAQ','USDONE','2023-01-01','verified');
+    INSERT INTO transactions(id,user_id,portfolio_id,portfolio_security_id,type,status,trade_at,local_trade_date,quantity_decimal,unit_price_decimal,currency_code,gross_amount_decimal,fee_amount_decimal,tax_amount_decimal,source_type,created_by_user_id,calculation_version,created_at) VALUES
+      ('tx-aud','owner','pf','ps-aud','buy','posted','${dates[0]}T00:00:00Z','${dates[0]}','100','10','AUD','1000','0','0','manual','owner',1,'${dates[0]}'),
+      ('tx-usd','owner','pf','ps-usd','buy','posted','${dates[0]}T00:00:00Z','${dates[0]}','100','10','USD','1000','0','0','manual','owner',1,'${dates[0]}');
+  `);
+  // sec-aud: priced on every date EXCEPT the gap date (the non-FX cause).
+  const audPrices = dates
+    .filter((_date, index) => index !== MIXED_GAP_INDEX)
+    .map(
+      (date, counter) =>
+        `('price-aud-${counter}','owner-import','user','owner','owner','map-aud','sec-aud','eod','${date}T04:00:00.000Z','${date}','Australia/Sydney','AUD','10.00','raw','observed','2026-08-24T00:00:00.000Z')`,
+    );
+  // sec-usd: priced on EVERY date -- its only possible failure is FX.
+  const usdPrices = dates.map(
+    (date, index) =>
+      `('price-usd-${index}','owner-import','user','owner','owner','map-usd','sec-usd','eod','${date}T04:00:00.000Z','${date}','America/New_York','USD','10.00','raw','observed','2026-08-24T00:00:00.000Z')`,
+  );
+  db.exec(
+    `INSERT INTO price_observations (id,provider_id,access_scope,scope_user_id,scope_key,mapping_id,security_id,interval,observation_at,market_date,market_timezone,currency_code,close_decimal,adjustment_state,quality,ingested_at) VALUES ${[...audPrices, ...usdPrices].join(",")};`,
+  );
+  const fxRows = dates
+    .filter((_date, index) => index !== MIXED_GAP_INDEX)
+    .map(
+      (date, counter) =>
+        `('fx-${counter}','yahoo-compatible','deployment',NULL,'deployment','AUD','USD','0.6700','eod','${date}T04:00:00.000Z','${date}','observed','2026-08-24T00:00:00.000Z')`,
+    );
+  db.exec(
+    `INSERT INTO fx_rate_observations (id,provider_id,access_scope,scope_user_id,scope_key,base_currency_code,quote_currency_code,rate_decimal,interval,observed_at,market_date,quality,ingested_at) VALUES ${fxRows.join(",")};`,
+  );
+  return { db, dates };
+}
+
+test("BUG-012 round-3 FU1: a MIXED gap (one unpriced base-currency security AND one FX-gapped foreign one on the same date) is never persisted as unresolvable", async () => {
+  const { db, dates } = await mixedGapFixture();
+  const gapDate = dates[MIXED_GAP_INDEX]!;
+  const client = createSqliteSqlClient(db);
+
+  const first = await loadHistoricalPortfolioValueSeries(
+    client,
+    "owner",
+    "pf",
+    NOW,
+  );
+  assert.ok(first);
+  if (!first) return;
+  assert.equal(
+    first.points.find((p) => p.date === gapDate)?.valueDecimal,
+    null,
+    "nothing resolves on the mixed-gap date",
+  );
+
+  // The load-bearing FU1 property. Pre-fix the round-2 predicate required
+  // EVERY held security's cause to be FX, so this date was classified
+  // `'no_priceable_security'` and marked -- after which the FX rate's
+  // arrival could never clear it (no FX write path invalidates the table)
+  // and, worse, a later PRICE for `sec-aud` WOULD clear a mark on a date
+  // that is still FX-blocked.
+  assert.deepEqual(unresolvedRows(db), []);
+  db.close();
+});
+
+test("BUG-012 round-3 FU1: after the FX rate arrives, the mixed-gap date resolves to a PARTIAL value on the next read -- never written off", async () => {
+  const { db, dates } = await mixedGapFixture();
+  const gapDate = dates[MIXED_GAP_INDEX]!;
+  const client = createSqliteSqlClient(db);
+
+  await loadHistoricalPortfolioValueSeries(client, "owner", "pf", NOW);
+  assert.deepEqual(unresolvedRows(db), []);
+
+  db.exec(
+    `INSERT INTO fx_rate_observations (id,provider_id,access_scope,scope_user_id,scope_key,base_currency_code,quote_currency_code,rate_decimal,interval,observed_at,market_date,quality,ingested_at) VALUES
+     ('fx-gap','yahoo-compatible','deployment',NULL,'deployment','AUD','USD','0.6800','eod','${gapDate}T04:00:00.000Z','${gapDate}','observed','2026-08-24T00:00:00.000Z');`,
+  );
+
+  const resolved = await loadHistoricalPortfolioValueSeries(
+    client,
+    "owner",
+    "pf",
+    NOW,
+  );
+  assert.ok(resolved);
+  if (!resolved) return;
+  const point = resolved.points.find((p) => p.date === gapDate);
+  assert.notEqual(
+    point?.valueDecimal,
+    null,
+    "the USD leg now resolves, so the date carries a real (partial) value",
+  );
+  assert.equal(
+    point?.completeness,
+    "partial",
+    "sec-aud is still unpriced on this date -- honestly partial, never presented as complete",
+  );
   db.close();
 });
