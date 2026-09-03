@@ -132,6 +132,11 @@ const OWNED_TABLES = [
   // owner's export should reflect what is stored, not just what could be
   // recomputed).
   "portfolio_value_history",
+  // BUG-012: sibling "attempted, genuinely unresolvable" record for a
+  // `portfolio_value_history` candidate date (see db/schema.ts's
+  // `portfolioValueHistoryUnresolvable` header comment) -- same "owned"
+  // shape as `portfolio_value_history` immediately above.
+  "portfolio_value_history_unresolvable",
 ];
 const classifications: Record<string, ExportTableClassification> =
   Object.fromEntries(
@@ -339,6 +344,11 @@ const PURGE_TABLES_IN_FK_ORDER = [
   // `portfolio_daily_snapshots` immediately above. No other table
   // references it.
   "portfolio_value_history",
+  // BUG-012: sibling table, same composite FK to `portfolios` as
+  // `portfolio_value_history` immediately above and no table references
+  // it either -- order relative to its sibling does not matter, only that
+  // both precede `portfolios` itself.
+  "portfolio_value_history_unresolvable",
   "calculation_runs",
   "cash_ledger_entries",
   "cash_accounts",

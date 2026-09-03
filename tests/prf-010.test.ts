@@ -26,8 +26,17 @@
  * (~95% per-tick reduction, ~79% once the recheck cadence's periodic full
  * checks are folded into a daily estimate). Every test in this file
  * verifies the fix reduces this cost without weakening any BUG-010 honesty
- * guarantee or hiding BUG-010 follow-up (e)'s `datesDerived > 0`/
- * `rowsPersisted === 0` tell.
+ * guarantee.
+ *
+ * BUG-012 (2026-09-03) superseded this file's original claim that BUG-010
+ * follow-up (e)'s permanently-unresolvable-dates case could never converge
+ * and would show its `datesDerived > 0`/`rowsPersisted === 0` tell forever
+ * -- BUG-012 persists "attempted, genuinely unresolvable" as a fact, so
+ * such a portfolio now CAN converge (see the renamed test below) once every
+ * remaining candidate date is either stored or marked unresolvable. The
+ * convergence fingerprint here also now folds in
+ * `portfolio_value_history_unresolvable`'s own row count/`MAX(attempted_at)`
+ * so that a later CLEARED mark un-converges the marker.
  */
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
@@ -472,7 +481,7 @@ test("PRF-010: a NON-converged portfolio still runs the full check and converges
   db.close();
 });
 
-test("PRF-010 honesty: BUG-010 follow-up (e)'s permanently-unresolvable-dates case is NEVER marked converged, so its datesDerived>0/rowsPersisted===0 tell stays visible on every tick", async () => {
+test("PRF-010/BUG-012: BUG-010 follow-up (e)'s permanently-unresolvable-dates case now CONVERGES once every remaining candidate date is stored or marked unresolvable -- superseded by BUG-012, see that task's schema/doc corrections", async () => {
   // Owner sells out entirely; a second, never-held security keeps pricing
   // after the sale, so every date from the sale onward is a CANDIDATE (has
   // price data) that no held security can resolve -- BUG-010's own
@@ -516,36 +525,93 @@ test("PRF-010 honesty: BUG-010 follow-up (e)'s permanently-unresolvable-dates ca
   );
   const client = createSqliteSqlClient(db);
 
-  // Several ticks, each fitting the whole 20-date candidate set within
-  // budget -- BUG-010 follow-up (e)'s exact shape: 9 resolvable + 11
-  // permanently unresolvable (sec-2 still priced after the sale).
-  for (let tick = 0; tick < 4; tick += 1) {
-    const outcome = await backfillStoredValueHistoryForPortfolio(
-      client,
-      "owner",
-      "pf",
-      100,
-      new Date(NOW.getTime() + tick * 3_600_000),
-    );
-    assert.ok(outcome);
-    if (!outcome) return;
-    assert.equal(outcome.candidateDates, dates.length);
-    // The tell this task must not hide: dates are derived (attempted) every
-    // tick, but 11 never persist, because they are genuinely unresolvable.
-    // Tick 0 attempts all 20 (nothing stored yet); every later tick still
-    // has exactly those same 11 unresolvable dates missing, so it keeps
-    // re-attempting exactly them, forever -- the pre-existing, deliberately
-    // unfixed BUG-010 follow-up (e) shape.
-    assert.equal(outcome.datesDerived, tick === 0 ? 20 : 11);
-    assert.equal(outcome.rowsPersisted, tick === 0 ? 9 : 0);
-    assert.ok(outcome.datesDerived > outcome.rowsPersisted);
-    const marker = await loadPortfolioConvergenceMarker(client, "owner", "pf");
-    assert.equal(
-      marker,
-      null,
-      `tick ${tick}: a portfolio with permanently-unresolvable dates must never be marked converged`,
-    );
-  }
+  // Tick 0: nothing stored, nothing marked yet -- attempts all 20, persists
+  // the 9 resolvable dates (sec-1 held before the sale), and BUG-012 marks
+  // the other 11 (sold out / never held -> heldSecurityCount 0 ->
+  // 'no_holdings') unresolvable rather than leaving them silently missing
+  // forever. Not yet converged: this tick's OWN `missingDates` count (20,
+  // measured before this tick's marks existed) is what gates the marker.
+  const tick0 = await backfillStoredValueHistoryForPortfolio(
+    client,
+    "owner",
+    "pf",
+    100,
+    NOW,
+  );
+  assert.ok(tick0);
+  if (!tick0) return;
+  assert.equal(tick0.candidateDates, dates.length);
+  assert.equal(tick0.datesDerived, 20);
+  assert.equal(tick0.rowsPersisted, 9);
+  assert.equal(tick0.missingDates, 20);
+  assert.equal(
+    await loadPortfolioConvergenceMarker(client, "owner", "pf"),
+    null,
+    "tick 0 itself found 20 missing dates -- must not be marked converged yet",
+  );
+  const unresolvedRows = db
+    .prepare(
+      `SELECT value_date, reason FROM portfolio_value_history_unresolvable WHERE user_id = 'owner' AND portfolio_id = 'pf' ORDER BY value_date`,
+    )
+    .all() as { value_date: string; reason: string }[];
+  assert.equal(unresolvedRows.length, 11);
+  assert.deepEqual(
+    unresolvedRows.map((row) => row.value_date),
+    dates.slice(9),
+  );
+  assert.ok(
+    unresolvedRows.every((row) => row.reason === "no_holdings"),
+    "sold-out/never-held dates are categorised 'no_holdings', not 'no_priceable_security'",
+  );
+
+  // Tick 1 (marker still null, so this runs the full check): every
+  // candidate date is now EITHER stored (9) or marked unresolvable (11) --
+  // BUG-012's fix to the stall hazard is exactly that `missingDates` now
+  // excludes the 11 marked dates, so this tick finds ZERO missing, derives
+  // nothing, and (this being the first `missingDates === 0` look) records
+  // the convergence marker -- a portfolio with permanently-unresolvable
+  // dates CAN now converge, which is the intended fix, not a regression of
+  // BUG-010 follow-up (e).
+  const tick1 = await backfillStoredValueHistoryForPortfolio(
+    client,
+    "owner",
+    "pf",
+    100,
+    new Date(NOW.getTime() + 3_600_000),
+  );
+  assert.ok(tick1);
+  if (!tick1) return;
+  assert.equal(tick1.missingDates, 0);
+  assert.equal(tick1.datesDerived, 0);
+  assert.equal(tick1.rowsPersisted, 0);
+  assert.equal(tick1.backfillPending, false);
+  assert.notEqual(
+    tick1.skipped,
+    true,
+    "this tick ran the real check, not the marker shortcut",
+  );
+  assert.ok(
+    await loadPortfolioConvergenceMarker(client, "owner", "pf"),
+    "tick 1 found zero missing dates for the first time -- must record the marker",
+  );
+
+  // Tick 2: the marker is fresh and the fingerprint still matches (nothing
+  // wrote to either table since) -- the expensive candidate-date scan is
+  // skipped entirely, exactly like a portfolio with no unresolvable dates
+  // at all would be.
+  const tick2 = await backfillStoredValueHistoryForPortfolio(
+    client,
+    "owner",
+    "pf",
+    100,
+    new Date(NOW.getTime() + 7_200_000),
+  );
+  assert.ok(tick2);
+  if (!tick2) return;
+  assert.equal(tick2.skipped, true);
+  assert.equal(tick2.missingDates, 0);
+  assert.equal(tick2.datesDerived, 0);
+  assert.equal(tick2.rowsPersisted, 0);
   db.close();
 });
 
@@ -720,6 +786,9 @@ test("PRF-010 ruling 2: MAX(computed_at) closes the delete-then-reinsert-elsewhe
     maxComputedAt: "2026-08-24T00:00:00.000Z",
     candidateMaxDate:
       PRODUCTION_SCALE_DATES[PRODUCTION_SCALE_DATES.length - 1]!,
+    // BUG-012: this fixture converges with no unresolvable dates on record.
+    unresolvableCount: 0,
+    maxUnresolvableAttemptedAt: null,
   };
   await recordPortfolioConvergenceMarker(
     client,

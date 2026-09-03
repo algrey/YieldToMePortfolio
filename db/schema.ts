@@ -4208,3 +4208,102 @@ export const portfolioValueHistory = sqliteTable(
     ),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// BUG-012 (2026-09-03, follow-up to BUG-010/PRF-010): a candidate date the
+// read-time derivation genuinely CANNOT resolve (no shares held that day, or
+// every held security missing a price/FX within tolerance) was never stored
+// in `portfolioValueHistory` above -- the table's own honesty invariant, see
+// its header comment. That meant such a date stayed "missing" forever and
+// was re-attempted on EVERY read/cron tick; a contiguous unresolvable run at
+// least as long as one call's `MAX_DERIVE_DATES_PER_READ`/
+// `CRON_MAX_BACKFILL_DATES_PER_TICK` bound pins that call's slice in place
+// permanently and starves every date behind it (docs/ARCHITECTURE.md §9.4's
+// BUG-010 entry recorded this as a known, deliberately-unfixed hazard).
+//
+// Orchestrator schema ruling: persist "attempted, genuinely unresolvable" as
+// a fact SIBLING to `portfolioValueHistory`, not as nullable columns on it.
+// `portfolioValueHistory.valueDecimal`/`completeness`/`heldSecurityCount`/
+// `pricedSecurityCount` are all `NOT NULL` with CHECK constraints tying
+// `pricedSecurityCount` to `heldSecurityCount` -- relaxing any of them to
+// nullable is a column-type change SQLite cannot do via `ALTER TABLE`
+// without a full table rebuild (drop + recreate + copy), which this
+// codebase avoids for a routine additive change (see `historyCompleteFrom`/
+// `value_history_backfill_verified_*`'s own nullable-`ADD COLUMN`
+// precedent, which only works because THEIR host columns start out
+// nullable). A sibling table with the SAME owner-scoped unique key
+// (`portfolio_id`, `value_date`) needs no rebuild and keeps
+// `portfolioValueHistory` itself exactly what its header promises: every
+// row there is a REAL, non-null derived value, never a placeholder.
+//
+// `reason` records WHY the derivation could not resolve a value (see
+// `domain/snapshots/historical-portfolio-value.ts`'s `valuePointAtDate`):
+// `'no_holdings'` when `heldSecurityCount` was 0 (nothing held that day --
+// e.g. a candidate date before this portfolio's first trade in a held
+// security), `'no_priceable_security'` when securities were held but NONE
+// resolved a price/FX within tolerance. Either can still change later: a
+// back-dated ledger correction can turn 0 shares into a non-zero holding, a
+// price/FX import can supply the missing observation -- so this is a
+// CACHED "not resolvable as of the last attempt" fact, never a permanent
+// write-off. `fingerprint` is a diagnostic-only snapshot of the facts that
+// produced this determination (`held=<n>;priced=<n>`), for a human
+// investigating why a date is marked -- unlike PRF-010's convergence
+// fingerprint, nothing in this codebase compares it for equality.
+//
+// Load-bearing correctness property: every write path that already
+// invalidates `portfolioValueHistory` for a date range (ledger mutations,
+// import-commit `finalize`, price-history uploads, the Yahoo-compatible/
+// Sharesight-price rollups, MKT-011A intraday capture) MUST ALSO clear the
+// matching rows here in the SAME atomic batch/call -- otherwise a date that
+// becomes newly resolvable stays permanently written off. See
+// `db/repositories/portfolio-value-history.ts`'s invalidation section for
+// the paired clear alongside each existing invalidation shape.
+//
+// The candidate-date query (`app/historical-portfolio-value.ts`'s
+// `resolveValueHistorySeries`) treats a date with a row here (and no
+// `portfolioValueHistory` row) as "already attempted, skip" -- excluded
+// from `missingDates`, so it can never pin a bounded slice again. A read
+// still renders it honestly absent (no fabricated/interpolated value,
+// mirroring every other "not derived this call" gap already rendered).
+//
+// PRF-010 fold: the convergence-marker fingerprint
+// (`ValueHistoryConvergenceFingerprint`) now folds in this table's row
+// count and `MAX(attempted_at)` for the portfolio -- a write path that
+// clears a mark here (a newly-resolvable date) changes that snapshot, so a
+// stale marker cannot claim "converged" over a portfolio whose unresolvable
+// set just shrank. Every existing invalidation path already mutates this
+// table per the paragraph above, so -- exactly like the stored-side
+// fingerprint -- there is no fifth call site to remember for the
+// fingerprint's sake specifically.
+export const portfolioValueHistoryUnresolvable = sqliteTable(
+  "portfolio_value_history_unresolvable",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    valueDate: text("value_date").notNull(),
+    reason: text("reason").notNull(),
+    attemptedAt: text("attempted_at").notNull(),
+    // Diagnostic-only; see this section's header comment.
+    fingerprint: text("fingerprint"),
+  },
+  (table) => [
+    foreignKey({
+      name: "portfolio_value_history_unresolvable_portfolio_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    check(
+      "portfolio_value_history_unresolvable_reason_check",
+      sql`${table.reason} IN ('no_holdings', 'no_priceable_security')`,
+    ),
+    uniqueIndex(
+      "portfolio_value_history_unresolvable_portfolio_date_unique",
+    ).on(table.portfolioId, table.valueDate),
+    index("portfolio_value_history_unresolvable_user_portfolio_idx").on(
+      table.userId,
+      table.portfolioId,
+      table.valueDate,
+    ),
+  ],
+);

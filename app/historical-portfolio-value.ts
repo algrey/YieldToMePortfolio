@@ -63,6 +63,31 @@
  * (`valueDecimal: null`) is NEVER stored (the honesty invariant), so it is
  * always "missing" and gets a cheap, bounded, single-date re-derivation
  * attempt on every subsequent read until it genuinely resolves.
+ * **CORRECTED by BUG-012 below**: an unresolvable date is now marked and
+ * skipped rather than re-attempted forever -- see that entry.
+ *
+ * BUG-012 (2026-09-03, BUG-010 follow-up): the paragraph above described a
+ * real hazard, not just an inefficiency -- BUG-010's own entry recorded
+ * that a CONTIGUOUS run of unresolvable dates at least as long as one
+ * call's bound pins that call's bounded slice in place PERMANENTLY
+ * (`toDerive` keeps re-selecting the same unresolvable dates every call)
+ * and starves every candidate date behind it; the read/cron sweeping from
+ * opposite ends was a mitigation, not a fix (both ends could still stall).
+ * `resolveValueHistorySeries` below now also loads
+ * `db/repositories/portfolio-value-history.ts`'s
+ * `portfolio_value_history_unresolvable` sibling table and excludes any
+ * date already marked there from `missingDates` -- such a date can never
+ * occupy a slot in a bounded slice again, closing the hazard by
+ * construction rather than merely making it less likely. A date this call's
+ * OWN derivation attempts (`toDerive`) and still cannot resolve is marked
+ * immediately after (`recordUnresolvableValueHistoryDates`), categorised by
+ * `unresolvableReasonFor`. This is a CACHED "not resolvable as of the last
+ * attempt" fact, not a permanent write-off: see the Invalidation paragraph
+ * below for why every write path that can make a date newly resolvable
+ * also clears the mark, in the same atomic unit as its existing
+ * `portfolio_value_history` invalidation. See db/schema.ts's
+ * `portfolioValueHistoryUnresolvable` header comment for the full schema
+ * design record (why a sibling table, not nullable columns).
  *
  * BUG-010 (owner-reported production OUTAGE, 2026-09-01): the paragraph
  * above describes the mechanism correctly, but its BOUND was ~10x the free
@@ -118,6 +143,15 @@
  * `buildValueHistoryInvalidationStatementsForSecurities`). See each site's own
  * doc comment for exactly what "affected" means there.
  *
+ * BUG-012 fold: all three shapes above ALSO clear the matching
+ * `portfolio_value_history_unresolvable` rows, in the SAME atomic unit as
+ * the DELETE they already issue -- a date this portfolio had marked
+ * unresolvable is exactly the shape of stale fact each shape already exists
+ * to correct (a new trade can turn "nothing held" into "held"; a price/FX
+ * write can turn "no priceable security" into "priceable"). See
+ * `db/repositories/portfolio-value-history.ts`'s own Invalidation section
+ * header for the paired clear next to each shape.
+ *
  * Recorded follow-up (deliberately NOT solved by this task -- review B2):
  * `loadFacts`'s `PRICE_SCOPE` predicate does not filter by `interval`, so a
  * `delayed`/`intraday` price observation participates in this derivation
@@ -168,9 +202,12 @@ import {
   deleteStoredValueHistoryInRangeForOwnedSecurity,
   loadPortfolioConvergenceMarker,
   loadStoredValueHistory,
+  loadUnresolvableValueHistoryDates,
   loadValueHistoryConvergenceFingerprint,
   recordPortfolioConvergenceMarker,
+  recordUnresolvableValueHistoryDates,
   upsertStoredValueHistory,
+  type UnresolvableValueHistoryReason,
 } from "../db/repositories/portfolio-value-history.ts";
 
 // Bounds, documented (free-plan READ discipline -- this feature performs no
@@ -920,19 +957,27 @@ export async function loadHistoricalPortfolioValueSeries(
  * `"oldest"` deliberately, so the two sweep the missing set from OPPOSITE
  * ends and meet in the middle.
  *
- * That is not just load-sharing. A candidate date the derivation genuinely
- * cannot resolve is NEVER stored (the honesty invariant -- no fabricated or
- * placeholder value, ever), so it stays "missing" forever and is re-attempted
- * on every call. A contiguous run of such dates that is at least as long as
- * one call's bound therefore pins that call's slice in place permanently and
- * starves every date behind it. That property is pre-existing (it applied at
- * the old 400 bound too, just needing a 400-date run to trigger) but a
- * smaller bound makes a shorter run sufficient, so the two sweeps are pointed
- * at different ends: an unresolvable run at one end can no longer block the
- * other end's progress. It is a mitigation, not a proof -- runs at BOTH ends
- * would still stall, and the durable fix is to persist "attempted, genuinely
- * unresolvable" as a fact (a schema change, deliberately NOT made here).
- * Recorded in `docs/ARCHITECTURE.md`'s BUG-010 entry. */
+ * That is not just load-sharing. Before BUG-012, a candidate date the
+ * derivation genuinely could not resolve was NEVER stored (the honesty
+ * invariant -- no fabricated or placeholder value, ever), so it stayed
+ * "missing" forever and was re-attempted on every call. A contiguous run of
+ * such dates that was at least as long as one call's bound therefore pinned
+ * that call's slice in place permanently and starved every date behind it.
+ * That property was pre-existing (it applied at the old 400 bound too, just
+ * needing a 400-date run to trigger) but a smaller bound made a shorter run
+ * sufficient, so the two sweeps were pointed at different ends: an
+ * unresolvable run at one end could no longer block the other end's
+ * progress. That was a mitigation, not a proof -- runs at BOTH ends could
+ * still stall. Recorded in `docs/ARCHITECTURE.md`'s BUG-010 entry.
+ *
+ * **BUG-012 (2026-09-03) closes this by construction**: an unresolvable
+ * date is now persisted as a fact
+ * (`portfolio_value_history_unresolvable`, see this module's header) and
+ * excluded from `missingDates`, so it can never occupy a slot in a bounded
+ * slice again -- a contiguous unresolvable run of any length no longer
+ * blocks progress from either end. This opposite-ends sweep remains
+ * (load-sharing is still a real benefit), but is no longer load-bearing for
+ * correctness the way it was before. */
 export type ValueHistoryDeriveEnd = "newest" | "oldest";
 
 /** What one bounded derive-and-persist slice actually did -- the cron's
@@ -962,6 +1007,23 @@ export type ValueHistoryBackfillOutcome = {
   skipped?: boolean;
 };
 
+/** BUG-012: categorizes WHY `computeHistoricalPortfolioValueSeries` could
+ * not resolve a value for a date, from the same point it already returns --
+ * see `domain/snapshots/historical-portfolio-value.ts`'s `valuePointAtDate`.
+ * `heldSecurityCount === 0` means nothing was held on this date at all
+ * (`'no_holdings'`, e.g. a candidate date before this portfolio's first
+ * trade in a currently-held security); otherwise every held security failed
+ * to resolve a price/FX within tolerance (`'no_priceable_security'`).
+ * Diagnostic categorisation only -- both reasons are cleared identically by
+ * every existing invalidation path. */
+function unresolvableReasonFor(
+  point: HistoricalPortfolioValuePoint,
+): UnresolvableValueHistoryReason {
+  return point.heldSecurityCount === 0
+    ? "no_holdings"
+    : "no_priceable_security";
+}
+
 /**
  * BUG-010: the ONE bounded derive-and-persist mechanism, shared verbatim by
  * the Overview read (`loadHistoricalPortfolioValueSeries` above) and the
@@ -989,8 +1051,11 @@ async function resolveValueHistorySeries(
   // `range.rangeTo` (already resolved above), neither consumes the other's
   // output (the "missing = candidate but not stored" comparison below reads
   // both results only AFTER they resolve) -- so they run concurrently
-  // instead of as two sequential round trips.
-  const [candidates, stored] = await Promise.all([
+  // instead of as two sequential round trips. BUG-012: `loadUnresolvableValueHistoryDates`
+  // joins the same concurrent group -- it is exactly as independent as
+  // `loadStoredValueHistory` (same keys, same "read only, no derivation"
+  // shape).
+  const [candidates, stored, unresolvable] = await Promise.all([
     loadCandidateDates(
       client,
       userId,
@@ -999,6 +1064,14 @@ async function resolveValueHistorySeries(
       range.rangeTo,
     ),
     loadStoredValueHistory(
+      client,
+      userId,
+      portfolioId,
+      range.rangeFrom,
+      range.rangeTo,
+      MAX_CANDIDATE_DATES + 1,
+    ),
+    loadUnresolvableValueHistoryDates(
       client,
       userId,
       portfolioId,
@@ -1020,13 +1093,27 @@ async function resolveValueHistorySeries(
     dates = dates.slice(dates.length - MAX_CANDIDATE_DATES); // keep the MOST RECENT dates
   }
 
-  const missingDates = dates.filter((date) => !stored.has(date));
+  // BUG-012: a date already marked "attempted, genuinely unresolvable" is
+  // excluded here -- never re-attempted just because it is still not
+  // `stored` -- which is exactly the structural fix for the stall hazard
+  // this task exists to close (a contiguous unresolvable run can no longer
+  // pin a bounded slice, because such dates never occupy a slot in it).
+  const missingDates = dates.filter(
+    (date) => !stored.has(date) && !unresolvable.has(date),
+  );
 
   if (missingDates.length === 0) {
-    // Fully backfilled for this range: the trivial bounded-read fast path
-    // HIST-002 exists for -- no shares/price/FX derivation, and (PRF-002)
-    // no full `price_observations` read, at all.
-    const points = dates.map((date) => stored.get(date)!);
+    // Fully backfilled for this range (or every remaining candidate date is
+    // marked unresolvable): the trivial bounded-read fast path HIST-002
+    // exists for -- no shares/price/FX derivation, and (PRF-002) no full
+    // `price_observations` read, at all. A date that is unresolvable rather
+    // than stored has no row in `stored` -- filtered out here, so it is
+    // simply absent from `points` (the same honest-gap shape every other
+    // "not derived this call" date already renders), never a fabricated or
+    // null-valued placeholder entry.
+    const points = dates
+      .filter((date) => stored.has(date))
+      .map((date) => stored.get(date)!);
     return {
       result: {
         baseCurrencyCode: candidates.baseCurrencyCode,
@@ -1092,6 +1179,27 @@ async function resolveValueHistorySeries(
     points: derived,
     now: nowIso,
   });
+  // BUG-012: every date this call attempted (`toDerive`) that came back
+  // with a `null` valueDecimal is genuinely unresolvable AS OF THIS
+  // ATTEMPT -- record it so it is never re-attempted until a write path
+  // that already invalidates this portfolio's value history (a ledger
+  // mutation, a price/FX import, a rollup) clears the mark. `toDerive`
+  // already excludes previously-marked dates (via `missingDates` above),
+  // so this only ever writes NEW marks or refreshes one just cleared and
+  // retried -- never the same mark on every read.
+  const unresolvedNow = derived.filter((point) => point.valueDecimal === null);
+  if (unresolvedNow.length > 0) {
+    await recordUnresolvableValueHistoryDates(client, {
+      userId,
+      portfolioId,
+      points: unresolvedNow.map((point) => ({
+        date: point.date,
+        reason: unresolvableReasonFor(point),
+        fingerprint: `held=${point.heldSecurityCount};priced=${point.pricedSecurityCount}`,
+      })),
+      now: nowIso,
+    });
+  }
   const derivedByDate = new Map(derived.map((point) => [point.date, point]));
 
   const points: HistoricalPortfolioValuePoint[] = [];
@@ -1164,11 +1272,22 @@ async function resolveValueHistorySeries(
  *
  * The marker is written ONLY when `missingDates === 0` from the very first
  * look this tick (never merely because a tick exhausted its derive budget
- * over dates that turned out unresolvable) -- a portfolio with even one
- * permanently-unresolvable candidate date (BUG-010 follow-up (e)'s
- * territory) can never satisfy that, so it keeps paying for, and keeps
- * LOGGING, the full check and its `datesDerived > 0`/`rowsPersisted === 0`
- * tell on every tick, exactly as before this task.
+ * over dates that turned out unresolvable this tick).
+ *
+ * **CORRECTED by BUG-012 (2026-09-03)**: before that task, a portfolio with
+ * even one permanently-unresolvable candidate date (BUG-010 follow-up (e)'s
+ * territory) could never satisfy `missingDates === 0` at all -- an
+ * unresolvable date was never stored, so it was always counted as missing,
+ * and the portfolio kept paying for, and kept LOGGING, the full check and
+ * its `datesDerived > 0`/`rowsPersisted === 0` tell on every tick forever.
+ * BUG-012 excludes a MARKED-unresolvable date from `missingDates`, so such
+ * a portfolio now CAN converge and record this marker once every remaining
+ * candidate date is either stored or marked unresolvable -- this is the
+ * intended fix for the stall hazard, not a regression of it. The
+ * convergence fingerprint (`ValueHistoryConvergenceFingerprint`) folds in
+ * `portfolio_value_history_unresolvable`'s own row count/`MAX(attempted_at)`
+ * specifically so that a later CLEARED mark (a newly-resolvable date)
+ * un-converges the marker rather than leaving it stale.
  *
  * Returns `null` for a portfolio this owner does not have (the same
  * fail-closed shape every read here uses), never a thrown error for a

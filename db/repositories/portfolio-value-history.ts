@@ -171,6 +171,122 @@ export async function upsertStoredValueHistory(
 }
 
 // ---------------------------------------------------------------------------
+// BUG-012: "attempted, genuinely unresolvable" record for a candidate date
+// the derivation could not resolve a value for -- see db/schema.ts's
+// `portfolioValueHistoryUnresolvable` header comment for the full design
+// record (why this is a sibling table, not nullable columns on
+// `portfolio_value_history`). Every function here is owner-scoped the same
+// way this file's other functions are.
+// ---------------------------------------------------------------------------
+
+export type UnresolvableValueHistoryReason =
+  "no_holdings" | "no_priceable_security";
+
+export type UnresolvableValueHistoryPoint = Readonly<{
+  date: string;
+  reason: UnresolvableValueHistoryReason;
+  /** Diagnostic-only, see the schema header comment -- never compared. */
+  fingerprint: string;
+}>;
+
+/** Bounded, owner-scoped read of every date already marked unresolvable for
+ * one portfolio within `[rangeFrom, rangeTo]` -- mirrors
+ * `loadStoredValueHistory`'s shape so both can run concurrently and feed the
+ * SAME "already accounted for" test at the call site
+ * (`app/historical-portfolio-value.ts`'s `resolveValueHistorySeries`:
+ * `missingDates = candidates - stored - unresolvable`). Only the date is
+ * needed by that comparison -- reason/fingerprint are for diagnostics only,
+ * so this returns a `Set`, not a `Map`. */
+export async function loadUnresolvableValueHistoryDates(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+  rangeFrom: string,
+  rangeTo: string,
+  limit: number,
+): Promise<Set<string>> {
+  const rows = await client.all<Record<string, unknown>>(
+    `SELECT value_date
+     FROM portfolio_value_history_unresolvable
+     WHERE user_id = ? AND portfolio_id = ? AND value_date BETWEEN ? AND ?
+     LIMIT ?`,
+    [userId, portfolioId, rangeFrom, rangeTo, limit],
+  );
+  const result = new Set<string>();
+  for (const row of rows) {
+    if (typeof row.value_date === "string") result.add(row.value_date);
+  }
+  return result;
+}
+
+/**
+ * Idempotent, owner-scoped upsert of "attempted, unresolvable" marks --
+ * companion to `upsertStoredValueHistory` above, called for exactly the
+ * dates this call's derivation attempted (`toDerive`) that came back with a
+ * `null` `valueDecimal`. Since `loadUnresolvableValueHistoryDates` already
+ * excludes previously-marked dates from `toDerive` (via `missingDates`),
+ * this only ever fires for a genuinely NEW discovery or a date whose mark
+ * was just cleared by a concurrent invalidation and is being retried --
+ * never on every read for the same date, unlike a naive "always upsert"
+ * would.
+ */
+export async function recordUnresolvableValueHistoryDates(
+  client: SqlClient,
+  input: Readonly<{
+    userId: string;
+    portfolioId: string;
+    points: readonly UnresolvableValueHistoryPoint[];
+    now: string;
+  }>,
+): Promise<{ written: number }> {
+  if (input.points.length === 0) return { written: 0 };
+  let written = 0;
+  for (const group of chunk(input.points, VALUE_HISTORY_CHUNK_SIZE)) {
+    const statements: SqlStatement[] = group.map((point) => ({
+      sql: `INSERT INTO portfolio_value_history_unresolvable (
+              id, user_id, portfolio_id, value_date, reason, attempted_at, fingerprint
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (portfolio_id, value_date) DO UPDATE SET
+              reason = excluded.reason,
+              attempted_at = excluded.attempted_at,
+              fingerprint = excluded.fingerprint
+            RETURNING id`,
+      params: [
+        randomUUID(),
+        input.userId,
+        input.portfolioId,
+        point.date,
+        point.reason,
+        input.now,
+        point.fingerprint,
+      ],
+    }));
+    const results = await client.batch(statements);
+    written += results.length;
+  }
+  return { written };
+}
+
+/** Pure statement builder -- the unresolvable-table twin of
+ * `valueHistoryInvalidationFromDateStatement`, for embedding in the SAME
+ * atomic batch as that DELETE (ledger mutations, import-commit `finalize`).
+ * A ledger fact effective from `fromDate` onward can change whether a later
+ * date has any shares held at all (the `'no_holdings'` reason), so a mark
+ * in that range must be cleared alongside the value-history row, not just
+ * the row itself. */
+export function unresolvableValueHistoryClearFromDateStatement(
+  userId: string,
+  portfolioId: string,
+  fromDate: string,
+): SqlStatement {
+  return {
+    sql: `DELETE FROM portfolio_value_history_unresolvable
+          WHERE user_id = ? AND portfolio_id = ? AND value_date >= ?`,
+    params: [userId, portfolioId, fromDate],
+  };
+}
+
+// ---------------------------------------------------------------------------
 // PRF-010: cron-only convergence marker.
 //
 // The hourly cron backfill (`app/value-history-backfill-service.ts`) paid a
@@ -291,12 +407,25 @@ export type ValueHistoryConvergenceFingerprint = {
    * resolution) -- this module only encodes/compares it. `null` only when
    * the portfolio holds no securities at all. */
   candidateMaxDate: string | null;
+  /** BUG-012 fold: row count of `portfolio_value_history_unresolvable` for
+   * this portfolio. BUG-012 lets a portfolio converge (`missingDates ===
+   * 0`) with unresolvable dates still on record -- without this, clearing a
+   * mark (a newly-resolvable date, via the SAME invalidation paths that
+   * already mutate `portfolio_value_history`) would leave a stale marker
+   * claiming "converged" even though there is now genuine derivation work
+   * to do. */
+  unresolvableCount: number;
+  /** BUG-012 fold: `MAX(attempted_at)` of the same table -- closes the
+   * analogous delete-then-reinsert collision `maxComputedAt` closes for the
+   * stored side (a mark cleared for date A and a NEW mark recorded for date
+   * B in the same tick could otherwise leave `unresolvableCount` unchanged). */
+  maxUnresolvableAttemptedAt: string | null;
 };
 
 function encodeConvergenceFingerprint(
   fingerprint: ValueHistoryConvergenceFingerprint,
 ): string {
-  return `${fingerprint.rowCount}:${fingerprint.minValueDate ?? ""}:${fingerprint.maxValueDate ?? ""}:${fingerprint.maxComputedAt ?? ""}:${fingerprint.candidateMaxDate ?? ""}`;
+  return `${fingerprint.rowCount}:${fingerprint.minValueDate ?? ""}:${fingerprint.maxValueDate ?? ""}:${fingerprint.maxComputedAt ?? ""}:${fingerprint.candidateMaxDate ?? ""}:${fingerprint.unresolvableCount}:${fingerprint.maxUnresolvableAttemptedAt ?? ""}`;
 }
 
 /** Cheap owner-scoped snapshot of `portfolio_value_history`'s CURRENT shape
@@ -313,18 +442,38 @@ export async function loadValueHistoryConvergenceFingerprint(
   userId: string,
   portfolioId: string,
 ): Promise<Omit<ValueHistoryConvergenceFingerprint, "candidateMaxDate">> {
-  const row = await client.get<Record<string, unknown>>(
-    `SELECT COUNT(*) AS row_count, MIN(value_date) AS lo, MAX(value_date) AS hi,
-            MAX(computed_at) AS last_computed
-     FROM portfolio_value_history WHERE user_id = ? AND portfolio_id = ?`,
-    [userId, portfolioId],
-  );
+  // BUG-012: the unresolvable-table aggregate runs alongside the existing
+  // stored-side one -- both are cheap owner-scoped aggregates over a small
+  // per-portfolio row set (independent reads, so no reason to sequence
+  // them), see `ValueHistoryConvergenceFingerprint`'s own doc comment for
+  // why both are needed.
+  const [row, unresolvableRow] = await Promise.all([
+    client.get<Record<string, unknown>>(
+      `SELECT COUNT(*) AS row_count, MIN(value_date) AS lo, MAX(value_date) AS hi,
+              MAX(computed_at) AS last_computed
+       FROM portfolio_value_history WHERE user_id = ? AND portfolio_id = ?`,
+      [userId, portfolioId],
+    ),
+    client.get<Record<string, unknown>>(
+      `SELECT COUNT(*) AS row_count, MAX(attempted_at) AS last_attempted
+       FROM portfolio_value_history_unresolvable WHERE user_id = ? AND portfolio_id = ?`,
+      [userId, portfolioId],
+    ),
+  ]);
   return {
     rowCount: typeof row?.row_count === "number" ? row.row_count : 0,
     minValueDate: typeof row?.lo === "string" ? row.lo : null,
     maxValueDate: typeof row?.hi === "string" ? row.hi : null,
     maxComputedAt:
       typeof row?.last_computed === "string" ? row.last_computed : null,
+    unresolvableCount:
+      typeof unresolvableRow?.row_count === "number"
+        ? unresolvableRow.row_count
+        : 0,
+    maxUnresolvableAttemptedAt:
+      typeof unresolvableRow?.last_attempted === "string"
+        ? unresolvableRow.last_attempted
+        : null,
   };
 }
 
@@ -392,6 +541,16 @@ export async function recordPortfolioConvergenceMarker(
 // forever the moment a stored row existed for a date a later mutation
 // changed. Three shapes below, matched to three different call-site
 // constraints:
+//
+// BUG-012 fold: each of the three shapes below now ALSO clears the matching
+// `portfolio_value_history_unresolvable` rows in the same range, in the
+// SAME atomic unit as the existing DELETE -- a date this portfolio had
+// marked unresolvable is exactly the shape of stale fact these three shapes
+// already exist to correct (a ledger fact can turn "nothing held" into
+// "held"; a price/FX write can turn "no priceable security" into
+// "priceable"). `unresolvableValueHistoryClearFromDateStatement` pairs with
+// `valueHistoryInvalidationFromDateStatement`; the other two shapes clear
+// inline at their own call sites below.
 // ---------------------------------------------------------------------------
 
 /**
@@ -449,12 +608,29 @@ export async function deleteStoredValueHistoryInRangeForOwnedSecurity(
     .slice(0, MAX_INVALIDATION_PORTFOLIOS);
   let rowsDeleted = 0;
   for (const portfolioId of portfolioIds) {
-    const result = await client.run(
-      `DELETE FROM portfolio_value_history
-       WHERE user_id = ? AND portfolio_id = ? AND value_date BETWEEN ? AND ?`,
-      [userId, portfolioId, fromDate, toDate],
-    );
-    rowsDeleted += result.changes;
+    // BUG-012: the two DELETEs run as one atomic `batch()` per portfolio --
+    // a price-history import for `securityId` in this date range can make a
+    // date this portfolio had marked unresolvable (e.g. `'no_priceable_
+    // security'`) newly resolvable, so the mark must be cleared alongside
+    // the (possibly no-op) value-history DELETE, never as a separate,
+    // skippable follow-up. `RETURNING id` on the first DELETE, not
+    // `SqlBatchResult.changes` (D1's `batch()` result shape this codebase's
+    // `upsertStoredValueHistory` already relies on `RETURNING` for, rather
+    // than `changes`, for exactly this reason).
+    const results = await client.batch([
+      {
+        sql: `DELETE FROM portfolio_value_history
+              WHERE user_id = ? AND portfolio_id = ? AND value_date BETWEEN ? AND ?
+              RETURNING id`,
+        params: [userId, portfolioId, fromDate, toDate],
+      },
+      {
+        sql: `DELETE FROM portfolio_value_history_unresolvable
+              WHERE user_id = ? AND portfolio_id = ? AND value_date BETWEEN ? AND ?`,
+        params: [userId, portfolioId, fromDate, toDate],
+      },
+    ]);
+    rowsDeleted += results[0]?.results.length ?? 0;
   }
   return { portfoliosInvalidated: portfolioIds.length, rowsDeleted };
 }
@@ -519,6 +695,17 @@ export async function buildValueHistoryInvalidationStatementsForSecurities(
     if (!target) continue;
     statements.push({
       sql: `DELETE FROM portfolio_value_history
+            WHERE user_id = ? AND portfolio_id = ? AND value_date BETWEEN ? AND ?`,
+      params: [row.user_id, row.portfolio_id, target.fromDate, target.toDate],
+    });
+    // BUG-012: paired clear, in the SAME statement list the caller batches
+    // atomically -- a fresher/corrected price for this security in this
+    // date range can turn a `'no_priceable_security'` mark into a
+    // resolvable date for any owner holding it, not just the write's own
+    // triggering user (see this function's own doc comment on why
+    // ownership here is resolved per-security).
+    statements.push({
+      sql: `DELETE FROM portfolio_value_history_unresolvable
             WHERE user_id = ? AND portfolio_id = ? AND value_date BETWEEN ? AND ?`,
       params: [row.user_id, row.portfolio_id, target.fromDate, target.toDate],
     });

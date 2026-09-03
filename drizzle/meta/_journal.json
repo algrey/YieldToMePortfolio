@@ -414,6 +414,13 @@
       "when": 1788329478097,
       "tag": "0058_prf_010_value_history_backfill_convergence_marker",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "6",
+      "when": 1788418742649,
+      "tag": "0059_bug_012_value_history_unresolvable",
+      "breakpoints": true
     }
   ]
 }

@@ -7,7 +7,10 @@ import {
   createAuditInsertStatement,
   createConditionalAuditInsertStatement,
 } from "./audit.ts";
-import { valueHistoryInvalidationFromDateStatement } from "./portfolio-value-history.ts";
+import {
+  unresolvableValueHistoryClearFromDateStatement,
+  valueHistoryInvalidationFromDateStatement,
+} from "./portfolio-value-history.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 import { prepareLedgerPosting } from "../../domain/ledger/posting.ts";
 import {
@@ -1062,15 +1065,25 @@ export function createOwnedImportCommitRepository(
     // nothing it committed can make a stored value-history row wrong) and
     // a mixed commit's DELETE date is unaffected by any dividend dates
     // outside the trade range.
+    // BUG-012: each affected portfolio also gets its unresolvable marks
+    // from `trade_range_from` onward cleared, in the SAME `statements` list
+    // this commit already batches atomically -- a committed trade can turn
+    // a previously-'no_holdings' date into a real holding, exactly the
+    // shape of stale fact this DELETE already exists to correct.
     const statements: SqlStatement[] = affected
       .filter((row) => row.trade_range_from !== null)
-      .map((row) =>
+      .flatMap((row) => [
         valueHistoryInvalidationFromDateStatement(
           userId,
           String(row.portfolio_id),
           String(row.trade_range_from),
         ),
-      );
+        unresolvableValueHistoryClearFromDateStatement(
+          userId,
+          String(row.portfolio_id),
+          String(row.trade_range_from),
+        ),
+      ]);
     statements.push(
       ...affected.map((row) => {
         const portfolioId = String(row.portfolio_id);

@@ -14,7 +14,10 @@ import {
   consumeManualLedgerMutationKeyStatement,
   type LedgerMutationAuthorization,
 } from "./manual-ledger-keys.ts";
-import { valueHistoryInvalidationFromDateStatement } from "./portfolio-value-history.ts";
+import {
+  unresolvableValueHistoryClearFromDateStatement,
+  valueHistoryInvalidationFromDateStatement,
+} from "./portfolio-value-history.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
 import {
   prepareLedgerPosting,
@@ -428,6 +431,16 @@ export async function buildLedgerPostingStatements(
   // `valueHistoryInvalidationFromDateStatement`'s own doc comment.
   statements.push(
     valueHistoryInvalidationFromDateStatement(
+      userId,
+      input.portfolioId,
+      input.localTradeDate,
+    ),
+  );
+  // BUG-012: a new trade can turn a date this portfolio had marked
+  // 'no_holdings' into a real holding -- clear the mark in the SAME atomic
+  // batch as the DELETE above, see this module's import's own doc comment.
+  statements.push(
+    unresolvableValueHistoryClearFromDateStatement(
       userId,
       input.portfolioId,
       input.localTradeDate,
@@ -950,6 +963,16 @@ export function createOwnedLedgerRepository(
     // doc comment.
     statements.push(
       valueHistoryInvalidationFromDateStatement(
+        userId,
+        input.portfolioId,
+        earliestAffectedLocalDate,
+      ),
+    );
+    // BUG-012: post/reverse/supersede can equally turn a
+    // previously-'no_holdings' date into a real holding -- clear the mark
+    // in the SAME atomic batch as the DELETE above.
+    statements.push(
+      unresolvableValueHistoryClearFromDateStatement(
         userId,
         input.portfolioId,
         earliestAffectedLocalDate,
