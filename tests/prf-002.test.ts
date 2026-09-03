@@ -67,7 +67,7 @@
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { createSqliteSqlClient } from "../db/repositories/index.ts";
 import { loadOwnedHoldings } from "../app/owned-holdings.ts";
 import {
@@ -2699,6 +2699,11 @@ test("PRF-012: loadOwnedHoldings renders byte-identically whether given a resolv
     USER_ID,
     PORTFOLIO_ID,
   );
+  // PRF-012 correction round B2: `resolveOwnedPortfolioContext` now
+  // returns `null` on a sanity fallback -- this fixture is well within
+  // every sanity bound, so a `null` here would itself be the bug this
+  // assertion catches (narrows the type for the calls below).
+  assert(context !== null, "expected a resolved context on this fixture");
   contextDb.close();
 
   const dbSelf = await productionScaleFixture();
@@ -2738,6 +2743,11 @@ test("PRF-012: loadOwnedDividendHistory renders byte-identically whether given a
     USER_ID,
     PORTFOLIO_ID,
   );
+  // PRF-012 correction round B2: `resolveOwnedPortfolioContext` now
+  // returns `null` on a sanity fallback -- this fixture is well within
+  // every sanity bound, so a `null` here would itself be the bug this
+  // assertion catches (narrows the type for the calls below).
+  assert(context !== null, "expected a resolved context on this fixture");
   contextDb.close();
 
   const dbSelf = await productionScaleFixture();
@@ -2776,6 +2786,11 @@ test("PRF-012: loadHistoricalPortfolioValueAtDates renders byte-identically whet
     USER_ID,
     PORTFOLIO_ID,
   );
+  // PRF-012 correction round B2: `resolveOwnedPortfolioContext` now
+  // returns `null` on a sanity fallback -- this fixture is well within
+  // every sanity bound, so a `null` here would itself be the bug this
+  // assertion catches (narrows the type for the calls below).
+  assert(context !== null, "expected a resolved context on this fixture");
   contextDb.close();
 
   const dbSelf = await productionScaleFixture();
@@ -2868,6 +2883,10 @@ test("PRF-012: a context resolved for a different userId or a different portfoli
     USER_ID,
     PORTFOLIO_ID,
   );
+  // PRF-012 correction round B2: this fixture is well within every sanity
+  // bound, so a `null` return here would itself be the bug this assertion
+  // catches (narrows the type for the spreads below).
+  assert(validContext !== null, "expected a resolved context on this fixture");
   const wrongUser = { ...validContext, userId: "someone-else" };
   const wrongPortfolio = {
     ...validContext,
@@ -2958,4 +2977,316 @@ test("PRF-012: loadHistoricalPortfolioValueAtDates has exactly one production ca
     ["app/owned-income-projection.ts"],
     "expected loadHistoricalPortfolioValueAtDates to have exactly one production caller",
   );
+});
+
+// ---------------------------------------------------------------------------
+// PRF-012 correction round (2026-09-04) -- two findings against the `966b1df`
+// landing:
+//
+// B1: `resolveOwnedPortfolioContext`'s identity read INNER JOINed
+// `securities`, so `status = 'unresolved'` rows (`security_id IS NULL` by
+// the table's own CHECK constraint) were silently dropped from
+// `identities` -- undercounting relative to `loadFacts`' own unjoined,
+// unfiltered `securityRows` self-load. At real scale (490 unresolved rows)
+// this meant the context path stayed under `loadHistoricalPortfolioValueAtDates`'s
+// own 500-row cap while the self-load path -- reading the SAME table with
+// no join and no filter -- exceeded it and threw. Fixed with a LEFT JOIN
+// (`app/owned-portfolio-context.ts`); `securityId` is now `string | null`.
+//
+// B2: the context's own sanity ceiling/currency/timezone checks THREW,
+// which could introduce a NEW failure a caller's self-load would never
+// hit on its own (an `/income/assumptions` load with 2,001 unrelated
+// `hidden` rows, or a malformed stored `timezone` on a field a given
+// self-load never even reads). Fixed: `resolveOwnedPortfolioContext`
+// returns `null` on these three sanity failures instead of throwing, logs
+// one structured warning naming the reason (no owner data), and every
+// caller passes `undefined` (not `null`) to each loader on that fallback
+// so it self-loads exactly as it did before this context existed.
+// ---------------------------------------------------------------------------
+
+test("PRF-012 correction round B1: resolveOwnedPortfolioContext LEFT JOINs securities so an `unresolved` row survives in `identities` with `securityId: null`, matching loadFacts' own unjoined self-load row count (regression pin: an INNER JOIN here silently dropped this row -- FAILS against 966b1df)", async () => {
+  const db = await productionScaleFixture();
+  db.exec(`
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at)
+      VALUES ('unresolved-0','owner-1','portfolio-1',NULL,'UNRES0','AUD','unresolved','2026-08-01T00:00:00.000Z','2026-08-01T00:00:00.000Z');
+  `);
+  const client = createSqliteSqlClient(db);
+  const context = await resolveOwnedPortfolioContext(
+    client,
+    USER_ID,
+    PORTFOLIO_ID,
+  );
+  assert(context !== null, "expected a resolved context on this fixture");
+  assert.equal(
+    context.identities.length,
+    SECURITY_COUNT + 1,
+    "expected the unresolved row to be carried in identities, matching loadFacts' own unjoined self-load row count",
+  );
+  const unresolvedIdentity = context.identities.find(
+    (identity) => identity.id === "unresolved-0",
+  );
+  assert.ok(
+    unresolvedIdentity,
+    "expected the unresolved row to appear in identities",
+  );
+  assert.equal(unresolvedIdentity?.securityId, null);
+  assert.equal(unresolvedIdentity?.status, "unresolved");
+  db.close();
+});
+
+test("PRF-012 correction round B1: loadHistoricalPortfolioValueAtDates renders byte-identically self-loaded vs context-supplied on a fixture that includes one `unresolved` row (GUARD, not an independent regression pin: an unresolved row contributes zero quantity/value regardless of whether it is counted -- see this file's own identity-count regression pin above, which DOES fail pre-fix)", async () => {
+  const requestedDates = ["2026-06-30", "2025-06-30"];
+
+  const contextDb = await productionScaleFixture();
+  contextDb.exec(`
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at)
+      VALUES ('unresolved-0','owner-1','portfolio-1',NULL,'UNRES0','AUD','unresolved','2026-08-01T00:00:00.000Z','2026-08-01T00:00:00.000Z');
+  `);
+  const context = await resolveOwnedPortfolioContext(
+    createSqliteSqlClient(contextDb),
+    USER_ID,
+    PORTFOLIO_ID,
+  );
+  assert(context !== null, "expected a resolved context on this fixture");
+  contextDb.close();
+
+  const dbSelf = await productionScaleFixture();
+  dbSelf.exec(`
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at)
+      VALUES ('unresolved-0','owner-1','portfolio-1',NULL,'UNRES0','AUD','unresolved','2026-08-01T00:00:00.000Z','2026-08-01T00:00:00.000Z');
+  `);
+  const selfLoaded = await loadHistoricalPortfolioValueAtDates(
+    createSqliteSqlClient(dbSelf),
+    USER_ID,
+    PORTFOLIO_ID,
+    requestedDates,
+    NOW,
+  );
+  dbSelf.close();
+
+  const dbContext = await productionScaleFixture();
+  dbContext.exec(`
+    INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at)
+      VALUES ('unresolved-0','owner-1','portfolio-1',NULL,'UNRES0','AUD','unresolved','2026-08-01T00:00:00.000Z','2026-08-01T00:00:00.000Z');
+  `);
+  const withContext = await loadHistoricalPortfolioValueAtDates(
+    createSqliteSqlClient(dbContext),
+    USER_ID,
+    PORTFOLIO_ID,
+    requestedDates,
+    NOW,
+    context,
+  );
+  dbContext.close();
+
+  assert.deepEqual(
+    withContext,
+    selfLoaded,
+    "expected loadHistoricalPortfolioValueAtDates' output to be unaffected by a supplied context, even with an unresolved row present",
+  );
+});
+
+test("PRF-012 correction round B1: loadHistoricalPortfolioValueAtDates' self-load 500-row cap and its context-supplied path throw IDENTICALLY once unresolved rows push the unfiltered row count past 500 (regression pin: pre-fix the context path's INNER JOIN silently dropped 490 unresolved rows, staying under the cap and returning a value while self-load threw -- FAILS against 966b1df)", async () => {
+  const db = await productionScaleFixture();
+  const insertUnresolved = db.prepare(
+    `INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at) VALUES (?,?,?,NULL,?,?,?,?,?)`,
+  );
+  for (let index = 0; index < 490; index += 1) {
+    insertUnresolved.run(
+      `unresolved-${index}`,
+      "owner-1",
+      "portfolio-1",
+      `UNRES${index}`,
+      "AUD",
+      "unresolved",
+      "2026-08-01T00:00:00.000Z",
+      "2026-08-01T00:00:00.000Z",
+    );
+  }
+  const client = createSqliteSqlClient(db);
+
+  await assert.rejects(
+    loadHistoricalPortfolioValueAtDates(
+      client,
+      USER_ID,
+      PORTFOLIO_ID,
+      ["2026-06-30"],
+      NOW,
+    ),
+    /too_many_securities/,
+    "expected the self-load path to throw once the unfiltered row count (508) exceeds MAX_SECURITIES (500)",
+  );
+
+  const context = await resolveOwnedPortfolioContext(
+    client,
+    USER_ID,
+    PORTFOLIO_ID,
+  );
+  assert(
+    context !== null,
+    "508 rows is still well under the context's own 2,000-row sanity ceiling",
+  );
+  assert.equal(context.identities.length, SECURITY_COUNT + 490);
+
+  await assert.rejects(
+    loadHistoricalPortfolioValueAtDates(
+      client,
+      USER_ID,
+      PORTFOLIO_ID,
+      ["2026-06-30"],
+      NOW,
+      context,
+    ),
+    /too_many_securities/,
+    "expected the context-supplied path to throw identically to the self-load path",
+  );
+  db.close();
+});
+
+/** Inserts `count` brand-new `securities` rows plus `count` `hidden`
+ * `portfolio_securities` rows referencing them -- `hidden` (unlike
+ * `unresolved`) requires a non-NULL `security_id` by the table's own CHECK
+ * constraint, and `portfolio_securities_resolved_unique` forbids reusing an
+ * existing security id within the same portfolio, so each hidden row needs
+ * its own distinct security. */
+function addHiddenSecurities(db: DatabaseSync, count: number): void {
+  const now = "2026-08-01T00:00:00.000Z";
+  const insertSecurity = db.prepare(
+    `INSERT INTO securities(id,asset_type,primary_currency_code,canonical_name,created_at,updated_at) VALUES (?,?,?,?,?,?)`,
+  );
+  const insertPortfolioSecurity = db.prepare(
+    `INSERT INTO portfolio_securities(id,user_id,portfolio_id,security_id,source_symbol,source_currency_code,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+  );
+  for (let index = 0; index < count; index += 1) {
+    const securityId = `hidden-security-${index}`;
+    insertSecurity.run(
+      securityId,
+      "equity",
+      "AUD",
+      `Hidden Security ${index}`,
+      now,
+      now,
+    );
+    insertPortfolioSecurity.run(
+      `hidden-${index}`,
+      "owner-1",
+      "portfolio-1",
+      securityId,
+      `HID${index}`,
+      "AUD",
+      "hidden",
+      now,
+      now,
+    );
+  }
+}
+
+test("PRF-012 correction round B2: resolveOwnedPortfolioContext returns null (never throws) once identities exceed MAX_CONTEXT_IDENTITY_ROWS, logging exactly one structured warning naming the reason only (no owner data)", async () => {
+  const db = await productionScaleFixture();
+  addHiddenSecurities(db, 2001);
+  const client = createSqliteSqlClient(db);
+
+  const warnMock = mock.method(console, "warn", () => {});
+  let context;
+  try {
+    context = await resolveOwnedPortfolioContext(client, USER_ID, PORTFOLIO_ID);
+  } finally {
+    warnMock.mock.restore();
+  }
+  assert.equal(
+    context,
+    null,
+    "expected a null fallback, never a thrown too_many_securities",
+  );
+  assert.equal(
+    warnMock.mock.callCount(),
+    1,
+    "expected exactly one structured warning",
+  );
+  const [loggedMessage] = warnMock.mock.calls[0]!.arguments;
+  const parsed = JSON.parse(String(loggedMessage));
+  assert.equal(parsed.reason, "too_many_securities");
+  assert.equal(parsed.userId, undefined, "must never log owner data");
+  assert.equal(parsed.portfolioId, undefined, "must never log owner data");
+  db.close();
+});
+
+test("PRF-012 correction round B2: /income/assumptions renders identically whether or not 2,001 unrelated `hidden` rows push the context's row count past its 2,000-row sanity ceiling -- resolveOwnedPortfolioContext falls back to null and loadOwnedDividendAssumptions self-loads exactly as before (regression pin: pre-fix this rejected with too_many_securities even though this screen's own self-load only ever reads the 500-row-capped HELD subset -- FAILS against 966b1df)", async () => {
+  const baselineDb = await productionScaleFixture();
+  const baseline = await loadOwnedDividendAssumptions(
+    createSqliteSqlClient(baselineDb),
+    USER_ID,
+    PORTFOLIO_ID,
+    NOW,
+  );
+  baselineDb.close();
+
+  const hiddenDb = await productionScaleFixture();
+  addHiddenSecurities(hiddenDb, 2001);
+  const withHidden = await loadOwnedDividendAssumptions(
+    createSqliteSqlClient(hiddenDb),
+    USER_ID,
+    PORTFOLIO_ID,
+    NOW,
+  );
+  hiddenDb.close();
+
+  assert.deepEqual(
+    withHidden,
+    baseline,
+    "expected /income/assumptions to be unaffected by 2,001 unrelated hidden rows",
+  );
+});
+
+test("PRF-012 correction round B2: an invalid (empty) stored portfolio timezone falls back to null instead of throwing, logs one structured warning, and loadHistoricalPortfolioValueAtDates renders identically to a true self-load (regression pin: pre-fix resolveOwnedPortfolioContext threw invalid_timezone -- FAILS against 966b1df)", async () => {
+  const db = await productionScaleFixture();
+  db.exec(`UPDATE portfolios SET timezone = '' WHERE id = 'portfolio-1'`);
+  const client = createSqliteSqlClient(db);
+
+  const warnMock = mock.method(console, "warn", () => {});
+  let context;
+  try {
+    context = await resolveOwnedPortfolioContext(client, USER_ID, PORTFOLIO_ID);
+  } finally {
+    warnMock.mock.restore();
+  }
+  assert.equal(
+    context,
+    null,
+    "expected a null fallback, never a thrown invalid_timezone",
+  );
+  assert.equal(
+    warnMock.mock.callCount(),
+    1,
+    "expected exactly one structured warning",
+  );
+  const parsed = JSON.parse(String(warnMock.mock.calls[0]!.arguments[0]));
+  assert.equal(parsed.reason, "invalid_timezone");
+
+  const selfLoaded = await loadHistoricalPortfolioValueAtDates(
+    client,
+    USER_ID,
+    PORTFOLIO_ID,
+    ["2026-06-30"],
+    NOW,
+  );
+  const withFallbackContext = await loadHistoricalPortfolioValueAtDates(
+    client,
+    USER_ID,
+    PORTFOLIO_ID,
+    ["2026-06-30"],
+    NOW,
+    context ?? undefined,
+  );
+  assert.deepEqual(
+    withFallbackContext,
+    selfLoaded,
+    "expected the fallback (null-context) path to render identically to a true self-load",
+  );
+  assert.equal(
+    selfLoaded,
+    null,
+    "an invalid timezone must render as an honest unavailable, never a thrown error or a fabricated value",
+  );
+  db.close();
 });

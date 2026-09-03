@@ -168,6 +168,14 @@ export async function loadOwnedIncomeProjection(
   // every other owned-* service). Passed through to all three so each
   // skips its own re-read; each still asserts the context belongs to
   // `userId`/`portfolioId` before trusting it.
+  //
+  // PRF-012 correction round B2: `context` can be `null` (a sanity
+  // fallback -- see `resolveOwnedPortfolioContext`'s own doc comment) even
+  // though the portfolio IS owned -- every use below must pass `?? undefined`
+  // to the three loaders (never the `null` itself) and never read a field
+  // off `context` without a null check, so this degraded case self-loads
+  // exactly as it did before this context existed rather than throwing a
+  // TypeError on a discarded context.
   const context = await resolveOwnedPortfolioContext(
     client,
     userId,
@@ -206,7 +214,7 @@ export async function loadOwnedIncomeProjection(
     now,
     {},
     "skip",
-    context,
+    context ?? undefined,
   ).catch(() => null);
   const history = await loadOwnedDividendHistory(
     client,
@@ -214,7 +222,7 @@ export async function loadOwnedIncomeProjection(
     portfolioId,
     now,
     undefined,
-    context,
+    context ?? undefined,
   );
   const today = history.today;
   const holdings: Awaited<ReturnType<typeof loadOwnedHoldings>> | null =
@@ -275,9 +283,26 @@ export async function loadOwnedIncomeProjection(
   // even when the holdings pipeline is unavailable (e.g. no published
   // calculation yet) -- PRF-012: `context.portfolio.baseCurrencyCode` is
   // this SAME fact, already resolved once above, so this no longer needs
-  // its own second `portfolios` read.
+  // its own second `portfolios` read when a context WAS resolved.
+  //
+  // PRF-012 correction round B2: `??`/the ternary below short-circuit, so
+  // `context` is only ever dereferenced when `baseCurrencyCode` is itself
+  // `null` -- on a `null` context (sanity fallback) this re-reads
+  // `base_currency_code` directly, restoring the exact pre-PRF-012
+  // self-load this branch always ran before the context existed, rather
+  // than throwing on `context.portfolio`.
   const resolvedBaseCurrencyCode =
-    baseCurrencyCode ?? context.portfolio.baseCurrencyCode;
+    baseCurrencyCode ??
+    (context
+      ? context.portfolio.baseCurrencyCode
+      : String(
+          (
+            await client.get<Record<string, unknown>>(
+              `SELECT base_currency_code FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
+              [portfolioId, userId],
+            )
+          )?.base_currency_code ?? "",
+        ));
 
   const holdingsByPortfolioSecurityId = new Map(
     (holdings?.rows ?? []).map((row) => [row.id, row]),
@@ -626,7 +651,7 @@ export async function loadOwnedIncomeProjection(
         portfolioId,
         [...endDatesByYear.values()],
         now,
-        context,
+        context ?? undefined,
       );
       if (valuesByDate) {
         for (const [endingYear, endDate] of endDatesByYear) {

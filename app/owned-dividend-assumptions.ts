@@ -34,6 +34,10 @@ import { createDividendAssumptionsRepository } from "../db/repositories/dividend
 import { loadOwnedHoldings } from "./owned-holdings.ts";
 import { loadOwnedDividendHistory } from "./owned-dividend-history.ts";
 import { resolveOwnedPortfolioContext } from "./owned-portfolio-context.ts";
+import {
+  createOwnedUserSettingsRepository,
+  type OwnedUserSettingsRecord,
+} from "../db/repositories/owned-portfolios.ts";
 import { currentFyWindow } from "../domain/calculations/financial-year.ts";
 import {
   deriveTrailingDividendYield,
@@ -109,12 +113,44 @@ export async function loadOwnedDividendAssumptions(
   // `loadOwnedHoldings`/`loadOwnedDividendHistory` calls further down all
   // independently re-read the SAME facts. Each still asserts the context
   // belongs to `userId`/`portfolioId` before trusting it.
+  //
+  // PRF-012 correction round B2: `resolveOwnedPortfolioContext` returns
+  // `null` on a sanity fallback (see that module's own doc comment) even
+  // though the portfolio IS owned -- this screen (unlike
+  // `loadOwnedIncomeProjection`, which only THREADS the context through)
+  // reads `settings`/`identities` off it directly for its OWN logic, so a
+  // `null` context here falls back to re-running EXACTLY the pre-PRF-012
+  // self-load (ownership + settings + held-identity reads) rather than
+  // throwing a TypeError on a discarded context.
   const context = await resolveOwnedPortfolioContext(
     client,
     userId,
     portfolioId,
   );
-  const settings = context.settings;
+  const [portfolio, settings, identityRows]: [
+    Row | undefined,
+    OwnedUserSettingsRecord | null,
+    Row[] | null,
+  ] = context
+    ? [{ id: context.portfolio.id }, context.settings, null]
+    : await Promise.all([
+        client.get<Row>(
+          `SELECT id FROM portfolios WHERE id = ? AND user_id = ? LIMIT 1`,
+          [portfolioId, userId],
+        ),
+        createOwnedUserSettingsRepository(client).get(userId),
+        client.all<Row>(
+          `SELECT ps.id, ps.security_id, COALESCE(ps.display_symbol, ps.source_symbol) AS symbol,
+              s.primary_currency_code
+       FROM portfolio_securities ps
+       JOIN securities s ON s.id = ps.security_id
+       WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.status = 'held'
+       ORDER BY ps.id LIMIT ?`,
+          [userId, portfolioId, MAX_SECURITIES + 1],
+        ),
+      ]);
+  if (!portfolio) throw new Error("not_owned");
+  if (!settings) throw new Error("missing_user_settings");
   const currentWindow = currentFyWindow(
     now.toISOString(),
     settings.financialYearStartMonth,
@@ -140,15 +176,30 @@ export async function loadOwnedDividendAssumptions(
   // PRF-012: `context.identities`, filtered to held, is the SAME row set
   // this screen's own identity query used to fetch separately -- the
   // `MAX_SECURITIES` cap below is unchanged, still enforced on the same
-  // held-only subset.
-  const identities = context.identities
-    .filter((identity) => identity.status === "held")
-    .map((identity) => ({
-      id: identity.id,
-      securityId: identity.securityId,
-      symbol: identity.symbol,
-      currencyCode: identity.primaryCurrencyCode,
-    }));
+  // held-only subset. `securityId !== null` never actually excludes a
+  // `held` row (the table's own CHECK constraint ties `unresolved` to a
+  // `NULL security_id`, and `unresolved` can never be `held`) -- it only
+  // narrows the type for the strongly-typed `identities` shape below,
+  // matching the null-safety every other consumer of `context.identities`
+  // already applies via `Row`/`requiredText`.
+  const identities = context
+    ? context.identities
+        .filter(
+          (identity): identity is typeof identity & { securityId: string } =>
+            identity.status === "held" && identity.securityId !== null,
+        )
+        .map((identity) => ({
+          id: identity.id,
+          securityId: identity.securityId,
+          symbol: identity.symbol,
+          currencyCode: identity.primaryCurrencyCode,
+        }))
+    : (identityRows ?? []).map((row) => ({
+        id: String(row.id),
+        securityId: String(row.security_id),
+        symbol: String(row.symbol),
+        currencyCode: String(row.primary_currency_code),
+      }));
   if (identities.length > MAX_SECURITIES)
     throw new Error("too_many_securities");
 
@@ -192,7 +243,7 @@ export async function loadOwnedDividendAssumptions(
         now,
         {},
         "skip",
-        context,
+        context ?? undefined,
       ).catch(() => null),
       // DIV-016 part B: `hasFullYearHistoryEvidence` per security is
       // `computeSecurityDividendForecast`'s OWN already-computed evidence
@@ -210,7 +261,7 @@ export async function loadOwnedDividendAssumptions(
         portfolioId,
         now,
         undefined,
-        context,
+        context ?? undefined,
       ).catch(() => null),
       client.all<Row>(
         `SELECT security_id, kind, status, ex_date, currency_code, gross_per_share_decimal
