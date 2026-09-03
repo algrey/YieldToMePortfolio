@@ -363,12 +363,17 @@ test("BRK-014: formatSyncResultMessage reads unambiguously as 'no new rows' when
 // because of a residual field (symbol/exchange) -- it can equally mean
 // Sharesight returned a different combination of rows than the last sync
 // (a full resync or a changed window) with no row's own value changing at
-// all. Either way, saying "every staged row already matches an existing
-// record" (the REUSED-path copy, which asserts a byte-identical fetch) here
-// would be dishonest, so this case must read differently from the
-// genuinely-reused zero-new case above -- naming what WAS checked and both
-// possibilities, never asserting either one occurred.
-test("BRK-014 review round 3: formatSyncResultMessage never claims 'every staged row already matches' for a NEW (non-reused) zero-new batch -- it names the residual, uncompared fields instead", () => {
+// all. Round 5 (correction to round 4's own two-way list): there is a THIRD
+// way, and it makes both of those false -- a bundle-restored ledger holds
+// committed Sharesight-keyed rows but no `import_batches` at all, so the
+// first sync afterwards matches no earlier batch simply because there is
+// none to match. However it arose, the shape is LEGITIMATE; what would be
+// dishonest is saying "every staged row already matches an existing record"
+// (the REUSED-path copy, which asserts a byte-identical fetch this batch has
+// not had), so this case must read differently from the genuinely-reused
+// zero-new case above -- naming what WAS checked and all three
+// possibilities, never asserting any one occurred.
+test("BRK-014 review round 3: formatSyncResultMessage never claims 'every staged row already matches' for a NEW (non-reused) zero-new batch -- it states all three ways the shape arises instead", () => {
   const message = formatSyncResultMessage({
     ok: true,
     batchId: "batch-27",
@@ -382,7 +387,8 @@ test("BRK-014 review round 3: formatSyncResultMessage never claims 'every staged
   });
   assert.doesNotMatch(message, /every staged row already matches/);
   assert.match(message, /not compared/);
-  assert.match(message, /review the batch before accepting/);
+  assert.match(message, /no earlier sync batch/);
+  assert.match(message, /Review the batch before accepting/);
 });
 
 test("BRK-014: formatSyncResultMessage names N when every staged row is genuinely new, without a redundant '0 already imported' clause", () => {

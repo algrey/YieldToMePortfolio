@@ -189,23 +189,30 @@ function windowLabel(window: SharesightSyncWindowSummary): string {
  *   BYTE-IDENTICAL to the prior sync (see `canonicalFetchDigestSource`),
  *   so "every staged row already matches an existing record" is literally
  *   true. Keeps the original "No new rows" copy.
- * - `reused === false`: a NEW batch was created, which only happens when
+ * - `reused === false`: `startUpload`'s dedupe matched NO prior batch, i.e.
  *   `canonicalFetchDigestSource`'s hash of the WHOLE fetched row set
- *   differed from every prior sync's. Round 4 (BLOCKING, correction to this
+ *   equalled no earlier sync's. Round 4 (BLOCKING, correction to this
  *   bullet's own round-3 wording): that hash covers the entire row SET, not
- *   any one row's fields, so it also changes whenever Sharesight returns a
- *   different COMBINATION of rows -- a Full resync, a narrowed window, a
- *   Sharesight-side deletion, or the first sync on a bundle-restored ledger
- *   all do this with no row's own value changing at all (reviewer
- *   reproduced this with a Full resync of two unchanged committed payouts).
- *   If `isRowAlreadyImported` still counts every row as already-imported,
- *   this function cannot tell WHICH of the two happened -- a genuinely
- *   different row set, or a change on a field it does not compare
+ *   any one row's fields, so it also fails to match whenever Sharesight
+ *   returns a different COMBINATION of rows -- a Full resync, a narrowed
+ *   window, or a Sharesight-side deletion all do this with no row's own
+ *   value changing at all (reviewer reproduced this with a Full resync of
+ *   two unchanged committed payouts). Round 5 (BLOCKING, correction to
+ *   round 4's own list): the first sync on a bundle-restored ledger belongs
+ *   to a THIRD case, not to that one. A restore carries `transactions` and
+ *   `dividend_manual_records` but never `import_batches`, so committed
+ *   Sharesight-keyed rows exist with NO prior batch to match at all -- the
+ *   row set need not differ from anything, because there is nothing to
+ *   differ from (reviewer reproduced `{reused: false, newRows: 0,
+ *   alreadyImportedRows: 1}` on exactly this shape). If
+ *   `isRowAlreadyImported` still counts every row as already-imported, this
+ *   function cannot tell WHICH of the three happened -- a genuinely
+ *   different row set, a change on a field it does not compare
  *   (`symbol`/`exchange` for either row kind -- see
  *   `app/sharesight-sync-service.ts`'s `isRowAlreadyImported` doc comment
- *   for the exact residual list) -- so this case gets its own honest
- *   sentence naming what WAS checked and stating both possibilities, never
- *   asserting either one occurred.
+ *   for the exact residual list), or no earlier batch to compare against --
+ *   so this case gets its own honest sentence naming what WAS checked and
+ *   stating all three possibilities, never asserting any one occurred.
  *
  * The all-new and mixed shapes are unchanged: the all-new case omits the
  * redundant "0 already imported" clause; the mixed case names both counts.
@@ -218,11 +225,13 @@ function newVsAlreadyImportedLine(result: SharesightSyncSuccess): string {
         " None differ from your ledger on the compared fields (quantity, " +
         "price, fee, date, type, currency for trades; cash, franking, " +
         "payment date, FX and currency where recorded for payouts). This " +
-        "batch is new, so either Sharesight returned a different set of " +
-        "rows than the last sync (a full resync or a changed window does " +
-        "this on its own) or something changed on a field that is not " +
-        "compared (symbol, exchange, or an FX rate or currency that was " +
-        "not recorded) -- review the batch before accepting."
+        "batch does not match any batch from an earlier sync, so one of " +
+        "three things is true: Sharesight returned a different set of rows " +
+        "(a full resync or a changed window does this on its own), " +
+        "something changed on a field that is not compared (symbol, " +
+        "exchange, or an FX rate or currency that was not recorded), or " +
+        "this ledger has no earlier sync batch to compare against (a " +
+        "restored backup does this). Review the batch before accepting."
       );
     }
     return " No new rows -- every staged row already matches an existing record.";

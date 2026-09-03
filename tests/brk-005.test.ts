@@ -1997,13 +1997,21 @@ test("BRK-014 review B1: a trade-date-only correction to a committed trade re-sy
 // payout `exchangeRateDecimal` vs `dividend_manual_records.fx_rate_to_portfolio_decimal`,
 // but only when the stored value is non-null) and pins the residual case
 // (a native-currency payout, whose FX rate is never independently stored,
-// must NOT be reported as changed just because it re-syncs). All four tests
-// below FAIL against the pre-fix code (`8097185`, verified by temporarily
-// reverting the round-3 comparison additions): the FX-only and
-// currency-only correction tests report `newRows: 0, alreadyImportedRows: 1`
-// instead of `newRows: 1, alreadyImportedRows: 0`; the symbol-only
-// correction test reports `newRows: 0` with the old, self-contradictory "No
-// new rows -- every staged row already matches an existing record." message.
+// must NOT be reported as changed just because it re-syncs).
+//
+// The block below is THREE regression tests plus ONE guard -- corrected in
+// review round 5, which found this header claiming all four failed pre-fix.
+// The three regression tests FAIL against the pre-fix code (`8097185`,
+// verified by temporarily reverting the round-3 comparison additions): the
+// FX-only and currency-only correction tests report `newRows: 0,
+// alreadyImportedRows: 1` instead of `newRows: 1, alreadyImportedRows: 0`;
+// the symbol-only correction test reports `newRows: 0` with the old "No new
+// rows -- every staged row already matches an existing record." message,
+// which asserts a byte-identical fetch that a `reused: false` batch has not
+// had. The fourth (the stored-NULL FX native payout) PASSES on `8097185`
+// too, because that code compared no FX field at all for a native payout --
+// it is a GUARD against a future false "changed", never evidence the
+// round-3 fix altered its outcome.
 // ---------------------------------------------------------------------------
 
 test("BRK-014 review round 3: an FX-only correction to a foreign-currency payout re-syncs as newRows -- not alreadyImportedRows", async () => {
@@ -2253,12 +2261,12 @@ test("BRK-014 review round 3: a native-currency payout with no independently sto
   assert.equal(
     second.newRows,
     0,
-    "a stored-null FX rate must be treated as not-comparable, never as a false 'changed'",
+    "a stored-null FX rate must be treated as not-comparable, never as a false 'changed' -- this is a guard test (the pre-round-3 code never compared any FX field for a native payout, so it already passed)",
   );
   assert.equal(second.alreadyImportedRows, 1);
 });
 
-test("BRK-014 review round 3: a symbol-only correction to a committed payout stages a genuinely new batch that is NOT 'new' by any compared field -- the sync message must name the residual, not claim every row already matches", async () => {
+test("BRK-014 review round 3: a symbol-only correction to a committed payout stages a genuinely new batch that is NOT 'new' by any compared field -- the sync message must state all three ways this shape arises, not claim every row already matches", async () => {
   const database = await migratedDatabase();
   const { client, sharesightClient: firstClient } = await linkedFixture(
     database,
@@ -2339,10 +2347,11 @@ test("BRK-014 review round 3: a symbol-only correction to a committed payout sta
   assert.doesNotMatch(
     message,
     /every staged row already matches/,
-    "a NEW batch (reused: false) must never claim every row already matches -- that is self-contradictory",
+    "that copy asserts a byte-identical fetch (the reused path); a NEW batch (reused: false) has not had one, so it must never borrow the claim -- the SHAPE itself is legitimate (review round 5)",
   );
   assert.match(message, /not compared/);
-  assert.match(message, /review the batch before accepting/);
+  assert.match(message, /no earlier sync batch/);
+  assert.match(message, /Review the batch before accepting/);
 });
 
 // ---------------------------------------------------------------------------
