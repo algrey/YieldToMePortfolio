@@ -712,6 +712,16 @@ short-circuit for a mid-part interruption (the SAME part resent after a
 crash replays already-written rows as no-ops and continues from there),
 exactly as the whole-bundle path already did within one request.
 
+**Correction (2026-09-03, BUG-018 round 3):** this guarantee holds only when
+the scaffold call that produced the count and the client's own slice are
+both served by the same build -- the count is server-derived and safe on its
+own, but the slice index is meaningful only against the chain order that
+produced it, and BUG-018 round 2 changed that order from breadth-first to
+depth-first (see `docs/ARCHITECTURE.md`'s BUG-018 entry). A chunked CORE
+restore interrupted before this task's round-2 depth-first `chainOrder` fix
+is deployed must be started over from scratch, not resumed, once the new
+build is live.
+
 ### Partial-failure messaging (per-phase, honest)
 
 Each phase reports failure with wording specific to what actually happened

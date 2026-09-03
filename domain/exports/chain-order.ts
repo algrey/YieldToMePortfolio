@@ -60,6 +60,14 @@ export type ChainItem = { ref: string; createdAt: string };
  * it is correct regardless of timestamp resolution or collisions.
  * `createdAt`/`ref` are used only to order otherwise-independent items
  * for readability/determinism, never to decide dependency order.
+ *
+ * The original-before-twin order between those two ROOTS above is carried
+ * only by the shared `createdAt`-then-`ref` tiebreak, not by the dependency
+ * graph (there is no edge between them), so the depth-first immediacy rule
+ * alone does not guarantee this shape restores -- a hand-edited export file
+ * that inverted their relative order would have both land as `posted` under
+ * the same `source_reference` and fail closed with a 409 conflict rather
+ * than corrupt data silently.
  */
 export function chainOrder<T extends ChainItem>(
   items: readonly T[],
