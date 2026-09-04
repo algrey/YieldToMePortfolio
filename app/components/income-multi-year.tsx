@@ -174,12 +174,19 @@ type DisplayRow = {
    * fy-to-date derivation, reused verbatim -- never re-derived here).
    * Populated only on the current FY's own row: either merged onto its
    * forward-forecast row (`mergeCurrentFinancialYear`) or, when no forward
-   * forecast is available, shown on its own standalone row (`mapCurrentRow`,
-   * unchanged from pre-DIV-011). `null` on every past row and every
-   * genuinely FUTURE projected row. Rendered ALONGSIDE, never summed into,
-   * the row's own (forecast) dividend figures -- they cover different,
-   * non-additive time windows (FY-to-date actuals vs a rolling
-   * 12-month-forward forecast); summing them would double-count/misstate. */
+   * forecast is available, shown on its own standalone row (`mapCurrentRow`).
+   * `null` on every past row and every genuinely FUTURE projected row.
+   * Rendered ALONGSIDE, never summed into, the row's own (forecast) dividend
+   * figures -- they cover different, non-additive time windows (FY-to-date
+   * actuals vs a rolling 12-month-forward forecast); summing them would
+   * double-count/misstate.
+   *
+   * BRK-022 slice 3 review fix round 2 (B1, Orchestrator ruling): on the
+   * `mapCurrentRow` fallback path this is now the PAID-only subset
+   * (`paidOnlyGrossDecimal`) of the row's own (full FY-to-date)
+   * `grossDecimal` above -- the same PAID-only/full-FY split
+   * `mergeCurrentFinancialYear` already expresses via this same slot next to
+   * its own (forecast) `grossDecimal`, so both paths read identically. */
   actualToDateGrossDecimal: string | null;
   /** `null` exactly when `actualToDateGrossDecimal` is -- i.e. this is not
    * the current FY's own row at all. A non-null label with a `null` gross
@@ -240,13 +247,22 @@ function mapPastRow(
  * pre-DIV-011 (still the "(to date)" label, still labels the derived tier
  * "fy to date").
  *
- * BRK-022 slice 3 review fix (B1): `row.dividendGrossDecimal` includes both
- * what has actually been paid and what Sharesight has merely announced --
- * `grossDecimal` here must stay PAID-only (`paidOnlyGrossDecimal`, the SAME
- * helper `mergeCurrentFinancialYear` below already uses for its own
- * `actualToDateGrossDecimal`), and the unpaid subset is separately disclosed
- * via `unpaidGrossDecimal`/`unpaidCount` so the render can append the same
- * "*$x unpaid" note `income-landing.tsx` shows. */
+ * BRK-022 slice 3 review fix round 2 (B1, Orchestrator ruling, option 2):
+ * round-1's fix made `grossDecimal` PAID-only but left
+ * `cashDecimal`/`frankingDecimal`/`yieldPercentDecimal` as the FULL
+ * FY-to-date figures -- an internally-inconsistent row (a paid-only gross
+ * next to a full-FY yield). This row's own `grossDecimal`/`cashDecimal`/
+ * `frankingDecimal`/`yieldPercentDecimal` go back to the full FY-to-date
+ * figures straight off `CurrentFinancialYearRow` (internally consistent,
+ * and matching `income-landing.tsx`'s FY (so far) figure) -- the "*$x
+ * unpaid" note on the gross cell (`unpaidGrossDecimal`/`unpaidCount` below)
+ * still discloses the announced-but-unpaid subset of that full figure. The
+ * PAID-only number is instead expressed through the existing, separately
+ * labelled `actualToDateGrossDecimal`/`actualToDateSourceLabel` slot --
+ * DIV-011's "received so far this FY" line -- exactly the same slot
+ * `mergeCurrentFinancialYear` below populates on the merged-forecast path,
+ * so both paths read identically ("$actual received so far this FY" next
+ * to a full-FY gross figure carrying its own "*$unpaid" note). */
 function mapCurrentRow(
   row: CurrentFinancialYearRow,
   dividendsHref: string,
@@ -257,7 +273,7 @@ function mapCurrentRow(
     label: `${row.label} (to date)`,
     valueDecimal: row.portfolioValueDecimal,
     valueStatus: row.valueStatus,
-    grossDecimal: paidOnlyGrossDecimal(row),
+    grossDecimal: row.dividendGrossDecimal,
     cashDecimal: row.dividendCashDecimal,
     frankingDecimal: row.dividendFrankingKnownDecimal,
     yieldPercentDecimal: row.effectiveYieldPercentDecimal,
@@ -268,8 +284,8 @@ function mapCurrentRow(
     excludedSecurities: row.excludedSecurities,
     overrideHref: null,
     dividendsHref: `${dividendsHref}?fy=${row.endingYear}`,
-    actualToDateGrossDecimal: null,
-    actualToDateSourceLabel: null,
+    actualToDateGrossDecimal: paidOnlyGrossDecimal(row),
+    actualToDateSourceLabel: sourceLabel,
     unpaidGrossDecimal: row.dividendUnpaidGrossDecimal,
     unpaidCount: row.dividendUnpaidCount,
   };

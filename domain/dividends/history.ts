@@ -1070,6 +1070,13 @@ function resolveImportedRecordCurrency(
  *   readable and applied still reaches the absent-value branch normally (its
  *   `converted.totalFrankingDecimal` is the override value, not `null`, so
  *   the `unreadable` short-circuit's own null check does not fire for it).
+ * - F2 CORRECTION ROUND (review ruling): never fires for a pending-payout
+ *   announcement (`original.announcedUnpaid === true`) -- DIV-007's "sends
+ *   an explicit 0 on unfranked native payouts" evidence base was drawn from
+ *   CONFIRMED, PAID records only, and says nothing about what an
+ *   unconfirmed announcement will turn out to report once it settles. An
+ *   absent total on such a row stays genuinely unknown
+ *   (`frankingDerivedZero: false`); see the inline guard just below.
  */
 function deriveAbsentImportedFranking(
   original: DividendManualRecordFact,

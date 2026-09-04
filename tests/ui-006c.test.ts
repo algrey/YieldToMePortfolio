@@ -1238,7 +1238,9 @@ test("UI-006C: the 'not paid' status is conveyed by both a distinct colour and l
   // event) -- the pin allows, but does not require, ONE trailing JSX
   // expression (`{...}`) after the literal "not paid" text, never arbitrary
   // trailing content (F8 correction round: the pre-fix `[\s\S]*?` catch-all
-  // would still have matched even if the literal text were deleted
-  // entirely, as long as SOME other characters preceded the next `<`).
+  // DID still require the literal "not paid" text to be present, but it
+  // permitted ANY trailing content up to the next `<` -- not just a single
+  // JSX expression -- so it would still have matched a stray literal string
+  // tacked on after the suffix, which this tighter pin no longer allows).
   assert.match(component, />\s*not paid\s*(?:\{[^{}]*\})?\s*</);
 });

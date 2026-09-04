@@ -1048,6 +1048,64 @@ test("BRK-022 slice 3 (DB): a pending row with a null security, and one whose se
   assert.equal(history.pendingPayoutCounts.pendingIncluded, 0);
 });
 
+test("BRK-022 slice 3, F-c correction round: on the MAIN (held-identities) path, seeding more than MAX_PENDING_PAYOUTS_PER_PORTFOLIO (500) active pending payouts reports pendingTruncated: true", async () => {
+  const database = await migratedDatabase();
+  // A single held security is enough to route through the MAIN derivation
+  // path (`identities.length > 0`) rather than the F5 zero-identities
+  // early-return path -- see that dedicated F5 test below, which exercises
+  // a DIFFERENT code path than this one (`app/owned-dividend-history.ts`'s
+  // two separate `MAX_PENDING_PAYOUTS_PER_PORTFOLIO + 1`-bounded
+  // `listActive` calls).
+  seedSecurity(database, {
+    securityId: "sec-held",
+    userId: "user-a",
+    portfolioId: "portfolio-a",
+    symbol: "HELD",
+    currencyCode: "AUD",
+  });
+  const client = createSqliteSqlClient(database);
+  const pendingRepo = createSharesightPendingPayoutsRepository(client);
+  const MAX_PENDING_PAYOUTS_PER_PORTFOLIO = 500; // mirrors the private constant in app/owned-dividend-history.ts
+  const observation = {
+    sharesightInstrumentId: null,
+    sharesightPayoutId: null,
+    portfolioSecurityId: null,
+    marketCode: "ASX",
+    currencyCode: "AUD",
+    exDate: null,
+    grossAmountDecimal: "100",
+    totalFrankingDecimal: null,
+    residentWithholdingTaxDecimal: null,
+    nonResidentWithholdingTaxDecimal: null,
+    fxRateToPortfolioDecimal: null,
+    fxRateSource: null,
+  };
+  const rows = [];
+  for (let i = 0; i < MAX_PENDING_PAYOUTS_PER_PORTFOLIO + 1; i++) {
+    rows.push({
+      ...observation,
+      sharesightHoldingId: `holding-${i}`,
+      symbol: `NEW${i}`,
+      sourceReference: `sharesight-payout:sp-1:holding-${i}:2026-08-20`,
+      paymentDate: "2026-08-20",
+      totalCashDecimal: "10",
+    });
+  }
+  await pendingRepo.upsertObserved("user-a", "portfolio-a", rows);
+
+  const history = await loadOwnedDividendHistory(
+    client,
+    "user-a",
+    "portfolio-a",
+    new Date("2026-09-01T00:00:00.000Z"),
+  );
+  assert.equal(history.pendingTruncated, true);
+  assert.equal(
+    history.pendingPayoutCounts.pendingUnresolved,
+    MAX_PENDING_PAYOUTS_PER_PORTFOLIO,
+  );
+});
+
 test("BRK-022 slice 3, F5 correction round (RULING): a portfolio with NO held securities at all still counts its active pending payouts as pendingUnresolved, rather than never loading them", async () => {
   const database = await migratedDatabase();
   // Deliberately no `seedSecurity` call at all -- `identities.length === 0`,
@@ -1766,7 +1824,7 @@ test("BRK-022 slice 3 (UI): the dividend list renders 'announced (Sharesight)' a
   void declaredRowHtml;
 });
 
-test("BRK-022 slice 3, B1 correction round: the DIV-011 fallback standalone '(to date)' row (multiYear degraded) is also PAID-ONLY, and discloses the unpaid subset via a '*$x unpaid' note", () => {
+test("BRK-022 slice 3, B1 correction round 2 (Orchestrator ruling, option 2): the DIV-011 fallback standalone '(to date)' row (multiYear degraded) keeps its OWN gross/cash/franking/yield as the full FY-to-date figures (internally consistent, matching income-landing.tsx's FY (so far) row), discloses the unpaid subset via a '*$x unpaid' note on the gross cell, and separately reports the PAID-only figure through the same 'received so far this FY' slot the merged-forecast path uses", () => {
   function renderMultiYearWithRouter(props: Record<string, unknown>): string {
     const componentUrl = new URL(
       "../app/components/income-multi-year.tsx",
@@ -1799,6 +1857,14 @@ test("BRK-022 slice 3, B1 correction round: the DIV-011 fallback standalone '(to
   // multiYear itself is degraded -- no forward forecast at all -- so the
   // component falls back to `mapCurrentRow`'s standalone "(to date)" row
   // rather than merging onto a forecast row.
+  //
+  // Round-1 fixture: gross $300.00 paid + $50.00 announced-but-unpaid (FY
+  // total $300.00); cash $240.00, franking $60.00, yield 3.00% (all straight
+  // off `MINIMAL_CURRENT_FY_ROW`, unmodified by round 1 or round 2) --
+  // 3.00% is consistent with the FULL $300.00 gross against the $10,000.00
+  // portfolio value (300/10000 = 3%), NOT with the paid-only $250.00 figure
+  // (which would be 2.5%) -- this is exactly the inconsistency round 1 left
+  // behind (B1) and round 2 must not reintroduce.
   const html = renderMultiYearWithRouter({
     portfolioId: "portfolio-a",
     assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
@@ -1822,11 +1888,43 @@ test("BRK-022 slice 3, B1 correction round: the DIV-011 fallback standalone '(to
     yearsBack: 0,
     yearsForward: 1,
   });
-  // Paid-only: 300.00 - 50.00 = 250.00, never the raw announced-inclusive
-  // 300.00 gross figure.
-  assert.match(html, /\$250\.00/);
-  assert.doesNotMatch(html, /\$300\.00/);
-  assert.match(html, /unpaid/);
+
+  // The table has exactly one data row in this fixture (pastFinancialYears
+  // is empty and multiYear is degraded), so the whole <tbody> row is the
+  // degraded "(to date)" row under test.
+  const rowMatch = html.match(/<tbody>[\s\S]*?<\/tbody>/);
+  assert.ok(rowMatch, "expected the table body to render");
+  const rowHtml = rowMatch![0];
+
+  // Gross cell: the FULL FY-to-date figure ($300.00), not the paid-only
+  // subset -- with the announced-but-unpaid subset disclosed via the "*$x
+  // unpaid" note, exactly like income-landing.tsx's FY (so far) row.
+  assert.match(rowHtml, /\$300\.00/);
+  assert.match(rowHtml, /\*\$50\.00 unpaid/);
+  // Yield cell: 3%, consistent with the full $300.00 gross figure above --
+  // NOT 2.5% (which 250/10,000 -- the paid-only figure -- would produce).
+  assert.match(rowHtml, /3(\.00)?%/);
+
+  // The PAID-only figure ($300.00 - $50.00 = $250.00) is reported through
+  // the SAME "received so far this FY" slot `mergeCurrentFinancialYear`
+  // uses on the merged-forecast path, so both paths read identically.
+  assert.match(html, /\$250\.00 received so far this FY/);
+
+  // The row-detail dialog reuses this exact same `DisplayRow` object
+  // (`selectedRow`, set from the clicked row -- see
+  // `IncomeMultiYear`'s `onClick` handler) for its own gross/cash/franking/
+  // yield figures, unfiltered -- see `mapCurrentRow`
+  // (`app/components/income-multi-year.tsx`), which sources
+  // `grossDecimal`/`cashDecimal`/`frankingDecimal`/`yieldPercentDecimal`
+  // directly and unconditionally from `row.dividendGrossDecimal`/
+  // `dividendCashDecimal`/`dividendFrankingKnownDecimal`/
+  // `effectiveYieldPercentDecimal` (never derived/filtered per-field), so
+  // the gross/yield assertions above -- the two of those four fields this
+  // fixture actually varies from a plain pass-through -- already exercise
+  // that path. This repo's render tests use `renderToStaticMarkup` only
+  // (no jsdom/interactive-DOM layer -- see tests/div-013.test.ts's
+  // documented constraint), so a click that opens the dialog itself cannot
+  // be simulated to assert its rendered cash/franking text directly.
 });
 
 test("BRK-022 slice 3 (UI): income-multi-year's 'received so far this FY' figure is PAID-ONLY -- it subtracts the unpaid subtotal, never silently growing", () => {
