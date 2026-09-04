@@ -378,9 +378,16 @@ test("FY-001C: OwnedOverviewScreen threads financialYearStartMonth, the settings
   // guessing.
   assert.match(source, /nowInstant=\{ownedWorkspace\.nowInstant \?\? ""\}/);
   // The workspace type threads both settings.timezone and the resolved
-  // instant through, not just the portfolio's own timezone.
-  assert.match(source, /timezone\?:\s*string;/);
-  assert.match(source, /nowInstant\?:\s*string;/);
+  // instant through, not just the portfolio's own timezone. PRF-014 step
+  // 2a moved the `OwnedWorkspace` type declaration (verbatim) into the
+  // pure sibling module `portfolio-shell-model.ts`, so these two field
+  // declarations are checked there instead of in portfolio-shell.tsx.
+  const modelSource = await readFile(
+    new URL("../app/components/portfolio-shell-model.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(modelSource, /timezone\?:\s*string;/);
+  assert.match(modelSource, /nowInstant\?:\s*string;/);
 });
 
 test("FY-001C: loadAuthenticatedWorkspace resolves nowInstant once server-side and copies user_settings.timezone into the workspace", async () => {

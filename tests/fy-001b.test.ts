@@ -420,9 +420,18 @@ test("FY-001B: the settings surface has a labelled financial-year-start month se
   assert.match(component, /Financial year start/);
   // A full 1-12 month picker, not a partial/free-text control.
   assert.match(component, /FY_MONTH_NAMES\.map/);
-  assert.match(component, /"January"[\s\S]{0,200}"December"/);
+  // PRF-014 step 2a moved the `FY_MONTH_NAMES` array and the
+  // `financialYearWindowHelperText` helper (verbatim) into the pure
+  // sibling module `portfolio-shell-model.ts` -- portfolio-shell.tsx still
+  // imports and calls them (asserted above/below), it just no longer
+  // DEFINES them inline, so these two content checks target that module.
+  const modelSource = await readFile(
+    new URL("../app/components/portfolio-shell-model.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(modelSource, /"January"[\s\S]{0,200}"December"/);
   // Helper text names the resulting window, e.g. "July: FY runs 1 Jul – 30 Jun".
-  assert.match(component, /FY runs 1 \$\{FY_MONTH_ABBREVIATIONS/);
+  assert.match(modelSource, /FY runs 1 \$\{FY_MONTH_ABBREVIATIONS/);
   // Same offline/pending gating as the sibling settings controls.
   assert.match(
     component,

@@ -754,8 +754,16 @@ test("UI-008: portfolio-shell.tsx's dialog submits (portfolio create/rename, quo
     source,
     /const DIALOG_TIMEOUT_MESSAGE =\s*"The request timed out\. It may still have gone through — check before retrying\.";/,
   );
+  // PRF-014 step 2a: `isAbortError` moved (verbatim) into the pure sibling
+  // module `portfolio-shell-model.ts` -- portfolio-shell.tsx still imports
+  // and calls it (asserted below via `isAbortError(error)` usage), it just
+  // no longer DEFINES it inline.
+  const modelSource = await readFile(
+    new URL("../app/components/portfolio-shell-model.ts", import.meta.url),
+    "utf8",
+  );
   assert.match(
-    source,
+    modelSource,
     /function isAbortError\(error: unknown\): boolean \{\s*return error instanceof DOMException && error\.name === "AbortError";/,
   );
 
