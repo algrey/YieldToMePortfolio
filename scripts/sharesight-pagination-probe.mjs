@@ -186,20 +186,26 @@ export async function probeEndpoint(label, envelopeKey, calls) {
     const metaChanged =
       JSON.stringify(wide.paginationMetaValues) !==
       JSON.stringify(page1.paginationMetaValues);
+    // Array length is the ONLY signal that paging truncated the list; a
+    // change confined to the pagination-shaped metadata (e.g. a `links.self`
+    // that merely echoes the query string back) is reported separately so
+    // it can never be mistaken for real server-side paging.
+    let lengthChangedAcrossPages = false;
+    let metaChangedAcrossPages = false;
     if (page2?.ok && !page2.unexpectedShape) {
-      const page1VsPage2Changed =
-        page1.arrayLength !== page2.arrayLength ||
+      lengthChangedAcrossPages = page1.arrayLength !== page2.arrayLength;
+      metaChangedAcrossPages =
         JSON.stringify(page1.paginationMetaValues) !==
-          JSON.stringify(page2.paginationMetaValues);
-      pagingEffect =
-        lengthChanged || metaChanged || page1VsPage2Changed
-          ? "honours paging (response changed)"
-          : "ignores paging (response identical)";
+        JSON.stringify(page2.paginationMetaValues);
+    }
+    const page2Note =
+      page2?.ok && !page2.unexpectedShape ? "" : ", page 2 unavailable";
+    if (lengthChanged || lengthChangedAcrossPages) {
+      pagingEffect = `honours paging (array length changed${page2Note})`;
+    } else if (metaChanged || metaChangedAcrossPages) {
+      pagingEffect = `ignores paging (counts identical; only metadata echoed the query${page2Note})`;
     } else {
-      pagingEffect =
-        lengthChanged || metaChanged
-          ? "honours paging (response changed)"
-          : "ignores paging (response identical, page 2 unavailable)";
+      pagingEffect = `ignores paging (response identical${page2Note})`;
     }
   }
 
@@ -249,6 +255,20 @@ export function formatSummaryTable(probeResults, nowIso) {
         probe.pagingEffect,
       ].join(" | "),
     );
+  }
+  // Pagination-shaped metadata VALUES (never item bodies) per call, so the
+  // recorded evidence shows exactly what e.g. `links` contained.
+  lines.push("");
+  lines.push("pagination-meta values (wide / p1 / p2):");
+  for (const probe of probeResults) {
+    for (const call of ["wide", "page1", "page2"]) {
+      const outcome = probe.outcomes[call];
+      const rendered =
+        outcome?.ok && !outcome.unexpectedShape
+          ? JSON.stringify(outcome.paginationMetaValues)
+          : "?";
+      lines.push(`${probe.label} [${call}]: ${rendered}`);
+    }
   }
   return lines.join("\n");
 }
