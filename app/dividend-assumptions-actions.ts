@@ -42,6 +42,12 @@ import {
 } from "../db/repositories/index.ts";
 import { deriveSharesHeldAtDate } from "../domain/dividends/shares-held.ts";
 import { PROXIMITY_WINDOW_DAYS } from "../domain/dividends/history.ts";
+// BUG-023: interpolated into the two owner-facing bound messages below
+// rather than a hard-coded "24 decimal places and 64 digits" -- this is the
+// SAME constant `isWithinReadPathDecimalBounds` (imported above) checks
+// against, so the message can never silently drift from the bound it
+// describes the way a literal copy could.
+import { DECIMAL_LIMITS } from "../domain/calculations/decimal.ts";
 import {
   daysBetweenDates,
   isNonNegativeDecimalString,
@@ -648,7 +654,7 @@ export async function saveDividendEntryWithContext(
   // actually at fault name itself before the request even reaches the
   // repository.
   function amountBoundMessage(field: string): string {
-    return `${field} must have at most 24 decimal places and 64 digits in total.`;
+    return `${field} must have at most ${DECIMAL_LIMITS.inputScale} decimal places and ${DECIMAL_LIMITS.inputDigits} digits in total.`;
   }
   if (amountMode === "totals") {
     if (
@@ -999,8 +1005,7 @@ export async function saveDividendFrankingOverrideWithContext(
     return {
       ok: false,
       status: 400,
-      message:
-        "Franking credits must have at most 24 decimal places and 64 digits in total.",
+      message: `Franking credits must have at most ${DECIMAL_LIMITS.inputScale} decimal places and ${DECIMAL_LIMITS.inputDigits} digits in total.`,
     };
   }
   const expectedVersion = expectedVersionOf(input.expectedVersion);

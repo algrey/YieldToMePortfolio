@@ -224,6 +224,14 @@ Dividend manual records are replayed via
 CSV/Sharesight dividend imports use) for **every** row, followed by a
 `superseded_by_record_id` link-up pass once both ends of a chain exist.
 
+BUG-022/BUG-021 consequence: a legacy dividend record or franking override
+whose amount exceeds `DECIMAL_LIMITS.inputScale`/`inputDigits` — creatable
+only before those two tasks closed every writer at that bound — now fails
+the whole restore part with the typed "could not be replayed" failure
+instead of silently importing an unreadable figure; the remedy is
+correcting the offending record in the source account before exporting it
+again.
+
 ## Design decisions (flagged to the Orchestrator, not silently assumed)
 
 1. **Import always creates a NEW portfolio** from the bundle's own

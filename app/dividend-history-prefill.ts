@@ -135,13 +135,23 @@ export function frankingDisplay(
   row: DerivedDividendRow,
   baseCurrencyCode: string,
 ): string {
+  // BUG-023: checked BEFORE the per-share/totals branch below -- a
+  // per-share row (`dividendPerShareDecimal !== null`) whose OWN franking
+  // credit could not be read would otherwise take the `frankingCell`
+  // branch, which renders a plain "Unknown" for `franking.source ===
+  // "unknown"` with no way to distinguish "never entered" from "unreadable"
+  // -- the exact byte-identical-to-absent gap this task closes. Safe for
+  // every other row shape too: `row.frankingUnreadable` is only ever `true`
+  // when `frankingTotalDecimal` is already `null` (see that field's own doc
+  // comment), so this never pre-empts a row whose franking actually
+  // resolved.
+  if (row.frankingUnreadable) return "Franking unavailable — needs correction";
   if (
     row.dividendPerShareDecimal !== null ||
     row.franking.source !== "unknown"
   ) {
     return frankingCell(row.franking, row.currencyCode, baseCurrencyCode);
   }
-  if (row.frankingUnreadable) return "Franking unavailable — needs correction";
   if (row.frankingTotalDecimal === null) return "Unknown";
   const amount = `${formatIncomeMoney(row.currencyCode, baseCurrencyCode, row.frankingTotalDecimal)} total`;
   if (row.frankingDerivedZero) return `${amount} (none reported)`;

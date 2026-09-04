@@ -443,7 +443,13 @@ export type DerivedDividendRow = {
    * needs correction" copy rather than "Unknown" or DIV-007's "none
    * reported" inference. `false`/`undefined` for `"auto"`/`"edited"`
    * sources and for a clean manual/receipt/imported record, mirroring
-   * `amountUnreadable`'s convention. */
+   * `amountUnreadable`'s convention. BUG-023: also `true` when the cause is
+   * an unreadable PER-SHARE franking credit
+   * (`frankingCreditPerShareDecimal`) rather than an unreadable TOTAL --
+   * see `resolveFrankingPerShareRespectingUnreadable`'s doc comment. A
+   * consumer never needs to distinguish the two causes; both mean "a real
+   * franking figure exists here but this app could not read it, never
+   * substitute the default assumption". */
   frankingUnreadable?: boolean;
 };
 
@@ -590,6 +596,39 @@ function computeCashGrossOrTotals(
     grossDecimal: null,
     grossIncludesFranking: false,
   };
+}
+
+/**
+ * BUG-023: the single point every franking-per-share derivation in this
+ * module goes through (main per-event loop, `pushEventlessRow`, excluded-
+ * event resurfacing), so the three call sites cannot drift apart the way
+ * BUG-021's `frankingUnreadable`/`amountUnreadable` guards already had to be
+ * kept in sync by hand across them. When the winning fact's OWN per-share
+ * franking credit could not be read (`frankingPerShareUnreadable`, the
+ * `"frankingPerShare"` marker `sanitizeManualRecordAmounts` sets), the
+ * franking resolution is forced to `"unknown"` WITHOUT ever calling
+ * `resolveFrankingPerShare` -- that function cannot distinguish "no
+ * per-share credit was ever entered" from "one was entered but is
+ * unreadable" (both reach it as `overridePerShareDecimal: null`), so calling
+ * it here would let its default-percent tier silently substitute the
+ * security's "franking if not known" assumption for a value that in fact
+ * exists but this app cannot currently read -- exactly the fabricated-
+ * known-from-corrupt pattern BUG-021 closed for the franking TOTAL.
+ */
+function resolveFrankingPerShareRespectingUnreadable(
+  frankingPerShareUnreadable: boolean,
+  overrideFrankingPerShare: string | null,
+  defaultFrankingPercentDecimal: string | null,
+  dividendPerShareDecimal: string | null,
+): FrankingResolution {
+  if (frankingPerShareUnreadable) {
+    return { source: "unknown", perShareDecimal: null };
+  }
+  return resolveFrankingPerShare(
+    overrideFrankingPerShare,
+    defaultFrankingPercentDecimal,
+    dividendPerShareDecimal,
+  );
 }
 
 // BRK-010: half-even rounding at the same 24-decimal-place intermediate
@@ -1433,6 +1472,23 @@ export function deriveDividendHistoryForSecurity(
     // for the winning fact -- see that field's doc comment. Always `false`
     // for a receipt, matching `amountUnreadable`'s convention above.
     frankingUnreadable: boolean;
+    // BUG-023: `true` exactly when the winning fact's OWN per-share
+    // franking credit (`frankingCreditPerShareDecimal`, marked
+    // `"frankingPerShare"` by `sanitizeManualRecordAmounts`) could not be
+    // read. Named separately from `frankingUnreadable` above -- that field
+    // only ever tracks an unreadable TOTAL (`totalFrankingDecimal`/
+    // `frankingOverrideTotalDecimal`, the `"totalFranking"` marker), which
+    // is a distinct stored column from this one. `overrideFrankingPerShare`
+    // above is already `null` in this case (nulled by the same pre-pass),
+    // which is indistinguishable from "no per-share credit was ever
+    // entered" to `resolveFrankingPerShare` -- without this flag, its
+    // default-percent tier would silently substitute the security's
+    // "franking if not known" assumption for a value that in fact exists
+    // but could not be read, exactly the fabricated-known-from-corrupt
+    // pattern BUG-021 closed for the total. Always `false` for a receipt
+    // (never sanitized) and for a manual/imported fact with no unreadable
+    // per-share field.
+    frankingPerShareUnreadable: boolean;
   } | null {
     if (manual) {
       return {
@@ -1471,6 +1527,12 @@ export function deriveDividendHistoryForSecurity(
         // step in between to distinguish from.
         frankingUnreadable:
           manual.unreadableFields?.has("totalFranking") === true,
+        // BUG-023: the per-share companion to the total check immediately
+        // above -- `manual.frankingCreditPerShareDecimal` (already read as
+        // `overrideFrankingPerShare` above) was nulled by the same
+        // `"frankingPerShare"` marker when unreadable.
+        frankingPerShareUnreadable:
+          manual.unreadableFields?.has("frankingPerShare") === true,
       };
     }
     if (receiptResolution) {
@@ -1495,6 +1557,7 @@ export function deriveDividendHistoryForSecurity(
         frankingCurrencySource: null,
         amountUnreadable: false,
         frankingUnreadable: false,
+        frankingPerShareUnreadable: false,
       };
     }
     if (imported) {
@@ -1518,6 +1581,10 @@ export function deriveDividendHistoryForSecurity(
         frankingCurrencySource: imported.frankingCurrencySource ?? null,
         amountUnreadable: imported.amountUnreadable === true,
         frankingUnreadable: imported.frankingUnreadable === true,
+        // BUG-023: mirrors the manual branch above -- an imported
+        // per-share fact's own unreadable franking credit.
+        frankingPerShareUnreadable:
+          imported.unreadableFields?.has("frankingPerShare") === true,
       };
     }
     return null;
@@ -1633,6 +1700,7 @@ export function deriveDividendHistoryForSecurity(
     let frankingCurrencySource: "owner_manual" | null = null;
     let amountUnreadableFact = false;
     let frankingUnreadableFact = false;
+    let frankingPerShareUnreadableFact = false;
 
     if (override) {
       source = "edited";
@@ -1663,6 +1731,7 @@ export function deriveDividendHistoryForSecurity(
       frankingCurrencySource = ownerFact.frankingCurrencySource;
       amountUnreadableFact = ownerFact.amountUnreadable;
       frankingUnreadableFact = ownerFact.frankingUnreadable;
+      frankingPerShareUnreadableFact = ownerFact.frankingPerShareUnreadable;
       // DIV-005 Round A: an imported row that missed this event's own
       // window but is within window of the WINNING manual/receipt fact's
       // own date chains in here instead of surfacing as a second row.
@@ -1681,7 +1750,8 @@ export function deriveDividendHistoryForSecurity(
       paymentDate = event.paymentDate;
     }
 
-    const franking = resolveFrankingPerShare(
+    const franking = resolveFrankingPerShareRespectingUnreadable(
+      frankingPerShareUnreadableFact,
       overrideFrankingPerShare,
       input.defaultFrankingPercentDecimal,
       dividendPerShareDecimal,
@@ -1738,9 +1808,13 @@ export function deriveDividendHistoryForSecurity(
       // cash-cell copy for a cash amount that is, in fact, fine.
       amountUnreadable: amountUnreadableFact && cashDecimal === null,
       // BUG-021 correction round: mirrors the guard immediately above,
-      // scoped to franking instead of cash.
+      // scoped to franking instead of cash. BUG-023: ORs in the per-share
+      // unreadable cause too -- either an unreadable TOTAL or an unreadable
+      // PER-SHARE credit ends this row's franking at `null`, and both must
+      // render the same "needs correction" disclosure.
       frankingUnreadable:
-        frankingUnreadableFact && frankingTotalDecimal === null,
+        (frankingUnreadableFact || frankingPerShareUnreadableFact) &&
+        frankingTotalDecimal === null,
     });
   }
 
@@ -1952,8 +2026,13 @@ export function deriveDividendHistoryForSecurity(
     // Omitted (falsy) for a `source === "receipt"` row, matching
     // `resolveOwnerFact`'s own receipt branch.
     frankingUnreadable?: boolean;
+    // BUG-023: mirrors `resolveOwnerFact`'s identical field for the manual/
+    // imported record this eventless row was built from. Omitted (falsy)
+    // for a `source === "receipt"` row, matching `frankingUnreadable` above.
+    frankingPerShareUnreadable?: boolean;
   }): void {
-    const franking = resolveFrankingPerShare(
+    const franking = resolveFrankingPerShareRespectingUnreadable(
+      fields.frankingPerShareUnreadable ?? false,
       fields.overrideFrankingPerShare,
       input.defaultFrankingPercentDecimal,
       fields.dividendPerShareDecimal,
@@ -2005,9 +2084,13 @@ export function deriveDividendHistoryForSecurity(
       amountUnreadable:
         (fields.amountUnreadable ?? false) && cashDecimal === null,
       // BUG-021 correction round: see the main per-event loop's identical
-      // guard above, scoped to franking.
+      // guard above, scoped to franking. BUG-023: ORs in the per-share
+      // unreadable cause too, mirroring the main per-event loop's identical
+      // guard.
       frankingUnreadable:
-        (fields.frankingUnreadable ?? false) && frankingTotalDecimal === null,
+        ((fields.frankingUnreadable ?? false) ||
+          (fields.frankingPerShareUnreadable ?? false)) &&
+        frankingTotalDecimal === null,
     });
   }
 
@@ -2085,6 +2168,8 @@ export function deriveDividendHistoryForSecurity(
           amountUnreadable: record.amountUnreadable === true,
           frankingUnreadable:
             record.unreadableFields?.has("totalFranking") === true,
+          frankingPerShareUnreadable:
+            record.unreadableFields?.has("frankingPerShare") === true,
         });
       }
       for (const receiptFact of clusterReceipts) {
@@ -2128,6 +2213,8 @@ export function deriveDividendHistoryForSecurity(
           frankingCurrencySource: record.frankingCurrencySource ?? null,
           amountUnreadable: record.amountUnreadable === true,
           frankingUnreadable: record.frankingUnreadable === true,
+          frankingPerShareUnreadable:
+            record.unreadableFields?.has("frankingPerShare") === true,
         });
       }
       continue;
@@ -2169,6 +2256,8 @@ export function deriveDividendHistoryForSecurity(
         amountUnreadable: manualPick.winner.amountUnreadable === true,
         frankingUnreadable:
           manualPick.winner.unreadableFields?.has("totalFranking") === true,
+        frankingPerShareUnreadable:
+          manualPick.winner.unreadableFields?.has("frankingPerShare") === true,
       });
     } else if (receiptPick) {
       const rawEvent =
@@ -2212,6 +2301,9 @@ export function deriveDividendHistoryForSecurity(
           importedPick.winner.frankingCurrencySource ?? null,
         amountUnreadable: importedPick.winner.amountUnreadable === true,
         frankingUnreadable: importedPick.winner.frankingUnreadable === true,
+        frankingPerShareUnreadable:
+          importedPick.winner.unreadableFields?.has("frankingPerShare") ===
+          true,
       });
     }
   }
@@ -2243,7 +2335,8 @@ export function deriveDividendHistoryForSecurity(
       const chained = chainAnchorDominatedImported.get(event.id);
       if (chained) dominatedImported = toDominatedImported(chained);
     }
-    const franking = resolveFrankingPerShare(
+    const franking = resolveFrankingPerShareRespectingUnreadable(
+      ownerFact.frankingPerShareUnreadable,
       ownerFact.overrideFrankingPerShare,
       input.defaultFrankingPercentDecimal,
       ownerFact.dividendPerShareDecimal,
@@ -2302,9 +2395,13 @@ export function deriveDividendHistoryForSecurity(
       // BUG-021: see the main per-event loop's identical guard above.
       amountUnreadable: ownerFact.amountUnreadable && cashDecimal === null,
       // BUG-021 correction round: see the main per-event loop's identical
-      // guard above, scoped to franking.
+      // guard above, scoped to franking. BUG-023: ORs in the per-share
+      // unreadable cause too, mirroring the main per-event loop's identical
+      // guard.
       frankingUnreadable:
-        ownerFact.frankingUnreadable && frankingTotalDecimal === null,
+        (ownerFact.frankingUnreadable ||
+          ownerFact.frankingPerShareUnreadable) &&
+        frankingTotalDecimal === null,
     });
   }
 
