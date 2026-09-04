@@ -327,8 +327,15 @@ function excerptAfter(source: string, marker: string, length = 200): string {
 }
 
 test("FY-001C (B1): OwnedOverviewScreen anchors FY windows on nowInstant, not a history point's date", async () => {
+  // PRF-014 step 2d: these calls moved (verbatim) into
+  // portfolio-shell-client-leaves.tsx's OverviewRangeSelector, the
+  // "use client" leaf that now owns the range-derived useMemos -- see that
+  // module's own header comment.
   const source = await readFile(
-    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    new URL(
+      "../app/components/portfolio-shell-client-leaves.tsx",
+      import.meta.url,
+    ),
     "utf8",
   );
   // The chart calls the FY-001A domain functions with the resolved "now"
@@ -346,8 +353,13 @@ test("FY-001C (B1): OwnedOverviewScreen anchors FY windows on nowInstant, not a 
 });
 
 test("FY-001C: both FY windows are memoised on nowInstant, financialYearStartMonth, and timezone, so any of the three re-derives the window on the next render (no stale-cache bug)", async () => {
+  // PRF-014 step 2d: see the previous test's own comment -- these useMemos
+  // now live in OverviewRangeSelector.
   const source = await readFile(
-    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    new URL(
+      "../app/components/portfolio-shell-client-leaves.tsx",
+      import.meta.url,
+    ),
     "utf8",
   );
   const currentDeps = excerptAfter(source, "const currentFyResult = useMemo(");

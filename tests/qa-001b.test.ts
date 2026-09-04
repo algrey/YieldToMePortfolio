@@ -859,10 +859,16 @@ test("UI-008/WLT-001 review (B3, BLOCKING): OwnedWatchlistScreen's five fetch ca
   // PRF-014 step 2c: `OwnedWorkspaceScreen` (the function this end marker
   // used to name) moved to portfolio-shell-leaves.tsx -- the next
   // top-level function declared in portfolio-shell.tsx after
-  // OwnedWatchlistScreen is now OwnedOverviewScreen (2c also moved
+  // OwnedWatchlistScreen became OwnedOverviewScreen (2c also moved
   // overviewDate/OverviewFact, which sat between them, out to the same
-  // module).
-  const end = source.indexOf("\nfunction OwnedOverviewScreen({", start);
+  // module). PRF-014 step 2d: OwnedOverviewScreen itself moved out (split
+  // into portfolio-shell-client-leaves.tsx's OverviewRangeSelector and
+  // portfolio-shell-overview.tsx's OwnedOverviewScreenBody), so the next
+  // top-level function is now SortButton.
+  const end = source.indexOf(
+    "\nexport function SortButton<T extends string>({",
+    start,
+  );
   assert.ok(end > start, "expected to find the next top-level function");
   const screenSource = source.slice(start, end);
 

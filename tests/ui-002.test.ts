@@ -550,18 +550,32 @@ test("UI-002 published snapshot lookup is owner-scoped", async () => {
 
 test("UI-002 populated Overview exposes semantic drill-down and responsive controls", () => {
   const shell = readFileSync("app/components/portfolio-shell.tsx", "utf8");
+  // PRF-014 step 2d: OwnedOverviewScreen's render body (the drill-down
+  // details, coverage headings, and history table) moved verbatim into
+  // portfolio-shell-overview.tsx; the range-tab row (and its
+  // aria-label="History range") moved into
+  // portfolio-shell-client-leaves.tsx's OverviewRangeSelector -- see both
+  // modules' own header comments.
+  const overview = readFileSync(
+    "app/components/portfolio-shell-overview.tsx",
+    "utf8",
+  );
+  const clientLeaves = readFileSync(
+    "app/components/portfolio-shell-client-leaves.tsx",
+    "utf8",
+  );
   const copy = readFileSync("app/overview-copy.ts", "utf8");
   const styles = readFileSync("app/globals.css", "utf8");
   const root = readFileSync("app/page.tsx", "utf8");
-  assert.match(shell, /Coverage and formula details/);
-  assert.match(shell, /Value unavailable/);
+  assert.match(overview, /Coverage and formula details/);
+  assert.match(overview, /Value unavailable/);
   assert.match(copy, /Total value unavailable\./);
-  assert.match(shell, /Coverage limitations/);
+  assert.match(overview, /Coverage limitations/);
   assert.match(copy, /price, FX, or session coverage/);
   assert.match(copy, /basis coverage is incomplete/);
   assert.match(copy, /history coverage is incomplete/);
-  assert.match(shell, /aria-label="History range"/);
-  assert.match(shell, /View history as a table/);
+  assert.match(clientLeaves, /aria-label="History range"/);
+  assert.match(overview, /View history as a table/);
   assert.match(shell, /Quotes/);
   assert.match(root, /includeOverview: true/);
   assert.match(styles, /\.range-controls button\s*\{[\s\S]*min-width: 44px/);

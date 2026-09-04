@@ -257,6 +257,12 @@ export type OwnedOverviewPoint = {
   completeness: "complete" | "partial" | "incomplete";
   barHeight: string;
 };
+// PRF-014 step 2d: the Overview screen's one piece of client state (the
+// history chart's selected window) -- shared between the "use client" leaf
+// that owns it (`OverviewRangeSelector`, portfolio-shell-client-leaves.tsx)
+// and the plain render body that consumes it as a prop
+// (`OwnedOverviewScreenBody`, portfolio-shell-overview.tsx).
+export type OverviewRange = "1M" | "3M" | "12M" | "FY" | "Last FY" | "All";
 export const primaryPortfolioSections: PortfolioSection[] = [
   "overview",
   "news",

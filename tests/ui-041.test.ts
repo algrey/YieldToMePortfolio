@@ -545,8 +545,11 @@ test("UI-041: the 'No valuation history yet' EmptyState still renders when the c
 });
 
 test("UI-041 source: OwnedOverviewScreen's empty branch gates the EmptyState on hasUsableHistoryPoints, with the chart mounted first", async () => {
+  // PRF-014 step 2d: OwnedOverviewScreen's render body (this branch
+  // included) moved verbatim into portfolio-shell-overview.tsx's
+  // OwnedOverviewScreenBody -- see that module's own header comment.
   const source = await readFile(
-    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    new URL("../app/components/portfolio-shell-overview.tsx", import.meta.url),
     "utf8",
   );
   const start = source.indexOf(

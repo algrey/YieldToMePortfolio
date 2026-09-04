@@ -523,8 +523,11 @@ test("UI-047 source: loadAuthenticatedWorkspace loads the same securities-only h
 });
 
 test("UI-047 source: the Overview hero headline reads ownedHoldingAmountWhole on the holdings-derived value, never data.current.value", () => {
+  // PRF-014 step 2d: this hero markup moved verbatim into
+  // portfolio-shell-overview.tsx's OwnedOverviewScreenBody -- see that
+  // module's own header comment.
   return readFile(
-    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    new URL("../app/components/portfolio-shell-overview.tsx", import.meta.url),
     "utf8",
   ).then((source) => {
     const heroBlock = excerptAfter(
