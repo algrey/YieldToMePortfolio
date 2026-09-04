@@ -443,9 +443,10 @@ test("BRK-020 B3 (pin, not a regression test): with ONLY reversed rows sharing t
         updatedAt,
       );
   };
-  // Two reversed generations, older one inserted last / given the LATER
-  // `updated_at`, so "reuse the most recently updated one" is the only
-  // rule that can pick `rev-newer`.
+  // Two reversed generations: `rev-newer` carries the later `updated_at`.
+  // Without the `ORDER BY`, the owner index visits `updated_at` ascending and
+  // returns `rev-older` (measured in review), so this fixture distinguishes
+  // the tiebreak from the pre-fix plan.
   insertBatch("rev-newer", "reversed", "2026-09-03T02:00:00Z");
   insertBatch("rev-older", "reversed", "2026-09-03T01:00:00Z");
 
