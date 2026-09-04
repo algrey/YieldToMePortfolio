@@ -31,7 +31,7 @@ CREATE TABLE `sharesight_pending_payouts` (
 	CONSTRAINT "sharesight_pending_payouts_fx_rate_source_check" CHECK("sharesight_pending_payouts"."fx_rate_source" IS NULL OR "sharesight_pending_payouts"."fx_rate_source" IN ('sharesight'))
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `sharesight_pending_payouts_portfolio_source_reference_unique` ON `sharesight_pending_payouts` (`portfolio_id`,`source_reference`);--> statement-breakpoint
+CREATE UNIQUE INDEX `sharesight_pending_payouts_owner_portfolio_source_reference_unique` ON `sharesight_pending_payouts` (`user_id`,`portfolio_id`,`source_reference`);--> statement-breakpoint
 CREATE INDEX `sharesight_pending_payouts_owner_portfolio_withdrawn_idx` ON `sharesight_pending_payouts` (`user_id`,`portfolio_id`,`withdrawn_at`);--> statement-breakpoint
 CREATE INDEX `sharesight_pending_payouts_owner_portfolio_security_idx` ON `sharesight_pending_payouts` (`user_id`,`portfolio_id`,`portfolio_security_id`);--> statement-breakpoint
 -- BRK-022: account_purge_lock_* triggers for the new owner-scoped

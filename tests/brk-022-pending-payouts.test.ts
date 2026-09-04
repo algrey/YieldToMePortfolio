@@ -86,8 +86,8 @@ test("migration creates sharesight_pending_payouts with its unique/index shape a
     .sort();
   assert.deepEqual(indexNames, [
     "sharesight_pending_payouts_owner_portfolio_security_idx",
+    "sharesight_pending_payouts_owner_portfolio_source_reference_unique",
     "sharesight_pending_payouts_owner_portfolio_withdrawn_idx",
-    "sharesight_pending_payouts_portfolio_source_reference_unique",
   ]);
   const triggerNames = db
     .prepare(
@@ -291,6 +291,86 @@ test("same source_reference in two different portfolios is two independent rows"
   ]);
   assert.equal((await repo.listActive("a", "pa")).length, 1);
   assert.equal((await repo.listActive("a", "pa2")).length, 1);
+});
+
+test("a cross-owner call cannot overwrite another owner's row via a colliding source_reference (B1 review fix)", async () => {
+  const db = await ownedFixture();
+  const repo = createSharesightPendingPayoutsRepository(
+    createSqliteSqlClient(db),
+    () => "2026-09-01T00:00:00.000Z",
+  );
+  const sharedReference = "sharesight-payout:shared:holding-1:2026-09-15";
+  await repo.upsertObserved("a", "pa", [
+    payout({ sourceReference: sharedReference, totalCashDecimal: "150.00" }),
+  ]);
+  const originalRow = (await repo.listActive("a", "pa"))[0];
+
+  // Colliding source_reference under B's OWN, different portfolio never
+  // touches A's row -- the unique key includes portfolio_id, so it doesn't
+  // even match.
+  const differentPortfolio = await repo.upsertObserved("b", "pb", [
+    payout({ sourceReference: sharedReference, totalCashDecimal: "999.99" }),
+  ]);
+  assert.deepEqual(differentPortfolio, { ok: true, inserted: 1, updated: 0 });
+  assert.deepEqual((await repo.listActive("a", "pa"))[0], originalRow);
+
+  // The actual attack: B passes A's own portfolio_id. Before this fix, the
+  // unique index and the ON CONFLICT target were (portfolio_id,
+  // source_reference) only, so this matched A's row on conflict regardless
+  // of user_id and silently overwrote it. user_id is now part of both, so
+  // this falls through to the INSERT path instead, where the
+  // (portfolio_id, user_id) FK to portfolios rejects it (portfolio 'pa'
+  // belongs to user 'a', not 'b') -- a typed atomic_failure, and A's row is
+  // untouched.
+  const asOwnersPortfolio = await repo.upsertObserved("b", "pa", [
+    payout({ sourceReference: sharedReference, totalCashDecimal: "1.00" }),
+  ]);
+  assert.deepEqual(asOwnersPortfolio, {
+    ok: false,
+    reason: "atomic_failure",
+  });
+  assert.deepEqual((await repo.listActive("a", "pa"))[0], originalRow);
+});
+
+test("upsertObserved de-dupes a duplicate sourceReference within one call (last occurrence wins), never double-writing or inflating counts", async () => {
+  const db = await ownedFixture();
+  const repo = createSharesightPendingPayoutsRepository(
+    createSqliteSqlClient(db),
+    () => "2026-09-01T00:00:00.000Z",
+  );
+  const result = await repo.upsertObserved("a", "pa", [
+    payout({
+      sourceReference: "sharesight-payout:pa:holding-1:2026-09-15",
+      totalCashDecimal: "100.00",
+    }),
+    payout({
+      sourceReference: "sharesight-payout:pa:holding-1:2026-09-15",
+      totalCashDecimal: "200.00",
+    }),
+  ]);
+  assert.deepEqual(result, { ok: true, inserted: 1, updated: 0 });
+  const rows = await repo.listActive("a", "pa");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].totalCashDecimal, "200.00");
+});
+
+test("upsertObserved chunks its INSERT batch at REFERENCE_CHUNK_SIZE without miscounting across chunks", async () => {
+  const db = await ownedFixture();
+  const repo = createSharesightPendingPayoutsRepository(
+    createSqliteSqlClient(db),
+    () => "2026-09-01T00:00:00.000Z",
+  );
+  // 51 rows crosses the module's 50-statement chunk boundary (one full
+  // chunk plus one more), exercising the loop of client.batch() calls.
+  const inputs = Array.from({ length: 51 }, (_, index) =>
+    payout({
+      sourceReference: `sharesight-payout:pa:holding-${index}:2026-09-15`,
+      sharesightHoldingId: `holding-${index}`,
+    }),
+  );
+  const result = await repo.upsertObserved("a", "pa", inputs);
+  assert.deepEqual(result, { ok: true, inserted: 51, updated: 0 });
+  assert.equal((await repo.listActive("a", "pa")).length, 51);
 });
 
 // ---------------------------------------------------------------------------

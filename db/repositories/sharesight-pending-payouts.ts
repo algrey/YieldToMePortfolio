@@ -300,8 +300,13 @@ export function createSharesightPendingPayoutsRepository(
 ) {
   /**
    * Upserts a batch of payout observations for ONE portfolio, keyed by
-   * `(portfolio_id, source_reference)` (the table's own unique index). A
-   * new `source_reference` is inserted with `first_observed_at =
+   * `(user_id, portfolio_id, source_reference)` (the table's own unique
+   * index -- `user_id` is part of the key, and of the `ON CONFLICT` target
+   * below, so that the composite `(portfolio_id, user_id)` FK is always
+   * evaluated for a cross-owner `source_reference` collision: it falls
+   * through to the INSERT path and the FK rejects it as `atomic_failure`,
+   * rather than the conflict path silently overwriting another owner's
+   * row). A new `source_reference` is inserted with `first_observed_at =
    * last_observed_at = now`; an already-known one has every value column
    * refreshed, `last_observed_at`/`updated_at` advanced, and `withdrawn_at`
    * cleared (a re-observed row is no longer withdrawn), while `id`,
@@ -312,12 +317,22 @@ export function createSharesightPendingPayoutsRepository(
    *
    * Every row is validated BEFORE any statement is built (fail-closed: one
    * invalid row means nothing in the batch is written, not a partial
-   * commit) -- see `validateObservationInput`. `inserted`/`updated` counts
-   * come from a pre-check `SELECT` of which `source_reference`s already
-   * exist for this portfolio, taken before the batch executes; this is a
-   * reporting count only (mirrors BRK-014's own "best-effort, not a
-   * concurrency boundary" counts), not something the upsert's own
-   * correctness depends on.
+   * commit) -- see `validateObservationInput`. Rows are then de-duplicated
+   * by `sourceReference` (last occurrence wins), so a duplicate reference
+   * inside one call cannot produce two conflicting statements for the same
+   * row. `inserted`/`updated` counts come from a pre-check `SELECT` of
+   * which `source_reference`s already exist for this portfolio, taken
+   * before the batch executes; this is a reporting count only (mirrors
+   * BRK-014's own "best-effort, not a concurrency boundary" counts), not
+   * something the upsert's own correctness depends on.
+   *
+   * The INSERT statements are sent in chunks of `REFERENCE_CHUNK_SIZE`
+   * statements per `client.batch()` call, rather than one call for however
+   * many rows this sync observed. Each chunk is its own atomic unit, so a
+   * failure partway through applies only some chunks -- that is safe here
+   * because an observation is idempotent: the next sync re-observes and
+   * re-upserts every row regardless of what a prior partial call left
+   * behind.
    */
   async function upsertObserved(
     userId: string,
@@ -327,7 +342,9 @@ export function createSharesightPendingPayoutsRepository(
     | { ok: true; inserted: number; updated: number }
     | SharesightPendingPayoutMutationFailure
   > {
-    if (!isNonEmptyString(userId) || !isNonEmptyString(portfolioId))
+    if (!isNonEmptyString(userId))
+      return { ok: false, reason: "invalid_input", field: "userId" };
+    if (!isNonEmptyString(portfolioId))
       return { ok: false, reason: "invalid_input", field: "portfolioId" };
     if (inputs.length === 0) return { ok: true, inserted: 0, updated: 0 };
 
@@ -342,7 +359,14 @@ export function createSharesightPendingPayoutsRepository(
       }
     }
 
-    const sourceReferences = inputs.map((input) => input.sourceReference);
+    // De-duplicate by sourceReference -- see docstring above.
+    const deduped = new Map<string, PendingPayoutObservationInput>();
+    for (const input of inputs) deduped.set(input.sourceReference, input);
+    const dedupedInputs = [...deduped.values()];
+
+    const sourceReferences = dedupedInputs.map(
+      (input) => input.sourceReference,
+    );
     const existing = new Set<string>();
     for (const referenceChunk of chunk(
       sourceReferences,
@@ -359,13 +383,13 @@ export function createSharesightPendingPayoutsRepository(
     }
 
     const observedAt = now();
-    const statements: SqlStatement[] = inputs.map((input) => ({
+    const statements: SqlStatement[] = dedupedInputs.map((input) => ({
       sql: `INSERT INTO sharesight_pending_payouts (
           ${PENDING_PAYOUT_COLUMNS}
         ) VALUES (
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?
         )
-        ON CONFLICT (portfolio_id, source_reference) DO UPDATE SET
+        ON CONFLICT (user_id, portfolio_id, source_reference) DO UPDATE SET
           portfolio_security_id = excluded.portfolio_security_id,
           sharesight_holding_id = excluded.sharesight_holding_id,
           sharesight_instrument_id = excluded.sharesight_instrument_id,
@@ -414,7 +438,9 @@ export function createSharesightPendingPayoutsRepository(
     }));
 
     try {
-      await client.batch(statements);
+      for (const statementChunk of chunk(statements, REFERENCE_CHUNK_SIZE)) {
+        await client.batch(statementChunk);
+      }
     } catch {
       return { ok: false, reason: "atomic_failure" };
     }
@@ -422,7 +448,7 @@ export function createSharesightPendingPayoutsRepository(
     const inserted = sourceReferences.filter(
       (ref) => !existing.has(ref),
     ).length;
-    return { ok: true, inserted, updated: inputs.length - inserted };
+    return { ok: true, inserted, updated: dedupedInputs.length - inserted };
   }
 
   /**
@@ -448,7 +474,9 @@ export function createSharesightPendingPayoutsRepository(
   ): Promise<
     { ok: true; withdrawn: number } | SharesightPendingPayoutMutationFailure
   > {
-    if (!isNonEmptyString(userId) || !isNonEmptyString(portfolioId))
+    if (!isNonEmptyString(userId))
+      return { ok: false, reason: "invalid_input", field: "userId" };
+    if (!isNonEmptyString(portfolioId))
       return { ok: false, reason: "invalid_input", field: "portfolioId" };
     if (window.kind === "narrowed" && !isValidDateString(window.sinceDate))
       return { ok: false, reason: "invalid_input", field: "window.sinceDate" };

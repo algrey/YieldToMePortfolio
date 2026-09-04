@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "a50673a9-7fef-43d2-93a7-ce2488ef62f9",
+  "id": "1253aef8-3f44-48ef-9d5f-598f67079097",
   "prevId": "7291b7be-5a6f-496a-a2bb-c93373f223ea",
   "tables": {
     "account_export_checkpoint_guards": {
@@ -7825,9 +7825,9 @@
         }
       },
       "indexes": {
-        "sharesight_pending_payouts_portfolio_source_reference_unique": {
-          "name": "sharesight_pending_payouts_portfolio_source_reference_unique",
-          "columns": ["portfolio_id", "source_reference"],
+        "sharesight_pending_payouts_owner_portfolio_source_reference_unique": {
+          "name": "sharesight_pending_payouts_owner_portfolio_source_reference_unique",
+          "columns": ["user_id", "portfolio_id", "source_reference"],
           "isUnique": true
         },
         "sharesight_pending_payouts_owner_portfolio_withdrawn_idx": {

@@ -3880,8 +3880,13 @@ export const sharesightDelayedPrices = sqliteTable(
 // under this key, the read path suppresses the pending row entirely, never
 // double-counting. This table itself enforces nothing about that
 // suppression -- it is a pure sync-time cache of what Sharesight currently
-// says is outstanding for this portfolio, unique per `(portfolio_id,
-// source_reference)`.
+// says is outstanding for this portfolio, unique per `(user_id, portfolio_id,
+// source_reference)` -- `user_id` is part of the unique key (not just
+// `portfolio_id`) so the upsert's own `ON CONFLICT` target matches the
+// `(portfolio_id, user_id)` composite FK below: a cross-owner call whose
+// `source_reference` collides with another owner's row always falls through
+// to the INSERT path, where that FK rejects it, rather than silently
+// overwriting the other owner's row on conflict.
 //
 // `portfolio_security_id` is NULLABLE (unlike `dividend_manual_records`,
 // where it is required): an announced payout can arrive before the sync's
@@ -3963,8 +3968,8 @@ export const sharesightPendingPayouts = sqliteTable(
       foreignColumns: [currencies.code],
     }).onDelete("restrict"),
     uniqueIndex(
-      "sharesight_pending_payouts_portfolio_source_reference_unique",
-    ).on(table.portfolioId, table.sourceReference),
+      "sharesight_pending_payouts_owner_portfolio_source_reference_unique",
+    ).on(table.userId, table.portfolioId, table.sourceReference),
     index("sharesight_pending_payouts_owner_portfolio_withdrawn_idx").on(
       table.userId,
       table.portfolioId,
