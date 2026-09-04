@@ -41,6 +41,7 @@ import {
   type DividendManualRecordFact,
   type ProviderDividendEventFact,
 } from "../domain/dividends/index.ts";
+import type { EventOverrideFact } from "../domain/dividends/event-override-resolution.ts";
 import { frankingDisplay } from "../app/dividend-history-prefill.ts";
 
 const NINETY_SEVEN_DIGITS = "1".repeat(97);
@@ -216,6 +217,150 @@ test("BUG-023: an eventless standalone IMPORTED (CSV) per-share record with an u
   assert.equal(row.frankingTotalDecimal, null);
   assert.equal(row.frankingUnreadable, true);
   assert.equal(row.grossDecimal, "15");
+});
+
+// ---------------------------------------------------------------------------
+// Part 1b: the third derivation site -- excluded-event RESURFACING
+// (domain/dividends/history.ts's dedicated loop over `activeEvents` whose id
+// is in `excludedEventIds`). A manual record can still attach to an event an
+// owner override excludes; the excluded event contributes its own
+// zero-contributing `source: "edited"` marker row, and the attached manual
+// record resurfaces as its own row via the identical `resolveOwnerFact` /
+// `resolveFrankingPerShareRespectingUnreadable` precedence the non-excluded
+// main loop uses (fixture shape mirrors DIV-005's "excluded-event variant",
+// tests/div-005.test.ts:~127).
+// ---------------------------------------------------------------------------
+
+test("BUG-023: a manual record attached to an event excluded by an owner override, with an unreadable per-share franking credit, resurfaces with franking forced unknown -- never the default assumption", () => {
+  const events: ProviderDividendEventFact[] = [
+    event({ id: "e1", exDate: "2026-08-01", paymentDate: "2026-08-01" }),
+  ];
+  const overrides: EventOverrideFact[] = [
+    {
+      dividendEventId: "e1",
+      sharesDecimal: null,
+      dividendPerShareDecimal: null,
+      frankingCreditPerShareDecimal: null,
+      exclude: true,
+    },
+  ];
+  const record: DividendManualRecordFact = {
+    id: "m6",
+    paymentDate: "2026-08-04", // within PROXIMITY_WINDOW_DAYS of e1
+    sharesDecimal: "10",
+    dividendPerShareDecimal: "1.50",
+    // 97 fractional digits -- unreadable, not absent.
+    frankingCreditPerShareDecimal: `0.${NINETY_SEVEN_DIGITS}`,
+    totalCashDecimal: null,
+    totalFrankingDecimal: null,
+    importBatchId: null,
+  };
+
+  const warnMock = mock.method(console, "warn", () => {});
+  let rows;
+  try {
+    rows = deriveDividendHistoryForSecurity({
+      portfolioSecurityId: "ps-g",
+      securityCurrencyCode: "AUD",
+      events,
+      overrides,
+      receipts: [],
+      manualRecords: [record],
+      transactions: [],
+      defaultFrankingPercentDecimal: "50",
+      today: "2026-09-19",
+    });
+  } finally {
+    warnMock.mock.restore();
+  }
+
+  assert.equal(
+    rows.length,
+    2,
+    "the excluded marker row plus exactly one resurfaced row",
+  );
+  const excludedRow = rows.find((row) => row.source === "edited");
+  const resurfaced = rows.find((row) => row.source !== "edited");
+  assert.ok(excludedRow);
+  assert.equal(excludedRow!.excluded, true);
+  assert.ok(resurfaced, "the manual record must still resurface its own row");
+  assert.equal(resurfaced!.source, "manual");
+  assert.equal(
+    resurfaced!.cashDecimal,
+    "15",
+    "cash still computes -- unaffected",
+  );
+  assert.equal(
+    resurfaced!.franking.source,
+    "unknown",
+    "must never silently substitute the default assumption for an unreadable value",
+  );
+  assert.equal(resurfaced!.franking.perShareDecimal, null);
+  assert.equal(resurfaced!.frankingTotalDecimal, null);
+  assert.equal(resurfaced!.frankingUnreadable, true);
+  assert.equal(
+    resurfaced!.grossDecimal,
+    resurfaced!.cashDecimal,
+    "gross equals cash when franking is unknown (grossIncludesFranking: false)",
+  );
+
+  const totals = computeLifetimeDividendTotals(rows, "AUD");
+  assert.equal(totals.status, "ok");
+  if (totals.status !== "ok") return;
+  assert.equal(
+    totals.receivedFrankingKnownDecimal,
+    "0",
+    "never inflated by a default-derived figure",
+  );
+  assert.equal(totals.receivedFrankingUnknownCount, 1);
+});
+
+test("BUG-023 guard: the identical excluded-event resurfacing shape with a genuinely ABSENT (never entered) per-share franking credit still takes the default assumption, unaffected by this fix", () => {
+  const events: ProviderDividendEventFact[] = [
+    event({ id: "e1", exDate: "2026-08-01", paymentDate: "2026-08-01" }),
+  ];
+  const overrides: EventOverrideFact[] = [
+    {
+      dividendEventId: "e1",
+      sharesDecimal: null,
+      dividendPerShareDecimal: null,
+      frankingCreditPerShareDecimal: null,
+      exclude: true,
+    },
+  ];
+  const record: DividendManualRecordFact = {
+    id: "m7",
+    paymentDate: "2026-08-04",
+    sharesDecimal: "10",
+    dividendPerShareDecimal: "1.50",
+    frankingCreditPerShareDecimal: null, // never entered -- genuinely absent
+    totalCashDecimal: null,
+    totalFrankingDecimal: null,
+    importBatchId: null,
+  };
+
+  const rows = deriveDividendHistoryForSecurity({
+    portfolioSecurityId: "ps-h",
+    securityCurrencyCode: "AUD",
+    events,
+    overrides,
+    receipts: [],
+    manualRecords: [record],
+    transactions: [],
+    defaultFrankingPercentDecimal: "50",
+    today: "2026-09-19",
+  });
+
+  assert.equal(rows.length, 2);
+  const resurfaced = rows.find((row) => row.source !== "edited");
+  assert.ok(resurfaced);
+  assert.equal(
+    resurfaced!.franking.source,
+    "default",
+    "an absent value must still take the default -- only UNREADABLE values are blocked",
+  );
+  assert.equal(resurfaced!.frankingUnreadable ?? false, false);
+  assert.ok(resurfaced!.frankingTotalDecimal !== null);
 });
 
 // ---------------------------------------------------------------------------
