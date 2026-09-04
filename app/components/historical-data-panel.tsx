@@ -168,18 +168,22 @@ export function PriceHistoryCoverageZeroList({
       <ul className="historical-data-coverage-list">
         {rows.map((row) => (
           <li key={row.portfolioSecurityId}>
-            <span className="historical-data-coverage-name">
-              <strong>{row.ticker}</strong> — {row.name}
-            </span>
-            <a
-              className="historical-data-coverage-link"
-              href={iiShareUrl(row.ticker)}
-              target="_blank"
-              rel="noopener noreferrer"
-              referrerPolicy="no-referrer"
-            >
-              Open {row.ticker} on Intelligent Investor
-            </a>
+            <div className="coverage-row">
+              <strong className="coverage-ticker">{row.ticker}</strong>
+              <span className="historical-data-coverage-name">{row.name}</span>
+              <span className="coverage-status coverage-status-missing">
+                no history
+              </span>
+              <a
+                className="historical-data-coverage-link"
+                href={iiShareUrl(row.ticker)}
+                target="_blank"
+                rel="noopener noreferrer"
+                referrerPolicy="no-referrer"
+              >
+                Open {row.ticker} on Intelligent Investor
+              </a>
+            </div>
             <span className="historical-data-coverage-filename">
               Expected download filename: {iiDownloadFilename(row.ticker)}
             </span>
@@ -202,19 +206,20 @@ export function PriceHistoryCoveragePartialList({
       <ul className="historical-data-coverage-list">
         {rows.map((row) => (
           <li key={row.portfolioSecurityId}>
-            <span className="historical-data-coverage-name">
-              <strong>{row.ticker}</strong> — {row.name}
-            </span>
-            <span>{coverageGapSummary(row)}</span>
-            <a
-              className="historical-data-coverage-link"
-              href={iiShareUrl(row.ticker)}
-              target="_blank"
-              rel="noopener noreferrer"
-              referrerPolicy="no-referrer"
-            >
-              Open {row.ticker} on Intelligent Investor
-            </a>
+            <div className="coverage-row">
+              <strong className="coverage-ticker">{row.ticker}</strong>
+              <span className="historical-data-coverage-name">{row.name}</span>
+              <a
+                className="historical-data-coverage-link"
+                href={iiShareUrl(row.ticker)}
+                target="_blank"
+                rel="noopener noreferrer"
+                referrerPolicy="no-referrer"
+              >
+                Open {row.ticker} on Intelligent Investor
+              </a>
+            </div>
+            <span className="coverage-status">{coverageGapSummary(row)}</span>
           </li>
         ))}
       </ul>
@@ -566,41 +571,46 @@ export function PriceUploadList({
   onDeleteClick: (batchId: string) => void;
 }) {
   return (
-    <div className="historical-data-uploads">
-      <h3>Past uploads</h3>
-      {batchesError ? (
-        <p role="alert" className="historical-data-error">
-          {batchesError}
-        </p>
-      ) : null}
-      {batches === null ? (
-        <p role="status">Loading past uploads…</p>
-      ) : batches.length === 0 ? (
-        <p>No uploads yet.</p>
-      ) : (
-        <ul className="historical-data-upload-list">
-          {batches.map((batch) => (
-            <li key={batch.id}>
-              <span>
-                {batch.filename} ({batch.format}, {batch.sourceLabel}) —{" "}
-                {uploadRowCountLabel(batch)}
-                {batch.malformedRowCount > 0
-                  ? `, ${batch.malformedRowCount} skipped`
-                  : ""}{" "}
-                · {batch.createdAt}
-              </span>
-              <button
-                type="button"
-                onClick={() => onDeleteClick(batch.id)}
-                disabled={deletePending === batch.id}
-                aria-busy={deletePending === batch.id || undefined}
-              >
-                {deletePending === batch.id ? "Deleting…" : "Delete"}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
+    <div className="step-grid historical-data-uploads">
+      <div className="step-label">
+        <h3>Past uploads</h3>
+        <p>Deleting an upload removes only the rows it created.</p>
+      </div>
+      <div className="step-body">
+        {batchesError ? (
+          <p role="alert" className="historical-data-error">
+            {batchesError}
+          </p>
+        ) : null}
+        {batches === null ? (
+          <p role="status">Loading past uploads…</p>
+        ) : batches.length === 0 ? (
+          <p>No uploads yet.</p>
+        ) : (
+          <ul className="historical-data-upload-list">
+            {batches.map((batch) => (
+              <li key={batch.id}>
+                <span>
+                  {batch.filename} ({batch.format}, {batch.sourceLabel}) —{" "}
+                  {uploadRowCountLabel(batch)}
+                  {batch.malformedRowCount > 0
+                    ? `, ${batch.malformedRowCount} skipped`
+                    : ""}{" "}
+                  · {batch.createdAt}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onDeleteClick(batch.id)}
+                  disabled={deletePending === batch.id}
+                  aria-busy={deletePending === batch.id || undefined}
+                >
+                  {deletePending === batch.id ? "Deleting…" : "Delete"}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }
@@ -1239,210 +1249,233 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
 
   return (
     <section
-      className="historical-data-panel"
+      className="backup-card historical-data-panel"
       aria-labelledby="historical-data-title"
     >
-      <p className="eyebrow">Historical Data</p>
-      <h2 id="historical-data-title">Price history import</h2>
-      <p>
-        Import a per-security price-history CSV (Intelligent Investor export),
-        export a full backup of your imported price history, or restore from a
-        previously exported backup.
-      </p>
+      <div className="backup-card-header">
+        <div className="backup-card-title">
+          <p className="eyebrow">Historical Data</p>
+          <h2 id="historical-data-title">Price history import</h2>
+        </div>
+        <p className="backup-card-blurb">
+          Import a per-security price-history CSV (Intelligent Investor export),
+          export a full backup of your imported price history, or restore from a
+          previously exported backup.
+        </p>
+      </div>
 
       <section
         className="historical-data-coverage"
         aria-labelledby="historical-data-coverage-title"
       >
-        <h3 id="historical-data-coverage-title">Download price history</h3>
-        <p>
-          Downloads run in your own browser via the guide — this app never
-          fetches Intelligent Investor&apos;s data directly.
-        </p>
-        {coverageError ? (
-          <p role="alert" className="historical-data-error">
-            {coverageError}
-          </p>
-        ) : null}
-        {!coverageError && coverage === null ? (
-          <p role="status">Checking price-history coverage…</p>
-        ) : null}
-        {coverage &&
-        coverage.zero.length === 0 &&
-        coverage.partial.length === 0 ? (
-          <p>Every held security has recorded price history.</p>
-        ) : null}
-        {coverage ? (
-          <>
-            <PriceHistoryCoverageZeroList rows={coverage.zero} />
-            <PriceHistoryCoveragePartialList rows={coverage.partial} />
-          </>
-        ) : null}
-        {coverage &&
-        (coverage.zero.length > 0 || coverage.partial.length > 0) ? (
-          <p>
-            Download each CSV above, then{" "}
-            <a href="#historical-data-single-upload">import it below</a>.
-          </p>
-        ) : null}
+        <div className="step-grid">
+          <div className="step-label">
+            <h3 id="historical-data-coverage-title">
+              <span className="step-number">1 ·</span> Download price history
+            </h3>
+            <p>
+              Downloads run in your own browser via the guide — this app never
+              fetches Intelligent Investor&apos;s data directly.
+            </p>
+          </div>
+          <div className="step-body">
+            {coverageError ? (
+              <p role="alert" className="historical-data-error">
+                {coverageError}
+              </p>
+            ) : null}
+            {!coverageError && coverage === null ? (
+              <p role="status" className="backup-progress">
+                Checking price-history coverage…
+              </p>
+            ) : null}
+            {coverage &&
+            coverage.zero.length === 0 &&
+            coverage.partial.length === 0 ? (
+              <p className="backup-copy">
+                Every held security has recorded price history.
+              </p>
+            ) : null}
+            {coverage ? (
+              <>
+                <PriceHistoryCoverageZeroList rows={coverage.zero} />
+                <PriceHistoryCoveragePartialList rows={coverage.partial} />
+              </>
+            ) : null}
+            {coverage &&
+            (coverage.zero.length > 0 || coverage.partial.length > 0) ? (
+              <p className="backup-preview-note">
+                Download each CSV above, then{" "}
+                <a href="#historical-data-single-upload">import it below</a>.
+              </p>
+            ) : null}
+          </div>
+        </div>
       </section>
 
-      <div className="historical-data-settings">
-        <label>
-          Exchange
-          <input
-            value={exchangeAlias}
-            disabled={multiRunning}
-            onChange={(event) => setExchangeAlias(event.target.value)}
-          />
-        </label>
-        <label>
-          Currency
-          <input
-            value={currencyCode}
-            disabled={multiRunning}
-            onChange={(event) => setCurrencyCode(event.target.value)}
-          />
-        </label>
-        {/* EFF-001 (measure 5): DEFAULT ON, boundary year adjustable per
-            import -- applies to every file in a multi-file run, same as
-            Exchange/Currency above. Full daily history stays the default
-            data model everywhere else; this only thins what a NEW CSV
-            import writes for dates before the boundary. */}
-        <label>
-          <input
-            type="checkbox"
-            checked={downsampleEnabled}
-            disabled={multiRunning}
-            onChange={(event) => setDownsampleEnabled(event.target.checked)}
-          />{" "}
-          Downsample history before the boundary year to monthly
-        </label>
-        <label>
-          Boundary year
-          <input
-            type="number"
-            inputMode="numeric"
-            value={boundaryYearText}
-            disabled={multiRunning || !downsampleEnabled}
-            onChange={(event) => setBoundaryYearText(event.target.value)}
-          />
-        </label>
-      </div>
-
-      <div
-        className="historical-data-import"
-        id="historical-data-single-upload"
-      >
-        <h3>Per-ticker price history (CSV files)</h3>
-        <p>
-          Select one file to import it directly below, or select several at once
-          to import them one at a time, in order.
-        </p>
-        <p>
-          The Exchange, Currency, and Source label settings above and below
-          apply to every file in the run -- they cannot be changed per file.
-        </p>
-        <label>
-          Price history CSV
-          <span className="file-picker">
-            <input
-              type="file"
-              accept=".csv,text/csv,text/tab-separated-values"
-              multiple
-              disabled={multiRunning}
-              className="file-picker-input"
-              onChange={(event) => {
-                const selected = Array.from(event.target.files ?? []);
-                // MKT-018C: exactly one file (including one chosen from a
-                // multi-select picker) takes the ORIGINAL single-file state
-                // path below, unchanged -- only picking more than one file
-                // switches into the sequential multi-file run.
-                if (selected.length > 1) {
-                  setFile(null);
+      <div className="step-grid" id="historical-data-single-upload">
+        <div className="step-label">
+          <h3>
+            <span className="step-number">2 ·</span> Per-ticker price history
+            (CSV files)
+          </h3>
+          <p>
+            Select one file to import it directly below, or select several at
+            once to import them one at a time, in order.
+          </p>
+          <p>
+            The Exchange, Currency, and Source label settings above and below
+            apply to every file in the run -- they cannot be changed per file.
+          </p>
+        </div>
+        <div className="step-body">
+          <div className="step-form-row">
+            <label>
+              Exchange
+              <input
+                value={exchangeAlias}
+                disabled={multiRunning}
+                onChange={(event) => setExchangeAlias(event.target.value)}
+              />
+            </label>
+            <label>
+              Currency
+              <input
+                value={currencyCode}
+                disabled={multiRunning}
+                onChange={(event) => setCurrencyCode(event.target.value)}
+              />
+            </label>
+            <label>
+              Source label
+              <input
+                value={sourceLabel}
+                disabled={multiRunning}
+                onChange={(event) => setSourceLabel(event.target.value)}
+              />
+            </label>
+          </div>
+          {/* EFF-001 (measure 5): DEFAULT ON, boundary year adjustable per
+              import -- applies to every file in a multi-file run, same as
+              Exchange/Currency above. Full daily history stays the default
+              data model everywhere else; this only thins what a NEW CSV
+              import writes for dates before the boundary. */}
+          <div className="step-inline-row">
+            <label className="step-checkbox">
+              <input
+                type="checkbox"
+                checked={downsampleEnabled}
+                disabled={multiRunning}
+                onChange={(event) => setDownsampleEnabled(event.target.checked)}
+              />{" "}
+              Downsample history before the boundary year to monthly
+            </label>
+            <label className="step-year">
+              Boundary year
+              <input
+                type="number"
+                inputMode="numeric"
+                value={boundaryYearText}
+                disabled={multiRunning || !downsampleEnabled}
+                onChange={(event) => setBoundaryYearText(event.target.value)}
+              />
+            </label>
+          </div>
+          <label className="file-drop">
+            <span className="visually-hidden">Price history CSV</span>
+            <span className="file-picker">
+              <input
+                type="file"
+                accept=".csv,text/csv,text/tab-separated-values"
+                multiple
+                disabled={multiRunning}
+                className="file-picker-input"
+                onChange={(event) => {
+                  const selected = Array.from(event.target.files ?? []);
+                  // MKT-018C: exactly one file (including one chosen from a
+                  // multi-select picker) takes the ORIGINAL single-file state
+                  // path below, unchanged -- only picking more than one file
+                  // switches into the sequential multi-file run.
+                  if (selected.length > 1) {
+                    setFile(null);
+                    setSinglePreview(null);
+                    setSingleError(null);
+                    setSingleResult(null);
+                    setMultiFileCount(selected.length);
+                    void startMultiRun(selected);
+                    return;
+                  }
+                  setFile(selected[0] ?? null);
+                  setMultiFileCount(null);
                   setSinglePreview(null);
                   setSingleError(null);
                   setSingleResult(null);
-                  setMultiFileCount(selected.length);
-                  void startMultiRun(selected);
-                  return;
-                }
-                setFile(selected[0] ?? null);
-                setMultiFileCount(null);
-                setSinglePreview(null);
-                setSingleError(null);
-                setSingleResult(null);
-                setMultiResults([]);
-                setMultiCancelled(false);
-                setMultiPhase(null);
-                setMultiCurrentPreview(null);
-              }}
-            />
-            <span className="file-picker-button">Choose file(s)…</span>
-            <span className="file-picker-filename">
-              {file
-                ? file.name
-                : multiFileCount
-                  ? `${multiFileCount} files selected`
-                  : "No file selected"}
+                  setMultiResults([]);
+                  setMultiCancelled(false);
+                  setMultiPhase(null);
+                  setMultiCurrentPreview(null);
+                }}
+              />
+              <span className="file-picker-button">Choose file(s)…</span>
+              <span className="file-picker-filename">
+                {file
+                  ? file.name
+                  : multiFileCount
+                    ? `${multiFileCount} files selected`
+                    : "No file selected"}
+              </span>
             </span>
-          </span>
-        </label>
-        <label>
-          Source label
-          <input
-            value={sourceLabel}
-            disabled={multiRunning}
-            onChange={(event) => setSourceLabel(event.target.value)}
-          />
-        </label>
-        <div className="historical-data-actions">
-          <button
-            type="button"
-            onClick={() => void previewSingle()}
-            disabled={!file || singlePending}
-            aria-busy={singlePending || undefined}
-          >
-            {singlePending ? "Checking…" : "Preview"}
-          </button>
-          {singlePreview ? (
+          </label>
+          <div className="backup-actions">
             <button
               type="button"
-              onClick={() => void confirmSingle()}
-              disabled={singlePending}
+              className="backup-secondary-button"
+              onClick={() => void previewSingle()}
+              disabled={!file || singlePending}
               aria-busy={singlePending || undefined}
             >
-              {singlePending ? "Importing…" : "Confirm import"}
+              {singlePending ? "Checking…" : "Preview"}
             </button>
+            {singlePreview ? (
+              <button
+                type="button"
+                className="backup-confirm-button"
+                onClick={() => void confirmSingle()}
+                disabled={singlePending}
+                aria-busy={singlePending || undefined}
+              >
+                {singlePending ? "Importing…" : "Confirm import"}
+              </button>
+            ) : null}
+          </div>
+          {singlePreview ? (
+            <SinglePreviewSummary preview={singlePreview} />
           ) : null}
+          {singleError ? (
+            <p role="alert" className="historical-data-error">
+              {singleError}
+            </p>
+          ) : null}
+          {singleResult ? (
+            <p role="status" className="historical-data-result">
+              {singleResult}
+            </p>
+          ) : null}
+          <MultiFileRunStatus
+            running={multiRunning}
+            phase={multiPhase}
+            total={multiTotal}
+            index={multiIndex}
+            currentFilename={multiCurrentFilename}
+            currentPreview={multiCurrentPreview}
+            pending={multiPending}
+            results={multiResults}
+            cancelled={multiCancelled}
+            onConfirm={() => respondMultiDecision("confirm")}
+            onSkip={() => respondMultiDecision("skip")}
+            onCancel={() => respondMultiDecision("cancel")}
+          />
         </div>
-        {singlePreview ? (
-          <SinglePreviewSummary preview={singlePreview} />
-        ) : null}
-        {singleError ? (
-          <p role="alert" className="historical-data-error">
-            {singleError}
-          </p>
-        ) : null}
-        {singleResult ? (
-          <p role="status" className="historical-data-result">
-            {singleResult}
-          </p>
-        ) : null}
-        <MultiFileRunStatus
-          running={multiRunning}
-          phase={multiPhase}
-          total={multiTotal}
-          index={multiIndex}
-          currentFilename={multiCurrentFilename}
-          currentPreview={multiCurrentPreview}
-          pending={multiPending}
-          results={multiResults}
-          cancelled={multiCancelled}
-          onConfirm={() => respondMultiDecision("confirm")}
-          onSkip={() => respondMultiDecision("skip")}
-          onCancel={() => respondMultiDecision("cancel")}
-        />
       </div>
 
       {/* UI-048 (owner-reported): export and restore used to be two
@@ -1451,83 +1484,90 @@ export function HistoricalDataPanel({ portfolioId }: { portfolioId: string }) {
           restore section at all. One heading, both actions co-located, so
           "where's the restore" has a single place to look. */}
       <section
-        className="historical-data-import"
+        className="step-grid"
         id="historical-data-backup"
         aria-labelledby="historical-data-backup-title"
       >
-        <h3 id="historical-data-backup-title">
-          Price-history backup (export / restore)
-        </h3>
-        <p>
-          Export a full, re-importable backup of your imported price history, or
-          restore a previously exported backup file.
-        </p>
-        <h4>Export backup</h4>
-        {/* This targets a file-download API route (text/csv,
-            content-disposition: attachment), not a Next.js page -- a plain
-            anchor triggers the browser's normal download handling; `next/link`
-            would instead try to client-navigate/prefetch it as an app route. */}
-        {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
-        <a
-          className="historical-data-export-link"
-          href="/api/market-data/price-uploads/export"
-        >
-          Export price history
-        </a>
-        <h4>Restore from backup</h4>
-        <label>
-          Backup CSV
-          <span className="file-picker">
-            <input
-              type="file"
-              accept=".csv,text/csv"
-              className="file-picker-input"
-              onChange={(event) => {
-                setBackupFile(event.target.files?.[0] ?? null);
-                setBackupPreview(null);
-                setBackupError(null);
-                setBackupResult(null);
-              }}
-            />
-            <span className="file-picker-button">Choose backup file…</span>
-            <span className="file-picker-filename">
-              {backupFile ? backupFile.name : "No file selected"}
-            </span>
-          </span>
-        </label>
-        <div className="historical-data-actions">
-          <button
-            type="button"
-            onClick={() => void previewBackup()}
-            disabled={!backupFile || backupPending}
-            aria-busy={backupPending || undefined}
+        <div className="step-label">
+          <h3 id="historical-data-backup-title">
+            <span className="step-number">3 ·</span> Price-history backup
+            (export / restore)
+          </h3>
+          <p>
+            Export a full, re-importable backup of your imported price history,
+            or restore a previously exported backup file.
+          </p>
+        </div>
+        <div className="step-body">
+          <h4>Export backup</h4>
+          {/* This targets a file-download API route (text/csv,
+              content-disposition: attachment), not a Next.js page -- a plain
+              anchor triggers the browser's normal download handling; `next/link`
+              would instead try to client-navigate/prefetch it as an app route. */}
+          {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
+          <a
+            className="backup-export-button"
+            href="/api/market-data/price-uploads/export"
           >
-            {backupPending ? "Checking…" : "Preview"}
-          </button>
-          {backupPreview ? (
+            Export price history
+          </a>
+          <h4>Restore from backup</h4>
+          <label className="file-drop">
+            <span className="visually-hidden">Backup CSV</span>
+            <span className="file-picker">
+              <input
+                type="file"
+                accept=".csv,text/csv"
+                className="file-picker-input"
+                onChange={(event) => {
+                  setBackupFile(event.target.files?.[0] ?? null);
+                  setBackupPreview(null);
+                  setBackupError(null);
+                  setBackupResult(null);
+                }}
+              />
+              <span className="file-picker-button">Choose backup file…</span>
+              <span className="file-picker-filename">
+                {backupFile ? backupFile.name : "No file selected"}
+              </span>
+            </span>
+          </label>
+          <div className="backup-actions">
             <button
               type="button"
-              onClick={() => void confirmBackup()}
-              disabled={backupPending}
+              className="backup-secondary-button"
+              onClick={() => void previewBackup()}
+              disabled={!backupFile || backupPending}
               aria-busy={backupPending || undefined}
             >
-              {backupPending ? "Restoring…" : "Confirm restore"}
+              {backupPending ? "Checking…" : "Preview"}
             </button>
+            {backupPreview ? (
+              <button
+                type="button"
+                className="backup-confirm-button"
+                onClick={() => void confirmBackup()}
+                disabled={backupPending}
+                aria-busy={backupPending || undefined}
+              >
+                {backupPending ? "Restoring…" : "Confirm restore"}
+              </button>
+            ) : null}
+          </div>
+          {backupPreview ? (
+            <BackupPreviewSummary preview={backupPreview} />
+          ) : null}
+          {backupError ? (
+            <p role="alert" className="historical-data-error">
+              {backupError}
+            </p>
+          ) : null}
+          {backupResult ? (
+            <p role="status" className="historical-data-result">
+              {backupResult}
+            </p>
           ) : null}
         </div>
-        {backupPreview ? (
-          <BackupPreviewSummary preview={backupPreview} />
-        ) : null}
-        {backupError ? (
-          <p role="alert" className="historical-data-error">
-            {backupError}
-          </p>
-        ) : null}
-        {backupResult ? (
-          <p role="status" className="historical-data-result">
-            {backupResult}
-          </p>
-        ) : null}
       </section>
 
       <PriceUploadList

@@ -1,5 +1,12 @@
 @import "tailwindcss";
 
+/* Design-sync kinds for custom properties this file does NOT declare: the
+   Tailwind v4 import above emits `--default-transition-duration`,
+   `--default-transition-timing-function`, and every `--tw-*` property
+   (`--tw-numeric-figure`, `--tw-ordinal`, `--tw-blur`, `--tw-invert`,
+   `--tw-scale-x`, `--tw-scale-y`, ...) into the compiled stylesheet. They
+   are Tailwind internals, not design tokens: @kind other */
+
 :root {
   --ink: #06110f;
   --forest: #0b1c18;
@@ -18,8 +25,9 @@
   --tabs: 44px;
   --sans:
     Inter, Geist, -apple-system, BlinkMacSystemFont, "SF Pro Text",
-    "Helvetica Neue", Arial, sans-serif;
-  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    "Helvetica Neue", Arial, sans-serif; /* @kind font */
+  --serif:
+    "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif; /* @kind font */
 }
 
 * {
@@ -5505,70 +5513,574 @@ dd {
   opacity: 0.6;
 }
 
-/* MKT-008: "Historical Data" section -- mirrors `.sharesight-sync-panel`'s
-   established shape (panel/actions/result/error/dialog) exactly, renamed. */
-.historical-data-panel {
+/* MKT-008 / EXP-001 / EXP-002 -- the import page's three data & backup
+   panels (`HistoricalDataPanel`, `BundlePanel`, `SystemBackupPanel`),
+   restyled to the design/data-backups mockup: one `.backup-card` per panel
+   (header row, then either an Export / Restore two-column split or numbered
+   `200px 1fr` step rows). Every rule below is a purpose-named class -- the
+   mockup's inline styles, moved here; no Tailwind utilities. Classes that
+   `MultiFileRunStatus`, the preview summaries, and the delete dialog still
+   use (`.historical-data-actions`, `.historical-data-preview`,
+   `.historical-data-upload-list`, ...) are kept further down. */
+.backup-card {
   margin-top: 28px;
-  padding: 20px;
   border: 1px solid var(--divider);
-  border-radius: 6px;
-  background: var(--forest-raised);
+  border-radius: 8px;
+  background: var(--forest);
+  overflow: hidden;
 }
 
-.historical-data-panel h2 {
-  margin-top: 6px;
-  font-family: var(--serif);
-  font-weight: 400;
+.backup-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 24px;
+  padding: 24px 28px 20px;
+  border-bottom: 1px solid var(--divider);
 }
 
-.historical-data-panel h3 {
-  margin-top: 20px;
-  font-family: var(--serif);
-  font-weight: 400;
-  font-size: 1.05rem;
+.backup-card-title {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
-/* Review B3 (BLOCKING): the "Export backup"/"Restore from backup" <h4>s
-   inside the merged backup section had no rule at all -- mirrors
-   `.historical-data-multi-run h4`'s serif/400-weight convention. */
-#historical-data-backup h4 {
-  margin-top: 16px;
+.backup-card-title .eyebrow {
+  margin: 0;
+}
+
+.backup-card-title h2,
+.backup-card-title h3 {
+  margin: 0;
   font-family: var(--serif);
   font-weight: 400;
-  font-size: 0.95rem;
+  font-size: 1.35rem;
   color: var(--cream);
 }
 
-.historical-data-settings,
-.historical-data-import {
+.backup-card-blurb {
+  margin: 0;
+  max-width: 38ch;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  text-align: right;
+  text-wrap: pretty;
+}
+
+.backup-card-blurb a {
+  color: var(--green-bright);
+}
+
+.backup-card-split {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+}
+
+.backup-export,
+.backup-restore {
+  min-width: 0;
+  padding: 24px 28px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin-top: 12px;
+  align-items: flex-start;
+  gap: 14px;
 }
 
-.historical-data-settings {
-  flex-direction: row;
+.backup-export {
+  border-right: 1px solid var(--divider);
+}
+
+.backup-export h4,
+.backup-restore h4,
+.step-body h4 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--cream);
+}
+
+.backup-restore > * {
+  max-width: 100%;
+}
+
+.backup-restore > .backup-preview,
+.backup-restore > .file-drop,
+.backup-restore > .historical-data-preview,
+.backup-restore > .historical-data-error,
+.backup-restore > .historical-data-result,
+.step-body > .file-drop,
+.step-body > .historical-data-preview,
+.step-body > .historical-data-error,
+.step-body > .historical-data-result {
+  width: 100%;
+  margin-top: 0;
+}
+
+.backup-copy {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.backup-progress {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+/* Export control: the same shape whether it is a `<button>` (system backup,
+   assembled in the browser) or an `<a>` to a file-download route. */
+.backup-export-button {
+  align-self: flex-start;
+  min-height: 44px;
+  padding: 0 18px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--green);
+  border-radius: 4px;
+  background: rgb(99 200 120 / 10%);
+  color: var(--cream);
+  font: inherit;
+  font-size: 0.9rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.backup-export-button:hover {
+  background: rgb(99 200 120 / 18%);
+}
+
+.backup-export-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+/* The dashed file "drop" surface wrapping the app's standard visually-hidden
+   file input + button-look sibling (`.file-picker`, defined further down).
+   The `<label>` carries the accessible name in a `.visually-hidden` span. */
+.file-drop {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px dashed var(--divider);
+  border-radius: 6px;
+  background: var(--ink);
+  cursor: pointer;
+}
+
+.file-drop:hover,
+.file-drop:focus-within {
+  border-color: var(--green);
+}
+
+.file-drop .file-picker {
+  width: 100%;
+  flex-wrap: nowrap;
+  gap: 14px;
+}
+
+.file-drop .file-picker-button {
+  flex-shrink: 0;
+  min-height: 44px;
+  padding: 0 14px;
+  border-radius: 4px;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.file-drop .file-picker-filename {
+  min-width: 0;
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.backup-actions {
+  display: flex;
   flex-wrap: wrap;
-  gap: 16px;
+  gap: 10px;
 }
 
+.backup-secondary-button,
+.backup-confirm-button {
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--divider);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--cream);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.backup-secondary-button:hover {
+  border-color: var(--green);
+}
+
+.backup-confirm-button {
+  border-color: var(--green);
+  background: var(--green);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.backup-confirm-button:hover {
+  background: var(--green-bright);
+}
+
+.backup-secondary-button:disabled,
+.backup-confirm-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+/* Preview summaries (`SystemBackupPreviewSummary`, `BundlePreviewSummary`). */
+.backup-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-top: 6px;
+  font-size: 0.82rem;
+}
+
+.backup-preview .status-banner {
+  width: 100%;
+  margin: 0;
+  min-height: 0;
+  padding: 10px 12px;
+  border: 1px solid;
+  border-radius: 6px;
+}
+
+.backup-preview .status-banner p {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--cream);
+}
+
+.backup-preview-headline {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.backup-preview-headline strong {
+  font-weight: 500;
+}
+
+.backup-preview-muted {
+  color: var(--muted);
+}
+
+.backup-note {
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 2px solid var(--divider);
+  background: var(--forest-soft);
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.backup-preview-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.backup-preview-group .status-banner {
+  margin: 6px 0;
+}
+
+.backup-preview-group > .backup-preview-note {
+  margin-top: 8px;
+}
+
+.backup-preview-label {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.backup-preview-note {
+  margin: 0;
+  color: var(--muted-dark);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.backup-preview-note a {
+  color: var(--green-bright);
+}
+
+/* Count grid: one numeral per cell (value on top, muted label below), never
+   an "N thing(s)" list item. Three columns by default, four for the bundle. */
+.count-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: var(--divider);
+  overflow: hidden;
+}
+
+.count-grid.four {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.count-cell {
+  min-width: 0;
+  padding: 12px 14px;
+  background: var(--forest-soft);
+}
+
+.count-value {
+  margin: 0;
+  font-size: 1.35rem;
+  line-height: 1.1;
+  color: var(--cream);
+}
+
+.count-label {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.count-label-warning {
+  color: var(--warning);
+}
+
+/* "Portfolios to recreate" rows. */
+.backup-portfolio-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 16px;
+  align-items: baseline;
+  padding: 8px 0;
+  border-top: 1px solid var(--divider);
+  font-size: 0.82rem;
+}
+
+.backup-portfolio-row strong {
+  font-weight: 400;
+  color: var(--cream);
+}
+
+.backup-portfolio-row-code {
+  color: var(--muted-dark);
+}
+
+.backup-portfolio-row-tag {
+  padding: 1px 6px;
+  border: 1px solid var(--divider);
+  border-radius: 3px;
+  color: var(--muted-dark);
+  font-size: 0.72rem;
+}
+
+.backup-portfolio-row-count {
+  color: var(--muted);
+}
+
+/* Settings diff: only rows whose value changes (current -> next). */
+.settings-diff {
+  margin: 0;
+}
+
+.settings-diff-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 20px auto;
+  gap: 12px;
+  align-items: baseline;
+  padding: 8px 0;
+  border-top: 1px solid var(--divider);
+  font-size: 0.82rem;
+}
+
+.settings-diff-row dt {
+  color: var(--muted);
+}
+
+.settings-diff-row dd {
+  margin: 0;
+}
+
+.settings-diff-current {
+  color: var(--muted-dark);
+  text-decoration: line-through;
+}
+
+.settings-diff-arrow {
+  color: var(--muted-dark);
+  text-align: center;
+}
+
+.settings-diff-next {
+  color: var(--green-bright);
+}
+
+.backup-facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.backup-facts dt {
+  color: var(--muted-dark);
+}
+
+.backup-facts dd {
+  margin: 0;
+}
+
+/* Numbered step rows (`HistoricalDataPanel`): label column, body column. */
+.step-grid {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 28px;
+  padding: 24px 28px;
+  border-bottom: 1px solid var(--divider);
+}
+
+.backup-card > :last-child,
+.backup-card > .historical-data-uploads {
+  border-bottom: 0;
+}
+
+.step-label h3 {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--cream);
+}
+
+.step-number {
+  color: var(--muted-dark);
+}
+
+.step-label p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.step-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.step-body > p {
+  margin: 0;
+}
+
+.step-body > .historical-data-multi-run,
+.step-body > .historical-data-upload-list,
+.step-body > .historical-data-coverage-group {
+  width: 100%;
+  margin-top: 0;
+}
+
+.step-form-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 100px 100px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.step-inline-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+}
+
+/* The two labels below sit inside `.historical-data-panel`, whose generic
+   `label` rule (kept further down) stacks text above the control. */
+.historical-data-panel .step-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.8rem;
+}
+
+.historical-data-panel .step-checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--green);
+}
+
+.historical-data-panel .step-year input {
+  width: 96px;
+  text-align: center;
+}
+
+/* Coverage rows: ticker | name | (status) | guide link, with the expected
+   filename / gap summary as a full-width second line. */
+.coverage-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+}
+
+.coverage-row:has(.coverage-status) {
+  grid-template-columns: 72px minmax(0, 1fr) auto auto;
+}
+
+.coverage-ticker {
+  font-weight: 500;
+  color: var(--cream);
+}
+
+.coverage-status {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.coverage-status-missing {
+  color: var(--warning);
+  white-space: nowrap;
+}
+
+/* Kept rules: still used by the panel's labelled inputs, the multi-file run
+   status (`MultiFileRunStatus`), the single/backup preview summaries, the
+   upload list, and the delete dialog. */
 .historical-data-panel label {
   display: flex;
   flex-direction: column;
   gap: 4px;
   color: var(--muted);
-  font-size: 0.82rem;
+  font-size: 0.75rem;
 }
 
 .historical-data-panel input[type="text"],
-.historical-data-panel input:not([type="file"]) {
+.historical-data-panel input:not([type="file"]):not([type="checkbox"]) {
   min-height: 44px;
   padding: 0 10px;
   border: 1px solid var(--divider);
-  border-radius: 3px;
-  background: var(--forest);
+  border-radius: 4px;
+  background: var(--ink);
   color: var(--cream);
+  font: inherit;
+  font-size: 0.85rem;
 }
 
 .historical-data-actions {
@@ -5609,7 +6121,7 @@ dd {
   margin-top: 12px;
   padding: 13px 15px;
   border-left: 2px solid var(--green);
-  background: var(--forest);
+  background: var(--forest-soft);
   color: var(--cream);
   font-size: 0.8rem;
   line-height: 1.5;
@@ -5626,7 +6138,6 @@ dd {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
 }
 
 .historical-data-upload-list li {
@@ -5641,9 +6152,27 @@ dd {
   color: var(--muted);
 }
 
+/* Upload-history delete: quiet by default, negative on hover/focus. */
+.historical-data-upload-list button {
+  min-height: 44px;
+  padding: 0 10px;
+  border-color: var(--divider);
+  border-radius: 4px;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.78rem;
+}
+
+.historical-data-upload-list button:hover,
+.historical-data-upload-list button:focus-visible {
+  background: transparent;
+  border-color: var(--negative);
+  color: var(--negative);
+}
+
 /* MKT-018C: the sequential multi-file run's live status + per-file results
    list, rendered inline under the single-file preview/confirm controls
-   (same "historical-data-import" section, same visual language -- reuses
+   (same step body, same visual language -- reuses
    .historical-data-preview/.historical-data-actions/.historical-data-uploads/
    .historical-data-upload-list above rather than introducing new ones). */
 .historical-data-multi-run {
@@ -5658,25 +6187,15 @@ dd {
   color: var(--cream);
 }
 
-.historical-data-coverage {
-  margin-top: 12px;
-  padding: 14px 16px;
-  border: 1px solid var(--divider);
-  border-radius: 4px;
-  background: var(--forest);
-}
-
-.historical-data-coverage h3 {
-  margin-top: 0;
-}
-
-.historical-data-coverage-group {
-  margin-top: 14px;
+.historical-data-coverage-group + .historical-data-coverage-group {
+  margin-top: 6px;
 }
 
 .historical-data-coverage-group h4 {
   margin: 0 0 6px;
-  font-size: 0.85rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--muted);
 }
 
@@ -5686,9 +6205,7 @@ dd {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
   max-width: 100%;
-  overflow-x: auto;
 }
 
 .historical-data-coverage-list li {
@@ -5702,7 +6219,11 @@ dd {
 }
 
 .historical-data-coverage-name {
-  color: var(--cream);
+  min-width: 0;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .historical-data-coverage-link {
@@ -5710,11 +6231,14 @@ dd {
   align-items: center;
   min-height: 44px;
   color: var(--green-bright);
+  font-size: 0.8rem;
+  white-space: nowrap;
   width: fit-content;
 }
 
 .historical-data-coverage-filename {
-  color: var(--muted);
+  color: var(--muted-dark);
+  font-size: 0.78rem;
 }
 
 .historical-data-dialog {
@@ -5851,6 +6375,65 @@ input[type="file"].file-picker-input {
   color: var(--muted);
   font-size: 0.78rem;
   line-height: 1.5;
+}
+
+/* Data & backups cards: below ~720px the Export / Restore split and the
+   `200px 1fr` step rows stack to one column. */
+@media (max-width: 720px) {
+  .backup-card-header {
+    flex-direction: column;
+    gap: 12px;
+    padding: 20px 18px 16px;
+  }
+
+  .backup-card-blurb {
+    max-width: none;
+    text-align: left;
+  }
+
+  .backup-card-split {
+    grid-template-columns: 1fr;
+  }
+
+  .backup-export {
+    border-right: 0;
+    border-bottom: 1px solid var(--divider);
+  }
+
+  .backup-export,
+  .backup-restore,
+  .step-grid {
+    padding: 20px 18px;
+  }
+
+  .step-grid {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .count-grid,
+  .count-grid.four {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .step-form-row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .step-form-row > label:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .coverage-row,
+  .coverage-row:has(.coverage-status) {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+
+  .coverage-row .coverage-status,
+  .coverage-row .historical-data-coverage-link {
+    grid-column: 2;
+    white-space: normal;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

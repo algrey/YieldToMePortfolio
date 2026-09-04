@@ -81,45 +81,79 @@ type BundleCommitResult = {
   skippedDividendEventOverrides: number;
 };
 
+// Thousands-separated integer for the preview count cells. Deliberately a
+// plain digit-grouping replace rather than `Intl`/`toLocaleString`: this is
+// a "use client" component and locale-data formatting is not hydration-safe
+// (see `app/date-display.ts`'s BUG-003 note).
+function formatCount(value: number): string {
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
 export function BundlePreviewSummary({ preview }: { preview: BundlePreview }) {
   return (
-    <div className="historical-data-preview" role="status">
-      <p>
-        <strong>{preview.portfolioName}</strong> ({preview.portfolioCode}) will
-        be recreated as a new portfolio.
+    <div className="backup-preview" role="status">
+      <p className="backup-preview-headline">
+        <strong>{preview.portfolioName}</strong>{" "}
+        <span className="backup-portfolio-row-code">
+          {preview.portfolioCode}
+        </span>{" "}
+        <span className="backup-preview-muted">
+          will be recreated as a new portfolio.
+        </span>
       </p>
       {preview.baseCurrencyMismatch ? (
-        <p role="alert" className="historical-data-error">
-          This bundle&rsquo;s base currency ({preview.bundleBaseCurrencyCode})
-          does not match your account&rsquo;s home currency (
-          {preview.ownerHomeCurrencyCode}). Change your home currency in
-          Settings before importing, or the import will be rejected.
-        </p>
+        <div className="status-banner warning" role="alert">
+          <span className="status-symbol">!</span>
+          <p>
+            This bundle&rsquo;s base currency ({preview.bundleBaseCurrencyCode})
+            does not match your account&rsquo;s home currency (
+            {preview.ownerHomeCurrencyCode}). Change your home currency in
+            Settings before importing, or the import will be rejected.
+          </p>
+        </div>
       ) : null}
       {preview.idempotent ? (
-        <p>
+        <p className="backup-note">
           This exact bundle was already imported (portfolio ID{" "}
           {preview.existingPortfolioId}). Confirming will not create a
           duplicate.
         </p>
       ) : null}
-      <ul>
-        <li>{preview.counts.securities} security identity record(s)</li>
-        <li>{preview.counts.transactions} transaction(s)</li>
-        <li>{preview.counts.dividendManualRecords} dividend record(s)</li>
-        <li>
-          {preview.counts.dividendSecurityAssumptions} per-security
-          assumption(s)
-        </li>
-        <li>{preview.counts.dividendFyOverrides} FY override(s)</li>
-        <li>
-          {preview.counts.dividendEventOverrides} dividend event override(s)
-        </li>
-        <li>
-          {preview.counts.dividendImportFrankingOverrides} franking override(s)
-        </li>
-        <li>{preview.counts.whatifScenarios} saved what-if scenario(s)</li>
-      </ul>
+      <div className="count-grid four">
+        <div className="count-cell">
+          <p className="count-value">
+            {formatCount(preview.counts.securities)}
+          </p>
+          <p className="count-label">security identity records</p>
+        </div>
+        <div className="count-cell">
+          <p className="count-value">
+            {formatCount(preview.counts.transactions)}
+          </p>
+          <p className="count-label">transactions</p>
+        </div>
+        <div className="count-cell">
+          <p className="count-value">
+            {formatCount(preview.counts.dividendManualRecords)}
+          </p>
+          <p className="count-label">dividend records</p>
+        </div>
+        <div className="count-cell">
+          <p className="count-value">
+            {formatCount(preview.counts.whatifScenarios)}
+          </p>
+          <p className="count-label">saved what-if scenarios</p>
+        </div>
+      </div>
+      <dl className="backup-facts">
+        <dt>Overrides</dt>
+        <dd>
+          {preview.counts.dividendSecurityAssumptions} per-security assumptions
+          · {preview.counts.dividendFyOverrides} FY overrides ·{" "}
+          {preview.counts.dividendEventOverrides} dividend event overrides ·{" "}
+          {preview.counts.dividendImportFrankingOverrides} franking overrides
+        </dd>
+      </dl>
     </div>
   );
 }
@@ -196,88 +230,104 @@ export function BundlePanel({ portfolioId }: { portfolioId: string }) {
 
   return (
     <section
-      className="historical-data-import"
+      className="backup-card"
       id="portfolio-bundle"
       aria-labelledby="portfolio-bundle-title"
     >
-      <h3 id="portfolio-bundle-title">Portfolio bundle (export / restore)</h3>
-      <p>
-        Export this portfolio&rsquo;s transactions, dividend records,
-        assumptions, and saved scenarios as one file, or restore a previously
-        exported bundle into a new portfolio. Together with a price-history
-        backup, this bundle can recreate the portfolio&rsquo;s full
-        functionality. Historical prices and anything the app derives (capital
-        gains, snapshots, value history) are not included -- see{" "}
-        <a href="#historical-data-backup">the price-history backup</a> and the
-        docs for what regenerates automatically.
-      </p>
-      <h4>Export this portfolio</h4>
-      {/* File-download API route, not a Next.js page -- see
-          `HistoricalDataPanel`'s identical export-link comment. */}
-      <a
-        className="historical-data-export-link"
-        href={`/api/portfolio-bundle/${portfolioId}/export`}
-      >
-        Export portfolio bundle
-      </a>
-      <h4>Restore from a bundle</h4>
-      <p>
-        Restoring always creates a NEW portfolio (never overwrites an existing
-        one). Undo a restore by archiving that new portfolio from Settings.
-      </p>
-      <label>
-        Bundle JSON
-        <span className="file-picker">
-          <input
-            type="file"
-            accept=".json,application/json"
-            className="file-picker-input"
-            onChange={(event) => {
-              setFile(event.target.files?.[0] ?? null);
-              setPreview(null);
-              setError(null);
-              setResult(null);
-            }}
-          />
-          <span className="file-picker-button">Choose bundle file…</span>
-          <span className="file-picker-filename">
-            {file ? file.name : "No file selected"}
-          </span>
-        </span>
-      </label>
-      <div className="historical-data-actions">
-        <button
-          type="button"
-          onClick={() => void preview_()}
-          disabled={!file || pending}
-          aria-busy={pending || undefined}
-        >
-          {pending ? "Checking…" : "Preview"}
-        </button>
-        {preview ? (
-          <button
-            type="button"
-            onClick={() => void confirm()}
-            disabled={pending || preview.baseCurrencyMismatch}
-            aria-busy={pending || undefined}
-          >
-            {pending ? "Restoring…" : "Confirm restore"}
-          </button>
-        ) : null}
+      <div className="backup-card-header">
+        <div className="backup-card-title">
+          <p className="eyebrow">This portfolio</p>
+          <h3 id="portfolio-bundle-title">
+            Portfolio bundle (export / restore)
+          </h3>
+        </div>
+        <p className="backup-card-blurb">
+          Export this portfolio&rsquo;s transactions, dividend records,
+          assumptions, and saved scenarios as one file, or restore a previously
+          exported bundle into a new portfolio. Together with a price-history
+          backup, this bundle can recreate the portfolio&rsquo;s full
+          functionality. Historical prices and anything the app derives (capital
+          gains, snapshots, value history) are not included -- see{" "}
+          <a href="#historical-data-backup">the price-history backup</a> and the
+          docs for what regenerates automatically.
+        </p>
       </div>
-      {preview ? <BundlePreviewSummary preview={preview} /> : null}
-      {error ? (
-        <p role="alert" className="historical-data-error">
-          {error}
-        </p>
-      ) : null}
-      {result ? (
-        <p role="status" className="historical-data-result">
-          {result.idempotent
-            ? `This bundle was already imported as "${result.portfolioName}".`
-            : `Restored "${result.portfolioName}" (${result.securitiesCreated} security identity record(s) created, ${result.securitiesMatched} matched to existing ones${result.skippedDividendEventOverrides > 0 ? `; ${result.skippedDividendEventOverrides} dividend event override(s) skipped -- the provider event no longer exists` : ""}). Cap Gains and other derived views populate once the calculation engine has run.`}
-        </p>
-      ) : null}
+      <div className="backup-card-split">
+        <div className="backup-export">
+          <h4>Export this portfolio</h4>
+          {/* File-download API route, not a Next.js page -- see
+              `HistoricalDataPanel`'s identical export-link comment. */}
+          <a
+            className="backup-export-button"
+            href={`/api/portfolio-bundle/${portfolioId}/export`}
+          >
+            Export portfolio bundle
+          </a>
+        </div>
+        <div className="backup-restore">
+          <h4>Restore from a bundle</h4>
+          <p className="backup-copy">
+            Restoring always creates a NEW portfolio (never overwrites an
+            existing one). Undo a restore by archiving that new portfolio from
+            Settings.
+          </p>
+          <label className="file-drop">
+            <span className="visually-hidden">Bundle JSON</span>
+            <span className="file-picker">
+              <input
+                type="file"
+                accept=".json,application/json"
+                className="file-picker-input"
+                onChange={(event) => {
+                  setFile(event.target.files?.[0] ?? null);
+                  setPreview(null);
+                  setError(null);
+                  setResult(null);
+                }}
+              />
+              <span className="file-picker-button">Choose bundle file…</span>
+              <span className="file-picker-filename">
+                {file ? file.name : "No file selected"}
+              </span>
+            </span>
+          </label>
+          <div className="backup-actions">
+            <button
+              type="button"
+              className="backup-secondary-button"
+              onClick={() => void preview_()}
+              disabled={!file || pending}
+              aria-busy={pending || undefined}
+            >
+              {pending ? "Checking…" : "Preview"}
+            </button>
+            {preview ? (
+              <button
+                type="button"
+                className="backup-confirm-button"
+                onClick={() => void confirm()}
+                disabled={pending || preview.baseCurrencyMismatch}
+                aria-busy={pending || undefined}
+              >
+                {pending ? "Restoring…" : "Confirm restore"}
+              </button>
+            ) : null}
+          </div>
+          {preview ? <BundlePreviewSummary preview={preview} /> : null}
+          {error ? (
+            <p role="alert" className="historical-data-error">
+              {error}
+            </p>
+          ) : null}
+          {result ? (
+            <p role="status" className="historical-data-result">
+              {result.idempotent
+                ? `This bundle was already imported as "${result.portfolioName}".`
+                : `Restored "${result.portfolioName}" (${result.securitiesCreated} security identity record(s) created, ${result.securitiesMatched} matched to existing ones${result.skippedDividendEventOverrides > 0 ? `; ${result.skippedDividendEventOverrides} dividend event override(s) skipped -- the provider event no longer exists` : ""}). Cap Gains and other derived views populate once the calculation engine has run.`}
+            </p>
+          ) : null}
+        </div>
+      </div>
     </section>
   );
 }

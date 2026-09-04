@@ -342,65 +342,160 @@ const SETTINGS_DISCLOSURE_FIELDS: ReadonlyArray<{
   },
 ];
 
+// Thousands-separated integer for the preview count cells. Deliberately a
+// plain digit-grouping replace rather than `Intl`/`toLocaleString`: this is
+// a "use client" component and locale-data formatting is not hydration-safe
+// (see `app/date-display.ts`'s BUG-003 note).
+function formatCount(value: number): string {
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
 export function SystemBackupPreviewSummary({
   preview,
 }: {
   preview: SystemBackupPreview;
 }) {
+  const transactionCount = preview.portfolios.reduce(
+    (sum, portfolio) => sum + portfolio.counts.transactions,
+    0,
+  );
+  const dividendCount = preview.portfolios.reduce(
+    (sum, portfolio) => sum + portfolio.counts.dividendManualRecords,
+    0,
+  );
+  // Design handoff (design/data-backups): only settings whose value actually
+  // changes are listed; the rest are summarised in one line beneath. A
+  // missing `currentAccount` (nothing to compare against) shows every row.
+  const settingsRows = SETTINGS_DISCLOSURE_FIELDS.map(({ label, read }) => {
+    const next = read(preview.account);
+    const current = preview.currentAccount
+      ? read(preview.currentAccount)
+      : null;
+    return { label, current, next };
+  });
+  const changedSettings = settingsRows.filter(
+    (row) => row.current !== row.next,
+  );
+  const unchangedSettingCount = settingsRows.length - changedSettings.length;
   return (
-    <div className="historical-data-preview" role="status">
+    <div className="backup-preview" role="status">
       {!preview.precondition.fresh ? (
-        <p role="alert" className="historical-data-error">
-          This account already has{" "}
-          {preview.precondition.unrelatedPortfolioCount} portfolio(s) unrelated
-          to this backup. Full-system restore requires a fresh account --
-          archive or remove them first, or restore into a fresh deployment.
-        </p>
+        <div className="status-banner warning" role="alert">
+          <span className="status-symbol">!</span>
+          <p>
+            This account already has{" "}
+            {preview.precondition.unrelatedPortfolioCount} portfolio(s)
+            unrelated to this backup. Full-system restore requires a fresh
+            account -- archive or remove them first, or restore into a fresh
+            deployment.
+          </p>
+        </div>
       ) : null}
-      <p>Account settings will be overwritten as follows:</p>
-      <ul>
-        {SETTINGS_DISCLOSURE_FIELDS.map(({ label, read }) => {
-          const next = read(preview.account);
-          const current = preview.currentAccount
-            ? read(preview.currentAccount)
-            : null;
-          return (
-            <li key={label}>
-              {label}: {current ?? "(unknown)"} &rarr; {next}
-            </li>
-          );
-        })}
-      </ul>
-      <ul>
-        <li>
-          {preview.watchlistCounts.securities} watched security(ies),{" "}
-          {preview.watchlistCounts.currencyPairs} watched currency pair(s)
-        </li>
-        <li>
-          {preview.priceBackup.rowCount} price-history row(s)
-          {preview.priceBackup.malformedCount > 0
-            ? ` (${preview.priceBackup.malformedCount} malformed, skipped)`
-            : ""}
-        </li>
-      </ul>
-      <p>{preview.portfolios.length} portfolio(s) will be recreated:</p>
-      <ul>
-        {preview.portfolios.map((portfolio) => (
-          <li key={`${portfolio.code}-${portfolio.name}`}>
-            <strong>{portfolio.name}</strong> ({portfolio.code}
-            {portfolio.status === "archived" ? ", archived" : ""}) --{" "}
-            {portfolio.counts.transactions} transaction(s),{" "}
-            {portfolio.counts.dividendManualRecords} dividend record(s)
-            {portfolio.baseCurrencyMismatch ? (
-              <span role="alert" className="historical-data-error">
+      <div className="count-grid">
+        <div className="count-cell">
+          <p className="count-value">
+            {formatCount(preview.portfolios.length)}
+          </p>
+          <p className="count-label">portfolios</p>
+        </div>
+        <div className="count-cell">
+          <p className="count-value">{formatCount(transactionCount)}</p>
+          <p className="count-label">transactions</p>
+        </div>
+        <div className="count-cell">
+          <p className="count-value">{formatCount(dividendCount)}</p>
+          <p className="count-label">dividend records</p>
+        </div>
+        <div className="count-cell">
+          <p className="count-value">
+            {formatCount(preview.watchlistCounts.securities)}
+          </p>
+          <p className="count-label">watched securities</p>
+        </div>
+        <div className="count-cell">
+          <p className="count-value">
+            {formatCount(preview.watchlistCounts.currencyPairs)}
+          </p>
+          <p className="count-label">watched currency pairs</p>
+        </div>
+        <div className="count-cell">
+          <p className="count-value">
+            {formatCount(preview.priceBackup.rowCount)}
+          </p>
+          <p className="count-label">
+            price-history rows
+            {preview.priceBackup.malformedCount > 0 ? (
+              <span className="count-label-warning">
                 {" "}
-                base currency does not match this backup&rsquo;s account home
-                currency -- will be rejected.
+                · {preview.priceBackup.malformedCount} malformed, skipped
               </span>
             ) : null}
-          </li>
+          </p>
+        </div>
+      </div>
+      <div className="backup-preview-group">
+        <p className="backup-preview-label">Portfolios to recreate</p>
+        {preview.portfolios.map((portfolio) => (
+          <div key={`${portfolio.code}-${portfolio.name}`}>
+            <div className="backup-portfolio-row">
+              <span>
+                <strong>{portfolio.name}</strong>{" "}
+                <span className="backup-portfolio-row-code">
+                  {portfolio.code}
+                </span>
+                {portfolio.status === "archived" ? (
+                  <>
+                    {" "}
+                    <span className="backup-portfolio-row-tag">archived</span>
+                  </>
+                ) : null}
+              </span>
+              <span className="numeric backup-portfolio-row-count">
+                {formatCount(portfolio.counts.transactions)} transactions
+              </span>
+              <span className="numeric backup-portfolio-row-count">
+                {formatCount(portfolio.counts.dividendManualRecords)} dividend
+                records
+              </span>
+            </div>
+            {portfolio.baseCurrencyMismatch ? (
+              <div className="status-banner warning" role="alert">
+                <span className="status-symbol">!</span>
+                <p>
+                  {portfolio.name}: base currency does not match this
+                  backup&rsquo;s account home currency -- will be rejected.
+                </p>
+              </div>
+            ) : null}
+          </div>
         ))}
-      </ul>
+      </div>
+      <div className="backup-preview-group">
+        <p className="backup-preview-label">
+          Account settings overwritten on restore
+        </p>
+        {changedSettings.length > 0 ? (
+          <dl className="settings-diff">
+            {changedSettings.map((row) => (
+              <div className="settings-diff-row" key={row.label}>
+                <dt>{row.label}</dt>
+                <dd className="settings-diff-current">
+                  {row.current ?? "(unknown)"}
+                </dd>
+                <dd className="settings-diff-arrow" aria-hidden="true">
+                  &rarr;
+                </dd>
+                <dd className="settings-diff-next">{row.next}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
+        <p className="backup-preview-note">
+          {changedSettings.length > 0
+            ? `(${unchangedSettingCount} other settings unchanged)`
+            : `(All ${settingsRows.length} settings unchanged)`}
+        </p>
+      </div>
     </div>
   );
 }
@@ -884,119 +979,140 @@ export function SystemBackupPanel() {
 
   return (
     <section
-      className="historical-data-import"
+      className="backup-card"
       id="system-backup"
       aria-labelledby="system-backup-title"
     >
-      <h3 id="system-backup-title">Full-system backup (export / restore)</h3>
-      <p>
-        Export EVERYTHING needed to recreate this account on a fresh deployment
-        in one file -- every portfolio (transactions, dividend records,
-        assumptions, saved scenarios), the watchlist, account settings, and
-        price history. Restore only works into a FRESH account (no existing
-        portfolios outside this backup).
-      </p>
-      <h4>Export the full system</h4>
-      <p>
-        The browser fetches the backup in small parts and assembles the same
-        single JSON file locally.
-      </p>
-      <button
-        type="button"
-        onClick={() => void exportInBrowser()}
-        disabled={exporting || pending}
-        aria-busy={exporting || undefined}
-      >
-        {exporting ? "Exporting…" : "Export full-system backup"}
-      </button>
-      <h4>Restore from a full-system backup</h4>
-      <p>
-        Restoring recreates every portfolio in the backup as a NEW portfolio,
-        restores the watchlist and account settings, and restores price history.
-        Undo by archiving the restored portfolios from Settings and removing the
-        restored price history from the price-history backup section above.
-        Large portfolios (many transactions or dividend records) and large price
-        histories are both restored in small, idempotent parts. If the Free-plan
-        daily D1 allowance is reached, or the restore is otherwise interrupted,
-        re-select the same file after 00:00 UTC and the browser resumes from
-        exactly where the account&rsquo;s own data actually is.
-      </p>
-      <label>
-        System backup JSON
-        <span className="file-picker">
-          <input
-            type="file"
-            accept=".json,application/json"
-            className="file-picker-input"
-            onChange={(event) => {
-              setFile(event.target.files?.[0] ?? null);
-              setPreview(null);
-              setError(null);
-              setResult(null);
-              setProgress(null);
-            }}
-          />
-          <span className="file-picker-button">Choose backup file…</span>
-          <span className="file-picker-filename">
-            {file ? file.name : "No file selected"}
-          </span>
-        </span>
-      </label>
-      <div className="historical-data-actions">
-        <button
-          type="button"
-          onClick={() => void preview_()}
-          disabled={!file || pending}
-          aria-busy={pending || undefined}
-        >
-          {pending ? "Checking…" : "Preview"}
-        </button>
-        {preview ? (
+      <div className="backup-card-header">
+        <div className="backup-card-title">
+          <p className="eyebrow">Whole account</p>
+          <h3 id="system-backup-title">
+            Full-system backup (export / restore)
+          </h3>
+        </div>
+        <p className="backup-card-blurb">
+          Export EVERYTHING needed to recreate this account on a fresh
+          deployment in one file -- every portfolio (transactions, dividend
+          records, assumptions, saved scenarios), the watchlist, account
+          settings, and price history. Restore only works into a FRESH account
+          (no existing portfolios outside this backup).
+        </p>
+      </div>
+      <div className="backup-card-split">
+        <div className="backup-export">
+          <h4>Export the full system</h4>
+          <p className="backup-copy">
+            The browser fetches the backup in small parts and assembles the same
+            single JSON file locally.
+          </p>
           <button
             type="button"
-            onClick={() => void confirm()}
-            disabled={pending || !preview.precondition.fresh}
-            aria-busy={pending || undefined}
+            className="backup-export-button"
+            onClick={() => void exportInBrowser()}
+            disabled={exporting || pending}
+            aria-busy={exporting || undefined}
           >
-            {pending ? "Restoring…" : "Confirm restore"}
+            {exporting ? "Exporting…" : "Export full-system backup"}
           </button>
-        ) : null}
+        </div>
+        <div className="backup-restore">
+          <h4>Restore from a full-system backup</h4>
+          <p className="backup-copy">
+            Restoring recreates every portfolio in the backup as a NEW
+            portfolio, restores the watchlist and account settings, and restores
+            price history. Undo by archiving the restored portfolios from
+            Settings and removing the restored price history from the
+            price-history backup section above. Large portfolios (many
+            transactions or dividend records) and large price histories are both
+            restored in small, idempotent parts. If the Free-plan daily D1
+            allowance is reached, or the restore is otherwise interrupted,
+            re-select the same file after 00:00 UTC and the browser resumes from
+            exactly where the account&rsquo;s own data actually is.
+          </p>
+          <label className="file-drop">
+            <span className="visually-hidden">System backup JSON</span>
+            <span className="file-picker">
+              <input
+                type="file"
+                accept=".json,application/json"
+                className="file-picker-input"
+                onChange={(event) => {
+                  setFile(event.target.files?.[0] ?? null);
+                  setPreview(null);
+                  setError(null);
+                  setResult(null);
+                  setProgress(null);
+                }}
+              />
+              <span className="file-picker-button">Choose backup file…</span>
+              <span className="file-picker-filename">
+                {file ? file.name : "No file selected"}
+              </span>
+            </span>
+          </label>
+          <div className="backup-actions">
+            <button
+              type="button"
+              className="backup-secondary-button"
+              onClick={() => void preview_()}
+              disabled={!file || pending}
+              aria-busy={pending || undefined}
+            >
+              {pending ? "Checking…" : "Preview"}
+            </button>
+            {preview ? (
+              <button
+                type="button"
+                className="backup-confirm-button"
+                onClick={() => void confirm()}
+                disabled={pending || !preview.precondition.fresh}
+                aria-busy={pending || undefined}
+              >
+                {pending ? "Restoring…" : "Confirm restore"}
+              </button>
+            ) : null}
+          </div>
+          {progress ? (
+            <p role="status" className="backup-progress">
+              {progress}
+            </p>
+          ) : null}
+          {preview ? <SystemBackupPreviewSummary preview={preview} /> : null}
+          {error ? (
+            <p role="alert" className="historical-data-error">
+              {error}
+            </p>
+          ) : null}
+          {result ? (
+            <p role="status" className="historical-data-result">
+              Restored {result.portfolios.length} portfolio(s):{" "}
+              {result.portfolios.map((portfolio) => portfolio.name).join(", ")}.
+              Watchlist: {result.watchlist.pairsAdded} currency pair(s),{" "}
+              {result.watchlist.securitiesAdded} security(ies) added
+              {result.watchlist.securitiesSkipped > 0
+                ? ` (${result.watchlist.securitiesSkipped} skipped -- could not be resolved)`
+                : ""}
+              .{" "}
+              {result.priceBackup
+                ? `Price history: ${result.priceBackup.written} row(s) written` +
+                  (result.priceBackup.unresolvedRowCount > 0
+                    ? `, ${result.priceBackup.unresolvedRowCount} unresolved`
+                    : "") +
+                  (result.priceBackup.malformedCount > 0
+                    ? `, ${result.priceBackup.malformedCount} malformed`
+                    : "") +
+                  (result.priceBackup.unchangedCount > 0
+                    ? `, ${result.priceBackup.unchangedCount} unchanged`
+                    : "") +
+                  "." +
+                  (result.priceBackup.note ? ` ${result.priceBackup.note}` : "")
+                : "No price history was included in this backup."}{" "}
+              Cap Gains and other derived views populate once the calculation
+              engine has run.
+            </p>
+          ) : null}
+        </div>
       </div>
-      {progress ? <p role="status">{progress}</p> : null}
-      {preview ? <SystemBackupPreviewSummary preview={preview} /> : null}
-      {error ? (
-        <p role="alert" className="historical-data-error">
-          {error}
-        </p>
-      ) : null}
-      {result ? (
-        <p role="status" className="historical-data-result">
-          Restored {result.portfolios.length} portfolio(s):{" "}
-          {result.portfolios.map((portfolio) => portfolio.name).join(", ")}.{" "}
-          Watchlist: {result.watchlist.pairsAdded} currency pair(s),{" "}
-          {result.watchlist.securitiesAdded} security(ies) added
-          {result.watchlist.securitiesSkipped > 0
-            ? ` (${result.watchlist.securitiesSkipped} skipped -- could not be resolved)`
-            : ""}
-          .{" "}
-          {result.priceBackup
-            ? `Price history: ${result.priceBackup.written} row(s) written` +
-              (result.priceBackup.unresolvedRowCount > 0
-                ? `, ${result.priceBackup.unresolvedRowCount} unresolved`
-                : "") +
-              (result.priceBackup.malformedCount > 0
-                ? `, ${result.priceBackup.malformedCount} malformed`
-                : "") +
-              (result.priceBackup.unchangedCount > 0
-                ? `, ${result.priceBackup.unchangedCount} unchanged`
-                : "") +
-              "." +
-              (result.priceBackup.note ? ` ${result.priceBackup.note}` : "")
-            : "No price history was included in this backup."}{" "}
-          Cap Gains and other derived views populate once the calculation engine
-          has run.
-        </p>
-      ) : null}
     </section>
   );
 }
