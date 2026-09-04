@@ -2017,3 +2017,107 @@ test("BRK-022 slice 3 (UI): income-multi-year's 'received so far this FY' figure
   assert.match(html, /\$250\.00 received so far this FY/);
   assert.doesNotMatch(html, /\$300\.00 received so far this FY/);
 });
+
+// ---------------------------------------------------------------------------
+// BRK-022 polish round: three small follow-ups from the prior review round.
+// ---------------------------------------------------------------------------
+
+function renderMultiYearWithRouter(props: Record<string, unknown>): string {
+  const componentUrl = new URL(
+    "../app/components/income-multi-year.tsx",
+    import.meta.url,
+  ).href;
+  const script = `
+    import { createElement } from "react";
+    import { renderToStaticMarkup } from "react-dom/server";
+    import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime";
+    import { IncomeMultiYear } from ${JSON.stringify(componentUrl)};
+    const routerStub = { push(){}, replace(){}, back(){}, forward(){}, refresh(){}, prefetch(){} };
+    const props = ${JSON.stringify(props)};
+    process.stdout.write(
+      renderToStaticMarkup(
+        createElement(
+          AppRouterContext.Provider,
+          { value: routerStub },
+          createElement(IncomeMultiYear, props),
+        ),
+      ),
+    );
+  `;
+  return execFileSync(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "--eval", script],
+    { encoding: "utf8" },
+  );
+}
+
+test("BRK-022 polish round: the DIV-011 fallback '(to date)' row does NOT print the 'received so far this FY' figure a second time when there is no real unpaid subset (dividendUnpaidCount 0, gross null)", () => {
+  const html = renderMultiYearWithRouter({
+    portfolioId: "portfolio-a",
+    assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
+    dividendsHref: "/portfolio/portfolio-a/income/dividends",
+    baseCurrencyCode: "AUD",
+    pastFinancialYears: { ok: true, rows: [] },
+    currentFinancialYear: {
+      ok: true,
+      row: {
+        ...MINIMAL_CURRENT_FY_ROW,
+        dividendGrossDecimal: "300.00",
+        dividendUnpaidGrossDecimal: null,
+        dividendUnpaidCount: 0,
+      },
+    },
+    multiYear: { ok: false, reason: "no_yield_coverage" },
+    multiYearBaselineInput: null,
+    portfolioValueGrowthPercentDecimal: "10",
+    portfolioDividendGrowthPercentDecimal: "5",
+    financialYearStartMonth: 7,
+    yearsBack: 0,
+    yearsForward: 1,
+  });
+  // The gross figure still renders once, as normal.
+  assert.match(html, /\$300\.00/);
+  // But NOT a second time via the "received so far this FY" slot -- with
+  // nothing unpaid, that figure would be numerically identical to the gross
+  // figure above, i.e. a duplicated fact rather than a new one.
+  assert.doesNotMatch(html, /received so far this FY/);
+});
+
+test("BRK-022 polish round: the DIV-011 fallback '(to date)' row also suppresses the duplicate figure when dividendUnpaidCount is non-zero but the unpaid gross is an explicit '0.00' (nothing distinct to disclose)", () => {
+  const html = renderMultiYearWithRouter({
+    portfolioId: "portfolio-a",
+    assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
+    dividendsHref: "/portfolio/portfolio-a/income/dividends",
+    baseCurrencyCode: "AUD",
+    pastFinancialYears: { ok: true, rows: [] },
+    currentFinancialYear: {
+      ok: true,
+      row: {
+        ...MINIMAL_CURRENT_FY_ROW,
+        dividendGrossDecimal: "300.00",
+        dividendUnpaidGrossDecimal: "0.00",
+        dividendUnpaidCount: 1,
+      },
+    },
+    multiYear: { ok: false, reason: "no_yield_coverage" },
+    multiYearBaselineInput: null,
+    portfolioValueGrowthPercentDecimal: "10",
+    portfolioDividendGrowthPercentDecimal: "5",
+    financialYearStartMonth: 7,
+    yearsBack: 0,
+    yearsForward: 1,
+  });
+  assert.match(html, /\$300\.00/);
+  assert.doesNotMatch(html, /received so far this FY/);
+});
+
+test("BRK-022 polish round: the row-detail dialog discloses 'Not yet paid (included above)' when the selected row has a non-zero unpaidCount (source-shape pin -- click-to-open dialogs can't be simulated with renderToStaticMarkup, see the B1 test above)", async () => {
+  const component = await readFile(
+    new URL("../app/components/income-multi-year.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    component,
+    /selectedRow\.unpaidCount > 0[\s\S]{0,200}Not yet paid \(included above\)[\s\S]{0,300}selectedRow\.unpaidGrossDecimal/,
+  );
+});

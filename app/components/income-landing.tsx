@@ -389,8 +389,14 @@ export function IncomeLanding({
                           <span className="unavailable"> · partial</span>
                         ) : null}
                         {/* BRK-022 slice 3: `dividendGrossDecimal` above
-                            already includes Sharesight announcements that
-                            have not actually been paid yet
+                            already includes every not-yet-paid
+                            `declared_pending` row -- both explicit Sharesight
+                            announcements and any other provider-declared
+                            event whose ex-date has not yet passed (F3
+                            correction round, RULING: NOT limited to
+                            Sharesight announcements -- see
+                            `domain/dividends/aggregations.ts`'s
+                            `unpaidCashDecimal` doc comment)
                             (`dividendUnpaidGrossDecimal`, always a subset of
                             it) -- disclosed here rather than left implicit,
                             non-colour (AGENTS.md): the "unpaid" WORD is the

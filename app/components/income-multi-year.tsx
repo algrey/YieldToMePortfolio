@@ -121,6 +121,7 @@ import {
 import { formatIncomeMoney, formatIncomePercent } from "../income-format.ts";
 import {
   formatDecimalExact,
+  isZero,
   parseDecimal,
   subtractDecimal,
 } from "../../domain/calculations/decimal.ts";
@@ -186,21 +187,32 @@ type DisplayRow = {
    * (`paidOnlyGrossDecimal`) of the row's own (full FY-to-date)
    * `grossDecimal` above -- the same PAID-only/full-FY split
    * `mergeCurrentFinancialYear` already expresses via this same slot next to
-   * its own (forecast) `grossDecimal`, so both paths read identically. */
+   * its own (forecast) `grossDecimal`, so both paths read identically.
+   *
+   * BRK-022 polish round: on the `mapCurrentRow` fallback path, `null` also
+   * when there is no real unpaid subset to distinguish it from
+   * (`hasUnpaidSubset(row)` false) -- with nothing unpaid, the PAID-only
+   * figure equals the row's own full `grossDecimal`, so populating this slot
+   * would just print that same figure a second time. */
   actualToDateGrossDecimal: string | null;
   /** `null` exactly when `actualToDateGrossDecimal` is -- i.e. this is not
    * the current FY's own row at all. A non-null label with a `null` gross
    * figure ("no data") is a real, honest state: the current FY genuinely has
    * no recorded dividends yet. */
   actualToDateSourceLabel: SourceLabel | null;
-  /** BRK-022 slice 3 review fix (B1): the announced-but-unpaid subset of
-   * `grossDecimal` above -- populated only on the DIV-011 fallback standalone
-   * "(to date)" row (`mapCurrentRow`, when the forward forecast itself is
-   * degraded and there is no merged forecast row to attach `actualToDate*`
-   * to). `null`/`0` on every other row -- a past row's own gross figure
-   * never includes an unpaid subset by the time it closes, and every
-   * projected/merged-forecast row's `grossDecimal` is a rolling forecast
-   * composition, not an actuals total, so there is nothing to subtract. */
+  /** BRK-022 slice 3 review fix (B1): the not-yet-paid (`declared_pending`)
+   * subset of `grossDecimal` above -- every row still awaiting payment,
+   * whether backed by an explicit Sharesight announcement or any other
+   * provider-declared event whose ex-date has not yet passed (F3 correction
+   * round, RULING: NOT limited to Sharesight announcements -- see
+   * `domain/dividends/aggregations.ts`'s `unpaidCashDecimal` doc comment) --
+   * populated only on the DIV-011 fallback standalone "(to date)" row
+   * (`mapCurrentRow`, when the forward forecast itself is degraded and there
+   * is no merged forecast row to attach `actualToDate*` to). `null`/`0` on
+   * every other row -- a past row's own gross figure never includes an
+   * unpaid subset by the time it closes, and every projected/merged-forecast
+   * row's `grossDecimal` is a rolling forecast composition, not an actuals
+   * total, so there is nothing to subtract. */
   unpaidGrossDecimal: string | null;
   unpaidCount: number;
 };
@@ -256,18 +268,29 @@ function mapPastRow(
  * figures straight off `CurrentFinancialYearRow` (internally consistent,
  * and matching `income-landing.tsx`'s FY (so far) figure) -- the "*$x
  * unpaid" note on the gross cell (`unpaidGrossDecimal`/`unpaidCount` below)
- * still discloses the announced-but-unpaid subset of that full figure. The
+ * still discloses the not-yet-paid (`declared_pending`) subset of that full
+ * figure -- not limited to explicit Sharesight announcements, see
+ * `unpaidGrossDecimal`'s own doc comment above. The
  * PAID-only number is instead expressed through the existing, separately
  * labelled `actualToDateGrossDecimal`/`actualToDateSourceLabel` slot --
  * DIV-011's "received so far this FY" line -- exactly the same slot
  * `mergeCurrentFinancialYear` below populates on the merged-forecast path,
  * so both paths read identically ("$actual received so far this FY" next
- * to a full-FY gross figure carrying its own "*$unpaid" note). */
+ * to a full-FY gross figure carrying its own "*$unpaid" note).
+ *
+ * BRK-022 polish round: when there is NO unpaid subset at all,
+ * `paidOnlyGrossDecimal(row)` is numerically identical to the row's own
+ * `grossDecimal` -- populating `actualToDate*` would print the exact same
+ * figure twice ("$300.00 · $300.00 received so far this FY"), a duplicated
+ * fact rather than a new one. `actualToDate*` is now populated only when
+ * `hasUnpaidSubset(row)` is true; otherwise both stay `null`, exactly as
+ * pre-BRK-022 (see `hasUnpaidSubset`'s doc comment). */
 function mapCurrentRow(
   row: CurrentFinancialYearRow,
   dividendsHref: string,
 ): DisplayRow {
   const sourceLabel: SourceLabel = currentFinancialYearSourceLabel(row);
+  const unpaid = hasUnpaidSubset(row);
   return {
     key: `fy-${row.endingYear}-current`,
     label: `${row.label} (to date)`,
@@ -284,11 +307,26 @@ function mapCurrentRow(
     excludedSecurities: row.excludedSecurities,
     overrideHref: null,
     dividendsHref: `${dividendsHref}?fy=${row.endingYear}`,
-    actualToDateGrossDecimal: paidOnlyGrossDecimal(row),
-    actualToDateSourceLabel: sourceLabel,
+    actualToDateGrossDecimal: unpaid ? paidOnlyGrossDecimal(row) : null,
+    actualToDateSourceLabel: unpaid ? sourceLabel : null,
     unpaidGrossDecimal: row.dividendUnpaidGrossDecimal,
     unpaidCount: row.dividendUnpaidCount,
   };
+}
+
+/** BRK-022 polish round: true only when `row` carries a REAL, non-zero
+ * announced-but-unpaid subset -- `dividendUnpaidCount` non-zero AND
+ * `dividendUnpaidGrossDecimal` present and non-zero. A count/gross pair can
+ * disagree in fixtures/degraded data (e.g. a count with no dollar figure);
+ * either half being absent/zero means there is nothing distinct to disclose
+ * via the separate "received so far this FY" line, so `mapCurrentRow`
+ * treats it as "no unpaid subset" rather than risk a spurious duplicate
+ * figure. */
+function hasUnpaidSubset(row: CurrentFinancialYearRow): boolean {
+  if (row.dividendUnpaidCount === 0) return false;
+  const unpaidGrossDecimal = row.dividendUnpaidGrossDecimal ?? null;
+  if (unpaidGrossDecimal === null) return false;
+  return !isZero(parseDecimal(unpaidGrossDecimal));
 }
 
 function currentFinancialYearSourceLabel(
@@ -1794,6 +1832,24 @@ export function IncomeMultiYear({
                     selectedRow.actualToDateGrossDecimal,
                   )}{" "}
                   ({selectedRow.actualToDateSourceLabel})
+                </dd>
+              </div>
+            ) : null}
+            {/* BRK-022 polish round: the dialog's "Dividends (gross)" figure
+                above already INCLUDES the announced-but-unpaid subset (see
+                `unpaidGrossDecimal`'s doc comment) -- the row's own "*$x
+                unpaid" note discloses this on the summary table, but the
+                dialog had no equivalent line. Non-colour text, matching the
+                summary table's own disclosure convention. */}
+            {selectedRow.unpaidCount > 0 ? (
+              <div>
+                <dt>Not yet paid (included above)</dt>
+                <dd>
+                  {formatIncomeMoney(
+                    baseCurrencyCode,
+                    baseCurrencyCode,
+                    selectedRow.unpaidGrossDecimal,
+                  )}
                 </dd>
               </div>
             ) : null}
