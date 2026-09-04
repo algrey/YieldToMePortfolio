@@ -142,6 +142,14 @@ export type OwnedIncomeProjection = {
    * `domain/dividends/projection.ts`). Already resolved by
    * `loadOwnedDividendHistory` above -- reused verbatim, never re-derived. */
   financialYearStartMonth: number;
+  /** BRK-022 slice 3: count of active Sharesight pending-payout
+   * announcements this load could not attribute to a holding (`portfolio_security_id
+   * IS NULL`, or a security outside this portfolio's held composition) --
+   * `app/components/income-landing.tsx` renders a one-line disclosure below
+   * the past-FY table when this is non-zero. Reused verbatim from
+   * `app/owned-dividend-history.ts`'s `pendingPayoutCounts`, never
+   * re-derived. */
+  pendingUnresolvedPayoutCount: number;
 };
 
 export async function loadOwnedIncomeProjection(
@@ -708,5 +716,6 @@ export async function loadOwnedIncomeProjection(
     pastFinancialYears,
     breakdown,
     financialYearStartMonth: history.financialYearStartMonth,
+    pendingUnresolvedPayoutCount: history.pendingPayoutCounts.pendingUnresolved,
   };
 }

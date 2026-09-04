@@ -811,6 +811,9 @@ export function SecurityDividendsTab({
                       ) : notPaid ? (
                         <span className="dividend-status-not-paid">
                           not paid
+                          {row.announcedUnpaid
+                            ? " · announced (Sharesight)"
+                            : ""}
                         </span>
                       ) : (
                         <span>paid</span>

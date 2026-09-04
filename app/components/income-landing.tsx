@@ -388,6 +388,25 @@ export function IncomeLanding({
                         {currentFyRow.excludedSecurities.length > 0 ? (
                           <span className="unavailable"> · partial</span>
                         ) : null}
+                        {/* BRK-022 slice 3: `dividendGrossDecimal` above
+                            already includes Sharesight announcements that
+                            have not actually been paid yet
+                            (`dividendUnpaidGrossDecimal`, always a subset of
+                            it) -- disclosed here rather than left implicit,
+                            non-colour (AGENTS.md): the "unpaid" WORD is the
+                            signal, never styling alone. */}
+                        {currentFyRow.dividendUnpaidCount > 0 ? (
+                          <span className="unavailable">
+                            {" "}
+                            *
+                            {formatIncomeMoney(
+                              projection.baseCurrencyCode,
+                              projection.baseCurrencyCode,
+                              currentFyRow.dividendUnpaidGrossDecimal,
+                            )}{" "}
+                            unpaid
+                          </span>
+                        ) : null}
                       </Link>
                     </th>
                     <td className="numeric">
@@ -591,6 +610,17 @@ export function IncomeLanding({
             </table>
           </div>
         )}
+        {/* BRK-022 slice 3: a Sharesight announcement this load could not
+            attribute to any held/composition security (`portfolio_security_id
+            IS NULL`, or a hidden/sold security the loader excludes) --
+            never silently dropped. */}
+        {projection.pendingUnresolvedPayoutCount > 0 ? (
+          <p className="unavailable">
+            {projection.pendingUnresolvedPayoutCount === 1
+              ? "1 announced dividend could not be matched to a holding"
+              : `${projection.pendingUnresolvedPayoutCount} announced dividends could not be matched to a holding`}
+          </p>
+        ) : null}
         <p>
           {/* Follow-up (b): the sub-page's own default is 2 years back
               (`DEFAULT_YEARS_BACK`, income-year-range.ts) -- without an

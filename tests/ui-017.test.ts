@@ -243,6 +243,7 @@ function row(overrides: Partial<OwnedDividendListRow>): OwnedDividendListRow {
     originalCurrencyCode: null,
     fxRateToPortfolioDecimal: null,
     fxRateSource: null,
+    announcedUnpaid: false,
     ...overrides,
   };
 }
@@ -381,6 +382,7 @@ function toListRow(dRow: {
     originalCurrencyCode: dRow.originalCurrencyCode,
     fxRateToPortfolioDecimal: dRow.fxRateToPortfolioDecimal,
     fxRateSource: dRow.fxRateSource,
+    announcedUnpaid: false,
   };
 }
 

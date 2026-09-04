@@ -2258,14 +2258,18 @@ test("PRF-008: measured basis end to end -- /income's cold-cache Sharesight cost
   // drops to the PRF-005 baseline" (33/33 at the time PRF-008 landed;
   // PRF-012 (resolved-portfolio-context threading) later dropped this
   // further to 26/26 -- confirmed separately by the existing per-page
-  // census test with NOT_CONFIGURED_SHARESIGHT).
+  // census test with NOT_CONFIGURED_SHARESIGHT). BRK-022 slice 3 added ONE
+  // more read to this same batched wave (`loadOwnedDividendHistory`'s
+  // `sharesight_pending_payouts` `listActive` call, the announced-payout
+  // read path) -- 26/26 -> 27/27, still zero `sharesight_sync_state`
+  // statements.
   assert.equal(
     afterSharesightStatements,
     0,
     "expected zero sharesight_sync_state statements on /income after PRF-008",
   );
-  assert.equal(afterStats.calls, 26);
-  assert.equal(afterStats.statements, 26);
+  assert.equal(afterStats.calls, 27);
+  assert.equal(afterStats.statements, 27);
   // The BEFORE reconstruction must cost STRICTLY more than the AFTER real
   // measurement -- proving the fix actually removes real, measured cost on
   // this exact fixture, not merely an estimate.
@@ -2613,11 +2617,13 @@ test("PRF-013: the holding Dividends tab reads every dividend table exactly once
   // dropped 9 -> 8 (this file's own DEPTH_CEILING entry, asserted in the
   // PRF-003 census test below) -- recorded in docs/ARCHITECTURE.md's PRF
   // section (dated 2026-09-03 append) alongside the full before/after
-  // per-table breakdown.
+  // per-table breakdown. BRK-022 slice 3 added ONE more read to the SAME
+  // batched wave (`sharesight_pending_payouts`'s `listActive`, unnarrowed by
+  // security per that read's own doc comment) -- 15 -> 16.
   assert.equal(
     stats.statements,
-    15,
-    `expected 15 statements post-fix, got ${stats.statements}`,
+    16,
+    `expected 16 statements post-fix, got ${stats.statements}`,
   );
   db.close();
 });
@@ -2671,11 +2677,11 @@ test("PRF-013: every loadOwnedDividendHistory caller NOT threading a PRF-012 con
 // portfolioId` before trusting anything on it (`assertOwnedPortfolioContext`).
 // ---------------------------------------------------------------------------
 
-test("PRF-012: per-page census -- /income and /income/multi-year drop 33/34 -> 26/27 statements, /income/assumptions drops to 25 (regression pin: fails against the pre-fix source -- see this file's own git-archive verification note in docs/ARCHITECTURE.md)", async () => {
+test("PRF-012: per-page census -- /income and /income/multi-year drop 33/34 -> 26/27 statements, /income/assumptions drops to 25 (regression pin: fails against the pre-fix source -- see this file's own git-archive verification note in docs/ARCHITECTURE.md). BRK-022 slice 3 added ONE more `loadOwnedDividendHistory` read (`sharesight_pending_payouts`'s `listActive`) to all three pages' same batched wave -- 26/27/25 -> 27/28/26.", async () => {
   const EXPECTED: Record<string, number> = {
-    "/portfolio/:id/income": 26,
-    "/portfolio/:id/income/multi-year": 27,
-    "/portfolio/:id/income/assumptions": 25,
+    "/portfolio/:id/income": 27,
+    "/portfolio/:id/income/multi-year": 28,
+    "/portfolio/:id/income/assumptions": 26,
   };
   for (const [name, expected] of Object.entries(EXPECTED)) {
     const page = PAGES.find((candidate) => candidate.name === name);

@@ -1621,6 +1621,18 @@ export type PastFinancialYearRow = {
   valueStatus: "available" | "unavailable";
   effectiveYieldPercentDecimal: string | null;
   method: string;
+  /** BRK-022 slice 3: the announced-but-unpaid subset of this row's totals
+   * -- ALWAYS already included inside `dividendGrossDecimal`/
+   * `dividendCashDecimal`/`dividendFrankingKnownDecimal` above, never
+   * summed a second time. `null`/`0` under `dividendSource: "fy_override"`,
+   * `"no_evidence"`, or `"unavailable"`. Normally zero for a CLOSED past
+   * year (an announcement that never resolved to a paid record would, by
+   * now, usually have been withdrawn on a later sync), but not asserted
+   * zero -- an owner who stops syncing could still see one here. */
+  dividendUnpaidGrossDecimal: string | null;
+  dividendUnpaidCashDecimal: string | null;
+  dividendUnpaidFrankingKnownDecimal: string | null;
+  dividendUnpaidCount: number;
 };
 
 export type PastFinancialYearSecurityInput = {
@@ -1658,6 +1670,13 @@ type YearAggregationTotals = {
   cashTotal: DecimalFraction;
   frankingTotal: DecimalFraction;
   frankingIncomplete: boolean;
+  /** BRK-022 slice 3: the announced-but-unpaid subset of `cashTotal`/
+   * `frankingTotal` above (a per-security `FyDividendTotal.unpaidCashDecimal`/
+   * `unpaidFrankingKnownDecimal` sum) -- ALWAYS already included inside
+   * those totals, never summed a second time. */
+  unpaidCashTotal: DecimalFraction;
+  unpaidFrankingTotal: DecimalFraction;
+  unpaidCount: number;
 };
 
 /**
@@ -1693,6 +1712,9 @@ function aggregateHomeCurrencySecuritiesForYear(
   let cashTotal = ZERO;
   let frankingTotal = ZERO;
   let frankingIncomplete = false;
+  let unpaidCashTotal = ZERO;
+  let unpaidFrankingTotal = ZERO;
+  let unpaidCount = 0;
   for (const security of homeCurrencySecurities) {
     if (security.fyTotalsStatus !== "ok") {
       excludedSecurities.push({
@@ -1727,6 +1749,24 @@ function aggregateHomeCurrencySecuritiesForYear(
     } else {
       frankingIncomplete = true;
     }
+    // BRK-022 slice 3: the announced-but-unpaid subset -- always already
+    // inside `cashTotal`/`frankingTotal` above, summed separately here
+    // purely for disclosure.
+    if (yearTotal.unpaidCount > 0) {
+      unpaidCount += yearTotal.unpaidCount;
+      if (yearTotal.unpaidCashDecimal !== null) {
+        unpaidCashTotal = addDecimal(
+          unpaidCashTotal,
+          parseDecimal(yearTotal.unpaidCashDecimal),
+        );
+      }
+      if (yearTotal.unpaidFrankingKnownDecimal !== null) {
+        unpaidFrankingTotal = addDecimal(
+          unpaidFrankingTotal,
+          parseDecimal(yearTotal.unpaidFrankingKnownDecimal),
+        );
+      }
+    }
   }
   return {
     excludedSecurities,
@@ -1735,6 +1775,9 @@ function aggregateHomeCurrencySecuritiesForYear(
     allActual,
     allEstimate,
     cashTotal,
+    unpaidCashTotal,
+    unpaidFrankingTotal,
+    unpaidCount,
     frankingTotal,
     frankingIncomplete,
   };
@@ -1857,6 +1900,12 @@ export function computePastFinancialYearRows(
             : null,
         method:
           "owner FY correction (replaces the derived total for this year)",
+        // BRK-022 slice 3: see `PastFinancialYearRow.dividendUnpaidGrossDecimal`'s
+        // doc comment -- an override replaces the whole figure.
+        dividendUnpaidGrossDecimal: null,
+        dividendUnpaidCashDecimal: null,
+        dividendUnpaidFrankingKnownDecimal: null,
+        dividendUnpaidCount: 0,
       });
       continue;
     }
@@ -1892,6 +1941,17 @@ export function computePastFinancialYearRows(
     const dividendFrankingKnownDecimal = hasNoFigure
       ? null
       : formatDecimalExact(totals.frankingTotal);
+    const dividendUnpaidCashDecimal = hasNoFigure
+      ? null
+      : formatDecimalExact(totals.unpaidCashTotal);
+    const dividendUnpaidFrankingKnownDecimal = hasNoFigure
+      ? null
+      : formatDecimalExact(totals.unpaidFrankingTotal);
+    const dividendUnpaidGrossDecimal = hasNoFigure
+      ? null
+      : formatDecimalExact(
+          addDecimal(totals.unpaidCashTotal, totals.unpaidFrankingTotal),
+        );
     rows.push({
       endingYear,
       label: windowResult.label,
@@ -1905,6 +1965,10 @@ export function computePastFinancialYearRows(
       excludedSecurities: totals.excludedSecurities,
       portfolioValueDecimal,
       valueStatus: portfolioValueDecimal === null ? "unavailable" : "available",
+      dividendUnpaidGrossDecimal,
+      dividendUnpaidCashDecimal,
+      dividendUnpaidFrankingKnownDecimal,
+      dividendUnpaidCount: hasNoFigure ? 0 : totals.unpaidCount,
       effectiveYieldPercentDecimal:
         dividendGrossDecimal !== null &&
         portfolioValueDecimal !== null &&
@@ -1972,6 +2036,14 @@ export type CurrentFinancialYearRow = {
   valueStatus: "available" | "partial" | "unavailable";
   effectiveYieldPercentDecimal: string | null;
   method: string;
+  /** BRK-022 slice 3: see `PastFinancialYearRow.dividendUnpaidGrossDecimal`'s
+   * doc comment -- identical meaning, for the in-progress FY. This is what
+   * `app/components/income-landing.tsx` reads to render the "*$x unpaid"
+   * note on the FY (so far) row. */
+  dividendUnpaidGrossDecimal: string | null;
+  dividendUnpaidCashDecimal: string | null;
+  dividendUnpaidFrankingKnownDecimal: string | null;
+  dividendUnpaidCount: number;
 };
 
 export type ComputeCurrentFinancialYearRowInput = {
@@ -2077,6 +2149,10 @@ export function computeCurrentFinancialYearRow(
               )
             : null,
         method: `owner FY correction (replaces the FY-to-date total for this year)${partialValueNote}`,
+        dividendUnpaidGrossDecimal: null,
+        dividendUnpaidCashDecimal: null,
+        dividendUnpaidFrankingKnownDecimal: null,
+        dividendUnpaidCount: 0,
       },
     };
   }
@@ -2104,6 +2180,17 @@ export function computeCurrentFinancialYearRow(
   const dividendFrankingKnownDecimal = hasNoFigure
     ? null
     : formatDecimalExact(totals.frankingTotal);
+  const dividendUnpaidCashDecimal = hasNoFigure
+    ? null
+    : formatDecimalExact(totals.unpaidCashTotal);
+  const dividendUnpaidFrankingKnownDecimal = hasNoFigure
+    ? null
+    : formatDecimalExact(totals.unpaidFrankingTotal);
+  const dividendUnpaidGrossDecimal = hasNoFigure
+    ? null
+    : formatDecimalExact(
+        addDecimal(totals.unpaidCashTotal, totals.unpaidFrankingTotal),
+      );
 
   return {
     ok: true,
@@ -2120,6 +2207,10 @@ export function computeCurrentFinancialYearRow(
       excludedSecurities: totals.excludedSecurities,
       portfolioValueDecimal,
       valueStatus: input.currentPortfolioValueStatus,
+      dividendUnpaidGrossDecimal,
+      dividendUnpaidCashDecimal,
+      dividendUnpaidFrankingKnownDecimal,
+      dividendUnpaidCount: hasNoFigure ? 0 : totals.unpaidCount,
       effectiveYieldPercentDecimal:
         dividendGrossDecimal !== null &&
         portfolioValueDecimal !== null &&

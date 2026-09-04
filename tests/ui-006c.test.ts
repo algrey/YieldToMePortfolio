@@ -1004,6 +1004,7 @@ function row(overrides: Partial<DerivedDividendRow>): DerivedDividendRow {
     fxRateSource: null,
     frankingDerivedZero: false,
     frankingCurrencySource: null,
+    announcedUnpaid: false,
     ...overrides,
   };
 }
@@ -1231,5 +1232,10 @@ test("UI-006C: the 'not paid' status is conveyed by both a distinct colour and l
     new URL("../app/components/security-dividends-tab.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(component, />\s*not paid\s*</);
+  // BRK-022 slice 3: "not paid" may now be followed by an optional
+  // "· announced (Sharesight)" suffix inside the SAME span (a Sharesight
+  // announcement is not the same evidence as a plain declared-pending
+  // event) -- the pin now allows, but does not require, trailing content
+  // after the literal "not paid" text.
+  assert.match(component, />\s*not paid[\s\S]*?</);
 });

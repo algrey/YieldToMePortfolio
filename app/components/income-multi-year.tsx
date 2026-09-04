@@ -119,6 +119,11 @@ import {
   type CapitalEventRowState,
 } from "../income-whatif.ts";
 import { formatIncomeMoney, formatIncomePercent } from "../income-format.ts";
+import {
+  formatDecimalExact,
+  parseDecimal,
+  subtractDecimal,
+} from "../../domain/calculations/decimal.ts";
 
 const MONTH_NAMES = [
   "January",
@@ -320,6 +325,29 @@ function mapProjectedRow(
  * (they cover different, non-additive time windows). No-op (the plain
  * forecast row, `actualToDate*` left `null`) when `currentFinancialYear`
  * itself is degraded -- the forecast still renders honestly on its own. */
+/** BRK-022 slice 3: `CurrentFinancialYearRow.dividendGrossDecimal` includes
+ * BOTH what has actually been paid and what Sharesight has merely announced
+ * (`dividendUnpaidGrossDecimal`, always a subset of it -- see that field's
+ * doc comment). The "received so far this FY" figure this module surfaces
+ * must stay PAID-only, never silently grow the moment an announcement is
+ * observed -- subtracts the (always non-negative, always a subset) unpaid
+ * portion via decimal arithmetic, never floats. `null` when the underlying
+ * gross figure itself is `null` (nothing to report either way). */
+function paidOnlyGrossDecimal(row: CurrentFinancialYearRow): string | null {
+  if (row.dividendGrossDecimal === null) return null;
+  // `?? null` rather than a strict `=== null` check: a caller/fixture built
+  // before this field existed supplies `undefined`, not `null` -- both mean
+  // "nothing to subtract", never a value to feed `parseDecimal`.
+  const unpaidGrossDecimal = row.dividendUnpaidGrossDecimal ?? null;
+  if (unpaidGrossDecimal === null) return row.dividendGrossDecimal;
+  return formatDecimalExact(
+    subtractDecimal(
+      parseDecimal(row.dividendGrossDecimal),
+      parseDecimal(unpaidGrossDecimal),
+    ),
+  );
+}
+
 function mergeCurrentFinancialYear(
   forecastRow: DisplayRow,
   /** Year 1's OWN `endingYear` (the raw `ProjectionYearRow` this
@@ -337,7 +365,7 @@ function mergeCurrentFinancialYear(
   if (forecastEndingYear !== row.endingYear) return forecastRow;
   return {
     ...forecastRow,
-    actualToDateGrossDecimal: row.dividendGrossDecimal,
+    actualToDateGrossDecimal: paidOnlyGrossDecimal(row),
     actualToDateSourceLabel: currentFinancialYearSourceLabel(row),
     dividendsHref: `${dividendsHref}?fy=${row.endingYear}`,
   };

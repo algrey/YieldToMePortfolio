@@ -750,6 +750,7 @@ function row(overrides: Partial<DerivedDividendRow>): DerivedDividendRow {
     fxRateSource: null,
     frankingDerivedZero: false,
     frankingCurrencySource: null,
+    announcedUnpaid: false,
     ...overrides,
   };
 }

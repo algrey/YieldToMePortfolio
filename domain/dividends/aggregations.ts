@@ -138,6 +138,18 @@ export type FyDividendTotal = {
   frankingUnknownCount: number;
   unknownAmountCount: number;
   rowCount: number;
+  /** BRK-022 slice 3: the subset of this year's total that is a Sharesight
+   * announcement (`DerivedDividendRow.announcedUnpaid`), not yet paid --
+   * `null` when the year contributes no such rows (mirrors `cashDecimal`'s
+   * own null-when-nothing convention) or under `source: "fy_override"`
+   * (an owner correction replaces the whole year's figure; there is no
+   * per-row composition left to break out). ALWAYS a subset already
+   * included INSIDE `cashDecimal`/`frankingKnownDecimal` above -- the
+   * owner's ruling is that the FY total reads paid + announced together,
+   * with the announced portion separately disclosed, never summed twice. */
+  unpaidCashDecimal: string | null;
+  unpaidFrankingKnownDecimal: string | null;
+  unpaidCount: number;
 };
 
 export type ComputeFyDividendTotalsResult =
@@ -234,6 +246,11 @@ export function computeFyDividendTotals(
         frankingUnknownCount: override.frankingAmountDecimal === null ? 1 : 0,
         unknownAmountCount: 0,
         rowCount: 0,
+        // BRK-022 slice 3: an owner FY override replaces the whole year's
+        // figure -- there is no per-row announced/paid split left to report.
+        unpaidCashDecimal: null,
+        unpaidFrankingKnownDecimal: null,
+        unpaidCount: 0,
       });
       continue;
     }
@@ -243,6 +260,16 @@ export function computeFyDividendTotals(
     );
     const unknownAmountCount = yearRows.length - knownAmount.length;
     const frankingKnown = knownAmount.filter(
+      (entry) => entry.row.frankingTotalDecimal !== null,
+    );
+    // BRK-022 slice 3: the announced-but-unpaid subset of this year's
+    // KNOWN-amount rows -- always a subset of `knownAmount`/`frankingKnown`
+    // above, never summed a second time (see `unpaidCashDecimal`'s doc
+    // comment).
+    const unpaidKnownAmount = knownAmount.filter(
+      (entry) => entry.row.announcedUnpaid,
+    );
+    const unpaidFrankingKnown = unpaidKnownAmount.filter(
       (entry) => entry.row.frankingTotalDecimal !== null,
     );
     const estimatedCount = yearRows.filter((entry) => entry.estimated).length;
@@ -270,6 +297,21 @@ export function computeFyDividendTotals(
       frankingUnknownCount: knownAmount.length - frankingKnown.length,
       unknownAmountCount,
       rowCount: yearRows.length,
+      unpaidCashDecimal:
+        unpaidKnownAmount.length > 0
+          ? sumDecimals(
+              unpaidKnownAmount.map((entry) => entry.row.cashDecimal!),
+            )
+          : null,
+      unpaidFrankingKnownDecimal:
+        unpaidFrankingKnown.length > 0
+          ? sumDecimals(
+              unpaidFrankingKnown.map(
+                (entry) => entry.row.frankingTotalDecimal!,
+              ),
+            )
+          : null,
+      unpaidCount: unpaidKnownAmount.length,
     });
   }
 

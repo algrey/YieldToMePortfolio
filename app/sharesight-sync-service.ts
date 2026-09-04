@@ -318,10 +318,17 @@ export type RunSharesightSyncResult =
       // the SAME fetch -- the same warning-severity `SHARESIGHT_PAYOUT_KEY_COLLISION`
       // condition `domain/sharesight-sync/transform.ts` already blocks
       // readiness on for a STAGEABLE row, but here the payout is never
-      // staged as a row at all, so there is no batch row for a persisted
-      // `import_issues` entry to attach to; the panel surfaces it directly
-      // via `pendingPayoutsLine` instead. A previously-recorded row under a
-      // now-colliding key is left untouched (neither refreshed nor
+      // staged as a row at all -- unlike the CSV path, this pending-payout
+      // recording is not part of the staged import batch at all, so there
+      // is no batch/`import_issues` machinery in scope here to begin with.
+      // BRK-022 slice 3 review correction (R7b): a row-less top-level issue
+      // CAN be persisted to `import_issues` (`db/repositories/import-staging.ts`'s
+      // `buildParsedRowStatements` already does exactly this for
+      // `SHARESIGHT_PAYOUT_UNCONFIRMED`, a null-`row_id`/`security_id`
+      // insert) -- this is a DELIBERATE panel-only disclosure choice for the
+      // pending-payout path, not an impossibility. The panel surfaces it
+      // directly via `pendingPayoutsLine` instead. A previously-recorded row
+      // under a now-colliding key is left untouched (neither refreshed nor
       // withdrawn) rather than guessed at -- see the pending-payout block
       // below.
       pendingPayoutsCollided: number;
