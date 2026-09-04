@@ -21,15 +21,20 @@ import {
   type SharesightCommittedRowValues,
   type SqlClient,
 } from "../db/repositories/index.ts";
-import {
-  compareDecimal,
-  parseDecimal,
-} from "../domain/calculations/decimal.ts";
 import type {
   ImportParseSuccess,
   NormalizedImportRow,
   ParsedImportRow,
 } from "../domain/imports/index.ts";
+// BRK-019 slice 1: the field-comparison helpers this function used to define
+// privately now live in `domain/imports/committed-value-comparison.ts`, so
+// this module and `domain/imports/reconciliation.ts`'s preview-time
+// `ROW_DIFFERS_FROM_COMMITTED_RECORD` detection share the SAME comparison --
+// see that module's header comment for why a shared module, not a duplicate.
+import {
+  dividendValueDifferences,
+  tradeValueDifferences,
+} from "../domain/imports/committed-value-comparison.ts";
 import {
   computeRoutineSyncFromDate,
   SHARESIGHT_PAYOUT_SYNC_OVERLAP_DAYS,
@@ -248,13 +253,30 @@ export type RunSharesightSyncResult =
       // BRK-014 (owner-reported): of the `rowsStaged` rows, how many are
       // genuinely NEW versus already match a currently-committed
       // transaction/dividend record for this portfolio -- see
-      // `isRowAlreadyImported`'s doc comment for the exact "unchanged
-      // identity + unchanged value" definition and why a Sharesight-side
-      // value CORRECTION deliberately counts as `newRows`, never
-      // `alreadyImportedRows`. Always `newRows + alreadyImportedRows ===
-      // rowsStaged`.
+      // `classifySharesightRow`'s doc comment for the exact "unchanged
+      // identity + unchanged value" definition.
+      //
+      // BRK-019 slice 1: a Sharesight-side value CORRECTION under an
+      // identity that already exists committed used to be folded into
+      // `newRows` (a decision the owner still needed to see, but
+      // indistinguishable in the count from a row Sharesight has never
+      // reported before) -- it is now its own bucket, `needsDecisionRows`,
+      // so the sync result can say "N new rows" and "N need a decision"
+      // separately. Always `newRows + alreadyImportedRows +
+      // needsDecisionRows === rowsStaged`.
       newRows: number;
       alreadyImportedRows: number;
+      // BRK-019 slice 1: of the `rowsStaged` rows, how many match an
+      // already-committed identity (same `source_reference`) but whose
+      // economic value differs from what is currently stored -- see
+      // `domain/imports/committed-value-comparison.ts`'s
+      // `tradeValueDifferences`/`dividendValueDifferences` for the
+      // field-by-field comparison. These rows stage normally (the owner can
+      // still review/exclude them) but `db/repositories/import-commit.ts`'s
+      // commit-time fail-closed check skips one rather than silently
+      // accepting either the old or the new value -- see that module's
+      // header comment.
+      needsDecisionRows: number;
       // BRK-015: what this call actually asked Sharesight for -- honest UI
       // copy must state the window rather than ever implying "fully in
       // sync" after a narrowed routine sync. See
@@ -328,29 +350,6 @@ function canonicalRowDigestFields(row: ParsedImportRow): string {
     // this function exists to prevent.
     normalized.exchangeRateDecimal ?? "",
   ].join("|");
-}
-
-/**
- * BRK-014: exact-decimal equality, tolerant of a formatting difference
- * ("100" vs "100.00") the way every other decimal comparison in this
- * codebase is (AGENTS.md) -- never a literal string/`Number()` compare.
- * `null` matches `null` (both sides genuinely have no value); any other
- * mismatch, including one side `null` and the other not, or a parse
- * failure on a malformed stored value, returns `false`. This is
- * deliberately the CONSERVATIVE direction: an uncertain comparison must
- * never be mistaken for "confirmed unchanged" (see `isRowAlreadyImported`).
- */
-function decimalValuesMatch(
-  incoming: string | null,
-  existing: string | null,
-): boolean {
-  if (incoming === null && existing === null) return true;
-  if (incoming === null || existing === null) return false;
-  try {
-    return compareDecimal(parseDecimal(incoming), parseDecimal(existing)) === 0;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -458,52 +457,32 @@ function decimalValuesMatch(
  * semantics). Reporting the correction as `newRows` here is what keeps it
  * visible to the owner as a decision, even though this task does not
  * change what accepting it actually does.
+ *
+ * BRK-019 slice 1 UPDATE: the "reporting the correction as `newRows`" note
+ * above is now more precise -- a value-changed row is classified
+ * `"needs_decision"`, a distinct bucket from a genuinely new identity
+ * (`"new"`), so the sync result can say "N new rows" and "N need a
+ * decision" separately rather than folding a correction into the same
+ * count as a row Sharesight has never reported before. Both buckets are
+ * still rows the owner must look at before they land -- `import-commit.ts`'s
+ * own commit-time fail-closed check (this task) skips a `needs_decision`
+ * row rather than silently accepting either its old or new value.
  */
-/**
- * BRK-014 round 3: `dividend_manual_records.fx_rate_to_portfolio_decimal` is
- * only ever written when the payout is foreign to its security AND
- * Sharesight supplied a rate (see `sharesight-sync-state.ts`'s
- * `SharesightCommittedRowValues` doc comment for the full case breakdown) --
- * a stored `null` means "not independently recorded", never "no rate
- * supplied" and never "confirmed equal to the incoming value". Treating a
- * stored `null` as a mismatch (the way `decimalValuesMatch` conservatively
- * treats every other null) would report EVERY native-currency payout --
- * this owner's common case -- as `newRows` on every routine re-sync the
- * moment Sharesight includes any `exchangeRateDecimal` in its feed at all,
- * breaking this task's own "a re-sync that adds nothing reads unambiguously
- * as no new rows" acceptance criterion. So this field is deliberately NOT
- * COMPARABLE when nothing is stored to compare against, and "not
- * comparable" here means "does not by itself indicate a change" -- the
- * opposite default from `decimalValuesMatch`, which exists to catch a
- * comparison that ought to have been possible but failed.
- */
-function fxRateNotComparableOrMatches(
-  incoming: string | null,
-  storedFxRateToPortfolioDecimal: string | null,
-): boolean {
-  if (storedFxRateToPortfolioDecimal === null) return true;
-  return decimalValuesMatch(incoming, storedFxRateToPortfolioDecimal);
-}
+type SharesightRowClassification = "already_imported" | "needs_decision" | "new";
 
 /**
- * BRK-014 round 4: the currency counterpart of `fxRateNotComparableOrMatches`
- * above -- `dividend_manual_records.currency_code` is written under the same
- * `isForeignToSecurity` condition as the FX rate (`import-commit.ts`), so a
- * stored `null` means "this payout was native to its security, nothing
- * independently recorded", never "changed" and never "confirmed equal to the
- * incoming value". Exact string equality once a stored value exists --
- * unlike `decimalValuesMatch`, this is not a decimal, so no formatting
- * tolerance is needed.
+ * BRK-019 slice 1: three-way classification, replacing BRK-014's plain
+ * boolean `isRowAlreadyImported` -- built on the SAME field-by-field
+ * comparison (`domain/imports/committed-value-comparison.ts`'s
+ * `tradeValueDifferences`/`dividendValueDifferences`, extracted from this
+ * function's own pre-this-task body) so the three-way split can never drift
+ * from the boolean version's own long-reviewed field list. No committed row
+ * under this identity at all -> `"new"`; a committed row exists and every
+ * comparable field matches -> `"already_imported"`; a committed row exists
+ * but at least one comparable field differs (a Sharesight-side correction)
+ * -> `"needs_decision"`.
  */
-function currencyNotComparableOrMatches(
-  incoming: string | null,
-  storedCurrencyCode: string | null,
-): boolean {
-  if (storedCurrencyCode === null) return true;
-  return incoming === storedCurrencyCode;
-}
-
-function isRowAlreadyImported(
+function classifySharesightRow(
   row: {
     fingerprint: string;
     normalized: Pick<
@@ -520,75 +499,80 @@ function isRowAlreadyImported(
     >;
   },
   existing: SharesightCommittedRowValues,
-): boolean {
+): SharesightRowClassification {
   const sourceReference = `import-fingerprint:${row.fingerprint}`;
   if (row.normalized.type === "dividend") {
     const existingPayout = existing.payouts.get(sourceReference);
-    if (!existingPayout) return false;
-    return (
-      decimalValuesMatch(
-        row.normalized.totalCashDecimal ?? null,
-        existingPayout.cashTotalDecimal,
-      ) &&
-      decimalValuesMatch(
-        row.normalized.totalFrankingDecimal ?? null,
-        existingPayout.totalFrankingDecimal,
-      ) &&
-      row.normalized.localTradeDate === existingPayout.paymentDate &&
-      fxRateNotComparableOrMatches(
-        row.normalized.exchangeRateDecimal ?? null,
-        existingPayout.fxRateToPortfolioDecimal,
-      ) &&
-      currencyNotComparableOrMatches(
-        row.normalized.currency ?? null,
-        existingPayout.currencyCode,
-      )
+    if (!existingPayout) return "new";
+    // Every Sharesight-sourced dividend row is totals-mode (`transform.ts`
+    // never sets `sharesOwned`/`costPerShare` on one), so the raw
+    // `totalCashDecimal` field IS already the comparable amount -- matches
+    // this function's pre-this-task behaviour exactly (no
+    // `safeComputeDividendCashTotal` call needed here the way
+    // `reconciliation.ts`'s CSV-inclusive comparison needs one, since a CSV
+    // per-share row never reaches this Sharesight-only function).
+    const differences = dividendValueDifferences(
+      {
+        cashTotalDecimal: row.normalized.totalCashDecimal ?? null,
+        totalFrankingDecimal: row.normalized.totalFrankingDecimal ?? null,
+        paymentDate: row.normalized.localTradeDate,
+        fxRateToPortfolioDecimal: row.normalized.exchangeRateDecimal ?? null,
+        currencyCode: row.normalized.currency ?? null,
+      },
+      existingPayout,
     );
+    return differences.length === 0 ? "already_imported" : "needs_decision";
   }
   const existingTrade = existing.trades.get(sourceReference);
-  if (!existingTrade) return false;
-  return (
-    decimalValuesMatch(
-      row.normalized.sharesOwned,
-      existingTrade.quantityDecimal,
-    ) &&
-    decimalValuesMatch(
-      row.normalized.costPerShare,
-      existingTrade.priceDecimal,
-    ) &&
-    decimalValuesMatch(
-      row.normalized.commission ?? "0",
-      existingTrade.feeAmountDecimal,
-    ) &&
-    row.normalized.localTradeDate === existingTrade.localTradeDate &&
-    row.normalized.type === existingTrade.type &&
-    row.normalized.currency === existingTrade.currencyCode
+  if (!existingTrade) return "new";
+  const differences = tradeValueDifferences(
+    {
+      type: row.normalized.type,
+      localTradeDate: row.normalized.localTradeDate,
+      quantityDecimal: row.normalized.sharesOwned,
+      priceDecimal: row.normalized.costPerShare,
+      feeAmountDecimal: row.normalized.commission ?? "0",
+      currencyCode: row.normalized.currency ?? null,
+    },
+    existingTrade,
   );
+  return differences.length === 0 ? "already_imported" : "needs_decision";
 }
 
-function countAlreadyImported(
-  rows: readonly {
-    fingerprint: string;
-    normalized: Pick<
-      NormalizedImportRow,
-      | "type"
-      | "sharesOwned"
-      | "costPerShare"
-      | "totalCashDecimal"
-      | "totalFrankingDecimal"
-      | "localTradeDate"
-      | "commission"
-      | "currency"
-      | "exchangeRateDecimal"
-    >;
-  }[],
+function isRowAlreadyImported(
+  row: Parameters<typeof classifySharesightRow>[0],
   existing: SharesightCommittedRowValues,
+): boolean {
+  return classifySharesightRow(row, existing) === "already_imported";
+}
+
+function countByClassification(
+  rows: readonly Parameters<typeof classifySharesightRow>[0][],
+  existing: SharesightCommittedRowValues,
+  classification: SharesightRowClassification,
 ): number {
   let count = 0;
   for (const row of rows) {
-    if (isRowAlreadyImported(row, existing)) count += 1;
+    if (classifySharesightRow(row, existing) === classification) count += 1;
   }
   return count;
+}
+
+function countAlreadyImported(
+  rows: readonly Parameters<typeof classifySharesightRow>[0][],
+  existing: SharesightCommittedRowValues,
+): number {
+  return countByClassification(rows, existing, "already_imported");
+}
+
+// BRK-019 slice 1: the "needs a decision" analog of `countAlreadyImported`
+// above -- see `RunSharesightSyncResult.needsDecisionRows`'s doc comment for
+// what this count means and why it is reported separately from `newRows`.
+function countNeedsDecision(
+  rows: readonly Parameters<typeof classifySharesightRow>[0][],
+  existing: SharesightCommittedRowValues,
+): number {
+  return countByClassification(rows, existing, "needs_decision");
 }
 
 // BRK-005B review finding B2 (BLOCKING): the digest omitted the LOCAL
@@ -967,6 +951,14 @@ export async function runSharesightSyncWithContext(
     transformed.rows,
     existingSharesightRowValues,
   );
+  // BRK-019 slice 1: same honesty discipline as `alreadyImportedRows` above
+  // -- a row whose identity already exists committed but whose value
+  // differs (a Sharesight-side correction) must not be silently folded into
+  // `newRows`; see `RunSharesightSyncResult.needsDecisionRows`'s doc comment.
+  let needsDecisionRows = countNeedsDecision(
+    transformed.rows,
+    existingSharesightRowValues,
+  );
   if (started.reused) {
     rowsStaged = started.batch.totalRows;
     const storedIssues = await staging.listIssues(
@@ -993,8 +985,16 @@ export async function runSharesightSyncWithContext(
       economicRows,
       existingSharesightRowValues,
     );
+    needsDecisionRows = countNeedsDecision(
+      economicRows,
+      existingSharesightRowValues,
+    );
   }
-  const newRows = rowsStaged - alreadyImportedRows;
+  // BRK-019 slice 1: `newRows` now excludes `needsDecisionRows` too -- a
+  // value-changed row is neither a true no-op (`alreadyImportedRows`) nor a
+  // decision-free fresh identity (`newRows`); it is its own bucket. Always
+  // `newRows + alreadyImportedRows + needsDecisionRows === rowsStaged`.
+  const newRows = rowsStaged - alreadyImportedRows - needsDecisionRows;
 
   return {
     ok: true,
@@ -1004,6 +1004,7 @@ export async function runSharesightSyncWithContext(
     skippedPayouts,
     newRows,
     alreadyImportedRows,
+    needsDecisionRows,
     reused: started.reused,
     window: { trades: tradeWindow, payouts: payoutWindow },
   };

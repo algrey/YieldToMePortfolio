@@ -1805,14 +1805,19 @@ test("BRK-005: reviewer B1 repro -- a Sharesight-side correction to an already-s
   // BRK-014: the corrected row shares the SAME identity as the already-
   // committed trade (`fingerprint`/`source_reference` are identity-only,
   // unaffected by a value correction), but its VALUE differs -- it must
-  // count as `newRows` (a decision the owner still needs to see), never
-  // `alreadyImportedRows`, or the correction would silently read as a
-  // routine no-op re-sync.
+  // never count as `alreadyImportedRows`, or the correction would silently
+  // read as a routine no-op re-sync.
+  //
+  // BRK-019 slice 1: a value-corrected row under an already-committed
+  // identity is now its OWN bucket (`needsDecisionRows`), not folded into
+  // `newRows` -- see `RunSharesightSyncResult.needsDecisionRows`'s doc
+  // comment.
   assert.equal(
-    second.newRows,
+    second.needsDecisionRows,
     1,
-    "a value-corrected row must count as new, never already imported",
+    "a value-corrected row must count as needing a decision, never already imported or plain new",
   );
+  assert.equal(second.newRows, 0);
   assert.equal(second.alreadyImportedRows, 0);
 
   const secondRows = await createOwnedImportStagingRepository(client).listRows(
@@ -2104,11 +2109,14 @@ test("BRK-014 review B1: a franking-only correction to a committed payout re-syn
     "a franking correction must produce a NEW batch, never silently reuse the prior one",
   );
   assert.equal(second.reused, false);
+  // BRK-019 slice 1: a value-corrected row under an already-committed
+  // identity is its own bucket (`needsDecisionRows`), not `newRows`.
   assert.equal(
-    second.newRows,
+    second.needsDecisionRows,
     1,
-    "a franking-only correction must count as new, never already imported",
+    "a franking-only correction must count as needing a decision, never already imported or plain new",
   );
+  assert.equal(second.newRows, 0);
   assert.equal(second.alreadyImportedRows, 0);
 });
 
@@ -2179,11 +2187,14 @@ test("BRK-014 review B1: a trade-date-only correction to a committed trade re-sy
     "a trade-date correction must produce a NEW batch, never silently reuse the prior one",
   );
   assert.equal(second.reused, false);
+  // BRK-019 slice 1: a value-corrected row under an already-committed
+  // identity is its own bucket (`needsDecisionRows`), not `newRows`.
   assert.equal(
-    second.newRows,
+    second.needsDecisionRows,
     1,
-    "a trade-date-only correction must count as new, never already imported",
+    "a trade-date-only correction must count as needing a decision, never already imported or plain new",
   );
+  assert.equal(second.newRows, 0);
   assert.equal(second.alreadyImportedRows, 0);
 });
 
@@ -2308,11 +2319,14 @@ test("BRK-014 review round 3: an FX-only correction to a foreign-currency payout
     "an FX correction must produce a NEW batch, never silently reuse the prior one",
   );
   assert.equal(second.reused, false);
+  // BRK-019 slice 1: a value-corrected row under an already-committed
+  // identity is its own bucket (`needsDecisionRows`), not `newRows`.
   assert.equal(
-    second.newRows,
+    second.needsDecisionRows,
     1,
-    "an FX-only correction must count as new, never already imported",
+    "an FX-only correction must count as needing a decision, never already imported or plain new",
   );
+  assert.equal(second.newRows, 0);
   assert.equal(second.alreadyImportedRows, 0);
 });
 
@@ -2386,11 +2400,14 @@ test("BRK-014 review round 3: a currency-only correction to a committed trade re
     "a currency correction must produce a NEW batch, never silently reuse the prior one",
   );
   assert.equal(second.reused, false);
+  // BRK-019 slice 1: a value-corrected row under an already-committed
+  // identity is its own bucket (`needsDecisionRows`), not `newRows`.
   assert.equal(
-    second.newRows,
+    second.needsDecisionRows,
     1,
-    "a currency-only correction must count as new, never already imported",
+    "a currency-only correction must count as needing a decision, never already imported or plain new",
   );
+  assert.equal(second.newRows, 0);
   assert.equal(second.alreadyImportedRows, 0);
 });
 
@@ -2650,11 +2667,14 @@ test("BRK-014 review round 4: a currency-only correction to a foreign-currency p
     "a currency correction must produce a NEW batch, never silently reuse the prior one",
   );
   assert.equal(second.reused, false);
+  // BRK-019 slice 1: a value-corrected row under an already-committed
+  // identity is its own bucket (`needsDecisionRows`), not `newRows`.
   assert.equal(
-    second.newRows,
+    second.needsDecisionRows,
     1,
-    "a currency-only correction must count as new, never already imported",
+    "a currency-only correction must count as needing a decision, never already imported or plain new",
   );
+  assert.equal(second.newRows, 0);
   assert.equal(second.alreadyImportedRows, 0);
 });
 

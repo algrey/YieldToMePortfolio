@@ -146,6 +146,8 @@ type Review = {
     committedRows: number;
     skippedRows: number;
     excludedByOwnerRows: number;
+    // BRK-019 slice 1
+    needsDecisionRows: number;
     remainingRows: number;
   };
   // UI-014 part 3: business-basics facts for rows an issue references (see
@@ -160,6 +162,7 @@ const EMPTY_COMMIT_PROGRESS = {
   committedRows: 0,
   skippedRows: 0,
   excludedByOwnerRows: 0,
+  needsDecisionRows: 0,
   remainingRows: 0,
 };
 
@@ -231,6 +234,9 @@ type CommitResult = {
   committedRows: number;
   skippedRows: number;
   excludedByOwnerRows: number;
+  // BRK-019 slice 1: see `db/repositories/import-commit.ts`'s
+  // `ImportCommitSuccess.needsDecisionRows` doc comment.
+  needsDecisionRows: number;
   // UI-013 review round B1: still-`staged` rows -- the real denominator for
   // "N of M rows" accept progress (see `acceptLoopProgress`).
   remainingRows: number;
@@ -2360,7 +2366,7 @@ export function ImportReview({
                   role="status"
                 >
                   {reviewCommit.status === "committed"
-                    ? `Committed ${reviewCommit.committedRows} row effects; ${reviewCommit.skippedRows} rows were skipped (${reviewCommit.excludedByOwnerRows} excluded by owner).`
+                    ? `Committed ${reviewCommit.committedRows} row effects; ${reviewCommit.skippedRows} rows were skipped (${reviewCommit.excludedByOwnerRows} excluded by owner${reviewCommit.needsDecisionRows > 0 ? `; ${reviewCommit.needsDecisionRows} need${reviewCommit.needsDecisionRows === 1 ? "s" : ""} a decision` : ""}).`
                     : `Commit is resumable after physical row ${reviewCommit.highWaterRow}. It is not complete.`}
                 </p>
               ) : null}

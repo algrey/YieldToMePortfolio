@@ -80,13 +80,18 @@ export type SharesightSyncSuccess = {
   skippedPayouts: number;
   // BRK-014 (owner-reported): of `rowsStaged`, how many are genuinely NEW
   // versus already match a currently-committed record for this portfolio.
-  // Always `newRows + alreadyImportedRows === rowsStaged`. See
-  // `app/sharesight-sync-service.ts`'s `isRowAlreadyImported` doc comment
-  // for the exact "unchanged identity + unchanged value" definition and why
-  // a Sharesight-side value correction counts as `newRows`, never
-  // `alreadyImportedRows`.
+  // See `app/sharesight-sync-service.ts`'s `classifySharesightRow` doc
+  // comment for the exact "unchanged identity + unchanged value" definition.
+  //
+  // BRK-019 slice 1: a Sharesight-side value correction under an
+  // already-committed identity no longer counts as `newRows` -- it is its
+  // own bucket, `needsDecisionRows` (optional/defaulted to 0 below so every
+  // pre-this-task caller/fixture that never mentions it keeps compiling and
+  // rendering unchanged). Always `newRows + alreadyImportedRows +
+  // (needsDecisionRows ?? 0) === rowsStaged`.
   newRows: number;
   alreadyImportedRows: number;
+  needsDecisionRows?: number;
   reused: boolean;
   window: SharesightSyncWindowSummary;
 };
@@ -217,9 +222,22 @@ function windowLabel(window: SharesightSyncWindowSummary): string {
  * The all-new and mixed shapes are unchanged: the all-new case omits the
  * redundant "0 already imported" clause; the mixed case names both counts.
  */
+// BRK-019 slice 1: extends the shape analysis above with a THIRD bucket
+// (`needsDecisionRows`) without disturbing any of the nine pre-existing
+// shapes -- `needsDecisionRows` is optional and defaults to 0 for every
+// caller/fixture that predates this task (see `SharesightSyncSuccess`'s doc
+// comment), and every branch below that fires when it is 0 is byte-for-byte
+// the pre-this-task text. A non-zero `needsDecisionRows` always takes the
+// new itemised branch, naming it alongside whichever of `newRows`/
+// `alreadyImportedRows` is also non-zero -- see
+// `db/repositories/import-commit.ts`'s header comment for what "needs a
+// decision" means (a row whose identity already exists committed but whose
+// value differs) and why such a row is skipped, never silently accepted,
+// at commit time.
 function newVsAlreadyImportedLine(result: SharesightSyncSuccess): string {
   if (result.rowsStaged === 0) return "";
-  if (result.newRows === 0) {
+  const needsDecisionRows = result.needsDecisionRows ?? 0;
+  if (result.newRows === 0 && needsDecisionRows === 0) {
     if (!result.reused) {
       return (
         " None differ from your ledger on the compared fields (quantity, " +
@@ -236,9 +254,19 @@ function newVsAlreadyImportedLine(result: SharesightSyncSuccess): string {
     }
     return " No new rows -- every staged row already matches an existing record.";
   }
-  const newLabel = `${result.newRows} new row${result.newRows === 1 ? "" : "s"}`;
-  if (result.alreadyImportedRows === 0) return ` ${newLabel}.`;
-  return ` ${newLabel}; ${result.alreadyImportedRows} already imported.`;
+  const parts: string[] = [];
+  if (result.newRows > 0) {
+    parts.push(`${result.newRows} new row${result.newRows === 1 ? "" : "s"}`);
+  }
+  if (needsDecisionRows > 0) {
+    parts.push(
+      `${needsDecisionRows} ${needsDecisionRows === 1 ? "needs" : "need"} a decision`,
+    );
+  }
+  if (result.alreadyImportedRows > 0) {
+    parts.push(`${result.alreadyImportedRows} already imported`);
+  }
+  return ` ${parts.join("; ")}.`;
 }
 
 export function formatSyncResultMessage(result: SharesightSyncSuccess): string {

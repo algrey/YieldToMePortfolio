@@ -8,6 +8,10 @@ import type {
 } from "../domain/imports/reconciliation.ts";
 import { buildImportReview } from "../domain/imports/review.ts";
 import type { ImportReviewMapping } from "../domain/imports/review.ts";
+import type {
+  CommittedDividendValues,
+  CommittedTradeValues,
+} from "../domain/imports/committed-value-comparison.ts";
 import {
   deriveSharesightSecuritiesSummary,
   type SharesightSecuritySummaryEntry,
@@ -90,6 +94,9 @@ export type ImportReviewPreview = {
     committedRows: number;
     skippedRows: number;
     excludedByOwnerRows: number;
+    // BRK-019 slice 1: see the derivation's own comment in
+    // `buildImportReviewPreview` below.
+    needsDecisionRows: number;
     remainingRows: number;
   };
   // UI-014 part 3: business-basics facts (symbol/type/date/quantity/amount/
@@ -131,6 +138,10 @@ export function buildImportReviewPreview(input: {
   // identical commit-time skip -- see
   // `ImportReconciliationInput.existingTradeSourceReferences`'s doc comment.
   existingTradeSourceReferences?: ReadonlySet<string>;
+  // BRK-019 slice 1: see `ImportReconciliationInput.committedTradeValues`/
+  // `.committedDividendValues`'s doc comments.
+  committedTradeValues?: ReadonlyMap<string, CommittedTradeValues>;
+  committedDividendValues?: ReadonlyMap<string, CommittedDividendValues>;
   attestedSecurityIds?: readonly string[];
   // BRK-009C: pre-fetched inputs to `deriveSharesightSecuritiesSummary` --
   // this function stays a synchronous, DB-free builder (like every other
@@ -157,6 +168,8 @@ export function buildImportReviewPreview(input: {
     reconciliationCandidates: input.reconciliationCandidates,
     existingDividendSourceReferences: input.existingDividendSourceReferences,
     existingTradeSourceReferences: input.existingTradeSourceReferences,
+    committedTradeValues: input.committedTradeValues,
+    committedDividendValues: input.committedDividendValues,
   });
   const excludedRows = input.rows
     .filter((row) => row.excludedByOwnerAt !== null)
@@ -168,6 +181,19 @@ export function buildImportReviewPreview(input: {
     .sort((left, right) => left.physicalRowNumber - right.physicalRowNumber);
   // UI-013 review round B1: see the field's own doc comment above -- ledger
   // fact, not reconciliation intent.
+  // BRK-019 slice 1: `db/repositories/import-commit.ts`'s fail-closed skip
+  // persists a `ROW_DIFFERS_FROM_COMMITTED_RECORD` issue in the SAME atomic
+  // statement group as the row's own `commit_status = 'skipped'` UPDATE
+  // (`committedRecordDiffersIssueStatement`), so `input.issues` (already
+  // loaded, no extra query) is the authoritative source for this count too
+  // -- mirrors `excludedByOwnerRows`'s own "ledger fact, not reconciliation
+  // intent" derivation above.
+  const needsDecisionRowIds = new Set(
+    input.issues
+      .filter((issue) => issue.code === "ROW_DIFFERS_FROM_COMMITTED_RECORD")
+      .map((issue) => issue.rowId)
+      .filter((rowId): rowId is string => rowId !== null),
+  );
   const commitProgress = {
     committedRows: input.rows.filter((row) => row.commitStatus === "committed")
       .length,
@@ -175,6 +201,10 @@ export function buildImportReviewPreview(input: {
       .length,
     excludedByOwnerRows: input.rows.filter(
       (row) => row.commitStatus === "skipped" && row.excludedByOwnerAt !== null,
+    ).length,
+    needsDecisionRows: input.rows.filter(
+      (row) =>
+        row.commitStatus === "skipped" && needsDecisionRowIds.has(row.id),
     ).length,
     remainingRows: input.rows.filter((row) => row.commitStatus === "staged")
       .length,

@@ -253,6 +253,8 @@ export function SharesightSyncPanel({
             skippedPayouts: number;
             newRows: number;
             alreadyImportedRows: number;
+            // BRK-019 slice 1
+            needsDecisionRows: number;
             reused: boolean;
             window: SharesightSyncWindowSummary;
           }
@@ -273,6 +275,7 @@ export function SharesightSyncPanel({
         skippedPayouts: result.skippedPayouts,
         newRows: result.newRows,
         alreadyImportedRows: result.alreadyImportedRows,
+        needsDecisionRows: result.needsDecisionRows,
         reused: result.reused,
         window: result.window,
       });

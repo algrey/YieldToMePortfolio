@@ -833,9 +833,17 @@ test("source pin: existingManualDividendRowsQuery/existingReceiptDividendRowsQue
   // were mutated as long as the OTHER, untouched query's occurrence still
   // satisfied it -- silently catching nothing. Anchoring the bind to its OWN
   // query's preceding SQL makes each pin fail independently.
+  // BRK-019 slice 1 widened this SELECT further (adds `source_reference`,
+  // for the DIV-004 paid-date-correction escalation) -- the pin now matches
+  // up to `dividend_per_share_decimal,` and separately confirms the
+  // FROM/WHERE/LIMIT clause this test cares about is unchanged.
   assert.match(
     querySource,
-    /SELECT portfolio_security_id, payment_date, shares_decimal,\s*\n\s*dividend_per_share_decimal, franking_credit_per_share_decimal,\s*\n\s*total_cash_decimal, total_franking_decimal, currency_code\s*\n\s*FROM dividend_manual_records\s*\n\s*WHERE user_id = \? AND superseded_by_record_id IS NULL\s*\n\s*LIMIT \?`,\s*\n\s*params: \[userId, limit\],/,
+    /SELECT portfolio_security_id, payment_date, shares_decimal,\s*\n\s*dividend_per_share_decimal,/,
+  );
+  assert.match(
+    querySource,
+    /total_cash_decimal, total_franking_decimal, currency_code,\s*\n\s*source_reference\s*\n\s*FROM dividend_manual_records\s*\n\s*WHERE user_id = \? AND superseded_by_record_id IS NULL\s*\n\s*LIMIT \?`,\s*\n\s*params: \[userId, limit\],/,
   );
   assert.match(
     querySource,
@@ -949,9 +957,13 @@ test("source pin: existingTradeSourceReferenceRowsQuery (app/import-review-queri
     new URL("../app/import-actions.ts", import.meta.url),
     "utf8",
   );
+  // BRK-019 slice 1 widened this SELECT (six value-bearing columns, for the
+  // preview-time committed-value comparison) -- the pin now matches the
+  // widened column list separately from the unchanged FROM/WHERE/LIMIT
+  // clause this test cares about.
   assert.match(
     querySource,
-    /SELECT portfolio_id, source_reference FROM transactions\s*\n\s*WHERE user_id = \? AND source_type = 'csv_import' AND source_reference IS NOT NULL\s*\n\s*AND status <> 'reversed'\s*\n\s*LIMIT \?`,\s*\n\s*params: \[userId, limit\],/,
+    /SELECT portfolio_id, source_reference, quantity_decimal,\s*\n\s*unit_price_decimal, fee_amount_decimal, local_trade_date,\s*\n\s*type, currency_code\s*\n\s*FROM transactions\s*\n\s*WHERE user_id = \? AND source_type = 'csv_import' AND source_reference IS NOT NULL\s*\n\s*AND status <> 'reversed'\s*\n\s*LIMIT \?`,\s*\n\s*params: \[userId, limit\],/,
   );
   // loadReview passes MAX + 1 as the limit.
   assert.match(
@@ -989,10 +1001,25 @@ test("source pin: existingDividendSourceReferenceRowsQuery (app/import-review-qu
     new URL("../app/import-actions.ts", import.meta.url),
     "utf8",
   );
+  // BRK-019 slice 1 widened the SELECT list (five value-bearing columns,
+  // for the preview-time committed-value comparison), so this pin now
+  // matches the query's FROM/WHERE clause and confirms the widened SELECT
+  // still carries no `LIMIT` anywhere in the statement -- the property this
+  // pin exists to protect (an unbounded comparison set) is unchanged.
   assert.match(
     querySource,
-    /SELECT portfolio_id, source_reference FROM dividend_manual_records\s*\n\s*WHERE user_id = \? AND source_reference IS NOT NULL`,\s*\n\s*params: \[userId\],/,
+    /FROM dividend_manual_records\s*\n\s*WHERE user_id = \? AND source_reference IS NOT NULL`,\s*\n\s*params: \[userId\],/,
     "the dividend query must be unbounded -- no LIMIT clause",
+  );
+  assert.doesNotMatch(
+    querySource.slice(
+      querySource.indexOf("export function existingDividendSourceReferenceRowsQuery"),
+      querySource.indexOf(
+        "export function existingTradeSourceReferenceRowsQuery",
+      ),
+    ),
+    /LIMIT/,
+    "the dividend query's own function body must contain no LIMIT clause anywhere",
   );
   assert.doesNotMatch(
     source,

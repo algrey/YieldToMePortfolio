@@ -313,6 +313,12 @@ async function loadReview(
             }),
             currencyCode:
               row.currency_code === null ? null : String(row.currency_code),
+            // BRK-019 slice 1: see `ImportPreviewExistingDividendEntry.sourceReference`'s
+            // doc comment -- feeds the paid-date-correction escalation.
+            sourceReference:
+              row.source_reference === null
+                ? null
+                : String(row.source_reference),
           })),
           ...cappedReceiptDividendRows.entries.map((row) => ({
             portfolioSecurityId: String(row.portfolio_security_id),
@@ -387,6 +393,63 @@ async function loadReview(
       (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
     ),
   );
+  // BRK-019 slice 1: value-bearing columns for the SAME rows the two
+  // suppression/comparison sets above are keyed from (reusing those already
+  // -loaded, already-capped/degraded result sets -- no extra query). Built
+  // from `cappedTradeSourceReferenceRows.rows` (not the raw
+  // `existingTradeSourceReferenceRows`) so an overflowed trade suppression
+  // set degrades this map identically -- when the suppression set is empty,
+  // `tradeAlreadyBoundForSkip` is false for every row and this map is never
+  // consulted anyway, so degrading the two together is safe and simpler
+  // than a second, independent overflow policy.
+  const committedTradeValues = new Map(
+    cappedTradeSourceReferenceRows.rows.map((row) => [
+      `${String(row.portfolio_id)}::${String(row.source_reference)}`,
+      {
+        quantityDecimal:
+          row.quantity_decimal === null ? null : String(row.quantity_decimal),
+        priceDecimal:
+          row.unit_price_decimal === null
+            ? null
+            : String(row.unit_price_decimal),
+        feeAmountDecimal:
+          row.fee_amount_decimal === null
+            ? null
+            : String(row.fee_amount_decimal),
+        localTradeDate:
+          row.local_trade_date === null ? null : String(row.local_trade_date),
+        type: row.type === null ? null : String(row.type),
+        currencyCode:
+          row.currency_code === null ? null : String(row.currency_code),
+      },
+    ]),
+  );
+  // BRK-019 slice 1: the dividend analog, from the SAME (deliberately
+  // uncapped -- see that query's own doc comment) comparison set
+  // `existingDividendSourceReferences` above is keyed from.
+  const committedDividendValues = new Map(
+    existingSourceReferenceRows.map((row) => [
+      `${String(row.portfolio_id)}::${String(row.source_reference)}`,
+      {
+        cashTotalDecimal:
+          row.total_cash_decimal === null
+            ? null
+            : String(row.total_cash_decimal),
+        totalFrankingDecimal:
+          row.total_franking_decimal === null
+            ? null
+            : String(row.total_franking_decimal),
+        paymentDate:
+          row.payment_date === null ? null : String(row.payment_date),
+        fxRateToPortfolioDecimal:
+          row.fx_rate_to_portfolio_decimal === null
+            ? null
+            : String(row.fx_rate_to_portfolio_decimal),
+        currencyCode:
+          row.currency_code === null ? null : String(row.currency_code),
+      },
+    ]),
+  );
   const linkedSecurityIds = securityCandidates
     .map((candidate) => candidate.securityId)
     .filter((id): id is string => id !== null);
@@ -420,6 +483,8 @@ async function loadReview(
     reconciliationCandidates,
     existingDividendSourceReferences,
     existingTradeSourceReferences,
+    committedTradeValues,
+    committedDividendValues,
     attestedSecurityIds,
     securityNames,
     autoCreatedSecurityIds,

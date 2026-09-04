@@ -38,7 +38,17 @@ export function portfolioSecurityCandidatesQuery(userId: string): SqlStatement {
  * `DIVIDEND_MATCHES_EXISTING_ENTRY` (`domain/imports/reconciliation.ts`)
  * needs, excluding a superseded (historical) row. Bounded at `limit` rows
  * (the caller passes `MAX_EXISTING_DIVIDEND_ENTRIES_FOR_DUPLICATE_CHECK +
- * 1`) so the caller's `capExistingDividendRows` can detect overflow exactly. */
+ * 1`) so the caller's `capExistingDividendRows` can detect overflow exactly.
+ *
+ * BRK-019 slice 1: also carries `source_reference` -- the DIV-004 proximity
+ * warning (`DIVIDEND_NEAR_EXISTING_ENTRY`) needs it to tell whether the
+ * NEAR (not identical-identity) existing record it matched against is
+ * itself Sharesight-sourced (`import-fingerprint:sharesight-payout:`
+ * prefix), the signal that escalates a same-security/same-cash-total/
+ * different-paid-date near match to `ROW_DIFFERS_FROM_COMMITTED_RECORD`
+ * (a likely Sharesight-side paid-date correction) rather than leaving it a
+ * plain advisory warning -- see `reconciliation.ts`'s own comment at that
+ * escalation for the full rationale. */
 export function existingManualDividendRowsQuery(
   userId: string,
   limit: number,
@@ -46,7 +56,8 @@ export function existingManualDividendRowsQuery(
   return {
     sql: `SELECT portfolio_security_id, payment_date, shares_decimal,
               dividend_per_share_decimal, franking_credit_per_share_decimal,
-              total_cash_decimal, total_franking_decimal, currency_code
+              total_cash_decimal, total_franking_decimal, currency_code,
+              source_reference
        FROM dividend_manual_records
        WHERE user_id = ? AND superseded_by_record_id IS NULL
        LIMIT ?`,
@@ -78,12 +89,26 @@ export function existingReceiptDividendRowsQuery(
  * `alreadyImportedRows`, so it is DELIBERATELY left UNBOUNDED (no `LIMIT`,
  * never routed through `capSuppressionReferenceRows`) -- a fail-open
  * collapse to empty would put a genuinely dedupe-bound row back into
- * `freshRows` and earn it a false `DIVIDEND_RECONCILIATION_PROPOSED`. */
+ * `freshRows` and earn it a false `DIVIDEND_RECONCILIATION_PROPOSED`.
+ *
+ * BRK-019 slice 1: widened by the five value-bearing columns
+ * `domain/imports/committed-value-comparison.ts`'s `CommittedDividendValues`
+ * needs, so this ONE already-loaded set also answers "does this row's own
+ * value still match what is committed under its identity" -- reusing the
+ * existing round trip rather than adding a second query for the same rows
+ * (`db/repositories/sharesight-sync-state.ts`'s `loadCommittedSharesightRowValues`
+ * runs a near-identical query for the Sharesight-only subset; this one is
+ * route-agnostic, no `sharesight-` prefix filter, matching this task's CSV
+ * + Sharesight scope). Still deliberately unbounded, for the same
+ * COMPARISON-set reason as above. */
 export function existingDividendSourceReferenceRowsQuery(
   userId: string,
 ): SqlStatement {
   return {
-    sql: `SELECT portfolio_id, source_reference FROM dividend_manual_records
+    sql: `SELECT portfolio_id, source_reference, total_cash_decimal,
+              total_franking_decimal, payment_date,
+              fx_rate_to_portfolio_decimal, currency_code
+       FROM dividend_manual_records
        WHERE user_id = ? AND source_reference IS NOT NULL`,
     params: [userId],
   };
@@ -102,13 +127,22 @@ export function existingDividendSourceReferenceRowsQuery(
  * skipped" too. Unlike a comparison set, truncating this pure SUPPRESSION
  * set can only ever ADD noise, never hide a duplicate, so it fails OPEN
  * (bounded at `limit`, the caller's `capSuppressionReferenceRows` degrades
- * overflow to an empty set). */
+ * overflow to an empty set).
+ *
+ * BRK-019 slice 1: widened by the six value-bearing columns
+ * `domain/imports/committed-value-comparison.ts`'s `CommittedTradeValues`
+ * needs, reusing this same already-loaded, already-bounded round trip for
+ * the "does this row's own value still match what is committed" check
+ * rather than a second query. */
 export function existingTradeSourceReferenceRowsQuery(
   userId: string,
   limit: number,
 ): SqlStatement {
   return {
-    sql: `SELECT portfolio_id, source_reference FROM transactions
+    sql: `SELECT portfolio_id, source_reference, quantity_decimal,
+              unit_price_decimal, fee_amount_decimal, local_trade_date,
+              type, currency_code
+       FROM transactions
        WHERE user_id = ? AND source_type = 'csv_import' AND source_reference IS NOT NULL
          AND status <> 'reversed'
        LIMIT ?`,

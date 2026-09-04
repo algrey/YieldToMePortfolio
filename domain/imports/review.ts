@@ -11,6 +11,10 @@ import {
   type ImportReconciliationPreview,
   type ImportReconciliationRow,
 } from "./reconciliation.ts";
+import type {
+  CommittedDividendValues,
+  CommittedTradeValues,
+} from "./committed-value-comparison.ts";
 
 export type ImportReviewBatch = Readonly<{
   id: string;
@@ -102,6 +106,12 @@ export type ImportReviewEvidence = Readonly<{
   // commit-time exact-`source_reference` skip -- see
   // `ImportReconciliationInput.existingTradeSourceReferences`'s doc comment.
   existingTradeSourceReferences?: ReadonlySet<string>;
+  // BRK-019 slice 1: see `ImportReconciliationInput.committedTradeValues`/
+  // `.committedDividendValues`'s doc comments -- same page-only-supplied,
+  // hash-excluded scoping as every other field above (see `hashedPreview`
+  // below).
+  committedTradeValues?: ReadonlyMap<string, CommittedTradeValues>;
+  committedDividendValues?: ReadonlyMap<string, CommittedDividendValues>;
 }>;
 
 export type BuiltImportReview = Readonly<{
@@ -171,6 +181,8 @@ export function buildImportReview(
     reconciliationCandidates: evidence.reconciliationCandidates,
     existingDividendSourceReferences: evidence.existingDividendSourceReferences,
     existingTradeSourceReferences: evidence.existingTradeSourceReferences,
+    committedTradeValues: evidence.committedTradeValues,
+    committedDividendValues: evidence.committedDividendValues,
   });
   // DIV-004 (Orchestrator ruling, review round 1 BLOCKING B1 fix):
   // `DIVIDEND_NEAR_EXISTING_ENTRY` is advisory DISPLAY evidence only -- it
@@ -254,7 +266,21 @@ export function buildImportReview(
         issue.code !== "DIVIDEND_RECONCILIATION_PROPOSED" &&
         issue.code !== "DIVIDEND_RECONCILIATION_AMBIGUOUS" &&
         issue.code !== "DIVIDEND_ALREADY_IMPORTED_MANUAL_DUPLICATE" &&
-        issue.code !== "DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE",
+        issue.code !== "DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE" &&
+        // BRK-019 slice 1: `ROW_DIFFERS_FROM_COMMITTED_RECORD` depends on
+        // `evidence.committedTradeValues`/`.committedDividendValues`/
+        // `.existingDividendEntries` -- like every other code excluded
+        // above, these are supplied ONLY by the page/refresh preview path
+        // (`app/import-actions.ts`'s `loadReview`), never by ready-service,
+        // security-verification-service, or commit's own revalidation, so
+        // this issue must not change `previewVersion` or those callers
+        // would compute a different hash than the page rendered. The
+        // OWNER-VISIBLE blocking behaviour is unaffected -- `preview.ready`
+        // (the un-hashed struct) still reflects it wherever this evidence
+        // IS supplied; `db/repositories/import-commit.ts`'s own
+        // independent, live commit-time check (this task) is the
+        // authoritative backstop that never depends on this hash.
+        issue.code !== "ROW_DIFFERS_FROM_COMMITTED_RECORD",
     ),
   };
   const canonicalEvidence = {

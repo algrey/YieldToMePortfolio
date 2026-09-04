@@ -10,6 +10,26 @@ import {
   computeDividendCashTotal,
   computeDividendReconciliation,
 } from "./dividend-reconciliation.ts";
+// BRK-019 slice 1: the shared field-comparison this preview-time check and
+// `app/sharesight-sync-service.ts`'s sync-result classification both use --
+// see that module's header comment for why it is shared, not duplicated.
+import {
+  dividendValueDifferences,
+  tradeValueDifferences,
+  type CommittedDividendValues,
+  type CommittedRecordFieldDifference,
+  type CommittedTradeValues,
+} from "./committed-value-comparison.ts";
+
+// BRK-019 slice 1: the identity-key prefix Sharesight-sourced payouts commit
+// under (`domain/sharesight-sync/transform.ts`'s payout identity key,
+// carried into `source_reference` as `import-fingerprint:sharesight-payout:
+// <portfolioId>:<holdingId>:<paidOnDate>`) -- used ONLY to recognise a
+// DIV-004 near match's existing side as Sharesight-sourced for the
+// paid-date-correction escalation below, never for matching/identity
+// itself (that stays `sourceReferenceKey`'s exact-string comparison).
+const SHARESIGHT_PAYOUT_SOURCE_REFERENCE_PREFIX =
+  "import-fingerprint:sharesight-payout:";
 
 type Decimal = { coefficient: bigint; scale: number };
 
@@ -266,6 +286,23 @@ function sourceReferenceKey(portfolioId: string, fingerprint: string): string {
   return `${portfolioId}::import-fingerprint:${fingerprint}`;
 }
 
+// BRK-019 slice 1: renders a `ROW_DIFFERS_FROM_COMMITTED_RECORD` issue's
+// field-by-field differences as prose, for the ONE place this codebase
+// surfaces an issue's detail today -- `message` (see
+// `app/components/import-review.tsx`, which renders `issue.message` as
+// plain text with no per-code structured rendering). `fieldDifferences` on
+// the issue itself carries the same list structured, for a future UI.
+export function formatFieldDifferences(
+  differences: readonly CommittedRecordFieldDifference[],
+): string {
+  return differences
+    .map(
+      (difference) =>
+        `${difference.field} (committed ${difference.committed ?? "unset"} -> incoming ${difference.incoming ?? "unset"})`,
+    )
+    .join(", ");
+}
+
 export type ImportReconciliationRow = Readonly<{
   id: string;
   physicalRowNumber: number;
@@ -402,12 +439,52 @@ export type ImportReconciliationIssue = Readonly<{
     // `input.reconciliationCandidates`, so -- like
     // `DIVIDEND_RECONCILIATION_PROPOSED` et al. -- it IS excluded from
     // `previewVersion` hashing; see `domain/imports/review.ts`.
-    | "DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE";
+    | "DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE"
+    // BRK-019 slice 1: a row whose commit-time identity (`source_reference`)
+    // ALREADY exists committed (the SAME exact-match this file already uses
+    // to suppress `TRADE_NEAR_EXISTING_ENTRY`/`DIVIDEND_MATCHES_EXISTING_ENTRY`
+    // as guaranteed noise -- `tradeAlreadyBoundForSkip`/
+    // `dividendAlreadyBoundForSkip` below) but whose own economic VALUE
+    // differs from what is currently stored under that identity -- a
+    // Sharesight-side correction (BRK-014) or a re-uploaded, edited CSV row
+    // sharing its predecessor's fingerprint. Unlike the identical-value case
+    // (a true no-op, silently skipped at commit exactly as today), this is
+    // NOT safe to silently keep re-arriving at the OLD value: `error`
+    // severity, ROW-LINKED (never batch-level), so it blocks readiness of
+    // THAT ROW ONLY -- matching the IMP-008 exclusion precedent (an
+    // error-severity issue tied to `rowId` stops blocking once the OWNER
+    // excludes that one row via "Skip this row"), so the rest of the batch
+    // stays committable. `db/repositories/import-commit.ts`'s own
+    // commit-time fail-closed check (this task) independently re-derives
+    // this same finding from live DB state and skips such a row rather than
+    // silently accepting either the old or the new value, even if this
+    // preview-time check was somehow bypassed (stale preview, resumed old
+    // batch) -- see that module's header comment.
+    //
+    // Also raised (see the DIV-004 block below) when an incoming dividend
+    // row's payment date falls within DIV-001's proximity window of an
+    // EXISTING Sharesight-sourced record for the SAME resolved security with
+    // the SAME cash total but a DIFFERENT paid date -- the identity itself
+    // differs (a Sharesight payout's identity key embeds its paid-on date),
+    // so this is not an identity match, but the combination of same
+    // security + same amount + a Sharesight-sourced neighbour is strong
+    // enough evidence of a paid-date correction that this stays advisory-
+    // warning territory only for a NON-Sharesight (manual/CSV) neighbour --
+    // two such legitimate economic-identity collisions are confirmed to
+    // exist on the owner's own account, so this is never auto-skipped,
+    // only surfaced as a decision the owner must resolve.
+    | "ROW_DIFFERS_FROM_COMMITTED_RECORD";
   severity: "error" | "warning" | "info";
   rowId?: string;
   physicalRowNumber?: number;
   sourceKey?: string;
   message: string;
+  // BRK-019 slice 1: the field-by-field old (committed)/new (incoming)
+  // values behind a `ROW_DIFFERS_FROM_COMMITTED_RECORD` issue -- present
+  // only on that code, for a UI that wants a structured table rather than
+  // parsing `message`. `message` itself always states the same differences
+  // in prose, so no consumer is required to read this field.
+  fieldDifferences?: readonly CommittedRecordFieldDifference[];
 }>;
 
 // DIV-004: an existing (already-persisted, pre-this-batch) dividend fact
@@ -468,6 +545,15 @@ export type ImportPreviewExistingDividendEntry = Readonly<{
   // warning message, that FX was involved on the EXISTING side when
   // present -- never to compute a currency match/mismatch verdict.
   currencyCode?: string | null;
+  // BRK-019 slice 1: this row's own `source_reference`, when known -- used
+  // ONLY to recognise a DIV-004 near match as Sharesight-sourced (the
+  // `import-fingerprint:sharesight-payout:` prefix) for the paid-date-
+  // correction escalation (`ROW_DIFFERS_FROM_COMMITTED_RECORD`) -- see that
+  // code's own doc comment. Optional/absent-tolerant so every pre-this-task
+  // caller/fixture that never mentions it keeps compiling unchanged and
+  // simply never qualifies for the escalation (falls back to the existing
+  // plain advisory warning).
+  sourceReference?: string | null;
 }>;
 
 // BUG-011: an existing POSTED buy/sell transaction (any source route,
@@ -621,6 +707,21 @@ export type ImportReconciliationInput = Readonly<{
   // 2026-09-01 batch staged 226 trades, committed 0; every one would have
   // warned under the pre-fix behaviour).
   existingTradeSourceReferences?: ReadonlySet<string>;
+  // BRK-019 slice 1: keyed EXACTLY like `existingTradeSourceReferences`
+  // above (`${portfolioId}::${sourceReference}`), carrying the committed
+  // row's own value-bearing columns for every key present in that set --
+  // lets a row already bound for the identical commit-time skip
+  // (`tradeAlreadyBoundForSkip`) be further split into a true no-op
+  // (values match, silently skipped exactly as today) versus a value
+  // correction (`ROW_DIFFERS_FROM_COMMITTED_RECORD`, blocks THAT row's
+  // readiness). Absent/missing-key-tolerant: a caller that does not supply
+  // this (or a key with no entry) simply never raises the new issue for
+  // that row, matching every other page-only-supplied advisory input's
+  // established fallback.
+  committedTradeValues?: ReadonlyMap<string, CommittedTradeValues>;
+  // BRK-019 slice 1: the dividend analog of `committedTradeValues` above,
+  // keyed like `existingDividendSourceReferences`.
+  committedDividendValues?: ReadonlyMap<string, CommittedDividendValues>;
 }>;
 
 function decisionFor(
@@ -697,6 +798,12 @@ export function createImportReconciliationPreview(
     input.existingDividendSourceReferences ?? new Set<string>();
   const existingTradeSourceReferences =
     input.existingTradeSourceReferences ?? new Set<string>();
+  // BRK-019 slice 1: see `ImportReconciliationInput.committedTradeValues`/
+  // `.committedDividendValues`'s doc comments.
+  const committedTradeValues =
+    input.committedTradeValues ?? new Map<string, CommittedTradeValues>();
+  const committedDividendValues =
+    input.committedDividendValues ?? new Map<string, CommittedDividendValues>();
   const issues: ImportReconciliationIssue[] = [];
   const unresolvedCandidates: ImportPreviewSecurityCandidate[] = [];
   const unresolvedCandidateIds = new Set<string>();
@@ -922,6 +1029,70 @@ export function createImportReconciliationPreview(
       sourceReferenceKey(portfolio.id, row.fingerprint),
     );
 
+    // BRK-019 slice 1: a row already bound for the commit-time exact-
+    // `source_reference` skip (`dividendAlreadyBoundForSkip` above) is a
+    // TRUE no-op only when its own economic value also matches what is
+    // currently committed under that identity -- if it does not, silently
+    // skipping it at commit would leave a Sharesight-side correction (or a
+    // re-uploaded, edited CSV row sharing its predecessor's fingerprint)
+    // invisible. This does NOT overlap with `DIVIDEND_MATCHES_EXISTING_
+    // ENTRY`/`DIVIDEND_NEAR_EXISTING_ENTRY` below (both explicitly gated on
+    // `!dividendAlreadyBoundForSkip`) -- exactly one of the two paths can
+    // fire for a given row. See `ROW_DIFFERS_FROM_COMMITTED_RECORD`'s own
+    // doc comment for the readiness-blocking/IMP-008-exclusion semantics.
+    if (
+      isDividend &&
+      dividendAlreadyBoundForSkip &&
+      membershipId !== null &&
+      row.normalized.localTradeDate !== null
+    ) {
+      const committed = committedDividendValues.get(
+        sourceReferenceKey(portfolio.id, row.fingerprint),
+      );
+      if (committed) {
+        const incomingCashTotal = safeComputeDividendCashTotal({
+          totalCashDecimal: row.normalized.totalCashDecimal ?? null,
+          sharesDecimal: row.normalized.sharesOwned,
+          dividendPerShareDecimal: row.normalized.costPerShare,
+        });
+        // A cash total that cannot be computed at all is "not comparable",
+        // not "changed to nothing" -- `DIVIDEND_RECONCILIATION_ROW_AMOUNT_
+        // UNAVAILABLE` (below, unconditional on every dividend row) already
+        // surfaces that case; this check only runs once there is a genuine
+        // incoming value to compare.
+        if (incomingCashTotal !== null) {
+          const incomingFrankingTotal = safeComputeDividendCashTotal({
+            totalCashDecimal: row.normalized.totalFrankingDecimal ?? null,
+            sharesDecimal: row.normalized.sharesOwned,
+            dividendPerShareDecimal: row.normalized.frankingPerShare,
+          });
+          const differences = dividendValueDifferences(
+            {
+              cashTotalDecimal: incomingCashTotal,
+              totalFrankingDecimal: incomingFrankingTotal,
+              paymentDate: row.normalized.localTradeDate,
+              fxRateToPortfolioDecimal:
+                row.normalized.exchangeRateDecimal ?? null,
+              currencyCode: row.normalized.currency ?? null,
+            },
+            committed,
+          );
+          if (differences.length > 0) {
+            unresolved += 1;
+            issues.push({
+              code: "ROW_DIFFERS_FROM_COMMITTED_RECORD",
+              severity: "error",
+              rowId: row.id,
+              physicalRowNumber: row.physicalRowNumber,
+              sourceKey: membershipId,
+              message: `This dividend's identity already exists on your ledger, but its recorded value has changed: ${formatFieldDifferences(differences)}. Committing will not update the existing record -- exclude this row ("Skip this row", below) to keep the current value, or reverse and re-import the earlier batch to accept the correction.`,
+              fieldDifferences: differences,
+            });
+          }
+        }
+      }
+    }
+
     // DIV-004: a NON-BLOCKING proximity warning (mirrors FRANKING_ON_NON_
     // DIVIDEND -- readiness/commit are unaffected) when an incoming dividend
     // row falls within DIV-001's matching window of an EXISTING owner-typed
@@ -937,21 +1108,85 @@ export function createImportReconciliationPreview(
       row.normalized.localTradeDate !== null
     ) {
       const paymentDate = row.normalized.localTradeDate;
-      const nearExisting = (input.existingDividendEntries ?? []).some(
+      const nearEntries = (input.existingDividendEntries ?? []).filter(
         (entry) =>
           entry.portfolioSecurityId === membershipId &&
           Math.abs(daysBetweenDates(entry.paymentDate, paymentDate)) <=
             PROXIMITY_WINDOW_DAYS,
       );
-      if (nearExisting) {
-        issues.push({
-          code: "DIVIDEND_NEAR_EXISTING_ENTRY",
-          severity: "warning",
-          rowId: row.id,
-          physicalRowNumber: row.physicalRowNumber,
-          sourceKey: membershipId,
-          message: `This dividend is within ${PROXIMITY_WINDOW_DAYS} days of an existing entry already recorded for this security -- check it is not a duplicate before committing.`,
+      if (nearEntries.length > 0) {
+        // BRK-019 slice 1: the `paidOnDate` case -- a near match this close
+        // by date, on the SAME resolved security, whose EXISTING side is
+        // itself Sharesight-sourced (its `source_reference` carries the
+        // `sharesight-payout:` identity prefix) and whose cash total also
+        // matches (within DIV-016C's own tolerance) is strong evidence of a
+        // Sharesight-side paid-date correction, not a coincidental near
+        // match -- see `ROW_DIFFERS_FROM_COMMITTED_RECORD`'s own doc
+        // comment for why this stays advisory-warning territory for a
+        // NON-Sharesight (manual/CSV) neighbour (two legitimate economic
+        // near-duplicates are confirmed to exist on the owner's account).
+        const incomingCashTotal = safeComputeDividendCashTotal({
+          totalCashDecimal: row.normalized.totalCashDecimal ?? null,
+          sharesDecimal: row.normalized.sharesOwned,
+          dividendPerShareDecimal: row.normalized.costPerShare,
         });
+        const correctedEntry =
+          incomingCashTotal !== null
+            ? nearEntries.find(
+                (entry) =>
+                  entry.paymentDate !== paymentDate &&
+                  (entry.sourceReference ?? "").startsWith(
+                    SHARESIGHT_PAYOUT_SOURCE_REFERENCE_PREFIX,
+                  ) &&
+                  (entry.cashTotalDecimal ?? null) !== null &&
+                  safeCashTotalsWithinTolerance(
+                    entry.cashTotalDecimal as string,
+                    incomingCashTotal,
+                  ),
+              )
+            : undefined;
+        if (correctedEntry) {
+          const incomingFrankingTotal = safeComputeDividendCashTotal({
+            totalCashDecimal: row.normalized.totalFrankingDecimal ?? null,
+            sharesDecimal: row.normalized.sharesOwned,
+            dividendPerShareDecimal: row.normalized.frankingPerShare,
+          });
+          const differences = dividendValueDifferences(
+            {
+              cashTotalDecimal: incomingCashTotal,
+              totalFrankingDecimal: incomingFrankingTotal,
+              paymentDate,
+              fxRateToPortfolioDecimal: null,
+              currencyCode: row.normalized.currency ?? null,
+            },
+            {
+              cashTotalDecimal: correctedEntry.cashTotalDecimal ?? null,
+              totalFrankingDecimal: correctedEntry.frankingTotalDecimal ?? null,
+              paymentDate: correctedEntry.paymentDate,
+              fxRateToPortfolioDecimal: null,
+              currencyCode: correctedEntry.currencyCode ?? null,
+            },
+          );
+          unresolved += 1;
+          issues.push({
+            code: "ROW_DIFFERS_FROM_COMMITTED_RECORD",
+            severity: "error",
+            rowId: row.id,
+            physicalRowNumber: row.physicalRowNumber,
+            sourceKey: membershipId,
+            message: `This dividend looks like a paid-date correction to an existing Sharesight-sourced record for the same security and cash total: ${formatFieldDifferences(differences)}. Committing this row as a new entry would double-count the distribution -- exclude this row ("Skip this row", below) to keep the existing record, or reverse and re-import the earlier batch to accept the correction.`,
+            fieldDifferences: differences,
+          });
+        } else {
+          issues.push({
+            code: "DIVIDEND_NEAR_EXISTING_ENTRY",
+            severity: "warning",
+            rowId: row.id,
+            physicalRowNumber: row.physicalRowNumber,
+            sourceKey: membershipId,
+            message: `This dividend is within ${PROXIMITY_WINDOW_DAYS} days of an existing entry already recorded for this security -- check it is not a duplicate before committing.`,
+          });
+        }
       }
     }
 
@@ -1091,6 +1326,52 @@ export function createImportReconciliationPreview(
     const tradeAlreadyBoundForSkip = existingTradeSourceReferences.has(
       sourceReferenceKey(portfolio.id, row.fingerprint),
     );
+
+    // BRK-019 slice 1: the trade analog of the dividend value-differs check
+    // above -- a row already bound for the commit-time exact-
+    // `source_reference` skip is a true no-op only when its own value also
+    // matches what is currently committed under that identity. See
+    // `ROW_DIFFERS_FROM_COMMITTED_RECORD`'s own doc comment.
+    if (
+      !isDividend &&
+      !isCash &&
+      tradeAlreadyBoundForSkip &&
+      membershipId !== null &&
+      (row.normalized.type === "buy" || row.normalized.type === "sell") &&
+      row.normalized.localTradeDate !== null &&
+      row.normalized.sharesOwned !== null &&
+      row.normalized.costPerShare !== null
+    ) {
+      const committed = committedTradeValues.get(
+        sourceReferenceKey(portfolio.id, row.fingerprint),
+      );
+      if (committed) {
+        const differences = tradeValueDifferences(
+          {
+            type: row.normalized.type,
+            localTradeDate: row.normalized.localTradeDate,
+            quantityDecimal: row.normalized.sharesOwned,
+            priceDecimal: row.normalized.costPerShare,
+            feeAmountDecimal: row.normalized.commission ?? "0",
+            currencyCode: row.normalized.currency ?? null,
+          },
+          committed,
+        );
+        if (differences.length > 0) {
+          unresolved += 1;
+          issues.push({
+            code: "ROW_DIFFERS_FROM_COMMITTED_RECORD",
+            severity: "error",
+            rowId: row.id,
+            physicalRowNumber: row.physicalRowNumber,
+            sourceKey: membershipId,
+            message: `This ${row.normalized.type}'s identity already exists on your ledger, but its recorded value has changed: ${formatFieldDifferences(differences)}. Committing will not update the existing record -- exclude this row ("Skip this row", below) to keep the current value, or reverse and re-import the earlier batch to accept the correction.`,
+            fieldDifferences: differences,
+          });
+        }
+      }
+    }
+
     if (
       !isDividend &&
       !isCash &&

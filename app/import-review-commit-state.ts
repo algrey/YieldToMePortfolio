@@ -25,6 +25,13 @@ export type ReviewCommitProgress = {
   committedRows: number;
   skippedRows: number;
   excludedByOwnerRows: number;
+  // BRK-019 slice 1: the subset of `skippedRows` skipped because this row's
+  // identity already exists committed but its value differs (see
+  // `db/repositories/import-commit.ts`'s `committedRecordDiffersIssueStatement`
+  // doc comment). Optional/defaulted to 0 in `rowEffectsSentence` below so
+  // every pre-this-task caller/fixture that never mentions it keeps
+  // compiling and rendering unchanged.
+  needsDecisionRows?: number;
   remainingRows: number;
 };
 
@@ -38,6 +45,9 @@ export type ReviewCommitResult = {
   committedRows: number;
   skippedRows: number;
   excludedByOwnerRows: number;
+  // BRK-019 slice 1: see `ReviewCommitProgress.needsDecisionRows`'s doc
+  // comment -- same optional/defaulted scoping.
+  needsDecisionRows?: number;
   remainingRows: number;
 };
 
@@ -90,12 +100,23 @@ function rowEffectsSentence(effects: {
   committedRows: number;
   skippedRows: number;
   excludedByOwnerRows: number;
+  needsDecisionRows?: number;
 }): string {
+  const needsDecisionRows = effects.needsDecisionRows ?? 0;
+  // BRK-019 slice 1: named alongside the pre-existing "excluded by owner"
+  // parenthetical only when non-zero, so the pre-this-task sentence stays
+  // byte-for-byte identical whenever no row was skipped for this reason
+  // (every pre-this-task caller/fixture, which never supplies the field at
+  // all).
+  const skippedDetail =
+    needsDecisionRows > 0
+      ? `(${effects.excludedByOwnerRows} excluded by owner; ${needsDecisionRows} need${needsDecisionRows === 1 ? "s" : ""} a decision)`
+      : `(${effects.excludedByOwnerRows} excluded by owner)`;
   return (
     `Committed ${effects.committedRows} row effect${effects.committedRows === 1 ? "" : "s"}; ` +
     `${effects.skippedRows} row${effects.skippedRows === 1 ? "" : "s"} ` +
     `${effects.skippedRows === 1 ? "was" : "were"} skipped ` +
-    `(${effects.excludedByOwnerRows} excluded by owner).`
+    `${skippedDetail}.`
   );
 }
 

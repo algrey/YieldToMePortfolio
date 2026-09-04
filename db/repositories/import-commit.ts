@@ -40,7 +40,21 @@ import {
 // a request that should fail with an honest `mapping_incomplete` into a
 // permanent 503 (`app/import-commit-actions.ts`'s catch-all). See
 // `safeComputeDividendCashTotal`'s doc comment.
-import { safeComputeDividendCashTotal } from "../../domain/imports/reconciliation.ts";
+import {
+  formatFieldDifferences,
+  safeComputeDividendCashTotal,
+} from "../../domain/imports/reconciliation.ts";
+// BRK-019 slice 1: the same shared field-comparison
+// `domain/imports/reconciliation.ts`'s preview-time check and
+// `app/sharesight-sync-service.ts`'s sync-result classification use -- see
+// `domain/imports/committed-value-comparison.ts`'s header comment for why
+// shared, not duplicated. This is commit's OWN independent, live
+// re-derivation of the same finding, never trusting the preview alone.
+import {
+  dividendValueDifferences,
+  tradeValueDifferences,
+  type CommittedRecordFieldDifference,
+} from "../../domain/imports/committed-value-comparison.ts";
 
 // BRK-005: mirrors `app/import-ready-service.ts`'s identical widening of the
 // CSV parser's `(parserFormat, parserVersion)` allowlist by exactly one
@@ -152,6 +166,13 @@ export type ImportCommitSuccess = {
   // unsupported-row skip) -- "N rows excluded by owner" in commit metadata
   // and batch history, per the Orchestrator ruling.
   excludedByOwnerRows: number;
+  // BRK-019 slice 1: the subset of `skippedRows` that were skipped because
+  // this row's identity already exists committed but its value DIFFERS from
+  // what is currently stored -- distinct from a true no-op duplicate skip
+  // (identity AND value both match). Never a write either way; see
+  // `committedRecordDiffersIssueStatement`'s doc comment for how this is
+  // persisted and counted.
+  needsDecisionRows: number;
   // UI-013 (review round B1): still-`staged` rows this batch has not yet
   // processed -- the real, machinery-derived denominator for a client's
   // "N of M rows" commit progress display. Deliberately NOT
@@ -281,6 +302,56 @@ function mapRows(rows: Record<string, unknown>[]): StagedRow[] {
         ? null
         : String(row.excluded_by_owner_at),
   }));
+}
+
+// BRK-019 slice 1: persists commit's own fail-closed finding (a row's
+// identity already exists committed but its value differs) as a normal
+// `import_issues` row -- the SAME table/shape `db/repositories/import-staging.ts`
+// writes a persisted issue into at parse time (e.g.
+// `SHARESIGHT_PAYOUT_KEY_COLLISION`), reused here rather than a new
+// column/enum on `import_rows` -- `import_issues.code` is free-form text
+// with no CHECK constraint (`db/schema.ts`), so this needs no migration.
+// `summary()` below counts a row this way as `needsDecisionRows`, distinct
+// from a true no-op skip. `WHERE NOT EXISTS` guards against inserting a
+// duplicate copy of the same finding if this exact chunk is ever retried
+// (the row's own `commit_status` UPDATE in the same statement group is
+// itself idempotent via its `WHERE commit_status = 'staged'` guard, but an
+// unconditional INSERT would not be).
+function committedRecordDiffersIssueStatement(
+  userId: string,
+  batchId: string,
+  row: StagedRow,
+  differences: readonly CommittedRecordFieldDifference[],
+  createdAt: string,
+): SqlStatement {
+  const id = randomUUID();
+  const message = `This row's identity already exists on the ledger, but its recorded value has changed: ${formatFieldDifferences(differences)}. Skipped at commit -- it was not accepted at either the old or the new value.`;
+  return {
+    sql: `
+      INSERT INTO import_issues (
+        id, user_id, batch_id, row_id, physical_row_number, field, severity,
+        code, message, suggested_resolution_type, resolved_value,
+        resolved_by_user_id, resolved_at, created_at, updated_at, version
+      )
+      SELECT ?, ?, ?, ?, ?, NULL, 'error', 'ROW_DIFFERS_FROM_COMMITTED_RECORD', ?, NULL, NULL, NULL, NULL, ?, ?, 1
+      WHERE NOT EXISTS (
+        SELECT 1 FROM import_issues
+        WHERE batch_id = ? AND row_id = ? AND code = 'ROW_DIFFERS_FROM_COMMITTED_RECORD'
+      )
+    `,
+    params: [
+      id,
+      userId,
+      batchId,
+      row.id,
+      row.physicalRowNumber,
+      message,
+      createdAt,
+      createdAt,
+      batchId,
+      row.id,
+    ],
+  };
 }
 
 function batchFromRow(row: Record<string, unknown>): BatchState {
@@ -658,6 +729,12 @@ export function createOwnedImportCommitRepository(
          SUM(CASE WHEN commit_status = 'skipped' THEN 1 ELSE 0 END) AS skipped_rows,
          SUM(CASE WHEN commit_status = 'skipped' AND excluded_by_owner_at IS NOT NULL
               THEN 1 ELSE 0 END) AS excluded_by_owner_rows,
+         SUM(CASE WHEN commit_status = 'skipped' AND EXISTS (
+              SELECT 1 FROM import_issues
+               WHERE import_issues.batch_id = import_rows.batch_id
+                 AND import_issues.row_id = import_rows.id
+                 AND import_issues.code = 'ROW_DIFFERS_FROM_COMMITTED_RECORD'
+              ) THEN 1 ELSE 0 END) AS needs_decision_rows,
          SUM(CASE WHEN commit_status = 'staged' THEN 1 ELSE 0 END) AS remaining_rows
        FROM import_rows WHERE user_id = ? AND batch_id = ?`,
       [userId, batchId],
@@ -689,6 +766,7 @@ export function createOwnedImportCommitRepository(
       committedRows: Number(counts?.committed_rows ?? 0),
       skippedRows: Number(counts?.skipped_rows ?? 0),
       excludedByOwnerRows: Number(counts?.excluded_by_owner_rows ?? 0),
+      needsDecisionRows: Number(counts?.needs_decision_rows ?? 0),
       remainingRows: Number(counts?.remaining_rows ?? 0),
       rebuildJobId: rebuildJobIds[0] ?? null,
       rebuildJobIds,
@@ -1402,12 +1480,86 @@ export function createOwnedImportCommitRepository(
             // portfolio) trades use via `transactions.source_reference`,
             // looked up against `dividend_manual_records.source_reference`
             // instead (see `buildDividendManualRecordImportInsertStatements`).
-            const existingRecord = await client.get<{ id: string }>(
-              `SELECT id FROM dividend_manual_records
+            const existingRecord = await client.get<{
+              id: string;
+              total_cash_decimal: string | null;
+              total_franking_decimal: string | null;
+              payment_date: string | null;
+              fx_rate_to_portfolio_decimal: string | null;
+              currency_code: string | null;
+            }>(
+              `SELECT id, total_cash_decimal, total_franking_decimal, payment_date,
+                      fx_rate_to_portfolio_decimal, currency_code
+                 FROM dividend_manual_records
                WHERE user_id = ? AND portfolio_id = ? AND source_reference = ? LIMIT 1`,
               [userId, target.portfolioId, resolved.sourceReference],
             );
             if (existingRecord) {
+              // BRK-019 slice 1: fail-closed backstop -- a row whose
+              // identity already exists here is ALWAYS skipped, never
+              // written (unchanged), but a row whose own economic value
+              // DIFFERS from what is stored gets a DISTINCT, persisted
+              // signal (`import_issues`, code `ROW_DIFFERS_FROM_COMMITTED_
+              // RECORD`) in the SAME atomic statement group as the skip --
+              // never silent, and `summary()` below counts it separately
+              // from a true no-op skip. This is the independent, live,
+              // commit-time re-derivation of the SAME check
+              // `domain/imports/reconciliation.ts`'s preview-time check
+              // already ran on (best-effort, page-only-supplied evidence)
+              // -- see that module's `ROW_DIFFERS_FROM_COMMITTED_RECORD`
+              // doc comment for why commit must never trust the preview
+              // alone (a stale preview, a resumed old batch, or a
+              // concurrent change could all let a value-changed row reach
+              // this point with no earlier warning).
+              const incomingNormalized = parseNormalized(
+                row.normalizedFieldsJson,
+              );
+              const incomingCashTotal = incomingNormalized
+                ? safeComputeDividendCashTotal({
+                    totalCashDecimal:
+                      incomingNormalized.totalCashDecimal ?? null,
+                    sharesDecimal: incomingNormalized.sharesOwned,
+                    dividendPerShareDecimal: incomingNormalized.costPerShare,
+                  })
+                : null;
+              if (incomingNormalized && incomingCashTotal !== null) {
+                const incomingFrankingTotal = safeComputeDividendCashTotal({
+                  totalCashDecimal:
+                    incomingNormalized.totalFrankingDecimal ?? null,
+                  sharesDecimal: incomingNormalized.sharesOwned,
+                  dividendPerShareDecimal: incomingNormalized.frankingPerShare,
+                });
+                const differences = dividendValueDifferences(
+                  {
+                    cashTotalDecimal: incomingCashTotal,
+                    totalFrankingDecimal: incomingFrankingTotal,
+                    paymentDate: incomingNormalized.localTradeDate,
+                    fxRateToPortfolioDecimal:
+                      incomingNormalized.exchangeRateDecimal ?? null,
+                    currencyCode: incomingNormalized.currency ?? null,
+                  },
+                  {
+                    cashTotalDecimal: existingRecord.total_cash_decimal,
+                    totalFrankingDecimal:
+                      existingRecord.total_franking_decimal,
+                    paymentDate: existingRecord.payment_date,
+                    fxRateToPortfolioDecimal:
+                      existingRecord.fx_rate_to_portfolio_decimal,
+                    currencyCode: existingRecord.currency_code,
+                  },
+                );
+                if (differences.length > 0) {
+                  statements.push(
+                    committedRecordDiffersIssueStatement(
+                      userId,
+                      batch.id,
+                      row,
+                      differences,
+                      nowIso(now),
+                    ),
+                  );
+                }
+              }
               statements.push({
                 sql: `UPDATE import_rows SET commit_status = 'skipped', commit_transaction_id = ?, updated_at = ?, version = version + 1
                   WHERE id = ? AND user_id = ? AND batch_id = ? AND commit_status = 'staged'`,
@@ -1513,13 +1665,53 @@ export function createOwnedImportCommitRepository(
           const existing = await client.get<{
             id: string;
             idempotency_key: string | null;
+            quantity_decimal: string | null;
+            unit_price_decimal: string | null;
+            fee_amount_decimal: string | null;
+            local_trade_date: string | null;
+            type: string | null;
+            currency_code: string | null;
           }>(
-            `SELECT id, idempotency_key FROM transactions
+            `SELECT id, idempotency_key, quantity_decimal, unit_price_decimal,
+                    fee_amount_decimal, local_trade_date, type, currency_code
+               FROM transactions
              WHERE user_id = ? AND portfolio_id = ? AND source_type = 'csv_import'
                AND source_reference = ? AND status <> 'reversed' LIMIT 1`,
             [userId, resolved.input.portfolioId, resolved.sourceReference],
           );
           if (existing) {
+            // BRK-019 slice 1: the trade analog of the dividend fail-closed
+            // check above -- see that block's comment for the full
+            // rationale.
+            const differences = tradeValueDifferences(
+              {
+                type: resolved.input.type,
+                localTradeDate: resolved.input.localTradeDate,
+                quantityDecimal: resolved.input.quantityDecimal,
+                priceDecimal: resolved.input.unitPriceDecimal,
+                feeAmountDecimal: resolved.input.feeAmountDecimal,
+                currencyCode: resolved.input.currencyCode,
+              },
+              {
+                quantityDecimal: existing.quantity_decimal,
+                priceDecimal: existing.unit_price_decimal,
+                feeAmountDecimal: existing.fee_amount_decimal,
+                localTradeDate: existing.local_trade_date,
+                type: existing.type,
+                currencyCode: existing.currency_code,
+              },
+            );
+            if (differences.length > 0) {
+              statements.push(
+                committedRecordDiffersIssueStatement(
+                  userId,
+                  batch.id,
+                  row,
+                  differences,
+                  nowIso(now),
+                ),
+              );
+            }
             statements.push({
               sql: `UPDATE import_rows SET commit_status = 'skipped', commit_transaction_id = ?, updated_at = ?, version = version + 1
                 WHERE id = ? AND user_id = ? AND batch_id = ? AND commit_status = 'staged'`,
