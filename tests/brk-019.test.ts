@@ -2125,6 +2125,10 @@ test("BRK-019 CORRECTION ROUND (B1): a paid-date-shifted re-sync is caught end-t
   // The escalation must now also be PERSISTED (not just computed) -- this is
   // what lets the review UI's `blockedRowIssues`/`acceptDisabled` (persisted-
   // issue-driven, BRK-009C) show the block pre-emptively.
+  // ROUND 3 (B3, 2026-09-04), correcting the sentence above: the insert
+  // happens inside markImportReadyWithContext, so the first Accept/Mark-ready
+  // attempt is rejected and persists the finding; the block is visible from
+  // the NEXT render, not pre-emptively.
   const persistedIssues = await client.all<{ code: string; row_id: string }>(
     `SELECT code, row_id FROM import_issues
       WHERE batch_id = ? AND code = 'ROW_DIFFERS_FROM_COMMITTED_RECORD'`,

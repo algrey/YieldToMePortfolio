@@ -1672,7 +1672,10 @@ export function createOwnedImportCommitRepository(
             // `IS NULL` keeps manually-entered rows in scope), so it matches
             // the PRE-BATCH evidence snapshot the preview-time escalation
             // sees. `commit()` writes in chunks of at most
-            // `IMPORT_COMMIT_LIMITS.maxStatementsPerChunk` rows per
+            // `IMPORT_COMMIT_LIMITS.maxChunkSize` rows per
+            // (Corrected 2026-09-04 after the round-3 review: this comment previously
+            // named `maxStatementsPerChunk`, the 85-STATEMENT bound; the per-invocation
+            // ROW bound is `maxChunkSize` = 2, so a chunk straddle needs only 3 rows.)
             // invocation, so without this predicate a row committed by an
             // EARLIER chunk of the SAME batch was visible here as an
             // "existing" record: two LEGITIMATE distributions on one security,
