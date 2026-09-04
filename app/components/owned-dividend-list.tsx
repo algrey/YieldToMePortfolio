@@ -313,6 +313,9 @@ export function OwnedDividendList({
                       ) : row.notPaid ? (
                         <span className="dividend-status-not-paid">
                           not paid
+                          {row.announcedUnpaid
+                            ? " · announced (Sharesight)"
+                            : ""}
                         </span>
                       ) : (
                         <span>paid</span>

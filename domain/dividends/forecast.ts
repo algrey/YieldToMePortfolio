@@ -650,7 +650,16 @@ export function computeSecurityDividendForecast(
       !row.excluded &&
       row.exDate !== null &&
       row.exDate >= windowFromDate &&
-      row.exDate <= windowToDate,
+      row.exDate <= windowToDate &&
+      // BRK-022 ruling 1: a STANDALONE Sharesight announcement (no matching
+      // provider event) never adds NEW declared coverage -- it is a
+      // provider observation, not a ledger fact, and this forecast's
+      // Next-12-Months headline must stay byte-identical before/after such
+      // an announcement exists. An announcement that instead WON an actual
+      // event's row (`dividendEventId` set, via the existing Round A
+      // proximity match) keeps counting -- it replaced the provider row
+      // that already contributed this coverage, not added to it.
+      !(row.announcedUnpaid && row.dividendEventId === null),
   );
   // A declared row with an unknown amount (defensive edge case -- see
   // `history.ts`'s null `gross_per_share_decimal` handling) contributes to

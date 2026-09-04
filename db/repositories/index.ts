@@ -206,8 +206,10 @@ export {
   createOwnedSecurityResolutionRepository,
   listAutoCreatedSecurityIds,
   listNameEditableSecurityIds,
+  loadResolvablePortfolioSecuritiesForPendingPayouts,
   loadResolvedPortfolioInstrumentCurrencies,
   sanitizeCanonicalName,
+  type ResolvablePortfolioSecurityForPendingPayouts,
   type ResolvedInstrumentCurrencyRow,
   type SecurityResolutionCandidateIdentity,
   type SecurityResolutionLinkResult,
@@ -269,6 +271,12 @@ export {
   type SharesightSyncStateRecord,
   type UpsertSharesightSyncStateInput,
 } from "./sharesight-sync-state.ts";
+export {
+  createSharesightPendingPayoutsRepository,
+  type PendingPayoutObservationInput,
+  type SharesightPendingPayoutMutationFailure,
+  type SharesightPendingPayoutRecord,
+} from "./sharesight-pending-payouts.ts";
 export {
   computeSnapshotRunRange,
   createHistoricalSnapshotRepository,

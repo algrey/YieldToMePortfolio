@@ -86,6 +86,12 @@ export type OwnedDividendListRow = {
   originalCurrencyCode: string | null;
   fxRateToPortfolioDecimal: string | null;
   fxRateSource: string | null;
+  /** BRK-022 slice 3: `true` exactly when this row's underlying evidence is
+   * a Sharesight pending-payout ANNOUNCEMENT (`DerivedDividendRow.announcedUnpaid`)
+   * rather than a receipt/committed import -- the component renders
+   * "announced (Sharesight)" alongside the existing not-paid status text so
+   * a reader can tell the two apart. */
+  announcedUnpaid: boolean;
 };
 
 export type OwnedDividendList = {
@@ -168,6 +174,7 @@ export async function loadOwnedDividendList(
     originalCurrencyCode: row.originalCurrencyCode,
     fxRateToPortfolioDecimal: row.fxRateToPortfolioDecimal,
     fxRateSource: row.fxRateSource,
+    announcedUnpaid: row.announcedUnpaid,
   }));
 
   return {

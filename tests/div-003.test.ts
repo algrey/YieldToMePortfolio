@@ -736,6 +736,9 @@ function fyTotal(
     frankingUnknownCount: 0,
     unknownAmountCount: 0,
     rowCount: 1,
+    unpaidCashDecimal: null,
+    unpaidFrankingKnownDecimal: null,
+    unpaidCount: 0,
     ...overrides,
   };
 }

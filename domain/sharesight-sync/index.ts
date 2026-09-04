@@ -1,7 +1,11 @@
 export {
   resolveSharesightTradeDirection,
   transformSharesightSync,
+  countPayoutKeyCollisions,
   invertToPortfolioConversionRate,
+  instrumentMatchKey,
+  isFutureUnconfirmedPayout,
+  payoutIdentityKey,
   SHARESIGHT_SYNC_PARSER_FORMAT,
   SHARESIGHT_SYNC_PARSER_VERSION,
   type SharesightPayoutTransformOutcome,

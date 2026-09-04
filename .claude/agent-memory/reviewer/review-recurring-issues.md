@@ -2132,3 +2132,250 @@ name every scratch tree `<task>-<role>` (e.g. `prf014r-post`), and if
 `format:check`/`lint` flags a file the diff never touched, re-extract into a
 uniquely named directory before reporting it. Extends
 [[review-verification-commands]]'s `$TMPDIR` note to the session scratchpad.
+
+**63c. A ruling to "reword the trigger list" gets applied to the trigger
+paragraph while the SAME section's `Tests:` coverage sentence still
+enumerates the retired trigger.** BRK-017's follow-up round (`b7f8bad`,
+2026-09-04) correctly reworded `docs/ARCHITECTURE.md` §8.2's main paragraph
+to "a `total` … inside a `meta`/`pagination` sub-object only (top level
+scoped out 2026-09-04)" and appended a dated follow-up paragraph — but line
+609's `Tests:` sentence still reads "each trigger key (`links.next`,
+`links.prev`, `total_pages`, `page_count`, `next_page`, `total_count`, bare
+`total`, `per_page`, …) rejects on its own", which is false (the suite's own
+test asserts a bare top-level `total` PASSES) and omits the newly added
+`total_entries`. The guard's own code/behaviour was correct in every
+measured case. **How to apply:** a section usually carries the same claim
+TWICE — once as the design/trigger description and once as the
+"Tests: … covers X" inventory — and rounds fix only the first. After
+verifying a doc reword, grep the retired key name across the WHOLE section
+(and the test file) and check each hit against the actual assertions.
+Family of pattern 36e.
+
+### BRK-017 follow-up round verification recipe (2026-09-04, reusable)
+
+The whole matrix for `findPaginationEvidence` is one ~20-line
+`--experimental-strip-types` script calling `parseSharesightTrades` with
+`tests/brk-017.test.ts`'s own `VALID_TRADE_ITEM` shape (`{id, instrument:{code,
+market_code, currency_code}, transaction_date, quantity, price, holding_id,
+portfolio_id}`) — a hand-rolled item fails item parsing and masks the guard's
+answer. Measured at `b7f8bad`: `next_page` rejects on `true`/`2`/`"2"` and
+passes on `false`/`0`/`""`/`null`/`Infinity`/`NaN`/`{}`/`[]`/`-1`, top and
+nested; `total_entries` rejects at `> arrayLength` top/`meta`/`pagination`,
+passes at `==`/`<` and on the STRING `"5"` (number-only, same as
+`total_count`); top-level `total` passes, nested rejects.
+`scripts/sharesight-pagination-probe.mjs`'s `redactPortfolioIds` masks
+`/portfolios/<d>`, `/holdings/<d>`, `portfolio_id=`/`holding_id=` query values
+and NUMERIC values under `id`/`*_id` at any depth (including through arrays,
+which inherit the parent key) — residual unmasked shapes: a STRING id
+(`{portfolio_id: "555111"}`), `sub_portfolio_id=` (the `\b` never matches after
+`_`), a numeric id under a non-id key, and any money value under a key matching
+`PAGINATION_META_PATTERN` (`total`), against the header's "No amount, id … is
+ever printed".
+
+**66. A "does the incoming value still match what is committed" comparator
+computes the INCOMING side and reads the COMMITTED side RAW — so the storage
+mode the comment says it supports is the one it breaks.** BRK-019 slice 1
+(2026-09-04) passes `safeComputeDividendCashTotal(...)` for the incoming
+dividend total, with a doc comment on `dividendValueDifferences` saying that
+"passing the computed total rather than a raw `totalCashDecimal` field is what
+lets this comparison also work for a CSV PER-SHARE dividend row (which never
+populates `totalCashDecimal` at all)". But all three committed-side suppliers
+(`app/import-actions.ts`'s `committedDividendValues` map,
+`db/repositories/import-commit.ts`'s `existingRecord` SELECT,
+`db/repositories/sharesight-sync-state.ts`) read the raw
+`total_cash_decimal`/`total_franking_decimal` columns —
+`buildDividendManualRecordImportInsertStatements`
+(`db/repositories/dividends.ts`) stores those as NULL in PER-SHARE mode and
+stores `shares_decimal`/`dividend_per_share_decimal`/
+`franking_credit_per_share_decimal` instead. Reproduced with real writers: an
+IDENTICAL per-share CSV dividend re-upload (same fingerprint, byte-identical
+values) yields `cash total (committed unset -> incoming 2.5)` +
+`franking credits (committed unset -> incoming 1)`, `preview.ready === false`,
+and a persisted false `ROW_DIFFERS_FROM_COMMITTED_RECORD` with
+`needsDecisionRows: 1`. All 14 shipped tests missed it because Sharesight
+payouts are TOTALS-mode and the CSV parity test staged a TRADE.
+**How to apply:** for any new field-by-field comparator, list the writer's
+storage modes for each compared column (grep the INSERT builder for
+`= null` / mode branches) and check the committed side is derived the SAME way
+the incoming side is; the repo already has the right helper at both other
+call sites (`existingDividendEntries` and `dividendCandidates` both call
+`safeComputeDividendCashTotal` over the stored row). Cheap proof: commit a row
+through the real machinery, re-stage the identical normalized JSON under the
+same fingerprint, and print the preview issues. Related: pattern 36 (field-set
+drift) — this is its mirror image, a false POSITIVE from an asymmetric
+comparison rather than a false negative from a short field list.
+
+**67. A "blocking, needs-a-decision" row that is only COMPUTED (never
+persisted to `import_issues`) does not block the Sharesight `Accept`
+button — that button gates on PERSISTED issues by design.**
+`app/components/import-review.tsx`'s `acceptDisabled` uses `blockedRowIssues`
+= `review.issues` (the persisted list, `isRowStillBlocking`) and *deliberately*
+NOT `review.preview.ready` (BRK-009C finding B3 comment explains why). So a
+reconciliation-computed `severity: "error"` issue renders in the issue list
+but leaves Accept enabled; `acceptImportWithContext` then calls
+`markImportReadyWithContext`, whose own `loadImportReview`
+(`app/import-ready-service.ts`) is a STANDALONE copy that does not supply the
+page-only evidence, so `preview.ready` is true there too. BRK-019's paid-date
+escalation has no commit-time counterpart (the corrected payout mints a NEW
+`sharesight-payout:<portfolio>:<holding>:<paidOnDate>` identity, so commit's
+exact-`source_reference` skip never fires) — reproduced end to end: sync,
+commit, re-sync with `paidOnDate` +3 days, Accept → TWO
+`dividend_manual_records` rows for the same distribution, `committedRows: 1`,
+`needsDecisionRows: 0`, sync copy "1 new row". **How to apply:** whenever a
+diff adds an error-severity issue in `createImportReconciliationPreview`, ask
+which of the FOUR gates it actually reaches — the page's disabled "Mark import
+ready" button (`preview.ready`, client-only), the ready-service's
+`preview.ready` (needs the evidence supplied by *its* loader), the persisted
+`hasUnresolvedPersistedIssue` check, and commit's own live re-derivation. A
+computed-only issue reaches exactly one of them, and never on the Sharesight
+Accept path.
+
+**70b/71b. ACCEPTED remedies for 70 and 71 (BRK-022 slice 2 correction
+`2ca04d8`, reviewer-verified 2026-09-04).** For 70: build the observed set
+from the WHOLE fetch (`payoutsResult.value.map(payoutIdentityKey)`), not from
+the classifier's bucket, so withdrawal fires only on genuine absence.
+Re-verified independently with a reviewer-built three-sync fixture (pending at
+`now < paidOn` -> active; `now > paidOn` with the payout still returned ->
+`rowsStaged 1, pendingPayoutsWithdrawn 0`, row still active; fetch empty ->
+withdrawn 1) and mutation-tested (restoring `pendingPayoutCandidates.map(...)`
+makes the shipped B1 test fail at exactly the "must not be withdrawn"
+assertion). For 71: a tiny exported minter
+(`domain/imports/committed-source-reference.ts`'s
+`committedSourceReferenceForFingerprint`) called from BOTH `import-commit.ts`
+sites plus the sync classifier, with a parity test that runs a REAL commit and
+asserts `derived === committed.source_reference` AND
+`bare !== committed.source_reference`. Verified by SELECTing both columns after
+a real commit: `sharesight-payout:sp-1:h-1:2026-09-10` vs
+`import-fingerprint:sharesight-payout:sp-1:h-1:2026-09-10`. **Two residuals to
+carry forward:** (a) the helper's own comment calls itself "the SINGLE place
+that mints" the prefix, but `domain/imports/reconciliation.ts`'s
+`sourceReferenceKey` (line ~286) still hand-writes
+`` `${portfolioId}::import-fingerprint:${fingerprint}` `` — always grep the
+literal prefix across `app/ db/ domain/` before accepting a "single place"
+claim; (b) the identity-only suppression only matches a paid record that came
+through the SHARESIGHT staging path — a CSV-imported paid dividend has a
+sha256 fingerprint, so the announcement will not be suppressed and double
+counts. That matters here because this owner's dividends historically arrived
+by CSV (see pattern 24).
+
+**72. "There is no persisted surface to attach this disclosure to" — check
+whether the repo already persists ROW-LESS issues.** BRK-022 slice 2's
+collision rule (neither of two same-key future payouts is recorded) is
+disclosed only through the ephemeral panel line, justified in
+`app/sharesight-sync-service.ts` by "the payout is never staged as a row at
+all, so there is no batch row for a persisted `import_issues` entry to attach
+to". False: `db/repositories/import-staging.ts`'s `buildParsedRowStatements`
+was specifically fixed (BRK-005 round 2) to persist genuinely row-less
+top-level issues — `SHARESIGHT_PAYOUT_UNCONFIRMED` is its named example, and
+one is stored for every one of these payouts. **How to apply:** before
+accepting "there is nowhere to record this", grep for the mechanism by name;
+this repo persists batch-level, row-less `import_issues` entries by object
+identity. (Kept as follow-up here because the persisted message is hedged —
+"Announced, not-yet-paid payouts are recorded separately by the sync; see the
+sync summary" — rather than asserting the specific payout was recorded.)
+
+**73. A "never silently grow / paid-only" disclosure fix lands on the
+component's PRIMARY render path while the same component's DEGRADED fallback
+path still renders the raw figure.** BRK-022 slice 3 (`9e272f1`) fixed
+`app/components/income-multi-year.tsx`'s `mergeCurrentFinancialYear`
+(`actualToDateGrossDecimal: paidOnlyGrossDecimal(row)`, correctly subtracting
+the announced-but-unpaid subtotal) but left `mapCurrentRow` — the DIV-011
+fallback that renders the SAME `CurrentFinancialYearRow` on its own standalone
+"FY27 (to date)" row whenever `projectedRows.length === 0` (i.e. `multiYear`
+degraded: `no_yield_coverage`, `portfolio_value_unavailable`, or a rejected
+what-if recompute) — reading `row.dividendGrossDecimal` raw. Reproduced by
+rendering the component with `multiYear: {ok:false}`: the merged path shows
+`$250.00 received so far this FY`, the fallback path shows `$300.00` with the
+word "unpaid" absent from the entire page. The worker's own test comment names
+the fallback ("silently defeating this test") and engineers the fixture to
+avoid it — awareness without coverage. **How to apply:** whenever a diff
+changes how ONE derived field is displayed, grep the component for every other
+mapper that reads the same source field (`grep -n "<fieldName>"` on the
+`.tsx`), and render each path; degraded/fallback branches are where the
+disclosure is most often missing and least often tested. Related: pattern 3
+(the tested layer is not the layer the user hits).
+
+**74. "The same 'currently committed' predicate that `X` uses" — read `X`'s
+own doc comment first.** Same commit: `app/owned-dividend-history.ts`,
+`docs/DATA_MODEL.md` and `docs/CALCULATIONS.md` all state the pending-payout
+suppression reuses "the identical 'currently committed' predicate
+`loadCommittedSharesightRowValues` uses (non-reversed/non-superseded)", and
+DATA_MODEL attributes `superseded_by_record_id IS NULL` to it. That function's
+payout query (`db/repositories/sharesight-sync-state.ts:684-698`) is
+`user_id + portfolio_id + source_reference LIKE 'import-fingerprint:sharesight-payout:%'`
+and NOTHING else — its own doc comment says `superseded_by_record_id IS NULL`
+is "intentionally still absent here". The implementation actually reuses
+`createDividendManualRecordRepository.list` (which DOES filter superseded).
+Outcome-equivalent today (both supersede writers require
+`import_batch_id IS NULL`, so a Sharesight-committed row can never be
+superseded), but the sentence is inference written as observation.
+**How to apply:** for any "identical/same predicate as X" claim, open X and
+diff the WHERE clauses column by column; a doc that attributes a predicate to
+a function which documents its deliberate absence is a correction, not a
+nitpick.
+
+**75. Swapping ONE cell to a net/paid-only figure leaves the row's SIBLING
+cells (and its detail dialog) still derived from the gross.** BRK-022 slice 3's
+correction round (2026-09-05, `7e399cf`) fixed pattern 73 by making
+`income-multi-year.tsx`'s DIV-011 fallback `mapCurrentRow` emit
+`grossDecimal: paidOnlyGrossDecimal(row)` plus a `*$x unpaid` note. But the same
+`DisplayRow` still carries `cashDecimal: row.dividendCashDecimal`,
+`frankingDecimal: row.dividendFrankingKnownDecimal` and
+`yieldPercentDecimal: row.effectiveYieldPercentDecimal` — all three
+unpaid-INCLUSIVE (the yield is computed inside
+`computeCurrentFinancialYearRow` from the full gross). Rendered (gross 300,
+unpaid 50, value 10,000): the table row reads `$250.00 *$50.00 unpaid … 3%`
+(250/10,000 is 2.5%), and the row-label button opens a dialog showing
+`Dividends (gross) $250.00`, `Cash $240.00`, `Franking credits $60.00`.
+Pre-fix the same row was 300/240/60/3% — internally consistent but overstated,
+so the correction traded an overstatement for an arithmetic contradiction. The
+MERGED path avoids this because it keeps the row's own gross/cash/franking as
+the forecast composition and adds paid-only actuals on a separately LABELLED
+line (`actualToDateGrossDecimal`, "received so far this FY"). **How to apply:**
+when a fix changes what one displayed money field means, list every other field
+of the SAME row/DTO that was derived from the old meaning (breakdown
+components, ratios/yields, dialog copy) and check they still add up; a mapper
+that assigns 8 fields from one source row is the shape to inspect. Rendering
+only the table cell the finding named will not surface it — the dialog is
+client-state gated and never appears in `renderToStaticMarkup`.
+
+**76. A tightened source-regex guard whose commit comment misstates what the
+OLD regex allowed.** Same round: `tests/ui-006c.test.ts`'s "not paid" pin went
+from `/>\s*not paid[\s\S]*?</` to `/>\s*not paid\s*(?:\{[^{}]*\})?\s*</`,
+justified in-file by "the pre-fix `[\s\S]*?` catch-all would still have matched
+even if the literal text were deleted entirely". Measured (one `node -e` that
+`.replace(/not paid/g,"")`s the real component and runs both regexes): the old
+pattern requires the literal too, so it returns `false` on the mutated source —
+the stated rationale is wrong. What the old pattern really permitted was
+arbitrary trailing content up to the next `<`. The tightening is still an
+improvement; the sentence is not. **How to apply:** any claim of the form "the
+old guard would have passed on X" is a two-line experiment — mutate the source
+string in memory and run the OLD regex — and this repo's workers state it
+without running it (see also patterns 9, 12, 36d).
+
+**75b. ACCEPTED remedy for 75 (BRK-022 slice 3 round 2, `18f9c9e`,
+reviewer-verified 2026-09-05) — and the sentence the round left behind.**
+The ruling was: give the degraded `mapCurrentRow` row back its FULL FY-to-date
+`grossDecimal`/`cashDecimal`/`frankingDecimal`/`yieldPercentDecimal` (so the
+row and its dialog are internally consistent and match
+`income-landing.tsx`'s FY (so far) row), keep the `*$x unpaid` note on the
+gross cell, and route the PAID-only figure through the pre-existing
+`actualToDateGrossDecimal`/`actualToDateSourceLabel` slot ("$x received so far
+this FY") that the merged-forecast path already uses. Verified by rendering
+the real component through `node --import tsx --input-type=module --eval`
+(cwd = repo, so `react`/`next` resolve; `npx tsx script.mjs` fails in the
+sandbox with `EPERM` on its `/tmp/.../*.pipe` IPC socket — use `--eval`):
+degraded row = `$300.00 · $250.00 received so far this FY *$50.00 unpaid 3%`,
+landing FY (so far) row = `$300.00 … *$50.00 unpaid`, same figure. **Residual
+found:** the round corrected the DisplayRow field doc, the mapper doc and
+`docs/CALCULATIONS.md`, but the JSX comment 900 lines below, right above the
+`row.unpaidCount > 0` note, still said "the row's own gross figure above is
+now PAID-only" — the exact claim the round reverted (pattern 36e again).
+Reviewer-fixed in `9d8d1c9`. **How to apply:** after any round that REVERTS a
+previous round's field change, grep the distinctive phrase of the reverted
+claim across the whole file, not just the mapper/doc the ruling named — this
+repo's components carry the same rationale in 3-4 places (type field doc,
+mapper doc, render-site comment, CALCULATIONS.md). Also note what the new
+slot costs on the common path: with `unpaidCount === 0` the degraded row now
+prints the SAME number twice (`$300.00 · $300.00 received so far this FY`),
+which is honest but redundant — worth a follow-up, not a block.

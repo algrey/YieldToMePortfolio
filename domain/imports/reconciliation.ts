@@ -1,5 +1,11 @@
 import { parseDecimal } from "../calculations/decimal.ts";
 import type { NormalizedImportRow } from "./strict-versioned-parser.ts";
+// BRK-022 slice 3 review follow-up (R7a): the single minter of a committed
+// row's `import-fingerprint:<fingerprint>` `source_reference` -- see that
+// module's header for why `import-commit.ts`'s own two copies were
+// extracted there, and why this was the third hand-written copy left to
+// fix.
+import { committedSourceReferenceForFingerprint } from "./committed-source-reference.ts";
 // DIV-004: reuse DIV-001's documented proximity window rather than
 // re-deriving a second "how close counts as a duplicate" constant.
 import { PROXIMITY_WINDOW_DAYS } from "../dividends/history.ts";
@@ -283,7 +289,7 @@ function daysBetweenDates(a: string, b: string): number {
 // drift out of sync with each other or with `import-commit.ts`'s own
 // construction.
 function sourceReferenceKey(portfolioId: string, fingerprint: string): string {
-  return `${portfolioId}::import-fingerprint:${fingerprint}`;
+  return `${portfolioId}::${committedSourceReferenceForFingerprint(fingerprint)}`;
 }
 
 // BRK-019 slice 1: renders a `ROW_DIFFERS_FROM_COMMITTED_RECORD` issue's

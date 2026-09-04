@@ -388,6 +388,31 @@ export function IncomeLanding({
                         {currentFyRow.excludedSecurities.length > 0 ? (
                           <span className="unavailable"> · partial</span>
                         ) : null}
+                        {/* BRK-022 slice 3: `dividendGrossDecimal` above
+                            already includes every not-yet-paid
+                            `declared_pending` row -- both explicit Sharesight
+                            announcements and any other provider-declared
+                            event whose ex-date has not yet passed (F3
+                            correction round, RULING: NOT limited to
+                            Sharesight announcements -- see
+                            `domain/dividends/aggregations.ts`'s
+                            `unpaidCashDecimal` doc comment)
+                            (`dividendUnpaidGrossDecimal`, always a subset of
+                            it) -- disclosed here rather than left implicit,
+                            non-colour (AGENTS.md): the "unpaid" WORD is the
+                            signal, never styling alone. */}
+                        {currentFyRow.dividendUnpaidCount > 0 ? (
+                          <span className="unavailable">
+                            {" "}
+                            *
+                            {formatIncomeMoney(
+                              projection.baseCurrencyCode,
+                              projection.baseCurrencyCode,
+                              currentFyRow.dividendUnpaidGrossDecimal,
+                            )}{" "}
+                            unpaid
+                          </span>
+                        ) : null}
                       </Link>
                     </th>
                     <td className="numeric">
@@ -554,6 +579,24 @@ export function IncomeLanding({
                         {row.excludedSecurities.length > 0 ? (
                           <span className="unavailable"> · partial</span>
                         ) : null}
+                        {/* F6 (BRK-022 review follow-up): a past FY can still
+                            carry announced-but-unpaid rows (an event whose
+                            ex-date is within the year but has not yet passed
+                            `today`, or a Sharesight announcement) -- same
+                            wording/format as the current-FY row's note
+                            above, non-colour (AGENTS.md). */}
+                        {row.dividendUnpaidCount > 0 ? (
+                          <span className="unavailable">
+                            {" "}
+                            *
+                            {formatIncomeMoney(
+                              projection.baseCurrencyCode,
+                              projection.baseCurrencyCode,
+                              row.dividendUnpaidGrossDecimal,
+                            )}{" "}
+                            unpaid
+                          </span>
+                        ) : null}
                       </Link>
                     </th>
                     <td className="numeric">
@@ -591,6 +634,39 @@ export function IncomeLanding({
             </table>
           </div>
         )}
+        {/* BRK-022 slice 3: a Sharesight announcement this load could not
+            attribute to any held/composition security (`portfolio_security_id
+            IS NULL`, or a hidden/sold security the loader excludes) --
+            never silently dropped. */}
+        {projection.pendingUnresolvedPayoutCount > 0 ? (
+          <p className="unavailable">
+            {projection.pendingUnresolvedPayoutCount === 1
+              ? "1 announced dividend could not be matched to a holding"
+              : `${projection.pendingUnresolvedPayoutCount} announced dividends could not be matched to a holding`}
+          </p>
+        ) : null}
+        {/* F4 (BRK-022 review follow-up): a Sharesight announcement this
+            load matched to a currently-committed record within the
+            proximity window -- suppressed (not shown as its own row) rather
+            than double-counted alongside the real payment, disclosed here
+            so a reader is not left wondering why it never appears on its
+            own. */}
+        {projection.pendingSuppressedByProximityCount > 0 ? (
+          <p className="unavailable">
+            {projection.pendingSuppressedByProximityCount === 1
+              ? "1 announced dividend matched a received record within 7 days and is not shown separately"
+              : `${projection.pendingSuppressedByProximityCount} announced dividends matched a received record within 7 days and are not shown separately`}
+          </p>
+        ) : null}
+        {/* F7 (BRK-022 review follow-up): the read of active Sharesight
+            announcements is capped at `MAX_PENDING_PAYOUTS_PER_PORTFOLIO` --
+            disclosed rather than silently under-reporting past the cap. */}
+        {projection.pendingTruncated ? (
+          <p className="unavailable">
+            Some announced dividends are not shown; there are too many to
+            display at once.
+          </p>
+        ) : null}
         <p>
           {/* Follow-up (b): the sub-page's own default is 2 years back
               (`DEFAULT_YEARS_BACK`, income-year-range.ts) -- without an

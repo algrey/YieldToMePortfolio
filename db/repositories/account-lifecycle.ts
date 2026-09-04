@@ -83,6 +83,12 @@ const OWNED_TABLES = [
   // `price_observations`/`fx_rate_observations` "user-scoped-observation"
   // special-cases below.
   "sharesight_delayed_prices",
+  // BRK-022: owner-scoped announced-but-unpaid Sharesight payout
+  // observation, one row per (user, portfolio, source_reference) -- see
+  // db/schema.ts's header comment on `sharesightPendingPayouts`. Keyed
+  // directly by `user_id` like `sharesight_delayed_prices` above: every row
+  // is this owner's own sync-time observation, never a shared fact.
+  "sharesight_pending_payouts",
   // MKT-011A: owner-scoped intraday capture cache, one row per captured
   // tick -- see db/schema.ts's header comment on `intradayPricePoints`.
   // Keyed directly by `user_id` like `sharesight_delayed_prices` above, not
@@ -380,6 +386,12 @@ const PURGE_TABLES_IN_FK_ORDER = [
   // currencies (all shared reference data or deleted last), so any
   // position before `users` is FK-safe. No other table references it.
   "sharesight_delayed_prices",
+  // BRK-022: pending-payout observation references BOTH portfolios (via a
+  // composite FK) and portfolio_securities (via a nullable composite FK),
+  // so -- unlike its sync-cursor sibling above -- it must be purged before
+  // `portfolio_securities` specifically, not merely before `portfolios`.
+  // No other table references it.
+  "sharesight_pending_payouts",
   // MKT-011A: intraday capture cache references only users/securities/
   // currencies/market_data_providers (all shared reference data or deleted
   // last), same FK-safety as `sharesight_delayed_prices` immediately above.

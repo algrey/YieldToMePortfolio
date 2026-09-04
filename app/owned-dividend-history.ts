@@ -34,6 +34,8 @@
 // needs FX-aware multi-security aggregation for its landing screen) can
 // reconcile the two. Flagged as a follow-up rather than silently guessed.
 import type { SqlClient } from "../db/repositories/sql-client.ts";
+import { createSharesightPendingPayoutsRepository } from "../db/repositories/sharesight-pending-payouts.ts";
+import { committedSourceReferenceForFingerprint } from "../domain/imports/committed-source-reference.ts";
 import {
   createDividendAssumptionsRepository,
   createDividendEventOverrideRepository,
@@ -62,6 +64,7 @@ import {
 } from "../domain/dividends/aggregations.ts";
 import {
   deriveDividendHistoryForSecurity,
+  PROXIMITY_WINDOW_DAYS,
   type DerivedDividendRow,
   type DividendManualRecordFact,
   type DividendReceiptFact,
@@ -78,6 +81,13 @@ import type { TrailingDividendEventInput } from "../domain/market-data/dividend-
 const MAX_SECURITIES = 500;
 const MAX_EVENTS_PER_PORTFOLIO = 20_000;
 const MAX_TRANSACTIONS_PER_PORTFOLIO = 100_000;
+// F7 correction round: bounds `listActive`'s unbounded read (BRK-022 slice
+// 3 shipped with none) so a portfolio with an unusually large number of
+// active Sharesight announcements cannot grow this load's cost without
+// limit. Disclosed via `pendingTruncated` rather than silently dropping
+// rows past the cap -- see `OwnedDividendHistory.pendingTruncated`'s doc
+// comment.
+const MAX_PENDING_PAYOUTS_PER_PORTFOLIO = 500;
 
 type Row = Record<string, unknown>;
 
@@ -153,6 +163,32 @@ export type OwnedDividendHistory = {
   securities: OwnedDividendSecurityHistory[];
   /** Raw, unconverted -- see the module header's scope-boundary note. */
   portfolioFyOverrides: FyDividendOverrideFact[];
+  /** BRK-022 slice 3: portfolio-wide disposition of this portfolio's active
+   * `sharesight_pending_payouts` (Sharesight announcements) -- see
+   * `suppressAndBuildPendingFacts`'s doc comment for the exact suppression
+   * rules. Every active row lands in exactly one of the four counts below. */
+  pendingPayoutCounts: {
+    /** Skipped: a currently-committed `dividend_manual_records` row shares
+     * this payout's identity (`committedSourceReferenceForFingerprint`). */
+    pendingSuppressedByIdentity: number;
+    /** Skipped: no identity match, but a currently-committed record for the
+     * SAME security has a payment date within `PROXIMITY_WINDOW_DAYS`. */
+    pendingSuppressedByProximity: number;
+    /** Skipped: `portfolio_security_id IS NULL`, or resolves to a security
+     * outside this load's held/composition set -- never crashes, always
+     * disclosed here instead. */
+    pendingUnresolved: number;
+    /** Fed into `deriveDividendHistoryForSecurity` as an `announcedUnpaid`
+     * fact for its security. */
+    pendingIncluded: number;
+  };
+  /** F7 correction round: `true` when this portfolio has MORE than
+   * `MAX_PENDING_PAYOUTS_PER_PORTFOLIO` active `sharesight_pending_payouts`
+   * rows -- the read is capped at that many (oldest `payment_date`/`symbol`
+   * first, `listActive`'s existing ORDER BY), and every row past the cap is
+   * simply never read at all, not merely uncounted. Disclosed on the Income
+   * landing page rather than left as a silent undercount. */
+  pendingTruncated: boolean;
 };
 
 function inClause(count: number): string {
@@ -190,6 +226,18 @@ function addDays(value: string, days: number): string {
   const date = new Date(`${value}T00:00:00Z`);
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
+}
+
+// BRK-022 slice 3: mirrors `domain/dividends/history.ts`'s identically-
+// implemented private `daysBetween` (unsigned, rounds to whole days) --
+// duplicated per this module's own established convention above.
+function daysBetweenAbs(a: string, b: string): number {
+  const msPerDay = 86_400_000;
+  return Math.abs(
+    Math.round(
+      (Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / msPerDay,
+    ),
+  );
 }
 
 export async function loadOwnedDividendHistory(
@@ -358,11 +406,40 @@ export async function loadOwnedDividendHistory(
   );
 
   if (identities.length === 0) {
+    // F5 correction round (RULING): a pending payout can still exist for a
+    // portfolio with no held securities (e.g. a Sharesight announcement for
+    // a symbol never resolved to a holding) -- it must still be counted
+    // `pendingUnresolved` so the landing page's disclosure shows it, rather
+    // than silently vanishing just because the rest of this load short-
+    // circuits. On the narrowed (single-security Dividends tab) path this
+    // count is left uncounted entirely, exactly like the main path below --
+    // that consumer never reads `pendingPayoutCounts` and the narrow filter
+    // could not possibly resolve the one requested security here anyway
+    // (mirrors the main loop's own `narrowed` doc comment).
+    let pendingUnresolved = 0;
+    let pendingTruncated = false;
+    if (!narrowed) {
+      const activePending = await createSharesightPendingPayoutsRepository(
+        client,
+      ).listActive(userId, portfolioId, MAX_PENDING_PAYOUTS_PER_PORTFOLIO + 1);
+      pendingTruncated =
+        activePending.length > MAX_PENDING_PAYOUTS_PER_PORTFOLIO;
+      pendingUnresolved = pendingTruncated
+        ? MAX_PENDING_PAYOUTS_PER_PORTFOLIO
+        : activePending.length;
+    }
     return {
       today,
       financialYearStartMonth: settings.financialYearStartMonth,
       securities: [],
       portfolioFyOverrides,
+      pendingPayoutCounts: {
+        pendingSuppressedByIdentity: 0,
+        pendingSuppressedByProximity: 0,
+        pendingUnresolved,
+        pendingIncluded: 0,
+      },
+      pendingTruncated,
     };
   }
 
@@ -390,6 +467,7 @@ export async function loadOwnedDividendHistory(
     receiptRecords,
     assumptionsRecords,
     transactionRows,
+    pendingPayoutRecords,
   ] = await Promise.all([
     client.all<Row>(
       `SELECT id, security_id, kind, status, ex_date, payment_date, currency_code,
@@ -450,10 +528,36 @@ export async function loadOwnedDividendHistory(
         MAX_TRANSACTIONS_PER_PORTFOLIO + 1,
       ],
     ),
+    // BRK-022 slice 3: active Sharesight announcements for this whole
+    // portfolio -- `listActive` has no per-security filter, mirroring
+    // `receiptRecords`/`listSecurityAssumptions` above. On the narrowed
+    // (single-security Dividends tab) path a pending row for a DIFFERENT
+    // security is simply never relevant below (the per-security derivation
+    // loop only ever runs for the requested identity) and, per
+    // `pendingPayoutCounts`'s scope note, is left uncounted entirely on that
+    // path rather than misreported as portfolio-wide -- narrowing this read
+    // would cost a second per-security repository shape for no consumer
+    // this task adds. F7 correction round: `MAX_PENDING_PAYOUTS_PER_PORTFOLIO
+    // + 1` bounds the read; the truncation check below detects and discloses
+    // (`pendingTruncated`) rather than the read silently costing more the
+    // larger this table grows.
+    createSharesightPendingPayoutsRepository(client).listActive(
+      userId,
+      portfolioId,
+      MAX_PENDING_PAYOUTS_PER_PORTFOLIO + 1,
+    ),
   ]);
 
   if (eventRows.length > MAX_EVENTS_PER_PORTFOLIO)
     throw new Error("too_many_dividend_events");
+  // F7 correction round: cap `pendingPayoutRecords` at
+  // `MAX_PENDING_PAYOUTS_PER_PORTFOLIO`, disclosing truncation rather than
+  // processing every row past the cap (`listActive`'s existing
+  // `ORDER BY payment_date, symbol` decides which rows survive).
+  const pendingTruncated =
+    pendingPayoutRecords.length > MAX_PENDING_PAYOUTS_PER_PORTFOLIO;
+  if (pendingTruncated)
+    pendingPayoutRecords.length = MAX_PENDING_PAYOUTS_PER_PORTFOLIO;
   const eventsBySecurity = new Map<string, ProviderDividendEventFact[]>();
   for (const row of eventRows) {
     const securityId = String(row.security_id);
@@ -599,13 +703,146 @@ export async function loadOwnedDividendHistory(
     transactionsBySecurity.set(portfolioSecurityId, list);
   }
 
+  // BRK-022 slice 3: paid-overrides-pending suppression (Orchestrator ruling
+  // R2) -- built from `manualRecords`, the SAME currently-committed
+  // `dividend_manual_records` set every `manualBySecurity` row above was
+  // already built from.
+  //
+  // F1 CORRECTION ROUND (accuracy fix): this is NOT "the same predicate
+  // `loadCommittedSharesightRowValues` uses (non-reversed/non-superseded)"
+  // -- `manualRecords` here comes from
+  // `createDividendManualRecordRepository.list`, whose ONLY filter is
+  // `superseded_by_record_id IS NULL` (supersession, not reversal; see that
+  // function's own doc comment in `db/repositories/dividends.ts`). A
+  // reversed import batch is never merely flagged -- `db/repositories/
+  // import-reversal.ts`'s reversal statements HARD-DELETE every
+  // `dividend_manual_records` row for that batch (`DELETE FROM
+  // dividend_manual_records WHERE user_id = ? AND import_batch_id = ?`), so
+  // a reversed record cannot suppress a pending row structurally: it is
+  // simply gone from `manualRecords` by the time this function runs, not
+  // filtered out by a shared predicate. Reused directly here (rather than
+  // issuing a second, narrower query) because the already-loaded
+  // `manualRecords` additionally covers rule (b) below (ANY source, not
+  // just Sharesight-prefixed), which `loadCommittedSharesightRowValues`'s
+  // own `payouts` map cannot answer at all.
+  //
+  // Two independent suppression rules, checked in order:
+  //   (a) IDENTITY: a currently-committed row's `source_reference` equals
+  //       `committedSourceReferenceForFingerprint(pending.sourceReference)`
+  //       -- the pending row's own committed twin has landed.
+  //   (b) PROXIMITY: no identity match, but a currently-committed row for
+  //       the SAME security has a `payment_date` within
+  //       `PROXIMITY_WINDOW_DAYS` of the pending row's own -- amount-
+  //       agnostic on purpose (a DRP/fee-adjusted receipt must still
+  //       suppress the announcement).
+  // A row whose security is unresolved (`portfolio_security_id IS NULL`) or
+  // outside this load's held/composition set is counted `pendingUnresolved`
+  // rather than crashing or silently vanishing.
+  const committedSourceReferences = new Set(
+    manualRecords
+      .map((record) => record.sourceReference)
+      .filter((value): value is string => value !== null),
+  );
+  const committedPaymentDatesBySecurity = new Map<string, string[]>();
+  for (const record of manualRecords) {
+    const list =
+      committedPaymentDatesBySecurity.get(record.portfolioSecurityId) ?? [];
+    list.push(record.paymentDate);
+    committedPaymentDatesBySecurity.set(record.portfolioSecurityId, list);
+  }
+  const identityById = new Map(identities.map((row) => [row.id, row]));
+
+  let pendingSuppressedByIdentity = 0;
+  let pendingSuppressedByProximity = 0;
+  let pendingUnresolved = 0;
+  let pendingIncluded = 0;
+  const pendingBySecurity = new Map<string, DividendManualRecordFact[]>();
+  for (const pending of pendingPayoutRecords) {
+    // A narrowed (single-security Dividends tab) load never even considers
+    // a pending row for a DIFFERENT security -- see the `listActive` fetch's
+    // own doc comment above for why it is left uncounted here entirely
+    // rather than misreported as unresolved.
+    if (narrowed && !narrowedIds.has(pending.portfolioSecurityId ?? "")) {
+      continue;
+    }
+    const identity =
+      pending.portfolioSecurityId === null
+        ? undefined
+        : identityById.get(pending.portfolioSecurityId);
+    if (pending.portfolioSecurityId === null || !identity) {
+      pendingUnresolved += 1;
+      continue;
+    }
+    const committedTwinReference = committedSourceReferenceForFingerprint(
+      pending.sourceReference,
+    );
+    if (committedSourceReferences.has(committedTwinReference)) {
+      pendingSuppressedByIdentity += 1;
+      continue;
+    }
+    const committedDatesForSecurity =
+      committedPaymentDatesBySecurity.get(pending.portfolioSecurityId) ?? [];
+    const hasNearbyCommittedRecord = committedDatesForSecurity.some(
+      (date) =>
+        daysBetweenAbs(date, pending.paymentDate) <= PROXIMITY_WINDOW_DAYS,
+    );
+    if (hasNearbyCommittedRecord) {
+      pendingSuppressedByProximity += 1;
+      continue;
+    }
+    pendingIncluded += 1;
+    // BRK-022 review note (slice 2): `pending.currencyCode` is ALWAYS
+    // populated (unlike a `dividend_manual_records` row, where it is
+    // populated only when foreign) -- compare it against the SECURITY's own
+    // currency here, mirroring `app/owned-dividend-history.ts`'s existing
+    // BRK-010 imported-fact convention, so a native-currency payout is
+    // handed to `deriveDividendHistoryForSecurity` exactly like every other
+    // native fact (no `currencyCode`/rate at all), letting that module's
+    // existing `resolveImportedRecordCurrency` case-A short-circuit apply
+    // unchanged; only a genuinely foreign one carries the trio through.
+    const isForeign = pending.currencyCode !== identity.currencyCode;
+    const list = pendingBySecurity.get(pending.portfolioSecurityId) ?? [];
+    list.push({
+      id: `pending:${pending.id}`,
+      paymentDate: pending.paymentDate,
+      exDate: pending.exDate,
+      sharesDecimal: null,
+      dividendPerShareDecimal: null,
+      frankingCreditPerShareDecimal: null,
+      totalCashDecimal: pending.totalCashDecimal,
+      totalFrankingDecimal: pending.totalFrankingDecimal,
+      importBatchId: null,
+      currencyCode: isForeign ? pending.currencyCode : undefined,
+      fxRateToPortfolioDecimal: isForeign
+        ? pending.fxRateToPortfolioDecimal
+        : undefined,
+      fxRateSource: isForeign ? pending.fxRateSource : undefined,
+      announcedUnpaid: true,
+    });
+    pendingBySecurity.set(pending.portfolioSecurityId, list);
+  }
+  const pendingPayoutCounts: OwnedDividendHistory["pendingPayoutCounts"] = {
+    pendingSuppressedByIdentity,
+    pendingSuppressedByProximity,
+    pendingUnresolved,
+    pendingIncluded,
+  };
+
   // --- Pure derivation loop: no I/O, everything above is already grouped. ---
 
   const securities: OwnedDividendSecurityHistory[] = identities.map(
     (identity) => {
       const events = eventsBySecurity.get(identity.securityId) ?? [];
       const overrides = overridesBySecurity.get(identity.id) ?? [];
-      const manual = manualBySecurity.get(identity.id) ?? [];
+      // BRK-022 slice 3: the security's committed manual/imported records
+      // PLUS its own already-suppression-filtered pending-payout
+      // announcements (both are `DividendManualRecordFact`s;
+      // `deriveDividendHistoryForSecurity` places the latter in the
+      // imported tier via its own `announcedUnpaid` discriminator).
+      const manual = [
+        ...(manualBySecurity.get(identity.id) ?? []),
+        ...(pendingBySecurity.get(identity.id) ?? []),
+      ];
       const receipts = receiptsBySecurity.get(identity.id) ?? [];
       const transactions = transactionsBySecurity.get(identity.id) ?? [];
       const securityAssumption = assumptionsBySecurity.get(identity.id);
@@ -727,5 +964,7 @@ export async function loadOwnedDividendHistory(
     financialYearStartMonth: settings.financialYearStartMonth,
     securities,
     portfolioFyOverrides,
+    pendingPayoutCounts,
+    pendingTruncated,
   };
 }

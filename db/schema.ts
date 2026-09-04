@@ -3862,6 +3862,142 @@ export const sharesightDelayedPrices = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
+// BRK-022: announced-but-unpaid Sharesight payouts -- an OBSERVATION table,
+// not a ledger fact. `domain/sharesight-sync/transform.ts`'s
+// `isFutureUnconfirmedPayout` used to skip every future-dated null-id
+// payout outright; this table now records what the sync observed instead,
+// so the owner can see a declared-but-not-yet-paid distribution before it
+// commits. Owner ruling (2026-09-04): no staging/review step -- upserted
+// DIRECTLY at sync time (an announcement is a provider observation that
+// refreshes or withdraws on every sync, unlike a CSV import row, which is
+// staged/previewed/reversible before it ever touches a ledger table).
+//
+// `source_reference` is the SAME payout identity key BRK-005C mints
+// (`sharesight-payout:<portfolio>:<holding>:<paidOn>`), independent of
+// Sharesight's confirmed/null id -- so an announcement and its LATER paid
+// `dividend_manual_records` row share exactly one key. That is the "paid
+// overrides pending" rule slice 3 relies on: once a committed row exists
+// under this key, the read path suppresses the pending row entirely, never
+// double-counting. This table itself enforces nothing about that
+// suppression -- it is a pure sync-time cache of what Sharesight currently
+// says is outstanding for this portfolio, unique per `(user_id, portfolio_id,
+// source_reference)` -- `user_id` is part of the unique key (not just
+// `portfolio_id`) so the upsert's own `ON CONFLICT` target matches the
+// `(portfolio_id, user_id)` composite FK below: a cross-owner call whose
+// `source_reference` collides with another owner's row always falls through
+// to the INSERT path, where that FK rejects it, rather than silently
+// overwriting the other owner's row on conflict.
+//
+// `portfolio_security_id` is NULLABLE (unlike `dividend_manual_records`,
+// where it is required): an announced payout can arrive before the sync's
+// own security-resolution step finds an owned `portfolio_securities` row
+// for it (slice 2's resolution mirrors `loadResolvedPortfolioInstrumentCurrencies`'s
+// `security_identifiers` / `source_symbol` lookup) -- null means "not yet
+// resolvable to an owned security", not an error; the read path (slice 3)
+// skips a null-security row rather than guessing.
+//
+// `total_cash_decimal` (Sharesight's `amount`) and `gross_amount_decimal`
+// are BOTH required -- unlike `dividend_manual_records`' amount-mode CHECK
+// (shares/per-share XOR totals), this table only ever stores the
+// totals-mode shape a Sharesight payout carries. `fx_rate_to_portfolio_decimal`
+// / `fx_rate_source` reuse `dividend_manual_records`' exact provenance
+// pairing CHECK -- see that table's header comment for the three-case
+// foreign-currency model this mirrors.
+//
+// `first_observed_at` / `last_observed_at` let the repository distinguish
+// "seen once, still current" from "refreshed on every subsequent sync";
+// `withdrawn_at` (nullable) marks a row the most recent COVERING sync no
+// longer observed (`markWithdrawnNotObserved` -- see
+// `db/repositories/sharesight-pending-payouts.ts`), re-observing clears it.
+// This table participates in account export/purge like every other
+// owner-scoped table (`db/repositories/account-lifecycle.ts`'s
+// `OWNED_TABLES`/`PURGE_TABLES_IN_FK_ORDER`), with the same
+// `account_purge_lock_*` triggers hand-appended in the CREATE-only
+// migration, following `sharesight_delayed_prices`'s (`0045`) established
+// precedent exactly (no rebuild, no drop-the-trigger hazard).
+// ---------------------------------------------------------------------------
+export const sharesightPendingPayouts = sqliteTable(
+  "sharesight_pending_payouts",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    portfolioId: text("portfolio_id").notNull(),
+    portfolioSecurityId: text("portfolio_security_id"),
+    sourceReference: text("source_reference").notNull(),
+    sharesightHoldingId: text("sharesight_holding_id").notNull(),
+    sharesightInstrumentId: text("sharesight_instrument_id"),
+    sharesightPayoutId: text("sharesight_payout_id"),
+    symbol: text("symbol").notNull(),
+    marketCode: text("market_code").notNull(),
+    currencyCode: text("currency_code").notNull(),
+    paymentDate: text("payment_date").notNull(),
+    exDate: text("ex_date"),
+    totalCashDecimal: text("total_cash_decimal").notNull(),
+    grossAmountDecimal: text("gross_amount_decimal").notNull(),
+    totalFrankingDecimal: text("total_franking_decimal"),
+    residentWithholdingTaxDecimal: text("resident_withholding_tax_decimal"),
+    nonResidentWithholdingTaxDecimal: text(
+      "non_resident_withholding_tax_decimal",
+    ),
+    fxRateToPortfolioDecimal: text("fx_rate_to_portfolio_decimal"),
+    fxRateSource: text("fx_rate_source"),
+    firstObservedAt: text("first_observed_at").notNull(),
+    lastObservedAt: text("last_observed_at").notNull(),
+    withdrawnAt: text("withdrawn_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "sharesight_pending_payouts_portfolio_id_user_id_fk",
+      columns: [table.portfolioId, table.userId],
+      foreignColumns: [portfolios.id, portfolios.userId],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "sharesight_pending_payouts_security_id_user_id_portfolio_id_fk",
+      columns: [table.portfolioSecurityId, table.userId, table.portfolioId],
+      foreignColumns: [
+        portfolioSecurities.id,
+        portfolioSecurities.userId,
+        portfolioSecurities.portfolioId,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "sharesight_pending_payouts_currency_code_currencies_code_fk",
+      columns: [table.currencyCode],
+      foreignColumns: [currencies.code],
+    }).onDelete("restrict"),
+    uniqueIndex(
+      "sharesight_pending_payouts_owner_portfolio_source_reference_unique",
+    ).on(table.userId, table.portfolioId, table.sourceReference),
+    index("sharesight_pending_payouts_owner_portfolio_withdrawn_idx").on(
+      table.userId,
+      table.portfolioId,
+      table.withdrawnAt,
+    ),
+    index("sharesight_pending_payouts_owner_portfolio_security_idx").on(
+      table.userId,
+      table.portfolioId,
+      table.portfolioSecurityId,
+    ),
+    // Same provenance pairing `dividend_manual_records_fx_provenance_check`
+    // enforces -- see that table's header comment for the full case model.
+    // `currency_code` is NOT NULL on this table (unlike
+    // `dividend_manual_records`, where it is sparse), so the second half of
+    // that sibling CHECK (rate implies a recorded currency) is unconditionally
+    // satisfied here and is not repeated.
+    check(
+      "sharesight_pending_payouts_fx_provenance_check",
+      sql`(${table.fxRateToPortfolioDecimal} IS NULL) = (${table.fxRateSource} IS NULL)`,
+    ),
+    check(
+      "sharesight_pending_payouts_fx_rate_source_check",
+      sql`${table.fxRateSource} IS NULL OR ${table.fxRateSource} IN ('sharesight')`,
+    ),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // MKT-011A: the daily-price-capture INTRADAY cache -- owner-scoped, one row
 // per (user, security, provider, observed_at) captured tick, gathered by the
 // `25,55 * * * *` sweep (`app/daily-price-capture-service.ts`) across each

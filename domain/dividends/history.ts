@@ -300,6 +300,25 @@ export type DividendManualRecordFact = {
   // genuinely absent or Sharesight-omitted one (those stay `frankingDerivedZero`/
   // plain-unknown, as before).
   frankingUnreadable?: boolean;
+  // BRK-022 slice 3: `true` exactly for a `sharesight_pending_payouts`
+  // observation fed in as a fact (`app/owned-dividend-history.ts`'s
+  // `pending:<row id>` facts) -- a Sharesight ANNOUNCEMENT, never itself
+  // payment evidence, unlike every other fact this module ever sees
+  // (owner-typed manual entry, receipt, or a committed CSV/Sharesight
+  // import). `undefined`/falsy on every other fact. This is also the
+  // discriminator that routes such a fact into the "imported" tier
+  // (alongside `importBatchId !== null`) below -- an announcement is
+  // provider evidence the owner never personally typed, exactly DIV-004's
+  // rationale for that tier, even though it never went through a CSV
+  // import batch (`importBatchId` stays `null`, honestly reflecting that).
+  announcedUnpaid?: boolean;
+  // BRK-022 slice 3: the pending payout's own `ex_date` (Sharesight's
+  // `goes_ex_on`), when known -- `DividendManualRecordFact` otherwise never
+  // carries an ex-date (only `ProviderDividendEventFact`/`DividendReceiptFact`
+  // do). Lets a standalone announced row (no matching event) still surface
+  // and be attributed by ex-date, mirroring a receipt's `rawEvent?.exDate`
+  // convention. `undefined`/null for every other fact.
+  exDate?: string | null;
 };
 
 export type DerivedDividendRowSource =
@@ -451,6 +470,21 @@ export type DerivedDividendRow = {
    * franking figure exists here but this app could not read it, never
    * substitute the default assumption". */
   frankingUnreadable?: boolean;
+  /** BRK-022 slice 3: `true` exactly when this row's underlying fact is a
+   * `sharesight_pending_payouts` announcement (`DividendManualRecordFact.announcedUnpaid`)
+   * -- never payment evidence, unlike every other `source` this row could
+   * carry. `false` for every auto-derived/override/receipt/owner-manual/
+   * committed-imported row, INCLUDING an event-anchored row an announced
+   * fact happens to win (`dividendEventId` set) -- that row's `status`
+   * still derives from the event's own `exDate` as before (a real declared
+   * event backs it), this flag only marks that the WINNING fact was itself
+   * an announcement rather than a receipt/committed import. Consumers:
+   * `domain/dividends/forecast.ts` excludes a STANDALONE announced row
+   * (`announcedUnpaid && dividendEventId === null`) from declared coverage
+   * (an event-anchored one keeps counting -- it replaced the provider row
+   * that already counted); `app/owned-dividend-list.ts`/UI render
+   * "announced (Sharesight)" alongside the not-paid status. */
+  announcedUnpaid: boolean;
 };
 
 export type DeriveDividendHistoryInput = {
@@ -1036,6 +1070,13 @@ function resolveImportedRecordCurrency(
  *   readable and applied still reaches the absent-value branch normally (its
  *   `converted.totalFrankingDecimal` is the override value, not `null`, so
  *   the `unreadable` short-circuit's own null check does not fire for it).
+ * - F2 CORRECTION ROUND (review ruling): never fires for a pending-payout
+ *   announcement (`original.announcedUnpaid === true`) -- DIV-007's "sends
+ *   an explicit 0 on unfranked native payouts" evidence base was drawn from
+ *   CONFIRMED, PAID records only, and says nothing about what an
+ *   unconfirmed announcement will turn out to report once it settles. An
+ *   absent total on such a row stays genuinely unknown
+ *   (`frankingDerivedZero: false`); see the inline guard just below.
  */
 function deriveAbsentImportedFranking(
   original: DividendManualRecordFact,
@@ -1049,6 +1090,13 @@ function deriveAbsentImportedFranking(
   ) {
     return { ...converted, frankingUnreadable: true };
   }
+  // F2 correction round (review ruling): an announcement never gets this
+  // inference -- DIV-007's "Sharesight sends an explicit 0 on unfranked
+  // native payouts" evidence base is confirmed PAID payouts only. An absent
+  // total on a pending-payout announcement (`announcedUnpaid: true`) stays
+  // genuinely unknown; an explicit "0" Sharesight sends never reaches this
+  // absent-value branch at all and is unaffected.
+  if (original.announcedUnpaid === true) return converted;
   const isTotalsMode = (original.totalCashDecimal ?? null) !== null;
   const rawTotalFrankingAbsent =
     (original.totalFrankingDecimal ?? null) === null;
@@ -1356,9 +1404,15 @@ export function deriveDividendHistoryForSecurity(
   // DIV-004: split `dividend_manual_records` rows by `importBatchId` into
   // the owner-typed tier (2) and the imported tier (4) BEFORE any matching
   // happens, so the two tiers are matched to events independently and can
-  // never be confused with each other downstream.
+  // never be confused with each other downstream. BRK-022 slice 3: a
+  // `sharesight_pending_payouts` announcement (`announcedUnpaid: true`)
+  // never went through a CSV import batch (`importBatchId` stays `null`,
+  // honestly), but it is still provider evidence the owner never personally
+  // typed -- DIV-004's exact rationale for the imported tier -- so it is
+  // routed there by this second condition rather than by `importBatchId`.
   const ownerManualRecords = sanitizedManualRecords.filter(
-    (record) => record.importBatchId === null,
+    (record) =>
+      record.importBatchId === null && record.announcedUnpaid !== true,
   );
   // BRK-010 review finding B4: attempt to convert every imported
   // (Sharesight-derived) fact's totals into the security's own currency
@@ -1371,7 +1425,10 @@ export function deriveDividendHistoryForSecurity(
   // honestly at row-construction time rather than the rest of this module
   // silently assuming every imported fact is already security-native.
   const importedRecords = sanitizedManualRecords
-    .filter((record) => record.importBatchId !== null)
+    .filter(
+      (record) =>
+        record.importBatchId !== null || record.announcedUnpaid === true,
+    )
     .map((record) => applyFrankingCurrencyOverride(record))
     .map((record) =>
       deriveAbsentImportedFranking(
@@ -1489,6 +1546,11 @@ export function deriveDividendHistoryForSecurity(
     // (never sanitized) and for a manual/imported fact with no unreadable
     // per-share field.
     frankingPerShareUnreadable: boolean;
+    // BRK-022 slice 3: mirrors `DerivedDividendRow.announcedUnpaid` -- `true`
+    // exactly when `source === "imported"` AND the winning fact is a
+    // Sharesight pending-payout announcement. Always `false` for the manual
+    // and receipt branches (neither tier can ever carry the flag).
+    announcedUnpaid: boolean;
   } | null {
     if (manual) {
       return {
@@ -1533,6 +1595,7 @@ export function deriveDividendHistoryForSecurity(
         // `"frankingPerShare"` marker when unreadable.
         frankingPerShareUnreadable:
           manual.unreadableFields?.has("frankingPerShare") === true,
+        announcedUnpaid: false,
       };
     }
     if (receiptResolution) {
@@ -1558,6 +1621,7 @@ export function deriveDividendHistoryForSecurity(
         amountUnreadable: false,
         frankingUnreadable: false,
         frankingPerShareUnreadable: false,
+        announcedUnpaid: false,
       };
     }
     if (imported) {
@@ -1585,6 +1649,7 @@ export function deriveDividendHistoryForSecurity(
         // per-share fact's own unreadable franking credit.
         frankingPerShareUnreadable:
           imported.unreadableFields?.has("frankingPerShare") === true,
+        announcedUnpaid: imported.announcedUnpaid === true,
       };
     }
     return null;
@@ -1701,6 +1766,12 @@ export function deriveDividendHistoryForSecurity(
     let amountUnreadableFact = false;
     let frankingUnreadableFact = false;
     let frankingPerShareUnreadableFact = false;
+    // BRK-022 slice 3: only ever `true` when `ownerFact.source === "imported"`
+    // and the winning fact is a pending-payout announcement -- stays `false`
+    // for the override/auto branches (this event's own status already comes
+    // from its real `exDate` via `lifecycleStatus` above; this flag only
+    // records what backed the row, never changes `status` itself here).
+    let announcedUnpaidFact = false;
 
     if (override) {
       source = "edited";
@@ -1732,6 +1803,7 @@ export function deriveDividendHistoryForSecurity(
       amountUnreadableFact = ownerFact.amountUnreadable;
       frankingUnreadableFact = ownerFact.frankingUnreadable;
       frankingPerShareUnreadableFact = ownerFact.frankingPerShareUnreadable;
+      announcedUnpaidFact = ownerFact.announcedUnpaid;
       // DIV-005 Round A: an imported row that missed this event's own
       // window but is within window of the WINNING manual/receipt fact's
       // own date chains in here instead of surfacing as a second row.
@@ -1815,6 +1887,7 @@ export function deriveDividendHistoryForSecurity(
       frankingUnreadable:
         (frankingUnreadableFact || frankingPerShareUnreadableFact) &&
         frankingTotalDecimal === null,
+      announcedUnpaid: announcedUnpaidFact,
     });
   }
 
@@ -2030,6 +2103,11 @@ export function deriveDividendHistoryForSecurity(
     // imported record this eventless row was built from. Omitted (falsy)
     // for a `source === "receipt"` row, matching `frankingUnreadable` above.
     frankingPerShareUnreadable?: boolean;
+    // BRK-022 slice 3: mirrors `DerivedDividendRow.announcedUnpaid` for the
+    // imported record this eventless row was built from -- only ever set
+    // for `source === "imported"`. Omitted (falsy) for a manual/receipt
+    // row, which can never carry the flag.
+    announcedUnpaid?: boolean;
   }): void {
     const franking = resolveFrankingPerShareRespectingUnreadable(
       fields.frankingPerShareUnreadable ?? false,
@@ -2066,7 +2144,13 @@ export function deriveDividendHistoryForSecurity(
       grossIncludesFranking,
       // Owner-typed/receipt/imported evidence -- always treated as paid,
       // same convention as every other owner-fact row in this module.
-      status: "ex_date_passed",
+      // BRK-022 slice 3: EXCEPT a pending-payout announcement, which is
+      // never payment evidence -- such a row stays `declared_pending`
+      // regardless of its own payment date having already passed (only a
+      // committed receipt/import/manual record proves payment; read-time
+      // suppression, not date passage, is what removes an announcement once
+      // its committed twin lands -- see `app/owned-dividend-history.ts`).
+      status: fields.announcedUnpaid ? "declared_pending" : "ex_date_passed",
       source: fields.source,
       excluded: false,
       amountUnknown: cashDecimal === null,
@@ -2091,6 +2175,7 @@ export function deriveDividendHistoryForSecurity(
         ((fields.frankingUnreadable ?? false) ||
           (fields.frankingPerShareUnreadable ?? false)) &&
         frankingTotalDecimal === null,
+      announcedUnpaid: fields.announcedUnpaid ?? false,
     });
   }
 
@@ -2205,6 +2290,7 @@ export function deriveDividendHistoryForSecurity(
           totalCashDecimal: record.totalCashDecimal,
           totalFrankingDecimal: record.totalFrankingDecimal,
           paymentDate: record.paymentDate,
+          exDate: record.exDate ?? null,
           currencyCode: display.currencyCodeOverride ?? undefined,
           originalCurrencyCode: display.originalCurrencyCode,
           fxRateToPortfolioDecimal: display.fxRateToPortfolioDecimal,
@@ -2215,6 +2301,7 @@ export function deriveDividendHistoryForSecurity(
           frankingUnreadable: record.frankingUnreadable === true,
           frankingPerShareUnreadable:
             record.unreadableFields?.has("frankingPerShare") === true,
+          announcedUnpaid: record.announcedUnpaid === true,
         });
       }
       continue;
@@ -2291,6 +2378,7 @@ export function deriveDividendHistoryForSecurity(
         totalCashDecimal: importedPick.winner.totalCashDecimal,
         totalFrankingDecimal: importedPick.winner.totalFrankingDecimal,
         paymentDate: importedPick.winner.paymentDate,
+        exDate: importedPick.winner.exDate ?? null,
         additionalImportedCount: importedPick.additionalCount,
         currencyCode: display.currencyCodeOverride ?? undefined,
         originalCurrencyCode: display.originalCurrencyCode,
@@ -2304,6 +2392,7 @@ export function deriveDividendHistoryForSecurity(
         frankingPerShareUnreadable:
           importedPick.winner.unreadableFields?.has("frankingPerShare") ===
           true,
+        announcedUnpaid: importedPick.winner.announcedUnpaid === true,
       });
     }
   }
@@ -2378,7 +2467,9 @@ export function deriveDividendHistoryForSecurity(
       grossIncludesFranking,
       // Owner-asserted/imported evidence -- always treated as paid, same
       // convention as the standalone manual/orphan-receipt rows above.
-      status: "ex_date_passed",
+      // BRK-022 slice 3: EXCEPT a pending-payout announcement -- see the
+      // identical guard in `pushEventlessRow`.
+      status: ownerFact.announcedUnpaid ? "declared_pending" : "ex_date_passed",
       source: ownerFact.source,
       excluded: false,
       amountUnknown: cashDecimal === null,
@@ -2402,6 +2493,7 @@ export function deriveDividendHistoryForSecurity(
         (ownerFact.frankingUnreadable ||
           ownerFact.frankingPerShareUnreadable) &&
         frankingTotalDecimal === null,
+      announcedUnpaid: ownerFact.announcedUnpaid,
     });
   }
 
