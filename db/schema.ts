@@ -714,6 +714,19 @@ export const importBatches = sqliteTable(
     // `app/portfolio-bundle-service.ts`'s bundle-restore scaffold reads this
     // key with a plain SELECT (no `ON CONFLICT`) and only ever INSERTs when
     // NO row exists, so it never creates a second live row.
+    //
+    // Correction (2026-09-04, BRK-020 round 3): "immutable (never rewritten
+    // to free the key)" is accurate for CSV/Sharesight batches, but NOT for
+    // the bundle-restore scaffold above -- `commitPortfolioBundleImport`
+    // (`app/portfolio-bundle-service.ts`) deliberately reuses-and-resets the
+    // most recently updated REVERSED row when no live row shares the key,
+    // rewriting it `reversed -> committing -> committed` (see
+    // `findExistingBatch`'s own comment there, and `docs/ARCHITECTURE.md`'s
+    // BRK-020 entry). `findExistingBatch`'s SELECT also now orders live rows
+    // first (`ORDER BY CASE WHEN status <> 'reversed' THEN 0 ELSE 1 END,
+    // updated_at DESC`), so this schema's ONE surviving live row is always
+    // picked over any reversed row sharing the key -- it does need this
+    // tiebreak, contrary to what this comment previously implied.
     uniqueIndex("import_batches_user_file_parser_unique")
       .on(
         table.userId,

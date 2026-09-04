@@ -278,18 +278,16 @@ const FIND_EXISTING_BATCH_SQL = `SELECT id, status, target_portfolio_id FROM imp
      ORDER BY CASE WHEN status <> 'reversed' THEN 0 ELSE 1 END, updated_at DESC
      LIMIT 1`;
 
-test("BRK-020 F1 (pin): findExistingBatch's query resolves to the LIVE row over a REVERSED row sharing the same key regardless of insertion order or recency, and its EXPLAIN QUERY PLAN is a bounded per-owner scan plus a temp B-tree sort (not a regression into scanning an unrelated table)", () => {
-  const database = new DatabaseSync(":memory:");
-  database.exec("PRAGMA foreign_keys = OFF;"); // raw fixture rows only, no FK setup needed
-  for (const stmt of [
-    `CREATE TABLE import_batches (
-       id TEXT PRIMARY KEY, user_id TEXT, target_portfolio_id TEXT,
-       parser_format TEXT, parser_version TEXT, filename TEXT, byte_size INTEGER,
-       file_sha256 TEXT, status TEXT, created_at TEXT, updated_at TEXT, version INTEGER
-     )`,
-  ]) {
-    database.exec(stmt);
-  }
+test("BRK-020 F1 (pin): findExistingBatch's query resolves to the LIVE row over a REVERSED row sharing the same key regardless of insertion order or recency, and its EXPLAIN QUERY PLAN against the REAL migrated schema is an owner-scoped index seek plus a temp B-tree sort (not a regression into an unindexed scan or a scan of an unrelated table)", async () => {
+  // Built with the file's own `migratedDatabase()` helper -- against the
+  // REAL schema, `import_batches_owner_status_updated_at_idx` (user_id,
+  // status, updated_at) covers this query's `user_id = ?` predicate, so the
+  // planner seeks that index rather than scanning the table; only the
+  // ORDER BY's tiebreak still needs a temp B-tree. A hand-rolled, index-free
+  // `CREATE TABLE import_batches` (as this test previously used) records
+  // the OPPOSITE of production and would miss a real regression in either
+  // direction.
+  const database = await migratedDatabase();
   const insert = (id: string, status: string, updatedAt: string): void => {
     database
       .prepare(
@@ -326,13 +324,19 @@ test("BRK-020 F1 (pin): findExistingBatch's query resolves to the LIVE row over 
     detail: string;
   }>;
   const planText = plan.map((step) => step.detail).join(" | ");
-  // No index covers (user_id, file_sha256, parser_format, parser_version)
-  // without a status predicate, so this is a full scan of import_batches
-  // (bounded by that user's batch count, not the whole table across owners)
-  // plus a temp B-tree for the ORDER BY -- acceptable at this table's size;
-  // recorded here so a regression that makes this materially worse (e.g. a
-  // scan of an unrelated table) is visible in the plan text.
-  assert.match(planText, /SCAN.*import_batches/i);
+  // Real plan (verified against the migrated schema): the planner seeks
+  // `import_batches_owner_status_updated_at_idx` on `user_id = ?` -- that
+  // index does not cover `file_sha256`/`parser_format`/`parser_version`, so
+  // those are filtered in the VM -- then sorts the owner's matching rows in
+  // a temp B-tree for the ORDER BY tiebreak. This is an owner-bounded index
+  // seek followed by a temp sort of that owner's matching rows, not a
+  // table scan; acceptable at this table's per-owner size. Recorded here so
+  // a regression that makes this materially worse (e.g. a scan of an
+  // unrelated table, or losing the index seek) is visible in the plan text.
+  assert.match(
+    planText,
+    /SEARCH import_batches USING INDEX import_batches_owner_status_updated_at_idx \(user_id=\?\)/i,
+  );
   assert.match(planText, /USE TEMP B-TREE FOR ORDER BY/i);
 });
 
@@ -406,6 +410,79 @@ test("BRK-020 F1: commitPortfolioBundleImport reuses the LIVE ('reversing') batc
     liveStatus.status,
     "committed",
     "the live batch, not the reversed one, must be the one reused and committed",
+  );
+});
+
+test("BRK-020 B3 (pin, not a regression test): with ONLY reversed rows sharing the bundle's fingerprint key (no live row at all), commitPortfolioBundleImport reuses and resets the most recently updated REVERSED row rather than minting a fresh batch -- this is this module's pre-existing, deliberate bundle-restore semantics (findExistingBatch's own comment and docs/ARCHITECTURE.md's BRK-020 entry), not a bug; this test exists only to make that outcome visible so a future change cannot silently alter it", async () => {
+  const database = await migratedDatabase();
+  const client = createSqliteSqlClient(database);
+  const exported = await exportPortfolioBundle(
+    { client, userId: "user-a", requestId: randomUUID() },
+    "portfolio-a",
+  );
+  assert.equal(exported.ok, true);
+  if (!exported.ok) return;
+  const bundle = exported.bundle;
+  const fingerprint = await fingerprintBundle(bundle);
+
+  const insertBatch = (id: string, status: string, updatedAt: string): void => {
+    database
+      .prepare(
+        `INSERT INTO import_batches (
+           id, user_id, target_portfolio_id, parser_format, parser_version, filename,
+           byte_size, file_sha256, status, created_at, updated_at, version
+         ) VALUES (?, 'user-a', 'portfolio-a', ?, ?, 'b.json', 1, ?, ?,
+           '2026-09-03T00:00:00Z', ?, 1)`,
+      )
+      .run(
+        id,
+        PORTFOLIO_BUNDLE_PARSER_FORMAT,
+        String(PORTFOLIO_BUNDLE_SCHEMA_VERSION),
+        fingerprint,
+        status,
+        updatedAt,
+      );
+  };
+  // Two reversed generations, older one inserted last / given the LATER
+  // `updated_at`, so "reuse the most recently updated one" is the only
+  // rule that can pick `rev-newer`.
+  insertBatch("rev-newer", "reversed", "2026-09-03T02:00:00Z");
+  insertBatch("rev-older", "reversed", "2026-09-03T01:00:00Z");
+
+  const result = await commitPortfolioBundleImport(
+    { client, userId: "user-a", requestId: randomUUID() },
+    bundle,
+    "b.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(
+    result.ok,
+    true,
+    result.ok ? "" : (result as { message: string }).message,
+  );
+  if (!result.ok) return;
+
+  const rows = database
+    .prepare(
+      "SELECT id, status FROM import_batches WHERE user_id = 'user-a' AND file_sha256 = ?",
+    )
+    .all(fingerprint) as { id: string; status: string }[];
+  assert.equal(
+    rows.length,
+    2,
+    "no third batch row should be minted -- the newest reversed row is reused in place",
+  );
+  const newer = rows.find((row) => row.id === "rev-newer");
+  const older = rows.find((row) => row.id === "rev-older");
+  assert.equal(
+    newer?.status,
+    "committed",
+    "the most recently updated reversed row is reused-and-reset through committing to committed",
+  );
+  assert.equal(
+    older?.status,
+    "reversed",
+    "the older reversed generation is left untouched",
   );
 });
 
@@ -709,39 +786,103 @@ async function collectTsFiles(dir: URL, out: string[]): Promise<void> {
   }
 }
 
-test("BRK-020 B1 (pin): every assignment of import_batches.status = 'failed' lives in app/portfolio-bundle-service.ts -- a writer for a new parser_format must fail this test and force the failed/index-predicate decision (docs/DATA_MODEL.md) to be revisited", async () => {
+test("BRK-020 B1 (pin): every assignment of import_batches.status = 'failed' lives in app/portfolio-bundle-service.ts, and every transitionStatus(...) call site (the CSV/Sharesight staging path) passes only a known non-failed nextStatus literal -- a new writer, a reordered SET clause, or a 'failed' nextStatus literal must fail this test and force the failed/index-predicate decision (docs/DATA_MODEL.md) to be revisited", async () => {
   const files: string[] = [];
   await collectTsFiles(new URL("../app/", import.meta.url), files);
   await collectTsFiles(new URL("../db/", import.meta.url), files);
+  await collectTsFiles(new URL("../domain/", import.meta.url), files);
+  await collectTsFiles(new URL("../worker/", import.meta.url), files);
 
-  const assignmentPattern =
-    /UPDATE\s+import_batches\s+SET\s+status\s*=\s*'failed'/gi;
-  const matches: Array<{ file: string; count: number }> = [];
+  const contentsByFile = new Map<string, string>();
   for (const file of files) {
-    const contents = await readFile(file, "utf8");
-    const count = (contents.match(assignmentPattern) ?? []).length;
-    if (count > 0) matches.push({ file, count });
+    contentsByFile.set(file, await readFile(file, "utf8"));
   }
 
-  const otherFiles = matches.filter(
+  const lineOf = (contents: string, index: number): number =>
+    contents.slice(0, index).split("\n").length;
+
+  // (b) Order-insensitive: capture each `UPDATE import_batches SET ...`
+  // statement's whole SET clause (up to its WHERE) and search it for a
+  // `status = 'failed'` assignment ANYWHERE in the list, not only as the
+  // first (and not tied to a particular `updated_at`/`status` ordering).
+  const updateStatementPattern =
+    /UPDATE\s+import_batches\s+SET\s+([\s\S]*?)\bWHERE\b/gi;
+  const failedAssignmentPattern = /status\s*=\s*'failed'/i;
+  const writerMatches: Array<{ file: string; line: number }> = [];
+  for (const [file, contents] of contentsByFile) {
+    for (const match of contents.matchAll(updateStatementPattern)) {
+      if (failedAssignmentPattern.test(match[1] ?? "")) {
+        writerMatches.push({
+          file,
+          line: lineOf(contents, match.index ?? 0),
+        });
+      }
+    }
+  }
+
+  const otherWriters = writerMatches.filter(
     (m) => !m.file.endsWith("/app/portfolio-bundle-service.ts"),
   );
   assert.deepEqual(
-    otherFiles,
+    otherWriters,
     [],
     "a new writer of import_batches.status = 'failed' outside app/portfolio-bundle-service.ts means the `failed`/`WHERE status <> 'reversed'` decision in docs/DATA_MODEL.md must be revisited",
   );
 
-  const bundleServiceMatches = matches.find((m) =>
+  const bundleServiceWriters = writerMatches.filter((m) =>
     m.file.endsWith("/app/portfolio-bundle-service.ts"),
   );
-  assert.ok(
-    bundleServiceMatches,
-    "expected the known three writers to be found",
-  );
+  const bundleServiceLines = bundleServiceWriters
+    .map((m) => m.line)
+    .sort((a, b) => a - b);
   assert.equal(
-    bundleServiceMatches!.count,
+    bundleServiceWriters.length,
     3,
-    "expected exactly the three known writers (~470, ~531, ~1086); a changed count is also a signal to re-verify the decision's premises",
+    `expected exactly three known writers in app/portfolio-bundle-service.ts, found ${bundleServiceWriters.length} (at line(s) ${bundleServiceLines.join(", ") || "none"}); a changed count is also a signal to re-verify the decision's premises and, if genuine, update docs/DATA_MODEL.md's B1 paragraph to cite the new line numbers`,
   );
+
+  // (c) Every `transitionStatus(...)` CALL SITE -- matched with a leading
+  // `.` so this never matches the method's own definition
+  // (`async transitionStatus(` in db/repositories/import-staging.ts, which
+  // has no receiver before it) -- must pass a `nextStatus` literal drawn
+  // from the known non-`failed` set. A new call site, or one passing
+  // `"failed"`, must fail loudly here rather than silently reproducing the
+  // stuck-key hazard BRK-020 fixed for `reversed`.
+  const knownNonFailedNextStatuses = new Set(["ready", "needs_mapping"]);
+  const callSitePattern = /\.transitionStatus\(/g;
+  const nextStatusPattern = /nextStatus\s*:\s*["']([A-Za-z_]+)["']/;
+  const callSites: Array<{
+    file: string;
+    line: number;
+    nextStatus: string | null;
+  }> = [];
+  for (const [file, contents] of contentsByFile) {
+    for (const match of contents.matchAll(callSitePattern)) {
+      const startIndex = match.index ?? 0;
+      const window = contents.slice(startIndex, startIndex + 500);
+      const nextStatusMatch = nextStatusPattern.exec(window);
+      callSites.push({
+        file,
+        line: lineOf(contents, startIndex),
+        nextStatus: nextStatusMatch ? nextStatusMatch[1] : null,
+      });
+    }
+  }
+
+  assert.ok(
+    callSites.length >= 2,
+    `expected at least the two known transitionStatus call sites, found ${callSites.length}`,
+  );
+  for (const site of callSites) {
+    assert.ok(
+      site.nextStatus !== null,
+      `${site.file}:${site.line} calls transitionStatus but no nextStatus literal could be found within 500 characters -- widen the search window or inspect this call site manually`,
+    );
+    assert.ok(
+      knownNonFailedNextStatuses.has(site.nextStatus!),
+      site.nextStatus === "failed"
+        ? `${site.file}:${site.line} calls transitionStatus with nextStatus: "failed" -- the failed/index-predicate decision in docs/DATA_MODEL.md must be revisited`
+        : `${site.file}:${site.line} calls transitionStatus with an unrecognized nextStatus literal ${JSON.stringify(site.nextStatus)} -- add it to the known set here only after confirming it cannot reach 'failed' for a non-bundle parser_format, per docs/DATA_MODEL.md's B1 decision`,
+    );
+  }
 });

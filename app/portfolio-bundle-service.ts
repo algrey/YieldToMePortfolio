@@ -209,16 +209,29 @@ async function findExistingBatch(
   // BRK-020 F1: `import_batches_user_file_parser_unique` is now a PARTIAL
   // unique index (`WHERE status <> 'reversed'`, db/schema.ts), so this key
   // can hold several `reversed` rows plus at most one live (non-reversed)
-  // row. Without an explicit tiebreak, `LIMIT 1` returns whichever matching
-  // row the query planner happens to visit first -- there is no index
-  // covering exactly (user_id, file_sha256, parser_format, parser_version)
-  // without a status predicate, so that has been a full-table-scan
-  // (rowid/insertion order) accident, not a guarantee. This ORDER BY makes
-  // the choice contractual: prefer the live row outright, then (among rows
-  // of the same liveness) the most recently updated one, so a stale
-  // `reversed` audit row is never handed back as "the existing batch" and
-  // reused/rewritten by a caller -- reversed rows are immutable audit
-  // records (see the index comment in db/schema.ts).
+  // row. Without an explicit tiebreak, `LIMIT 1` returned whichever matching
+  // row the query planner visited first -- against the real migrated schema
+  // that is `import_batches_owner_status_updated_at_idx` on `user_id`, so
+  // pre-fix the effective order was status-then-`updated_at` WITHIN this
+  // owner (not rowid/insertion order), which is exactly why a live
+  // `'reversing'` row (sorting after `'reversed'`) could be shadowed by an
+  // older reversed one. This ORDER BY makes the choice contractual: prefer
+  // the live row outright, then (among rows of the same liveness) the most
+  // recently updated one.
+  //
+  // Correction (BRK-020 round 3, 2026-09-04): the guarantee this buys is
+  // narrower than "a reversed row is never handed back" -- it is "the live
+  // row wins WHEN ONE EXISTS." With only reversed rows sharing this key
+  // (nothing live), this function still returns the most recently updated
+  // reversed row, and `commitPortfolioBundleImport`'s caller-side branch
+  // (`existing.status !== "committed"`) then reuses and resets THAT row:
+  // `target_portfolio_id` back to NULL and `status` back to `committing`,
+  // moving it `reversed -> committing -> committed`. That is not a bug --
+  // it is this module's pre-existing, deliberate bundle-restore semantics
+  // (see the comment at that reuse branch below), just not what this
+  // function's own comment used to claim. Reversed rows stay immutable
+  // audit records on the CSV/Sharesight staging path (db/schema.ts); the
+  // bundle-restore scaffold is the one path that reuses-and-resets one.
   const row = await client.get<Record<string, unknown>>(
     `SELECT id, status, target_portfolio_id FROM import_batches
      WHERE user_id = ? AND file_sha256 = ? AND parser_format = ? AND parser_version = ?
