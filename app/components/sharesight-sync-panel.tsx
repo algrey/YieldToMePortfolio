@@ -260,6 +260,8 @@ export function SharesightSyncPanel({
             // BRK-022 slice 2
             pendingPayouts: number;
             pendingPayoutsUnresolved: number;
+            // Review round F2
+            pendingPayoutsCollided: number;
             pendingPayoutsError: string | null;
           }
         | { ok: false; message: string };
@@ -284,6 +286,7 @@ export function SharesightSyncPanel({
         window: result.window,
         pendingPayouts: result.pendingPayouts,
         pendingPayoutsUnresolved: result.pendingPayoutsUnresolved,
+        pendingPayoutsCollided: result.pendingPayoutsCollided,
         pendingPayoutsError: result.pendingPayoutsError,
       });
     } catch (error) {

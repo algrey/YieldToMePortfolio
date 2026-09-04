@@ -231,18 +231,38 @@ test("upsertObserved rejects an invalid decimal input, writes nothing, and retur
   assert.equal((await repo.listActive("a", "pa")).length, 0);
 });
 
-test("upsertObserved rejects a non-positive totalCashDecimal (form-invalid, not merely over-bound)", async () => {
+// Review round correction (F3, 2026-09-04): this used to assert that a
+// zero-amount payout was REJECTED ("form-invalid, not merely over-bound").
+// That was wrong -- Sharesight can genuinely announce a `"0"` payout, and
+// this table's write is validated WHOLESALE (see `upsertObserved`'s doc
+// comment), so rejecting a zero-amount row would have blocked recording
+// (and, via the caller's skipped withdrawal call, withdrawal) for every
+// OTHER pending payout in the same sync, not just this one. `"0"` is now
+// accepted for both `totalCashDecimal` and `grossAmountDecimal`; a genuinely
+// negative value is still rejected (unrepresentable for a payout).
+test("upsertObserved accepts a zero totalCashDecimal/grossAmountDecimal but rejects a negative one", async () => {
   const db = await ownedFixture();
   const repo = createSharesightPendingPayoutsRepository(
     createSqliteSqlClient(db),
     () => "2026-09-01T00:00:00.000Z",
   );
-  const result = await repo.upsertObserved("a", "pa", [
-    payout({ totalCashDecimal: "0" }),
+  const zero = await repo.upsertObserved("a", "pa", [
+    payout({ totalCashDecimal: "0", grossAmountDecimal: "0" }),
   ]);
-  assert.equal(result.ok, false);
-  if (!result.ok && result.reason === "invalid_input")
-    assert.equal(result.field, "payouts[0].totalCashDecimal");
+  assert.deepEqual(zero, { ok: true, inserted: 1, updated: 0 });
+  const [row] = await repo.listActive("a", "pa");
+  assert.equal(row?.totalCashDecimal, "0");
+  assert.equal(row?.grossAmountDecimal, "0");
+
+  const negative = await repo.upsertObserved("a", "pa", [
+    payout({
+      sourceReference: "sharesight-payout:pa:holding-negative:2026-09-25",
+      totalCashDecimal: "-1.00",
+    }),
+  ]);
+  assert.equal(negative.ok, false);
+  if (!negative.ok && negative.reason === "invalid_input")
+    assert.equal(negative.field, "payouts[0].totalCashDecimal");
 });
 
 test("upsertObserved rejects a fx rate present without a fx rate source", async () => {

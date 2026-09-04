@@ -30,6 +30,8 @@ export {
   type ParsedImportRow,
 } from "./strict-versioned-parser.ts";
 
+export { committedSourceReferenceForFingerprint } from "./committed-source-reference.ts";
+
 export {
   createImportReconciliationPreview,
   type ImportPreviewMappingDecision,

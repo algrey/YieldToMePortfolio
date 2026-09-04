@@ -25,10 +25,11 @@ import {
   type SharesightCommittedRowValues,
   type SqlClient,
 } from "../db/repositories/index.ts";
-import type {
-  ImportParseSuccess,
-  NormalizedImportRow,
-  ParsedImportRow,
+import {
+  committedSourceReferenceForFingerprint,
+  type ImportParseSuccess,
+  type NormalizedImportRow,
+  type ParsedImportRow,
 } from "../domain/imports/index.ts";
 // BRK-019 slice 1: the field-comparison helpers this function used to define
 // privately now live in `domain/imports/committed-value-comparison.ts`, so
@@ -41,6 +42,7 @@ import {
 } from "../domain/imports/committed-value-comparison.ts";
 import {
   computeRoutineSyncFromDate,
+  countPayoutKeyCollisions,
   instrumentMatchKey,
   invertToPortfolioConversionRate,
   isFutureUnconfirmedPayout,
@@ -309,6 +311,20 @@ export type RunSharesightSyncResult =
       // observed within the payout stream's own covered window -- see
       // `markWithdrawnNotObserved`'s doc comment).
       pendingPayoutsWithdrawn: number;
+      // Review round F2 (2026-09-04): of this fetch's future-dated,
+      // not-yet-due payouts, how many were NOT recorded (and not counted in
+      // `pendingPayouts`/`pendingPayoutsUnresolved` above) because their
+      // `payoutIdentityKey` collided with another future-dated payout in
+      // the SAME fetch -- the same warning-severity `SHARESIGHT_PAYOUT_KEY_COLLISION`
+      // condition `domain/sharesight-sync/transform.ts` already blocks
+      // readiness on for a STAGEABLE row, but here the payout is never
+      // staged as a row at all, so there is no batch row for a persisted
+      // `import_issues` entry to attach to; the panel surfaces it directly
+      // via `pendingPayoutsLine` instead. A previously-recorded row under a
+      // now-colliding key is left untouched (neither refreshed nor
+      // withdrawn) rather than guessed at -- see the pending-payout block
+      // below.
+      pendingPayoutsCollided: number;
       // Non-null only when `upsertObserved`/`markWithdrawnNotObserved`
       // returned a typed failure -- a short, amount-free message. Recording
       // pending payouts is best-effort and NEVER fails the sync itself (the
@@ -534,7 +550,9 @@ function classifySharesightRow(
   },
   existing: SharesightCommittedRowValues,
 ): SharesightRowClassification {
-  const sourceReference = `import-fingerprint:${row.fingerprint}`;
+  const sourceReference = committedSourceReferenceForFingerprint(
+    row.fingerprint,
+  );
   if (row.normalized.type === "dividend") {
     const existingPayout = existing.payouts.get(sourceReference);
     if (!existingPayout) return "new";
@@ -1050,6 +1068,7 @@ export async function runSharesightSyncWithContext(
   let pendingPayouts = 0;
   let pendingPayoutsUnresolved = 0;
   let pendingPayoutsWithdrawn = 0;
+  let pendingPayoutsCollided = 0;
   let pendingPayoutsError: string | null = null;
   {
     const resolvableSecurities =
@@ -1062,10 +1081,29 @@ export async function runSharesightSyncWithContext(
       context.client,
       options.now,
     );
+
+    // Review round F2 (2026-09-04): two future-dated payouts sharing one
+    // `payoutIdentityKey` in THIS fetch (same holding, same paid date --
+    // e.g. an interim and a special dividend, both still unconfirmed)
+    // cannot be told apart, exactly the collision `SHARESIGHT_PAYOUT_KEY_COLLISION`
+    // already blocks for STAGEABLE rows (`transform.ts`'s `buildPayoutRow`).
+    // Recording either one arbitrarily would silently pick one of two
+    // indistinguishable announcements, so NEITHER is recorded -- the SAME
+    // `countPayoutKeyCollisions` helper `transform.ts` uses, run over this
+    // separate future-dated candidate list, so the two collision checks can
+    // never drift apart on what counts as a collision.
+    const pendingKeyCollisionCounts = countPayoutKeyCollisions(
+      pendingPayoutCandidates,
+    );
+    const nonCollidingCandidates = pendingPayoutCandidates.filter(
+      (payout) =>
+        (pendingKeyCollisionCounts.get(payoutIdentityKey(payout)) ?? 1) === 1,
+    );
+    pendingPayoutsCollided =
+      pendingPayoutCandidates.length - nonCollidingCandidates.length;
+
     const observationInputs: PendingPayoutObservationInput[] = [];
-    const observedSourceReferences: string[] = [];
-    for (const payout of pendingPayoutCandidates) {
-      observedSourceReferences.push(payoutIdentityKey(payout));
+    for (const payout of nonCollidingCandidates) {
       const resolvedSecurity = resolvePendingPayoutPortfolioSecurity(
         payout,
         resolvableSecurities,
@@ -1075,6 +1113,23 @@ export async function runSharesightSyncWithContext(
         buildPendingPayoutObservationInput(payout, resolvedSecurity),
       );
     }
+
+    // Review round B1 (BLOCKING, 2026-09-04): the observed set passed to
+    // `markWithdrawnNotObserved` must be the identity keys of EVERY payout
+    // Sharesight returned THIS fetch -- stageable or not, confirmed or not,
+    // colliding or not -- never just the future-dated candidates upserted
+    // above. The original version built it from `pendingPayoutCandidates`
+    // alone, so the very first sync AFTER a pending payout's own pay date
+    // passed withdrew it: it is no longer future-dated (so it drops out of
+    // the candidate set), yet nothing has staged/committed for it yet
+    // either (owner ruling 3 -- a pending payout must keep showing as
+    // unpaid until the COMMITTED record lands, not merely until the pay
+    // date passes). Building the observed set from the whole fetch instead
+    // means a payout that is simply about to stage as a real row -- or one
+    // that collided and was therefore skipped above -- stays observed, and
+    // therefore active, for as long as Sharesight keeps listing it at all.
+    const observedSourceReferences = payoutsResult.value.map(payoutIdentityKey);
+
     const upserted = await pendingPayoutsRepository.upsertObserved(
       context.userId,
       portfolioId,
@@ -1088,13 +1143,20 @@ export async function runSharesightSyncWithContext(
           : "Could not record announced payouts -- they may be stale until the next sync.";
     } else {
       pendingPayouts = upserted.inserted + upserted.updated;
-      // Ordering note: `upsertObserved` either writes every chunk or fails
-      // wholesale (this branch is reached only on full success), so
-      // `observedSourceReferences` is always a faithful superset of what
-      // is actually stored by the time withdrawal runs -- a partial
-      // multi-chunk upsert failure would instead hit the `!upserted.ok`
-      // branch above and skip withdrawal entirely, never withdraw against
-      // an incomplete write.
+      // Review round correction (B3, BLOCKING, 2026-09-04): the ordering
+      // note here used to claim `upsertObserved` "either writes every
+      // chunk or fails wholesale" -- false. Its VALIDATION is wholesale (an
+      // `invalid_input` row means nothing is written, the `!upserted.ok`
+      // branch above), but its writes are sent as several `client.batch()`
+      // calls, one per chunk; a chunk failure partway through can leave
+      // EARLIER chunks applied while still surfacing as `!upserted.ok`
+      // (`atomic_failure`) here. This is still safe: an observation is
+      // idempotent (the next sync re-observes and re-upserts every row
+      // regardless of what a prior partial call left behind), and
+      // withdrawal is skipped ENTIRELY whenever `upserted.ok` is false --
+      // including on a partial chunk failure -- so a partial write is never
+      // compounded by a withdrawal pass reasoning from an incomplete
+      // observed set.
       const withdrawal =
         await pendingPayoutsRepository.markWithdrawnNotObserved(
           context.userId,
@@ -1216,6 +1278,7 @@ export async function runSharesightSyncWithContext(
     pendingPayouts,
     pendingPayoutsUnresolved,
     pendingPayoutsWithdrawn,
+    pendingPayoutsCollided,
     pendingPayoutsError,
   };
 }

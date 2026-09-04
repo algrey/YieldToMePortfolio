@@ -1,6 +1,7 @@
 export {
   resolveSharesightTradeDirection,
   transformSharesightSync,
+  countPayoutKeyCollisions,
   invertToPortfolioConversionRate,
   instrumentMatchKey,
   isFutureUnconfirmedPayout,

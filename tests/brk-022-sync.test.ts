@@ -34,8 +34,9 @@ import {
   createSharesightPendingPayoutsRepository,
   createSqliteSqlClient,
   type ImportCommitInput,
-  type SqlClient,
 } from "../db/repositories/index.ts";
+import type { SqlClient, SqlStatement } from "../db/repositories/sql-client.ts";
+import { committedSourceReferenceForFingerprint } from "../domain/imports/index.ts";
 import { invertToPortfolioConversionRate } from "../domain/sharesight-sync/index.ts";
 import type {
   SharesightClient,
@@ -215,6 +216,37 @@ const integrationOf = (client: SharesightClient) => ({
   enabled: true as const,
   client,
 });
+
+/**
+ * Review round F1: wraps a real `SqlClient` so a `client.batch()` call whose
+ * FIRST statement's SQL text contains `matchSubstring` throws instead of
+ * executing -- mirrors `tests/mkt-011a.test.ts`'s `wrapClientWithFailingCall`
+ * (there wrapping `.all()`) for the write path
+ * `sharesight-pending-payouts.ts`'s `upsertObserved`/`markWithdrawnNotObserved`
+ * both use. Used to simulate a genuine DB failure at exactly one of those two
+ * steps without corrupting any other write this test's sync also performs
+ * (staging, security resolution, sync-state upsert all use `client.batch()`
+ * too, so matching on statement TEXT rather than failing every batch call is
+ * required to isolate the one step under test).
+ */
+function wrapClientWithFailingBatch(
+  client: SqlClient,
+  matchSubstring: string,
+): SqlClient {
+  return {
+    all: (sql, params) => client.all(sql, params),
+    get: (sql, params) => client.get(sql, params),
+    run: (sql, params) => client.run(sql, params),
+    batch: (statements: readonly SqlStatement[]) => {
+      if (
+        statements.some((statement) => statement.sql.includes(matchSubstring))
+      ) {
+        throw new Error(`simulated batch failure: ${matchSubstring}`);
+      }
+      return client.batch(statements);
+    },
+  };
+}
 
 async function linkedFixture(
   database: DatabaseSync,
@@ -1042,4 +1074,552 @@ test("BRK-022 slice 2: formatSyncResultMessage omits the pending-payout line at 
     pendingPayoutsError: "boom",
   });
   assert.match(errored, /Announced dividends could not be recorded: boom/);
+});
+
+// ---------------------------------------------------------------------------
+// 10. Review round B1: withdrawal fires only on genuine ABSENCE from the
+//     fetch, never merely because the pay date passed.
+// ---------------------------------------------------------------------------
+
+test("BRK-022 slice 2 review round B1: a pending payout stays active once its pay date passes and it starts staging, and is withdrawn only once Sharesight stops listing it", async () => {
+  const database = await migratedDatabase();
+  seedResolvedSecurity(database, {
+    securityId: "sec-abc",
+    userId: "user-a",
+    portfolioId: "portfolio-a",
+    symbol: "ABC",
+    exchangeAlias: "ASX",
+    currencyCode: "AUD",
+  });
+  const payoutStillPending = fakePayout({
+    id: null,
+    holdingId: "holding-1",
+    symbol: "ABC",
+    marketCode: "ASX",
+    paidOnDate: "2026-09-10",
+  });
+  const { client } = await linkedFixture(database, {
+    portfolios: [fakePortfolio()],
+    trades: [],
+    payouts: [payoutStillPending],
+  });
+
+  // Sync 1 (now = 2026-09-04): the payout is future-dated -> pending row.
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    {
+      integration: integrationOf(
+        fakeSharesightClient({
+          portfolios: [fakePortfolio()],
+          payouts: [payoutStillPending],
+        }),
+      ),
+      now: () => "2026-09-04T00:00:00.000Z",
+    },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  assert.equal(first.pendingPayouts, 1);
+  assert.equal(first.rowsStaged, 0);
+
+  // Sync 2 (now = 2026-09-20): Sharesight STILL returns the exact same
+  // payout, but it is now past its pay date -> stages as a normal row. The
+  // pending row must NOT be withdrawn -- Sharesight still lists the payout,
+  // and nothing has COMMITTED yet (owner ruling 3).
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    {
+      integration: integrationOf(
+        fakeSharesightClient({
+          portfolios: [fakePortfolio()],
+          payouts: [payoutStillPending],
+        }),
+      ),
+      now: () => "2026-09-20T00:00:00.000Z",
+    },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  assert.equal(second.rowsStaged, 1, "the payout now stages as a normal row");
+  assert.equal(second.pendingPayouts, 0, "no longer a future-dated candidate");
+  assert.equal(
+    second.pendingPayoutsWithdrawn,
+    0,
+    "still observed this sync -- must not be withdrawn",
+  );
+
+  const repo = createSharesightPendingPayoutsRepository(client);
+  const stillActive = await repo.listActive("user-a", "portfolio-a");
+  assert.equal(stillActive.length, 1, "the pending row is still active");
+  assert.equal(
+    stillActive[0]?.sourceReference,
+    "sharesight-payout:sp-1:holding-1:2026-09-10",
+  );
+
+  // Sync 3 (now = 2026-09-20): Sharesight no longer lists the payout at
+  // all -- NOW it is withdrawn.
+  const third = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-3" },
+    "portfolio-a",
+    {
+      integration: integrationOf(
+        fakeSharesightClient({ portfolios: [fakePortfolio()], payouts: [] }),
+      ),
+      now: () => "2026-09-20T00:00:00.000Z",
+    },
+  );
+  assert.equal(third.ok, true);
+  if (!third.ok) return;
+  assert.equal(third.pendingPayoutsWithdrawn, 1);
+  assert.equal(
+    (await repo.listActive("user-a", "portfolio-a")).length,
+    0,
+    "withdrawn once genuinely absent from the fetch",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 11. Review round B2: the pending row's BARE source_reference, wrapped by
+//     `committedSourceReferenceForFingerprint`, matches a REAL committed
+//     row's own `source_reference` exactly.
+// ---------------------------------------------------------------------------
+
+test("BRK-022 slice 2 review round B2: committedSourceReferenceForFingerprint(pending.sourceReference) equals the committed row's own source_reference exactly", async () => {
+  const database = await migratedDatabase();
+  seedResolvedSecurity(database, {
+    securityId: "sec-abc",
+    userId: "user-a",
+    portfolioId: "portfolio-a",
+    symbol: "ABC",
+    exchangeAlias: "ASX",
+    currencyCode: "AUD",
+  });
+  const payout = fakePayout({
+    id: null,
+    holdingId: "holding-1",
+    symbol: "ABC",
+    marketCode: "ASX",
+    paidOnDate: "2026-09-10",
+  });
+  const { client } = await linkedFixture(database, {
+    portfolios: [fakePortfolio()],
+    trades: [],
+    payouts: [payout],
+  });
+
+  // Sync 1: future-dated -> pending row, bare key.
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    {
+      integration: integrationOf(
+        fakeSharesightClient({
+          portfolios: [fakePortfolio()],
+          payouts: [payout],
+        }),
+      ),
+      now: () => "2026-09-04T00:00:00.000Z",
+    },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  assert.equal(first.pendingPayouts, 1);
+
+  // Sync 2: past its pay date -> stages, then commit it.
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    {
+      integration: integrationOf(
+        fakeSharesightClient({
+          portfolios: [fakePortfolio()],
+          payouts: [payout],
+        }),
+      ),
+      now: () => "2026-09-20T00:00:00.000Z",
+    },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  assert.equal(second.rowsStaged, 1);
+  await commitBatch(client, second.batchId, "brk-022-b2-commit");
+
+  const pendingRepo = createSharesightPendingPayoutsRepository(client);
+  const [pendingRow] = await pendingRepo.listActive("user-a", "portfolio-a");
+  assert.ok(pendingRow, "the pending row is still present (slice 3 territory)");
+
+  const committedRow = await client.get<{ source_reference: string }>(
+    `SELECT source_reference FROM dividend_manual_records
+     WHERE user_id = ? AND portfolio_id = ?
+       AND source_reference LIKE 'import-fingerprint:sharesight-payout:%'
+     LIMIT 1`,
+    ["user-a", "portfolio-a"],
+  );
+  assert.ok(committedRow, "expected a committed dividend row");
+
+  // The load-bearing assertion: the pending row's BARE key, wrapped by the
+  // shared helper, is BYTE-EQUAL to the committed row's own source_reference
+  // -- not merely similar, not the bare key compared directly.
+  assert.equal(
+    committedSourceReferenceForFingerprint(pendingRow.sourceReference),
+    committedRow?.source_reference,
+  );
+  assert.notEqual(
+    pendingRow.sourceReference,
+    committedRow?.source_reference,
+    "the two are related, never byte-equal to each other directly",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 12. Review round F1: the two best-effort failure branches.
+// ---------------------------------------------------------------------------
+
+test("BRK-022 slice 2 review round F1(a): an upsertObserved failure surfaces pendingPayoutsError, zeroes the counts, skips withdrawal, and never fails the sync", async () => {
+  const database = await migratedDatabase();
+  seedResolvedSecurity(database, {
+    securityId: "sec-abc",
+    userId: "user-a",
+    portfolioId: "portfolio-a",
+    symbol: "ABC",
+    exchangeAlias: "ASX",
+    currencyCode: "AUD",
+  });
+  const stalePayout = fakePayout({
+    id: null,
+    holdingId: "holding-stale",
+    symbol: "ABC",
+    marketCode: "ASX",
+    paidOnDate: "2099-01-01",
+  });
+  const { client, sharesightClient } = await linkedFixture(database, {
+    portfolios: [fakePortfolio()],
+    trades: [],
+    payouts: [stalePayout],
+  });
+  const firstSync = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: integrationOf(sharesightClient), now: () => FIXED_NOW },
+  );
+  assert.equal(firstSync.ok, true);
+  if (!firstSync.ok) return;
+  assert.equal(firstSync.pendingPayouts, 1, "sanity: the stale row exists");
+
+  const newPayout = fakePayout({
+    id: null,
+    holdingId: "holding-new",
+    symbol: "ABC",
+    marketCode: "ASX",
+    paidOnDate: "2099-02-01",
+  });
+  const failingClient = wrapClientWithFailingBatch(
+    client,
+    "INSERT INTO sharesight_pending_payouts",
+  );
+  const result = await runSharesightSyncWithContext(
+    { client: failingClient, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    {
+      integration: integrationOf(
+        fakeSharesightClient({
+          portfolios: [fakePortfolio()],
+          payouts: [newPayout],
+        }),
+      ),
+      now: () => FIXED_NOW,
+    },
+  );
+  assert.equal(
+    result.ok,
+    true,
+    "recording is best-effort -- never fails the sync",
+  );
+  if (!result.ok) return;
+  assert.equal(
+    result.pendingPayoutsError,
+    "Could not record announced payouts -- they may be stale until the next sync.",
+  );
+  assert.equal(result.pendingPayouts, 0);
+  assert.equal(result.pendingPayoutsUnresolved, 0);
+  assert.equal(
+    result.pendingPayoutsWithdrawn,
+    0,
+    "withdrawal must be skipped entirely, not just report zero",
+  );
+
+  const repo = createSharesightPendingPayoutsRepository(client);
+  const active = await repo.listActive("user-a", "portfolio-a");
+  assert.deepEqual(
+    active.map((row) => row.sharesightHoldingId),
+    ["holding-stale"],
+    "the pre-existing row must still be active -- withdrawal never ran",
+  );
+});
+
+test("BRK-022 slice 2 review round F1(b): a markWithdrawnNotObserved failure surfaces pendingPayoutsError but never fails the sync, and writes nothing", async () => {
+  const database = await migratedDatabase();
+  seedResolvedSecurity(database, {
+    securityId: "sec-abc",
+    userId: "user-a",
+    portfolioId: "portfolio-a",
+    symbol: "ABC",
+    exchangeAlias: "ASX",
+    currencyCode: "AUD",
+  });
+  const payout = fakePayout({
+    id: null,
+    holdingId: "holding-1",
+    symbol: "ABC",
+    marketCode: "ASX",
+    paidOnDate: "2099-01-01",
+  });
+  const { client, sharesightClient } = await linkedFixture(database, {
+    portfolios: [fakePortfolio()],
+    trades: [],
+    payouts: [payout],
+  });
+  const firstSync = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: integrationOf(sharesightClient), now: () => FIXED_NOW },
+  );
+  assert.equal(firstSync.ok, true);
+  if (!firstSync.ok) return;
+  assert.equal(firstSync.pendingPayouts, 1);
+
+  const failingClient = wrapClientWithFailingBatch(
+    client,
+    "UPDATE sharesight_pending_payouts",
+  );
+  const result = await runSharesightSyncWithContext(
+    { client: failingClient, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    {
+      integration: integrationOf(
+        fakeSharesightClient({ portfolios: [fakePortfolio()], payouts: [] }),
+      ),
+      now: () => FIXED_NOW,
+    },
+  );
+  assert.equal(
+    result.ok,
+    true,
+    "withdrawal failure is best-effort -- never fails the sync",
+  );
+  if (!result.ok) return;
+  assert.equal(
+    result.pendingPayoutsError,
+    "Could not withdraw stale announced payouts -- they may still show as outstanding until the next sync.",
+  );
+  assert.equal(result.pendingPayoutsWithdrawn, 0);
+
+  const repo = createSharesightPendingPayoutsRepository(client);
+  const active = await repo.listActive("user-a", "portfolio-a");
+  assert.equal(
+    active.length,
+    1,
+    "the write never happened -- row is untouched",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 13. Review round F2: same-fetch identity collisions among future-dated
+//     payouts are never recorded arbitrarily.
+// ---------------------------------------------------------------------------
+
+test("BRK-022 slice 2 review round F2: two future-dated payouts sharing one identity key are both skipped, counted, and disclosed in the panel copy", async () => {
+  const database = await migratedDatabase();
+  seedResolvedSecurity(database, {
+    securityId: "sec-abc",
+    userId: "user-a",
+    portfolioId: "portfolio-a",
+    symbol: "ABC",
+    exchangeAlias: "ASX",
+    currencyCode: "AUD",
+  });
+  const interim = fakePayout({
+    id: null,
+    holdingId: "holding-collide",
+    symbol: "ABC",
+    marketCode: "ASX",
+    paidOnDate: "2099-05-01",
+    amountDecimal: "10.00",
+    grossAmountDecimal: "14.29",
+  });
+  const special = fakePayout({
+    id: null,
+    holdingId: "holding-collide",
+    symbol: "ABC",
+    marketCode: "ASX",
+    paidOnDate: "2099-05-01", // same holding + same paid date -> same key
+    amountDecimal: "25.00",
+    grossAmountDecimal: "35.71",
+  });
+  const { client, sharesightClient } = await linkedFixture(database, {
+    portfolios: [fakePortfolio()],
+    trades: [],
+    payouts: [interim, special],
+  });
+
+  const result = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: integrationOf(sharesightClient), now: () => FIXED_NOW },
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.pendingPayouts, 0, "neither is recorded");
+  assert.equal(result.pendingPayoutsUnresolved, 0);
+  assert.equal(result.pendingPayoutsCollided, 2);
+  assert.equal(result.pendingPayoutsError, null);
+
+  const repo = createSharesightPendingPayoutsRepository(client);
+  assert.equal((await repo.listActive("user-a", "portfolio-a")).length, 0);
+
+  assert.match(
+    formatSyncResultMessage(result),
+    /2 not recorded: Sharesight lists two payouts for the same holding and date/,
+  );
+});
+
+test("BRK-022 slice 2 review round F2: a colliding pair does not block an unrelated non-colliding payout from being recorded", async () => {
+  const database = await migratedDatabase();
+  seedResolvedSecurity(database, {
+    securityId: "sec-abc",
+    userId: "user-a",
+    portfolioId: "portfolio-a",
+    symbol: "ABC",
+    exchangeAlias: "ASX",
+    currencyCode: "AUD",
+  });
+  const colliding1 = fakePayout({
+    id: null,
+    holdingId: "holding-collide",
+    symbol: "ABC",
+    marketCode: "ASX",
+    paidOnDate: "2099-05-01",
+  });
+  const colliding2 = fakePayout({
+    id: null,
+    holdingId: "holding-collide",
+    symbol: "ABC",
+    marketCode: "ASX",
+    paidOnDate: "2099-05-01",
+  });
+  const clean = fakePayout({
+    id: null,
+    holdingId: "holding-clean",
+    symbol: "ABC",
+    marketCode: "ASX",
+    paidOnDate: "2099-06-01",
+  });
+  const { client, sharesightClient } = await linkedFixture(database, {
+    portfolios: [fakePortfolio()],
+    trades: [],
+    payouts: [colliding1, colliding2, clean],
+  });
+
+  const result = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: integrationOf(sharesightClient), now: () => FIXED_NOW },
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.pendingPayouts, 1);
+  assert.equal(result.pendingPayoutsCollided, 2);
+
+  const repo = createSharesightPendingPayoutsRepository(client);
+  const active = await repo.listActive("user-a", "portfolio-a");
+  assert.deepEqual(
+    active.map((row) => row.sharesightHoldingId),
+    ["holding-clean"],
+  );
+});
+
+test("BRK-022 slice 2 review round F2: a previously-recorded row left active when its key later collides, rather than withdrawn or overwritten", async () => {
+  const database = await migratedDatabase();
+  seedResolvedSecurity(database, {
+    securityId: "sec-abc",
+    userId: "user-a",
+    portfolioId: "portfolio-a",
+    symbol: "ABC",
+    exchangeAlias: "ASX",
+    currencyCode: "AUD",
+  });
+  const original = fakePayout({
+    id: null,
+    holdingId: "holding-collide",
+    symbol: "ABC",
+    marketCode: "ASX",
+    paidOnDate: "2099-05-01",
+    amountDecimal: "10.00",
+    grossAmountDecimal: "14.29",
+  });
+  const { client } = await linkedFixture(database, {
+    portfolios: [fakePortfolio()],
+    trades: [],
+    payouts: [original],
+  });
+
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    {
+      integration: integrationOf(
+        fakeSharesightClient({
+          portfolios: [fakePortfolio()],
+          payouts: [original],
+        }),
+      ),
+      now: () => FIXED_NOW,
+    },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  assert.equal(first.pendingPayouts, 1);
+
+  // Sharesight now ALSO reports a second, colliding payout for the exact
+  // same holding+date -- the previously-recorded row must be left exactly
+  // as it was: not withdrawn (it is still observed), not refreshed (the
+  // collision makes neither payout safe to write).
+  const newlyCollidingSibling = fakePayout({
+    id: null,
+    holdingId: "holding-collide",
+    symbol: "ABC",
+    marketCode: "ASX",
+    paidOnDate: "2099-05-01",
+    amountDecimal: "99.00",
+    grossAmountDecimal: "141.43",
+  });
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    {
+      integration: integrationOf(
+        fakeSharesightClient({
+          portfolios: [fakePortfolio()],
+          payouts: [original, newlyCollidingSibling],
+        }),
+      ),
+      now: () => FIXED_NOW,
+    },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  assert.equal(second.pendingPayouts, 0);
+  assert.equal(second.pendingPayoutsCollided, 2);
+  assert.equal(second.pendingPayoutsWithdrawn, 0);
+
+  const repo = createSharesightPendingPayoutsRepository(client);
+  const active = await repo.listActive("user-a", "portfolio-a");
+  assert.equal(active.length, 1);
+  assert.equal(
+    active[0]?.totalCashDecimal,
+    "10.00",
+    "the original value is untouched -- never overwritten by the collision",
+  );
 });

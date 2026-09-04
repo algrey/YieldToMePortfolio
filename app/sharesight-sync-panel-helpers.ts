@@ -102,6 +102,12 @@ export type SharesightSyncSuccess = {
   // the sync itself, so this is additive to an otherwise `ok: true` result.
   pendingPayouts?: number;
   pendingPayoutsUnresolved?: number;
+  // Review round F2 (2026-09-04): optional/defaulted-to-0, same back-compat
+  // convention as `pendingPayouts` above -- of this sync's future-dated
+  // announced payouts, how many were NOT recorded because their identity
+  // key collided with another future-dated payout in the same fetch (see
+  // `app/sharesight-sync-service.ts`'s `pendingPayoutsCollided` doc comment).
+  pendingPayoutsCollided?: number;
   pendingPayoutsError?: string | null;
 };
 
@@ -294,11 +300,23 @@ function pendingPayoutsLine(result: SharesightSyncSuccess): string {
     return ` Announced dividends could not be recorded: ${result.pendingPayoutsError}`;
   }
   const pendingPayouts = result.pendingPayouts ?? 0;
-  if (pendingPayouts === 0) return "";
+  const collided = result.pendingPayoutsCollided ?? 0;
+  if (pendingPayouts === 0 && collided === 0) return "";
   const unresolved = result.pendingPayoutsUnresolved ?? 0;
   const unresolvedNote =
     unresolved > 0 ? ` (${unresolved} could not be matched to a holding)` : "";
-  return ` ${pendingPayouts} announced dividend${pendingPayouts === 1 ? "" : "s"} not yet paid recorded${unresolvedNote}.`;
+  // Review round F2 (2026-09-04): a collision can happen with ZERO
+  // successfully-recorded payouts this sync (every future-dated payout in
+  // the fetch collided), so this note is appended whenever `collided` is
+  // non-zero, independent of whether `pendingPayouts` itself is zero.
+  const collidedNote =
+    collided > 0
+      ? ` (${collided} not recorded: Sharesight lists two payouts for the same holding and date)`
+      : "";
+  if (pendingPayouts === 0) {
+    return ` 0 announced dividends not yet paid recorded${collidedNote}.`;
+  }
+  return ` ${pendingPayouts} announced dividend${pendingPayouts === 1 ? "" : "s"} not yet paid recorded${unresolvedNote}${collidedNote}.`;
 }
 
 export function formatSyncResultMessage(result: SharesightSyncSuccess): string {

@@ -619,18 +619,24 @@ export function isFutureUnconfirmedPayout(
 }
 
 /**
- * `payoutIdentityKey` -> how many STAGEABLE payouts in this fetch share it
- * (1 = no collision). Computed once, up front, over the WHOLE fetch's
- * stageable set (confirmed payouts and past-dated unconfirmed payouts
- * alike -- see the BRK-005C block comment on why they now share one
- * identity scheme) so `buildPayoutRow` can look up any given payout's own
- * collision count without recomputing it per row.
+ * `payoutIdentityKey` -> how many payouts in the given list share it (1 = no
+ * collision). Computed once, up front, over the WHOLE fetch's stageable set
+ * (confirmed payouts and past-dated unconfirmed payouts alike -- see the
+ * BRK-005C block comment on why they now share one identity scheme) so
+ * `buildPayoutRow` can look up any given payout's own collision count
+ * without recomputing it per row.
+ *
+ * BRK-022 slice 2 review round (F2): exported (name unchanged) so
+ * `app/sharesight-sync-service.ts` can run the SAME collision check over its
+ * own future-dated (pending) payout candidate set -- a completely separate
+ * list from this module's `stageablePayouts` -- rather than a second
+ * hand-written key-counting copy that could silently drift from this one.
  */
-function countPayoutKeyCollisions(
-  stageablePayouts: readonly SharesightPayout[],
+export function countPayoutKeyCollisions(
+  payouts: readonly SharesightPayout[],
 ): ReadonlyMap<string, number> {
   const counts = new Map<string, number>();
-  for (const payout of stageablePayouts) {
+  for (const payout of payouts) {
     const key = payoutIdentityKey(payout);
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
@@ -925,12 +931,23 @@ function buildPayoutRow(
     // identity key (`payoutIdentityKey`). The issue code/severity are
     // unchanged -- only the message's claim about what happens to the
     // payout is corrected.
+    //
+    // Review round correction (F4, 2026-09-04): the message used to assert
+    // "has been recorded" unconditionally -- this pure, DB-free transform
+    // cannot actually know that. Recording happens later, in
+    // `app/sharesight-sync-service.ts`, and is not guaranteed: it is
+    // best-effort (a DB failure surfaces via `pendingPayoutsError`, never
+    // this issue) and, per the F2 collision rule, a payout that collides
+    // with another future-dated payout sharing its identity key is
+    // deliberately NOT recorded at all. The message now only states what
+    // this module itself knows (not staged) and points at the sync summary
+    // for the actual outcome, rather than asserting one.
     return {
       kind: "skipped",
       issue: {
         code: "SHARESIGHT_PAYOUT_UNCONFIRMED",
         severity: "warning",
-        message: `Sharesight payout for ${payout.symbol} due ${payout.paidOnDate} is future-dated (not yet paid) and has no confirmed id -- it was not staged as a transaction, but has been recorded as an announced, not-yet-paid dividend (see the Income screen) and will be replaced by the paid record once Sharesight confirms it.`,
+        message: `Sharesight payout for ${payout.symbol} due ${payout.paidOnDate} is future-dated (not yet paid) and has no confirmed id -- not staged as a ledger row. Announced, not-yet-paid payouts are recorded separately by the sync; see the sync summary.`,
       },
     };
   }

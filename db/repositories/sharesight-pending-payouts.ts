@@ -198,7 +198,20 @@ function isNullable<T>(value: T | null, check: (value: T) => boolean): boolean {
  * `null` when the row is fully valid. Every amount field is additionally
  * bounded by `isWithinReadPathDecimalBounds` (BUG-014/BUG-022) so an
  * over-precision Sharesight figure can never reach storage and later crash
- * a read-time `parseDecimal` call the way an unbounded import once did. */
+ * a read-time `parseDecimal` call the way an unbounded import once did.
+ *
+ * Review round correction (F3, 2026-09-04): `totalCashDecimal`/
+ * `grossAmountDecimal` used to require a POSITIVE decimal
+ * (`isPositiveDecimalString`), but Sharesight can genuinely announce a
+ * payout of exactly `"0"` (the parser accepts it -- nothing about a
+ * zero-amount announcement is malformed), and this table's validation is
+ * WHOLESALE (see `upsertObserved`'s doc comment): one such payout in a
+ * fetch would have blocked recording -- and, via the skipped
+ * `markWithdrawnNotObserved` call -- WITHDRAWAL of every OTHER pending
+ * payout for the whole portfolio, not just the zero-amount one. A `"0"`
+ * observation is representable and simply contributes nothing to any total,
+ * exactly like a `"0"` CSV-imported dividend amount would; non-negative
+ * (`isNonNegativeDecimalString`) is now the accepted range. */
 function validateObservationInput(
   input: PendingPayoutObservationInput,
 ): string | null {
@@ -218,12 +231,12 @@ function validateObservationInput(
     return "sharesightPayoutId";
 
   if (
-    !isPositiveDecimalString(input.totalCashDecimal) ||
+    !isNonNegativeDecimalString(input.totalCashDecimal) ||
     !isWithinReadPathDecimalBounds(input.totalCashDecimal)
   )
     return "totalCashDecimal";
   if (
-    !isPositiveDecimalString(input.grossAmountDecimal) ||
+    !isNonNegativeDecimalString(input.grossAmountDecimal) ||
     !isWithinReadPathDecimalBounds(input.grossAmountDecimal)
   )
     return "grossAmountDecimal";

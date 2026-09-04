@@ -16,6 +16,7 @@ import { prepareLedgerPosting } from "../../domain/ledger/posting.ts";
 import {
   SUPPORTED_IMPORT_PARSER_VERSIONS,
   buildImportReview,
+  committedSourceReferenceForFingerprint,
   type ImportPreviewSecurityCandidate,
   type NormalizedImportRow,
 } from "../../domain/imports/index.ts";
@@ -606,7 +607,9 @@ export function createOwnedImportCommitRepository(
       if (!normalized.localTradeDate) continue;
       const target = built.preview.resolvedTargets[row.id];
       if (!target || !target.portfolioSecurityId) continue;
-      const sourceReference = `import-fingerprint:${row.normalizedFingerprint ?? row.id}`;
+      const sourceReference = committedSourceReferenceForFingerprint(
+        row.normalizedFingerprint ?? row.id,
+      );
       if (
         existingDividendSourceReferences.has(
           `${target.portfolioId}::${sourceReference}`,
@@ -828,7 +831,9 @@ export function createOwnedImportCommitRepository(
       if (!membership) return { ok: false, reason: "mapping_incomplete" };
     }
 
-    const sourceReference = `import-fingerprint:${row.normalizedFingerprint ?? row.id}`;
+    const sourceReference = committedSourceReferenceForFingerprint(
+      row.normalizedFingerprint ?? row.id,
+    );
 
     // Dividend rows never post through the ledger: they create a
     // `dividend_manual_records` row (see `buildDividendManualRecordImportInsertStatements`
