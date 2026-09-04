@@ -2396,8 +2396,12 @@ test("wiring: system-backup-panel.tsx drives all four EXP-004 core-restore phase
   );
   assert.match(source, /missingTransactionRefs/);
   assert.match(source, /missingDividendRefs/);
-  // Resume evidence is server-derived, never a client-trusted claim -- the
-  // panel must read the scaffold response's own counts, not invent its own.
+  // The scaffold response still carries `committedTransactionCount`/
+  // `committedDividendCount` as live, server-derived counts, but they are
+  // informational/diagnostic only now (see `portfolio-bundle-service.ts`'s
+  // "RESUME EVIDENCE" comment) -- the panel does not derive a resume slice
+  // from them. Assert only that the panel's response type still carries the
+  // fields (it never invents its own count in their place).
   assert.match(source, /committedTransactionCount/);
   assert.match(source, /committedDividendCount/);
 });

@@ -6,14 +6,27 @@
 //
 // EXP-004 moved this out of `app/portfolio-bundle-service.ts` (server-only:
 // that module pulls in D1 repositories) into this dependency-free `domain/`
-// module so BOTH sides of a resumable, chunked bundle replay can use the
-// IDENTICAL ordering: the server (unchanged behaviour, now imported rather
-// than defined locally) and the browser panel
-// (`app/components/system-backup-panel.tsx`), which must slice a portfolio's
-// transactions/dividend records into request-sized parts in the SAME order
-// the server would compute, so that a chain dependency (a reversal's or
-// supersession's target) always lands in an earlier part (or earlier in the
-// same part) than its dependent -- never a later one.
+// module so the server's chain-order computation was reusable without a D1
+// dependency.
+//
+// CORRECTED 2026-09-03 (OPS-005 round 2): this module's own header
+// originally justified the `domain/` location by saying the browser panel
+// (`app/components/system-backup-panel.tsx`) also imports it, to slice a
+// portfolio's transactions/dividend records into request-sized parts in the
+// SAME order the server would compute. That is no longer true and never
+// safely could be: a chain-order change straddling a deploy would let the
+// browser's own recomputed order desynchronise from the server's (OPS-005
+// round 1). The panel now sends exactly the `missingTransactionRefs`/
+// `missingDividendRefs` the server names in its scaffold response
+// (`app/portfolio-bundle-service.ts`'s "RESUME EVIDENCE" comment) and never
+// imports this module at all (`tests/exp-004.test.ts`'s wiring pin asserts
+// this by source-scanning the panel for the import path). The SERVER is now
+// the only orderer. This module still lives in `domain/` because the
+// server-side scaffold code still benefits from a dependency-free,
+// independently testable ordering function; nothing requires it to stay
+// here, and it could be moved back into `app/portfolio-bundle-service.ts` if
+// a future change removes the last reason to keep it separate -- recorded
+// here for that decision, not acted on now.
 export type ChainItem = { ref: string; createdAt: string };
 
 /**

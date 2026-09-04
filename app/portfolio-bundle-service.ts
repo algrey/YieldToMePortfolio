@@ -1121,19 +1121,26 @@ async function commitFailure(
 // the single-shot path's B1 archival logic does: there is no discarded
 // attempt to archive, because a resume always continues the SAME portfolio.
 //
-// RESUME EVIDENCE (binding design constraint from the task, satisfied
-// directly): `commitPortfolioBundleScaffold` reports `committedTransactionCount`/
-// `committedDividendCount` as LIVE counts of rows already durably written
-// under this bundle's own idempotency-key namespace -- never a client-
-// claimed cursor. The caller (browser) always re-derives "how much is left"
-// from this authoritative count on every scaffold call (fresh or resumed),
-// then slices the SAME chain-ordered array (`domain/exports/chain-order.ts`,
-// shared with the browser so both sides compute an IDENTICAL order) starting
-// at that count. A stale/incorrect client-side guess can therefore never
-// skip real, unwritten rows -- at worst it re-sends already-written rows,
-// which every write below tolerates as a no-op (via `ledger.post/reverse/
-// supersede`'s own built-in idempotency, and the dividend idempotency key
-// added by this task, see `db/repositories/dividends.ts`).
+// RESUME EVIDENCE (corrected 2026-09-03, OPS-005 rounds 1-2 -- this
+// paragraph originally described a count/slice protocol as the resume
+// mechanism and claimed it could "never skip real, unwritten rows"; that
+// claim was disproven by BUG-018 round 3 and OPS-005 round 1, where a chain-
+// order change across a deploy made a stale client-side re-slice skip real
+// rows. It is replaced below with the ref-membership mechanism that fixed
+// it.): `commitPortfolioBundleScaffold` computes `missingTransactionRefs`/
+// `missingDividendRefs` server-side, in the bundle's CURRENT chain order, by
+// checking which `bundle:<fingerprint>:<ref>` idempotency keys do not yet
+// exist under this bundle's own namespace -- never a client-claimed cursor
+// or count. The caller (browser) sends back exactly those refs, in that
+// order; it never re-derives or slices an order of its own. At finalize,
+// this module cross-checks the CALLER-supplied ref list against the sorted-
+// ref digests and counts persisted on `import_batches` at scaffold time
+// (migration `0061`) and separately probes existence for every ref named in
+// the request, failing closed (409) on any mismatch or missing row -- so a
+// short, stale, or reordered client ref list can never be silently accepted
+// as complete. `committedTransactionCount`/`committedDividendCount` remain
+// live counts, kept only as an informational/diagnostic figure now that the
+// refs above are the actual resume mechanism.
 // ---------------------------------------------------------------------------
 
 export type BundleScaffoldSecurity = {

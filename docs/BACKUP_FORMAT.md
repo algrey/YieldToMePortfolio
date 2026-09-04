@@ -412,9 +412,11 @@ one:
    parses, validates and fingerprints the whole core payload once (see
    "What the scaffold actually costs" below). Returns each portfolio's
    destination id, its `securities` ref→id map (the browser needs this for
-   every later part), and LIVE resume evidence
-   (`committedTransactionCount`/`committedDividendCount` — see "Resume
-   evidence" below).
+   every later part), and resume evidence — **corrected 2026-09-04, OPS-005:**
+   the actual resume mechanism is `missingTransactionRefs`/
+   `missingDividendRefs` (server-computed, in current chain order);
+   `committedTransactionCount`/`committedDividendCount` are LIVE counts kept
+   only as an informational/diagnostic figure — see "Resume evidence" below.
 2. **Transactions part** (one portfolio, 20 rows/request —
    `TRANSACTIONS_RESTORE_CHUNK_ROWS`, `system-backup-panel.tsx`):
    `commitPortfolioBundleTransactionsPart` replays a bounded, already
@@ -439,9 +441,18 @@ Both the whole-bundle path and the chunked path replay a portfolio's
 transactions (and its dividend records) in the order `chainOrder` computes
 from the bundle's own explicit `ref` graph — never a `createdAt` sort, whose
 millisecond ties are routine and whose UUID tiebreak has no relation to
-dependency order. The browser slicer (`system-backup-panel.tsx`) IMPORTS
-that same module rather than reimplementing it, so both sides of a chunked
-restore compute a byte-identical order.
+dependency order.
+
+**Corrected 2026-09-04, OPS-005:** this section originally said the browser
+slicer (`system-backup-panel.tsx`) imports this module so both sides of a
+chunked restore compute a byte-identical order. That stopped being true in
+OPS-005 round 2 (and was never safely sufficient — a chain-order change
+straddling a deploy could desynchronise the two sides' independently
+recomputed orders regardless). The panel no longer imports `chain-order.ts`
+at all; it sends back exactly the `missingTransactionRefs`/
+`missingDividendRefs` the server names in its scaffold response (see "Resume
+evidence" below), so only the SERVER ever computes chain order for a
+resumed restore.
 
 The ordering rule, since `BUG-018` review round 2: **a reversal or
 supersession is emitted immediately after the transaction it targets**, and

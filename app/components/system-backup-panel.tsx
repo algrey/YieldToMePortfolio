@@ -53,8 +53,23 @@ const DIVIDENDS_RESTORE_CHUNK_ROWS = 50;
 // Human-visible marker for the restore client generation, shown in progress
 // and failure copy so a stale cached browser bundle is instantly
 // distinguishable from the current one. Bump whenever the wire protocol or
-// part sizes change ("r3" = the 20/50-row parts).
-const RESTORE_PROTOCOL = "r3";
+// part sizes change ("r3" = the 20/50-row parts; "r4" = OPS-005 rounds 1-2,
+// which moved resume from server-derived counts sliced against a
+// client-recomputed chain order to server-named `missingTransactionRefs`/
+// `missingDividendRefs`, and dropped this panel's import of
+// `chain-order.ts` entirely).
+//
+// This marker is purely informational (support/debugging copy) and is never
+// sent to or checked by the server, so bumping it changes no behaviour by
+// itself. A STALE CACHED CLIENT still showing "r3" -- i.e. one built before
+// OPS-005 and still trying the old count/slice resume -- remains fail-closed
+// compatible with the current server: it would send a shorter or
+// differently-ordered ref list than the scaffold's `missingTransactionRefs`/
+// `missingDividendRefs`, and finalize (`app/portfolio-bundle-service.ts`)
+// cross-checks the caller's ref list against the persisted sorted-ref
+// digests/counts and fails closed (409, batch `failed`) on any mismatch or
+// missing row, rather than silently accepting an incomplete restore.
+const RESTORE_PROTOCOL = "r4";
 const CHUNK_PAUSE_MS = 100;
 
 function defaultNonJsonMessage(httpStatus: number): string {
