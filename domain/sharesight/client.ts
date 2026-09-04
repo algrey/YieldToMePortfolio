@@ -47,6 +47,7 @@ import type {
   SharesightListParams,
   SharesightPayout,
   SharesightPortfolio,
+  SharesightRawListParams,
   SharesightResult,
   SharesightTrade,
   SharesightUserInstrument,
@@ -409,7 +410,33 @@ export type SharesightClient = Readonly<{
    */
   getPayoutsRaw?(
     portfolioId: string,
-    params?: SharesightListParams,
+    params?: SharesightRawListParams,
+  ): Promise<SharesightResult<unknown>>;
+  /**
+   * BRK-017 evidence probe (2026-09-04) -- same discipline as
+   * `getPayoutsRaw` above: RAW parsed JSON, no `parse.ts` domain contract,
+   * requested against the identical endpoint `listTrades` already uses.
+   * Exists SOLELY so `scripts/sharesight-pagination-probe.mjs` can inspect
+   * a trades response's full envelope (top-level keys, sibling metadata
+   * fields) and test `page`/`per_page` query parameters that the typed
+   * `listTrades` has no reason to send. Never promoted to a typed contract,
+   * never consumed by any production code path.
+   */
+  getTradesRaw?(
+    portfolioId: string,
+    params?: SharesightRawListParams,
+  ): Promise<SharesightResult<unknown>>;
+  /**
+   * BRK-017 evidence probe (2026-09-04) -- same discipline as
+   * `getPayoutsRaw`/`getTradesRaw` above: RAW parsed JSON, requested
+   * against the identical endpoint `listUserInstruments` already uses.
+   * Exists SOLELY so `scripts/sharesight-pagination-probe.mjs` can inspect
+   * the full envelope and test `page`/`per_page` query parameters. Never
+   * promoted to a typed contract, never consumed by any production code
+   * path.
+   */
+  getUserInstrumentsRaw?(
+    params?: SharesightRawListParams,
   ): Promise<SharesightResult<unknown>>;
 }>;
 
@@ -451,6 +478,29 @@ function toSearchParams(
   if (params.from) result.start_date = params.from;
   if (params.to) result.end_date = params.to;
   return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * BRK-017 evidence probe: like `toSearchParams` above, but additionally maps
+ * `SharesightRawListParams`'s `page`/`perPage` onto the documented wire
+ * query keys `page`/`per_page` -- used ONLY by the spike-only RAW list
+ * accessors (`getTradesRaw`/`getPayoutsRaw`/`getUserInstrumentsRaw`) so
+ * `scripts/sharesight-pagination-probe.mjs` can test whether these
+ * endpoints honour explicit paging at all. The typed production methods
+ * (`listTrades`/`listPayouts`/`listUserInstruments`) never call this --
+ * they keep using `toSearchParams` and `SharesightListParams` unchanged.
+ */
+function toRawSearchParams(
+  params: SharesightRawListParams | undefined,
+): Record<string, string> | undefined {
+  const base = toSearchParams(params);
+  if (!params || (params.page === undefined && params.perPage === undefined)) {
+    return base;
+  }
+  const result: Record<string, string> = { ...base };
+  if (params.page !== undefined) result.page = String(params.page);
+  if (params.perPage !== undefined) result.per_page = String(params.perPage);
+  return result;
 }
 
 export function createSharesightClient(
@@ -886,7 +936,29 @@ export function createSharesightClient(
       return getJson(
         "getPayoutsRaw",
         `/portfolios/${encodeURIComponent(portfolioId)}/payouts.json`,
-        toSearchParams(params),
+        toRawSearchParams(params),
+        payoutsBaseUrl,
+      );
+    },
+    // BRK-017 evidence probe (2026-09-04), UNPROMOTED -- RAW passthrough, no
+    // domain parsing (see `SharesightClient.getTradesRaw`'s doc comment
+    // above). Identical endpoint/host to `listTrades` -- only the query
+    // params differ (page/per_page, via `toRawSearchParams`).
+    async getTradesRaw(portfolioId, params) {
+      return getJson(
+        "getTradesRaw",
+        `/portfolios/${encodeURIComponent(portfolioId)}/trades`,
+        toRawSearchParams(params),
+      );
+    },
+    // BRK-017 evidence probe (2026-09-04), UNPROMOTED -- RAW passthrough, no
+    // domain parsing (see `SharesightClient.getUserInstrumentsRaw`'s doc
+    // comment above). Identical endpoint/host to `listUserInstruments`.
+    async getUserInstrumentsRaw(params) {
+      return getJson(
+        "getUserInstrumentsRaw",
+        "/user_instruments.json",
+        toRawSearchParams(params),
         payoutsBaseUrl,
       );
     },

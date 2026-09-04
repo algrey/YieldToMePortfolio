@@ -516,6 +516,25 @@ export type SharesightListParams = Readonly<{
 }>;
 
 /**
+ * BRK-017 evidence probe: query parameters for the spike-only RAW list
+ * accessors (`getTradesRaw`/`getPayoutsRaw`/`getUserInstrumentsRaw` on
+ * `client.ts`) only -- adds `page`/`perPage` on top of
+ * `SharesightListParams`'s `from`/`to` so
+ * `scripts/sharesight-pagination-probe.mjs` can test whether these list
+ * endpoints honour explicit paging query parameters at all (documented
+ * Sharesight query keys `page`/`per_page`, per third-party
+ * `markcatley/sharesight.rs` Swagger-derived docs -- unconfirmed live until
+ * this probe runs). Never consumed by the typed production methods
+ * (`listTrades`/`listPayouts`/`listUserInstruments`), which keep their
+ * existing signatures unchanged.
+ */
+export type SharesightRawListParams = SharesightListParams &
+  Readonly<{
+    page?: number;
+    perPage?: number;
+  }>;
+
+/**
  * BRK-012B: typed, validated contract for `GET /user_instruments.json`,
  * promoted from BRK-012A's raw evidence-probe shape now that the price
  * refresh pipeline actually consumes it -- see `docs/ARCHITECTURE.md` §8.2's
