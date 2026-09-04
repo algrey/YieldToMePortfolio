@@ -164,11 +164,18 @@ test("BRK-017: formatSummaryTable renders a dated header line and one row per pr
     "BRK-017 pagination probe -- 2026-09-04T00:00:00.000Z",
   );
   assert.match(lines[1], /^endpoint \|/);
-  assert.equal(lines.length, 3);
+  // 3 table lines + a blank + the "pagination-meta values" header + one
+  // value line per call (wide/page1/page2) for the single probe result.
+  assert.equal(lines.length, 8);
   assert.match(
     lines[2],
     /^portfolio #1 trades \| 3 \| 3 \| 3 \| \(none\) \| \(none\) \| ignores paging/,
   );
+  assert.equal(lines[3], "");
+  assert.equal(lines[4], "pagination-meta values (wide / p1 / p2):");
+  assert.equal(lines[5], "portfolio #1 trades [wide]: {}");
+  assert.equal(lines[6], "portfolio #1 trades [page1]: {}");
+  assert.equal(lines[7], "portfolio #1 trades [page2]: {}");
 });
 
 test("BRK-017: formatSummaryTable reports an unavailable outcome by its typed error kind, never a raw value", () => {
