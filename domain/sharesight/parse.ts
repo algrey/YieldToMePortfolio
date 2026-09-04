@@ -396,6 +396,90 @@ function instrumentFailureDetail(record: RecordValue): {
   return { fieldName: "instrument", reason: "wrong_type" };
 }
 
+/**
+ * BRK-017 step 2 (docs/ARCHITECTURE.md §8.2, live probe recorded
+ * 2026-09-04): none of the Sharesight list endpoints `parseItemList` serves
+ * (portfolios/holdings/trades/payouts/user_instruments) paginates
+ * server-side TODAY -- every probed response carried only a `links.self`
+ * echo (or an empty `links: {}`), and `page`/`per_page` never changed the
+ * returned array's length. That is observed BEHAVIOUR, not a documented
+ * contract, so a future Sharesight change that starts truncating these
+ * lists must never be swallowed as a silent partial import. This guard
+ * inspects the envelope for pagination-shaped metadata that indicates more
+ * data exists than the array already returned, and fails the WHOLE list
+ * closed (`invalid_response`, never a partial list) the instant it sees
+ * one.
+ *
+ * Deliberately narrow: only the exact key names/value shapes below trip
+ * it. `links.self` alone, an empty `links: {}`, and any other sibling key
+ * (e.g. the real `api_transaction` sibling observed on the trades
+ * envelope) must pass unchanged -- this is not a general "reject unknown
+ * keys" trip-wire, only a "the provider just told us there's more" one.
+ * Checked against the top-level envelope AND a `meta`/`pagination`
+ * sub-object, since different APIs nest paging metadata differently; none
+ * of that nesting has ever been observed live, so this is deliberately
+ * conservative for a shape that hasn't happened yet.
+ *
+ * Returns the offending key name (never a value) for the error message, or
+ * `null` if nothing pagination-shaped was found.
+ */
+function findPaginationEvidence(
+  record: RecordValue,
+  arrayLength: number,
+): string | null {
+  const links = asRecord(record.links);
+  if (links) {
+    if (typeof links.next === "string" && links.next.length > 0) {
+      return "links.next";
+    }
+    if (typeof links.prev === "string" && links.prev.length > 0) {
+      return "links.prev";
+    }
+  }
+
+  const containers: RecordValue[] = [record];
+  const meta = asRecord(record.meta);
+  if (meta) containers.push(meta);
+  const pagination = asRecord(record.pagination);
+  if (pagination) containers.push(pagination);
+
+  for (const container of containers) {
+    if (
+      typeof container.total_pages === "number" &&
+      container.total_pages > 1
+    ) {
+      return "total_pages";
+    }
+    if (typeof container.page_count === "number" && container.page_count > 1) {
+      return "page_count";
+    }
+    if (container.next_page !== undefined && container.next_page !== null) {
+      return "next_page";
+    }
+    if (
+      typeof container.total_count === "number" &&
+      container.total_count > arrayLength
+    ) {
+      return "total_count";
+    }
+    if (typeof container.total === "number" && container.total > arrayLength) {
+      return "total";
+    }
+    // `per_page` alone doesn't say how many items exist in total, but a
+    // returned page filled all the way to that declared cap is exactly the
+    // ambiguous case this guard exists for -- we cannot tell whether that's
+    // a coincidence or a truncation, so treat it as evidence of more.
+    if (
+      typeof container.per_page === "number" &&
+      container.per_page > 0 &&
+      arrayLength >= container.per_page
+    ) {
+      return "per_page";
+    }
+  }
+  return null;
+}
+
 function parseItemList<T>(
   root: unknown,
   envelopeKey: string,
@@ -406,6 +490,18 @@ function parseItemList<T>(
   const rawList = record ? record[envelopeKey] : null;
   if (!Array.isArray(rawList)) {
     return invalid(`Sharesight response is missing a "${envelopeKey}" list.`);
+  }
+  const paginationKey = findPaginationEvidence(
+    record as RecordValue,
+    rawList.length,
+  );
+  if (paginationKey) {
+    return invalid(
+      `Sharesight ${itemLabel} response carries pagination metadata ` +
+        `("${paginationKey}") indicating more data exists than the ` +
+        `${rawList.length}-item list returned; refusing to return a ` +
+        `possibly-truncated list.`,
+    );
   }
   const items: T[] = [];
   for (let itemIndex = 0; itemIndex < rawList.length; itemIndex += 1) {

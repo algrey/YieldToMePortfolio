@@ -15,10 +15,17 @@
  *      network, no credentials;
  *   4. that `--dry-run` on the command line exercises the identical path
  *      end to end (spawned as a real process, matching this repo's
- *      established spike-testing convention).
+ *      established spike-testing convention);
+ *   5. BRK-017 step 2 -- `parseItemList`'s (`domain/sharesight/parse.ts`)
+ *      fail-closed pagination guard, added once step 1's live probe (see
+ *      docs/ARCHITECTURE.md §8.2, 2026-09-04) confirmed none of the tested
+ *      endpoints paginates server-side today. The guard exists so a future
+ *      API change that starts truncating these lists surfaces as a visible
+ *      sync failure rather than a silent partial import.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,6 +38,11 @@ import {
   probeEndpoint,
   runProbe,
 } from "../scripts/sharesight-pagination-probe.mjs";
+import {
+  parseSharesightPayouts,
+  parseSharesightTrades,
+  parseSharesightUserInstruments,
+} from "../domain/sharesight/parse.ts";
 
 const scriptPath = fileURLToPath(
   new URL("../scripts/sharesight-pagination-probe.mjs", import.meta.url),
@@ -293,5 +305,233 @@ test("BRK-017: the probe exits 1 with a clear message when .dev.vars exists but 
     assert.match(result.stderr, /Missing Sharesight credentials/);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 5. `parseItemList`'s fail-closed pagination guard (BRK-017 step 2)
+// ---------------------------------------------------------------------------
+//
+// Live-recorded evidence (docs/ARCHITECTURE.md §8.2, 2026-09-04): every
+// probed response carried ONLY a `links.self` echo (or an empty `links: {}`)
+// -- no `next`/`prev`/`total_pages`/`next_page`/`total_count`/`per_page` key
+// has ever been observed on the wire. Guard triggers below are therefore
+// exercised against SYNTHETIC envelopes; they document defensive behaviour
+// for a shape that hasn't happened yet, not a reproduction of a real bug.
+// Fixtures use empty/near-empty item arrays throughout because the guard
+// runs BEFORE per-item parsing -- item-shape correctness is covered by
+// tests/brk-003.test.ts, tests/brk-012b.test.ts, etc.
+
+test("BRK-017 guard: links.next (non-empty string) rejects the whole list closed", () => {
+  const result = parseSharesightTrades(
+    {
+      trades: [],
+      links: { self: "https://x/trades", next: "https://x/trades?page=2" },
+    },
+    "1",
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.kind, "invalid_response");
+    assert.match(result.error.message, /trades/);
+    assert.match(result.error.message, /"links\.next"/);
+  }
+});
+
+test("BRK-017 guard: links.prev (non-empty string) rejects the whole list closed", () => {
+  const result = parseSharesightTrades(
+    {
+      trades: [],
+      links: { self: "https://x/trades", prev: "https://x/trades?page=1" },
+    },
+    "1",
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error.message, /"links\.prev"/);
+});
+
+test("BRK-017 guard: top-level total_pages > 1 rejects the whole list closed", () => {
+  const result = parseSharesightTrades({ trades: [], total_pages: 2 }, "1");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error.message, /"total_pages"/);
+});
+
+test("BRK-017 guard: top-level page_count > 1 rejects the whole list closed", () => {
+  const result = parseSharesightTrades({ trades: [], page_count: 3 }, "1");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error.message, /"page_count"/);
+});
+
+test("BRK-017 guard: a non-null next_page rejects the whole list closed", () => {
+  const result = parseSharesightTrades({ trades: [], next_page: 2 }, "1");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error.message, /"next_page"/);
+});
+
+test("BRK-017 guard: total_count greater than the returned array length rejects the whole list closed", () => {
+  const result = parseSharesightTrades({ trades: [], total_count: 5 }, "1");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error.message, /"total_count"/);
+});
+
+test("BRK-017 guard: bare total greater than the returned array length rejects the whole list closed", () => {
+  const result = parseSharesightTrades({ trades: [], total: 5 }, "1");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error.message, /"total"/);
+});
+
+test("BRK-017 guard: per_page reached by the returned array length rejects the whole list closed", () => {
+  // Array length (1) >= per_page (1) -- the page is exactly full, which is
+  // the ambiguous "might be truncated" case this guard treats as evidence.
+  const result = parseSharesightTrades({ trades: [{}], per_page: 1 }, "1");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error.message, /"per_page"/);
+});
+
+test("BRK-017 guard: nested meta/pagination sub-objects are also checked", () => {
+  const viaMeta = parseSharesightTrades(
+    { trades: [], meta: { total_pages: 2 } },
+    "1",
+  );
+  assert.equal(viaMeta.ok, false);
+  const viaPagination = parseSharesightTrades(
+    { trades: [], pagination: { next_page: 2 } },
+    "1",
+  );
+  assert.equal(viaPagination.ok, false);
+});
+
+test("BRK-017 guard: links.self alone, an empty links object, and an unrelated sibling key all pass unchanged", () => {
+  const selfOnly = parseSharesightTrades(
+    { trades: [], links: { self: "https://x/trades" } },
+    "1",
+  );
+  assert.equal(selfOnly.ok, true);
+
+  const emptyLinks = parseSharesightUserInstruments({
+    instruments: [],
+    links: {},
+  });
+  assert.equal(emptyLinks.ok, true);
+
+  // `api_transaction` matches none of the trigger key names -- passes even
+  // though it is an unrecognised sibling key, because this guard only ever
+  // reacts to pagination-shaped names, never "any unknown key".
+  const unrelatedSibling = parseSharesightTrades(
+    {
+      trades: [],
+      api_transaction: { some: "shape" },
+      links: { self: "https://x/trades" },
+    },
+    "1",
+  );
+  assert.equal(unrelatedSibling.ok, true);
+});
+
+test("BRK-017 guard: the real recorded envelope shapes (dummy portfolio id) all pass unchanged", () => {
+  // Masked/dummy portfolio id -- never a real one, per ARCHITECTURE §8.2
+  // leak discipline.
+  const DUMMY_ID = "12345";
+
+  const tradesWide = parseSharesightTrades(
+    {
+      trades: [],
+      api_transaction: {},
+      links: {
+        self: `https://api.sharesight.com/api/v3.0/portfolios/${DUMMY_ID}/trades?end_date=2026-09-04&start_date=1990-01-01`,
+      },
+    },
+    DUMMY_ID,
+  );
+  assert.equal(tradesWide.ok, true);
+
+  const tradesPage1 = parseSharesightTrades(
+    {
+      trades: [],
+      api_transaction: {},
+      links: {
+        self: `https://api.sharesight.com/api/v3.0/portfolios/${DUMMY_ID}/trades`,
+      },
+    },
+    DUMMY_ID,
+  );
+  assert.equal(tradesPage1.ok, true);
+
+  const payoutsWide = parseSharesightPayouts(
+    {
+      payouts: [],
+      links: {
+        self: `https://api.sharesight.com/api/v2.0/portfolios/${DUMMY_ID}/payouts?end_date=2026-09-04&start_date=1990-01-01`,
+      },
+    },
+    DUMMY_ID,
+  );
+  assert.equal(payoutsWide.ok, true);
+
+  const payoutsPage1 = parseSharesightPayouts(
+    {
+      payouts: [],
+      links: {
+        self: `https://api.sharesight.com/api/v2.0/portfolios/${DUMMY_ID}/payouts?page=1&per_page=1`,
+      },
+    },
+    DUMMY_ID,
+  );
+  assert.equal(payoutsPage1.ok, true);
+
+  const payoutsPage2 = parseSharesightPayouts(
+    {
+      payouts: [],
+      links: {
+        self: `https://api.sharesight.com/api/v2.0/portfolios/${DUMMY_ID}/payouts?page=2`,
+      },
+    },
+    DUMMY_ID,
+  );
+  assert.equal(payoutsPage2.ok, true);
+
+  const userInstruments = parseSharesightUserInstruments({
+    instruments: [],
+    links: {},
+  });
+  assert.equal(userInstruments.ok, true);
+});
+
+test("BRK-017 guard: listTrades/listPayouts/listUserInstruments's parsers all reject the identical trigger, proving they share the one guard", () => {
+  const trigger = { links: { next: "https://x/more" } };
+  const trades = parseSharesightTrades({ trades: [], ...trigger }, "1");
+  const payouts = parseSharesightPayouts({ payouts: [], ...trigger }, "1");
+  const userInstruments = parseSharesightUserInstruments({
+    instruments: [],
+    ...trigger,
+  });
+  for (const result of [trades, payouts, userInstruments]) {
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.error.message, /"links\.next"/);
+  }
+});
+
+test("BRK-017 guard: parseSharesightTrades/Payouts/UserInstruments route through parseItemList by source (guards against a future bypass)", () => {
+  const source = readFileSync(
+    fileURLToPath(new URL("../domain/sharesight/parse.ts", import.meta.url)),
+    "utf8",
+  );
+  for (const fnName of [
+    "parseSharesightTrades",
+    "parseSharesightPayouts",
+    "parseSharesightUserInstruments",
+  ]) {
+    const start = source.indexOf(`export function ${fnName}(`);
+    assert.notEqual(start, -1, `${fnName} not found in parse.ts`);
+    const nextExport = source.indexOf("\nexport function", start + 1);
+    const body = source.slice(
+      start,
+      nextExport === -1 ? undefined : nextExport,
+    );
+    assert.match(
+      body,
+      /parseItemList\(/,
+      `${fnName} must call parseItemList (the guard's only home) directly`,
+    );
   }
 });
