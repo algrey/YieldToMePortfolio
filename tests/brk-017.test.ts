@@ -279,7 +279,7 @@ test("BRK-017 (follow-up): redactPortfolioIds masks a numeric value under a key 
   assert.equal(redacted.nested[0].instrument_id, "<id>");
 });
 
-test("BRK-017 (follow-up): formatSummaryTable's printed pagination-meta values never carry a real portfolio id from links.self", () => {
+test("BRK-017 (F1 correction round): formatSummaryTable's printed pagination-meta values never carry a real portfolio id from links.self", () => {
   const probeResults = [
     {
       label: "portfolio #1 trades",
