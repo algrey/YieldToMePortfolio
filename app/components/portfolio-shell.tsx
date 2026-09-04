@@ -4082,8 +4082,15 @@ export function PortfolioShell({
   // fixture import. Every real caller passes either `ownedWorkspace` or
   // `portfolioPrototypesOverride` (never neither -- see app/page.tsx,
   // app/portfolio/[portfolioId]/[section]/page.tsx and its [holdingId]
-  // sibling), so this fallback is unreachable in practice; an empty array
-  // keeps that unreachable path harmless without importing the fixture.
+  // sibling), so this `?? []` path is unreachable in production -- not
+  // merely harmless if it were reached: with neither prop, `portfolios`
+  // is `[]` and several unguarded `portfolio.<field>` reads further down
+  // (the Holdings sort, and the Quotes/Details screens) throw rather than
+  // degrade. A discriminated props union (`{ ownedWorkspace: ... } | {
+  // portfolioPrototypesOverride: ... }`) would make that combination
+  // unconstructable at the type level and close this gap by construction;
+  // recorded as a follow-up in docs/ARCHITECTURE.md §9.12, not implemented
+  // in this step.
   const portfolios = portfolioPrototypesOverride ?? [];
   const ownedMode = ownedWorkspace !== undefined;
   const selectorItems: Array<{
