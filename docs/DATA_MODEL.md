@@ -699,6 +699,8 @@ Sensitive notes are financial user data and follow account retention.
 - suggested resolution type;
 - resolved value/actor/time.
 
+`code` is free-text with no CHECK constraint (only `severity` is constrained, `IN ('error','warning','info')`), so a new issue code -- like `SECURITY_RESOLUTION_CONFLICT` above -- never needs a migration. **`ROW_DIFFERS_FROM_COMMITTED_RECORD` (`BRK-019` slice 1, 2026-09-04)** is the latest such addition: `db/repositories/import-commit.ts`'s exact-identity skip (trade and dividend branches) inserts one, error-severity, WHEN its OWN live re-derivation finds the row's incoming value differs from what is currently committed under that identity -- in the SAME atomic statement group as the row's ordinary `commit_status = 'skipped'` UPDATE, guarded `WHERE NOT EXISTS (...)` against a duplicate insert on a retried chunk. `import_rows.commit_status`'s own CHECK constraint (`'staged' | 'committed' | 'skipped' | 'reversed' | 'failed'`) is UNCHANGED -- a needs-decision row commits as an ordinary `'skipped'` row; the distinct disclosure and count (`needsDecisionRows`, `db/repositories/import-commit.ts`'s `summary()`) both derive entirely from the presence of this issue code, not from a new row status. See `docs/CSV_IMPORT_SPEC.md` §3/§10/§13 for the full preview-time and commit-time mechanism.
+
 ### `import_mapping_decisions`
 
 - batch/user;
