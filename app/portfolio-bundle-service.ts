@@ -206,9 +206,23 @@ async function findExistingBatch(
 ): Promise<
   { id: string; status: string; targetPortfolioId: string | null } | undefined
 > {
+  // BRK-020 F1: `import_batches_user_file_parser_unique` is now a PARTIAL
+  // unique index (`WHERE status <> 'reversed'`, db/schema.ts), so this key
+  // can hold several `reversed` rows plus at most one live (non-reversed)
+  // row. Without an explicit tiebreak, `LIMIT 1` returns whichever matching
+  // row the query planner happens to visit first -- there is no index
+  // covering exactly (user_id, file_sha256, parser_format, parser_version)
+  // without a status predicate, so that has been a full-table-scan
+  // (rowid/insertion order) accident, not a guarantee. This ORDER BY makes
+  // the choice contractual: prefer the live row outright, then (among rows
+  // of the same liveness) the most recently updated one, so a stale
+  // `reversed` audit row is never handed back as "the existing batch" and
+  // reused/rewritten by a caller -- reversed rows are immutable audit
+  // records (see the index comment in db/schema.ts).
   const row = await client.get<Record<string, unknown>>(
     `SELECT id, status, target_portfolio_id FROM import_batches
      WHERE user_id = ? AND file_sha256 = ? AND parser_format = ? AND parser_version = ?
+     ORDER BY CASE WHEN status <> 'reversed' THEN 0 ELSE 1 END, updated_at DESC
      LIMIT 1`,
     [
       userId,

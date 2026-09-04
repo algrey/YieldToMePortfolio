@@ -17,11 +17,18 @@
 // rule), and its duplicate-lookup fallback filters the same way so it can never
 // hand back a reversed batch as the "existing" one.
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { buildImportReviewPreview } from "../app/import-preview.ts";
 import { markImportReadyWithContext } from "../app/import-ready-service.ts";
+import {
+  commitPortfolioBundleImport,
+  exportPortfolioBundle,
+  fingerprintBundle,
+} from "../app/portfolio-bundle-service.ts";
 import {
   linkSharesightPortfolioWithContext,
   runSharesightSyncWithContext,
@@ -36,6 +43,10 @@ import {
   type ImportCommitInput,
   type SqlClient,
 } from "../db/repositories/index.ts";
+import {
+  PORTFOLIO_BUNDLE_PARSER_FORMAT,
+  PORTFOLIO_BUNDLE_SCHEMA_VERSION,
+} from "../domain/exports/portfolio-bundle.ts";
 import { SUPPORTED_IMPORT_PARSER_VERSION } from "../domain/imports/index.ts";
 import type {
   SharesightClient,
@@ -251,6 +262,151 @@ test("BRK-020: a corrected CSV upload with IDENTICAL content that supersedes a r
   assert.equal(corrected.batch.supersedesBatchId, original.batch.id);
   assert.equal(corrected.batch.targetPortfolioId, "portfolio-a");
   assert.equal(corrected.batch.fileSha256, CSV_UPLOAD.fileSha256);
+});
+
+// `FIND_EXISTING_BATCH_SQL` is the exact query `findExistingBatch`
+// (app/portfolio-bundle-service.ts) runs post-fix. This is a PIN, not a
+// pre/post-fix differential (it never imports the app module, so it can't
+// observe a regression there) -- it exists to (a) prove the ORDER BY
+// tiebreak resolves correctly in isolation, independent of physical row
+// order, and (b) capture the query's EXPLAIN QUERY PLAN so a change that
+// makes the plan materially worse is visible here. The differential proof
+// that the REAL function is fixed is the next test, which calls
+// `commitPortfolioBundleImport` and fails pre-fix.
+const FIND_EXISTING_BATCH_SQL = `SELECT id, status, target_portfolio_id FROM import_batches
+     WHERE user_id = ? AND file_sha256 = ? AND parser_format = ? AND parser_version = ?
+     ORDER BY CASE WHEN status <> 'reversed' THEN 0 ELSE 1 END, updated_at DESC
+     LIMIT 1`;
+
+test("BRK-020 F1 (pin): findExistingBatch's query resolves to the LIVE row over a REVERSED row sharing the same key regardless of insertion order or recency, and its EXPLAIN QUERY PLAN is a bounded per-owner scan plus a temp B-tree sort (not a regression into scanning an unrelated table)", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = OFF;"); // raw fixture rows only, no FK setup needed
+  for (const stmt of [
+    `CREATE TABLE import_batches (
+       id TEXT PRIMARY KEY, user_id TEXT, target_portfolio_id TEXT,
+       parser_format TEXT, parser_version TEXT, filename TEXT, byte_size INTEGER,
+       file_sha256 TEXT, status TEXT, created_at TEXT, updated_at TEXT, version INTEGER
+     )`,
+  ]) {
+    database.exec(stmt);
+  }
+  const insert = (id: string, status: string, updatedAt: string): void => {
+    database
+      .prepare(
+        `INSERT INTO import_batches (
+           id, user_id, target_portfolio_id, parser_format, parser_version, filename,
+           byte_size, file_sha256, status, created_at, updated_at, version
+         ) VALUES (?, 'user-a', NULL, 'portfolio-bundle-json', '1', 'b.json',
+           1, 'sha-bundle', ?, '2026-09-03T00:00:00Z', ?, 1)`,
+      )
+      .run(id, status, updatedAt);
+  };
+  // Reversed row inserted FIRST -- lower rowid -- and given the LATER
+  // `updated_at` too, so the assertion cannot pass by accident of either
+  // ordering: only "prefer non-reversed" can produce the right answer.
+  insert("rev-old", "reversed", "2026-09-03T02:00:00Z");
+  insert("live-new", "failed", "2026-09-03T01:00:00Z");
+
+  const row = database
+    .prepare(FIND_EXISTING_BATCH_SQL)
+    .get("user-a", "sha-bundle", "portfolio-bundle-json", "1") as {
+    id: string;
+    status: string;
+  };
+  assert.equal(
+    row.id,
+    "live-new",
+    "the live (non-reversed) row must win regardless of insertion order or recency",
+  );
+  assert.equal(row.status, "failed");
+
+  const plan = database
+    .prepare(`EXPLAIN QUERY PLAN ${FIND_EXISTING_BATCH_SQL}`)
+    .all("user-a", "sha-bundle", "portfolio-bundle-json", "1") as Array<{
+    detail: string;
+  }>;
+  const planText = plan.map((step) => step.detail).join(" | ");
+  // No index covers (user_id, file_sha256, parser_format, parser_version)
+  // without a status predicate, so this is a full scan of import_batches
+  // (bounded by that user's batch count, not the whole table across owners)
+  // plus a temp B-tree for the ORDER BY -- acceptable at this table's size;
+  // recorded here so a regression that makes this materially worse (e.g. a
+  // scan of an unrelated table) is visible in the plan text.
+  assert.match(planText, /SCAN.*import_batches/i);
+  assert.match(planText, /USE TEMP B-TREE FOR ORDER BY/i);
+});
+
+test("BRK-020 F1: commitPortfolioBundleImport reuses the LIVE ('reversing') batch sharing the bundle's fingerprint, never the REVERSED one under the same key -- fails pre-fix (findExistingBatch picks the reversed row, so the reuse UPDATE tries to make TWO non-reversed rows share the partial-unique key and throws 'UNIQUE constraint failed', where it should instead complete and leave the reversed row untouched)", async () => {
+  const database = await migratedDatabase();
+  const client = createSqliteSqlClient(database);
+  const exported = await exportPortfolioBundle(
+    { client, userId: "user-a", requestId: randomUUID() },
+    "portfolio-a",
+  );
+  assert.equal(exported.ok, true);
+  if (!exported.ok) return;
+  const bundle = exported.bundle;
+  const fingerprint = await fingerprintBundle(bundle);
+
+  const insertBatch = (id: string, status: string): void => {
+    database
+      .prepare(
+        `INSERT INTO import_batches (
+           id, user_id, target_portfolio_id, parser_format, parser_version, filename,
+           byte_size, file_sha256, status, created_at, updated_at, version
+         ) VALUES (?, 'user-a', NULL, ?, ?, 'b.json', 1, ?, ?,
+           '2026-09-03T00:00:00Z', '2026-09-03T00:00:00Z', 1)`,
+      )
+      .run(
+        id,
+        PORTFOLIO_BUNDLE_PARSER_FORMAT,
+        String(PORTFOLIO_BUNDLE_SCHEMA_VERSION),
+        fingerprint,
+        status,
+      );
+  };
+  // `rev-old` is a terminal reversed generation of this bundle's restore;
+  // `live-new` is a SECOND, still-live generation that is itself mid-reversal
+  // ('reversing' -- BRK-020's own schema comment: "A batch mid-reversal
+  // ('reversing') still occupies the key"). 'reversing' sorts AFTER
+  // 'reversed' in `import_batches_owner_status_updated_at_idx` (the index
+  // the planner actually picks for this query, per this test file's own
+  // EXPLAIN QUERY PLAN check above), which is exactly the "plan luck" the
+  // Reviewer flagged: a live status that happens to sort before 'reversed'
+  // (e.g. 'committed', 'failed') masks the bug; 'reversing' does not.
+  insertBatch("rev-old", "reversed");
+  insertBatch("live-new", "reversing");
+
+  const result = await commitPortfolioBundleImport(
+    { client, userId: "user-a", requestId: randomUUID() },
+    bundle,
+    "b.json",
+    JSON.stringify(bundle).length,
+  );
+  assert.equal(
+    result.ok,
+    true,
+    result.ok ? "" : (result as { message: string }).message,
+  );
+  if (!result.ok) return;
+
+  const revStatus = database
+    .prepare("SELECT status FROM import_batches WHERE id = 'rev-old'")
+    .get() as { status: string };
+  assert.equal(
+    revStatus.status,
+    "reversed",
+    "the reversed audit row must never be rewritten",
+  );
+
+  const liveStatus = database
+    .prepare("SELECT status FROM import_batches WHERE id = 'live-new'")
+    .get() as { status: string };
+  assert.equal(
+    liveStatus.status,
+    "committed",
+    "the live batch, not the reversed one, must be the one reused and committed",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -522,5 +678,70 @@ test("BRK-020 regression (the disclosed stuck shape): Sharesight sync -> accept 
         .get(original.id) as { status: string }
     ).status,
     "reversed",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// BRK-020 B1 (2026-09-04 owner ruling): `failed` keeps occupying the
+// `import_batches_user_file_parser_unique` key exactly as it does today --
+// the index predicate stays `WHERE status <> 'reversed'`, no migration --
+// because every write of `import_batches.status = 'failed'` lives in
+// `app/portfolio-bundle-service.ts`'s bundle-restore path (whose own reader,
+// `findExistingBatch`, reuses-and-resets any non-committed row, `failed`
+// included, so it can never get stuck occupying the key). CSV/Sharesight
+// staging never drives a batch to `failed` today (see docs/DATA_MODEL.md's
+// BRK-020 entry). This is a PIN, not a bug-reproducing regression test: it
+// exists so that a future writer of `import_batches.status = 'failed'` for
+// a NON-bundle `parser_format` fails loudly here and forces the `failed`/
+// index-predicate decision to be revisited, rather than silently
+// reproducing the stuck-key hazard BRK-020 fixed for `reversed`.
+// ---------------------------------------------------------------------------
+
+async function collectTsFiles(dir: URL, out: string[]): Promise<void> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name.startsWith(".")) continue;
+    if (entry.isDirectory()) {
+      await collectTsFiles(new URL(`${entry.name}/`, dir), out);
+    } else if (entry.name.endsWith(".ts")) {
+      out.push(fileURLToPath(new URL(entry.name, dir)));
+    }
+  }
+}
+
+test("BRK-020 B1 (pin): every assignment of import_batches.status = 'failed' lives in app/portfolio-bundle-service.ts -- a writer for a new parser_format must fail this test and force the failed/index-predicate decision (docs/DATA_MODEL.md) to be revisited", async () => {
+  const files: string[] = [];
+  await collectTsFiles(new URL("../app/", import.meta.url), files);
+  await collectTsFiles(new URL("../db/", import.meta.url), files);
+
+  const assignmentPattern =
+    /UPDATE\s+import_batches\s+SET\s+status\s*=\s*'failed'/gi;
+  const matches: Array<{ file: string; count: number }> = [];
+  for (const file of files) {
+    const contents = await readFile(file, "utf8");
+    const count = (contents.match(assignmentPattern) ?? []).length;
+    if (count > 0) matches.push({ file, count });
+  }
+
+  const otherFiles = matches.filter(
+    (m) => !m.file.endsWith("/app/portfolio-bundle-service.ts"),
+  );
+  assert.deepEqual(
+    otherFiles,
+    [],
+    "a new writer of import_batches.status = 'failed' outside app/portfolio-bundle-service.ts means the `failed`/`WHERE status <> 'reversed'` decision in docs/DATA_MODEL.md must be revisited",
+  );
+
+  const bundleServiceMatches = matches.find((m) =>
+    m.file.endsWith("/app/portfolio-bundle-service.ts"),
+  );
+  assert.ok(
+    bundleServiceMatches,
+    "expected the known three writers to be found",
+  );
+  assert.equal(
+    bundleServiceMatches!.count,
+    3,
+    "expected exactly the three known writers (~470, ~531, ~1086); a changed count is also a signal to re-verify the decision's premises",
   );
 });
