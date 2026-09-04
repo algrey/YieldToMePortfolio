@@ -1124,13 +1124,18 @@ export function IncomeMultiYear({
                           : "no dividends received yet this FY"}
                       </span>
                     ) : null}
-                    {/* BRK-022 slice 3 review fix (B1): the DIV-011 fallback
-                        standalone "(to date)" row's own gross figure above is
-                        now PAID-only (`mapCurrentRow`) -- discloses the
-                        announced-but-unpaid subset separately, mirroring
-                        `income-landing.tsx`'s identical note wording/format,
-                        non-colour (AGENTS.md): the "unpaid" WORD is the
-                        signal, never styling alone. */}
+                    {/* BRK-022 slice 3 review fix round 2 (B1, Orchestrator
+                        ruling, option 2 -- corrects round 1's wording here,
+                        which claimed this row's gross was PAID-only): the
+                        DIV-011 fallback standalone "(to date)" row's own gross
+                        figure above is the FULL FY-to-date total, paid AND
+                        announced-but-unpaid (`mapCurrentRow`); the paid-only
+                        subset is reported separately through the "received so
+                        far this FY" line above, and the unpaid subset is
+                        disclosed here, mirroring `income-landing.tsx`'s
+                        identical note wording/format, non-colour (AGENTS.md):
+                        the "unpaid" WORD is the signal, never styling
+                        alone. */}
                     {row.unpaidCount > 0 ? (
                       <span className="unavailable">
                         {" "}
