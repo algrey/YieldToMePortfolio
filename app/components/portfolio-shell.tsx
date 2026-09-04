@@ -152,9 +152,12 @@ export function ToneValue({
 // PRF-014 step 2b: `EmptyState` stays here (exported) rather than moving to
 // `preview-shell.tsx` -- it is shared with the OWNED screens' own empty
 // states (OwnedHoldingsScreen, OwnedOverviewScreen, OwnedWorkspaceScreen),
-// not preview-only. `StatusBanner` moved to `preview-shell.tsx`: it was
-// reachable from exactly one call site (the old preview-mode
-// `PortfolioShell` render), never from any owned screen.
+// not preview-only. `StatusBanner` moved to `preview-shell.tsx`: its pre-2b
+// render call site was UNCONDITIONAL (not gated by `ownedMode`); it was
+// inert in owned mode only because the sole `setViewState` caller lived
+// inside the `!ownedMode`-gated prototype-state popover, so `viewState`
+// stayed "populated" in owned mode and `StatusBanner` returned null --
+// never a visible banner from any owned screen.
 export function EmptyState({
   title = "No holdings yet",
   message = "Add a quote or import transactions to start this portfolio.",

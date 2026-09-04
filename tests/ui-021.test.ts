@@ -334,6 +334,7 @@ test("UI-021 (re-pointed for PRF-014 step 2b): preview/prototype mode never reac
     "HoldingsScreen",
     "DetailsScreen",
     "NewsScreen",
+    "HoldingSheet",
   ]) {
     assert.doesNotMatch(
       shellSource,
@@ -341,6 +342,15 @@ test("UI-021 (re-pointed for PRF-014 step 2b): preview/prototype mode never reac
       `expected portfolio-shell.tsx to never render the preview-only <${componentName}>`,
     );
   }
+  // The preview-only prop/state names that moved to PreviewShell along with
+  // the components above never come back into portfolio-shell.tsx as real
+  // code (a prop, a destructured param, a hook). The file's own PRF-014
+  // step 2b header comment (just above `PortfolioShell`'s declaration)
+  // legitimately names both identifiers, backtick-quoted, to document what
+  // moved -- so the pattern excludes a backtick-wrapped mention rather than
+  // treating this doc comment as a false positive.
+  assert.doesNotMatch(shellSource, /(?<!`)\bhistoryBarsOverride\b(?!`)/);
+  assert.doesNotMatch(shellSource, /(?<!`)\bselectedHolding\b(?!`)/);
   // Every prototype (non-owned) section still renders its own dedicated,
   // untouched screen component in PreviewShell, never OwnedWorkspaceScreen.
   assert.doesNotMatch(previewSource, /<OwnedWorkspaceScreen\b/);

@@ -32,3 +32,16 @@ const _rejectedByPortfolioShell: PortfolioShellProps = {
   portfolioPrototypesOverride: [],
 };
 void _rejectedByPortfolioShell;
+
+// Second, independent pin: `ownedWorkspace` itself is REQUIRED, not merely
+// "preview props are rejected". Omitting it (with no preview prop offered
+// either) must fail with TS2741 ("Property 'ownedWorkspace' is missing").
+// @ts-expect-error -- TS2741: missing required `ownedWorkspace`. If this
+// stops erroring, PortfolioShell can once again be constructed with neither
+// `ownedWorkspace` nor a preview prop, reopening the unreachable-fallback
+// gap PRF-014 step 1's correction (docs/ARCHITECTURE.md §9.12) recorded as
+// a follow-up and step 2b closed.
+const _missingOwnedWorkspace: PortfolioShellProps = {
+  activeSection: "overview",
+};
+void _missingOwnedWorkspace;
