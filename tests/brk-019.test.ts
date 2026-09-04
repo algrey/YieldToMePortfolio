@@ -21,6 +21,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { markImportReadyWithContext } from "../app/import-ready-service.ts";
 import { setImportRowExclusionWithContext } from "../app/import-row-exclusion-service.ts";
+import { loadImportReviewForReadyTransition } from "../app/import-ready-review-loader.ts";
 import { buildImportReviewPreview } from "../app/import-preview.ts";
 import { deriveCommittedStatusLine } from "../app/import-review-commit-state.ts";
 import { formatSyncResultMessage } from "../app/sharesight-sync-panel-helpers.ts";
@@ -54,6 +55,7 @@ import type {
 } from "../domain/sharesight/index.ts";
 import {
   createImportReconciliationPreview,
+  safeComputeDividendCashTotal,
   type ImportPreviewExistingDividendEntry,
   type ImportPreviewPortfolio,
   type ImportPreviewSecurityCandidate,
@@ -297,18 +299,41 @@ async function loadCommittedComparisonEvidence(
       (row) => `${String(row.portfolio_id)}::${String(row.source_reference)}`,
     ),
   );
+  // CORRECTION ROUND (B2, BLOCKING): mirrors `app/import-actions.ts`'s own
+  // fix -- the committed side must be derived via `safeComputeDividendCashTotal`
+  // over the three amount-bearing columns, exactly like the incoming side,
+  // never read `total_cash_decimal`/`total_franking_decimal` verbatim (that
+  // reports `null` for a PER-SHARE-mode committed record, see
+  // `committed-value-comparison.ts`'s `dividendValueDifferences` doc
+  // comment).
   const committedDividendValues = new Map<string, CommittedDividendValues>(
     dividendRows.map((row) => [
       `${String(row.portfolio_id)}::${String(row.source_reference)}`,
       {
-        cashTotalDecimal:
-          row.total_cash_decimal === null
-            ? null
-            : String(row.total_cash_decimal),
-        totalFrankingDecimal:
-          row.total_franking_decimal === null
-            ? null
-            : String(row.total_franking_decimal),
+        cashTotalDecimal: safeComputeDividendCashTotal({
+          totalCashDecimal:
+            row.total_cash_decimal === null
+              ? null
+              : String(row.total_cash_decimal),
+          sharesDecimal:
+            row.shares_decimal === null ? null : String(row.shares_decimal),
+          dividendPerShareDecimal:
+            row.dividend_per_share_decimal === null
+              ? null
+              : String(row.dividend_per_share_decimal),
+        }),
+        totalFrankingDecimal: safeComputeDividendCashTotal({
+          totalCashDecimal:
+            row.total_franking_decimal === null
+              ? null
+              : String(row.total_franking_decimal),
+          sharesDecimal:
+            row.shares_decimal === null ? null : String(row.shares_decimal),
+          dividendPerShareDecimal:
+            row.franking_credit_per_share_decimal === null
+              ? null
+              : String(row.franking_credit_per_share_decimal),
+        }),
         paymentDate:
           row.payment_date === null ? null : String(row.payment_date),
         fxRateToPortfolioDecimal:
@@ -411,60 +436,29 @@ async function loadFullPreview(
   return { issues: review.preview.issues, ready: review.preview.ready };
 }
 
-/** The evidence-BLIND preview version/readiness computation the ready and
- * exclusion services themselves use in production (`app/import-ready-service.ts`'s
- * `loadImportReview`) -- deliberately excludes `committedTradeValues`/
- * `committedDividendValues`/`existingDividendEntries`. `ROW_DIFFERS_FROM_
- * COMMITTED_RECORD` is excluded from `previewVersion` hashing regardless
- * (`domain/imports/review.ts`), so this stays byte-compatible with
- * `loadFullPreview`'s own hash for the SAME server-round-trip discipline
- * production relies on. */
+/** CORRECTION ROUND (B1b): the preview version/readiness computation the
+ * ready and accept services themselves use in production -- now the REAL
+ * shared loader (`app/import-ready-review-loader.ts`'s
+ * `loadImportReviewForReadyTransition`), imported directly rather than
+ * hand-mirrored, so this helper can never independently drift from
+ * production the way the pre-correction-round hand-typed copy did (see that
+ * loader's own header comment for the reviewer-discovered divergence this
+ * caused). Still deliberately narrower than `loadFullPreview` above --
+ * `committedTradeValues`/`committedDividendValues`/
+ * `existingDividendSourceReferences`/`existingTradeSourceReferences` stay
+ * absent, by production design (see the loader's own doc comment) -- but
+ * `existingDividendEntries` IS now included, matching production. */
 async function currentPreviewVersion(
   client: SqlClient,
   userId: string,
   batchId: string,
 ): Promise<string> {
-  const staging = createOwnedImportStagingRepository(client);
-  const batch = await staging.get(userId, batchId);
-  if (!batch) throw new Error("expected batch to exist");
-  const [rows, issues, mappings, portfolios, candidateRows] = await Promise.all(
-    [
-      staging.listRows(userId, batchId),
-      staging.listIssues(userId, batchId),
-      createOwnedImportMappingDecisionRepository(client).list(userId, batchId),
-      createOwnedPortfolioRepository(client).list(userId),
-      client.all<Record<string, unknown>>(
-        `SELECT id, portfolio_id, source_symbol, source_exchange_alias,
-                source_currency_code, security_id
-           FROM portfolio_securities WHERE user_id = ?
-          ORDER BY source_symbol ASC, id ASC`,
-        [userId],
-      ),
-    ],
+  const review = await loadImportReviewForReadyTransition(
+    client,
+    userId,
+    batchId,
   );
-  const review = buildImportReviewPreview({
-    batch,
-    rows,
-    issues,
-    mappings,
-    portfolios: portfolios.map((portfolio) => ({
-      id: portfolio.id,
-      name: portfolio.name,
-      homeCurrencyCode: portfolio.homeCurrencyCode,
-      historyCompleteFrom: portfolio.historyCompleteFrom,
-    })),
-    securityCandidates: candidateRows.map((row) => ({
-      id: String(row.id),
-      portfolioId: String(row.portfolio_id),
-      sourceSymbol: String(row.source_symbol),
-      sourceExchangeAlias:
-        row.source_exchange_alias === null
-          ? null
-          : String(row.source_exchange_alias),
-      sourceCurrencyCode: String(row.source_currency_code),
-      securityId: row.security_id === null ? null : String(row.security_id),
-    })),
-  });
+  if ("ok" in review) throw new Error("expected batch to exist");
   return review.previewVersion;
 }
 
@@ -1689,4 +1683,632 @@ test("BRK-019: the SAME row escalates to needs_decision the instant its committe
   assert.equal(diff.committed, "9.99");
   assert.equal(diff.incoming, "2.50");
   assert.equal(preview.ready, false);
+});
+
+// ---------------------------------------------------------------------------
+// BRK-019 slice 1 CORRECTION ROUND
+//
+// F2: the DIV-004 near-match escalation is Sharesight-payout-specific -- a
+// near neighbour sourced from a manual entry, a CSV import, or even a
+// Sharesight TRADE (not payout) stays the plain, non-blocking
+// DIVIDEND_NEAR_EXISTING_ENTRY warning; only a `sharesight-payout:`-prefixed
+// neighbour escalates to ROW_DIFFERS_FROM_COMMITTED_RECORD.
+// ---------------------------------------------------------------------------
+
+function nearMatchPreview(
+  existingSourceReference: string | null,
+): ReturnType<typeof createImportReconciliationPreview> {
+  const row = totalsDividendRow("row-nearmatch");
+  return createImportReconciliationPreview({
+    rows: [row],
+    portfolios: PORTFOLIOS,
+    securityCandidates: SECURITY_CANDIDATES,
+    // Payment date 3 days after the incoming row's own 2026-08-05 -- inside
+    // DIV-001's 7-day proximity window, but NOT the same date (so this
+    // exercises the near-match branch, not the exact-`source_reference`-
+    // match branch above -- `existingDividendSourceReferences` is
+    // deliberately omitted).
+    existingDividendEntries: [
+      {
+        portfolioSecurityId: "membership-1",
+        paymentDate: "2026-08-08",
+        cashTotalDecimal: "2.50",
+        frankingTotalDecimal: null,
+        currencyCode: null,
+        sourceReference: existingSourceReference,
+      },
+    ],
+  });
+}
+
+test("BRK-019 (F2): a near-match against a MANUAL entry (source_reference null) stays a plain DIVIDEND_NEAR_EXISTING_ENTRY warning, never escalates", () => {
+  const preview = nearMatchPreview(null);
+  assert.equal(
+    preview.issues.find(
+      (issue) => issue.code === "ROW_DIFFERS_FROM_COMMITTED_RECORD",
+    ),
+    undefined,
+  );
+  const warning = onlyIssue(preview.issues, "DIVIDEND_NEAR_EXISTING_ENTRY");
+  assert.equal(warning.severity, "warning");
+  assert.equal(preview.ready, true);
+});
+
+test("BRK-019 (F2): a near-match against a CSV-sourced entry (import-fingerprint:csv-...) stays a plain DIVIDEND_NEAR_EXISTING_ENTRY warning, never escalates", () => {
+  const preview = nearMatchPreview("import-fingerprint:csv-abc123");
+  assert.equal(
+    preview.issues.find(
+      (issue) => issue.code === "ROW_DIFFERS_FROM_COMMITTED_RECORD",
+    ),
+    undefined,
+  );
+  const warning = onlyIssue(preview.issues, "DIVIDEND_NEAR_EXISTING_ENTRY");
+  assert.equal(warning.severity, "warning");
+  assert.equal(preview.ready, true);
+});
+
+test("BRK-019 (F2): a near-match against a Sharesight TRADE-sourced entry (import-fingerprint:sharesight-trade:...) stays a plain DIVIDEND_NEAR_EXISTING_ENTRY warning, never escalates -- only the sharesight-payout: prefix qualifies", () => {
+  const preview = nearMatchPreview(
+    "import-fingerprint:sharesight-trade:trade-1",
+  );
+  assert.equal(
+    preview.issues.find(
+      (issue) => issue.code === "ROW_DIFFERS_FROM_COMMITTED_RECORD",
+    ),
+    undefined,
+  );
+  const warning = onlyIssue(preview.issues, "DIVIDEND_NEAR_EXISTING_ENTRY");
+  assert.equal(warning.severity, "warning");
+  assert.equal(preview.ready, true);
+});
+
+test("BRK-019 (F2): a near-match against a Sharesight PAYOUT-sourced entry (import-fingerprint:sharesight-payout:...) escalates to ROW_DIFFERS_FROM_COMMITTED_RECORD, replacing the plain warning", () => {
+  const preview = nearMatchPreview(
+    "import-fingerprint:sharesight-payout:sp-1:holding-1:2026-08-08",
+  );
+  assert.equal(
+    preview.issues.find(
+      (issue) => issue.code === "DIVIDEND_NEAR_EXISTING_ENTRY",
+    ),
+    undefined,
+    "the escalation must REPLACE the plain warning, not add to it",
+  );
+  const issue = onlyIssue(preview.issues, "ROW_DIFFERS_FROM_COMMITTED_RECORD");
+  assert.equal(issue.severity, "error");
+  assert.equal(preview.ready, false);
+});
+
+// ---------------------------------------------------------------------------
+// B2: an identical PER-SHARE CSV dividend re-upload (same fingerprint, same
+// per-share amount) must never report a false ROW_DIFFERS_FROM_COMMITTED_RECORD
+// -- the committed side's comparable total must be DERIVED
+// (`safeComputeDividendCashTotal`) from the stored per-share columns, never
+// read from the (NULL, in per-share mode) raw totals columns. A genuinely
+// CHANGED per-share amount must still be caught.
+// ---------------------------------------------------------------------------
+
+function csvDividendRowJson(overrides: {
+  id: string;
+  dividendPerShare: string;
+  paymentDate: string;
+}): string {
+  return JSON.stringify({
+    id: overrides.id,
+    symbol: "ABC",
+    name: "Alpha",
+    displaySymbol: null,
+    exchange: "ASX",
+    portfolio: "Main",
+    currency: "AUD",
+    sharesOwned: "5",
+    costPerShare: overrides.dividendPerShare,
+    commission: "0",
+    transactionDate: overrides.paymentDate,
+    transactionTime: null,
+    purchaseExchangeRate: null,
+    type: "dividend",
+    accounting: null,
+    accountingExecutionIds: null,
+    notes: null,
+    tradeAtUtc: `${overrides.paymentDate}T00:00:00.000Z`,
+    localTradeDate: overrides.paymentDate,
+    cashEvent: null,
+    frankingPerShare: null,
+    totalCashDecimal: null,
+    totalFrankingDecimal: null,
+  });
+}
+
+function stageCsvDividendBatch(
+  database: DatabaseSync,
+  batchId: string,
+  rowId: string,
+  fingerprint: string,
+  dividendPerShare: string,
+  paymentDate: string,
+): void {
+  const now = "2026-08-20T00:00:00Z";
+  database
+    .prepare(
+      `INSERT INTO import_batches (
+         id, user_id, target_portfolio_id, parser_format, parser_version, filename,
+         byte_size, file_sha256, status, created_at, updated_at, version
+       ) VALUES (?, 'user-a', 'portfolio-a', 'strict-versioned-csv', ?, ?, 100, ?, 'parsed', ?, ?, 1)`,
+    )
+    .run(
+      batchId,
+      SUPPORTED_IMPORT_PARSER_VERSION,
+      `${batchId}.csv`,
+      `file-${batchId}`,
+      now,
+      now,
+    );
+  database
+    .prepare(
+      `INSERT INTO import_rows (
+         id, user_id, batch_id, physical_row_number, row_class,
+         original_fields_json, normalized_fields_json, normalized_fingerprint,
+         validation_status, target_portfolio_id, target_portfolio_security_id,
+         commit_status, created_at, updated_at, version
+       ) VALUES (?, 'user-a', ?, 2, 'transaction', '[]', ?, ?, 'valid',
+         'portfolio-a', 'membership-a', 'staged', ?, ?, 1)`,
+    )
+    .run(
+      rowId,
+      batchId,
+      csvDividendRowJson({ id: rowId, dividendPerShare, paymentDate }),
+      fingerprint,
+      now,
+      now,
+    );
+}
+
+test("BRK-019 (B2): an identical PER-SHARE CSV dividend re-upload never reports a false needs_decision -- the committed side is derived, not read verbatim", async () => {
+  const database = await migratedDatabase();
+  const client = createSqliteSqlClient(database);
+
+  stageCsvDividendBatch(
+    database,
+    "div-b2-batch-1",
+    "div-b2-row-1",
+    "div-b2-fingerprint-shared",
+    "0.50",
+    "2026-08-05",
+  );
+  await commitBatchAndReturnResult(
+    client,
+    "user-a",
+    "div-b2-batch-1",
+    "div-b2-commit-1",
+    1,
+  );
+
+  // Confirm the committed record is genuinely PER-SHARE-mode (the totals
+  // columns are NULL) -- otherwise this test would not exercise B2 at all.
+  const committed = await client.all<{
+    total_cash_decimal: string | null;
+    shares_decimal: string;
+    dividend_per_share_decimal: string;
+  }>(
+    `SELECT total_cash_decimal, shares_decimal, dividend_per_share_decimal
+       FROM dividend_manual_records
+      WHERE user_id = 'user-a' AND source_reference = 'import-fingerprint:div-b2-fingerprint-shared'`,
+    [],
+  );
+  assert.equal(committed.length, 1);
+  assert.equal(committed[0]!.total_cash_decimal, null);
+
+  // Re-upload: SAME fingerprint (same identity), SAME per-share amount.
+  stageCsvDividendBatch(
+    database,
+    "div-b2-batch-2",
+    "div-b2-row-2",
+    "div-b2-fingerprint-shared",
+    "0.50",
+    "2026-08-05",
+  );
+  const preview = await loadFullPreview(client, "user-a", "div-b2-batch-2");
+  assert.equal(
+    preview.issues.find(
+      (issue) => issue.code === "ROW_DIFFERS_FROM_COMMITTED_RECORD",
+    ),
+    undefined,
+    "an identical per-share re-upload must never report a false needs_decision",
+  );
+  assert.equal(preview.ready, true);
+
+  const commitResult = await commitBatchAndReturnResult(
+    client,
+    "user-a",
+    "div-b2-batch-2",
+    "div-b2-commit-2",
+    1,
+  );
+  assert.equal(commitResult.committedRows, 0);
+  assert.equal(commitResult.skippedRows, 1);
+  assert.equal(
+    commitResult.needsDecisionRows,
+    0,
+    "an identical per-share re-upload must skip as a true no-op, never as needs_decision",
+  );
+  const persistedIssues = await client.all(
+    `SELECT id FROM import_issues WHERE batch_id = 'div-b2-batch-2' AND row_id = 'div-b2-row-2'`,
+    [],
+  );
+  assert.equal(
+    persistedIssues.length,
+    0,
+    "no import_issues row may exist for a genuinely unchanged re-upload",
+  );
+});
+
+test("BRK-019 (B2): a PER-SHARE CSV dividend re-upload with a CHANGED per-share amount is still caught as exactly one needs_decision row", async () => {
+  const database = await migratedDatabase();
+  const client = createSqliteSqlClient(database);
+
+  stageCsvDividendBatch(
+    database,
+    "div-b2c-batch-1",
+    "div-b2c-row-1",
+    "div-b2c-fingerprint-shared",
+    "0.50",
+    "2026-08-05",
+  );
+  await commitBatchAndReturnResult(
+    client,
+    "user-a",
+    "div-b2c-batch-1",
+    "div-b2c-commit-1",
+    1,
+  );
+
+  // Re-upload: SAME fingerprint, CHANGED per-share amount.
+  stageCsvDividendBatch(
+    database,
+    "div-b2c-batch-2",
+    "div-b2c-row-2",
+    "div-b2c-fingerprint-shared",
+    "0.60",
+    "2026-08-05",
+  );
+  const commitResult = await commitBatchAndReturnResult(
+    client,
+    "user-a",
+    "div-b2c-batch-2",
+    "div-b2c-commit-2",
+    1,
+  );
+  assert.equal(commitResult.committedRows, 0);
+  assert.equal(commitResult.skippedRows, 1);
+  assert.equal(commitResult.needsDecisionRows, 1);
+
+  const issues = await client.all<{ code: string; message: string }>(
+    `SELECT code, message FROM import_issues
+      WHERE batch_id = 'div-b2c-batch-2' AND row_id = 'div-b2c-row-2'`,
+    [],
+  );
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0]!.code, "ROW_DIFFERS_FROM_COMMITTED_RECORD");
+  assert.match(issues[0]!.message, /cash total/);
+
+  const manualRecordCount = await client.all<{ count: number }>(
+    `SELECT COUNT(*) as count FROM dividend_manual_records
+      WHERE user_id = 'user-a' AND source_reference = 'import-fingerprint:div-b2c-fingerprint-shared'`,
+    [],
+  );
+  assert.equal(
+    manualRecordCount[0]!.count,
+    1,
+    "the CSV route must never double-write for a shared fingerprint",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// B1: end-to-end commit-through drill -- sync -> commit -> re-sync (SAME
+// amount, paidOnDate shifted) -> Accept must never double-write, must be
+// visibly blocked in the review's derived state, and excluding the row must
+// let the rest of the batch commit.
+// ---------------------------------------------------------------------------
+
+test("BRK-019 CORRECTION ROUND (B1): a paid-date-shifted re-sync is caught end-to-end -- exactly one dividend_manual_records row survives, the sync/commit results agree on needs_decision, Accept is blocked until the row is excluded, and excluding it commits the rest", async () => {
+  const database = await migratedDatabase();
+  const { client, sharesightClient: firstClient } = await linkedFixture(
+    database,
+    "user-a",
+    "portfolio-a",
+    "sp-1",
+    {
+      portfolios: [fakePortfolio()],
+      trades: [],
+      payouts: [
+        fakePayout({
+          id: "payout-b1-drill",
+          paidOnDate: "2026-08-05",
+          amountDecimal: "2.50",
+          frankingCreditsDecimal: "1.07",
+        }),
+      ],
+    },
+  );
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: { enabled: true, client: firstClient } },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  const firstBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    first.batchId,
+  );
+  await commitBatchAndReturnResult(
+    client,
+    "user-a",
+    first.batchId,
+    "brk-019-b1-drill-commit-1",
+    firstBatch!.version,
+  );
+
+  // Re-sync: SAME payout id, SAME amount, paid-on-date shifted by 3 days --
+  // within DIV-001/DIV-004's 7-day proximity window. The identity key
+  // (`sharesight-payout:<portfolio>:<holding>:<paidOnDate>`) is NEW, so this
+  // can never hit commit's exact-match lookup.
+  const correctedClient = fakeSharesightClient({
+    trades: [],
+    payouts: [
+      fakePayout({
+        id: "payout-b1-drill",
+        paidOnDate: "2026-08-08",
+        amountDecimal: "2.50",
+        frankingCreditsDecimal: "1.07",
+      }),
+    ],
+  });
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    { integration: { enabled: true, client: correctedClient } },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  // B1c: the sync result itself must classify this as needing a decision,
+  // never as a genuinely new payout.
+  assert.equal(second.needsDecisionRows, 1);
+  assert.equal(second.newRows, 0);
+
+  const secondBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    second.batchId,
+  );
+
+  // "Accept blocked in the review's derived state": the escalation must be
+  // visible and blocking BEFORE any commit is attempted, via the REAL
+  // ready-service path every Accept/Mark-Ready flow goes through -- not just
+  // the full page's own (already-correct) preview.
+  const previewVersion = await currentPreviewVersion(
+    client,
+    "user-a",
+    second.batchId,
+  );
+  const blockedReady = await markImportReadyWithContext(
+    { client, userId: "user-a" },
+    second.batchId,
+    {
+      expectedVersion: secondBatch!.version,
+      expectedPreviewVersion: previewVersion,
+    },
+  );
+  assert.equal(
+    blockedReady.ok,
+    false,
+    "the ready transition (and therefore Accept) must be blocked while the paid-date correction is unresolved",
+  );
+
+  // The escalation must now also be PERSISTED (not just computed) -- this is
+  // what lets the review UI's `blockedRowIssues`/`acceptDisabled` (persisted-
+  // issue-driven, BRK-009C) show the block pre-emptively.
+  const persistedIssues = await client.all<{ code: string; row_id: string }>(
+    `SELECT code, row_id FROM import_issues
+      WHERE batch_id = ? AND code = 'ROW_DIFFERS_FROM_COMMITTED_RECORD'`,
+    [second.batchId],
+  );
+  assert.equal(persistedIssues.length, 1);
+  const blockedRowId = persistedIssues[0]!.row_id;
+
+  // Excluding the row clears the block; the batch then reaches ready and
+  // commits with zero NEW dividend_manual_records rows for this identity.
+  const previewVersionForExclude = await currentPreviewVersion(
+    client,
+    "user-a",
+    second.batchId,
+  );
+  const excluded = await setImportRowExclusionWithContext(
+    { client, userId: "user-a", requestId: "exclude-req" },
+    second.batchId,
+    {
+      action: "exclude",
+      target: { kind: "rowIds", rowIds: [blockedRowId] },
+      expectedVersion: secondBatch!.version,
+      expectedPreviewVersion: previewVersionForExclude,
+    },
+  );
+  assert.equal(excluded.ok, true);
+
+  const secondBatchAfterExclude = await createOwnedImportStagingRepository(
+    client,
+  ).get("user-a", second.batchId);
+  const commitResult = await commitBatchAndReturnResult(
+    client,
+    "user-a",
+    second.batchId,
+    "brk-019-b1-drill-commit-2",
+    secondBatchAfterExclude!.version,
+  );
+  assert.equal(commitResult.committedRows, 0);
+  assert.equal(commitResult.skippedRows, 1);
+  assert.equal(commitResult.excludedByOwnerRows, 1);
+  assert.equal(
+    commitResult.needsDecisionRows,
+    0,
+    "an excluded row is never ALSO counted as needing a decision",
+  );
+
+  // The financial-safety property this whole drill exists to prove: exactly
+  // ONE dividend_manual_records row survives for this holding, never two.
+  const manualRecords = await client.all<{
+    id: string;
+    payment_date: string;
+    source_reference: string;
+  }>(
+    `SELECT id, payment_date, source_reference FROM dividend_manual_records
+      WHERE user_id = 'user-a' AND portfolio_id = 'portfolio-a'
+        AND portfolio_security_id = 'membership-a'
+        AND superseded_by_record_id IS NULL`,
+    [],
+  );
+  assert.equal(
+    manualRecords.length,
+    1,
+    "the paid-date correction must never double-write the distribution",
+  );
+  assert.equal(manualRecords[0]!.payment_date, "2026-08-05");
+  assert.equal(
+    manualRecords[0]!.source_reference,
+    "import-fingerprint:sharesight-payout:sp-1:holding-1:2026-08-05",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// B1a: commit's OWN independent near-match backstop still fires even when
+// the ready-time check is bypassed entirely (a resumed old batch, or a
+// direct commit call that never went through markImportReadyWithContext) --
+// this is the defence-in-depth layer, not a substitute for the ready-time
+// block above.
+// ---------------------------------------------------------------------------
+
+test("BRK-019 CORRECTION ROUND (B1a): commit's own near-match backstop skips a paid-date-shifted row even if the ready-time check never ran, and persists the SAME issue commit's exact-match backstop uses", async () => {
+  const database = await migratedDatabase();
+  const { client, sharesightClient: firstClient } = await linkedFixture(
+    database,
+    "user-a",
+    "portfolio-a",
+    "sp-1",
+    {
+      portfolios: [fakePortfolio()],
+      trades: [],
+      payouts: [
+        fakePayout({
+          id: "payout-b1a-backstop",
+          paidOnDate: "2026-08-05",
+          amountDecimal: "2.50",
+          frankingCreditsDecimal: "1.07",
+        }),
+      ],
+    },
+  );
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: { enabled: true, client: firstClient } },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  const firstBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    first.batchId,
+  );
+  await commitBatchAndReturnResult(
+    client,
+    "user-a",
+    first.batchId,
+    "brk-019-b1a-backstop-commit-1",
+    firstBatch!.version,
+  );
+
+  const correctedClient = fakeSharesightClient({
+    trades: [],
+    payouts: [
+      fakePayout({
+        id: "payout-b1a-backstop",
+        paidOnDate: "2026-08-08",
+        amountDecimal: "2.50",
+        frankingCreditsDecimal: "1.07",
+      }),
+    ],
+  });
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    { integration: { enabled: true, client: correctedClient } },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+
+  // Force the batch straight to `ready` at the DB level -- bypassing
+  // `markImportReadyWithContext` entirely, simulating a batch that reached
+  // `ready` before this correction round's ready-time check existed (or any
+  // other path that skips it), so the assertion below exercises commit's OWN
+  // independent re-derivation, never the ready-time block from the drill
+  // above.
+  database.exec(
+    `UPDATE import_batches SET status = 'ready' WHERE id = '${second.batchId}'`,
+  );
+  const secondBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    second.batchId,
+  );
+  const commitRepo = createOwnedImportCommitRepository(client);
+  const validated = await commitRepo.validate("user-a", second.batchId);
+  assert.equal(validated.ok, true);
+  if (!validated.ok) return;
+  const commitInput: ImportCommitInput = {
+    expectedVersion: secondBatch!.version,
+    expectedPreviewVersion: validated.previewVersion,
+    idempotencyKey: "brk-019-b1a-backstop-commit-2",
+    confirmation: true,
+    requestId: "brk-019-b1a-backstop-commit-2-request",
+  };
+  let commitResult = await commitRepo.commit(
+    "user-a",
+    second.batchId,
+    commitInput,
+  );
+  for (
+    let attempt = 0;
+    attempt < 10 && (!commitResult.ok || commitResult.status !== "committed");
+    attempt += 1
+  ) {
+    assert.equal(commitResult.ok, true);
+    commitResult = await commitRepo.commit(
+      "user-a",
+      second.batchId,
+      commitInput,
+    );
+  }
+  assert.equal(commitResult.ok, true);
+  if (!commitResult.ok) return;
+  assert.equal(commitResult.status, "committed");
+  assert.equal(commitResult.committedRows, 0);
+  assert.equal(commitResult.skippedRows, 1);
+  assert.equal(commitResult.needsDecisionRows, 1);
+
+  const manualRecords = await client.all<{ id: string }>(
+    `SELECT id FROM dividend_manual_records
+      WHERE user_id = 'user-a' AND portfolio_id = 'portfolio-a'
+        AND portfolio_security_id = 'membership-a'
+        AND superseded_by_record_id IS NULL`,
+    [],
+  );
+  assert.equal(
+    manualRecords.length,
+    1,
+    "commit's own backstop must never double-write even when the ready-time check is bypassed",
+  );
+
+  const issues = await client.all<{ code: string }>(
+    `SELECT code FROM import_issues
+      WHERE batch_id = ? AND code = 'ROW_DIFFERS_FROM_COMMITTED_RECORD'`,
+    [second.batchId],
+  );
+  assert.equal(issues.length, 1);
 });

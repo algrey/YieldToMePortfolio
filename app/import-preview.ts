@@ -202,9 +202,19 @@ export function buildImportReviewPreview(input: {
     excludedByOwnerRows: input.rows.filter(
       (row) => row.commitStatus === "skipped" && row.excludedByOwnerAt !== null,
     ).length,
+    // CORRECTION ROUND (B1b follow-on fix): also excludes an
+    // owner-excluded row -- `app/import-ready-service.ts`'s ready-time
+    // persistence (this task) can leave a `ROW_DIFFERS_FROM_COMMITTED_RECORD`
+    // issue in `import_issues` from BEFORE the owner excluded that same row
+    // (excluding never deletes/resolves an already-persisted issue). The two
+    // counts must stay mutually exclusive, matching
+    // `db/repositories/import-commit.ts`'s own `summary()` fix for the
+    // identical overlap.
     needsDecisionRows: input.rows.filter(
       (row) =>
-        row.commitStatus === "skipped" && needsDecisionRowIds.has(row.id),
+        row.commitStatus === "skipped" &&
+        row.excludedByOwnerAt === null &&
+        needsDecisionRowIds.has(row.id),
     ).length,
     remainingRows: input.rows.filter((row) => row.commitStatus === "staged")
       .length,

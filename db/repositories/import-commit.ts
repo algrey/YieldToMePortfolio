@@ -55,6 +55,13 @@ import {
   tradeValueDifferences,
   type CommittedRecordFieldDifference,
 } from "../../domain/imports/committed-value-comparison.ts";
+// BRK-019 slice 1 CORRECTION ROUND: DIV-001's own proximity window and the
+// dividend-reconciliation tolerance helper, reused (never re-derived) for
+// commit's OWN live re-derivation of the DIV-004 near-match/paid-date-
+// correction escalation below (B1a) -- see that block's comment.
+import { PROXIMITY_WINDOW_DAYS } from "../../domain/dividends/history.ts";
+import { cashTotalsWithinTolerance } from "../../domain/imports/dividend-reconciliation.ts";
+import { rowDiffersFromCommittedRecordIssueStatement } from "./import-issue-statements.ts";
 
 // BRK-005: mirrors `app/import-ready-service.ts`'s identical widening of the
 // CSV parser's `(parserFormat, parserVersion)` allowlist by exactly one
@@ -260,6 +267,32 @@ function multiplyDecimal(left: string, right: string): string | null {
   return `${digits.slice(0, -scale)}.${digits.slice(-scale)}`;
 }
 
+// CORRECTION ROUND (B1a): plain calendar-day difference, matching
+// `domain/imports/reconciliation.ts`'s own private `daysBetweenDates`
+// exactly -- kept as a local copy rather than exported/shared, per that
+// module's own established convention for this two-line date-math
+// primitive (only the proximity WINDOW constant, `PROXIMITY_WINDOW_DAYS`,
+// is imported/reused).
+function daysBetweenDates(a: string, b: string): number {
+  const msPerDay = 86_400_000;
+  return Math.round(
+    (Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / msPerDay,
+  );
+}
+
+// CORRECTION ROUND (B1a): mirrors `domain/imports/reconciliation.ts`'s own
+// private `safeCashTotalsWithinTolerance` -- a corrupt/non-canonical stored
+// value must never throw out of commit's live near-match re-derivation
+// below; an unparseable comparison is treated as NOT a match (conservative:
+// never mistaken for "confirmed unchanged").
+function safeCashTotalsWithinTolerance(left: string, right: string): boolean {
+  try {
+    return cashTotalsWithinTolerance(left, right);
+  } catch {
+    return false;
+  }
+}
+
 function invertDecimal(value: string): string | null {
   if (!DECIMAL.test(value) || value === "0") return null;
   const [whole, fraction = ""] = value.split(".");
@@ -306,17 +339,14 @@ function mapRows(rows: Record<string, unknown>[]): StagedRow[] {
 
 // BRK-019 slice 1: persists commit's own fail-closed finding (a row's
 // identity already exists committed but its value differs) as a normal
-// `import_issues` row -- the SAME table/shape `db/repositories/import-staging.ts`
-// writes a persisted issue into at parse time (e.g.
-// `SHARESIGHT_PAYOUT_KEY_COLLISION`), reused here rather than a new
-// column/enum on `import_rows` -- `import_issues.code` is free-form text
-// with no CHECK constraint (`db/schema.ts`), so this needs no migration.
-// `summary()` below counts a row this way as `needsDecisionRows`, distinct
-// from a true no-op skip. `WHERE NOT EXISTS` guards against inserting a
-// duplicate copy of the same finding if this exact chunk is ever retried
-// (the row's own `commit_status` UPDATE in the same statement group is
-// itself idempotent via its `WHERE commit_status = 'staged'` guard, but an
-// unconditional INSERT would not be).
+// `import_issues` row. `summary()` below counts a row this way as
+// `needsDecisionRows`, distinct from a true no-op skip.
+//
+// CORRECTION ROUND: the actual INSERT (with its `WHERE NOT EXISTS`
+// idempotency guard) now lives in the shared
+// `db/repositories/import-issue-statements.ts` module -- `app/import-ready-
+// service.ts` persists the SAME finding, for the DIV-004 near-match case, at
+// the ready transition, and must never independently re-derive this SQL.
 function committedRecordDiffersIssueStatement(
   userId: string,
   batchId: string,
@@ -324,34 +354,15 @@ function committedRecordDiffersIssueStatement(
   differences: readonly CommittedRecordFieldDifference[],
   createdAt: string,
 ): SqlStatement {
-  const id = randomUUID();
   const message = `This row's identity already exists on the ledger, but its recorded value has changed: ${formatFieldDifferences(differences)}. Skipped at commit -- it was not accepted at either the old or the new value.`;
-  return {
-    sql: `
-      INSERT INTO import_issues (
-        id, user_id, batch_id, row_id, physical_row_number, field, severity,
-        code, message, suggested_resolution_type, resolved_value,
-        resolved_by_user_id, resolved_at, created_at, updated_at, version
-      )
-      SELECT ?, ?, ?, ?, ?, NULL, 'error', 'ROW_DIFFERS_FROM_COMMITTED_RECORD', ?, NULL, NULL, NULL, NULL, ?, ?, 1
-      WHERE NOT EXISTS (
-        SELECT 1 FROM import_issues
-        WHERE batch_id = ? AND row_id = ? AND code = 'ROW_DIFFERS_FROM_COMMITTED_RECORD'
-      )
-    `,
-    params: [
-      id,
-      userId,
-      batchId,
-      row.id,
-      row.physicalRowNumber,
-      message,
-      createdAt,
-      createdAt,
-      batchId,
-      row.id,
-    ],
-  };
+  return rowDiffersFromCommittedRecordIssueStatement(
+    userId,
+    batchId,
+    row.id,
+    row.physicalRowNumber,
+    message,
+    createdAt,
+  );
 }
 
 function batchFromRow(row: Record<string, unknown>): BatchState {
@@ -723,21 +734,35 @@ export function createOwnedImportCommitRepository(
     resumed: boolean,
     idempotent: boolean,
   ): Promise<ImportCommitSuccess> {
+    // CORRECTION ROUND (B1b follow-on fix): `needs_decision_rows` now also
+    // requires `excluded_by_owner_at IS NULL` -- `app/import-ready-service.ts`'s
+    // ready-time persistence (this task) can leave a `ROW_DIFFERS_FROM_
+    // COMMITTED_RECORD` issue in `import_issues` from BEFORE the owner
+    // excluded that same row (excluding a row never deletes/resolves an
+    // already-persisted issue; `isRowStillBlocking`/`hasUnresolvedPersistedIssue`
+    // handle that by filtering on the row's CURRENT exclusion status instead
+    // -- see that service's own comment). Without this guard, an excluded
+    // row with a pre-existing persisted issue was counted in BOTH
+    // `excluded_by_owner_rows` and `needs_decision_rows` -- the two counts
+    // must stay mutually exclusive (`tests/brk-019.test.ts`'s own "an
+    // excluded row is never ALSO counted as needing a decision" assertion).
     const counts = await client.get<Record<string, unknown>>(
       `SELECT
          SUM(CASE WHEN commit_status = 'committed' THEN 1 ELSE 0 END) AS committed_rows,
          SUM(CASE WHEN commit_status = 'skipped' THEN 1 ELSE 0 END) AS skipped_rows,
          SUM(CASE WHEN commit_status = 'skipped' AND excluded_by_owner_at IS NOT NULL
               THEN 1 ELSE 0 END) AS excluded_by_owner_rows,
-         SUM(CASE WHEN commit_status = 'skipped' AND EXISTS (
+         SUM(CASE WHEN commit_status = 'skipped' AND excluded_by_owner_at IS NULL
+              AND EXISTS (
               SELECT 1 FROM import_issues
                WHERE import_issues.batch_id = import_rows.batch_id
                  AND import_issues.row_id = import_rows.id
+                 AND import_issues.user_id = ?
                  AND import_issues.code = 'ROW_DIFFERS_FROM_COMMITTED_RECORD'
               ) THEN 1 ELSE 0 END) AS needs_decision_rows,
          SUM(CASE WHEN commit_status = 'staged' THEN 1 ELSE 0 END) AS remaining_rows
        FROM import_rows WHERE user_id = ? AND batch_id = ?`,
-      [userId, batchId],
+      [userId, userId, batchId],
     );
     // CALC-004 queued a sibling `snapshot`-pipeline row per affected
     // portfolio here too; CALC-005 retired that sibling (see
@@ -1480,15 +1505,29 @@ export function createOwnedImportCommitRepository(
             // portfolio) trades use via `transactions.source_reference`,
             // looked up against `dividend_manual_records.source_reference`
             // instead (see `buildDividendManualRecordImportInsertStatements`).
+            // CORRECTION ROUND (B2, BLOCKING): also reads the three
+            // per-share columns -- a PER-SHARE-mode committed record never
+            // populates `total_cash_decimal`/`total_franking_decimal`, so
+            // reading those two verbatim (pre-correction) compared a real
+            // incoming total against a `null` committed one and reported a
+            // false `ROW_DIFFERS_FROM_COMMITTED_RECORD` on an identical
+            // per-share re-upload. See `committed-value-comparison.ts`'s
+            // `dividendValueDifferences` doc comment for the caller contract
+            // this now follows on both sides.
             const existingRecord = await client.get<{
               id: string;
               total_cash_decimal: string | null;
               total_franking_decimal: string | null;
+              shares_decimal: string | null;
+              dividend_per_share_decimal: string | null;
+              franking_credit_per_share_decimal: string | null;
               payment_date: string | null;
               fx_rate_to_portfolio_decimal: string | null;
               currency_code: string | null;
             }>(
-              `SELECT id, total_cash_decimal, total_franking_decimal, payment_date,
+              `SELECT id, total_cash_decimal, total_franking_decimal,
+                      shares_decimal, dividend_per_share_decimal,
+                      franking_credit_per_share_decimal, payment_date,
                       fx_rate_to_portfolio_decimal, currency_code
                  FROM dividend_manual_records
                WHERE user_id = ? AND portfolio_id = ? AND source_reference = ? LIMIT 1`,
@@ -1539,8 +1578,18 @@ export function createOwnedImportCommitRepository(
                     currencyCode: incomingNormalized.currency ?? null,
                   },
                   {
-                    cashTotalDecimal: existingRecord.total_cash_decimal,
-                    totalFrankingDecimal: existingRecord.total_franking_decimal,
+                    cashTotalDecimal: safeComputeDividendCashTotal({
+                      totalCashDecimal: existingRecord.total_cash_decimal,
+                      sharesDecimal: existingRecord.shares_decimal,
+                      dividendPerShareDecimal:
+                        existingRecord.dividend_per_share_decimal,
+                    }),
+                    totalFrankingDecimal: safeComputeDividendCashTotal({
+                      totalCashDecimal: existingRecord.total_franking_decimal,
+                      sharesDecimal: existingRecord.shares_decimal,
+                      dividendPerShareDecimal:
+                        existingRecord.franking_credit_per_share_decimal,
+                    }),
                     paymentDate: existingRecord.payment_date,
                     fxRateToPortfolioDecimal:
                       existingRecord.fx_rate_to_portfolio_decimal,
@@ -1571,6 +1620,157 @@ export function createOwnedImportCommitRepository(
                 ],
               });
               continue;
+            }
+            // CORRECTION ROUND (B1a, BLOCKING): a paid-date CORRECTION mints
+            // a BRAND NEW `source_reference` (`payoutIdentityKey` embeds the
+            // paid-on date), so the exact-match lookup above can never see
+            // it -- without this check the row fell through to the ordinary
+            // create path below and double-wrote the distribution. This is
+            // commit's own live, independent re-derivation of the SAME
+            // DIV-004 near-match escalation `domain/imports/reconciliation.ts`'s
+            // preview-time check computes from page-only-supplied evidence
+            // (see that module's `ROW_DIFFERS_FROM_COMMITTED_RECORD` doc
+            // comment) -- never trusts the preview alone, exactly like the
+            // exact-match backstop above. Scoped to the EXISTING side only:
+            // looks for another committed, non-superseded Sharesight-sourced
+            // payout (`sharesight-payout:` prefix) for the SAME owner,
+            // portfolio, and resolved security, within DIV-001's own
+            // proximity window of this row's own payment date, whose cash
+            // total matches within DIV-016C's tolerance -- the incoming row
+            // itself may be from EITHER route (CSV or Sharesight), matching
+            // the preview-side escalation's own scope.
+            const incomingNormalizedForNearMatch = parseNormalized(
+              row.normalizedFieldsJson,
+            );
+            if (
+              incomingNormalizedForNearMatch &&
+              target.portfolioSecurityId &&
+              incomingNormalizedForNearMatch.localTradeDate !== null
+            ) {
+              const incomingCashTotal = safeComputeDividendCashTotal({
+                totalCashDecimal:
+                  incomingNormalizedForNearMatch.totalCashDecimal ?? null,
+                sharesDecimal: incomingNormalizedForNearMatch.sharesOwned,
+                dividendPerShareDecimal:
+                  incomingNormalizedForNearMatch.costPerShare,
+              });
+              if (incomingCashTotal !== null) {
+                const nearCandidates = await client.all<{
+                  id: string;
+                  total_cash_decimal: string | null;
+                  total_franking_decimal: string | null;
+                  shares_decimal: string | null;
+                  dividend_per_share_decimal: string | null;
+                  franking_credit_per_share_decimal: string | null;
+                  payment_date: string | null;
+                  currency_code: string | null;
+                }>(
+                  `SELECT id, total_cash_decimal, total_franking_decimal,
+                          shares_decimal, dividend_per_share_decimal,
+                          franking_credit_per_share_decimal, payment_date,
+                          currency_code
+                     FROM dividend_manual_records
+                    WHERE user_id = ? AND portfolio_id = ?
+                      AND portfolio_security_id = ?
+                      AND source_reference LIKE 'import-fingerprint:sharesight-payout:%'
+                      AND source_reference <> ?
+                      AND superseded_by_record_id IS NULL`,
+                  [
+                    userId,
+                    target.portfolioId,
+                    target.portfolioSecurityId,
+                    resolved.sourceReference,
+                  ],
+                );
+                const correctedRecord = nearCandidates.find((candidate) => {
+                  if (candidate.payment_date === null) return false;
+                  if (
+                    candidate.payment_date ===
+                    incomingNormalizedForNearMatch.localTradeDate
+                  )
+                    return false;
+                  if (
+                    Math.abs(
+                      daysBetweenDates(
+                        candidate.payment_date,
+                        incomingNormalizedForNearMatch.localTradeDate as string,
+                      ),
+                    ) > PROXIMITY_WINDOW_DAYS
+                  )
+                    return false;
+                  const candidateCashTotal = safeComputeDividendCashTotal({
+                    totalCashDecimal: candidate.total_cash_decimal,
+                    sharesDecimal: candidate.shares_decimal,
+                    dividendPerShareDecimal:
+                      candidate.dividend_per_share_decimal,
+                  });
+                  if (candidateCashTotal === null) return false;
+                  return safeCashTotalsWithinTolerance(
+                    candidateCashTotal,
+                    incomingCashTotal,
+                  );
+                });
+                if (correctedRecord) {
+                  const incomingFrankingTotal = safeComputeDividendCashTotal({
+                    totalCashDecimal:
+                      incomingNormalizedForNearMatch.totalFrankingDecimal ??
+                      null,
+                    sharesDecimal: incomingNormalizedForNearMatch.sharesOwned,
+                    dividendPerShareDecimal:
+                      incomingNormalizedForNearMatch.frankingPerShare,
+                  });
+                  const differences = dividendValueDifferences(
+                    {
+                      cashTotalDecimal: incomingCashTotal,
+                      totalFrankingDecimal: incomingFrankingTotal,
+                      paymentDate:
+                        incomingNormalizedForNearMatch.localTradeDate,
+                      fxRateToPortfolioDecimal: null,
+                      currencyCode:
+                        incomingNormalizedForNearMatch.currency ?? null,
+                    },
+                    {
+                      cashTotalDecimal: safeComputeDividendCashTotal({
+                        totalCashDecimal: correctedRecord.total_cash_decimal,
+                        sharesDecimal: correctedRecord.shares_decimal,
+                        dividendPerShareDecimal:
+                          correctedRecord.dividend_per_share_decimal,
+                      }),
+                      totalFrankingDecimal: safeComputeDividendCashTotal({
+                        totalCashDecimal:
+                          correctedRecord.total_franking_decimal,
+                        sharesDecimal: correctedRecord.shares_decimal,
+                        dividendPerShareDecimal:
+                          correctedRecord.franking_credit_per_share_decimal,
+                      }),
+                      paymentDate: correctedRecord.payment_date,
+                      fxRateToPortfolioDecimal: null,
+                      currencyCode: correctedRecord.currency_code,
+                    },
+                  );
+                  statements.push(
+                    committedRecordDiffersIssueStatement(
+                      userId,
+                      batch.id,
+                      row,
+                      differences,
+                      nowIso(now),
+                    ),
+                  );
+                  statements.push({
+                    sql: `UPDATE import_rows SET commit_status = 'skipped', commit_transaction_id = ?, updated_at = ?, version = version + 1
+                      WHERE id = ? AND user_id = ? AND batch_id = ? AND commit_status = 'staged'`,
+                    params: [
+                      correctedRecord.id,
+                      nowIso(now),
+                      row.id,
+                      userId,
+                      batch.id,
+                    ],
+                  });
+                  continue;
+                }
+              }
             }
             statements.push(...resolved.statements);
             // DIV-016 part C: `validation.dividendReconciliation` (computed

@@ -35,6 +35,11 @@ import {
   dividendValueDifferences,
   tradeValueDifferences,
 } from "../domain/imports/committed-value-comparison.ts";
+// CORRECTION ROUND (B1c): DIV-001's own proximity window and DIV-016C's
+// tolerance helper, reused (never re-derived) for `classifySharesightRow`'s
+// near-match fallback below -- see that function's own comment.
+import { PROXIMITY_WINDOW_DAYS } from "../domain/dividends/history.ts";
+import { cashTotalsWithinTolerance } from "../domain/imports/dividend-reconciliation.ts";
 import {
   computeRoutineSyncFromDate,
   SHARESIGHT_PAYOUT_SYNC_OVERLAP_DAYS,
@@ -483,6 +488,31 @@ type SharesightRowClassification =
  * but at least one comparable field differs (a Sharesight-side correction)
  * -> `"needs_decision"`.
  */
+// CORRECTION ROUND (B1c): plain calendar-day difference, matching
+// `domain/imports/reconciliation.ts`'s own private `daysBetweenDates`
+// exactly -- kept local rather than exported/shared, per that module's own
+// established convention for this two-line date-math primitive (only the
+// proximity WINDOW constant is imported/reused).
+function daysBetweenDates(a: string, b: string): number {
+  const msPerDay = 86_400_000;
+  return Math.round(
+    (Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / msPerDay,
+  );
+}
+
+// CORRECTION ROUND (B1c): a payout `source_reference`'s identity minus its
+// trailing `:<paidOnDate>` segment (`payoutIdentityKey` --
+// `sharesight-payout:<sharesightPortfolioId>:<holdingId>:<paidOnDate>`,
+// prefixed with `import-fingerprint:` in `source_reference`) -- used ONLY to
+// group "the same holding" for the near-match fallback below, never for
+// identity/matching itself.
+function payoutIdentityPrefix(sourceReference: string): string {
+  const lastColon = sourceReference.lastIndexOf(":");
+  return lastColon === -1
+    ? sourceReference
+    : sourceReference.slice(0, lastColon);
+}
+
 function classifySharesightRow(
   row: {
     fingerprint: string;
@@ -504,7 +534,48 @@ function classifySharesightRow(
   const sourceReference = `import-fingerprint:${row.fingerprint}`;
   if (row.normalized.type === "dividend") {
     const existingPayout = existing.payouts.get(sourceReference);
-    if (!existingPayout) return "new";
+    if (!existingPayout) {
+      // CORRECTION ROUND (B1c, BLOCKING): a paid-date CORRECTION mints a
+      // brand new identity (the paid-on date is part of `payoutIdentityKey`),
+      // so the exact lookup above can never see it -- without this fallback
+      // the sync result reported a Sharesight-side paid-date correction as
+      // `"new"`, indistinguishable from a payout Sharesight has never
+      // reported before. Mirrors `domain/imports/reconciliation.ts`'s own
+      // DIV-004 near-match escalation: same holding (same `source_reference`
+      // identity prefix, i.e. same portfolio+holding, ignoring the trailing
+      // date), a payment date within DIV-001's proximity window, and a
+      // matching cash total (DIV-016C tolerance) is strong evidence of a
+      // correction, not a coincidental new payout. Every OTHER exact-match
+      // field comparison below is left untouched (BRK-014's nine-shape copy
+      // stays intact) -- this only widens the "no exact match" branch.
+      const rowPaymentDate = row.normalized.localTradeDate;
+      const rowCashTotal = row.normalized.totalCashDecimal ?? null;
+      if (rowPaymentDate !== null && rowCashTotal !== null) {
+        const rowPrefix = payoutIdentityPrefix(sourceReference);
+        for (const [key, payout] of existing.payouts) {
+          if (payoutIdentityPrefix(key) !== rowPrefix) continue;
+          if (payout.paymentDate === null) continue;
+          if (payout.paymentDate === rowPaymentDate) continue;
+          if (
+            Math.abs(daysBetweenDates(payout.paymentDate, rowPaymentDate)) >
+            PROXIMITY_WINDOW_DAYS
+          )
+            continue;
+          if (payout.cashTotalDecimal === null) continue;
+          let withinTolerance: boolean;
+          try {
+            withinTolerance = cashTotalsWithinTolerance(
+              payout.cashTotalDecimal,
+              rowCashTotal,
+            );
+          } catch {
+            withinTolerance = false;
+          }
+          if (withinTolerance) return "needs_decision";
+        }
+      }
+      return "new";
+    }
     // Every Sharesight-sourced dividend row is totals-mode (`transform.ts`
     // never sets `sharesOwned`/`costPerShare` on one), so the raw
     // `totalCashDecimal` field IS already the comparable amount -- matches

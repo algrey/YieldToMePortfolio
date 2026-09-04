@@ -1,23 +1,25 @@
 import { createAuditInsertStatement } from "../db/repositories/audit.ts";
 import {
   buildReadyToNeedsMappingStatement,
-  createOwnedImportMappingDecisionRepository,
   createOwnedImportStagingRepository,
   createOwnedPortfolioRepository,
-  listAttestedSecurityIds,
-  listAutoCreatedSecurityIds,
-  listNameEditableSecurityIds,
   type ImportBatchRecord,
   type ImportRowRecord,
   type SqlClient,
 } from "../db/repositories/index.ts";
 import type { SqlStatement } from "../db/repositories/sql-client.ts";
-import {
-  buildImportReviewPreview,
-  type ImportReviewPreview,
-} from "./import-preview.ts";
+import type { ImportReviewPreview } from "./import-preview.ts";
 import { buildImportReview } from "../domain/imports/review.ts";
-import type { ImportPreviewSecurityCandidate } from "../domain/imports/reconciliation.ts";
+// CORRECTION ROUND (B1b): the SAME shared loader `import-ready-service.ts`/
+// `import-accept-service.ts` use -- see that loader's own header comment.
+// This service's own `expectedPreviewVersion` guard (below) MUST compute the
+// same hash the ready/accept path does for the same batch, or an owner
+// excluding a row from a review the page rendered with `existingDividendEntries`
+// evidence (the same evidence the ready/accept path now also carries) would
+// spuriously 409 as "stale" the moment that evidence affected `preview.ready`
+// -- a reviewer-discovered divergence class this task's own three-hand-
+// rolled-copies history already produced once; never re-introduce a fourth.
+import { loadImportReviewForReadyTransition } from "./import-ready-review-loader.ts";
 
 export type ImportRowExclusionActionFailure = {
   ok: false;
@@ -48,86 +50,17 @@ export type ImportRowExclusionActionOptions = {
   now?: () => string;
 };
 
-// A standalone copy of `loadReview` (app/import-actions.ts) for the same
-// reason `import-ready-service.ts` and `security-verification-service.ts`
-// each keep their own: this module must stay importable and directly
-// testable against a plain sqlite-backed `SqlClient`, never pulling in
-// `./portfolio-actions.ts` (and the `next/headers`/D1-binding resolution it
-// carries).
+// CORRECTION ROUND (B1b): delegates entirely to the SHARED loader -- see
+// `app/import-ready-review-loader.ts`'s own header comment and this file's
+// import comment for why this service, `import-ready-service.ts`, and
+// `import-accept-service.ts` must all call the SAME function, never
+// independently-drifting copies.
 async function loadImportReview(
   client: SqlClient,
   userId: string,
   batchId: string,
 ): Promise<ImportReviewPreview | ImportRowExclusionActionFailure> {
-  const staging = createOwnedImportStagingRepository(client);
-  const batch = await staging.get(userId, batchId);
-  if (!batch)
-    return { ok: false, status: 404, message: "Import batch not found." };
-  const [rows, issues, mappings, portfolios, candidateRows] = await Promise.all(
-    [
-      staging.listRows(userId, batchId),
-      staging.listIssues(userId, batchId),
-      createOwnedImportMappingDecisionRepository(client).list(userId, batchId),
-      createOwnedPortfolioRepository(client).list(userId),
-      client.all<Record<string, unknown>>(
-        `SELECT ps.id, ps.portfolio_id, ps.source_symbol, ps.source_exchange_alias,
-        ps.source_currency_code, ps.security_id, s.canonical_name
-       FROM portfolio_securities ps
-       LEFT JOIN securities s ON s.id = ps.security_id
-       WHERE ps.user_id = ?
-       ORDER BY ps.source_symbol ASC, ps.id ASC`,
-        [userId],
-      ),
-    ],
-  );
-  const securityCandidates: ImportPreviewSecurityCandidate[] =
-    candidateRows.map((row) => ({
-      id: String(row.id),
-      portfolioId: String(row.portfolio_id),
-      sourceSymbol: String(row.source_symbol),
-      sourceExchangeAlias:
-        row.source_exchange_alias === null
-          ? null
-          : String(row.source_exchange_alias),
-      sourceCurrencyCode: String(row.source_currency_code),
-      securityId: row.security_id === null ? null : String(row.security_id),
-    }));
-  const linkedSecurityIds = securityCandidates
-    .map((candidate) => candidate.securityId)
-    .filter((id): id is string => id !== null);
-  // BRK-009C: `securities.canonical_name` for every linked candidate, read
-  // from the SAME query above (widened by one LEFT JOIN column) -- feeds
-  // the "Review securities" summary's Name column without a separate
-  // round trip.
-  const securityNames = new Map<string, string>();
-  for (const row of candidateRows) {
-    if (row.security_id !== null && row.canonical_name !== null) {
-      securityNames.set(String(row.security_id), String(row.canonical_name));
-    }
-  }
-  const [attestedSecurityIds, autoCreatedSecurityIds, nameEditableSecurityIds] =
-    await Promise.all([
-      listAttestedSecurityIds(client, linkedSecurityIds),
-      listAutoCreatedSecurityIds(client, linkedSecurityIds),
-      listNameEditableSecurityIds(client, userId, linkedSecurityIds),
-    ]);
-  return buildImportReviewPreview({
-    batch,
-    rows,
-    issues,
-    mappings,
-    portfolios: portfolios.map((portfolio) => ({
-      id: portfolio.id,
-      name: portfolio.name,
-      homeCurrencyCode: portfolio.homeCurrencyCode,
-      historyCompleteFrom: portfolio.historyCompleteFrom,
-    })),
-    securityCandidates,
-    attestedSecurityIds,
-    securityNames,
-    autoCreatedSecurityIds,
-    nameEditableSecurityIds,
-  });
+  return loadImportReviewForReadyTransition(client, userId, batchId);
 }
 
 // Mirrors `normalized()` in `domain/imports/reconciliation.ts` (kept local

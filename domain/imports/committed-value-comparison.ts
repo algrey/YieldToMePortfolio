@@ -182,13 +182,30 @@ export function tradeValueDifferences(
 /**
  * BRK-019 slice 1: field-by-field dividend comparison, mirroring
  * `isRowAlreadyImported`'s dividend branch (pre-this-task). `cashTotalDecimal`/
- * `totalFrankingDecimal` are the caller's own COMPUTED comparable totals
+ * `totalFrankingDecimal` are EACH SIDE's own COMPUTED comparable totals
  * (`domain/imports/reconciliation.ts`'s `safeComputeDividendCashTotal`, the
  * same helper `DIVIDEND_MATCHES_EXISTING_ENTRY` already uses) -- passing the
  * computed total rather than a raw `totalCashDecimal` field is what lets
  * this comparison also work for a CSV PER-SHARE dividend row (which never
  * populates `totalCashDecimal` at all), not just a Sharesight totals-mode
  * payout.
+ *
+ * CORRECTION ROUND (B2, BLOCKING): this is a caller CONTRACT on BOTH
+ * parameters, not just `incoming` -- the original wording here only spelled
+ * out the incoming side, and one committed-side supplier
+ * (`app/import-actions.ts`'s `committedDividendValues`) read
+ * `dividend_manual_records.total_cash_decimal`/`total_franking_decimal`
+ * VERBATIM instead, which are `NULL` for a PER-SHARE-mode committed record
+ * (see `db/repositories/dividends.ts`). That compared a real incoming total
+ * against a `null` committed one and reported a false
+ * `ROW_DIFFERS_FROM_COMMITTED_RECORD` on an identical per-share re-upload.
+ * Every committed-side supplier (`app/import-actions.ts`'s
+ * `committedDividendValues`, `db/repositories/import-commit.ts`'s
+ * `existingRecord` lookup) must run `safeComputeDividendCashTotal` over the
+ * stored `total_cash_decimal`/`shares_decimal`/`dividend_per_share_decimal`
+ * triple (and the franking equivalent) exactly like the incoming side always
+ * has -- `existingDividendEntries`/`dividendCandidates` already did this
+ * correctly; reuse that pattern, never a raw column read.
  */
 export function dividendValueDifferences(
   incoming: Readonly<{

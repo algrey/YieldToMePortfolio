@@ -100,14 +100,27 @@ export function existingReceiptDividendRowsQuery(
  * runs a near-identical query for the Sharesight-only subset; this one is
  * route-agnostic, no `sharesight-` prefix filter, matching this task's CSV
  * + Sharesight scope). Still deliberately unbounded, for the same
- * COMPARISON-set reason as above. */
+ * COMPARISON-set reason as above.
+ *
+ * BRK-019 slice 1 CORRECTION ROUND (B2): also carries `shares_decimal`,
+ * `dividend_per_share_decimal`, and `franking_credit_per_share_decimal` --
+ * a PER-SHARE-mode committed record (`db/repositories/dividends.ts`) never
+ * populates `total_cash_decimal`/`total_franking_decimal` at all, so a
+ * caller comparing only the raw totals columns against an incoming row's
+ * own COMPUTED total (`safeComputeDividendCashTotal`) compared a real amount
+ * against a `null`, reporting a false `ROW_DIFFERS_FROM_COMMITTED_RECORD` on
+ * an identical per-share re-upload. Every consumer of this query's rows must
+ * derive the comparable total via `safeComputeDividendCashTotal` over ALL
+ * THREE columns (never read `total_cash_decimal` verbatim) -- see that
+ * function's own doc comment and `CommittedDividendValues`'s type doc. */
 export function existingDividendSourceReferenceRowsQuery(
   userId: string,
 ): SqlStatement {
   return {
     sql: `SELECT portfolio_id, source_reference, total_cash_decimal,
-              total_franking_decimal, payment_date,
-              fx_rate_to_portfolio_decimal, currency_code
+              total_franking_decimal, shares_decimal,
+              dividend_per_share_decimal, franking_credit_per_share_decimal,
+              payment_date, fx_rate_to_portfolio_decimal, currency_code
        FROM dividend_manual_records
        WHERE user_id = ? AND source_reference IS NOT NULL`,
     params: [userId],

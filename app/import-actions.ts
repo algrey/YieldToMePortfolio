@@ -427,18 +427,45 @@ async function loadReview(
   // BRK-019 slice 1: the dividend analog, from the SAME (deliberately
   // uncapped -- see that query's own doc comment) comparison set
   // `existingDividendSourceReferences` above is keyed from.
+  //
+  // BRK-019 slice 1 CORRECTION ROUND (B2, BLOCKING): the committed side must
+  // be derived via `safeComputeDividendCashTotal` over the row's three
+  // amount-bearing columns, exactly like the incoming side always was --
+  // reading `total_cash_decimal`/`total_franking_decimal` verbatim reports
+  // `null` for a PER-SHARE-mode committed record (those two columns are
+  // never populated in per-share mode; see `db/repositories/dividends.ts`),
+  // which compared as "differs from a real amount" against an identical
+  // per-share re-upload's own computed total -- a false
+  // `ROW_DIFFERS_FROM_COMMITTED_RECORD`. `existingDividendSourceReferenceRowsQuery`
+  // now also selects the three per-share columns for exactly this.
   const committedDividendValues = new Map(
     existingSourceReferenceRows.map((row) => [
       `${String(row.portfolio_id)}::${String(row.source_reference)}`,
       {
-        cashTotalDecimal:
-          row.total_cash_decimal === null
-            ? null
-            : String(row.total_cash_decimal),
-        totalFrankingDecimal:
-          row.total_franking_decimal === null
-            ? null
-            : String(row.total_franking_decimal),
+        cashTotalDecimal: safeComputeDividendCashTotal({
+          totalCashDecimal:
+            row.total_cash_decimal === null
+              ? null
+              : String(row.total_cash_decimal),
+          sharesDecimal:
+            row.shares_decimal === null ? null : String(row.shares_decimal),
+          dividendPerShareDecimal:
+            row.dividend_per_share_decimal === null
+              ? null
+              : String(row.dividend_per_share_decimal),
+        }),
+        totalFrankingDecimal: safeComputeDividendCashTotal({
+          totalCashDecimal:
+            row.total_franking_decimal === null
+              ? null
+              : String(row.total_franking_decimal),
+          sharesDecimal:
+            row.shares_decimal === null ? null : String(row.shares_decimal),
+          dividendPerShareDecimal:
+            row.franking_credit_per_share_decimal === null
+              ? null
+              : String(row.franking_credit_per_share_decimal),
+        }),
         paymentDate:
           row.payment_date === null ? null : String(row.payment_date),
         fxRateToPortfolioDecimal:

@@ -1,22 +1,19 @@
 import {
-  createOwnedImportMappingDecisionRepository,
   createOwnedImportStagingRepository,
-  createOwnedPortfolioRepository,
-  listAttestedSecurityIds,
-  listAutoCreatedSecurityIds,
-  listNameEditableSecurityIds,
   type SqlClient,
 } from "../db/repositories/index.ts";
-import {
-  buildImportReviewPreview,
-  type ImportReviewPreview,
-} from "./import-preview.ts";
+import type { ImportReviewPreview } from "./import-preview.ts";
 import { SUPPORTED_IMPORT_PARSER_VERSIONS } from "../domain/imports/index.ts";
-import type { ImportPreviewSecurityCandidate } from "../domain/imports/reconciliation.ts";
 import {
   SHARESIGHT_SYNC_PARSER_FORMAT,
   SHARESIGHT_SYNC_PARSER_VERSION,
 } from "../domain/sharesight-sync/index.ts";
+// CORRECTION ROUND (B1b): the shared loader `app/import-accept-service.ts`
+// ALSO uses -- see that module's own comment and this loader's own header
+// comment for why both callers must import the SAME function, never
+// independently-drifting copies.
+import { loadImportReviewForReadyTransition } from "./import-ready-review-loader.ts";
+import { rowDiffersFromCommittedRecordIssueStatement } from "../db/repositories/import-issue-statements.ts";
 
 // BRK-005: the CSV parser's own `(parserFormat, parserVersion)` allowlist,
 // widened by exactly one additional pair for Sharesight-sourced batches.
@@ -54,86 +51,20 @@ export type ImportReadyActionContext = {
   userId: string;
 };
 
-// A standalone copy of `loadReview` (app/import-actions.ts) so this module
-// only depends on `db/repositories/index.ts` and `import-preview.ts` --
-// never `./portfolio-actions.ts` (which pulls in `next/headers` and the D1
-// binding resolver). That keeps `markImportReadyWithContext` importable and
-// exercisable against a plain sqlite-backed `SqlClient` in tests, exactly
-// like `reverseImportWithContext` in `import-reversal-service.ts`.
+// CORRECTION ROUND (B1b): `loadImportReview` now delegates entirely to the
+// SHARED loader `app/import-ready-review-loader.ts` -- `app/import-accept-
+// service.ts` calls the SAME function, so the two can never independently
+// drift on what evidence they supply (see that loader's own header comment
+// for why divergence there was a real, reviewer-discovered bug: it falsely
+// 409'd every Accept as "stale, reload" instead of the honest "resolve
+// blocking issues" the moment ANY dividend near-match evidence changed
+// `preview.ready`).
 async function loadImportReview(
   client: SqlClient,
   userId: string,
   batchId: string,
 ): Promise<ImportReviewPreview | ImportReadyActionFailure> {
-  const staging = createOwnedImportStagingRepository(client);
-  const batch = await staging.get(userId, batchId);
-  if (!batch)
-    return { ok: false, status: 404, message: "Import batch not found." };
-  const [rows, issues, mappings, portfolios, candidateRows] = await Promise.all(
-    [
-      staging.listRows(userId, batchId),
-      staging.listIssues(userId, batchId),
-      createOwnedImportMappingDecisionRepository(client).list(userId, batchId),
-      createOwnedPortfolioRepository(client).list(userId),
-      client.all<Record<string, unknown>>(
-        `SELECT ps.id, ps.portfolio_id, ps.source_symbol, ps.source_exchange_alias,
-        ps.source_currency_code, ps.security_id, s.canonical_name
-       FROM portfolio_securities ps
-       LEFT JOIN securities s ON s.id = ps.security_id
-       WHERE ps.user_id = ?
-       ORDER BY ps.source_symbol ASC, ps.id ASC`,
-        [userId],
-      ),
-    ],
-  );
-  const securityCandidates: ImportPreviewSecurityCandidate[] =
-    candidateRows.map((row) => ({
-      id: String(row.id),
-      portfolioId: String(row.portfolio_id),
-      sourceSymbol: String(row.source_symbol),
-      sourceExchangeAlias:
-        row.source_exchange_alias === null
-          ? null
-          : String(row.source_exchange_alias),
-      sourceCurrencyCode: String(row.source_currency_code),
-      securityId: row.security_id === null ? null : String(row.security_id),
-    }));
-  const linkedSecurityIds = securityCandidates
-    .map((candidate) => candidate.securityId)
-    .filter((id): id is string => id !== null);
-  // BRK-009C: `securities.canonical_name` for every linked candidate, read
-  // from the SAME query above (widened by one LEFT JOIN column) -- feeds
-  // the "Review securities" summary's Name column without a separate
-  // round trip.
-  const securityNames = new Map<string, string>();
-  for (const row of candidateRows) {
-    if (row.security_id !== null && row.canonical_name !== null) {
-      securityNames.set(String(row.security_id), String(row.canonical_name));
-    }
-  }
-  const [attestedSecurityIds, autoCreatedSecurityIds, nameEditableSecurityIds] =
-    await Promise.all([
-      listAttestedSecurityIds(client, linkedSecurityIds),
-      listAutoCreatedSecurityIds(client, linkedSecurityIds),
-      listNameEditableSecurityIds(client, userId, linkedSecurityIds),
-    ]);
-  return buildImportReviewPreview({
-    batch,
-    rows,
-    issues,
-    mappings,
-    portfolios: portfolios.map((portfolio) => ({
-      id: portfolio.id,
-      name: portfolio.name,
-      homeCurrencyCode: portfolio.homeCurrencyCode,
-      historyCompleteFrom: portfolio.historyCompleteFrom,
-    })),
-    securityCandidates,
-    attestedSecurityIds,
-    securityNames,
-    autoCreatedSecurityIds,
-    nameEditableSecurityIds,
-  });
+  return loadImportReviewForReadyTransition(client, userId, batchId);
 }
 
 // `transitionStatus` (db/repositories/import-staging.ts) only validates the
@@ -205,6 +136,45 @@ export async function markImportReadyWithContext(
       status: 409,
       message: "This preview is stale. Reload it before marking it ready.",
     };
+  }
+  // CORRECTION ROUND (B1b, BLOCKING): persist the DIV-004 near-match
+  // escalation (`ROW_DIFFERS_FROM_COMMITTED_RECORD`) into `import_issues`
+  // right here, at the moment readiness is checked -- this is the one point
+  // every path that can reach `ready`/Accept (the CSV "Mark Ready" button
+  // and the Sharesight `acceptImportWithContext` atomic flow,
+  // `app/import-accept-service.ts`) is guaranteed to pass through before
+  // ever reaching commit. Without this, the escalation lived only in the
+  // COMPUTED, un-persisted `preview.issues` -- `app/components/import-review.tsx`'s
+  // `acceptDisabled` deliberately gates on PERSISTED `review.issues` only
+  // (BRK-009C ruling, unchanged by this task), so the "Accept Import" button
+  // stayed visibly enabled with no indication of what was blocking it.
+  // Persisted with the SAME idempotent `WHERE NOT EXISTS` guard
+  // `db/repositories/import-commit.ts`'s own fail-closed skip uses (shared
+  // via `rowDiffersFromCommittedRecordIssueStatement`) -- a retried/repeated
+  // ready-check never inserts a second copy. No separate "clear on
+  // exclusion" step is needed: `isRowStillBlocking` (`import-review.tsx`)
+  // and this function's own `hasUnresolvedPersistedIssue` below already
+  // treat ANY issue linked to an EXCLUDED row as non-blocking regardless of
+  // `resolvedAt`, and the computed `preview.issues` this loop reads drops an
+  // excluded row's issues entirely before this point is ever reached (see
+  // `domain/imports/review.ts`) -- so once the owner excludes the row, this
+  // issue is simply never re-inserted and this loop never sees it again.
+  for (const issue of review.preview.issues) {
+    if (
+      issue.code === "ROW_DIFFERS_FROM_COMMITTED_RECORD" &&
+      issue.rowId !== undefined &&
+      issue.physicalRowNumber !== undefined
+    ) {
+      const statement = rowDiffersFromCommittedRecordIssueStatement(
+        context.userId,
+        batchId,
+        issue.rowId,
+        issue.physicalRowNumber,
+        issue.message,
+        new Date().toISOString(),
+      );
+      await context.client.run(statement.sql, statement.params);
+    }
   }
   // IMP-008: a persisted error-severity issue linked to a row the owner has
   // excluded (e.g. SHARESIGHT_PAYOUT_KEY_COLLISION) never blocks readiness
