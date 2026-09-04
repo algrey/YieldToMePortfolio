@@ -138,15 +138,19 @@ export type FyDividendTotal = {
   frankingUnknownCount: number;
   unknownAmountCount: number;
   rowCount: number;
-  /** BRK-022 slice 3: the subset of this year's total that is a Sharesight
-   * announcement (`DerivedDividendRow.announcedUnpaid`), not yet paid --
-   * `null` when the year contributes no such rows (mirrors `cashDecimal`'s
-   * own null-when-nothing convention) or under `source: "fy_override"`
-   * (an owner correction replaces the whole year's figure; there is no
-   * per-row composition left to break out). ALWAYS a subset already
-   * included INSIDE `cashDecimal`/`frankingKnownDecimal` above -- the
-   * owner's ruling is that the FY total reads paid + announced together,
-   * with the announced portion separately disclosed, never summed twice. */
+  /** BRK-022 slice 3: the subset of this year's total that is still not yet
+   * paid -- every row with `DerivedDividendRow.status === "declared_pending"`
+   * (F3 correction round, RULING: a provider-declared event whose own
+   * ex-date has not yet passed is exactly as unpaid as an explicit
+   * Sharesight announcement, whatever fact backs the row -- NOT limited to
+   * `announcedUnpaid` rows). `null` when the year contributes no such rows
+   * (mirrors `cashDecimal`'s own null-when-nothing convention) or under
+   * `source: "fy_override"` (an owner correction replaces the whole year's
+   * figure; there is no per-row composition left to break out). ALWAYS a
+   * subset already included INSIDE `cashDecimal`/`frankingKnownDecimal`
+   * above -- the owner's ruling is that the FY total reads paid + not-yet-
+   * paid together, with the not-yet-paid portion separately disclosed,
+   * never summed twice. */
   unpaidCashDecimal: string | null;
   unpaidFrankingKnownDecimal: string | null;
   unpaidCount: number;
@@ -262,12 +266,18 @@ export function computeFyDividendTotals(
     const frankingKnown = knownAmount.filter(
       (entry) => entry.row.frankingTotalDecimal !== null,
     );
-    // BRK-022 slice 3: the announced-but-unpaid subset of this year's
-    // KNOWN-amount rows -- always a subset of `knownAmount`/`frankingKnown`
-    // above, never summed a second time (see `unpaidCashDecimal`'s doc
-    // comment).
+    // BRK-022 slice 3, F3 correction round (RULING): "unpaid" is every
+    // row still `status === "declared_pending"` -- NOT just a Sharesight
+    // announcement (`row.announcedUnpaid`). A provider-declared event whose
+    // own ex-date has not yet passed (`lifecycleStatus`) is exactly as
+    // unpaid as an explicit Sharesight announcement, whatever won the row
+    // (auto/owner-typed/imported); `announcedUnpaid` stays on the row only
+    // for labelling ("announced (Sharesight)" vs a plain not-yet-paid
+    // event), never for this aggregate. Always a subset of
+    // `knownAmount`/`frankingKnown` above, never summed a second time (see
+    // `unpaidCashDecimal`'s doc comment).
     const unpaidKnownAmount = knownAmount.filter(
-      (entry) => entry.row.announcedUnpaid,
+      (entry) => entry.row.status === "declared_pending",
     );
     const unpaidFrankingKnown = unpaidKnownAmount.filter(
       (entry) => entry.row.frankingTotalDecimal !== null,

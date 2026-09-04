@@ -150,6 +150,19 @@ export type OwnedIncomeProjection = {
    * `app/owned-dividend-history.ts`'s `pendingPayoutCounts`, never
    * re-derived. */
   pendingUnresolvedPayoutCount: number;
+  /** F4 correction round: count of active Sharesight pending-payout
+   * announcements this load matched to a currently-committed record within
+   * `PROXIMITY_WINDOW_DAYS` (suppressed -- not shown separately, since the
+   * committed record already carries the real payment). Disclosed next to
+   * `pendingUnresolvedPayoutCount` so a reader is not left wondering why an
+   * announcement they know exists never appears on its own row. Reused
+   * verbatim from `app/owned-dividend-history.ts`'s `pendingPayoutCounts`. */
+  pendingSuppressedByProximityCount: number;
+  /** F7 correction round: `true` when this portfolio's active
+   * `sharesight_pending_payouts` rows exceeded
+   * `MAX_PENDING_PAYOUTS_PER_PORTFOLIO` and the read was capped -- reused
+   * verbatim from `app/owned-dividend-history.ts`'s `pendingTruncated`. */
+  pendingTruncated: boolean;
 };
 
 export async function loadOwnedIncomeProjection(
@@ -717,5 +730,8 @@ export async function loadOwnedIncomeProjection(
     breakdown,
     financialYearStartMonth: history.financialYearStartMonth,
     pendingUnresolvedPayoutCount: history.pendingPayoutCounts.pendingUnresolved,
+    pendingSuppressedByProximityCount:
+      history.pendingPayoutCounts.pendingSuppressedByProximity,
+    pendingTruncated: history.pendingTruncated,
   };
 }

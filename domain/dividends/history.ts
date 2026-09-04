@@ -1083,6 +1083,13 @@ function deriveAbsentImportedFranking(
   ) {
     return { ...converted, frankingUnreadable: true };
   }
+  // F2 correction round (review ruling): an announcement never gets this
+  // inference -- DIV-007's "Sharesight sends an explicit 0 on unfranked
+  // native payouts" evidence base is confirmed PAID payouts only. An absent
+  // total on a pending-payout announcement (`announcedUnpaid: true`) stays
+  // genuinely unknown; an explicit "0" Sharesight sends never reaches this
+  // absent-value branch at all and is unaffected.
+  if (original.announcedUnpaid === true) return converted;
   const isTotalsMode = (original.totalCashDecimal ?? null) !== null;
   const rawTotalFrankingAbsent =
     (original.totalFrankingDecimal ?? null) === null;

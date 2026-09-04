@@ -567,3 +567,46 @@ test("markWithdrawnNotObserved is scoped to one owner's one portfolio: user B's 
   assert.equal((await repo.listActive("a", "pa")).length, 0);
   assert.equal((await repo.listActive("b", "pb")).length, 1);
 });
+
+// ---------------------------------------------------------------------------
+// F7 correction round (BRK-022 slice 3 review): listActive's optional
+// `limit` -- caps the read so app/owned-dividend-history.ts's
+// MAX_PENDING_PAYOUTS_PER_PORTFOLIO cap can be enforced with a bounded
+// query rather than reading the whole table unbounded.
+// ---------------------------------------------------------------------------
+
+test("listActive with a limit returns only that many rows, ordered by payment_date then symbol (the earliest-due rows survive); omitting limit stays unbounded", async () => {
+  const db = await ownedFixture();
+  const repo = createSharesightPendingPayoutsRepository(
+    createSqliteSqlClient(db),
+    () => "2026-09-01T00:00:00.000Z",
+  );
+  await repo.upsertObserved("a", "pa", [
+    payout({
+      sourceReference: "sharesight-payout:pa:holding-1:2026-09-15",
+      paymentDate: "2026-09-15",
+      symbol: "BHP",
+    }),
+    payout({
+      sourceReference: "sharesight-payout:pa:holding-1:2026-09-10",
+      paymentDate: "2026-09-10",
+      symbol: "CBA",
+    }),
+    payout({
+      sourceReference: "sharesight-payout:pa:holding-1:2026-09-20",
+      paymentDate: "2026-09-20",
+      symbol: "WES",
+    }),
+  ]);
+
+  const unbounded = await repo.listActive("a", "pa");
+  assert.equal(unbounded.length, 3);
+
+  const limited = await repo.listActive("a", "pa", 2);
+  assert.equal(limited.length, 2);
+  // ORDER BY payment_date, symbol -- the two earliest-due rows survive.
+  assert.deepEqual(
+    limited.map((row) => row.paymentDate),
+    ["2026-09-10", "2026-09-15"],
+  );
+});

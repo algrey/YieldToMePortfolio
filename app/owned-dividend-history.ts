@@ -81,6 +81,13 @@ import type { TrailingDividendEventInput } from "../domain/market-data/dividend-
 const MAX_SECURITIES = 500;
 const MAX_EVENTS_PER_PORTFOLIO = 20_000;
 const MAX_TRANSACTIONS_PER_PORTFOLIO = 100_000;
+// F7 correction round: bounds `listActive`'s unbounded read (BRK-022 slice
+// 3 shipped with none) so a portfolio with an unusually large number of
+// active Sharesight announcements cannot grow this load's cost without
+// limit. Disclosed via `pendingTruncated` rather than silently dropping
+// rows past the cap -- see `OwnedDividendHistory.pendingTruncated`'s doc
+// comment.
+const MAX_PENDING_PAYOUTS_PER_PORTFOLIO = 500;
 
 type Row = Record<string, unknown>;
 
@@ -175,6 +182,13 @@ export type OwnedDividendHistory = {
      * fact for its security. */
     pendingIncluded: number;
   };
+  /** F7 correction round: `true` when this portfolio has MORE than
+   * `MAX_PENDING_PAYOUTS_PER_PORTFOLIO` active `sharesight_pending_payouts`
+   * rows -- the read is capped at that many (oldest `payment_date`/`symbol`
+   * first, `listActive`'s existing ORDER BY), and every row past the cap is
+   * simply never read at all, not merely uncounted. Disclosed on the Income
+   * landing page rather than left as a silent undercount. */
+  pendingTruncated: boolean;
 };
 
 function inClause(count: number): string {
@@ -392,21 +406,40 @@ export async function loadOwnedDividendHistory(
   );
 
   if (identities.length === 0) {
+    // F5 correction round (RULING): a pending payout can still exist for a
+    // portfolio with no held securities (e.g. a Sharesight announcement for
+    // a symbol never resolved to a holding) -- it must still be counted
+    // `pendingUnresolved` so the landing page's disclosure shows it, rather
+    // than silently vanishing just because the rest of this load short-
+    // circuits. On the narrowed (single-security Dividends tab) path this
+    // count is left uncounted entirely, exactly like the main path below --
+    // that consumer never reads `pendingPayoutCounts` and the narrow filter
+    // could not possibly resolve the one requested security here anyway
+    // (mirrors the main loop's own `narrowed` doc comment).
+    let pendingUnresolved = 0;
+    let pendingTruncated = false;
+    if (!narrowed) {
+      const activePending = await createSharesightPendingPayoutsRepository(
+        client,
+      ).listActive(userId, portfolioId, MAX_PENDING_PAYOUTS_PER_PORTFOLIO + 1);
+      pendingTruncated =
+        activePending.length > MAX_PENDING_PAYOUTS_PER_PORTFOLIO;
+      pendingUnresolved = pendingTruncated
+        ? MAX_PENDING_PAYOUTS_PER_PORTFOLIO
+        : activePending.length;
+    }
     return {
       today,
       financialYearStartMonth: settings.financialYearStartMonth,
       securities: [],
       portfolioFyOverrides,
-      // BRK-022 slice 3: no held security in this portfolio -- mirrors the
-      // existing shortcut immediately above (every other owner-fact table
-      // is skipped too on this path), so a pending payout is never even
-      // fetched here rather than being counted `pendingUnresolved`.
       pendingPayoutCounts: {
         pendingSuppressedByIdentity: 0,
         pendingSuppressedByProximity: 0,
-        pendingUnresolved: 0,
+        pendingUnresolved,
         pendingIncluded: 0,
       },
+      pendingTruncated,
     };
   }
 
@@ -504,15 +537,27 @@ export async function loadOwnedDividendHistory(
     // `pendingPayoutCounts`'s scope note, is left uncounted entirely on that
     // path rather than misreported as portfolio-wide -- narrowing this read
     // would cost a second per-security repository shape for no consumer
-    // this task adds.
+    // this task adds. F7 correction round: `MAX_PENDING_PAYOUTS_PER_PORTFOLIO
+    // + 1` bounds the read; the truncation check below detects and discloses
+    // (`pendingTruncated`) rather than the read silently costing more the
+    // larger this table grows.
     createSharesightPendingPayoutsRepository(client).listActive(
       userId,
       portfolioId,
+      MAX_PENDING_PAYOUTS_PER_PORTFOLIO + 1,
     ),
   ]);
 
   if (eventRows.length > MAX_EVENTS_PER_PORTFOLIO)
     throw new Error("too_many_dividend_events");
+  // F7 correction round: cap `pendingPayoutRecords` at
+  // `MAX_PENDING_PAYOUTS_PER_PORTFOLIO`, disclosing truncation rather than
+  // processing every row past the cap (`listActive`'s existing
+  // `ORDER BY payment_date, symbol` decides which rows survive).
+  const pendingTruncated =
+    pendingPayoutRecords.length > MAX_PENDING_PAYOUTS_PER_PORTFOLIO;
+  if (pendingTruncated)
+    pendingPayoutRecords.length = MAX_PENDING_PAYOUTS_PER_PORTFOLIO;
   const eventsBySecurity = new Map<string, ProviderDividendEventFact[]>();
   for (const row of eventRows) {
     const securityId = String(row.security_id);
@@ -660,16 +705,26 @@ export async function loadOwnedDividendHistory(
 
   // BRK-022 slice 3: paid-overrides-pending suppression (Orchestrator ruling
   // R2) -- built from `manualRecords`, the SAME currently-committed
-  // (`superseded_by_record_id IS NULL`, per
-  // `createDividendManualRecordRepository.list`'s own query) `dividend_manual_records`
-  // set every `manualBySecurity` row above was already built from. This is
-  // the identical "currently committed" predicate
-  // `db/repositories/sharesight-sync-state.ts`'s `loadCommittedSharesightRowValues`
-  // uses for its own committed-payout lookup (non-reversed/non-superseded);
-  // reused directly here rather than issuing a second, narrower query, since
-  // the already-loaded `manualRecords` additionally covers rule (b) below
-  // (ANY source, not just Sharesight-prefixed) which that function's own
-  // `payouts` map cannot answer at all.
+  // `dividend_manual_records` set every `manualBySecurity` row above was
+  // already built from.
+  //
+  // F1 CORRECTION ROUND (accuracy fix): this is NOT "the same predicate
+  // `loadCommittedSharesightRowValues` uses (non-reversed/non-superseded)"
+  // -- `manualRecords` here comes from
+  // `createDividendManualRecordRepository.list`, whose ONLY filter is
+  // `superseded_by_record_id IS NULL` (supersession, not reversal; see that
+  // function's own doc comment in `db/repositories/dividends.ts`). A
+  // reversed import batch is never merely flagged -- `db/repositories/
+  // import-reversal.ts`'s reversal statements HARD-DELETE every
+  // `dividend_manual_records` row for that batch (`DELETE FROM
+  // dividend_manual_records WHERE user_id = ? AND import_batch_id = ?`), so
+  // a reversed record cannot suppress a pending row structurally: it is
+  // simply gone from `manualRecords` by the time this function runs, not
+  // filtered out by a shared predicate. Reused directly here (rather than
+  // issuing a second, narrower query) because the already-loaded
+  // `manualRecords` additionally covers rule (b) below (ANY source, not
+  // just Sharesight-prefixed), which `loadCommittedSharesightRowValues`'s
+  // own `payouts` map cannot answer at all.
   //
   // Two independent suppression rules, checked in order:
   //   (a) IDENTITY: a currently-committed row's `source_reference` equals
@@ -910,5 +965,6 @@ export async function loadOwnedDividendHistory(
     securities,
     portfolioFyOverrides,
     pendingPayoutCounts,
+    pendingTruncated,
   };
 }

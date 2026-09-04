@@ -143,6 +143,48 @@ test("BRK-022 slice 3: a zero-amount pending fact is a real known $0, never fabr
   assert.equal(rows[0]!.amountUnknown, false);
 });
 
+test("BRK-022 slice 3, F2 correction round (RULING): an announcement's absent total_franking_decimal stays genuinely UNKNOWN -- never DIV-007's derived-zero inference, which is confirmed PAID payouts only", () => {
+  const rows = deriveDividendHistoryForSecurity({
+    portfolioSecurityId: "ps1",
+    securityCurrencyCode: "AUD",
+    events: [],
+    overrides: [],
+    receipts: [],
+    // Absent franking, totals-mode, native currency -- exactly the shape
+    // that WOULD trigger DIV-007's derived-zero inference for an ordinary
+    // imported (Sharesight-committed) record.
+    manualRecords: [pendingFact({ totalFrankingDecimal: null })],
+    transactions: [],
+    defaultFrankingPercentDecimal: null,
+    today: "2026-08-01",
+  });
+  const row = rows[0]!;
+  assert.equal(row.announcedUnpaid, true);
+  assert.equal(
+    row.frankingTotalDecimal,
+    null,
+    "absent franking on an announcement stays unknown, never a derived $0",
+  );
+  assert.equal(row.frankingDerivedZero, false);
+});
+
+test("BRK-022 slice 3, F2 correction round: an EXPLICIT '0' Sharesight sends on an announcement is unaffected -- it stays a real, known reported zero", () => {
+  const rows = deriveDividendHistoryForSecurity({
+    portfolioSecurityId: "ps1",
+    securityCurrencyCode: "AUD",
+    events: [],
+    overrides: [],
+    receipts: [],
+    manualRecords: [pendingFact({ totalFrankingDecimal: "0" })],
+    transactions: [],
+    defaultFrankingPercentDecimal: null,
+    today: "2026-08-01",
+  });
+  const row = rows[0]!;
+  assert.equal(row.frankingTotalDecimal, "0");
+  assert.equal(row.frankingDerivedZero, false);
+});
+
 test("BRK-022 slice 3: a foreign-currency pending fact converts through the SAME BRK-010 imported-fact pipeline (cash * fx rate)", () => {
   const rows = deriveDividendHistoryForSecurity({
     portfolioSecurityId: "ps1",
@@ -364,6 +406,80 @@ test("BRK-022 slice 3: computeFyDividendTotals sums an announcedUnpaid row into 
   assert.equal(fy26.cashDecimal, "120"); // 100 (pending) + 20 (paid)
   assert.equal(fy26.unpaidCashDecimal, "100");
   assert.equal(fy26.unpaidCount, 1);
+});
+
+test("BRK-022 slice 3, F3 correction round (RULING): 'unpaid' is every declared_pending row, not just an announcedUnpaid one -- a plain provider-declared event whose own ex-date has not yet passed counts too (paid $200 + provider-declared $110 => FY 310, unpaid 110, count 1)", () => {
+  // e1: a PLAIN provider-declared event, no Sharesight announcement
+  // involved at all (`announcedUnpaid` never set anywhere in this fixture)
+  // -- its own ex-date is still in the future relative to `today`, so
+  // `lifecycleStatus` derives `declared_pending` from the real event date
+  // alone. An override supplies the exact shares/per-share figures so the
+  // fixture needs no transactions.
+  const e1: ProviderDividendEventFact = {
+    id: "e1",
+    kind: "cash",
+    status: "declared",
+    exDate: "2026-09-10", // after `today` below
+    paymentDate: null,
+    currencyCode: "AUD",
+    grossPerShareDecimal: "11",
+    supersedesEventId: null,
+  };
+  // e2: a provider event whose ex-date has already passed -- paid.
+  const e2: ProviderDividendEventFact = {
+    id: "e2",
+    kind: "cash",
+    status: "declared",
+    exDate: "2026-08-01", // before `today` below
+    paymentDate: null,
+    currencyCode: "AUD",
+    grossPerShareDecimal: "10",
+    supersedesEventId: null,
+  };
+  const rows = deriveDividendHistoryForSecurity({
+    portfolioSecurityId: "ps1",
+    securityCurrencyCode: "AUD",
+    events: [e1, e2],
+    overrides: [
+      {
+        dividendEventId: "e1",
+        sharesDecimal: "10",
+        dividendPerShareDecimal: "11", // 10 * 11 = 110
+        frankingCreditPerShareDecimal: null,
+        exclude: false,
+      },
+      {
+        dividendEventId: "e2",
+        sharesDecimal: "20",
+        dividendPerShareDecimal: "10", // 20 * 10 = 200
+        frankingCreditPerShareDecimal: null,
+        exclude: false,
+      },
+    ],
+    receipts: [],
+    manualRecords: [],
+    transactions: [],
+    defaultFrankingPercentDecimal: null,
+    today: "2026-08-25",
+  });
+  const e1Row = rows.find((row) => row.dividendEventId === "e1")!;
+  const e2Row = rows.find((row) => row.dividendEventId === "e2")!;
+  assert.equal(e1Row.status, "declared_pending");
+  assert.equal(e1Row.announcedUnpaid, false, "no announcement involved");
+  assert.equal(e2Row.status, "ex_date_passed");
+  assert.equal(e2Row.cashDecimal, "200");
+  assert.equal(e1Row.cashDecimal, "110");
+
+  const result = computeFyDividendTotals(rows, [], 7);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  const fy27: FyDividendTotal = result.totals.find(
+    (t) => t.endingYear === 2027,
+  )!;
+  assert.ok(fy27, "expected an FY27 total");
+  assert.equal(fy27.cashDecimal, "310"); // 200 (paid) + 110 (declared_pending)
+  assert.equal(fy27.unpaidCashDecimal, "110");
+  assert.equal(fy27.unpaidCount, 1);
 });
 
 test("BRK-022 slice 3: computeCurrentFinancialYearRow threads the unpaid fields, and reports null/0 under an fy_override", () => {
@@ -866,11 +982,12 @@ test("BRK-022 slice 3 (DB): a pending row is suppressed by PROXIMITY against a c
 
 test("BRK-022 slice 3 (DB): a pending row with a null security, and one whose security is not held (sold/hidden), are both counted pendingUnresolved rather than crashing", async () => {
   const database = await migratedDatabase();
-  // A real HELD security -- otherwise `identities.length === 0` and the
-  // loader's own early-return shortcut skips pending-payout counting
-  // entirely (mirrors a portfolio with no held securities at all, a
-  // separate, already-covered case -- see `loadOwnedDividendHistory`'s own
-  // doc comment on that branch).
+  // A real HELD security -- this test targets the "not held" (`sold-ps`)
+  // and "null security" branches of the MAIN derivation loop specifically,
+  // distinct from the zero-held-identities early-return path (F5 correction
+  // round: that path ALSO counts every active row `pendingUnresolved` now
+  // -- see the dedicated F5 test below -- but exercises a different code
+  // path than this one).
   seedSecurity(database, {
     securityId: "sec-held",
     userId: "user-a",
@@ -929,6 +1046,50 @@ test("BRK-022 slice 3 (DB): a pending row with a null security, and one whose se
   );
   assert.equal(history.pendingPayoutCounts.pendingUnresolved, 2);
   assert.equal(history.pendingPayoutCounts.pendingIncluded, 0);
+});
+
+test("BRK-022 slice 3, F5 correction round (RULING): a portfolio with NO held securities at all still counts its active pending payouts as pendingUnresolved, rather than never loading them", async () => {
+  const database = await migratedDatabase();
+  // Deliberately no `seedSecurity` call at all -- `identities.length === 0`,
+  // exercising the loader's own early-return shortcut.
+  const client = createSqliteSqlClient(database);
+  const pendingRepo = createSharesightPendingPayoutsRepository(client);
+  await pendingRepo.upsertObserved("user-a", "portfolio-a", [
+    {
+      portfolioSecurityId: null,
+      sourceReference: "sharesight-payout:sp-1:holding-null:2026-08-20",
+      sharesightHoldingId: "holding-x",
+      sharesightInstrumentId: null,
+      sharesightPayoutId: null,
+      symbol: "NEW",
+      marketCode: "ASX",
+      currencyCode: "AUD",
+      paymentDate: "2026-08-20",
+      exDate: null,
+      totalCashDecimal: "90",
+      grossAmountDecimal: "90",
+      totalFrankingDecimal: null,
+      residentWithholdingTaxDecimal: null,
+      nonResidentWithholdingTaxDecimal: null,
+      fxRateToPortfolioDecimal: null,
+      fxRateSource: null,
+    },
+  ]);
+
+  const history = await loadOwnedDividendHistory(
+    client,
+    "user-a",
+    "portfolio-a",
+    new Date("2026-09-01T00:00:00.000Z"),
+  );
+  assert.equal(history.securities.length, 0);
+  assert.equal(
+    history.pendingPayoutCounts.pendingUnresolved,
+    1,
+    "the pending row cannot possibly attach to any held security -- disclosed, not silently dropped",
+  );
+  assert.equal(history.pendingPayoutCounts.pendingIncluded, 0);
+  assert.equal(history.pendingTruncated, false);
 });
 
 test("BRK-022 slice 3 (DB): another owner's pending payout is never loaded, counted, or shown against this owner's own read", async () => {
@@ -1397,6 +1558,11 @@ const MINIMAL_PROJECTION = {
   },
   financialYearStartMonth: 7,
   pendingUnresolvedPayoutCount: 2,
+  // F4/F7 correction round: zero by default so every pre-existing test
+  // fixture above stays byte-identical (no new disclosure renders) --
+  // overridden to non-zero in the dedicated F4/F7 tests below.
+  pendingSuppressedByProximityCount: 0,
+  pendingTruncated: false,
 };
 
 test("BRK-022 slice 3 (UI): the FY (so far) row renders a non-colour '*$x unpaid' note when dividendUnpaidCount > 0", () => {
@@ -1460,6 +1626,103 @@ test("BRK-022 slice 3 (UI): when dividendUnpaidCount is zero, no unpaid note ren
   assert.doesNotMatch(html, /could not be matched to a holding/);
 });
 
+test("BRK-022 slice 3, F4 correction round: a non-zero pendingSuppressedByProximityCount renders the 'matched a received record within 7 days' disclosure", () => {
+  const html = renderComponent(
+    "IncomeLanding",
+    "../app/components/income-landing.tsx",
+    {
+      projection: {
+        ...MINIMAL_PROJECTION,
+        pendingSuppressedByProximityCount: 3,
+      },
+      portfolioId: "portfolio-a",
+      multiYearHref: "/portfolio/portfolio-a/income/multi-year",
+      assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
+      dividendsHref: "/portfolio/portfolio-a/income/dividends",
+    },
+  );
+  assert.match(
+    html,
+    /3 announced dividends matched a received record within 7 days and are not shown separately/,
+  );
+});
+
+test("BRK-022 slice 3, F7 correction round: pendingTruncated renders a disclosure that some announced dividends are not shown", () => {
+  const html = renderComponent(
+    "IncomeLanding",
+    "../app/components/income-landing.tsx",
+    {
+      projection: {
+        ...MINIMAL_PROJECTION,
+        pendingTruncated: true,
+      },
+      portfolioId: "portfolio-a",
+      multiYearHref: "/portfolio/portfolio-a/income/multi-year",
+      assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
+      dividendsHref: "/portfolio/portfolio-a/income/dividends",
+    },
+  );
+  assert.match(html, /Some announced dividends are not shown/);
+});
+
+test("BRK-022 slice 3, F4/F7 correction round: neither disclosure renders when both are zero/false (no regression)", () => {
+  const html = renderComponent(
+    "IncomeLanding",
+    "../app/components/income-landing.tsx",
+    {
+      projection: MINIMAL_PROJECTION,
+      portfolioId: "portfolio-a",
+      multiYearHref: "/portfolio/portfolio-a/income/multi-year",
+      assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
+      dividendsHref: "/portfolio/portfolio-a/income/dividends",
+    },
+  );
+  assert.doesNotMatch(html, /matched a received record within 7 days/);
+  assert.doesNotMatch(html, /Some announced dividends are not shown/);
+});
+
+test("BRK-022 slice 3, F6 correction round: a past-FY row with a non-zero dividendUnpaidCount renders the same '*$x unpaid' note as the current-FY row", () => {
+  const html = renderComponent(
+    "IncomeLanding",
+    "../app/components/income-landing.tsx",
+    {
+      projection: {
+        ...MINIMAL_PROJECTION,
+        pastFinancialYears: {
+          ok: true,
+          rows: [
+            {
+              endingYear: 2026,
+              label: "FY26",
+              window: { startDate: "2025-07-01", endDate: "2026-06-30" },
+              dividendSource: "actual",
+              dividendGrossDecimal: "500.00",
+              dividendCashDecimal: "400.00",
+              dividendFrankingKnownDecimal: "100.00",
+              dividendFrankingIncomplete: false,
+              includedSecurityCount: 1,
+              excludedSecurities: [],
+              portfolioValueDecimal: "9000.00",
+              valueStatus: "available",
+              effectiveYieldPercentDecimal: "5.00",
+              method: "actual",
+              dividendUnpaidGrossDecimal: "30.00",
+              dividendUnpaidCashDecimal: "30.00",
+              dividendUnpaidFrankingKnownDecimal: null,
+              dividendUnpaidCount: 1,
+            },
+          ],
+        },
+      },
+      portfolioId: "portfolio-a",
+      multiYearHref: "/portfolio/portfolio-a/income/multi-year",
+      assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
+      dividendsHref: "/portfolio/portfolio-a/income/dividends",
+    },
+  );
+  assert.match(html, /\*\$30\.00 unpaid/);
+});
+
 test("BRK-022 slice 3 (UI): the dividend list renders 'announced (Sharesight)' alongside 'not paid' for an announcedUnpaid row, and plain 'not paid' for an ordinary declared-pending one", () => {
   const rows: OwnedDividendListRow[] = [
     listRow({
@@ -1501,6 +1764,69 @@ test("BRK-022 slice 3 (UI): the dividend list renders 'announced (Sharesight)' a
   const occurrences = (html.match(/announced \(Sharesight\)/g) ?? []).length;
   assert.equal(occurrences, 1);
   void declaredRowHtml;
+});
+
+test("BRK-022 slice 3, B1 correction round: the DIV-011 fallback standalone '(to date)' row (multiYear degraded) is also PAID-ONLY, and discloses the unpaid subset via a '*$x unpaid' note", () => {
+  function renderMultiYearWithRouter(props: Record<string, unknown>): string {
+    const componentUrl = new URL(
+      "../app/components/income-multi-year.tsx",
+      import.meta.url,
+    ).href;
+    const script = `
+      import { createElement } from "react";
+      import { renderToStaticMarkup } from "react-dom/server";
+      import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime";
+      import { IncomeMultiYear } from ${JSON.stringify(componentUrl)};
+      const routerStub = { push(){}, replace(){}, back(){}, forward(){}, refresh(){}, prefetch(){} };
+      const props = ${JSON.stringify(props)};
+      process.stdout.write(
+        renderToStaticMarkup(
+          createElement(
+            AppRouterContext.Provider,
+            { value: routerStub },
+            createElement(IncomeMultiYear, props),
+          ),
+        ),
+      );
+    `;
+    return execFileSync(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "--eval", script],
+      { encoding: "utf8" },
+    );
+  }
+
+  // multiYear itself is degraded -- no forward forecast at all -- so the
+  // component falls back to `mapCurrentRow`'s standalone "(to date)" row
+  // rather than merging onto a forecast row.
+  const html = renderMultiYearWithRouter({
+    portfolioId: "portfolio-a",
+    assumptionsHref: "/portfolio/portfolio-a/income/assumptions",
+    dividendsHref: "/portfolio/portfolio-a/income/dividends",
+    baseCurrencyCode: "AUD",
+    pastFinancialYears: { ok: true, rows: [] },
+    currentFinancialYear: {
+      ok: true,
+      row: {
+        ...MINIMAL_CURRENT_FY_ROW,
+        dividendGrossDecimal: "300.00",
+        dividendUnpaidGrossDecimal: "50.00",
+        dividendUnpaidCount: 1,
+      },
+    },
+    multiYear: { ok: false, reason: "no_yield_coverage" },
+    multiYearBaselineInput: null,
+    portfolioValueGrowthPercentDecimal: "10",
+    portfolioDividendGrowthPercentDecimal: "5",
+    financialYearStartMonth: 7,
+    yearsBack: 0,
+    yearsForward: 1,
+  });
+  // Paid-only: 300.00 - 50.00 = 250.00, never the raw announced-inclusive
+  // 300.00 gross figure.
+  assert.match(html, /\$250\.00/);
+  assert.doesNotMatch(html, /\$300\.00/);
+  assert.match(html, /unpaid/);
 });
 
 test("BRK-022 slice 3 (UI): income-multi-year's 'received so far this FY' figure is PAID-ONLY -- it subtracts the unpaid subtotal, never silently growing", () => {

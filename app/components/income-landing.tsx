@@ -573,6 +573,24 @@ export function IncomeLanding({
                         {row.excludedSecurities.length > 0 ? (
                           <span className="unavailable"> · partial</span>
                         ) : null}
+                        {/* F6 (BRK-022 review follow-up): a past FY can still
+                            carry announced-but-unpaid rows (an event whose
+                            ex-date is within the year but has not yet passed
+                            `today`, or a Sharesight announcement) -- same
+                            wording/format as the current-FY row's note
+                            above, non-colour (AGENTS.md). */}
+                        {row.dividendUnpaidCount > 0 ? (
+                          <span className="unavailable">
+                            {" "}
+                            *
+                            {formatIncomeMoney(
+                              projection.baseCurrencyCode,
+                              projection.baseCurrencyCode,
+                              row.dividendUnpaidGrossDecimal,
+                            )}{" "}
+                            unpaid
+                          </span>
+                        ) : null}
                       </Link>
                     </th>
                     <td className="numeric">
@@ -619,6 +637,28 @@ export function IncomeLanding({
             {projection.pendingUnresolvedPayoutCount === 1
               ? "1 announced dividend could not be matched to a holding"
               : `${projection.pendingUnresolvedPayoutCount} announced dividends could not be matched to a holding`}
+          </p>
+        ) : null}
+        {/* F4 (BRK-022 review follow-up): a Sharesight announcement this
+            load matched to a currently-committed record within the
+            proximity window -- suppressed (not shown as its own row) rather
+            than double-counted alongside the real payment, disclosed here
+            so a reader is not left wondering why it never appears on its
+            own. */}
+        {projection.pendingSuppressedByProximityCount > 0 ? (
+          <p className="unavailable">
+            {projection.pendingSuppressedByProximityCount === 1
+              ? "1 announced dividend matched a received record within 7 days and is not shown separately"
+              : `${projection.pendingSuppressedByProximityCount} announced dividends matched a received record within 7 days and are not shown separately`}
+          </p>
+        ) : null}
+        {/* F7 (BRK-022 review follow-up): the read of active Sharesight
+            announcements is capped at `MAX_PENDING_PAYOUTS_PER_PORTFOLIO` --
+            disclosed rather than silently under-reporting past the cap. */}
+        {projection.pendingTruncated ? (
+          <p className="unavailable">
+            Some announced dividends are not shown; there are too many to
+            display at once.
           </p>
         ) : null}
         <p>

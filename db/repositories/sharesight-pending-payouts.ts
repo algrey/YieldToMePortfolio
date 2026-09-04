@@ -541,17 +541,26 @@ export function createSharesightPendingPayoutsRepository(
   }
 
   /** Owner+portfolio-scoped active (non-withdrawn) pending payouts, for the
-   * slice-3 read path. */
+   * slice-3 read path. F7 correction round: `limit`, when supplied, bounds
+   * the number of rows returned (the caller -- `app/owned-dividend-
+   * history.ts`'s `MAX_PENDING_PAYOUTS_PER_PORTFOLIO` -- passes `limit + 1`
+   * so it can detect and disclose truncation rather than silently dropping
+   * rows past the cap; `undefined` (every pre-F7 caller) is unbounded,
+   * unchanged. */
   async function listActive(
     userId: string,
     portfolioId: string,
+    limit?: number,
   ): Promise<SharesightPendingPayoutRecord[]> {
     const rows = await client.all<Record<string, unknown>>(
       `SELECT ${PENDING_PAYOUT_COLUMNS}
        FROM sharesight_pending_payouts
        WHERE user_id = ? AND portfolio_id = ? AND withdrawn_at IS NULL
-       ORDER BY payment_date, symbol`,
-      [userId, portfolioId],
+       ORDER BY payment_date, symbol
+       ${limit !== undefined ? "LIMIT ?" : ""}`,
+      limit !== undefined
+        ? [userId, portfolioId, limit]
+        : [userId, portfolioId],
     );
     return rows.map(mapPendingPayout);
   }

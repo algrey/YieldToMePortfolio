@@ -186,6 +186,16 @@ type DisplayRow = {
    * figure ("no data") is a real, honest state: the current FY genuinely has
    * no recorded dividends yet. */
   actualToDateSourceLabel: SourceLabel | null;
+  /** BRK-022 slice 3 review fix (B1): the announced-but-unpaid subset of
+   * `grossDecimal` above -- populated only on the DIV-011 fallback standalone
+   * "(to date)" row (`mapCurrentRow`, when the forward forecast itself is
+   * degraded and there is no merged forecast row to attach `actualToDate*`
+   * to). `null`/`0` on every other row -- a past row's own gross figure
+   * never includes an unpaid subset by the time it closes, and every
+   * projected/merged-forecast row's `grossDecimal` is a rolling forecast
+   * composition, not an actuals total, so there is nothing to subtract. */
+  unpaidGrossDecimal: string | null;
+  unpaidCount: number;
 };
 
 function mapPastRow(
@@ -218,6 +228,8 @@ function mapPastRow(
     dividendsHref: `${dividendsHref}?fy=${row.endingYear}`,
     actualToDateGrossDecimal: null,
     actualToDateSourceLabel: null,
+    unpaidGrossDecimal: null,
+    unpaidCount: 0,
   };
 }
 
@@ -226,7 +238,15 @@ function mapPastRow(
  * still render on their own rather than silently vanishing just because a
  * different subsystem (the forecast) is degraded. Unchanged from
  * pre-DIV-011 (still the "(to date)" label, still labels the derived tier
- * "fy to date"). */
+ * "fy to date").
+ *
+ * BRK-022 slice 3 review fix (B1): `row.dividendGrossDecimal` includes both
+ * what has actually been paid and what Sharesight has merely announced --
+ * `grossDecimal` here must stay PAID-only (`paidOnlyGrossDecimal`, the SAME
+ * helper `mergeCurrentFinancialYear` below already uses for its own
+ * `actualToDateGrossDecimal`), and the unpaid subset is separately disclosed
+ * via `unpaidGrossDecimal`/`unpaidCount` so the render can append the same
+ * "*$x unpaid" note `income-landing.tsx` shows. */
 function mapCurrentRow(
   row: CurrentFinancialYearRow,
   dividendsHref: string,
@@ -237,7 +257,7 @@ function mapCurrentRow(
     label: `${row.label} (to date)`,
     valueDecimal: row.portfolioValueDecimal,
     valueStatus: row.valueStatus,
-    grossDecimal: row.dividendGrossDecimal,
+    grossDecimal: paidOnlyGrossDecimal(row),
     cashDecimal: row.dividendCashDecimal,
     frankingDecimal: row.dividendFrankingKnownDecimal,
     yieldPercentDecimal: row.effectiveYieldPercentDecimal,
@@ -250,6 +270,8 @@ function mapCurrentRow(
     dividendsHref: `${dividendsHref}?fy=${row.endingYear}`,
     actualToDateGrossDecimal: null,
     actualToDateSourceLabel: null,
+    unpaidGrossDecimal: row.dividendUnpaidGrossDecimal,
+    unpaidCount: row.dividendUnpaidCount,
   };
 }
 
@@ -307,6 +329,8 @@ function mapProjectedRow(
     dividendsHref: null,
     actualToDateGrossDecimal: null,
     actualToDateSourceLabel: null,
+    unpaidGrossDecimal: null,
+    unpaidCount: 0,
   };
 }
 
@@ -1082,6 +1106,25 @@ export function IncomeMultiYear({
                         {row.actualToDateGrossDecimal !== null
                           ? `${formatIncomeMoney(baseCurrencyCode, baseCurrencyCode, row.actualToDateGrossDecimal)} received so far this FY`
                           : "no dividends received yet this FY"}
+                      </span>
+                    ) : null}
+                    {/* BRK-022 slice 3 review fix (B1): the DIV-011 fallback
+                        standalone "(to date)" row's own gross figure above is
+                        now PAID-only (`mapCurrentRow`) -- discloses the
+                        announced-but-unpaid subset separately, mirroring
+                        `income-landing.tsx`'s identical note wording/format,
+                        non-colour (AGENTS.md): the "unpaid" WORD is the
+                        signal, never styling alone. */}
+                    {row.unpaidCount > 0 ? (
+                      <span className="unavailable">
+                        {" "}
+                        *
+                        {formatIncomeMoney(
+                          baseCurrencyCode,
+                          baseCurrencyCode,
+                          row.unpaidGrossDecimal,
+                        )}{" "}
+                        unpaid
                       </span>
                     ) : null}
                   </td>
