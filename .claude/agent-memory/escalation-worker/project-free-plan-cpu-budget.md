@@ -9,6 +9,22 @@ This app runs on the **Cloudflare Workers Free plan (10 ms CPU per request)**.
 Size any per-request loop (restore parts, import chunks, backfills) by counting
 **D1 operations**, not by timing it locally.
 
+**The cron handler gets NO extra CPU on Free (verified 2026-09-01 against
+Cloudflare's limits table).** Free is 10 ms for BOTH "CPU time per HTTP request"
+and "CPU time per Cron Trigger"; the 30 s / 15 min scheduled-handler allowance
+everyone assumes is a **Paid-plan** property. Do not size a cron job as if it
+had a bigger budget than a page render — BUG-010's task text assumed exactly
+that and was wrong. Corollary for any cron/backfill design here: make progress
+**durable per slice** (persist, then continue) so an invocation killed at the
+limit still leaves committed work behind.
+
+**Pure-CPU work is real here too, not just D1 count.** For CPU-bound derivation
+(decimal.js per security per date, row mapping/validation), meter it by
+subtracting SQL-client time from wall time in a wrapping client — the remainder
+is the part that is genuinely Worker CPU. Watch the split between *marginal*
+cost per unit and the *fixed* cost of entering the path at all: below some slice
+size the fixed cost dominates and shrinking the bound buys almost nothing.
+
 **Rule out [[project-d1-vs-node-sqlite-divergence]] BEFORE concluding "CPU".**
 A CPU eviction and a thrown D1 error can look alike from the browser (both
 non-JSON HTTP 500). They differ in `wrangler tail`: a CPU kill logs nothing at

@@ -1,0 +1,14 @@
+---
+name: count-gate-removal-vs-orphan-detection
+description: Before deleting a "redundant" count(*) precheck (PRF-004-style), check whether it also polices a JOIN-completeness invariant, not just an overflow bound -- removing both purposes at once needs a LEFT JOIN + per-field validation substitute, not a plain deletion.
+metadata:
+  type: feedback
+---
+
+PRF-004's pattern ("a `count(*)` precheck is redundant when the data query's own `LIMIT N+1`/`.length` check already answers the same question") does not automatically apply when the SAME count(*) is doing double duty: answering an overflow bound AND detecting that an `INNER JOIN` silently dropped a row whose foreign chain didn't resolve (no FK constraint prevents a child row's FK-adjacent fields from pointing at a mismatched sibling, e.g. a `lot_allocations` row whose `tax_lot_id` is valid but whose referenced `tax_lot`'s own `calculation_run_id` differs from the allocation's -- this is a real, constructible scenario in this schema, not hypothetical).
+
+**Why:** PRF-011 (`app/owned-capital-gains.ts`) removed `lot_allocations`' `count(*)` precheck per TASKS.md's literal instruction ("the LIMIT MAX+1 read already checks overflow"), but the task's own justification only accounted for the overflow purpose. The SAME count also fed an `allocationRows.length !== allocationCount` check that caught an `INNER JOIN` silently dropping an orphaned row (`missing_allocation_dates` -- AGENTS.md: never silently under-report disposals). Naively deleting the count and setting `allocationCount = allocationRows.length` would make that check tautologically always-true, silently disabling a real financial-correctness guard.
+
+**How to apply:** When removing a count(*) gate, grep every place the count variable is used (not just the overflow `if (count > MAX)` line) before deleting it. If it also feeds a `fetchedRows.length !== trueCount` completeness check, the fix is to make the driving table's cardinality survive the JOIN unconditionally: switch the dependent `INNER JOIN`s to `LEFT JOIN`s off the table whose row count you need to preserve, and let the existing per-field `requiredText`/`required*` validation catch a broken chain as a specific `invalid_<field>` error instead of the old aggregate error string. This is provably equivalent-or-stronger protection in ONE query instead of two, but it DOES change the exact error string on that (usually untested, "shouldn't happen") path -- write a test that deliberately constructs the mismatch (e.g., insert a tax_lot under one `calculation_run_id` and an allocation referencing it under another) and assert the NEW specific error, since no existing test in this codebase exercised that branch before.
+
+See also [[prf-011-projection-publications-pk]] for the companion "when is 2+ rows even reachable" question on the SAME task.

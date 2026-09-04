@@ -66,5 +66,34 @@ behavioural test of the actual logic; a reviewer will (rightly) reject a
 test that ONLY does source-regex matching for something that has real
 decision logic behind it.
 
+**Correction (PRF-011 round 2, 2026-09-03): the `node --import tsx` child-process
+trick (the `renderComponent`/similar shell-out) CAN import a `.tsx` file that
+transitively imports `next/headers` — confirmed by direct reproduction.**
+Both hard limits above are specific to the OUTER plain
+`node --experimental-strip-types --test` process; the `tsx` loader used in
+the INNER spawned child process resolves `next/headers` without error (it
+must patch/shim module resolution differently from plain ESM). This means
+when a source-regex pin on a `.tsx` file (e.g. a page component) exists
+specifically to prove a literal wiring/mapping is REAL rather than dead, and
+extracting the logic to a plain sibling module would remove that literal
+from the pinned file (breaking the existing pin an Orchestrator/Reviewer
+said to leave intact), the alternative is: add a bare `export` to the
+existing in-file function (no extraction, pin stays valid) and drive it via
+`execFileSync(process.execPath, ["--import", "tsx", "--input-type=module",
+"--eval", script])` importing `{ theFunction }` from the file's own URL —
+even though the file also imports `notFound` from `next/navigation` and
+`loadAuthenticatedWorkspace` (which pulls `next/headers`) at its top. Example:
+`app/portfolio/[portfolioId]/gains/page.tsx`'s `reasonForError` was exported
+this way and tested end-to-end (real DB fixture's thrown error message fed
+into the real function) in `tests/cgt-001a.test.ts`, without touching
+`tests/cgt-001b.test.ts`'s pre-existing source-regex pin on that same file.
+Prefer the established extract-to-sibling pattern below when nothing else
+constrains you — it's cheaper to read and keeps decision logic in a plain
+file — but reach for this child-process-export alternative when a
+still-valid regex pin depends on the literals staying exactly where they are.
+
 See [[worker]] general conventions for the broader AGENTS.md test-proportionality
-rule this satisfies.
+rule this satisfies. See also [[prf-011-projection-publications-pk]] and
+[[count-gate-removal-vs-orphan-detection]] for related PRF-011 correction
+findings (LEFT-JOIN-off-the-driving-table orphan detection must preserve the
+original aggregate failure identity, not just any typed failure).
