@@ -84,7 +84,7 @@ const OWNED_TABLES = [
   // special-cases below.
   "sharesight_delayed_prices",
   // BRK-022: owner-scoped announced-but-unpaid Sharesight payout
-  // observation, one row per (portfolio, source_reference) -- see
+  // observation, one row per (user, portfolio, source_reference) -- see
   // db/schema.ts's header comment on `sharesightPendingPayouts`. Keyed
   // directly by `user_id` like `sharesight_delayed_prices` above: every row
   // is this owner's own sync-time observation, never a shared fact.

@@ -281,6 +281,67 @@ export async function loadResolvedPortfolioInstrumentCurrencies(
   }));
 }
 
+/** One already-linked `portfolio_securities` row, as evidence for BRK-022
+ * slice 2's pending-payout resolution below. */
+export type ResolvablePortfolioSecurityForPendingPayouts = {
+  portfolioSecurityId: string;
+  sharesightInstrumentId: string | null;
+  symbol: string;
+  exchangeAlias: string | null;
+  currencyCode: string;
+};
+
+/**
+ * BRK-022 slice 2: resolves a future-dated (announced, not-yet-paid)
+ * Sharesight payout to an EXISTING `portfolio_securities` row for THIS
+ * user+portfolio -- reuses the EXACT same join
+ * `loadResolvedPortfolioInstrumentCurrencies` above already established for
+ * "already-linked instrument" evidence, but additionally surfaces `ps.id`
+ * (needed to populate `sharesight_pending_payouts.portfolio_security_id`)
+ * alongside `s.primary_currency_code` (needed by
+ * `app/sharesight-sync-service.ts` to decide whether the payout is foreign
+ * to its own security for FX-field storage, mirroring
+ * `db/repositories/import-commit.ts`'s dividend branch exactly -- see that
+ * service's own doc comment). NEVER creates a security: an instrument with
+ * no resolved row simply has no entry here, and the caller's own tiered
+ * match (Sharesight instrument id, then symbol+exchange -- see
+ * `domain/sharesight-sync/transform.ts`'s `instrumentMatchKey`) leaves such
+ * a payout `portfolioSecurityId: null` rather than guessing.
+ */
+export async function loadResolvablePortfolioSecuritiesForPendingPayouts(
+  client: SqlClient,
+  userId: string,
+  portfolioId: string,
+): Promise<ResolvablePortfolioSecurityForPendingPayouts[]> {
+  const rows = await client.all<Record<string, unknown>>(
+    `SELECT ps.id AS portfolio_security_id,
+            ps.source_symbol AS source_symbol,
+            ps.source_exchange_alias AS source_exchange_alias,
+            s.primary_currency_code AS primary_currency_code,
+            si.value AS sharesight_instrument_id
+       FROM portfolio_securities ps
+       JOIN securities s ON s.id = ps.security_id
+       LEFT JOIN security_identifiers si
+         ON si.security_id = ps.security_id
+        AND si.scheme = 'sharesight_instrument' AND si.valid_to IS NULL
+      WHERE ps.user_id = ? AND ps.portfolio_id = ? AND ps.security_id IS NOT NULL`,
+    [userId, portfolioId],
+  );
+  return rows.map((row) => ({
+    portfolioSecurityId: String(row.portfolio_security_id),
+    sharesightInstrumentId:
+      row.sharesight_instrument_id === null
+        ? null
+        : String(row.sharesight_instrument_id),
+    symbol: String(row.source_symbol),
+    exchangeAlias:
+      row.source_exchange_alias === null
+        ? null
+        : String(row.source_exchange_alias),
+    currencyCode: String(row.primary_currency_code),
+  }));
+}
+
 export function createOwnedSecurityResolutionRepository(
   client: SqlClient,
   now: () => string = () => new Date().toISOString(),

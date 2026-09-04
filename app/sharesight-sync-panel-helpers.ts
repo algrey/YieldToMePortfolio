@@ -94,6 +94,15 @@ export type SharesightSyncSuccess = {
   needsDecisionRows?: number;
   reused: boolean;
   window: SharesightSyncWindowSummary;
+  // BRK-022 slice 2: optional/defaulted-to-0, same back-compat convention as
+  // `needsDecisionRows` above -- every pre-this-task caller/fixture that
+  // never mentions these keeps compiling and rendering unchanged.
+  // `pendingPayoutsError` is a short, amount-free message naming a
+  // best-effort recording failure; recording pending payouts never fails
+  // the sync itself, so this is additive to an otherwise `ok: true` result.
+  pendingPayouts?: number;
+  pendingPayoutsUnresolved?: number;
+  pendingPayoutsError?: string | null;
 };
 
 /** BRK-015: the two sync modes the owner can trigger -- `"routine"` (the
@@ -269,6 +278,29 @@ function newVsAlreadyImportedLine(result: SharesightSyncSuccess): string {
   return ` ${parts.join("; ")}.`;
 }
 
+/**
+ * BRK-022 slice 2: one honest line naming how many future-dated,
+ * not-yet-due Sharesight payouts (the SAME set `skippedLine` above already
+ * counts as "skipped" from staging) were recorded/refreshed as
+ * `sharesight_pending_payouts` observations, visible on the Income screen
+ * once slice 3 lands -- omitted entirely when there was nothing to record
+ * (a sync with no future-dated payouts this time around). When recording
+ * itself failed (`pendingPayoutsError` set -- best-effort, never fails the
+ * sync), that takes priority over the count line: the owner needs to know
+ * the announced-payout view may now be stale, not a possibly-wrong count.
+ */
+function pendingPayoutsLine(result: SharesightSyncSuccess): string {
+  if (result.pendingPayoutsError) {
+    return ` Announced dividends could not be recorded: ${result.pendingPayoutsError}`;
+  }
+  const pendingPayouts = result.pendingPayouts ?? 0;
+  if (pendingPayouts === 0) return "";
+  const unresolved = result.pendingPayoutsUnresolved ?? 0;
+  const unresolvedNote =
+    unresolved > 0 ? ` (${unresolved} could not be matched to a holding)` : "";
+  return ` ${pendingPayouts} announced dividend${pendingPayouts === 1 ? "" : "s"} not yet paid recorded${unresolvedNote}.`;
+}
+
 export function formatSyncResultMessage(result: SharesightSyncSuccess): string {
   const batchLine = result.reused
     ? `No changes since last sync -- reused batch ${result.batchId} (status: ${statusLabel(result.batchStatus)}).`
@@ -279,9 +311,10 @@ export function formatSyncResultMessage(result: SharesightSyncSuccess): string {
     result.skippedPayouts > 0
       ? ` ${result.skippedPayouts} future-dated payout${result.skippedPayouts === 1 ? "" : "s"} skipped -- not yet paid; details in the batch preview.`
       : "";
+  const pendingLine = pendingPayoutsLine(result);
   // BRK-015: the window disclosure is its own trailing sentence, always
   // present.
-  return `${batchLine} ${rowsLine}${newVsExistingLine}${skippedLine} ${windowLabel(result.window)}`;
+  return `${batchLine} ${rowsLine}${newVsExistingLine}${skippedLine}${pendingLine} ${windowLabel(result.window)}`;
 }
 
 /**

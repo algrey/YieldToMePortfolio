@@ -12,7 +12,10 @@ import {
   createSharesightPendingPayoutsRepository,
   type PendingPayoutObservationInput,
 } from "../db/repositories/sharesight-pending-payouts.ts";
-import { createSqliteSqlClient } from "../db/repositories/sql-client.ts";
+import {
+  createSqliteSqlClient,
+  type SqlClient,
+} from "../db/repositories/sql-client.ts";
 
 async function migratedDatabase(): Promise<DatabaseSync> {
   const db = new DatabaseSync(":memory:");
@@ -354,23 +357,53 @@ test("upsertObserved de-dupes a duplicate sourceReference within one call (last 
   assert.equal(rows[0].totalCashDecimal, "200.00");
 });
 
-test("upsertObserved chunks its INSERT batch at REFERENCE_CHUNK_SIZE without miscounting across chunks", async () => {
+test("upsertObserved chunks its INSERT batch at REFERENCE_CHUNK_SIZE without miscounting across chunks, and its client.batch() calls are pinned at exactly [50, 50, 20] for 120 rows", async () => {
   const db = await ownedFixture();
+  const baseClient = createSqliteSqlClient(db);
+  // Census wrapper (mirrors tests/brk-012c.test.ts's counting-client
+  // pattern): records the STATEMENT COUNT of every client.batch() call so
+  // this test pins the chunk SIZES themselves, not merely the aggregate
+  // inserted count -- a chunk-size regression (e.g. one chunk of 120
+  // instead of three of 50/50/20) would previously slip through unnoticed.
+  const batchCallSizes: number[] = [];
+  const censusClient: SqlClient = {
+    ...baseClient,
+    batch: async (statements) => {
+      batchCallSizes.push(statements.length);
+      return baseClient.batch(statements);
+    },
+  };
   const repo = createSharesightPendingPayoutsRepository(
-    createSqliteSqlClient(db),
+    censusClient,
     () => "2026-09-01T00:00:00.000Z",
   );
-  // 51 rows crosses the module's 50-statement chunk boundary (one full
-  // chunk plus one more), exercising the loop of client.batch() calls.
-  const inputs = Array.from({ length: 51 }, (_, index) =>
+  // 120 rows crosses the module's 50-statement chunk boundary twice (two
+  // full chunks plus a 20-row remainder), exercising the loop of
+  // client.batch() calls.
+  const inputs = Array.from({ length: 120 }, (_, index) =>
     payout({
       sourceReference: `sharesight-payout:pa:holding-${index}:2026-09-15`,
       sharesightHoldingId: `holding-${index}`,
     }),
   );
   const result = await repo.upsertObserved("a", "pa", inputs);
-  assert.deepEqual(result, { ok: true, inserted: 51, updated: 0 });
-  assert.equal((await repo.listActive("a", "pa")).length, 51);
+  assert.deepEqual(result, { ok: true, inserted: 120, updated: 0 });
+  assert.equal((await repo.listActive("a", "pa")).length, 120);
+  assert.deepEqual(batchCallSizes, [50, 50, 20]);
+});
+
+test("upsertObserved rejects an empty userId with the field: 'userId' label, writing nothing", async () => {
+  const db = await ownedFixture();
+  const repo = createSharesightPendingPayoutsRepository(
+    createSqliteSqlClient(db),
+    () => "2026-09-01T00:00:00.000Z",
+  );
+  const result = await repo.upsertObserved("", "pa", [payout()]);
+  assert.deepEqual(result, {
+    ok: false,
+    reason: "invalid_input",
+    field: "userId",
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -257,6 +257,10 @@ export function SharesightSyncPanel({
             needsDecisionRows: number;
             reused: boolean;
             window: SharesightSyncWindowSummary;
+            // BRK-022 slice 2
+            pendingPayouts: number;
+            pendingPayoutsUnresolved: number;
+            pendingPayoutsError: string | null;
           }
         | { ok: false; message: string };
       if (!result.ok) {
@@ -278,6 +282,9 @@ export function SharesightSyncPanel({
         needsDecisionRows: result.needsDecisionRows,
         reused: result.reused,
         window: result.window,
+        pendingPayouts: result.pendingPayouts,
+        pendingPayoutsUnresolved: result.pendingPayoutsUnresolved,
+        pendingPayoutsError: result.pendingPayoutsError,
       });
     } catch (error) {
       setSyncResult({

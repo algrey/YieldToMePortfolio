@@ -14,10 +14,14 @@ import { randomUUID } from "node:crypto";
 import {
   createOwnedImportStagingRepository,
   createOwnedPortfolioRepository,
+  createSharesightPendingPayoutsRepository,
   createSharesightSyncStateRepository,
   loadCommittedSharesightRowValues,
   loadCommittedSharesightWatermarks,
+  loadResolvablePortfolioSecuritiesForPendingPayouts,
   loadResolvedPortfolioInstrumentCurrencies,
+  type PendingPayoutObservationInput,
+  type ResolvablePortfolioSecurityForPendingPayouts,
   type SharesightCommittedRowValues,
   type SqlClient,
 } from "../db/repositories/index.ts";
@@ -37,6 +41,10 @@ import {
 } from "../domain/imports/committed-value-comparison.ts";
 import {
   computeRoutineSyncFromDate,
+  instrumentMatchKey,
+  invertToPortfolioConversionRate,
+  isFutureUnconfirmedPayout,
+  payoutIdentityKey,
   SHARESIGHT_PAYOUT_SYNC_OVERLAP_DAYS,
   SHARESIGHT_SYNC_PARSER_FORMAT,
   SHARESIGHT_SYNC_PARSER_VERSION,
@@ -47,6 +55,7 @@ import {
 } from "../domain/sharesight-sync/index.ts";
 import type {
   SharesightClient,
+  SharesightPayout,
   SharesightPortfolio,
 } from "../domain/sharesight/index.ts";
 import {
@@ -283,6 +292,30 @@ export type RunSharesightSyncResult =
       // `domain/sharesight-sync/window.ts`'s `SharesightSyncWindow` doc
       // comment for the `full` vs `narrowed` distinction.
       window: SharesightSyncWindow;
+      // BRK-022 slice 2: of this fetch's future-dated, not-yet-due payouts
+      // (the SAME set `isFutureUnconfirmedPayout` skips from staging --
+      // never counted in `rowsStaged`/`newRows` above), how many were
+      // recorded/refreshed as `sharesight_pending_payouts` observations.
+      // Computed on BOTH the fresh and REUSED batch paths -- see the
+      // pending-payout block below for why this mirrors `alreadyImportedRows`'s
+      // "reflects current account state, not a staging-time snapshot" rule.
+      pendingPayouts: number;
+      // Of `pendingPayouts`, how many stored `portfolio_security_id: null`
+      // because the tiered match (Sharesight instrument id, then
+      // symbol+exchange -- see `resolvePendingPayoutPortfolioSecurity`)
+      // found no unambiguous existing security -- never a guess.
+      pendingPayoutsUnresolved: number;
+      // Previously-active pending payouts withdrawn this sync (no longer
+      // observed within the payout stream's own covered window -- see
+      // `markWithdrawnNotObserved`'s doc comment).
+      pendingPayoutsWithdrawn: number;
+      // Non-null only when `upsertObserved`/`markWithdrawnNotObserved`
+      // returned a typed failure -- a short, amount-free message. Recording
+      // pending payouts is best-effort and NEVER fails the sync itself (the
+      // batch is already safely staged by the time this runs); the owner
+      // still needs an honest signal that the announced-payout view may be
+      // stale.
+      pendingPayoutsError: string | null;
     }
   | SharesightSyncActionFailure;
 
@@ -594,6 +627,104 @@ function canonicalFetchDigestSource(
   });
 }
 
+/**
+ * BRK-022 slice 2: resolves a future-dated (pending) payout to an EXISTING
+ * `portfolio_securities` row for this user+portfolio, in two strict
+ * priority tiers, NEVER creating a security and NEVER guessing on an
+ * ambiguous match:
+ *
+ *   1. Sharesight instrument id (`payout.sharesightInstrumentId`, when
+ *      present) against `candidate.sharesightInstrumentId`. Exactly one
+ *      match resolves; more than one is treated as unresolved OUTRIGHT
+ *      (this codebase has no confirmed evidence that two distinct
+ *      `portfolio_securities` rows could legitimately share one
+ *      Sharesight instrument id, so more than one match is an anomaly, not
+ *      a case to fall through to weaker evidence for).
+ *   2. Symbol + exchange (`instrumentMatchKey`, the SAME normalisation
+ *      `payoutSecurityCurrencyProxy`/`tradeCurrencyByInstrumentKey` already
+ *      use in `domain/sharesight-sync/transform.ts`), tried only when tier
+ *      1 found NO match at all (a payout with no `sharesightInstrumentId`,
+ *      or one that matched nothing). Exactly one match resolves; zero or
+ *      more than one is unresolved.
+ *
+ * Unresolved (`null`) is a perfectly normal, expected outcome (a payout for
+ * an instrument this account has never linked a security for yet) -- it is
+ * stored as `portfolio_security_id: null` on the observation row, never
+ * blocks the sync, and is simply counted (`pendingPayoutsUnresolved`).
+ */
+function resolvePendingPayoutPortfolioSecurity(
+  payout: SharesightPayout,
+  candidates: readonly ResolvablePortfolioSecurityForPendingPayouts[],
+): ResolvablePortfolioSecurityForPendingPayouts | null {
+  if (payout.sharesightInstrumentId) {
+    const byInstrumentId = candidates.filter(
+      (candidate) =>
+        candidate.sharesightInstrumentId === payout.sharesightInstrumentId,
+    );
+    if (byInstrumentId.length === 1) return byInstrumentId[0] ?? null;
+    if (byInstrumentId.length > 1) return null;
+  }
+  const key = instrumentMatchKey(payout.symbol, payout.marketCode);
+  const bySymbolExchange = candidates.filter(
+    (candidate) =>
+      instrumentMatchKey(candidate.symbol, candidate.exchangeAlias) === key,
+  );
+  return bySymbolExchange.length === 1 ? (bySymbolExchange[0] ?? null) : null;
+}
+
+/**
+ * BRK-022 slice 2: builds one `sharesight_pending_payouts` observation
+ * input for a future-dated payout -- mirrors
+ * `db/repositories/import-commit.ts`'s dividend-branch FX derivation
+ * EXACTLY (`isForeignToSecurity`/case A-B-C reasoning there), but there is
+ * no commit-time fail-closed case here: this table is an OBSERVATION, never
+ * blocking, so a foreign payout with no usable rate simply stores
+ * `fxRateToPortfolioDecimal: null`/`fxRateSource: null` rather than
+ * failing the sync (unlike `import-commit.ts`'s case B, which fails closed
+ * with `mapping_incomplete`). `resolvedSecurity` is `null` for an
+ * unresolved payout, in which case "foreign to its security" cannot be
+ * evaluated at all (no security to compare against) and the FX fields stay
+ * null, same as a genuinely native payout.
+ */
+function buildPendingPayoutObservationInput(
+  payout: SharesightPayout,
+  resolvedSecurity: ResolvablePortfolioSecurityForPendingPayouts | null,
+): PendingPayoutObservationInput {
+  let fxRateToPortfolioDecimal: string | null = null;
+  let fxRateSource: string | null = null;
+  if (
+    resolvedSecurity !== null &&
+    payout.currencyCode !== resolvedSecurity.currencyCode
+  ) {
+    const invertedRate = invertToPortfolioConversionRate(
+      payout.exchangeRateDecimal,
+    );
+    if (invertedRate !== null) {
+      fxRateToPortfolioDecimal = invertedRate;
+      fxRateSource = "sharesight";
+    }
+  }
+  return {
+    portfolioSecurityId: resolvedSecurity?.portfolioSecurityId ?? null,
+    sourceReference: payoutIdentityKey(payout),
+    sharesightHoldingId: payout.holdingId,
+    sharesightInstrumentId: payout.sharesightInstrumentId,
+    sharesightPayoutId: payout.id,
+    symbol: payout.symbol,
+    marketCode: payout.marketCode,
+    currencyCode: payout.currencyCode,
+    paymentDate: payout.paidOnDate,
+    exDate: payout.goesExOnDate,
+    totalCashDecimal: payout.amountDecimal,
+    grossAmountDecimal: payout.grossAmountDecimal,
+    totalFrankingDecimal: payout.frankingCreditsDecimal,
+    residentWithholdingTaxDecimal: payout.residentWithholdingTaxDecimal,
+    nonResidentWithholdingTaxDecimal: payout.nonResidentWithholdingTaxDecimal,
+    fxRateToPortfolioDecimal,
+    fxRateSource,
+  };
+}
+
 async function sha256Hex(value: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -899,6 +1030,87 @@ export async function runSharesightSyncWithContext(
     { now: options.now },
   );
 
+  // BRK-022 slice 2: record every future-dated, not-yet-due payout
+  // `isFutureUnconfirmedPayout` skips from staging as its own
+  // `sharesight_pending_payouts` OBSERVATION (never a ledger fact),
+  // refreshed or withdrawn on THIS sync. Runs on BOTH the fresh and REUSED
+  // batch paths, unconditionally -- like `alreadyImportedRows` above, this
+  // reflects the account's CURRENT Sharesight state
+  // (`payoutsResult.value`, this call's own fetch), never a snapshot of
+  // whatever a possibly-older reused batch happened to stage. Kept AFTER
+  // the staging write (and after security resolution, so the freshest
+  // resolved-security evidence is available for the tiered match below) so
+  // a staging failure still returns its existing typed failure completely
+  // unchanged -- every `return` above this point is untouched by this
+  // block.
+  const today = nowAt.slice(0, 10);
+  const pendingPayoutCandidates = payoutsResult.value.filter((payout) =>
+    isFutureUnconfirmedPayout(payout, today),
+  );
+  let pendingPayouts = 0;
+  let pendingPayoutsUnresolved = 0;
+  let pendingPayoutsWithdrawn = 0;
+  let pendingPayoutsError: string | null = null;
+  {
+    const resolvableSecurities =
+      await loadResolvablePortfolioSecuritiesForPendingPayouts(
+        context.client,
+        context.userId,
+        portfolioId,
+      );
+    const pendingPayoutsRepository = createSharesightPendingPayoutsRepository(
+      context.client,
+      options.now,
+    );
+    const observationInputs: PendingPayoutObservationInput[] = [];
+    const observedSourceReferences: string[] = [];
+    for (const payout of pendingPayoutCandidates) {
+      observedSourceReferences.push(payoutIdentityKey(payout));
+      const resolvedSecurity = resolvePendingPayoutPortfolioSecurity(
+        payout,
+        resolvableSecurities,
+      );
+      if (resolvedSecurity === null) pendingPayoutsUnresolved += 1;
+      observationInputs.push(
+        buildPendingPayoutObservationInput(payout, resolvedSecurity),
+      );
+    }
+    const upserted = await pendingPayoutsRepository.upsertObserved(
+      context.userId,
+      portfolioId,
+      observationInputs,
+    );
+    if (!upserted.ok) {
+      pendingPayoutsUnresolved = 0;
+      pendingPayoutsError =
+        upserted.reason === "invalid_input"
+          ? `Could not record an announced payout (field: ${upserted.field}).`
+          : "Could not record announced payouts -- they may be stale until the next sync.";
+    } else {
+      pendingPayouts = upserted.inserted + upserted.updated;
+      // Ordering note: `upsertObserved` either writes every chunk or fails
+      // wholesale (this branch is reached only on full success), so
+      // `observedSourceReferences` is always a faithful superset of what
+      // is actually stored by the time withdrawal runs -- a partial
+      // multi-chunk upsert failure would instead hit the `!upserted.ok`
+      // branch above and skip withdrawal entirely, never withdraw against
+      // an incomplete write.
+      const withdrawal =
+        await pendingPayoutsRepository.markWithdrawnNotObserved(
+          context.userId,
+          portfolioId,
+          observedSourceReferences,
+          payoutWindow,
+        );
+      if (withdrawal.ok) {
+        pendingPayoutsWithdrawn = withdrawal.withdrawn;
+      } else {
+        pendingPayoutsError =
+          "Could not withdraw stale announced payouts -- they may still show as outstanding until the next sync.";
+      }
+    }
+  }
+
   // Watermark update (BRK-005 ruling 4): `last_synced_at` moves on
   // successful STAGING, never on commit -- commit is a separate, later,
   // owner-driven step through the unmodified review/ready/commit flow. This
@@ -1001,5 +1213,9 @@ export async function runSharesightSyncWithContext(
     needsDecisionRows,
     reused: started.reused,
     window: { trades: tradeWindow, payouts: payoutWindow },
+    pendingPayouts,
+    pendingPayoutsUnresolved,
+    pendingPayoutsWithdrawn,
+    pendingPayoutsError,
   };
 }

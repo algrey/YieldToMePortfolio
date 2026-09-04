@@ -467,8 +467,16 @@ const UNCONFIRMED_PAYOUT_PROVENANCE_NOTE =
  * decimal-digit string, which can never collide with this colon-delimited
  * shape, so no historically-committed `source_reference` is ambiguous
  * against this new one.
+ *
+ * BRK-022 slice 2: exported (name unchanged) so
+ * `app/sharesight-sync-service.ts` can compute the IDENTICAL
+ * `source_reference` for a future-dated (pending, not-yet-staged) payout's
+ * own `sharesight_pending_payouts` row -- the shared key is what lets a
+ * later paid record (staged under this same key once the payout is no
+ * longer future-dated) override the pending observation rather than
+ * doubling it.
  */
-function payoutIdentityKey(payout: SharesightPayout): string {
+export function payoutIdentityKey(payout: SharesightPayout): string {
   return `sharesight-payout:${payout.portfolioId}:${payout.holdingId}:${payout.paidOnDate}`;
 }
 
@@ -596,8 +604,14 @@ function buildDividendRowFromPayout(
 /** A null-id payout whose `paidOnDate` is strictly after `today` -- see
  * `buildPayoutRow`'s header comment. Confirmed (non-null-id) payouts are
  * NEVER classified future -- Sharesight itself already confirmed them, so
- * there is no "not yet due" state to wait out. */
-function isFutureUnconfirmedPayout(
+ * there is no "not yet due" state to wait out.
+ *
+ * BRK-022 slice 2: exported (name unchanged) so
+ * `app/sharesight-sync-service.ts` can identify the SAME set of payouts
+ * this module skips from staging and record them instead as
+ * `sharesight_pending_payouts` observations -- one shared predicate, never
+ * a second hand-written copy that could silently drift from this one. */
+export function isFutureUnconfirmedPayout(
   payout: SharesightPayout,
   today: string,
 ): boolean {
@@ -624,6 +638,23 @@ function countPayoutKeyCollisions(
 }
 
 /**
+ * Shared symbol+exchange normalisation (trim + uppercase both sides, empty
+ * string for a null exchange alias) -- used by `tradeCurrencyByInstrumentKey`/
+ * `resolvedCurrencyByInstrumentKey`/`payoutSecurityCurrencyProxy` below, and
+ * exported for BRK-022 slice 2's pending-payout security resolution
+ * (`app/sharesight-sync-service.ts`'s tier-2 symbol+exchange match against
+ * `portfolio_securities.source_symbol`/`source_exchange_alias`) so both
+ * call sites share ONE normalisation convention rather than risking silent
+ * drift between two hand-written copies.
+ */
+export function instrumentMatchKey(
+  symbol: string,
+  exchangeAlias: string | null,
+): string {
+  return `${symbol.trim().toUpperCase()}|${(exchangeAlias ?? "").trim().toUpperCase()}`;
+}
+
+/**
  * BRK-010 review finding B4: a SECONDARY evidence source for
  * `payoutSecurityCurrencyProxy` -- a trade for the same instrument
  * (preferring the `sharesight_instrument` id when both sides carry one,
@@ -646,7 +677,7 @@ function tradeCurrencyByInstrumentKey(
     ) {
       byInstrumentId.set(trade.sharesightInstrumentId, trade.currencyCode);
     }
-    const key = `${trade.instrumentCode.trim().toUpperCase()}|${trade.marketCode.trim().toUpperCase()}`;
+    const key = instrumentMatchKey(trade.instrumentCode, trade.marketCode);
     if (!bySymbolMarket.has(key)) bySymbolMarket.set(key, trade.currencyCode);
   }
   const merged = new Map<string, string>(bySymbolMarket);
@@ -681,7 +712,7 @@ function resolvedCurrencyByInstrumentKey(
     ) {
       byInstrumentId.set(row.sharesightInstrumentId, row.currencyCode);
     }
-    const key = `${row.symbol.trim().toUpperCase()}|${(row.exchangeAlias ?? "").trim().toUpperCase()}`;
+    const key = instrumentMatchKey(row.symbol, row.exchangeAlias);
     if (!bySymbolMarket.has(key)) bySymbolMarket.set(key, row.currencyCode);
   }
   const merged = new Map<string, string>(bySymbolMarket);
@@ -762,7 +793,7 @@ function payoutSecurityCurrencyProxy(
   resolvedCurrencies: ReadonlyMap<string, string>,
   tradeCurrencies: ReadonlyMap<string, string>,
 ): string | null {
-  const key = `${payout.symbol.trim().toUpperCase()}|${payout.marketCode.trim().toUpperCase()}`;
+  const key = instrumentMatchKey(payout.symbol, payout.marketCode);
   if (payout.sharesightInstrumentId) {
     const byResolvedId = resolvedCurrencies.get(
       `id:${payout.sharesightInstrumentId}`,
@@ -880,15 +911,26 @@ function buildPayoutRow(
 ): SharesightPayoutTransformOutcome {
   if (isFutureUnconfirmedPayout(payout, today)) {
     // FUTURE-dated (not yet due): still no reliable "this really happened"
-    // fact to stage -- skipped, surfaced as a visible warning rather than
-    // silently dropped. See the BRK-005C block comment above for why a
-    // PAST-dated null-id payout, by contrast, stages.
+    // fact to stage as a transaction/dividend row -- skipped from THIS
+    // batch, surfaced as a visible warning rather than silently dropped.
+    // See the BRK-005C block comment above for why a PAST-dated null-id
+    // payout, by contrast, stages.
+    //
+    // BRK-022 slice 2: wording corrected -- this payout is no longer simply
+    // thrown away. `app/sharesight-sync-service.ts` records every payout
+    // this predicate identifies as its own `sharesight_pending_payouts`
+    // observation (an announced, not-yet-paid dividend, visible on the
+    // Income screen once slice 3 lands), refreshed or withdrawn on every
+    // subsequent sync until the real paid record replaces it under the same
+    // identity key (`payoutIdentityKey`). The issue code/severity are
+    // unchanged -- only the message's claim about what happens to the
+    // payout is corrected.
     return {
       kind: "skipped",
       issue: {
         code: "SHARESIGHT_PAYOUT_UNCONFIRMED",
         severity: "warning",
-        message: `Sharesight payout for ${payout.symbol} due ${payout.paidOnDate} is future-dated (not yet paid) and has no confirmed id -- it was skipped and will be picked up on a future sync once its paid-on date has passed.`,
+        message: `Sharesight payout for ${payout.symbol} due ${payout.paidOnDate} is future-dated (not yet paid) and has no confirmed id -- it was not staged as a transaction, but has been recorded as an announced, not-yet-paid dividend (see the Income screen) and will be replaced by the paid record once Sharesight confirms it.`,
       },
     };
   }
