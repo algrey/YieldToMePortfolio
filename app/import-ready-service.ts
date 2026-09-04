@@ -147,7 +147,19 @@ export async function markImportReadyWithContext(
   // COMPUTED, un-persisted `preview.issues` -- `app/components/import-review.tsx`'s
   // `acceptDisabled` deliberately gates on PERSISTED `review.issues` only
   // (BRK-009C ruling, unchanged by this task), so the "Accept Import" button
-  // stayed visibly enabled with no indication of what was blocking it.
+  // stayed enabled AND, once clicked, gave no indication of what had
+  // blocked it.
+  //
+  // ROUND 3 (B3, 2026-09-04) -- correcting this comment's own overstated
+  // claim: persistence happens HERE, inside `markImportReadyWithContext`,
+  // so it is the FIRST Accept/Mark-ready attempt that is rejected and
+  // persists the finding; the button is disabled only from the NEXT render
+  // onward. This is NOT pre-emptive blocking, and slice 1 deliberately does
+  // not implement any (a pre-emptive block would need the page-only
+  // committed-value evidence loaded on every render). What this DOES buy is
+  // that the owner never gets a second, unexplained rejection: after the
+  // first attempt the block is visible and named on the row.
+  //
   // Persisted with the SAME idempotent `WHERE NOT EXISTS` guard
   // `db/repositories/import-commit.ts`'s own fail-closed skip uses (shared
   // via `rowDiffersFromCommittedRecordIssueStatement`) -- a retried/repeated
