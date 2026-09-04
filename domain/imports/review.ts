@@ -253,35 +253,79 @@ export function buildImportReview(
   // security-verification-service, commit revalidation, and the page/
   // refresh preview path) supplies identically, so it is exactly as
   // hash-stable across callers as e.g. `OVERSELL`/`FX_RATE_INCOMPLETE`.
+  //
+  // BRK-019 slice 1 ROUND 3 (B2, BLOCKING): filtering an issue OUT of
+  // `hashedPreview.issues` is not enough on its own -- `preview.ready` and
+  // `preview.counts.unresolved` are DERIVED from the full issue list, and
+  // (pre-fix) rode into `hashedPreview` unchanged via the spread, so a
+  // filtered ERROR-severity issue still moved the hash. That reopened
+  // exactly the divergence this whole filter exists to prevent: a batch
+  // carrying a `ROW_DIFFERS_FROM_COMMITTED_RECORD` hashed one way on the
+  // page (evidence supplied, `ready: false`, `unresolved: 1`) and another
+  // way in the ready/exclusion loader (evidence absent, `ready: true`,
+  // `unresolved: 0`), so every `POST .../exclusions` and `.../ready` the
+  // owner sent back 409'd "This preview is stale" -- making the issue's own
+  // advertised remedy ("Skip this row") unusable on the CSV route
+  // (reviewer repro, round 2). Both derived fields are therefore recomputed
+  // here FROM THE FILTERED LIST, so a filtered issue has no residual effect
+  // on the hash by any route.
+  //
+  // `unresolved` is reduced by the number of removed ERROR issues rather
+  // than recomputed from scratch (the count is not otherwise derivable from
+  // the issue list): every `unresolved += 1` in
+  // `createImportReconciliationPreview` is immediately followed by exactly
+  // one `issues.push({ severity: "error", ... })` for the same row, so the
+  // pairing is 1:1 and this subtraction is exact -- verified site by site
+  // (`ROW_UNSUPPORTED`, `PORTFOLIO_MAPPING_REQUIRED`/`_INVALID`,
+  // `SECURITY_MAPPING_REQUIRED` x2, `SECURITY_MAPPING_AMBIGUOUS`,
+  // `ROW_DIFFERS_FROM_COMMITTED_RECORD` x3, `FX_DIRECTION_REQUIRED`,
+  // `OVERSELL`). Of the codes filtered below, only
+  // `ROW_DIFFERS_FROM_COMMITTED_RECORD` is ever error-severity; the rest are
+  // warnings and contribute nothing to either derived field, so this is a
+  // no-op for them. Clamped at zero purely defensively -- a future
+  // error-severity code filtered WITHOUT its own `unresolved` increment
+  // would otherwise drive the count negative.
+  const hashedIssues = preview.issues.filter(
+    (issue) =>
+      issue.code !== "DIVIDEND_NEAR_EXISTING_ENTRY" &&
+      issue.code !== "TRADE_NEAR_EXISTING_ENTRY" &&
+      issue.code !== "TRADE_DUPLICATE_CHECK_UNAVAILABLE" &&
+      issue.code !== "DIVIDEND_MATCHES_EXISTING_ENTRY" &&
+      issue.code !== "DIVIDEND_DUPLICATE_CHECK_UNAVAILABLE" &&
+      issue.code !== "DIVIDEND_RECONCILIATION_PROPOSED" &&
+      issue.code !== "DIVIDEND_RECONCILIATION_AMBIGUOUS" &&
+      issue.code !== "DIVIDEND_ALREADY_IMPORTED_MANUAL_DUPLICATE" &&
+      issue.code !== "DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE" &&
+      // BRK-019 slice 1: `ROW_DIFFERS_FROM_COMMITTED_RECORD` depends on
+      // `evidence.committedTradeValues`/`.committedDividendValues`/
+      // `.existingDividendEntries` -- like every other code excluded
+      // above, these are supplied ONLY by the page/refresh preview path
+      // (`app/import-actions.ts`'s `loadReview`), never by ready-service,
+      // security-verification-service, or commit's own revalidation, so
+      // this issue must not change `previewVersion` or those callers
+      // would compute a different hash than the page rendered. The
+      // OWNER-VISIBLE blocking behaviour is unaffected -- `preview.ready`
+      // (the un-hashed struct) still reflects it wherever this evidence
+      // IS supplied; `db/repositories/import-commit.ts`'s own
+      // independent, live commit-time check (this task) is the
+      // authoritative backstop that never depends on this hash.
+      issue.code !== "ROW_DIFFERS_FROM_COMMITTED_RECORD",
+  );
+  const removedErrorIssueCount = preview.issues.filter(
+    (issue) => issue.severity === "error" && !hashedIssues.includes(issue),
+  ).length;
   const hashedPreview: ImportReconciliationPreview = {
     ...preview,
     proposedReconciliations: [],
-    issues: preview.issues.filter(
-      (issue) =>
-        issue.code !== "DIVIDEND_NEAR_EXISTING_ENTRY" &&
-        issue.code !== "TRADE_NEAR_EXISTING_ENTRY" &&
-        issue.code !== "TRADE_DUPLICATE_CHECK_UNAVAILABLE" &&
-        issue.code !== "DIVIDEND_MATCHES_EXISTING_ENTRY" &&
-        issue.code !== "DIVIDEND_DUPLICATE_CHECK_UNAVAILABLE" &&
-        issue.code !== "DIVIDEND_RECONCILIATION_PROPOSED" &&
-        issue.code !== "DIVIDEND_RECONCILIATION_AMBIGUOUS" &&
-        issue.code !== "DIVIDEND_ALREADY_IMPORTED_MANUAL_DUPLICATE" &&
-        issue.code !== "DIVIDEND_RECONCILIATION_CANDIDATE_AMOUNT_UNAVAILABLE" &&
-        // BRK-019 slice 1: `ROW_DIFFERS_FROM_COMMITTED_RECORD` depends on
-        // `evidence.committedTradeValues`/`.committedDividendValues`/
-        // `.existingDividendEntries` -- like every other code excluded
-        // above, these are supplied ONLY by the page/refresh preview path
-        // (`app/import-actions.ts`'s `loadReview`), never by ready-service,
-        // security-verification-service, or commit's own revalidation, so
-        // this issue must not change `previewVersion` or those callers
-        // would compute a different hash than the page rendered. The
-        // OWNER-VISIBLE blocking behaviour is unaffected -- `preview.ready`
-        // (the un-hashed struct) still reflects it wherever this evidence
-        // IS supplied; `db/repositories/import-commit.ts`'s own
-        // independent, live commit-time check (this task) is the
-        // authoritative backstop that never depends on this hash.
-        issue.code !== "ROW_DIFFERS_FROM_COMMITTED_RECORD",
-    ),
+    issues: hashedIssues,
+    ready: !hashedIssues.some((issue) => issue.severity === "error"),
+    counts: {
+      ...preview.counts,
+      unresolved: Math.max(
+        0,
+        preview.counts.unresolved - removedErrorIssueCount,
+      ),
+    },
   };
   const canonicalEvidence = {
     batch: evidence.batch,

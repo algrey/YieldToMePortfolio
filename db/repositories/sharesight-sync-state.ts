@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { createConditionalAuditInsertStatement } from "./audit.ts";
 import type { SqlClient, SqlStatement } from "./sql-client.ts";
+// ROUND 3 (F-a): see `loadCommittedSharesightRowValues`'s payout query for
+// why the committed cash/franking totals must be DERIVED, never read
+// verbatim.
+import { safeComputeDividendCashTotal } from "../../domain/imports/reconciliation.ts";
 
 // BRK-004: minimal owner-scoped repository for the Sharesight sync cursor
 // (`sharesight_sync_state` -- see `db/schema.ts`'s header comment on that
@@ -681,15 +685,35 @@ export async function loadCommittedSharesightRowValues(
         AND status <> 'reversed'`,
     [userId, portfolioId],
   );
+  // ROUND 3 (F-a): the two totals columns are DERIVED through
+  // `safeComputeDividendCashTotal`, never mapped verbatim.
+  // `dividend_manual_records` stores a dividend in exactly one of two modes
+  // (DB CHECK invariant): totals-mode populates
+  // `total_cash_decimal`/`total_franking_decimal` and leaves the three
+  // per-share columns NULL, per-share-mode does the reverse. Reading the
+  // totals columns verbatim therefore yields `null` -- "no value" -- for a
+  // per-share-mode record, which `dividendValueDifferences` would report as a
+  // changed cash total against any real incoming amount (the exact B2 defect
+  // corrected in `app/import-actions.ts` and `db/repositories/import-commit.ts`
+  // last round). Every row this query returns is Sharesight-sourced and so
+  // totals-mode today, which is why the verbatim read was not yet
+  // observable; deriving here removes the dependence on that coincidence
+  // rather than pinning it, and is a no-op for a totals-mode row (the helper
+  // returns `totalCashDecimal` unchanged when it is present).
   const payoutRows = await client.all<{
     source_reference: string;
     total_cash_decimal: string | null;
     total_franking_decimal: string | null;
+    shares_decimal: string | null;
+    dividend_per_share_decimal: string | null;
+    franking_credit_per_share_decimal: string | null;
     payment_date: string | null;
     fx_rate_to_portfolio_decimal: string | null;
     currency_code: string | null;
   }>(
     `SELECT source_reference, total_cash_decimal, total_franking_decimal,
+            shares_decimal, dividend_per_share_decimal,
+            franking_credit_per_share_decimal,
             payment_date, fx_rate_to_portfolio_decimal, currency_code
        FROM dividend_manual_records
       WHERE user_id = ? AND portfolio_id = ?
@@ -714,8 +738,16 @@ export async function loadCommittedSharesightRowValues(
       payoutRows.map((row) => [
         row.source_reference,
         {
-          cashTotalDecimal: row.total_cash_decimal,
-          totalFrankingDecimal: row.total_franking_decimal,
+          cashTotalDecimal: safeComputeDividendCashTotal({
+            totalCashDecimal: row.total_cash_decimal,
+            sharesDecimal: row.shares_decimal,
+            dividendPerShareDecimal: row.dividend_per_share_decimal,
+          }),
+          totalFrankingDecimal: safeComputeDividendCashTotal({
+            totalCashDecimal: row.total_franking_decimal,
+            sharesDecimal: row.shares_decimal,
+            dividendPerShareDecimal: row.franking_credit_per_share_decimal,
+          }),
           paymentDate: row.payment_date,
           fxRateToPortfolioDecimal: row.fx_rate_to_portfolio_decimal,
           currencyCode: row.currency_code,

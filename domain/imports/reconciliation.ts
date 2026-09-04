@@ -1447,9 +1447,35 @@ export function createImportReconciliationPreview(
       });
     }
 
+    // BRK-019 slice 1 ROUND 3 (B2, BLOCKING): `ROW_DIFFERS_FROM_COMMITTED_
+    // RECORD` is the ONE error code deliberately excluded from this gate.
+    // `resolvedTargets` answers "which portfolio/security/FX direction did
+    // this row RESOLVE to" -- an identity/mapping question. This issue says
+    // nothing about resolution: the row's target is fully resolved (every
+    // unresolved-security and unresolved-portfolio path above already
+    // `continue`d), it is the row's own recorded VALUE that differs from an
+    // already-committed record under the same identity. Two concrete
+    // reasons this must not drop the row from `resolvedTargets`:
+    //   1. This issue is derived ONLY from the page/refresh preview path's
+    //      own evidence (`committedTradeValues`/`committedDividendValues`/
+    //      `existingDividendEntries`) and is excluded from `previewVersion`
+    //      by `domain/imports/review.ts` for exactly that reason. If it
+    //      still moved `resolvedTargets`, the page and the evidence-blind
+    //      ready/exclusion/commit-revalidation callers would keep hashing
+    //      differently and every `POST .../exclusions` and `.../ready` on an
+    //      affected batch would 409 "stale" -- making the issue's own
+    //      advertised remedy ("Skip this row") unusable (reviewer repro,
+    //      round 2).
+    //   2. Blocking is `preview.ready`'s job (this issue is error-severity,
+    //      so `ready` is false while it stands) plus commit's own live
+    //      fail-closed skip; a missing `resolvedTarget` was never the
+    //      mechanism protecting this row, and it never reaches an insert.
     if (
       !issues.some(
-        (issue) => issue.rowId === row.id && issue.severity === "error",
+        (issue) =>
+          issue.rowId === row.id &&
+          issue.severity === "error" &&
+          issue.code !== "ROW_DIFFERS_FROM_COMMITTED_RECORD",
       )
     ) {
       resolvedTargets[row.id] = {

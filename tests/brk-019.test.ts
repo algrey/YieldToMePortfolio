@@ -381,7 +381,13 @@ async function loadFullPreview(
   client: SqlClient,
   userId: string,
   batchId: string,
-): Promise<{ issues: readonly ImportReconciliationIssue[]; ready: boolean }> {
+): Promise<{
+  issues: readonly ImportReconciliationIssue[];
+  ready: boolean;
+  // ROUND 3 (B2): the hash the PAGE renders and the owner's browser sends
+  // back as `expectedPreviewVersion` on every exclusion/ready POST.
+  previewVersion: string;
+}> {
   const staging = createOwnedImportStagingRepository(client);
   const batch = await staging.get(userId, batchId);
   if (!batch) throw new Error("expected batch to exist");
@@ -433,7 +439,11 @@ async function loadFullPreview(
     committedTradeValues: evidence.committedTradeValues,
     committedDividendValues: evidence.committedDividendValues,
   });
-  return { issues: review.preview.issues, ready: review.preview.ready };
+  return {
+    issues: review.preview.issues,
+    ready: review.preview.ready,
+    previewVersion: review.previewVersion,
+  };
 }
 
 /** CORRECTION ROUND (B1b): the preview version/readiness computation the
@@ -1942,7 +1952,15 @@ test("BRK-019 (B2): an identical PER-SHARE CSV dividend re-upload never reports 
   );
 });
 
-test("BRK-019 (B2): a PER-SHARE CSV dividend re-upload with a CHANGED per-share amount is still caught as exactly one needs_decision row", async () => {
+// ROUND 3 (F-c): explicitly labelled a GUARD, not a regression pin. It
+// passes against the pre-B2-fix source too: with the committed side read
+// verbatim, a per-share-mode record's `total_cash_decimal` is NULL, which
+// `dividendValueDifferences` reports as a "cash total" difference -- so the
+// pre-fix code reached the same needs_decision outcome here by the wrong
+// route. Its regression-pinning sibling is the identical-re-upload test
+// directly above (which DOES fail pre-fix); this one exists so that fix
+// cannot be over-applied into never escalating a genuine per-share change.
+test("BRK-019 (B2) GUARD (passes pre-fix -- see note above): a PER-SHARE CSV dividend re-upload with a CHANGED per-share amount is still caught as exactly one needs_decision row", async () => {
   const database = await migratedDatabase();
   const client = createSqliteSqlClient(database);
 
@@ -2311,4 +2329,456 @@ test("BRK-019 CORRECTION ROUND (B1a): commit's own near-match backstop skips a p
     [second.batchId],
   );
   assert.equal(issues.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// ROUND 3 (B1, BLOCKING): commit's near-match backstop must be scoped to the
+// PRE-BATCH evidence snapshot -- a row THIS batch itself wrote in an earlier
+// chunk is never a "correction" candidate. The repository's chunk size is
+// fixed at 2, so the two payouts below (the 4th and 5th rows of a five-row
+// batch) straddle a chunk boundary: pre-fix, the first committed and the
+// second was then silently skipped as a paid-date correction to it,
+// permanently losing a real distribution. Regression pin -- FAILS against
+// fa51b2c (4 records survive, not 5).
+// ---------------------------------------------------------------------------
+
+test("BRK-019 ROUND 3 (B1): two LEGITIMATE same-amount distributions three days apart, straddling a commit chunk inside ONE batch, both commit -- neither is mistaken for a paid-date correction to the other", async () => {
+  const database = await migratedDatabase();
+  const { client, sharesightClient } = await linkedFixture(
+    database,
+    "user-a",
+    "portfolio-a",
+    "sp-1",
+    {
+      portfolios: [fakePortfolio()],
+      trades: [],
+      // Five payout rows (odd count) so the colliding pair lands in
+      // DIFFERENT chunks. The three leading rows are deliberately far apart
+      // in date and distinct in amount, so only the last two can ever
+      // near-match each other.
+      payouts: [
+        fakePayout({
+          id: "payout-r3-pad-1",
+          paidOnDate: "2026-01-05",
+          amountDecimal: "1.11",
+          frankingCreditsDecimal: "0.11",
+        }),
+        fakePayout({
+          id: "payout-r3-pad-2",
+          paidOnDate: "2026-03-05",
+          amountDecimal: "2.22",
+          frankingCreditsDecimal: "0.22",
+        }),
+        fakePayout({
+          id: "payout-r3-pad-3",
+          paidOnDate: "2026-05-05",
+          amountDecimal: "3.33",
+          frankingCreditsDecimal: "0.33",
+        }),
+        // The owner's confirmed real-world shape: two genuine distributions
+        // on ONE security, three days apart, at the identical cash total.
+        fakePayout({
+          id: "payout-r3-real-a",
+          paidOnDate: "2026-08-05",
+          amountDecimal: "2.50",
+          frankingCreditsDecimal: "1.07",
+        }),
+        fakePayout({
+          id: "payout-r3-real-b",
+          paidOnDate: "2026-08-08",
+          amountDecimal: "2.50",
+          frankingCreditsDecimal: "1.07",
+        }),
+      ],
+    },
+  );
+  const synced = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: { enabled: true, client: sharesightClient } },
+  );
+  assert.equal(synced.ok, true);
+  if (!synced.ok) return;
+  const stagedRowCount = await client.all<{ count: number }>(
+    `SELECT COUNT(*) AS count FROM import_rows WHERE batch_id = ? AND user_id = 'user-a'`,
+    [synced.batchId],
+  );
+  assert.equal(
+    stagedRowCount[0]!.count,
+    5,
+    "the pair must straddle a chunk boundary -- an even row count would put both in one chunk and hide the defect",
+  );
+  const batch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    synced.batchId,
+  );
+  const commitResult = await commitBatchAndReturnResult(
+    client,
+    "user-a",
+    synced.batchId,
+    "brk-019-r3-b1-chunk-commit",
+    batch!.version,
+  );
+  assert.equal(commitResult.committedRows, 5);
+  assert.equal(commitResult.skippedRows, 0);
+  assert.equal(
+    commitResult.needsDecisionRows,
+    0,
+    "neither legitimate distribution may be reported as a correction to the other",
+  );
+
+  const records = await client.all<{ payment_date: string }>(
+    `SELECT payment_date FROM dividend_manual_records
+      WHERE user_id = 'user-a' AND portfolio_id = 'portfolio-a'
+        AND portfolio_security_id = 'membership-a'
+        AND superseded_by_record_id IS NULL
+      ORDER BY payment_date ASC`,
+    [],
+  );
+  assert.deepEqual(
+    records.map((record) => record.payment_date),
+    ["2026-01-05", "2026-03-05", "2026-05-05", "2026-08-05", "2026-08-08"],
+    "every payout in the batch must land -- a distribution must never be lost because of where a commit chunk happened to fall",
+  );
+  const issues = await client.all<{ id: string }>(
+    `SELECT id FROM import_issues
+      WHERE batch_id = ? AND code = 'ROW_DIFFERS_FROM_COMMITTED_RECORD'`,
+    [synced.batchId],
+  );
+  assert.equal(issues.length, 0);
+});
+
+test("BRK-019 ROUND 3 (B1): a GENUINE paid-date correction -- the same distribution re-synced in a LATER batch -- is still skipped, and says so in near-match wording, never the exact-identity wording", async () => {
+  const database = await migratedDatabase();
+  const { client, sharesightClient: firstClient } = await linkedFixture(
+    database,
+    "user-a",
+    "portfolio-a",
+    "sp-1",
+    {
+      portfolios: [fakePortfolio()],
+      trades: [],
+      payouts: [
+        fakePayout({
+          id: "payout-r3-genuine",
+          paidOnDate: "2026-08-05",
+          amountDecimal: "2.50",
+          frankingCreditsDecimal: "1.07",
+        }),
+      ],
+    },
+  );
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: { enabled: true, client: firstClient } },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  const firstBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    first.batchId,
+  );
+  await commitBatchAndReturnResult(
+    client,
+    "user-a",
+    first.batchId,
+    "brk-019-r3-genuine-commit-1",
+    firstBatch!.version,
+  );
+
+  const correctedClient = fakeSharesightClient({
+    trades: [],
+    payouts: [
+      fakePayout({
+        id: "payout-r3-genuine",
+        paidOnDate: "2026-08-08",
+        amountDecimal: "2.50",
+        frankingCreditsDecimal: "1.07",
+      }),
+    ],
+  });
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    { integration: { enabled: true, client: correctedClient } },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  // Force `ready` at the DB level so this exercises commit's OWN backstop
+  // (the ready-time check would otherwise block first). The existing record
+  // lives in an EARLIER batch, so the round-3 `import_batch_id` predicate
+  // leaves it fully in scope.
+  database.exec(
+    `UPDATE import_batches SET status = 'ready' WHERE id = '${second.batchId}'`,
+  );
+  const secondBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    second.batchId,
+  );
+  const commitRepo = createOwnedImportCommitRepository(client);
+  const validated = await commitRepo.validate("user-a", second.batchId);
+  assert.equal(validated.ok, true);
+  if (!validated.ok) return;
+  const commitInput: ImportCommitInput = {
+    expectedVersion: secondBatch!.version,
+    expectedPreviewVersion: validated.previewVersion,
+    idempotencyKey: "brk-019-r3-genuine-commit-2",
+    confirmation: true,
+    requestId: "brk-019-r3-genuine-commit-2-request",
+  };
+  let commitResult = await commitRepo.commit(
+    "user-a",
+    second.batchId,
+    commitInput,
+  );
+  for (
+    let attempt = 0;
+    attempt < 10 && (!commitResult.ok || commitResult.status !== "committed");
+    attempt += 1
+  ) {
+    assert.equal(commitResult.ok, true);
+    commitResult = await commitRepo.commit(
+      "user-a",
+      second.batchId,
+      commitInput,
+    );
+  }
+  assert.equal(commitResult.ok, true);
+  if (!commitResult.ok) return;
+  assert.equal(commitResult.committedRows, 0);
+  assert.equal(commitResult.skippedRows, 1);
+  assert.equal(commitResult.needsDecisionRows, 1);
+
+  const records = await client.all<{ payment_date: string }>(
+    `SELECT payment_date FROM dividend_manual_records
+      WHERE user_id = 'user-a' AND portfolio_id = 'portfolio-a'
+        AND portfolio_security_id = 'membership-a'
+        AND superseded_by_record_id IS NULL`,
+    [],
+  );
+  assert.equal(
+    records.length,
+    1,
+    "a genuine paid-date correction must still never double-write",
+  );
+
+  const issues = await client.all<{ message: string }>(
+    `SELECT message FROM import_issues
+      WHERE batch_id = ? AND code = 'ROW_DIFFERS_FROM_COMMITTED_RECORD'`,
+    [second.batchId],
+  );
+  assert.equal(issues.length, 1);
+  // ROUND 3 (B1): the near-match skip must NOT reuse the exact-identity
+  // wording -- a paid-date correction mints a brand new identity key, so
+  // "this row's identity already exists on the ledger" would be false.
+  assert.match(issues[0]!.message, /looks like a paid-date correction/);
+  assert.doesNotMatch(issues[0]!.message, /identity already exists/);
+});
+
+// ---------------------------------------------------------------------------
+// ROUND 3 (B2, BLOCKING): `previewVersion` must be IDENTICAL between the
+// page's evidence-complete preview and the evidence-blind loader every
+// ready/exclusion/commit-revalidation path uses. Pre-fix, filtering
+// `ROW_DIFFERS_FROM_COMMITTED_RECORD` out of the hashed issue list left its
+// effects on `preview.ready`, `counts.unresolved`, and `resolvedTargets`
+// riding into the hash, so an affected batch 409'd "This preview is stale"
+// on every exclusion and ready POST -- making the issue's own advertised
+// remedy ("Skip this row") unusable. Regression pin -- FAILS against
+// fa51b2c.
+// ---------------------------------------------------------------------------
+
+test("BRK-019 ROUND 3 (B2): an EXACT-match committed-record difference hashes identically on the page, in the ready/exclusion loader, and in commit's own revalidation -- and the page's own previewVersion drives exclusion and ready with no 409", async () => {
+  const database = await migratedDatabase();
+  const client = createSqliteSqlClient(database);
+
+  stageCsvDividendBatch(
+    database,
+    "div-r3-b2-batch-1",
+    "div-r3-b2-row-1",
+    "div-r3-b2-fingerprint-shared",
+    "0.50",
+    "2026-08-05",
+  );
+  await commitBatchAndReturnResult(
+    client,
+    "user-a",
+    "div-r3-b2-batch-1",
+    "div-r3-b2-commit-1",
+    1,
+  );
+  stageCsvDividendBatch(
+    database,
+    "div-r3-b2-batch-2",
+    "div-r3-b2-row-2",
+    "div-r3-b2-fingerprint-shared",
+    "0.60",
+    "2026-08-05",
+  );
+
+  const page = await loadFullPreview(client, "user-a", "div-r3-b2-batch-2");
+  assert.equal(
+    page.ready,
+    false,
+    "the page must still SHOW the block -- only the HASH is evidence-invariant",
+  );
+  onlyIssue(page.issues, "ROW_DIFFERS_FROM_COMMITTED_RECORD");
+  const loaderVersion = await currentPreviewVersion(
+    client,
+    "user-a",
+    "div-r3-b2-batch-2",
+  );
+  assert.equal(
+    page.previewVersion,
+    loaderVersion,
+    "the page's previewVersion must equal the ready/exclusion loader's, or every Skip/Accept 409s as stale",
+  );
+  const validated = await createOwnedImportCommitRepository(client).validate(
+    "user-a",
+    "div-r3-b2-batch-2",
+  );
+  assert.equal(validated.ok, true);
+  if (!validated.ok) return;
+  assert.equal(
+    validated.previewVersion,
+    loaderVersion,
+    "commit's own revalidation must agree with the shared ready loader (F-b)",
+  );
+
+  // The remedy the issue's own message points at, driven by exactly the
+  // version the page rendered.
+  const excluded = await setImportRowExclusionWithContext(
+    { client, userId: "user-a", requestId: "div-r3-b2-exclude" },
+    "div-r3-b2-batch-2",
+    {
+      action: "exclude",
+      target: { kind: "rowIds", rowIds: ["div-r3-b2-row-2"] },
+      expectedVersion: 1,
+      expectedPreviewVersion: page.previewVersion,
+    },
+  );
+  assert.equal(
+    excluded.ok,
+    true,
+    "excluding the row from the page's own preview must not 409 as stale",
+  );
+
+  const afterExclude = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    "div-r3-b2-batch-2",
+  );
+  const pageAfterExclude = await loadFullPreview(
+    client,
+    "user-a",
+    "div-r3-b2-batch-2",
+  );
+  const ready = await markImportReadyWithContext(
+    { client, userId: "user-a" },
+    "div-r3-b2-batch-2",
+    {
+      expectedVersion: afterExclude!.version,
+      expectedPreviewVersion: pageAfterExclude.previewVersion,
+    },
+  );
+  assert.equal(
+    ready.ok,
+    true,
+    "marking ready from the page's own preview version must not 409 either",
+  );
+});
+
+test("BRK-019 ROUND 3 (B2): the NEAR-match (paid-date correction) shape hashes identically on the page, in the ready/exclusion loader, and in commit's own revalidation", async () => {
+  const database = await migratedDatabase();
+  const { client, sharesightClient: firstClient } = await linkedFixture(
+    database,
+    "user-a",
+    "portfolio-a",
+    "sp-1",
+    {
+      portfolios: [fakePortfolio()],
+      trades: [],
+      payouts: [
+        fakePayout({
+          id: "payout-r3-b2-near",
+          paidOnDate: "2026-08-05",
+          amountDecimal: "2.50",
+          frankingCreditsDecimal: "1.07",
+        }),
+      ],
+    },
+  );
+  const first = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-1" },
+    "portfolio-a",
+    { integration: { enabled: true, client: firstClient } },
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  const firstBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    first.batchId,
+  );
+  await commitBatchAndReturnResult(
+    client,
+    "user-a",
+    first.batchId,
+    "brk-019-r3-b2-near-commit-1",
+    firstBatch!.version,
+  );
+
+  const correctedClient = fakeSharesightClient({
+    trades: [],
+    payouts: [
+      fakePayout({
+        id: "payout-r3-b2-near",
+        paidOnDate: "2026-08-08",
+        amountDecimal: "2.50",
+        frankingCreditsDecimal: "1.07",
+      }),
+    ],
+  });
+  const second = await runSharesightSyncWithContext(
+    { client, userId: "user-a", requestId: "sync-2" },
+    "portfolio-a",
+    { integration: { enabled: true, client: correctedClient } },
+  );
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+
+  const page = await loadFullPreview(client, "user-a", second.batchId);
+  assert.equal(page.ready, false);
+  const escalated = onlyIssue(page.issues, "ROW_DIFFERS_FROM_COMMITTED_RECORD");
+  const loaderVersion = await currentPreviewVersion(
+    client,
+    "user-a",
+    second.batchId,
+  );
+  assert.equal(page.previewVersion, loaderVersion);
+  const validated = await createOwnedImportCommitRepository(client).validate(
+    "user-a",
+    second.batchId,
+  );
+  assert.equal(validated.ok, true);
+  if (!validated.ok) return;
+  assert.equal(
+    validated.previewVersion,
+    loaderVersion,
+    "commit's own revalidation must agree with the shared ready loader on the near-match shape too (F-b)",
+  );
+
+  const secondBatch = await createOwnedImportStagingRepository(client).get(
+    "user-a",
+    second.batchId,
+  );
+  const excluded = await setImportRowExclusionWithContext(
+    { client, userId: "user-a", requestId: "brk-019-r3-b2-near-exclude" },
+    second.batchId,
+    {
+      action: "exclude",
+      target: { kind: "rowIds", rowIds: [escalated.rowId as string] },
+      expectedVersion: secondBatch!.version,
+      expectedPreviewVersion: page.previewVersion,
+    },
+  );
+  assert.equal(excluded.ok, true);
 });

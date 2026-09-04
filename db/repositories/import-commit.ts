@@ -365,6 +365,33 @@ function committedRecordDiffersIssueStatement(
   );
 }
 
+// ROUND 3 (B1): the NEAR-match skip's own message. The exact-identity
+// wording above ("This row's identity already exists on the ledger") is
+// factually wrong for this case -- a paid-date correction mints a BRAND NEW
+// identity key, so nothing with this row's identity is on the ledger at all;
+// what commit found is a DIFFERENT record it believes to be the same
+// distribution under an earlier paid date. Mirrors the near-match wording
+// `domain/imports/reconciliation.ts` already shows the owner at preview time
+// for the identical finding, re-tensed for the fact that the skip has now
+// actually happened.
+function nearMatchRecordDiffersIssueStatement(
+  userId: string,
+  batchId: string,
+  row: StagedRow,
+  differences: readonly CommittedRecordFieldDifference[],
+  createdAt: string,
+): SqlStatement {
+  const message = `This dividend looks like a paid-date correction to an existing Sharesight-sourced record for the same security and cash total: ${formatFieldDifferences(differences)}. Skipped at commit -- committing it as a new entry would have double-counted the distribution, so it was not accepted at either the old or the new date.`;
+  return rowDiffersFromCommittedRecordIssueStatement(
+    userId,
+    batchId,
+    row.id,
+    row.physicalRowNumber,
+    message,
+    createdAt,
+  );
+}
+
 function batchFromRow(row: Record<string, unknown>): BatchState {
   return {
     id: String(row.id),
@@ -1639,6 +1666,24 @@ export function createOwnedImportCommitRepository(
             // total matches within DIV-016C's tolerance -- the incoming row
             // itself may be from EITHER route (CSV or Sharesight), matching
             // the preview-side escalation's own scope.
+            //
+            // ROUND 3 (B1, BLOCKING): the candidate set additionally EXCLUDES
+            // anything THIS batch itself wrote (`import_batch_id <> batch.id`;
+            // `IS NULL` keeps manually-entered rows in scope), so it matches
+            // the PRE-BATCH evidence snapshot the preview-time escalation
+            // sees. `commit()` writes in chunks of at most
+            // `IMPORT_COMMIT_LIMITS.maxStatementsPerChunk` rows per
+            // invocation, so without this predicate a row committed by an
+            // EARLIER chunk of the SAME batch was visible here as an
+            // "existing" record: two LEGITIMATE distributions on one security,
+            // days apart at the same cash total (a shape confirmed to exist on
+            // this owner's own account -- see `docs/ARCHITECTURE.md`'s BRK-019
+            // decision entry) then silently lost the second one whenever the
+            // pair happened to straddle a chunk boundary, while committing
+            // both when it did not. Chunk-position-dependent financial
+            // outcomes are never acceptable; a genuine paid-date correction
+            // always lives in a DIFFERENT (earlier, already-committed) batch,
+            // so it is unaffected by this predicate and still caught.
             const incomingNormalizedForNearMatch = parseNormalized(
               row.normalizedFieldsJson,
             );
@@ -1674,12 +1719,14 @@ export function createOwnedImportCommitRepository(
                       AND portfolio_security_id = ?
                       AND source_reference LIKE 'import-fingerprint:sharesight-payout:%'
                       AND source_reference <> ?
+                      AND (import_batch_id IS NULL OR import_batch_id <> ?)
                       AND superseded_by_record_id IS NULL`,
                   [
                     userId,
                     target.portfolioId,
                     target.portfolioSecurityId,
                     resolved.sourceReference,
+                    batch.id,
                   ],
                 );
                 const correctedRecord = nearCandidates.find((candidate) => {
@@ -1749,7 +1796,7 @@ export function createOwnedImportCommitRepository(
                     },
                   );
                   statements.push(
-                    committedRecordDiffersIssueStatement(
+                    nearMatchRecordDiffersIssueStatement(
                       userId,
                       batch.id,
                       row,
