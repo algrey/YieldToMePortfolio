@@ -412,8 +412,11 @@ test("FY-001C: loadAuthenticatedWorkspace resolves nowInstant once server-side a
 // --- prototype details tabs: label-only, no fabricated data -----------------
 
 test("FY-001C: the details prototype inserts FY and Last FY after YTD without changing how periods render", async () => {
+  // PRF-014 step 2b: the prototype `DetailsScreen` moved from
+  // portfolio-shell.tsx to preview-shell.tsx -- see that file's own header
+  // comment.
   const source = await readFile(
-    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    new URL("../app/components/preview-shell.tsx", import.meta.url),
     "utf8",
   );
   assert.match(

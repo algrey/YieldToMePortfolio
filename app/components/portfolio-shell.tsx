@@ -13,11 +13,7 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 // either `ownedWorkspace` or `portfolioPrototypesOverride`, never neither.
 // Only TYPES are imported here (erased at build time); the preview routes
 // import the runtime values themselves and pass them down as props.
-import {
-  type Holding,
-  type PortfolioPrototype,
-  type Tone,
-} from "../prototype-data";
+import { type PortfolioPrototype, type Tone } from "../prototype-data";
 import {
   quoteDisplayState,
   quoteExplanation,
@@ -82,7 +78,6 @@ import { type PortfolioSection } from "../portfolio-sections";
 // already-exported DTO types keeps every existing `from "./portfolio-shell"`
 // importer (tests, portfolio-value-chart.tsx) working unchanged.
 import {
-  compactAmount,
   financialYearWindowHelperText,
   FY_MONTH_ABBREVIATIONS,
   FY_MONTH_NAMES,
@@ -93,18 +88,12 @@ import {
   type OwnedPortfolioValueHistoryPoint,
   type OwnedWorkspace,
   ownedNoPortfolioHref,
-  type OverviewRow,
   type Direction,
-  type HoldingSort,
   type OpenMenu,
-  overviewRowFromPortfolio,
   primaryPortfolioSections,
-  prototypeStateLabels,
   type QuoteSort,
-  sectionHref,
   sortByExactKey,
   type ViewState,
-  wholeDollarAmount,
 } from "./portfolio-shell-model";
 
 // Type-only re-export for existing callers (e.g. the holding-detail route)
@@ -146,7 +135,9 @@ const DIALOG_FETCH_TIMEOUT_MS = 15_000;
 const DIALOG_TIMEOUT_MESSAGE =
   "The request timed out. It may still have gone through — check before retrying.";
 
-function ToneValue({
+// PRF-014 step 2b: exported -- shared with preview-shell.tsx (see that
+// file's own header comment for why it stays here).
+export function ToneValue({
   children,
   tone,
   className = "",
@@ -158,39 +149,13 @@ function ToneValue({
   return <span className={`tone-${tone} ${className}`}>{children}</span>;
 }
 
-function StatusBanner({
-  viewState,
-  onReset,
-}: {
-  viewState: ViewState;
-  onReset: () => void;
-}) {
-  if (viewState === "populated" || viewState === "empty") {
-    return null;
-  }
-
-  const isPartial = viewState === "partial";
-  return (
-    <div className={`status-banner ${isPartial ? "warning" : "error"}`}>
-      <span className="status-symbol" aria-hidden="true">
-        {isPartial ? "!" : "×"}
-      </span>
-      <p>
-        <strong>{isPartial ? "Known value only" : "Prices unavailable"}</strong>
-        <span>
-          {isPartial
-            ? "One holding is excluded because its current price is unavailable."
-            : "Last known values are retained. Refresh is temporarily unavailable."}
-        </span>
-      </p>
-      <button type="button" onClick={onReset}>
-        Dismiss
-      </button>
-    </div>
-  );
-}
-
-function EmptyState({
+// PRF-014 step 2b: `EmptyState` stays here (exported) rather than moving to
+// `preview-shell.tsx` -- it is shared with the OWNED screens' own empty
+// states (OwnedHoldingsScreen, OwnedOverviewScreen, OwnedWorkspaceScreen),
+// not preview-only. `StatusBanner` moved to `preview-shell.tsx`: it was
+// reachable from exactly one call site (the old preview-mode
+// `PortfolioShell` render), never from any owned screen.
+export function EmptyState({
   title = "No holdings yet",
   message = "Add a quote or import transactions to start this portfolio.",
   action,
@@ -2312,67 +2277,12 @@ function OwnedOverviewScreen({
   );
 }
 
-function PortfolioSummary({
-  portfolio,
-  partial,
-}: {
-  portfolio: PortfolioPrototype;
-  partial: boolean;
-}) {
-  const summary = partial
-    ? {
-        value: "A$1,143,903.50",
-        cost: "A$865,743.12",
-        dailyAmount: "+A$2,934.99",
-        dailyPercent: "+0.26%",
-        gainAmount: "+A$278,496.60",
-        gainPercent: "+32.17%",
-        allTimeAmount: "+A$293,496.60",
-        allTimePercent: "+33.90%",
-      }
-    : portfolio;
-
-  return (
-    <aside className="portfolio-summary" aria-label="Portfolio totals">
-      <div className="summary-primary">
-        <span className="summary-label">
-          {partial ? "Known value" : "Unrealised"}
-        </span>
-        <strong>{wholeDollarAmount(summary.value)}</strong>
-        <ToneValue tone="positive">
-          {compactAmount(wholeDollarAmount(summary.dailyAmount))}
-        </ToneValue>
-        <ToneValue tone="positive">
-          {compactAmount(wholeDollarAmount(summary.gainAmount))}
-        </ToneValue>
-      </div>
-      <div className="summary-secondary">
-        <span aria-hidden="true" />
-        <span>{wholeDollarAmount(summary.cost)}</span>
-        <ToneValue tone="positive">{summary.dailyPercent}</ToneValue>
-        <ToneValue tone="positive">{summary.gainPercent}</ToneValue>
-      </div>
-      <div className="summary-gain-lines">
-        <p>
-          <span>Realised</span>
-          <ToneValue tone="positive">
-            {wholeDollarAmount(portfolio.realisedAmount)} (
-            {portfolio.realisedPercent})
-          </ToneValue>
-        </p>
-        <p>
-          <span>All-Time</span>
-          <ToneValue tone="positive">
-            {wholeDollarAmount(summary.allTimeAmount)} ({summary.allTimePercent}
-            )
-          </ToneValue>
-        </p>
-      </div>
-    </aside>
-  );
-}
-
-function SortButton<T extends string>({
+// PRF-014 step 2b: `PortfolioSummary` moved to `preview-shell.tsx` -- its
+// only caller was the preview-mode `HoldingsScreen`, also moved there.
+//
+// PRF-014 step 2b: exported (rather than moved) -- shared with the owned
+// holdings/watchlist sorters as well as preview-shell.tsx's HoldingsScreen.
+export function SortButton<T extends string>({
   label,
   sortKey,
   activeKey,
@@ -2407,328 +2317,9 @@ function SortButton<T extends string>({
   );
 }
 
-function OverviewScreen({
-  portfolio,
-  rows,
-  historyBars,
-  viewState,
-  onOpenPortfolio,
-}: {
-  portfolio?: PortfolioPrototype;
-  rows: readonly OverviewRow[];
-  /** PRF-014 step 1: caller-supplied demo chart bars (previously a direct
-   * module-level import of `../prototype-data`'s `historyBars`). */
-  historyBars: readonly string[];
-  viewState: ViewState;
-  onOpenPortfolio: (id: string) => void;
-}) {
-  if (viewState === "empty") {
-    return (
-      <EmptyState
-        title="No portfolios yet"
-        message="Create a portfolio or preview an import. No financial actions are connected."
-      />
-    );
-  }
-
-  return (
-    <div className="overview-screen">
-      <section className="overview-hero" aria-labelledby="overview-title">
-        <div>
-          <p className="eyebrow">
-            {portfolio
-              ? `${portfolio.name} · ${portfolio.homeCurrency}`
-              : "All portfolios · AUD"}
-          </p>
-          <h1 id="overview-title">
-            {portfolio ? portfolio.value : "A$1,695,575.90"}
-          </h1>
-          <p className="overview-movement">
-            {portfolio ? (
-              <>
-                <ToneValue
-                  tone={
-                    portfolio.dailyAmount.startsWith("−")
-                      ? "negative"
-                      : "positive"
-                  }
-                >
-                  {portfolio.dailyAmount.startsWith("−")
-                    ? `↓ ${portfolio.dailyAmount}`
-                    : `↑ ${portfolio.dailyAmount}`}
-                </ToneValue>
-                <span>today · {portfolio.dailyPercent}</span>
-              </>
-            ) : (
-              <>
-                <ToneValue tone="positive">↑ A$5,359.64</ToneValue>
-                <span>today · +0.32%</span>
-              </>
-            )}
-          </p>
-        </div>
-        <dl className="overview-kpis">
-          <div>
-            <dt>Invested</dt>
-            <dd>{portfolio ? portfolio.cost : "A$1,592,846.40"}</dd>
-          </div>
-          <div>
-            <dt>Cash</dt>
-            <dd>{portfolio ? portfolio.cash : "A$103,379.45"}</dd>
-          </div>
-          <div>
-            <dt>Unrealised</dt>
-            <dd
-              className={
-                portfolio?.gainAmount.startsWith("−")
-                  ? "tone-negative"
-                  : "tone-positive"
-              }
-            >
-              {portfolio ? portfolio.gainAmount : "+A$339,465.78"}
-            </dd>
-          </div>
-        </dl>
-      </section>
-
-      <section className="history-panel" aria-labelledby="history-title">
-        <div className="section-heading compact">
-          <div>
-            <p className="eyebrow">Portfolio history</p>
-            <h2 id="history-title">Value over 12 months</h2>
-          </div>
-          <ToneValue tone="positive">+18.42%</ToneValue>
-        </div>
-        <div
-          className="history-bars"
-          role="img"
-          aria-label="Portfolio value rose from approximately A$1.37 million to A$1.70 million over twelve months, with several short declines."
-        >
-          {historyBars.map((height, index) => (
-            <span
-              key={`${height}-${index}`}
-              style={{ "--bar-height": height } as React.CSSProperties}
-            />
-          ))}
-        </div>
-        <div className="chart-axis" aria-hidden="true">
-          <span>Aug</span>
-          <span>Jan</span>
-          <span>Jul</span>
-        </div>
-      </section>
-
-      <section className="portfolio-list" aria-labelledby="portfolios-title">
-        <div className="section-heading compact">
-          <div>
-            <p className="eyebrow">Breakdown</p>
-            <h2 id="portfolios-title">Portfolios</h2>
-          </div>
-          <span className="muted-copy">2 invested · 1 watchlist</span>
-        </div>
-        <div className="overview-grid table-heading" aria-hidden="true">
-          <span>Name</span>
-          <span>Value / cost</span>
-          <span>Daily</span>
-          <span>Total</span>
-        </div>
-        {rows.map((row) => (
-          <button
-            className="portfolio-row overview-grid"
-            type="button"
-            key={row.id}
-            onClick={() => onOpenPortfolio(row.id)}
-          >
-            <span className="row-primary">{row.name}</span>
-            <span className="row-primary numeric">{row.value}</span>
-            <ToneValue tone={row.tone} className="row-primary numeric">
-              {compactAmount(row.daily)}
-            </ToneValue>
-            <ToneValue tone={row.tone} className="row-primary numeric">
-              {compactAmount(row.total)}
-            </ToneValue>
-            <span className="row-secondary">{row.holdings}</span>
-            <span className="row-secondary numeric">{row.cost}</span>
-            <ToneValue tone={row.tone} className="row-secondary numeric">
-              {row.dailyPercent}
-            </ToneValue>
-            <ToneValue tone={row.tone} className="row-secondary numeric">
-              {row.totalPercent}
-            </ToneValue>
-          </button>
-        ))}
-      </section>
-    </div>
-  );
-}
-
-function HoldingsScreen({
-  portfolio,
-  viewState,
-  onSelectHolding,
-  holdingDetailHref,
-}: {
-  portfolio: PortfolioPrototype;
-  viewState: ViewState;
-  onSelectHolding: (holding: Holding, unavailable: boolean) => void;
-  holdingDetailHref?: (symbol: string) => string;
-}) {
-  const [sortKey, setSortKey] = useState<HoldingSort>("daily");
-  const [direction, setDirection] = useState<Direction>("descending");
-
-  const rows = useMemo(() => {
-    if (sortKey === "ticker") {
-      return [...portfolio.holdings].sort((left, right) => {
-        const compared = left.symbol.localeCompare(right.symbol);
-        return direction === "ascending" ? compared : -compared;
-      });
-    }
-    return sortByExactKey(
-      portfolio.holdings,
-      (holding) => holding.sort[sortKey],
-      direction,
-    );
-  }, [direction, portfolio.holdings, sortKey]);
-
-  function handleSort(nextKey: HoldingSort) {
-    if (nextKey === sortKey) {
-      setDirection((current) =>
-        current === "ascending" ? "descending" : "ascending",
-      );
-      return;
-    }
-    setSortKey(nextKey);
-    setDirection(nextKey === "ticker" ? "ascending" : "descending");
-  }
-
-  if (viewState === "empty" || rows.length === 0) {
-    return <EmptyState />;
-  }
-
-  return (
-    <div className="holdings-layout">
-      <section className="holdings-list" aria-label="Portfolio holdings">
-        <div className="holdings-grid table-heading sticky-heading">
-          <SortButton
-            label="Ticker"
-            sortKey="ticker"
-            activeKey={sortKey}
-            direction={direction}
-            onSort={handleSort}
-          />
-          <SortButton
-            label="Value / cost"
-            sortKey="value"
-            activeKey={sortKey}
-            direction={direction}
-            onSort={handleSort}
-          />
-          <SortButton
-            label="Daily"
-            sortKey="daily"
-            activeKey={sortKey}
-            direction={direction}
-            onSort={handleSort}
-          />
-          <SortButton
-            label="Total"
-            sortKey="total"
-            activeKey={sortKey}
-            direction={direction}
-            onSort={handleSort}
-          />
-        </div>
-        <div className="holding-rows">
-          {rows.map((holding, index) => {
-            const priceUnavailable =
-              viewState === "partial" && index === rows.length - 1;
-            const rowContent = (
-              <>
-                <span className="row-primary symbol">{holding.symbol}</span>
-                <span className="row-primary numeric">
-                  {priceUnavailable ? "—" : holding.value}
-                </span>
-                {priceUnavailable ? (
-                  <span className="row-primary numeric unavailable">
-                    unavailable
-                  </span>
-                ) : (
-                  <ToneValue
-                    tone={holding.dailyTone}
-                    className="row-primary numeric"
-                  >
-                    {compactAmount(holding.dailyAmount)}
-                  </ToneValue>
-                )}
-                {priceUnavailable ? (
-                  <span className="row-primary numeric unavailable">—</span>
-                ) : (
-                  <ToneValue
-                    tone={holding.totalTone}
-                    className="row-primary numeric"
-                  >
-                    {compactAmount(holding.totalAmount)}
-                  </ToneValue>
-                )}
-                <span className="row-secondary">{holding.price}</span>
-                <span className="row-secondary numeric">{holding.cost}</span>
-                {priceUnavailable ? (
-                  <span className="row-secondary numeric unavailable">—</span>
-                ) : (
-                  <ToneValue
-                    tone={holding.dailyTone}
-                    className="row-secondary numeric"
-                  >
-                    {holding.dailyPercent}
-                  </ToneValue>
-                )}
-                {priceUnavailable ? (
-                  <span className="row-secondary numeric unavailable">—</span>
-                ) : (
-                  <ToneValue
-                    tone={holding.totalTone}
-                    className="row-secondary numeric"
-                  >
-                    {holding.totalPercent}
-                  </ToneValue>
-                )}
-                <span className="row-tertiary">{holding.quantityLine}</span>
-                <span className="desktop-only holding-name">
-                  {holding.name} · {holding.exchange} · {holding.currency}
-                </span>
-              </>
-            );
-            const detailHref = holdingDetailHref?.(holding.symbol);
-            return detailHref ? (
-              <Link
-                className={`holding-row holdings-grid${priceUnavailable ? " unavailable-row" : ""}`}
-                href={detailHref}
-                key={holding.symbol}
-                aria-label={`${holding.symbol}, ${holding.name}, open details`}
-              >
-                {rowContent}
-              </Link>
-            ) : (
-              <button
-                className={`holding-row holdings-grid${priceUnavailable ? " unavailable-row" : ""}`}
-                type="button"
-                key={holding.symbol}
-                onClick={() => onSelectHolding(holding, priceUnavailable)}
-                aria-label={`${holding.symbol}, ${holding.name}, open details`}
-              >
-                {rowContent}
-              </button>
-            );
-          })}
-        </div>
-      </section>
-      <PortfolioSummary
-        portfolio={portfolio}
-        partial={viewState === "partial"}
-      />
-    </div>
-  );
-}
+// PRF-014 step 2b: `OverviewScreen` moved to `preview-shell.tsx` -- its only
+// caller was the preview-mode `PortfolioShell` render (`!ownedMode &&
+// activeSection === "overview"`), never reachable from an owned route.
 
 // MKT-014: extracted from QuotesScreen's own inline "Correction history"
 // panel so the owned-mode per-holding detail sheet
@@ -2916,7 +2507,11 @@ export function QuoteCorrectionHistory({
   );
 }
 
-function QuotesScreen({
+// PRF-014 step 2b: exported so preview-shell.tsx's PreviewShell (the only
+// remaining caller of the preview-mode branch below) can render this --
+// see the MKT-014 comment above QuoteCorrectionHistory for why this stays
+// defined here rather than moving out with the other preview screens.
+export function QuotesScreen({
   portfolio,
   ownedQuotes,
   viewState,
@@ -3495,271 +3090,32 @@ export function QuoteCorrectionDialog({
   );
 }
 
-function DetailsScreen({
-  portfolio,
-  viewState,
-}: {
-  portfolio: PortfolioPrototype;
-  viewState: ViewState;
-}) {
-  // FY/Last FY are inserted here as static labels only (FY-001C item 2):
-  // like every other period tab in this prototype, selecting one only
-  // changes the interpolated `{period}` eyebrow copy below -- it never
-  // recomputes the fixed prototype figures or implies real filtering.
-  const periods = ["1W", "1M", "3M", "6M", "YTD", "FY", "Last FY", "1Y", "Max"];
-  const [period, setPeriod] = useState("1Y");
-
-  if (viewState === "empty") {
-    return (
-      <EmptyState
-        title="History starts with a portfolio"
-        message="Value history is unavailable until transactions and market observations exist."
-      />
-    );
-  }
-
-  return (
-    <div className="details-screen">
-      <section className="details-history" aria-labelledby="details-title">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">Portfolio value · {period}</p>
-            <h1 id="details-title">{portfolio.value}</h1>
-            <p className="overview-movement">
-              <ToneValue tone="positive">↑ A$197,846.30</ToneValue>
-              <span>+18.42%</span>
-            </p>
-          </div>
-          <button className="compact-select" type="button">
-            Portfolio value <span aria-hidden="true">⌄</span>
-          </button>
-        </div>
-        <div
-          className="detail-chart"
-          role="img"
-          aria-label="Portfolio value trend with a dip in October and stronger growth from March to July."
-        >
-          <div className="chart-area" />
-          <span className="chart-endpoint" aria-hidden="true" />
-        </div>
-        <div className="period-tabs" aria-label="Chart period">
-          {periods.map((item) => (
-            <button
-              type="button"
-              key={item}
-              aria-pressed={period === item}
-              onClick={() => setPeriod(item)}
-            >
-              {item}
-            </button>
-          ))}
-        </div>
-      </section>
-
-      <section className="detail-metrics" aria-labelledby="analysis-title">
-        <div className="section-heading compact">
-          <div>
-            <p className="eyebrow">Open positions</p>
-            <h2 id="analysis-title">Analysis</h2>
-          </div>
-          <span className="muted-copy">
-            {viewState === "partial" ? "7 of 8 priced" : "Complete coverage"}
-          </span>
-        </div>
-        <dl className="metric-list">
-          <div>
-            <dt>Market value</dt>
-            <dd>
-              {viewState === "partial"
-                ? "A$1,143,903.50 known"
-                : portfolio.value}
-            </dd>
-          </div>
-          <div>
-            <dt>Open cost basis</dt>
-            <dd>{portfolio.cost}</dd>
-          </div>
-          <div>
-            <dt>Unrealised gain</dt>
-            <dd className="tone-positive">
-              {portfolio.gainAmount} · {portfolio.gainPercent}
-            </dd>
-          </div>
-          <div>
-            <dt>Realised gain</dt>
-            <dd className="tone-positive">
-              {portfolio.realisedAmount} · {portfolio.realisedPercent}
-            </dd>
-          </div>
-          <div>
-            <dt>Cash</dt>
-            <dd>{portfolio.cash}</dd>
-          </div>
-          <div>
-            <dt>Accounting</dt>
-            <dd>FIFO</dd>
-          </div>
-        </dl>
-      </section>
-
-      <section className="allocation-panel" aria-labelledby="allocation-title">
-        <div className="section-heading compact">
-          <div>
-            <p className="eyebrow">Priced holdings</p>
-            <h2 id="allocation-title">Largest positions</h2>
-          </div>
-          <span className="muted-copy">of invested value</span>
-        </div>
-        <div className="allocation-list">
-          {[
-            ["RIO.AX", "10.3%", "100%"],
-            ["DRO.AX", "9.8%", "95%"],
-            ["CLW.AX", "9.7%", "94%"],
-            ["MIN.AX", "9.1%", "88%"],
-          ].map(([symbol, percentage, width]) => (
-            <div key={symbol}>
-              <span>{symbol}</span>
-              <span className="allocation-track">
-                <i style={{ "--allocation": width } as React.CSSProperties} />
-              </span>
-              <strong>{percentage}</strong>
-            </div>
-          ))}
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function NewsScreen() {
-  return (
-    <section className="news-placeholder" aria-labelledby="news-title">
-      <p className="eyebrow">Route reserved</p>
-      <h1 id="news-title">Portfolio news is not connected</h1>
-      <p>
-        This prototype preserves the navigation pattern without inventing a
-        provider or showing unattributed market content.
-      </p>
-      <div className="news-skeleton" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-      </div>
-    </section>
-  );
-}
-
-function HoldingSheet({
-  holding,
-  onClose,
-  directRoute = false,
-  unavailable = false,
-}: {
-  holding: Holding;
-  onClose: () => void;
-  directRoute?: boolean;
-  unavailable?: boolean;
-}) {
-  return (
-    <div className="sheet-layer" role="presentation" onMouseDown={onClose}>
-      <section
-        className="holding-sheet"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="holding-sheet-title"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="sheet-handle" aria-hidden="true" />
-        <div className="sheet-heading">
-          <div>
-            <p className="eyebrow">
-              {holding.exchange} · {holding.currency}
-            </p>
-            <h2 id="holding-sheet-title">{holding.symbol}</h2>
-            <p>{holding.name}</p>
-          </div>
-          <button
-            type="button"
-            aria-label="Close holding details"
-            onClick={onClose}
-          >
-            ×
-          </button>
-        </div>
-        <div className="sheet-quote">
-          <strong>{unavailable ? "unavailable" : holding.price}</strong>
-          {unavailable ? (
-            <span className="unavailable">Daily movement unavailable</span>
-          ) : (
-            <ToneValue tone={holding.dailyTone}>
-              {holding.dailyAmount} · {holding.dailyPercent}
-            </ToneValue>
-          )}
-        </div>
-        <dl className="sheet-facts">
-          <div>
-            <dt>Market value</dt>
-            <dd>{unavailable ? "unavailable" : holding.value}</dd>
-          </div>
-          <div>
-            <dt>Open cost</dt>
-            <dd>{holding.cost}</dd>
-          </div>
-          <div>
-            <dt>Total gain</dt>
-            <dd
-              className={
-                unavailable ? "unavailable" : `tone-${holding.totalTone}`
-              }
-            >
-              {unavailable
-                ? "unavailable"
-                : `${holding.totalAmount} · ${holding.totalPercent}`}
-            </dd>
-          </div>
-          <div>
-            <dt>Quantity</dt>
-            <dd>{holding.quantityLine}</dd>
-          </div>
-        </dl>
-        <p className="sheet-note">
-          {holding.detailExplanation ??
-            "Prototype explanation: exact observation time, source, FX evidence, and FIFO lots remain available here without crowding the row."}
-        </p>
-        {directRoute ? (
-          <Link className="sheet-back" href="/portfolio/preview/holdings">
-            Back to holdings
-          </Link>
-        ) : null}
-      </section>
-    </div>
-  );
-}
-
+// PRF-014 step 2b: `DetailsScreen`, `NewsScreen`, and `HoldingSheet` moved
+// to `preview-shell.tsx` -- each was reachable only from the preview-mode
+// branches of the old `PortfolioShell` render below, never from an owned
+// route. `PortfolioShell` itself is now owned-only: `ownedWorkspace` is
+// required and the preview-only props/state/branches (`portfolioPrototypesOverride`,
+// `historyBarsOverride`, `holdingSymbol`, `viewState`'s prototype-state
+// simulator, the `selectedHolding`/`HoldingSheet` mount, the portfolio
+// dialog's now-impossible "no ownedWorkspace" path) moved to
+// `preview-shell.tsx`'s `PreviewShell`, the discriminated preview
+// counterpart of this component.
 export function PortfolioShell({
   activeSection,
-  reviewBadgeLabel = "Prototype · mock data",
   reviewNote = "Static review build · local mock data · no financial writes",
-  portfolioPrototypesOverride = null,
-  historyBarsOverride = [],
-  overviewHref = "/",
-  holdingSymbol = null,
   ownedWorkspace,
   ownedDetails = null,
   initialHideSold = true,
 }: {
   activeSection: PortfolioSection;
-  reviewBadgeLabel?: string;
+  // Rendered unconditionally in the navigation drawer below; no owned route
+  // has ever overridden this default (only the retired preview call sites
+  // did -- see preview-shell.tsx's own `reviewNote`), so it is not a
+  // preview-only prop despite the "prototype"-sounding copy in its default.
+  // Left exactly as-is (PRF-014 step 2b is a boundary move, not a content
+  // fix): pre-existing, out of this task's scope.
   reviewNote?: string;
-  portfolioPrototypesOverride?: readonly PortfolioPrototype[] | null;
-  /** PRF-014 step 1: the preview route's demo history-chart bars
-   * (`historyBars` in `../prototype-data`), passed in by the caller so this
-   * "use client" module never imports the fixture module's runtime values.
-   * Production never passes this (defaults to an empty chart). */
-  historyBarsOverride?: readonly string[];
-  overviewHref?: string;
-  holdingSymbol?: string | null;
-  ownedWorkspace?: OwnedWorkspace;
+  ownedWorkspace: OwnedWorkspace;
   ownedDetails?: PortfolioInspection | null;
   /** UI-052 test seam, threaded to `OwnedHoldingsScreen` -- see its own
    * doc comment. Production never passes this. */
@@ -3775,61 +3131,17 @@ export function PortfolioShell({
   useEffect(() => {
     if (pathname !== null) rememberPrimaryTab(pathname);
   }, [pathname]);
-  // PRF-014 step 1: previously fell back to the raw `portfolioPrototypes`
-  // fixture import. Every real caller passes either `ownedWorkspace` or
-  // `portfolioPrototypesOverride` (never neither -- see app/page.tsx,
-  // app/portfolio/[portfolioId]/[section]/page.tsx and its [holdingId]
-  // sibling), so this `?? []` path is unreachable in production -- not
-  // merely harmless if it were reached: with neither prop, `portfolios`
-  // is `[]` and several unguarded `portfolio.<field>` reads further down
-  // (the Holdings sort, and the Quotes/Details screens) throw rather than
-  // degrade. A discriminated props union (`{ ownedWorkspace: ... } | {
-  // portfolioPrototypesOverride: ... }`) would make that combination
-  // unconstructable at the type level and close this gap by construction;
-  // recorded as a follow-up in docs/ARCHITECTURE.md §9.12, not implemented
-  // in this step.
-  const portfolios = portfolioPrototypesOverride ?? [];
-  const ownedMode = ownedWorkspace !== undefined;
-  const selectorItems: Array<{
-    id: string;
-    name: string;
-    status: string;
-    version: number;
-  }> = ownedMode
-    ? ownedWorkspace.portfolios
-    : portfolios.map((item) => ({
-        id: item.id,
-        name: item.name,
-        status: "active",
-        version: 0,
-      }));
-  const [portfolioId, setPortfolioId] = useState(() => {
-    const detailPortfolio = holdingSymbol
-      ? portfolios.find((item) =>
-          item.holdings.some((holding) => holding.symbol === holdingSymbol),
-        )
-      : null;
-    return (
-      detailPortfolio?.id ??
-      portfolios.find((item) => item.id === "aus-stocks")?.id ??
-      portfolios[0]?.id ??
-      "aus-stocks"
-    );
-  });
-  const [viewState, setViewState] = useState<ViewState>("populated");
+  const selectorItems = ownedWorkspace.portfolios;
+  // PRF-014 step 2b: this used to derive from the (now-removed)
+  // `portfolioPrototypesOverride`/`holdingSymbol` preview props, which were
+  // always absent for every owned caller -- so this literal "aus-stocks"
+  // fallback was already the ONLY value this could ever initialise to in
+  // owned mode. `selectPortfolio` below still updates it on selection.
+  const [portfolioId, setPortfolioId] = useState("aus-stocks");
   const [openMenu, setOpenMenu] = useState<OpenMenu>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawerOpenerRef = useRef<HTMLButtonElement | null>(null);
   const drawerCloseRef = useRef<HTMLButtonElement>(null);
-  const [selectedHolding, setSelectedHolding] = useState<Holding | null>(() =>
-    holdingSymbol
-      ? (portfolios
-          .flatMap((item) => item.holdings)
-          .find((holding) => holding.symbol === holdingSymbol) ?? null)
-      : null,
-  );
-  const [selectedHoldingUnavailable, setSelectedHoldingUnavailable] =
-    useState(false);
   const [portfolioDialog, setPortfolioDialog] = useState<
     "create" | "rename" | null
   >(null);
@@ -3904,20 +3216,11 @@ export function PortfolioShell({
     }
   }, [portfolioDialog]);
 
-  const portfolio =
-    portfolios.find((item) => item.id === portfolioId) ?? portfolios[0];
-  // PRF-014 step 1: the `overviewRows` fixture fallback is unreachable for
-  // the same reason as `portfolios` above -- derive rows from `portfolios`
-  // unconditionally instead of importing the fixture's runtime value.
-  const overviewPortfolioRows = portfolios.map(overviewRowFromPortfolio);
-
   function selectPortfolio(nextId: string) {
     setPortfolioId(nextId);
     setOpenMenu(null);
     setDrawerOpen(false);
-    if (ownedMode) {
-      router.push(`/portfolio/${nextId}/${activeSection}`);
-    }
+    router.push(`/portfolio/${nextId}/${activeSection}`);
   }
 
   async function submitPortfolioAction(
@@ -4296,7 +3599,7 @@ export function PortfolioShell({
         <Link
           className="topbar-brand"
           href={
-            ownedMode && ownedWorkspace.activePortfolio
+            ownedWorkspace.activePortfolio
               ? `/portfolio/${ownedWorkspace.activePortfolio.id}/overview`
               : "/"
           }
@@ -4320,9 +3623,7 @@ export function PortfolioShell({
             }
           >
             <span>
-              {ownedMode
-                ? (ownedWorkspace?.activePortfolio?.name ?? "No portfolios")
-                : (portfolio?.name ?? "No portfolios")}
+              {ownedWorkspace?.activePortfolio?.name ?? "No portfolios"}
             </span>
             <span aria-hidden="true">⌄</span>
           </button>
@@ -4330,7 +3631,7 @@ export function PortfolioShell({
             <div className="popover portfolio-popover">
               <p>Portfolios</p>
               {selectorItems.map((item) =>
-                ownedMode && item.status === "archived" ? (
+                item.status === "archived" ? (
                   <button
                     type="button"
                     key={item.id}
@@ -4356,7 +3657,19 @@ export function PortfolioShell({
                   </button>
                 ),
               )}
-              {ownedMode ? (
+              <button
+                type="button"
+                onClick={() => {
+                  portfolioDialogOpenerRef.current = portfolioButtonRef.current;
+                  setOpenMenu(null);
+                  setPortfolioDialog("create");
+                }}
+                disabled={actionPending || !isOnline}
+              >
+                <span>Create portfolio</span>
+                <span aria-hidden="true">+</span>
+              </button>
+              {ownedWorkspace.activePortfolio ? (
                 <>
                   <button
                     type="button"
@@ -4364,36 +3677,19 @@ export function PortfolioShell({
                       portfolioDialogOpenerRef.current =
                         portfolioButtonRef.current;
                       setOpenMenu(null);
-                      setPortfolioDialog("create");
+                      setPortfolioDialog("rename");
                     }}
                     disabled={actionPending || !isOnline}
                   >
-                    <span>Create portfolio</span>
-                    <span aria-hidden="true">+</span>
+                    <span>Rename portfolio</span>
                   </button>
-                  {ownedWorkspace.activePortfolio ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          portfolioDialogOpenerRef.current =
-                            portfolioButtonRef.current;
-                          setOpenMenu(null);
-                          setPortfolioDialog("rename");
-                        }}
-                        disabled={actionPending || !isOnline}
-                      >
-                        <span>Rename portfolio</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={archiveActivePortfolio}
-                        disabled={actionPending || !isOnline}
-                      >
-                        <span>Archive portfolio</span>
-                      </button>
-                    </>
-                  ) : null}
+                  <button
+                    type="button"
+                    onClick={archiveActivePortfolio}
+                    disabled={actionPending || !isOnline}
+                  >
+                    <span>Archive portfolio</span>
+                  </button>
                 </>
               ) : null}
               {/* PRF-006 (owner-directed final pass): this popover mounts
@@ -4408,7 +3704,7 @@ export function PortfolioShell({
                   topbar-brand link above -- see its UI-051 comment. */}
               <Link
                 href={
-                  ownedMode && ownedWorkspace.activePortfolio
+                  ownedWorkspace.activePortfolio
                     ? `/portfolio/${ownedWorkspace.activePortfolio.id}/overview`
                     : "/"
                 }
@@ -4422,18 +3718,9 @@ export function PortfolioShell({
           ) : null}
         </div>
 
-        {!ownedMode ? (
-          <span className="prototype-chip desktop-only">
-            {reviewBadgeLabel}
-          </span>
-        ) : null}
-
-        {ownedMode ? (
-          <span className="fx-rate-pill">
-            USD/AUD{" "}
-            <strong>{ownedWorkspace.usdAudRate ?? "unavailable"}</strong>
-          </span>
-        ) : null}
+        <span className="fx-rate-pill">
+          USD/AUD <strong>{ownedWorkspace.usdAudRate ?? "unavailable"}</strong>
+        </span>
 
         <div className="app-actions">
           <button
@@ -4461,49 +3748,29 @@ export function PortfolioShell({
             </button>
             {openMenu === "add" ? (
               <div className="popover action-popover">
-                <p>{ownedMode ? "Workspace actions" : "Prototype actions"}</p>
-                {ownedMode ? (
-                  ownedWorkspace.activePortfolio ? (
-                    <>
-                      <Link
-                        href={`/portfolio/${ownedWorkspace.activePortfolio.id}/ledger/new?type=buy`}
-                        onClick={() => setOpenMenu(null)}
-                      >
-                        <span>Add holding</span>
-                        <small>Buy a new security · manual ledger entry</small>
-                      </Link>
-                      <Link
-                        href={`/portfolio/${ownedWorkspace.activePortfolio.id}/ledger/new`}
-                        onClick={() => setOpenMenu(null)}
-                      >
-                        <span>Add transaction</span>
-                        <small>Manual ledger entry</small>
-                      </Link>
-                    </>
-                  ) : null
-                ) : (
+                <p>Workspace actions</p>
+                {ownedWorkspace.activePortfolio ? (
                   <>
-                    <button type="button">
+                    <Link
+                      href={`/portfolio/${ownedWorkspace.activePortfolio.id}/ledger/new?type=buy`}
+                      onClick={() => setOpenMenu(null)}
+                    >
                       <span>Add holding</span>
-                      <small>UI only</small>
-                    </button>
-                    <button type="button">
+                      <small>Buy a new security · manual ledger entry</small>
+                    </Link>
+                    <Link
+                      href={`/portfolio/${ownedWorkspace.activePortfolio.id}/ledger/new`}
+                      onClick={() => setOpenMenu(null)}
+                    >
                       <span>Add transaction</span>
-                      <small>UI only</small>
-                    </button>
+                      <small>Manual ledger entry</small>
+                    </Link>
                   </>
-                )}
-                {ownedMode ? (
-                  <Link href="/import" onClick={() => setOpenMenu(null)}>
-                    <span>Import CSV</span>
-                    <small>Resolve &amp; commit</small>
-                  </Link>
-                ) : (
-                  <button type="button">
-                    <span>Import CSV</span>
-                    <small>Not connected</small>
-                  </button>
-                )}
+                ) : null}
+                <Link href="/import" onClick={() => setOpenMenu(null)}>
+                  <span>Import CSV</span>
+                  <small>Resolve &amp; commit</small>
+                </Link>
               </div>
             ) : null}
           </div>
@@ -4511,9 +3778,7 @@ export function PortfolioShell({
             <button
               className="icon-button"
               type="button"
-              aria-label={
-                ownedMode ? "Open account menu" : "Open prototype state menu"
-              }
+              aria-label="Open account menu"
               aria-expanded={openMenu === "prototype"}
               onClick={() =>
                 setOpenMenu((current) =>
@@ -4527,106 +3792,104 @@ export function PortfolioShell({
             </button>
             {openMenu === "prototype" ? (
               <div className="popover prototype-popover">
-                {ownedMode ? (
-                  <>
-                    <p>Signed in</p>
-                    <span className="menu-note">
-                      {ownedWorkspace.userDisplayName ?? "Private account"}
-                    </span>
-                    <label className="menu-field">
-                      <span>Home currency</span>
-                      <select
-                        value={ownedWorkspace.homeCurrencyCode ?? "AUD"}
-                        onChange={(event) =>
-                          void changeHomeCurrency(event.target.value)
-                        }
-                        disabled={actionPending || !isOnline}
-                      >
-                        <option value="AUD">AUD</option>
-                        <option value="USD">USD</option>
-                        <option value="GBP">GBP</option>
-                        <option value="EUR">EUR</option>
-                      </select>
-                    </label>
-                    <label className="menu-field">
-                      <span>Display values</span>
-                      <select
-                        value={ownedWorkspace.holdingCurrencyView ?? "native"}
-                        onChange={(event) =>
-                          void changeHoldingCurrencyView(
-                            event.target.value as "native" | "home",
-                          )
-                        }
-                        disabled={actionPending || !isOnline}
-                      >
-                        <option value="native">Native currency</option>
-                        <option value="home">Home currency</option>
-                      </select>
-                    </label>
-                    <div className="menu-field">
-                      <label htmlFor="fy-start-month-select">
-                        Financial year start
-                      </label>
-                      <select
-                        id="fy-start-month-select"
-                        value={ownedWorkspace.financialYearStartMonth ?? 7}
-                        onChange={(event) =>
-                          void changeFinancialYearStartMonth(
-                            Number(event.target.value),
-                          )
-                        }
-                        disabled={actionPending || !isOnline}
-                        aria-describedby="fy-start-month-helper"
-                      >
-                        {FY_MONTH_NAMES.map((name, index) => (
-                          <option key={name} value={index + 1}>
-                            {name}
-                          </option>
-                        ))}
-                      </select>
-                      {/* Outside the label (FY-001B review fold-in): the
+                <p>Signed in</p>
+                <span className="menu-note">
+                  {ownedWorkspace.userDisplayName ?? "Private account"}
+                </span>
+                <label className="menu-field">
+                  <span>Home currency</span>
+                  <select
+                    value={ownedWorkspace.homeCurrencyCode ?? "AUD"}
+                    onChange={(event) =>
+                      void changeHomeCurrency(event.target.value)
+                    }
+                    disabled={actionPending || !isOnline}
+                  >
+                    <option value="AUD">AUD</option>
+                    <option value="USD">USD</option>
+                    <option value="GBP">GBP</option>
+                    <option value="EUR">EUR</option>
+                  </select>
+                </label>
+                <label className="menu-field">
+                  <span>Display values</span>
+                  <select
+                    value={ownedWorkspace.holdingCurrencyView ?? "native"}
+                    onChange={(event) =>
+                      void changeHoldingCurrencyView(
+                        event.target.value as "native" | "home",
+                      )
+                    }
+                    disabled={actionPending || !isOnline}
+                  >
+                    <option value="native">Native currency</option>
+                    <option value="home">Home currency</option>
+                  </select>
+                </label>
+                <div className="menu-field">
+                  <label htmlFor="fy-start-month-select">
+                    Financial year start
+                  </label>
+                  <select
+                    id="fy-start-month-select"
+                    value={ownedWorkspace.financialYearStartMonth ?? 7}
+                    onChange={(event) =>
+                      void changeFinancialYearStartMonth(
+                        Number(event.target.value),
+                      )
+                    }
+                    disabled={actionPending || !isOnline}
+                    aria-describedby="fy-start-month-helper"
+                  >
+                    {FY_MONTH_NAMES.map((name, index) => (
+                      <option key={name} value={index + 1}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
+                  {/* Outside the label (FY-001B review fold-in): the
                           helper span used to sit inside the label, so its
                           text became part of the select's accessible name
                           AND was re-announced via aria-describedby -- a
                           double announcement. htmlFor/id association keeps
                           the label-select link explicit without wrapping
                           the note text into the name. */}
-                      <span className="menu-note" id="fy-start-month-helper">
-                        {financialYearWindowHelperText(
-                          ownedWorkspace.financialYearStartMonth ?? 7,
-                        )}
-                      </span>
-                    </div>
-                    <div className="menu-field">
-                      <label htmlFor="price-source-preference-select">
-                        Price source
-                      </label>
-                      <select
-                        id="price-source-preference-select"
-                        value={
-                          ownedWorkspace.priceSourcePreference ??
-                          "sharesight_delayed"
-                        }
-                        onChange={(event) =>
-                          void changePriceSourcePreference(
-                            event.target.value as
-                              | "yahoo_authenticated"
-                              | "yahoo_anonymous"
-                              | "sharesight_delayed",
-                          )
-                        }
-                        disabled={actionPending || !isOnline}
-                        aria-describedby="price-source-preference-helper"
-                      >
-                        <option value="yahoo_authenticated">
-                          Yahoo (logged in)
-                        </option>
-                        <option value="yahoo_anonymous">
-                          Yahoo (not logged in)
-                        </option>
-                        <option value="sharesight_delayed">Sharesight</option>
-                      </select>
-                      {/* Outside the label (B5, mirrors FY-001B's identical
+                  <span className="menu-note" id="fy-start-month-helper">
+                    {financialYearWindowHelperText(
+                      ownedWorkspace.financialYearStartMonth ?? 7,
+                    )}
+                  </span>
+                </div>
+                <div className="menu-field">
+                  <label htmlFor="price-source-preference-select">
+                    Price source
+                  </label>
+                  <select
+                    id="price-source-preference-select"
+                    value={
+                      ownedWorkspace.priceSourcePreference ??
+                      "sharesight_delayed"
+                    }
+                    onChange={(event) =>
+                      void changePriceSourcePreference(
+                        event.target.value as
+                          | "yahoo_authenticated"
+                          | "yahoo_anonymous"
+                          | "sharesight_delayed",
+                      )
+                    }
+                    disabled={actionPending || !isOnline}
+                    aria-describedby="price-source-preference-helper"
+                  >
+                    <option value="yahoo_authenticated">
+                      Yahoo (logged in)
+                    </option>
+                    <option value="yahoo_anonymous">
+                      Yahoo (not logged in)
+                    </option>
+                    <option value="sharesight_delayed">Sharesight</option>
+                  </select>
+                  {/* Outside the label (B5, mirrors FY-001B's identical
                           fix directly above): a helper span inside the
                           label becomes part of the select's accessible name
                           AND gets re-announced via aria-describedby -- a
@@ -4639,122 +3902,89 @@ export function PortfolioShell({
                           promise of real-time data or a login that may not
                           even be configured (see
                           docs/MARKET_DATA_STRATEGY.md §20). */}
-                      <span
-                        className="menu-note"
-                        id="price-source-preference-helper"
-                      >
-                        Preferred source for prices, with honest fallback when
-                        it has none.
-                      </span>
-                    </div>
-                    <div className="menu-field">
-                      <label htmlFor="daily-capture-source-select">
-                        Daily capture source
-                      </label>
-                      <select
-                        id="daily-capture-source-select"
-                        value={
-                          ownedWorkspace.dailyCaptureSource ?? "sharesight"
-                        }
-                        onChange={(event) =>
-                          void changeDailyCaptureSource(
-                            event.target.value as
-                              | "sharesight"
-                              | "yahoo_anonymous"
-                              | "yahoo_authenticated",
-                          )
-                        }
-                        disabled={actionPending || !isOnline}
-                        aria-describedby="daily-capture-source-helper"
-                      >
-                        <option value="sharesight">Sharesight</option>
-                        <option value="yahoo_anonymous">
-                          Yahoo (not logged in)
-                        </option>
-                        <option value="yahoo_authenticated">
-                          Yahoo (logged in)
-                        </option>
-                      </select>
-                      {/* Outside the label, same FY-001B/MKT-009B fix as the
+                  <span
+                    className="menu-note"
+                    id="price-source-preference-helper"
+                  >
+                    Preferred source for prices, with honest fallback when it
+                    has none.
+                  </span>
+                </div>
+                <div className="menu-field">
+                  <label htmlFor="daily-capture-source-select">
+                    Daily capture source
+                  </label>
+                  <select
+                    id="daily-capture-source-select"
+                    value={ownedWorkspace.dailyCaptureSource ?? "sharesight"}
+                    onChange={(event) =>
+                      void changeDailyCaptureSource(
+                        event.target.value as
+                          | "sharesight"
+                          | "yahoo_anonymous"
+                          | "yahoo_authenticated",
+                      )
+                    }
+                    disabled={actionPending || !isOnline}
+                    aria-describedby="daily-capture-source-helper"
+                  >
+                    <option value="sharesight">Sharesight</option>
+                    <option value="yahoo_anonymous">
+                      Yahoo (not logged in)
+                    </option>
+                    <option value="yahoo_authenticated">
+                      Yahoo (logged in)
+                    </option>
+                  </select>
+                  {/* Outside the label, same FY-001B/MKT-009B fix as the
                           two fields above -- see those comments. */}
-                      <span
-                        className="menu-note"
-                        id="daily-capture-source-helper"
-                      >
-                        Source for the daily intraday price sweep that closes
-                        each trading day&apos;s history.
-                      </span>
-                    </div>
-                    <div className="menu-field">
-                      <label htmlFor="daily-capture-interval-select">
-                        Daily capture cadence
-                      </label>
-                      <select
-                        id="daily-capture-interval-select"
-                        value={ownedWorkspace.dailyCaptureIntervalMinutes ?? 60}
-                        onChange={(event) =>
-                          void changeDailyCaptureIntervalMinutes(
-                            Number(event.target.value) as 30 | 60,
-                          )
-                        }
-                        disabled={actionPending || !isOnline}
-                        aria-describedby="daily-capture-interval-helper"
-                      >
-                        <option value={30}>Every 30 minutes</option>
-                        <option value={60}>Every 60 minutes</option>
-                      </select>
-                      {/* Outside the label, same FY-001B/MKT-009B fix as the
+                  <span className="menu-note" id="daily-capture-source-helper">
+                    Source for the daily intraday price sweep that closes each
+                    trading day&apos;s history.
+                  </span>
+                </div>
+                <div className="menu-field">
+                  <label htmlFor="daily-capture-interval-select">
+                    Daily capture cadence
+                  </label>
+                  <select
+                    id="daily-capture-interval-select"
+                    value={ownedWorkspace.dailyCaptureIntervalMinutes ?? 60}
+                    onChange={(event) =>
+                      void changeDailyCaptureIntervalMinutes(
+                        Number(event.target.value) as 30 | 60,
+                      )
+                    }
+                    disabled={actionPending || !isOnline}
+                    aria-describedby="daily-capture-interval-helper"
+                  >
+                    <option value={30}>Every 30 minutes</option>
+                    <option value={60}>Every 60 minutes</option>
+                  </select>
+                  {/* Outside the label, same FY-001B/MKT-009B fix as the
                           fields above -- see those comments. */}
-                      <span
-                        className="menu-note"
-                        id="daily-capture-interval-helper"
-                      >
-                        How often the intraday sweep captures a price during
-                        market hours.
-                      </span>
-                    </div>
-                  </>
-                ) : null}
-                {!ownedMode ? <p>Preview a state</p> : null}
-                {!ownedMode &&
-                  (Object.keys(prototypeStateLabels) as ViewState[]).map(
-                    (state) => (
-                      <button
-                        type="button"
-                        key={state}
-                        aria-pressed={viewState === state}
-                        onClick={() => {
-                          setViewState(state);
-                          setOpenMenu(null);
-                        }}
-                      >
-                        <span>{prototypeStateLabels[state]}</span>
-                        {viewState === state ? (
-                          <span aria-hidden="true">✓</span>
-                        ) : null}
-                      </button>
-                    ),
-                  )}
+                  <span
+                    className="menu-note"
+                    id="daily-capture-interval-helper"
+                  >
+                    How often the intraday sweep captures a price during market
+                    hours.
+                  </span>
+                </div>
               </div>
             ) : null}
           </div>
         </div>
       </header>
 
-      {!ownedMode ? (
-        <p className="prototype-chip mobile-only">{reviewBadgeLabel}</p>
-      ) : null}
-
       <nav className="primary-tabs" aria-label="Portfolio sections">
         {primaryPortfolioSections.map((section) => (
           <Link
             key={section}
             href={
-              ownedMode
-                ? ownedWorkspace.activePortfolio
-                  ? `/portfolio/${ownedWorkspace.activePortfolio.id}/${section}`
-                  : ownedNoPortfolioHref(section)
-                : sectionHref(section, overviewHref)
+              ownedWorkspace.activePortfolio
+                ? `/portfolio/${ownedWorkspace.activePortfolio.id}/${section}`
+                : ownedNoPortfolioHref(section)
             }
             aria-current={activeSection === section ? "page" : undefined}
           >
@@ -4767,7 +3997,7 @@ export function PortfolioShell({
             standalone `/portfolio/:id/income` route tree rather than through
             `primaryPortfolioSections`/`[section]/page.tsx`'s preview-aware
             dispatch. */}
-        {ownedMode && ownedWorkspace.activePortfolio ? (
+        {ownedWorkspace.activePortfolio ? (
           <Link
             href={`/portfolio/${ownedWorkspace.activePortfolio.id}/income`}
             aria-current={
@@ -4783,145 +4013,96 @@ export function PortfolioShell({
         ) : null}
       </nav>
 
-      <StatusBanner
-        viewState={viewState}
-        onReset={() => setViewState("populated")}
-      />
-
       <main className={`screen-content screen-${activeSection}`}>
-        {ownedMode ? (
-          activeSection === "details" && ownedWorkspace.activePortfolio ? (
-            <OwnedPortfolioDetails
-              inspection={ownedDetails}
-              onOpenSettings={() => setOpenMenu("prototype")}
-            />
-          ) : activeSection === "overview" && ownedWorkspace.activePortfolio ? (
-            <OwnedOverviewScreen
-              data={
-                ownedWorkspace.overview ?? {
-                  status: "unavailable",
-                  currencyCode: ownedWorkspace.activePortfolio.baseCurrencyCode,
-                  current: null,
-                  history: [],
-                  coverage: {
-                    pricedHoldingCount: null,
-                    nonZeroHoldingCount: null,
-                    convertedCashAccountCount: null,
-                    nonZeroCashAccountCount: null,
-                    totalHoldingCount: null,
-                    excluded: [],
-                    issues: [],
-                    marketDataStates: [],
-                  },
-                  allocation: { status: "unavailable", rows: [] },
-                }
-              }
-              portfolioId={ownedWorkspace.activePortfolio.id}
-              portfolioName={ownedWorkspace.activePortfolio.name}
-              financialYearStartMonth={
-                ownedWorkspace.financialYearStartMonth ?? 7
-              }
-              timezone={
-                ownedWorkspace.timezone ??
-                ownedWorkspace.activePortfolio.timezone ??
-                "Australia/Sydney"
-              }
-              // Server-resolved "now" (see OwnedWorkspace.nowInstant). No
-              // client-side Date() fallback: an absent instant must fail
-              // FY window resolution closed (empty state), never guess.
-              nowInstant={ownedWorkspace.nowInstant ?? ""}
-              portfolioValueHistory={
-                ownedWorkspace.portfolioValueHistory ?? {
-                  status: "unavailable",
-                  baseCurrencyCode:
-                    ownedWorkspace.activePortfolio.baseCurrencyCode,
-                  points: [],
-                  datesTruncated: false,
-                  backfillPending: false,
-                }
-              }
-              holdingsSummary={ownedWorkspace.holdingsSummary}
-              holdingsProjectionPending={
-                ownedWorkspace.holdingsProjectionPending
-              }
-            />
-          ) : activeSection === "holdings" && ownedWorkspace.activePortfolio ? (
-            <OwnedHoldingsScreen
-              rows={ownedWorkspace.holdings ?? []}
-              homeCurrencyCode={
-                ownedWorkspace.homeCurrencyCode ??
-                ownedWorkspace.activePortfolio.baseCurrencyCode
-              }
-              view={ownedWorkspace.holdingCurrencyView ?? "native"}
-              state={ownedWorkspace.holdingsViewState ?? "empty"}
-              cash={ownedWorkspace.cash}
-              portfolioId={ownedWorkspace.activePortfolio.id}
-              realisedGains={ownedWorkspace.realisedGains}
-              initialHideSold={initialHideSold}
-              summary={ownedWorkspace.holdingsSummary}
-              projectionPending={ownedWorkspace.holdingsProjectionPending}
-            />
-          ) : (
-            <OwnedWorkspaceScreen
-              activeSection={activeSection}
-              workspace={ownedWorkspace}
-              // UI-021 (owner-reported): mirrors the header dropdown's "Create
-              // portfolio" item exactly (`portfolioDialogOpenerRef.current =
-              // ...; setPortfolioDialog("create")`) -- one dialog, two
-              // openers. Unlike the dropdown item (which unmounts the
-              // instant its popover closes, forcing it to capture a
-              // DIFFERENT surviving node), this empty-state button itself
-              // stays mounted while the dialog is open, so it captures
-              // itself as the opener.
-              onCreatePortfolio={(event) => {
-                portfolioDialogOpenerRef.current = event.currentTarget;
-                setPortfolioDialog("create");
-              }}
-              createPortfolioDisabled={actionPending || !isOnline}
-              isOnline={isOnline}
-            />
-          )
-        ) : null}
-        {!ownedMode && activeSection === "overview" ? (
-          <OverviewScreen
-            portfolio={portfolioPrototypesOverride ? portfolio : undefined}
-            rows={overviewPortfolioRows}
-            historyBars={historyBarsOverride}
-            viewState={viewState}
-            onOpenPortfolio={(id) => {
-              selectPortfolio(id);
-              router.push("/portfolio/preview/holdings");
-            }}
+        {activeSection === "details" && ownedWorkspace.activePortfolio ? (
+          <OwnedPortfolioDetails
+            inspection={ownedDetails}
+            onOpenSettings={() => setOpenMenu("prototype")}
           />
-        ) : null}
-        {!ownedMode && activeSection === "holdings" ? (
-          <HoldingsScreen
-            portfolio={portfolio}
-            viewState={viewState}
-            onSelectHolding={(holding, unavailable) => {
-              setSelectedHolding(holding);
-              setSelectedHoldingUnavailable(unavailable);
-            }}
-            holdingDetailHref={
-              portfolioPrototypesOverride
-                ? (symbol) =>
-                    `/portfolio/preview/holdings/${encodeURIComponent(symbol)}`
-                : undefined
+        ) : activeSection === "overview" && ownedWorkspace.activePortfolio ? (
+          <OwnedOverviewScreen
+            data={
+              ownedWorkspace.overview ?? {
+                status: "unavailable",
+                currencyCode: ownedWorkspace.activePortfolio.baseCurrencyCode,
+                current: null,
+                history: [],
+                coverage: {
+                  pricedHoldingCount: null,
+                  nonZeroHoldingCount: null,
+                  convertedCashAccountCount: null,
+                  nonZeroCashAccountCount: null,
+                  totalHoldingCount: null,
+                  excluded: [],
+                  issues: [],
+                  marketDataStates: [],
+                },
+                allocation: { status: "unavailable", rows: [] },
+              }
             }
+            portfolioId={ownedWorkspace.activePortfolio.id}
+            portfolioName={ownedWorkspace.activePortfolio.name}
+            financialYearStartMonth={
+              ownedWorkspace.financialYearStartMonth ?? 7
+            }
+            timezone={
+              ownedWorkspace.timezone ??
+              ownedWorkspace.activePortfolio.timezone ??
+              "Australia/Sydney"
+            }
+            // Server-resolved "now" (see OwnedWorkspace.nowInstant). No
+            // client-side Date() fallback: an absent instant must fail
+            // FY window resolution closed (empty state), never guess.
+            nowInstant={ownedWorkspace.nowInstant ?? ""}
+            portfolioValueHistory={
+              ownedWorkspace.portfolioValueHistory ?? {
+                status: "unavailable",
+                baseCurrencyCode:
+                  ownedWorkspace.activePortfolio.baseCurrencyCode,
+                points: [],
+                datesTruncated: false,
+                backfillPending: false,
+              }
+            }
+            holdingsSummary={ownedWorkspace.holdingsSummary}
+            holdingsProjectionPending={ownedWorkspace.holdingsProjectionPending}
           />
-        ) : null}
-        {!ownedMode && activeSection === "quotes" ? (
-          <QuotesScreen
-            portfolio={portfolio}
-            portfolioId={portfolio.id}
-            readOnly={!ownedMode}
-            viewState={viewState}
+        ) : activeSection === "holdings" && ownedWorkspace.activePortfolio ? (
+          <OwnedHoldingsScreen
+            rows={ownedWorkspace.holdings ?? []}
+            homeCurrencyCode={
+              ownedWorkspace.homeCurrencyCode ??
+              ownedWorkspace.activePortfolio.baseCurrencyCode
+            }
+            view={ownedWorkspace.holdingCurrencyView ?? "native"}
+            state={ownedWorkspace.holdingsViewState ?? "empty"}
+            cash={ownedWorkspace.cash}
+            portfolioId={ownedWorkspace.activePortfolio.id}
+            realisedGains={ownedWorkspace.realisedGains}
+            initialHideSold={initialHideSold}
+            summary={ownedWorkspace.holdingsSummary}
+            projectionPending={ownedWorkspace.holdingsProjectionPending}
           />
-        ) : null}
-        {!ownedMode && activeSection === "details" ? (
-          <DetailsScreen portfolio={portfolio} viewState={viewState} />
-        ) : null}
-        {!ownedMode && activeSection === "news" ? <NewsScreen /> : null}
+        ) : (
+          <OwnedWorkspaceScreen
+            activeSection={activeSection}
+            workspace={ownedWorkspace}
+            // UI-021 (owner-reported): mirrors the header dropdown's "Create
+            // portfolio" item exactly (`portfolioDialogOpenerRef.current =
+            // ...; setPortfolioDialog("create")`) -- one dialog, two
+            // openers. Unlike the dropdown item (which unmounts the
+            // instant its popover closes, forcing it to capture a
+            // DIFFERENT surviving node), this empty-state button itself
+            // stays mounted while the dialog is open, so it captures
+            // itself as the opener.
+            onCreatePortfolio={(event) => {
+              portfolioDialogOpenerRef.current = event.currentTarget;
+              setPortfolioDialog("create");
+            }}
+            createPortfolioDisabled={actionPending || !isOnline}
+            isOnline={isOnline}
+          />
+        )}
       </main>
 
       {/* B2 review fix: while the portfolio dialog is open, a failure (e.g.
@@ -4936,7 +4117,7 @@ export function PortfolioShell({
         </p>
       ) : null}
 
-      {ownedMode && portfolioDialog ? (
+      {portfolioDialog ? (
         <dialog
           ref={portfolioDialogRef}
           className="portfolio-dialog"
@@ -5048,7 +4229,7 @@ export function PortfolioShell({
                   the topbar-brand link's UI-051 comment above for why. */}
               <Link
                 href={
-                  ownedMode && ownedWorkspace.activePortfolio
+                  ownedWorkspace.activePortfolio
                     ? `/portfolio/${ownedWorkspace.activePortfolio.id}/overview`
                     : "/"
                 }
@@ -5070,7 +4251,7 @@ export function PortfolioShell({
             <p className="drawer-label">Workspace</p>
             <Link
               href={
-                ownedMode && ownedWorkspace.activePortfolio
+                ownedWorkspace.activePortfolio
                   ? `/portfolio/${ownedWorkspace.activePortfolio.id}/overview`
                   : "/"
               }
@@ -5081,7 +4262,7 @@ export function PortfolioShell({
             </Link>
             <p className="drawer-label">Portfolios</p>
             {selectorItems.map((item) =>
-              ownedMode && item.status === "archived" ? (
+              item.status === "archived" ? (
                 <button
                   type="button"
                   key={item.id}
@@ -5107,40 +4288,18 @@ export function PortfolioShell({
               <span>Import / export</span>
               <small>Prototype only</small>
             </button>
-            {ownedMode ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setDrawerOpen(false);
-                  setOpenMenu("prototype");
-                }}
-              >
-                <span>Settings</span>
-              </button>
-            ) : (
-              <button type="button">
-                <span>Settings</span>
-                <small>Prototype only</small>
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => {
+                setDrawerOpen(false);
+                setOpenMenu("prototype");
+              }}
+            >
+              <span>Settings</span>
+            </button>
             <p className="drawer-note">{reviewNote}</p>
           </aside>
         </div>
-      ) : null}
-
-      {selectedHolding ? (
-        <HoldingSheet
-          holding={selectedHolding}
-          onClose={() => {
-            if (holdingSymbol !== null) {
-              router.push("/portfolio/preview/holdings");
-              return;
-            }
-            setSelectedHolding(null);
-          }}
-          directRoute={holdingSymbol !== null}
-          unavailable={selectedHoldingUnavailable}
-        />
       ) : null}
     </div>
   );

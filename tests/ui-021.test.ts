@@ -301,19 +301,49 @@ test("UI-021: onCreatePortfolio opens the SAME create-portfolio dialog as the he
   );
 });
 
-test("UI-021: preview/prototype mode (no ownedWorkspace) never reaches OwnedWorkspaceScreen or the empty-state create action -- each prototype section keeps its own distinct, unchanged screen component", async () => {
-  const source = await readFile(
-    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
-    "utf8",
-  );
+test("UI-021 (re-pointed for PRF-014 step 2b): preview/prototype mode never reaches OwnedWorkspaceScreen or the empty-state create action -- each prototype section keeps its own distinct, unchanged screen component", async () => {
+  // PRF-014 step 2b split the old single `ownedMode`-branching PortfolioShell
+  // into two components in two files: `PortfolioShell` (portfolio-shell.tsx,
+  // owned-only) and `PreviewShell` (preview-shell.tsx, preview-only). The
+  // guarantee this test pins is now structural (file boundaries + module
+  // imports) rather than a runtime `ownedMode` branch -- see both files' own
+  // header comments.
+  const [shellSource, previewSource] = await Promise.all([
+    readFile(
+      new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../app/components/preview-shell.tsx", import.meta.url),
+      "utf8",
+    ),
+  ]);
   // OwnedWorkspaceScreen (the only caller of the new onCreatePortfolio prop)
-  // is reached exclusively inside the `ownedMode ? (...) : null` branch.
+  // is `PortfolioShell`'s unconditional else-branch -- always reached when no
+  // more specific owned section matches.
   assert.match(
-    source,
-    /\{ownedMode \? \([\s\S]*?<OwnedWorkspaceScreen[\s\S]*?\) : null\}/,
+    shellSource,
+    /\) : \(\s*<OwnedWorkspaceScreen[\s\S]{0,1200}\/>\s*\)\}/,
   );
+  // portfolio-shell.tsx never renders (as JSX) any of the preview-only
+  // screen components -- they live only in preview-shell.tsx. (Their names
+  // may still appear in doc comments describing the PRF-014 step 2b move,
+  // so this checks for a JSX tag, not a bare identifier.)
+  for (const componentName of [
+    "OverviewScreen",
+    "HoldingsScreen",
+    "DetailsScreen",
+    "NewsScreen",
+  ]) {
+    assert.doesNotMatch(
+      shellSource,
+      new RegExp(`<${componentName}\\b`),
+      `expected portfolio-shell.tsx to never render the preview-only <${componentName}>`,
+    );
+  }
   // Every prototype (non-owned) section still renders its own dedicated,
-  // untouched screen component, never OwnedWorkspaceScreen.
+  // untouched screen component in PreviewShell, never OwnedWorkspaceScreen.
+  assert.doesNotMatch(previewSource, /<OwnedWorkspaceScreen\b/);
   for (const [section, componentName] of [
     ["overview", "OverviewScreen"],
     ["holdings", "HoldingsScreen"],
@@ -322,9 +352,9 @@ test("UI-021: preview/prototype mode (no ownedWorkspace) never reaches OwnedWork
     ["news", "NewsScreen"],
   ]) {
     assert.match(
-      source,
+      previewSource,
       new RegExp(
-        `!ownedMode && activeSection === "${section}"[\\s\\S]{0,400}<${componentName}\\b`,
+        `activeSection === "${section}"[\\s\\S]{0,400}<${componentName}\\b`,
       ),
       `expected the prototype "${section}" tab to still render <${componentName}>`,
     );

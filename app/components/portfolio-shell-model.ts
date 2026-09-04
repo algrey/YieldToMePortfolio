@@ -154,7 +154,9 @@ export type OwnedWorkspace = {
   // UI-030: CGT-001A's per-security LIFETIME realised-gain rollup, keyed by
   // `portfolioSecurityId` (matches `OwnedHoldingRow.id`) -- a plain object
   // (not a `Map`) because this workspace crosses the server/client RSC
-  // boundary as a prop into this "use client" module. `undefined` (as a
+  // boundary as a prop into `portfolio-shell.tsx`, the "use client" module
+  // that actually consumes this type (this module itself is plain, not
+  // "use client" -- see the file header above). `undefined` (as a
   // whole, or a missing key) means "never sold OR the enrichment failed to
   // load this request" -- `ownedHoldingRealisedGainLine` treats both the
   // same way (no fourth line), never a fabricated figure. See

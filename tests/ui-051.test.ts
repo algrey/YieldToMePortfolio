@@ -333,12 +333,17 @@ test("UI-051 (reviewer follow-up): the landingRedirectOut early-return's throwaw
 // ---------------------------------------------------------------------------
 
 test("UI-051 (reviewer B1): all four owned-mode chrome links target the active portfolio's Overview tab, falling back to '/' only with no active portfolio", async () => {
+  // PRF-014 step 2b: `PortfolioShell` is owned-only now, so the old
+  // `ownedMode && ownedWorkspace.activePortfolio` guard collapsed to a plain
+  // `ownedWorkspace.activePortfolio` check (no runtime `ownedMode` flag left
+  // -- see that component's own header comment). All four links stayed in
+  // portfolio-shell.tsx (none of them moved to preview-shell.tsx).
   const source = await readFile(
     new URL("../app/components/portfolio-shell.tsx", import.meta.url),
     "utf8",
   );
   const conditionalOverviewHref =
-    /href=\{\s*\n\s*ownedMode && ownedWorkspace\.activePortfolio\s*\n\s*\? `\/portfolio\/\$\{ownedWorkspace\.activePortfolio\.id\}\/overview`\s*\n\s*: "\/"\s*\n\s*\}/g;
+    /href=\{\s*\n\s*ownedWorkspace\.activePortfolio\s*\n\s*\? `\/portfolio\/\$\{ownedWorkspace\.activePortfolio\.id\}\/overview`\s*\n\s*: "\/"\s*\n\s*\}/g;
   const matches = [...source.matchAll(conditionalOverviewHref)];
   assert.equal(
     matches.length,

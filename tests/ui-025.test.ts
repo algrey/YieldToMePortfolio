@@ -244,8 +244,12 @@ test("UI-028 (owner ruling, 2026-08-22): the primary News tab's embed frame fill
 });
 
 test("UI-025: the prototype/preview-mode NewsScreen placeholder is untouched", async () => {
+  // PRF-014 step 2b: NewsScreen (and its call site) moved from
+  // portfolio-shell.tsx to preview-shell.tsx's PreviewShell -- see that
+  // file's own header comment. Both source and call site are pinned there
+  // now instead.
   const source = await readFile(
-    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    new URL("../app/components/preview-shell.tsx", import.meta.url),
     "utf8",
   );
   assert.match(
@@ -255,6 +259,6 @@ test("UI-025: the prototype/preview-mode NewsScreen placeholder is untouched", a
   assert.match(source, /Portfolio news is not connected/);
   assert.match(
     source,
-    /\{!ownedMode && activeSection === "news" \? <NewsScreen \/> : null\}/,
+    /\{activeSection === "news" \? <NewsScreen \/> : null\}/,
   );
 });

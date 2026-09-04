@@ -147,8 +147,11 @@ function renderOwnedHoldingsScreen(): string {
 }
 
 function renderPreviewHoldingsScreen(): string {
+  // PRF-014 step 2b: the preview-mode HoldingsScreen (and its
+  // .portfolio-summary aside) moved to preview-shell.tsx's PreviewShell --
+  // see that file's own header comment.
   const componentUrl = new URL(
-    "../app/components/portfolio-shell.tsx",
+    "../app/components/preview-shell.tsx",
     import.meta.url,
   ).href;
   const prototypeDataUrl = new URL("../app/prototype-data.ts", import.meta.url)
@@ -156,12 +159,13 @@ function renderPreviewHoldingsScreen(): string {
   const script = `
     import { createElement } from "react";
     import { renderToStaticMarkup } from "react-dom/server";
-    import { PortfolioShell } from ${JSON.stringify(componentUrl)};
-    // PRF-014 step 1: portfolio-shell.tsx no longer imports prototype-data's
-    // runtime fixture itself (only its types, erased at build time -- see
-    // tests/prf-014.test.ts) so callers that want the demo/preview dataset
-    // must pass it in explicitly, exactly like the real preview route
-    // (app/portfolio/[portfolioId]/[section]/page.tsx) now does.
+    import { PreviewShell } from ${JSON.stringify(componentUrl)};
+    // PRF-014 step 1: portfolio-shell.tsx/preview-shell.tsx no longer import
+    // prototype-data's runtime fixture themselves (only its types, erased at
+    // build time -- see tests/prf-014.test.ts) so callers that want the
+    // demo/preview dataset must pass it in explicitly, exactly like the real
+    // preview route (app/portfolio/[portfolioId]/[section]/page.tsx) now
+    // does.
     import { portfolioPrototypes } from ${JSON.stringify(prototypeDataUrl)};
     ${ROUTER_STUB_IMPORT}
 
@@ -170,7 +174,7 @@ function renderPreviewHoldingsScreen(): string {
         createElement(
           AppRouterContext.Provider,
           { value: routerStub },
-          createElement(PortfolioShell, {
+          createElement(PreviewShell, {
             activeSection: "holdings",
             portfolioPrototypesOverride: portfolioPrototypes,
           }),

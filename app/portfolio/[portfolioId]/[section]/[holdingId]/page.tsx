@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { PortfolioShell } from "../../../../components/portfolio-shell";
+import { PreviewShell } from "../../../../components/preview-shell";
 import { type PortfolioSection } from "../../../../portfolio-sections";
 import { createPreviewPortfolioPrototypes } from "../../../../preview-route-data";
 import { loadPreviewValuationFixture } from "../../../../preview-valuation";
@@ -133,7 +133,7 @@ export default async function HoldingDetailPage({
   }
 
   return (
-    <PortfolioShell
+    <PreviewShell
       activeSection={"holdings" as PortfolioSection}
       portfolioPrototypesOverride={portfolios}
       overviewHref="/portfolio/preview/overview"

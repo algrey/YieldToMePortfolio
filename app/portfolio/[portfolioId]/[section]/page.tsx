@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { PortfolioShell } from "../../../components/portfolio-shell";
+import { PreviewShell } from "../../../components/preview-shell";
 import {
   portfolioSections,
   type PortfolioSection,
@@ -81,7 +82,7 @@ export default async function PortfolioSectionPage({
   }
 
   return (
-    <PortfolioShell
+    <PreviewShell
       activeSection={section as PortfolioSection}
       portfolioPrototypesOverride={createPreviewPortfolioPrototypes(
         previewFixtureResult.fixture,

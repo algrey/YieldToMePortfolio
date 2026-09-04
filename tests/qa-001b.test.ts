@@ -561,7 +561,14 @@ test("UI-007: a failed quote correction renders its error INSIDE the modal dialo
   // Read-only and thrown-error paths both set local dialog state, so their
   // failure text itself never lands in the (suppressed) parent toast.
   const dialogFnStart = source.indexOf("function QuoteCorrectionDialog");
-  const dialogFnEnd = source.indexOf("\nfunction DetailsScreen", dialogFnStart);
+  // PRF-014 step 2b: `DetailsScreen` moved to preview-shell.tsx, so
+  // `QuoteCorrectionDialog` is now immediately followed by `PortfolioShell`
+  // in portfolio-shell.tsx -- see that file's own comment above
+  // `QuoteCorrectionHistory` for why the dialog stays here.
+  const dialogFnEnd = source.indexOf(
+    "\nexport function PortfolioShell",
+    dialogFnStart,
+  );
   const dialogFnSource = source.slice(dialogFnStart, dialogFnEnd);
   assert.match(
     dialogFnSource,
@@ -699,7 +706,11 @@ test("QA-001B: the viewport never disables pinch/keyboard zoom, and the shell ha
 // "UI only" note -- dead controls even in owned mode. They must now route
 // into the real manual-ledger-entry flow (UI-005E) in owned mode, while
 // preview/prototype mode keeps its honest non-functional buttons unchanged.
-test("QA-001B: owned add menu wires 'Add holding' and 'Add transaction' into the manual ledger entry route instead of leaving them as dead UI-only buttons", async () => {
+test("QA-001B (re-pointed for PRF-014 step 2b): owned add menu wires 'Add holding' and 'Add transaction' into the manual ledger entry route instead of leaving them as dead UI-only buttons", async () => {
+  // PRF-014 step 2b split the single `ownedMode`-branching add-menu into
+  // portfolio-shell.tsx's (owned, unconditional) and preview-shell.tsx's
+  // (preview, unconditional "UI only" markers) own copies -- see both
+  // files' own header comments.
   const source = await readFile(
     new URL("../app/components/portfolio-shell.tsx", import.meta.url),
     "utf8",
@@ -726,14 +737,18 @@ test("QA-001B: owned add menu wires 'Add holding' and 'Add transaction' into the
   // (`ownedWorkspace.activePortfolio ? (...) : null`).
   assert.match(
     source,
-    /href=\{`\/portfolio\/\$\{ownedWorkspace\.activePortfolio\.id\}\/ledger\/new`\}\s*\n\s*onClick=\{\(\) => setOpenMenu\(null\)\}\s*\n\s*>\s*\n\s*<span>Add transaction<\/span>\s*\n\s*<small>Manual ledger entry<\/small>\s*\n\s*<\/Link>\s*\n\s*<\/>\s*\n\s*\) : null\s*\n\s*\) : \(/,
+    /href=\{`\/portfolio\/\$\{ownedWorkspace\.activePortfolio\.id\}\/ledger\/new`\}\s*\n\s*onClick=\{\(\) => setOpenMenu\(null\)\}\s*\n\s*>\s*\n\s*<span>Add transaction<\/span>\s*\n\s*<small>Manual ledger entry<\/small>\s*\n\s*<\/Link>\s*\n\s*<\/>\s*\n\s*\) : null\}/,
   );
 
   // Preview/prototype mode is intentionally unchanged: it keeps the honest
   // non-functional "UI only" markers rather than pointing at a route that
-  // has no real backing portfolio.
+  // has no real backing portfolio. Now lives in preview-shell.tsx.
+  const previewSource = await readFile(
+    new URL("../app/components/preview-shell.tsx", import.meta.url),
+    "utf8",
+  );
   assert.match(
-    source,
+    previewSource,
     /<button type="button">\s*\n\s*<span>Add holding<\/span>\s*\n\s*<small>UI only<\/small>\s*\n\s*<\/button>\s*\n\s*<button type="button">\s*\n\s*<span>Add transaction<\/span>\s*\n\s*<small>UI only<\/small>\s*\n\s*<\/button>/,
   );
 });

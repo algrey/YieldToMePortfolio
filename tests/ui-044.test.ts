@@ -26,10 +26,14 @@ test("UI-044: every var(--token) referenced in globals.css actually resolves to 
   );
   // Some tokens are supplied at runtime as an inline style by a component
   // (e.g. an allocation bar's own width); those are defined in TSX, not CSS.
+  // PRF-014 step 2b: `--bar-height` (OverviewScreen) and `--allocation`
+  // (DetailsScreen) moved from portfolio-shell.tsx to preview-shell.tsx --
+  // see that file's own header comment.
   for (const source of await Promise.all(
-    ["../app/components/portfolio-shell.tsx"].map((path) =>
-      readFile(new URL(path, import.meta.url), "utf8"),
-    ),
+    [
+      "../app/components/portfolio-shell.tsx",
+      "../app/components/preview-shell.tsx",
+    ].map((path) => readFile(new URL(path, import.meta.url), "utf8")),
   )) {
     for (const match of source.matchAll(/"(--[\w-]+)":/g)) {
       defined.add(match[1]);

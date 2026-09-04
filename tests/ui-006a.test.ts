@@ -962,13 +962,23 @@ test("UI-006A: the FY table scrolls inside its own container instead of overflow
 });
 
 test("UI-006A: the Income tab only appears in owned mode, pointing at the standalone route (no preview/fixture parity claimed)", async () => {
+  // PRF-014 step 2b: `PortfolioShell` is owned-only now (no more runtime
+  // `ownedMode` flag -- see that component's own header comment), so this
+  // gate collapses to a plain `ownedWorkspace.activePortfolio` check. The
+  // preview counterpart (preview-shell.tsx's `PreviewShell`) never renders
+  // an Income tab at all -- unchanged from before this task.
   const shell = await readFile(
     new URL("../app/components/portfolio-shell.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(shell, /ownedMode && ownedWorkspace\.activePortfolio \? \(/);
+  assert.match(shell, /ownedWorkspace\.activePortfolio \? \(/);
   assert.match(
     shell,
     /href={`\/portfolio\/\$\{ownedWorkspace\.activePortfolio\.id\}\/income`}/,
   );
+  const previewSource = await readFile(
+    new URL("../app/components/preview-shell.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(previewSource, />\s*income\s*</);
 });
