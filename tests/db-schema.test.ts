@@ -137,6 +137,7 @@ test("generated migration applies cleanly with foreign keys enabled", async () =
     "security_identifiers",
     "security_provider_mappings",
     "sharesight_delayed_prices",
+    "sharesight_pending_payouts",
     "sharesight_sync_state",
     "snapshot_publications",
     "split_events",
