@@ -420,6 +420,8 @@ test("FY-001B: the settings surface has a labelled financial-year-start month se
   assert.match(component, /Financial year start/);
   // A full 1-12 month picker, not a partial/free-text control.
   assert.match(component, /FY_MONTH_NAMES\.map/);
+  // The shell must still CALL the helper, not merely import it.
+  assert.match(component, /financialYearWindowHelperText\(/);
   // PRF-014 step 2a moved the `FY_MONTH_NAMES` array and the
   // `financialYearWindowHelperText` helper (verbatim) into the pure
   // sibling module `portfolio-shell-model.ts` -- portfolio-shell.tsx still
