@@ -457,14 +457,16 @@ function findPaginationEvidence(
     // Kaminari-style field whose ordinary "no further page" encoding is
     // `false`/`0`/`""`, not absence. A bare presence test therefore fails
     // the whole list closed on every normal terminal page. Only a truthy
-    // value -- a positive finite page number, or a non-empty string
-    // cursor/URL -- is real evidence of a next page.
+    // value -- a positive finite page number, a non-empty string
+    // cursor/URL, or the boolean `true` (a plausible provider encoding of
+    // "yes, there is a next page") -- is real evidence of a next page.
     if (
       (typeof container.next_page === "number" &&
         Number.isFinite(container.next_page) &&
         container.next_page > 0) ||
       (typeof container.next_page === "string" &&
-        container.next_page.length > 0)
+        container.next_page.length > 0) ||
+      container.next_page === true
     ) {
       return "next_page";
     }
@@ -473,6 +475,19 @@ function findPaginationEvidence(
       container.total_count > arrayLength
     ) {
       return "total_count";
+    }
+    // BRK-017 follow-up round (2026-09-04, Orchestrator ruling): `total_entries`
+    // is will_paginate's count field (the Rails pagination gem underlying
+    // Kaminari's sibling `next_page` convention above), and carries the same
+    // unambiguous "count of all items" meaning as `total_count` at both the
+    // top level and nested in `meta`/`pagination` -- unlike bare `total`
+    // (see below), no envelope in this API ever uses `total_entries` for a
+    // money aggregate, so it needs no top-level scoping.
+    if (
+      typeof container.total_entries === "number" &&
+      container.total_entries > arrayLength
+    ) {
+      return "total_entries";
     }
     // BRK-017 correction round (B2, 2026-09-04, Orchestrator ruling): a
     // bare TOP-LEVEL `total` is deliberately NOT trusted as pagination

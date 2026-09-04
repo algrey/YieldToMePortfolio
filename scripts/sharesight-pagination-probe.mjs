@@ -60,9 +60,14 @@
 //   trade/payout/instrument record, and never prints a value from any
 //   OTHER sibling key. No amount, id, ticker, holding, or portfolio name
 //   is ever printed -- a printed pagination-meta value also passes through
-//   `redactPortfolioIds` first (BRK-017 correction round, F1), which
-//   rewrites any `/portfolios/<digits>` path segment (e.g. inside a
-//   `links.self` URL) to `/portfolios/<id>` before it is stringified.
+//   `redactPortfolioIds` first (BRK-017 correction round F1; broadened in
+//   the 2026-09-04 follow-up round), which rewrites: any
+//   `/portfolios/<digits>` or `/holdings/<digits>` path segment (e.g. inside
+//   a `links.self` URL) to the equivalent `<id>` placeholder path segment;
+//   any `portfolio_id=`/`holding_id=` query value to `portfolio_id=<id>` /
+//   `holding_id=<id>`; and any numeric value found under a key named `id`
+//   or ending in `_id` (at any nesting depth) to the literal `<id>` --
+//   before any of it is stringified.
 //
 // HOW TO RUN
 //   node --experimental-strip-types scripts/sharesight-pagination-probe.mjs
@@ -215,27 +220,48 @@ export async function probeEndpoint(label, envelopeKey, calls) {
   return { label, envelopeKey, outcomes, pagingEffect };
 }
 
-/** BRK-017 correction round (F1): redacts any `/portfolios/<digits>` path
- * segment to `/portfolios/<id>` inside a value about to be printed. The
- * pagination-meta values section below prints whatever a matched sibling
- * key (e.g. `links`) contains, and a `links.self` URL there carries the
- * owner's real Sharesight portfolio id -- exactly the kind of value this
- * script's header promises never to print. Recurses through
- * plain-object/array shapes; string leaves get the path-segment
- * replacement, everything else passes through unchanged. Pure/no I/O so it
+/** BRK-017 correction round (F1) / follow-up round (2026-09-04, confirmation
+ * review): redacts identifier-shaped content inside a value about to be
+ * printed. The pagination-meta values section below prints whatever a
+ * matched sibling key (e.g. `links`) contains, and that value can carry the
+ * owner's real Sharesight portfolio/holding id in several shapes -- a
+ * `links.self` URL path segment, a query-string parameter, or (in a nested
+ * `meta`/`pagination` object) a bare numeric field named `id` or ending in
+ * `_id` -- exactly the kind of value this script's header promises never to
+ * print. F1 only rewrote `/portfolios/<digits>` path segments; the
+ * follow-up round found that left three other id-shaped encodings
+ * unredacted, so this now also rewrites `/holdings/<digits>` path segments,
+ * `portfolio_id=`/`holding_id=` query values, and any numeric value found
+ * under a key named `id` or ending in `_id` (at any nesting depth) --
+ * all replaced with the literal `<id>`. Recurses through
+ * plain-object/array shapes, tracking each value's own key so the
+ * key-name-based rule can apply; string leaves get the path/query
+ * replacements, everything else passes through unchanged. Pure/no I/O so it
  * is unit tested directly (`tests/brk-017.test.ts`). */
 export function redactPortfolioIds(value) {
+  return redactIdentifiers(value, null);
+}
+
+const ID_KEY_PATTERN = /(^id$|_id$)/i;
+
+function redactIdentifiers(value, key) {
   if (typeof value === "string") {
-    return value.replace(/\/portfolios\/\d+/g, "/portfolios/<id>");
+    return value
+      .replace(/\/portfolios\/\d+/g, "/portfolios/<id>")
+      .replace(/\/holdings\/\d+/g, "/holdings/<id>")
+      .replace(/\b(portfolio_id|holding_id)=[^&]+/gi, "$1=<id>");
+  }
+  if (typeof value === "number" && key !== null && ID_KEY_PATTERN.test(key)) {
+    return "<id>";
   }
   if (Array.isArray(value)) {
-    return value.map((item) => redactPortfolioIds(item));
+    return value.map((item) => redactIdentifiers(item, key));
   }
   if (value !== null && typeof value === "object") {
     /** @type {Record<string, unknown>} */
     const result = {};
-    for (const [key, entry] of Object.entries(value)) {
-      result[key] = redactPortfolioIds(entry);
+    for (const [entryKey, entry] of Object.entries(value)) {
+      result[entryKey] = redactIdentifiers(entry, entryKey);
     }
     return result;
   }

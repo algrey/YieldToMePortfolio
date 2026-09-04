@@ -235,7 +235,51 @@ test("BRK-017 (F1): redactPortfolioIds leaves non-portfolio-id content, nested a
   assert.equal(redacted.nested[1].deep, "/portfolios/<id>");
 });
 
-test("BRK-017 (F1): formatSummaryTable's printed pagination-meta values never carry a real portfolio id from links.self", () => {
+// BRK-017 follow-up round (confirmation review, 2026-09-04): the F1 fix
+// above only rewrote `/portfolios/<digits>` path segments in string leaves,
+// but the probe's header promises NO id is ever printed -- a `/holdings/
+// <digits>` path segment, a `portfolio_id=`/`holding_id=` query value, or a
+// bare numeric field named `id`/ending in `_id` all carry the same real
+// identifier and were left unredacted. These three cases are now covered.
+test("BRK-017 (follow-up): redactPortfolioIds masks a /holdings/<digits> path segment", () => {
+  const redacted = redactPortfolioIds({
+    links: {
+      self: "https://api.sharesight.com/api/v3.0/holdings/424242/trades",
+    },
+  });
+  assert.equal(
+    redacted.links.self,
+    "https://api.sharesight.com/api/v3.0/holdings/<id>/trades",
+  );
+});
+
+test("BRK-017 (follow-up): redactPortfolioIds masks portfolio_id=/holding_id= query values", () => {
+  const redacted = redactPortfolioIds({
+    links: {
+      self: "https://api.sharesight.com/api/v3.0/trades?portfolio_id=123&holding_id=456&page=2",
+    },
+  });
+  assert.equal(
+    redacted.links.self,
+    "https://api.sharesight.com/api/v3.0/trades?portfolio_id=<id>&holding_id=<id>&page=2",
+  );
+});
+
+test("BRK-017 (follow-up): redactPortfolioIds masks a numeric value under a key named id or ending in _id, at any nesting depth", () => {
+  const redacted = redactPortfolioIds({
+    id: 111,
+    portfolio_id: 222,
+    meta: { holding_id: 333, total_pages: 2 },
+    nested: [{ instrument_id: 444 }],
+  });
+  assert.equal(redacted.id, "<id>");
+  assert.equal(redacted.portfolio_id, "<id>");
+  assert.equal(redacted.meta.holding_id, "<id>");
+  assert.equal(redacted.meta.total_pages, 2);
+  assert.equal(redacted.nested[0].instrument_id, "<id>");
+});
+
+test("BRK-017 (follow-up): formatSummaryTable's printed pagination-meta values never carry a real portfolio id from links.self", () => {
   const probeResults = [
     {
       label: "portfolio #1 trades",
@@ -477,10 +521,81 @@ test("BRK-017 guard (B1): meta: { next_page: false } passes unchanged", () => {
   assert.equal(result.ok, true);
 });
 
+// Follow-up round (confirmation review, 2026-09-04, Orchestrator ruling):
+// `next_page: true` must REJECT -- boolean `true` is a plausible provider
+// encoding of "yes, there is a next page" and this is a fail-closed guard.
+// `false`/`0`/`""`/`null`/`Infinity`/`NaN` continue to pass unchanged.
+test("BRK-017 guard (follow-up): next_page: true rejects the whole list closed", () => {
+  const result = parseSharesightTrades({ trades: [], next_page: true }, "1");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error.message, /"next_page"/);
+});
+
+test("BRK-017 guard (follow-up): meta: { next_page: true } rejects the whole list closed", () => {
+  const result = parseSharesightTrades(
+    { trades: [], meta: { next_page: true } },
+    "1",
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error.message, /"next_page"/);
+});
+
+test("BRK-017 guard (follow-up): next_page: null/Infinity/NaN pass unchanged", () => {
+  const nullResult = parseSharesightTrades(
+    { trades: [], next_page: null },
+    "1",
+  );
+  assert.equal(nullResult.ok, true);
+
+  const infinityResult = parseSharesightTrades(
+    { trades: [], next_page: Infinity },
+    "1",
+  );
+  assert.equal(infinityResult.ok, true);
+
+  const nanResult = parseSharesightTrades({ trades: [], next_page: NaN }, "1");
+  assert.equal(nanResult.ok, true);
+});
+
 test("BRK-017 guard: total_count greater than the returned array length rejects the whole list closed", () => {
   const result = parseSharesightTrades({ trades: [], total_count: 5 }, "1");
   assert.equal(result.ok, false);
   if (!result.ok) assert.match(result.error.message, /"total_count"/);
+});
+
+// Follow-up round (confirmation review, 2026-09-04): `total_entries` is
+// will_paginate's count field (the count-field sibling to Kaminari's
+// `next_page`), and docs/ARCHITECTURE.md §8.2 already described it as
+// "unaffected" by the bare-`total` scoping -- implying coverage that did
+// not actually exist. It now triggers with the same `> arrayLength` shape
+// as `total_count`, at both the top level and nested in `meta`/`pagination`.
+test("BRK-017 guard (follow-up): total_entries greater than the returned array length rejects the whole list closed", () => {
+  const result = parseSharesightTrades(
+    { trades: [VALID_TRADE_ITEM(1), VALID_TRADE_ITEM(2)], total_entries: 5 },
+    "1",
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error.message, /"total_entries"/);
+});
+
+test("BRK-017 guard (follow-up): total_entries equal to the returned array length passes unchanged", () => {
+  const result = parseSharesightTrades(
+    { trades: [VALID_TRADE_ITEM(1), VALID_TRADE_ITEM(2)], total_entries: 2 },
+    "1",
+  );
+  assert.equal(result.ok, true);
+});
+
+test("BRK-017 guard (follow-up): total_entries INSIDE a meta/pagination sub-object still rejects the whole list closed", () => {
+  const result = parseSharesightTrades(
+    {
+      trades: [VALID_TRADE_ITEM(1), VALID_TRADE_ITEM(2)],
+      pagination: { total_entries: 5 },
+    },
+    "1",
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error.message, /"total_entries"/);
 });
 
 // B2 (Orchestrator ruling): a bare TOP-LEVEL `total` is NOT trusted as
