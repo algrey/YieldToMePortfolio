@@ -185,29 +185,36 @@ test("UI-021 review B1 (BLOCKING fix): the create-portfolio button is gated by t
     new URL("../app/components/portfolio-shell.tsx", import.meta.url),
     "utf8",
   );
-  // The wiring site (inside PortfolioShell, where actionPending/isOnline
-  // actually live) passes the shell's own gate down.
+  // PRF-014 step 2c: `OwnedWorkspaceScreen` no longer threads
+  // onCreatePortfolio/createPortfolioDisabled -- a plain closure can't
+  // cross a real server/client boundary, so `PortfolioShell` (where
+  // actionPending/isOnline actually live) now builds the finished
+  // `<EmptyState action={{...}}>` element itself and hands it down as a
+  // `createPortfolioAction` node. Same gate, same disabled expression,
+  // just built one call frame up -- see that call site's own comment.
+  assert.match(source, /action=\{\{\s*\n\s*label: "Create a new portfolio",/);
+  assert.match(source, /disabled: actionPending \|\| !isOnline,/);
   assert.match(
     source,
-    /createPortfolioDisabled=\{actionPending \|\| !isOnline\}/,
+    /onClick: \(event\) => \{\s*\n\s*portfolioDialogOpenerRef\.current = event\.currentTarget;\s*\n\s*setPortfolioDialog\("create"\);\s*\n\s*\},/,
   );
-  // OwnedWorkspaceScreen threads it straight into EmptyState's action,
-  // never re-deriving or dropping it.
-  assert.match(source, /createPortfolioDisabled: boolean;/);
-  assert.match(
-    source,
-    /action=\{\{\s*\n\s*label: "Create a new portfolio",\s*\n\s*onClick: onCreatePortfolio,\s*\n\s*disabled: createPortfolioDisabled,\s*\n\s*\}\}/,
+  // EmptyState's button actually reads action.disabled -- EmptyState is
+  // now defined in portfolio-shell-leaves.tsx (PRF-014 step 2c).
+  const leavesSource = await readFile(
+    new URL("../app/components/portfolio-shell-leaves.tsx", import.meta.url),
+    "utf8",
   );
-  // EmptyState's button actually reads action.disabled.
   assert.match(
-    source,
+    leavesSource,
     /<button\s*\n\s*type="button"\s*\n\s*className="empty-state-primary-action"\s*\n\s*onClick=\{action\.onClick\}\s*\n\s*disabled=\{action\.disabled\}\s*\n\s*>/,
   );
 });
 
 test("UI-021 review B2 (correction): EmptyState never renders an action-less placeholder button -- the button only exists inside the `action ? ... : null` branch, and an empty state with no action (a portfolio already exists; this section just has no data yet) renders NO button at all inside .empty-state", async () => {
+  // PRF-014 step 2c: EmptyState moved to portfolio-shell-leaves.tsx (zero
+  // hooks) -- see that file's own header comment.
   const source = await readFile(
-    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    new URL("../app/components/portfolio-shell-leaves.tsx", import.meta.url),
     "utf8",
   );
   const fnMatch = source.match(/function EmptyState\(\{[\s\S]*?\n\}\n/);
@@ -251,12 +258,17 @@ test("UI-021: EmptyState's action slot is wired at exactly the 'no portfolios ye
     "expected exactly one EmptyState call site to pass an action",
   );
   assert.match(withAction[0]![0], /label: "Create a new portfolio"/);
-  assert.match(withAction[0]![0], /onClick: onCreatePortfolio/);
+  // PRF-014 step 2c: the handler is now an inline arrow function built at
+  // this call site (PortfolioShell), not a separately-named
+  // `onCreatePortfolio` prop threaded through OwnedWorkspaceScreen.
+  assert.match(withAction[0]![0], /onClick: \(event\) => \{/);
 });
 
 test("UI-021 review B2 (correction): the component's own doc comment accurately names all five call sites that relied on the removed placeholder's default, not a false 'every real call site suppressed it' claim", async () => {
+  // PRF-014 step 2c: EmptyState (and its doc comment) moved to
+  // portfolio-shell-leaves.tsx.
   const source = await readFile(
-    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    new URL("../app/components/portfolio-shell-leaves.tsx", import.meta.url),
     "utf8",
   );
   for (const name of [
@@ -276,29 +288,37 @@ test("UI-021 review B2 (correction): the component's own doc comment accurately 
   assert.match(source, /orchestrator-approved cleanup/);
 });
 
-test("UI-021: onCreatePortfolio opens the SAME create-portfolio dialog as the header dropdown, capturing the surviving empty-state button itself as the opener", async () => {
+test("UI-021: the create-portfolio action opens the SAME create-portfolio dialog as the header dropdown, capturing the surviving empty-state button itself as the opener", async () => {
+  // PRF-014 step 2c: the handler is no longer a separately-named
+  // `onCreatePortfolio` prop threaded through OwnedWorkspaceScreen -- it is
+  // now an inline `onClick` inside the `<EmptyState action={{...}}>`
+  // PortfolioShell itself builds (see that call site's own comment). The
+  // dialog-opener behaviour is unchanged; only its call frame moved.
   const source = await readFile(
     new URL("../app/components/portfolio-shell.tsx", import.meta.url),
     "utf8",
   );
-  const match = source.match(
-    /onCreatePortfolio=\{\(event\) => \{([\s\S]*?)\n {14}\}\}/,
-  );
-  assert.ok(
-    match,
-    "expected an onCreatePortfolio handler passed to OwnedWorkspaceScreen",
-  );
+  const match = source.match(/onClick: \(event\) => \{([\s\S]*?)\n {18}\},/);
+  assert.ok(match, "expected the create-portfolio action's onClick handler");
   assert.match(
     match![1]!,
     /portfolioDialogOpenerRef\.current = event\.currentTarget;/,
   );
   assert.match(match![1]!, /setPortfolioDialog\("create"\);/);
   // OwnedWorkspaceScreen itself has no dialog state of its own -- it takes
-  // the callback as a prop, one dialog shared across the whole shell.
-  assert.match(
-    source,
-    /onCreatePortfolio: \(event: MouseEvent<HTMLButtonElement>\) => void;/,
+  // the already-built action element as a `ReactNode` prop, one dialog
+  // shared across the whole shell.
+  const leavesSource = await readFile(
+    new URL("../app/components/portfolio-shell-leaves.tsx", import.meta.url),
+    "utf8",
   );
+  assert.match(leavesSource, /createPortfolioAction: ReactNode;/);
+  // portfolio-shell-leaves.tsx's own header comment legitimately names the
+  // old `onCreatePortfolio` prop, backtick-quoted, to document what moved
+  // (same convention as this file's other re-pointed test below for
+  // `historyBarsOverride`/`selectedHolding`) -- so a backtick-wrapped
+  // mention is excluded rather than treated as a false positive.
+  assert.doesNotMatch(leavesSource, /(?<!`)\bonCreatePortfolio\b(?!`)/);
 });
 
 test("UI-021 (re-pointed for PRF-014 step 2b): preview/prototype mode never reaches OwnedWorkspaceScreen or the empty-state create action -- each prototype section keeps its own distinct, unchanged screen component", async () => {
@@ -318,12 +338,15 @@ test("UI-021 (re-pointed for PRF-014 step 2b): preview/prototype mode never reac
       "utf8",
     ),
   ]);
-  // OwnedWorkspaceScreen (the only caller of the new onCreatePortfolio prop)
-  // is `PortfolioShell`'s unconditional else-branch -- always reached when no
-  // more specific owned section matches.
+  // OwnedWorkspaceScreen is `PortfolioShell`'s unconditional else-branch --
+  // always reached when no more specific owned section matches. PRF-014
+  // step 2c widened this call site (it now builds the `quotesScreen`/
+  // `createPortfolioAction` elements inline -- see that call site's own
+  // comment), so the window is generous enough to still reach the closing
+  // tag.
   assert.match(
     shellSource,
-    /\) : \(\s*<OwnedWorkspaceScreen[\s\S]{0,1200}\/>\s*\)\}/,
+    /\) : \(\s*<OwnedWorkspaceScreen[\s\S]{0,3200}\/>\s*\)\}/,
   );
   // portfolio-shell.tsx never renders (as JSX) any of the preview-only
   // screen components -- they live only in preview-shell.tsx. (Their names

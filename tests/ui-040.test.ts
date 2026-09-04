@@ -265,6 +265,27 @@ async function readComponentSource(): Promise<string> {
   );
 }
 
+// PRF-014 step 2c: `HoldingsSummaryFooterRow` (the `summary-lines-lower`
+// region below) moved to portfolio-shell-leaves.tsx; its toggle `<button>`
+// was inverted out into portfolio-shell-client-leaves.tsx's
+// `HideSoldToggle` -- see both files' own header comments.
+async function readLeavesSource(): Promise<string> {
+  return readFile(
+    new URL("../app/components/portfolio-shell-leaves.tsx", import.meta.url),
+    "utf8",
+  );
+}
+
+async function readClientLeavesSource(): Promise<string> {
+  return readFile(
+    new URL(
+      "../app/components/portfolio-shell-client-leaves.tsx",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+}
+
 test("UI-040: session persistence is wired through window.sessionStorage specifically (never localStorage), reusing the DIV-013 pattern's hideSoldStorageKey/loadHideSoldSession/saveHideSoldSession helpers, never isOnline-gated", async () => {
   const source = await readComponentSource();
   assert.match(source, /window\.sessionStorage/);
@@ -326,18 +347,30 @@ test("UI-040 structural pin: ownedHoldingHiddenSoldCount is computed from the FU
 });
 
 test("UI-040 structural pin (owner ruling: 'No explanatory text on the screen please ... never visible'): the toggle button's ONLY child is the state text itself -- no title attribute anywhere in the summary-lines-lower region (review B3: a hover tooltip is still visible text, forbidden)", async () => {
-  const source = await readComponentSource();
-  const region = source.slice(
-    source.indexOf('<div className="summary-lines-lower">'),
-    source.indexOf("</div>\n    </div>\n  );\n}"),
+  // PRF-014 step 2c: the button itself is now a tiny inverted client leaf
+  // (portfolio-shell-client-leaves.tsx's HideSoldToggle) -- pinned there.
+  // The rest of the summary-lines-lower region (still portfolio-shell-
+  // leaves.tsx's HoldingsSummaryFooterRow) no longer contains the button
+  // markup at all, so the "no title attribute" guard is checked on BOTH
+  // files -- neither may introduce a hover tooltip.
+  const clientLeavesSource = await readClientLeavesSource();
+  assert.match(clientLeavesSource, /aria-pressed=\{hideSold\}/);
+  assert.match(clientLeavesSource, /\{hideSold \? "Show Sold" : "Hide Sold"\}/);
+  assert.doesNotMatch(clientLeavesSource, /title=/);
+
+  const leavesSource = await readLeavesSource();
+  const region = leavesSource.slice(
+    leavesSource.indexOf('<div className="summary-lines-lower">'),
+    leavesSource.indexOf("</div>\n    </div>\n  );\n}"),
   );
-  assert.match(region, /aria-pressed=\{hideSold\}/);
-  assert.match(region, /\{hideSold \? "Show Sold" : "Hide Sold"\}/);
   assert.doesNotMatch(region, /title=/);
 });
 
 test("UI-040 structural pin (review fold): the sr-only live region is ALWAYS mounted (never conditionally added/removed) -- only its TEXT content is conditional on hideSold. A live region that is itself mounted-with-content on the same render is not reliably announced by assistive tech; a region already present in the a11y tree before its content changes is.", async () => {
-  const source = await readComponentSource();
+  // PRF-014 step 2c: HoldingsSummaryFooterRow (the live region's own
+  // component) moved to portfolio-shell-leaves.tsx -- only its toggle
+  // <button> moved out to the client leaf; this live region stayed.
+  const source = await readLeavesSource();
   const region = source.slice(
     source.indexOf('<div className="summary-lines-lower">'),
     source.indexOf("</div>\n    </div>\n  );\n}"),
@@ -356,7 +389,9 @@ test("UI-040 structural pin (review fold): the sr-only live region is ALWAYS mou
 });
 
 test("UI-040 structural pin: dollar-sign alignment mechanism -- both All Time and Realised labels carry the shared summary-line-label class (identical fixed-width column across both lines)", async () => {
-  const source = await readComponentSource();
+  // PRF-014 step 2c: HoldingsSummaryFooterRow (and this class) moved to
+  // portfolio-shell-leaves.tsx.
+  const source = await readLeavesSource();
   const labelOccurrences = (
     source.match(/row-primary symbol summary-line-label/g) ?? []
   ).length;

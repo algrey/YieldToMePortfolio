@@ -194,8 +194,10 @@ test("UI-025: the Worker CSP already allows exactly the greeninvestments.au orig
 });
 
 test("UI-025 review (fold), extended by WLT-001: OwnedWorkspaceScreen's generic per-section empty-state records no longer carry a 'news' OR 'quotes' entry -- the early returns for both mean titles/messages are typed Record<Exclude<PortfolioSection, \"news\" | \"quotes\">, string>, so a stale/false string can't silently exist for either", async () => {
+  // PRF-014 step 2c: OwnedWorkspaceScreen moved to
+  // portfolio-shell-leaves.tsx -- see that file's own header comment.
   const source = await readFile(
-    new URL("../app/components/portfolio-shell.tsx", import.meta.url),
+    new URL("../app/components/portfolio-shell-leaves.tsx", import.meta.url),
     "utf8",
   );
   assert.match(

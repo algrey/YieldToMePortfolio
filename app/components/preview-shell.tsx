@@ -15,14 +15,19 @@
 // the client chunk -- see tests/prf-014.test.ts's own reasoning for why a
 // SOURCE guard, not a bundle-grep, is the primary guard here).
 //
-// `SortButton`, `ToneValue`, `EmptyState`, and `QuotesScreen` stay defined
-// in `portfolio-shell.tsx` instead of moving here: the first three are
-// shared with the OWNED screens' own sorters/tone-coloured values/empty
-// states, and `QuotesScreen` sits directly beside (and MKT-014 explicitly
-// keeps it beside) `QuoteCorrectionHistory`/`QuoteCorrectionDialog`, which
-// `app/components/holding-detail.tsx`'s owned per-holding market-data panel
-// reuses -- see that file's own comment. This module imports all four from
-// there instead of forking copies.
+// `SortButton`, `ToneValue`, `EmptyState`, and `QuotesScreen` are shared
+// with the OWNED screens' own sorters/tone-coloured values/empty states
+// rather than moving here: `QuotesScreen` sits directly beside (and
+// MKT-014 explicitly keeps it beside) `QuoteCorrectionHistory`/
+// `QuoteCorrectionDialog`, which `app/components/holding-detail.tsx`'s
+// owned per-holding market-data panel reuses -- see that file's own
+// comment; `SortButton` stays in `portfolio-shell.tsx` for the same
+// sharing reason. `ToneValue` and `EmptyState` (PRF-014 step 2c) are now
+// actually DEFINED in the zero-hook `portfolio-shell-leaves.tsx` --
+// `portfolio-shell.tsx` re-exports both under their original names (see
+// that file's own header comment), so this module's import below is
+// unchanged. This module imports all four `from "./portfolio-shell"`
+// instead of forking copies.
 //
 // Callers: `app/portfolio/[portfolioId]/[section]/page.tsx`'s and its
 // `[holdingId]` sibling's `portfolioId === "preview"` branches. Discriminated
