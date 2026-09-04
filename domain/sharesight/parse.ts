@@ -453,7 +453,19 @@ function findPaginationEvidence(
     if (typeof container.page_count === "number" && container.page_count > 1) {
       return "page_count";
     }
-    if (container.next_page !== undefined && container.next_page !== null) {
+    // BRK-017 correction round (B1, 2026-09-04): `next_page` is a Rails/
+    // Kaminari-style field whose ordinary "no further page" encoding is
+    // `false`/`0`/`""`, not absence. A bare presence test therefore fails
+    // the whole list closed on every normal terminal page. Only a truthy
+    // value -- a positive finite page number, or a non-empty string
+    // cursor/URL -- is real evidence of a next page.
+    if (
+      (typeof container.next_page === "number" &&
+        Number.isFinite(container.next_page) &&
+        container.next_page > 0) ||
+      (typeof container.next_page === "string" &&
+        container.next_page.length > 0)
+    ) {
       return "next_page";
     }
     if (
@@ -462,7 +474,23 @@ function findPaginationEvidence(
     ) {
       return "total_count";
     }
-    if (typeof container.total === "number" && container.total > arrayLength) {
+    // BRK-017 correction round (B2, 2026-09-04, Orchestrator ruling): a
+    // bare TOP-LEVEL `total` is deliberately NOT trusted as pagination
+    // evidence -- on a trades/payouts/holdings envelope it reads just as
+    // plausibly as a money aggregate (e.g. a total value/amount), and
+    // `total > arrayLength` is satisfied by any such money value. A false
+    // positive here doesn't just fail one call closed: `total` is checked
+    // against every envelope this guard runs, including the one behind
+    // `listUserInstruments`, which all three price-lookup paths depend on
+    // -- so a spurious trip would stop the sync AND every price path.
+    // Inside a `meta`/`pagination` sub-object, `total` is unambiguously a
+    // count (nothing money-shaped is ever nested there), so it still trips
+    // the guard there.
+    if (
+      container !== record &&
+      typeof container.total === "number" &&
+      container.total > arrayLength
+    ) {
       return "total";
     }
     // `per_page` alone doesn't say how many items exist in total, but a

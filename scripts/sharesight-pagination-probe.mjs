@@ -59,7 +59,10 @@
 //   it never descends into an item array to print anything from an actual
 //   trade/payout/instrument record, and never prints a value from any
 //   OTHER sibling key. No amount, id, ticker, holding, or portfolio name
-//   is ever printed.
+//   is ever printed -- a printed pagination-meta value also passes through
+//   `redactPortfolioIds` first (BRK-017 correction round, F1), which
+//   rewrites any `/portfolios/<digits>` path segment (e.g. inside a
+//   `links.self` URL) to `/portfolios/<id>` before it is stringified.
 //
 // HOW TO RUN
 //   node --experimental-strip-types scripts/sharesight-pagination-probe.mjs
@@ -212,6 +215,33 @@ export async function probeEndpoint(label, envelopeKey, calls) {
   return { label, envelopeKey, outcomes, pagingEffect };
 }
 
+/** BRK-017 correction round (F1): redacts any `/portfolios/<digits>` path
+ * segment to `/portfolios/<id>` inside a value about to be printed. The
+ * pagination-meta values section below prints whatever a matched sibling
+ * key (e.g. `links`) contains, and a `links.self` URL there carries the
+ * owner's real Sharesight portfolio id -- exactly the kind of value this
+ * script's header promises never to print. Recurses through
+ * plain-object/array shapes; string leaves get the path-segment
+ * replacement, everything else passes through unchanged. Pure/no I/O so it
+ * is unit tested directly (`tests/brk-017.test.ts`). */
+export function redactPortfolioIds(value) {
+  if (typeof value === "string") {
+    return value.replace(/\/portfolios\/\d+/g, "/portfolios/<id>");
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactPortfolioIds(item));
+  }
+  if (value !== null && typeof value === "object") {
+    /** @type {Record<string, unknown>} */
+    const result = {};
+    for (const [key, entry] of Object.entries(value)) {
+      result[key] = redactPortfolioIds(entry);
+    }
+    return result;
+  }
+  return value;
+}
+
 /** BRK-017: formats one `probeEndpoint` result plus the whole run's probe
  * results into the compact, pasteable summary table this script prints at
  * the end. Pure/no I/O so it is unit tested directly against fixed input
@@ -265,7 +295,7 @@ export function formatSummaryTable(probeResults, nowIso) {
       const outcome = probe.outcomes[call];
       const rendered =
         outcome?.ok && !outcome.unexpectedShape
-          ? JSON.stringify(outcome.paginationMetaValues)
+          ? JSON.stringify(redactPortfolioIds(outcome.paginationMetaValues))
           : "?";
       lines.push(`${probe.label} [${call}]: ${rendered}`);
     }
@@ -303,7 +333,7 @@ export function buildFakeClient() {
     async listPortfolios() {
       return ok([{ id: "1001", name: "fake", currencyCode: "AUD" }]);
     },
-    async getTradesRaw(_portfolioId, _params) {
+    async getTradesRaw() {
       // Ignores paging entirely -- identical list and no metadata sibling
       // key regardless of params, mirroring BRK-015's `from`/`to`
       // silent-ignore precedent.
@@ -326,7 +356,7 @@ export function buildFakeClient() {
         per_page: fakePayoutsAll.length,
       });
     },
-    async getUserInstrumentsRaw(_params) {
+    async getUserInstrumentsRaw() {
       return ok({ instruments: [{ id: "1" }, { id: "2" }] });
     },
   };

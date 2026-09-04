@@ -36,6 +36,7 @@ import {
   deriveEnvelopeEvidence,
   formatSummaryTable,
   probeEndpoint,
+  redactPortfolioIds,
   runProbe,
 } from "../scripts/sharesight-pagination-probe.mjs";
 import {
@@ -207,16 +208,89 @@ test("BRK-017: formatSummaryTable reports an unavailable outcome by its typed er
   assert.match(table, /unavailable \(rate_limit\)/);
 });
 
+// F1 (review finding): the probe's header promises no id/portfolio name is
+// ever printed, but a matched `links.self` URL carries the owner's real
+// Sharesight portfolio id. `redactPortfolioIds` masks any
+// `/portfolios/<digits>` path segment before a pagination-meta value is
+// stringified for printing.
+test("BRK-017 (F1): redactPortfolioIds masks a /portfolios/<digits> path segment inside a links.self URL", () => {
+  const redacted = redactPortfolioIds({
+    links: {
+      self: "https://api.sharesight.com/api/v3.0/portfolios/987654/trades?page=2",
+    },
+  });
+  assert.equal(
+    redacted.links.self,
+    "https://api.sharesight.com/api/v3.0/portfolios/<id>/trades?page=2",
+  );
+});
+
+test("BRK-017 (F1): redactPortfolioIds leaves non-portfolio-id content, nested arrays, and non-string values unchanged", () => {
+  const redacted = redactPortfolioIds({
+    total_pages: 2,
+    nested: ["https://x/portfolios/42/payouts", { deep: "/portfolios/99" }],
+  });
+  assert.equal(redacted.total_pages, 2);
+  assert.equal(redacted.nested[0], "https://x/portfolios/<id>/payouts");
+  assert.equal(redacted.nested[1].deep, "/portfolios/<id>");
+});
+
+test("BRK-017 (F1): formatSummaryTable's printed pagination-meta values never carry a real portfolio id from links.self", () => {
+  const probeResults = [
+    {
+      label: "portfolio #1 trades",
+      envelopeKey: "trades",
+      outcomes: {
+        wide: {
+          ok: true,
+          topLevelKeys: ["trades", "links"],
+          envelopeKey: "trades",
+          arrayLength: 3,
+          siblingKeys: ["links"],
+          paginationMetaValues: {
+            links: {
+              self: "https://api.sharesight.com/api/v3.0/portfolios/555111/trades",
+            },
+          },
+        },
+        page1: {
+          ok: true,
+          topLevelKeys: ["trades"],
+          envelopeKey: "trades",
+          arrayLength: 3,
+          siblingKeys: [],
+          paginationMetaValues: {},
+        },
+        page2: {
+          ok: true,
+          topLevelKeys: ["trades"],
+          envelopeKey: "trades",
+          arrayLength: 3,
+          siblingKeys: [],
+          paginationMetaValues: {},
+        },
+      },
+      pagingEffect: "ignores paging (response identical)",
+    },
+  ];
+  const table = formatSummaryTable(probeResults, "2026-09-04T00:00:00.000Z");
+  assert.doesNotMatch(table, /555111/);
+  assert.match(table, /portfolios\/<id>\/trades/);
+});
+
 // ---------------------------------------------------------------------------
 // 3. Fake-client dry run of the full probe pipeline (no network)
 // ---------------------------------------------------------------------------
 
 test("BRK-017: probeEndpoint against the fake client's trades method reports 'ignores paging' (identical response regardless of page/per_page)", async () => {
   const client = buildFakeClient();
+  // BRK-017 correction round (F3): the fake client's getTradesRaw takes no
+  // arguments (it ignores paging entirely, per its own doc comment) --
+  // these calls no longer pass any, matching that 0-arg signature.
   const result = await probeEndpoint("portfolio #1 trades", "trades", {
-    wide: () => client.getTradesRaw("1001", { from: "1990-01-01" }),
-    page1: () => client.getTradesRaw("1001", { page: 1, perPage: 1 }),
-    page2: () => client.getTradesRaw("1001", { page: 2 }),
+    wide: () => client.getTradesRaw(),
+    page1: () => client.getTradesRaw(),
+    page2: () => client.getTradesRaw(),
   });
   assert.equal(result.pagingEffect, "ignores paging (response identical)");
   assert.equal(result.outcomes.wide.arrayLength, 3);
@@ -362,10 +436,45 @@ test("BRK-017 guard: top-level page_count > 1 rejects the whole list closed", ()
   if (!result.ok) assert.match(result.error.message, /"page_count"/);
 });
 
-test("BRK-017 guard: a non-null next_page rejects the whole list closed", () => {
+test("BRK-017 guard: a truthy numeric next_page rejects the whole list closed", () => {
   const result = parseSharesightTrades({ trades: [], next_page: 2 }, "1");
   assert.equal(result.ok, false);
   if (!result.ok) assert.match(result.error.message, /"next_page"/);
+});
+
+test("BRK-017 guard (B1): a truthy string next_page rejects the whole list closed", () => {
+  const result = parseSharesightTrades({ trades: [], next_page: "2" }, "1");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error.message, /"next_page"/);
+});
+
+// B1 correction (review finding): `next_page` is a Rails/Kaminari-style
+// field whose ordinary "no further page" encoding is `false`/`0`/`""`, not
+// absence -- a bare presence test previously failed the whole list closed
+// on every normal terminal page. Only a truthy value is real evidence.
+test("BRK-017 guard (B1): next_page: false/0/\"\" (the ordinary 'no further page' encoding) passes unchanged", () => {
+  const falseResult = parseSharesightTrades(
+    { trades: [], next_page: false },
+    "1",
+  );
+  assert.equal(falseResult.ok, true);
+
+  const zeroResult = parseSharesightTrades({ trades: [], next_page: 0 }, "1");
+  assert.equal(zeroResult.ok, true);
+
+  const emptyStringResult = parseSharesightTrades(
+    { trades: [], next_page: "" },
+    "1",
+  );
+  assert.equal(emptyStringResult.ok, true);
+});
+
+test("BRK-017 guard (B1): meta: { next_page: false } passes unchanged", () => {
+  const result = parseSharesightTrades(
+    { trades: [], meta: { next_page: false } },
+    "1",
+  );
+  assert.equal(result.ok, true);
 });
 
 test("BRK-017 guard: total_count greater than the returned array length rejects the whole list closed", () => {
@@ -374,8 +483,42 @@ test("BRK-017 guard: total_count greater than the returned array length rejects 
   if (!result.ok) assert.match(result.error.message, /"total_count"/);
 });
 
-test("BRK-017 guard: bare total greater than the returned array length rejects the whole list closed", () => {
-  const result = parseSharesightTrades({ trades: [], total: 5 }, "1");
+// B2 (Orchestrator ruling): a bare TOP-LEVEL `total` is NOT trusted as
+// pagination evidence -- on a trades/payouts/holdings envelope it reads
+// just as plausibly as a money aggregate (a total value/amount), and
+// `total > arrayLength` is satisfied by any such money value. A false
+// positive here would stop the sync AND every price-lookup path that
+// routes through `listUserInstruments`'s envelope. See
+// docs/ARCHITECTURE.md §8.2's 2026-09-04 correction-round paragraph.
+const VALID_TRADE_ITEM = (id: number) => ({
+  id,
+  instrument: { code: "WHC", market_code: "ASX", currency_code: "AUD" },
+  transaction_date: "2026-01-15",
+  quantity: 10,
+  price: "5.00",
+  holding_id: 1,
+  portfolio_id: 1,
+});
+
+test("BRK-017 guard (B2): a bare top-level total passes unchanged -- it can be a money aggregate, not a count", () => {
+  const result = parseSharesightTrades(
+    {
+      trades: [VALID_TRADE_ITEM(1), VALID_TRADE_ITEM(2)],
+      total: 1234.56,
+    },
+    "1",
+  );
+  assert.equal(result.ok, true);
+});
+
+test("BRK-017 guard (B2): total INSIDE a meta/pagination sub-object still rejects the whole list closed", () => {
+  const result = parseSharesightTrades(
+    {
+      trades: [VALID_TRADE_ITEM(1), VALID_TRADE_ITEM(2)],
+      meta: { total: 5 },
+    },
+    "1",
+  );
   assert.equal(result.ok, false);
   if (!result.ok) assert.match(result.error.message, /"total"/);
 });
