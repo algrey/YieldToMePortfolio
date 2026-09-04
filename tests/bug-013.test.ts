@@ -1013,7 +1013,9 @@ test("source pin: existingDividendSourceReferenceRowsQuery (app/import-review-qu
   );
   assert.doesNotMatch(
     querySource.slice(
-      querySource.indexOf("export function existingDividendSourceReferenceRowsQuery"),
+      querySource.indexOf(
+        "export function existingDividendSourceReferenceRowsQuery",
+      ),
       querySource.indexOf(
         "export function existingTradeSourceReferenceRowsQuery",
       ),

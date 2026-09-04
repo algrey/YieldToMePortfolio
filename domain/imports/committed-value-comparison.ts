@@ -130,7 +130,9 @@ export function tradeValueDifferences(
   committed: CommittedTradeValues,
 ): CommittedRecordFieldDifference[] {
   const differences: CommittedRecordFieldDifference[] = [];
-  if (!decimalValuesMatch(incoming.quantityDecimal, committed.quantityDecimal)) {
+  if (
+    !decimalValuesMatch(incoming.quantityDecimal, committed.quantityDecimal)
+  ) {
     differences.push({
       field: "quantity",
       committed: committed.quantityDecimal,

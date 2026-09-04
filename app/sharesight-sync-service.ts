@@ -468,11 +468,12 @@ function canonicalRowDigestFields(row: ParsedImportRow): string {
  * own commit-time fail-closed check (this task) skips a `needs_decision`
  * row rather than silently accepting either its old or new value.
  */
-type SharesightRowClassification = "already_imported" | "needs_decision" | "new";
+type SharesightRowClassification =
+  "already_imported" | "needs_decision" | "new";
 
 /**
  * BRK-019 slice 1: three-way classification, replacing BRK-014's plain
- * boolean `isRowAlreadyImported` -- built on the SAME field-by-field
+ * boolean already-imported check -- built on the SAME field-by-field
  * comparison (`domain/imports/committed-value-comparison.ts`'s
  * `tradeValueDifferences`/`dividendValueDifferences`, extracted from this
  * function's own pre-this-task body) so the three-way split can never drift
@@ -537,13 +538,6 @@ function classifySharesightRow(
     existingTrade,
   );
   return differences.length === 0 ? "already_imported" : "needs_decision";
-}
-
-function isRowAlreadyImported(
-  row: Parameters<typeof classifySharesightRow>[0],
-  existing: SharesightCommittedRowValues,
-): boolean {
-  return classifySharesightRow(row, existing) === "already_imported";
 }
 
 function countByClassification(

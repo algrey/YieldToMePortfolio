@@ -1540,8 +1540,7 @@ export function createOwnedImportCommitRepository(
                   },
                   {
                     cashTotalDecimal: existingRecord.total_cash_decimal,
-                    totalFrankingDecimal:
-                      existingRecord.total_franking_decimal,
+                    totalFrankingDecimal: existingRecord.total_franking_decimal,
                     paymentDate: existingRecord.payment_date,
                     fxRateToPortfolioDecimal:
                       existingRecord.fx_rate_to_portfolio_decimal,

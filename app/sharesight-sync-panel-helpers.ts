@@ -210,11 +210,11 @@ function windowLabel(window: SharesightSyncWindowSummary): string {
  *   row set need not differ from anything, because there is nothing to
  *   differ from (reviewer reproduced `{reused: false, newRows: 0,
  *   alreadyImportedRows: 1}` on exactly this shape). If
- *   `isRowAlreadyImported` still counts every row as already-imported, this
+ *   the classifier still counts every row as already-imported, this
  *   function cannot tell WHICH of the three happened -- a genuinely
  *   different row set, a change on a field it does not compare
  *   (`symbol`/`exchange` for either row kind -- see
- *   `app/sharesight-sync-service.ts`'s `isRowAlreadyImported` doc comment
+ *   `app/sharesight-sync-service.ts`'s `classifySharesightRow` doc comment
  *   for the exact residual list), or no earlier batch to compare against --
  *   so this case gets its own honest sentence naming what WAS checked and
  *   stating all three possibilities, never asserting any one occurred.
