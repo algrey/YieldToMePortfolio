@@ -4,10 +4,16 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { rememberPrimaryTab } from "../last-primary-tab";
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+// PRF-014 step 1: this file is "use client", so a runtime (value) import
+// from ../prototype-data would ship all 447 lines of preview/demo fixture
+// data (historyBars/overviewRows/portfolioPrototypes) in every production
+// client bundle, even though none of it is reachable outside the
+// `_sites-preview`/`/portfolio/preview/*` fixture routes -- every real
+// caller (app/page.tsx, [section]/page.tsx, [holdingId]/page.tsx) passes
+// either `ownedWorkspace` or `portfolioPrototypesOverride`, never neither.
+// Only TYPES are imported here (erased at build time); the preview routes
+// import the runtime values themselves and pass them down as props.
 import {
-  historyBars,
-  overviewRows,
-  portfolioPrototypes,
   type Holding,
   type PortfolioPrototype,
   type Tone,
@@ -2707,11 +2713,15 @@ function SortButton<T extends string>({
 function OverviewScreen({
   portfolio,
   rows,
+  historyBars,
   viewState,
   onOpenPortfolio,
 }: {
   portfolio?: PortfolioPrototype;
   rows: readonly OverviewRow[];
+  /** PRF-014 step 1: caller-supplied demo chart bars (previously a direct
+   * module-level import of `../prototype-data`'s `historyBars`). */
+  historyBars: readonly string[];
   viewState: ViewState;
   onOpenPortfolio: (id: string) => void;
 }) {
@@ -4034,6 +4044,7 @@ export function PortfolioShell({
   reviewBadgeLabel = "Prototype · mock data",
   reviewNote = "Static review build · local mock data · no financial writes",
   portfolioPrototypesOverride = null,
+  historyBarsOverride = [],
   overviewHref = "/",
   holdingSymbol = null,
   ownedWorkspace,
@@ -4044,6 +4055,11 @@ export function PortfolioShell({
   reviewBadgeLabel?: string;
   reviewNote?: string;
   portfolioPrototypesOverride?: readonly PortfolioPrototype[] | null;
+  /** PRF-014 step 1: the preview route's demo history-chart bars
+   * (`historyBars` in `../prototype-data`), passed in by the caller so this
+   * "use client" module never imports the fixture module's runtime values.
+   * Production never passes this (defaults to an empty chart). */
+  historyBarsOverride?: readonly string[];
   overviewHref?: string;
   holdingSymbol?: string | null;
   ownedWorkspace?: OwnedWorkspace;
@@ -4062,7 +4078,13 @@ export function PortfolioShell({
   useEffect(() => {
     if (pathname !== null) rememberPrimaryTab(pathname);
   }, [pathname]);
-  const portfolios = portfolioPrototypesOverride ?? portfolioPrototypes;
+  // PRF-014 step 1: previously fell back to the raw `portfolioPrototypes`
+  // fixture import. Every real caller passes either `ownedWorkspace` or
+  // `portfolioPrototypesOverride` (never neither -- see app/page.tsx,
+  // app/portfolio/[portfolioId]/[section]/page.tsx and its [holdingId]
+  // sibling), so this fallback is unreachable in practice; an empty array
+  // keeps that unreachable path harmless without importing the fixture.
+  const portfolios = portfolioPrototypesOverride ?? [];
   const ownedMode = ownedWorkspace !== undefined;
   const selectorItems: Array<{
     id: string;
@@ -4180,9 +4202,10 @@ export function PortfolioShell({
 
   const portfolio =
     portfolios.find((item) => item.id === portfolioId) ?? portfolios[0];
-  const overviewPortfolioRows = portfolioPrototypesOverride
-    ? portfolios.map(overviewRowFromPortfolio)
-    : overviewRows;
+  // PRF-014 step 1: the `overviewRows` fixture fallback is unreachable for
+  // the same reason as `portfolios` above -- derive rows from `portfolios`
+  // unconditionally instead of importing the fixture's runtime value.
+  const overviewPortfolioRows = portfolios.map(overviewRowFromPortfolio);
 
   function selectPortfolio(nextId: string) {
     setPortfolioId(nextId);
@@ -5159,6 +5182,7 @@ export function PortfolioShell({
           <OverviewScreen
             portfolio={portfolioPrototypesOverride ? portfolio : undefined}
             rows={overviewPortfolioRows}
+            historyBars={historyBarsOverride}
             viewState={viewState}
             onOpenPortfolio={(id) => {
               selectPortfolio(id);

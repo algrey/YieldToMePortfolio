@@ -6,6 +6,11 @@ import {
 } from "../../../portfolio-sections";
 import { createPreviewPortfolioPrototypes } from "../../../preview-route-data";
 import { loadPreviewValuationFixture } from "../../../preview-valuation";
+// PRF-014 step 1: this is a Server Component, so importing the fixture's
+// runtime `historyBars` here only serialises that one small array into the
+// preview route's RSC flight -- it never pulls prototype-data's 447 lines
+// into the "use client" portfolio-shell.tsx production bundle.
+import { historyBars } from "../../../prototype-data";
 import {
   loadAuthenticatedWorkspace,
   type AuthenticatedWorkspaceSqlContext,
@@ -81,6 +86,7 @@ export default async function PortfolioSectionPage({
       portfolioPrototypesOverride={createPreviewPortfolioPrototypes(
         previewFixtureResult.fixture,
       )}
+      historyBarsOverride={historyBars}
       overviewHref="/portfolio/preview/overview"
       reviewBadgeLabel="Fixture market data"
       reviewNote="Static review build · fixture market data · no financial writes"

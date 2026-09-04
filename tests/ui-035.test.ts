@@ -151,10 +151,18 @@ function renderPreviewHoldingsScreen(): string {
     "../app/components/portfolio-shell.tsx",
     import.meta.url,
   ).href;
+  const prototypeDataUrl = new URL("../app/prototype-data.ts", import.meta.url)
+    .href;
   const script = `
     import { createElement } from "react";
     import { renderToStaticMarkup } from "react-dom/server";
     import { PortfolioShell } from ${JSON.stringify(componentUrl)};
+    // PRF-014 step 1: portfolio-shell.tsx no longer imports prototype-data's
+    // runtime fixture itself (only its types, erased at build time -- see
+    // tests/prf-014.test.ts) so callers that want the demo/preview dataset
+    // must pass it in explicitly, exactly like the real preview route
+    // (app/portfolio/[portfolioId]/[section]/page.tsx) now does.
+    import { portfolioPrototypes } from ${JSON.stringify(prototypeDataUrl)};
     ${ROUTER_STUB_IMPORT}
 
     process.stdout.write(
@@ -164,6 +172,7 @@ function renderPreviewHoldingsScreen(): string {
           { value: routerStub },
           createElement(PortfolioShell, {
             activeSection: "holdings",
+            portfolioPrototypesOverride: portfolioPrototypes,
           }),
         ),
       ),
